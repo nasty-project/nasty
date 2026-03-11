@@ -120,8 +120,7 @@ in
 
       if [ "$PART_MODE" = "2" ]; then
         PART3="''${DISK}''${PSEP}3"
-        echo "==> Formatting data partition as bcachefs..."
-        bcachefs format --label=data "$PART3"
+        echo "==> Data partition: $PART3 (left unformatted for pool creation via WebUI)"
       fi
 
       echo "==> Mounting..."
@@ -153,7 +152,7 @@ in
       echo "  Default login: admin / admin"
       echo ""
       if [ "$PART_MODE" = "2" ]; then
-        echo "  Data partition: $PART3 (bcachefs, available for pool creation)"
+        echo "  Data partition: $PART3 (create a pool via WebUI)"
         echo ""
       fi
       echo "  To reconfigure later:"
