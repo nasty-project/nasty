@@ -13,7 +13,7 @@ in
   environment.etc."nasty-src".source = nastySrc;
 
   # ── Branding ──────────────────────────────────────────────
-  isoImage.isoBaseName = lib.mkForce "nasty";
+  image.baseName = lib.mkForce "nasty";
   isoImage.volumeID = "NASTY_INSTALLER";
   isoImage.appendToMenuLabel = " NASty Installer";
 
