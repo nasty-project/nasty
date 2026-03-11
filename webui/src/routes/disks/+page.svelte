@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { formatBytes } from '$lib/format';
-	import { withToast } from '$lib/toast';
+	import { withToast } from '$lib/toast.svelte';
 	import type { DiskHealth } from '$lib/types';
 
 	let disks: DiskHealth[] = $state([]);

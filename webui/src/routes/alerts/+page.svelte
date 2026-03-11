@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
-	import { withToast } from '$lib/toast';
+	import { withToast } from '$lib/toast.svelte';
 	import type { AlertRule, ActiveAlert, AlertMetric, AlertCondition, AlertSeverity } from '$lib/types';
 
 	let rules: AlertRule[] = $state([]);

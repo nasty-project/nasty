@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { formatBytes } from '$lib/format';
-	import { withToast } from '$lib/toast';
+	import { withToast } from '$lib/toast.svelte';
 	import type { Pool, Subvolume, Snapshot } from '$lib/types';
 
 	let pools: Pool[] = $state([]);

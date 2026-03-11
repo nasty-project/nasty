@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
-	import { withToast } from '$lib/toast';
+	import { withToast } from '$lib/toast.svelte';
 	import type { IscsiTarget } from '$lib/types';
 
 	let targets: IscsiTarget[] = $state([]);

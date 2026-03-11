@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient, resetClient } from '$lib/client';
 	import { getToken, clearToken, login as doLogin } from '$lib/auth';
-	import { error as showError } from '$lib/toast';
+	import { error as showError } from '$lib/toast.svelte';
 	import Toasts from '$lib/components/Toasts.svelte';
 	import type { AuthResult } from '$lib/rpc';
 	import favicon from '$lib/assets/favicon.svg';

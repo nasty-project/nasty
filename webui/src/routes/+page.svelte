@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { formatBytes, formatUptime, formatPercent } from '$lib/format';
-	import { withToast } from '$lib/toast';
+	import { withToast } from '$lib/toast.svelte';
 	import type { SystemInfo, SystemHealth, SystemStats, Pool, DiskHealth, DiskIoStats, NetIfStats, ActiveAlert } from '$lib/types';
 
 	let info: SystemInfo | null = $state(null);
