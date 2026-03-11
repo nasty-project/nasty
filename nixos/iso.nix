@@ -44,6 +44,29 @@ in
         exit 1
       fi
 
+      # Get disk size in GiB for display
+      DISK_SIZE_B=$(lsblk -b -d -n -o SIZE "$DISK")
+      DISK_SIZE_G=$(( DISK_SIZE_B / 1073741824 ))
+
+      echo ""
+      echo "Disk: $DISK (''${DISK_SIZE_G} GiB)"
+      echo ""
+      echo "Partitioning mode:"
+      echo "  1) Use entire disk for NASty OS (recommended if you have separate data disks)"
+      echo "  2) Split disk: 8 GiB for OS, rest for data (single-disk setup)"
+      echo ""
+      read -p "Choose [1/2]: " PART_MODE
+
+      if [ "$PART_MODE" != "1" ] && [ "$PART_MODE" != "2" ]; then
+        echo "Invalid choice."
+        exit 1
+      fi
+
+      if [ "$PART_MODE" = "2" ] && [ "$DISK_SIZE_G" -lt 16 ]; then
+        echo "Error: disk too small for split mode (need at least 16 GiB, have ''${DISK_SIZE_G} GiB)"
+        exit 1
+      fi
+
       echo ""
       echo "WARNING: This will ERASE all data on $DISK"
       read -p "Continue? (yes/no): " CONFIRM
@@ -52,26 +75,41 @@ in
         exit 0
       fi
 
+      # Determine partition suffix style
+      PSEP=""
+      if [[ "$DISK" == *nvme* ]] || [[ "$DISK" == *mmcblk* ]]; then
+        PSEP="p"
+      fi
+
       echo ""
       echo "==> Partitioning $DISK..."
-      parted -s "$DISK" -- \
-        mklabel gpt \
-        mkpart ESP fat32 1MiB 512MiB \
-        set 1 esp on \
-        mkpart root ext4 512MiB 100%
-
-      PART1="''${DISK}1"
-      PART2="''${DISK}2"
-
-      # Handle NVMe / MMC naming
-      if [[ "$DISK" == *nvme* ]] || [[ "$DISK" == *mmcblk* ]]; then
-        PART1="''${DISK}p1"
-        PART2="''${DISK}p2"
+      if [ "$PART_MODE" = "1" ]; then
+        parted -s "$DISK" -- \
+          mklabel gpt \
+          mkpart ESP fat32 1MiB 512MiB \
+          set 1 esp on \
+          mkpart root ext4 512MiB 100%
+      else
+        parted -s "$DISK" -- \
+          mklabel gpt \
+          mkpart ESP fat32 1MiB 512MiB \
+          set 1 esp on \
+          mkpart root ext4 512MiB 8GiB \
+          mkpart data 8GiB 100%
       fi
+
+      PART1="''${DISK}''${PSEP}1"
+      PART2="''${DISK}''${PSEP}2"
 
       echo "==> Formatting partitions..."
       mkfs.fat -F32 "$PART1"
       mkfs.ext4 -F "$PART2"
+
+      if [ "$PART_MODE" = "2" ]; then
+        PART3="''${DISK}''${PSEP}3"
+        echo "==> Formatting data partition as bcachefs..."
+        bcachefs format --label=data "$PART3"
+      fi
 
       echo "==> Mounting..."
       mount "$PART2" /mnt
@@ -101,6 +139,10 @@ in
       echo "  The NASty WebUI will be available at https://<ip>/"
       echo "  Default login: admin / admin"
       echo ""
+      if [ "$PART_MODE" = "2" ]; then
+        echo "  Data partition: $PART3 (bcachefs, available for pool creation)"
+        echo ""
+      fi
       echo "  To reconfigure later:"
       echo "    nixos-rebuild switch --flake /etc/nixos/nixos#nasty"
       echo ""
@@ -133,16 +175,11 @@ in
 
     Run the guided installer:  nasty-install
 
-    Or install manually:
-      1. Partition your disk:    cfdisk /dev/sdX
-      2. Format & mount partitions
-      3. Copy source:            cp -r /etc/nasty-src /mnt/etc/nixos
-      4. Generate hardware config:
-           nixos-generate-config --root /mnt --dir /tmp/hw
-           cp /tmp/hw/hardware-configuration.nix /mnt/etc/nixos/nixos/
-      5. Init flake repo:        cd /mnt/etc/nixos && git init && git add .
-      6. Install:                nixos-install --flake /mnt/etc/nixos/nixos#nasty
-      7. Reboot:                 reboot
+    The installer supports two modes:
+      1) Entire disk for OS  (use separate disks for data)
+      2) Split disk          (8 GiB OS + rest as bcachefs data)
+
+    For manual installation, see the project documentation.
 
   '';
 }
