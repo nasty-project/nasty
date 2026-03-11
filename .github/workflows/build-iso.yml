@@ -19,14 +19,14 @@ jobs:
 
       - name: Build x86_64 ISO
         run: |
+          set -o pipefail
           cd nixos
           nix build .#nixosConfigurations.nasty-iso.config.system.build.isoImage \
             --no-link --print-out-paths -L 2>&1 | tee /tmp/build.log
-          # Extract the store path (last line that starts with /nix/store)
           grep '^/nix/store' /tmp/build.log | tail -1 > /tmp/iso-path.txt
-          echo "ISO output: $(cat /tmp/iso-path.txt)"
+          cat /tmp/iso-path.txt
 
-      - name: Report ISO details
+      - name: Upload ISO
         run: |
           ISO_DIR=$(cat /tmp/iso-path.txt)
           ISO_FILE=$(find "$ISO_DIR" -name "*.iso" -type f | head -1)
@@ -34,7 +34,7 @@ jobs:
           ls -lh "$ISO_FILE"
           echo "iso_file=$ISO_FILE" >> "$GITHUB_ENV"
 
-      - name: Upload ISO
+      - name: Upload ISO artifact
         uses: actions/upload-artifact@v6
         with:
           name: nasty-iso-x86_64

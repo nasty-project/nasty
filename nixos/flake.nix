@@ -24,7 +24,7 @@
       pname = "nasty-webui";
       version = "0.1.0";
       src = ../webui;
-      npmDepsHash = ""; # TODO: run `prefetch-npm-deps package-lock.json` and paste hash
+      npmDepsHash = "sha256-wEWcg8NUvJBdvikDpFN1udE+rdJn2rPd03SxqG7Yq4E=";
       buildPhase = ''
         npm run build
       '';
