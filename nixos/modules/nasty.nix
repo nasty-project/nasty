@@ -106,7 +106,7 @@ in {
       smartmontools  # smartctl for disk health
     ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
       ++ lib.optionals cfg.smb.enable [ samba ]
-      ++ lib.optionals cfg.iscsi.enable [ targetcli ]
+      ++ lib.optionals cfg.iscsi.enable [ targetcli-fb ]
       ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ];
 
     # ── State directory ────────────────────────────────────────
