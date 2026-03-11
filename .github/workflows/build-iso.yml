@@ -1,0 +1,39 @@
+name: Build NASty ISO
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build x86_64 ISO
+        run: |
+          cd nixos
+          nix build .#nixosConfigurations.nasty-iso.config.system.build.isoImage \
+            --no-link --print-out-paths -L | tee /tmp/iso-path.txt
+
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: nasty-iso-x86_64
+          path: |
+            /nix/store/*-nasty-*.iso/iso/*.iso
+          if-no-files-found: warn
+
+      - name: Report ISO path
+        run: |
+          ISO_DIR=$(cat /tmp/iso-path.txt | tail -1)
+          ISO_FILE=$(find "$ISO_DIR" -name "*.iso" -type f | head -1)
+          echo "ISO: $ISO_FILE"
+          ls -lh "$ISO_FILE"
