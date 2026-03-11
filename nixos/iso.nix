@@ -131,8 +131,7 @@ in
 
       echo "==> Copying NASty source..."
       mkdir -p /mnt/etc
-      cp -r /etc/nasty-src /mnt/etc/nixos
-      chmod -R u+w /mnt/etc/nixos
+      cp -r --no-preserve=mode /etc/nasty-src /mnt/etc/nixos
 
       echo "==> Generating hardware configuration..."
       nixos-generate-config --root /mnt --dir /tmp/hw-config
