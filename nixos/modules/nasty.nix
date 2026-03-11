@@ -345,12 +345,7 @@ in {
     };
 
     # ── iSCSI / LIO ───────────────────────────────────────────
-
-    boot.kernelModules = mkIf cfg.iscsi.enable [
-      "target_core_mod"
-      "iscsi_target_mod"
-    ];
-
+    # kernel modules loaded via boot.kernelModules above
     # targetcli auto-restores from /etc/target/saveconfig.json on boot
 
     # ── WebUI via nginx ────────────────────────────────────────
