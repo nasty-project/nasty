@@ -37,6 +37,9 @@
   system.nixos.distroName = "NASty";
   system.nixos.distroId = "nasty";
 
+  # Useful tools
+  environment.systemPackages = with pkgs; [ vim ];
+
   # Additional system configuration
   time.timeZone = "UTC";
 
