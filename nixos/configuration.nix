@@ -5,6 +5,10 @@
     ./hardware-configuration.nix
   ];
 
+  # Boot loader — EFI with systemd-boot
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+
   networking.hostName = "nasty";
 
   # Enable the NASty module with all protocols
