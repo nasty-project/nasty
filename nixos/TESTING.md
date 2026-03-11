@@ -129,7 +129,7 @@ ls -la /var/lib/nasty/
 ### WebUI shows "Connecting to middleware..."
 ```bash
 # Check middleware is listening
-ss -tlnp | grep 3100
+ss -tlnp | grep 2137
 # Check nginx is proxying
 journalctl -u nginx -f
 ```

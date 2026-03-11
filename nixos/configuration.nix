@@ -13,7 +13,7 @@
 
     middleware = {
       package = nasty-middleware;
-      port = 3100;
+      port = 2137;
       logLevel = "nasty_api=info,tower_http=info";
     };
 

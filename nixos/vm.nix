@@ -18,7 +18,7 @@
         { from = "host"; host.port = 8443; guest.port = 443; }
         { from = "host"; host.port = 8080; guest.port = 80; }
         { from = "host"; host.port = 2222; guest.port = 22; }
-        { from = "host"; host.port = 3100; guest.port = 3100; }
+        { from = "host"; host.port = 2137; guest.port = 2137; }
       ];
 
       # Create virtual disks for testing pool operations

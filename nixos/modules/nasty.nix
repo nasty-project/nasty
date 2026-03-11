@@ -20,7 +20,7 @@ in {
 
       port = mkOption {
         type = types.port;
-        default = 3100;
+        default = 2137;
         description = "WebSocket API port";
       };
 

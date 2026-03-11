@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3100));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 2137));
     info!("NASty middleware listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
