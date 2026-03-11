@@ -358,16 +358,12 @@ in {
       recommendedTlsSettings = true;
       recommendedProxySettings = true;
 
-      # HTTP → HTTPS redirect
-      virtualHosts."nasty-redirect" = {
-        listen = [{ addr = "0.0.0.0"; port = cfg.webui.httpPort; }];
-        locations."/" = {
-          return = "301 https://$host$request_uri";
-        };
-      };
-
       virtualHosts."nasty" = {
-        listen = [{ addr = "0.0.0.0"; port = cfg.webui.port; ssl = true; }];
+        listen = [
+          { addr = "0.0.0.0"; port = cfg.webui.httpPort; }
+          { addr = "0.0.0.0"; port = cfg.webui.port; ssl = true; }
+        ];
+        forceSSL = true;
         root = "${cfg.webui.package}/share/nasty-webui";
         sslCertificate = tlsCertFile;
         sslCertificateKey = tlsKeyFile;
