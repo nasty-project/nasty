@@ -167,6 +167,16 @@ in {
         ++ lib.optional cfg.smb.enable "smb.service"
         ++ lib.optional cfg.nvmeof.enable "nasty-nvmeof-restore.service";
 
+      path = with pkgs; [
+        bashInteractive  # bash for terminal
+        util-linux       # lsblk, blkid, wipefs, mount, umount
+        bcachefs-tools   # bcachefs
+        smartmontools    # smartctl
+      ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
+        ++ lib.optionals cfg.smb.enable [ samba ]
+        ++ lib.optionals cfg.iscsi.enable [ targetcli-fb ]
+        ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ];
+
       environment = {
         RUST_LOG = cfg.middleware.logLevel;
       };

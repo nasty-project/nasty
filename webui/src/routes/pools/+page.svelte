@@ -15,6 +15,7 @@
 	let selectedDevices: string[] = $state([]);
 	let replicas = $state(1);
 	let compression = $state('');
+	let showPartitions = $state(false);
 
 	const client = getClient();
 
@@ -75,6 +76,9 @@
 		} else {
 			selectedDevices = [...selectedDevices, path];
 		}
+		if (selectedDevices.length <= 1) {
+			replicas = 1;
+		}
 	}
 
 	$effect(() => {
@@ -83,7 +87,7 @@
 	});
 
 	function availableDevices(): BlockDevice[] {
-		return devices.filter(d => !d.in_use);
+		return devices.filter(d => !d.in_use && (showPartitions || d.dev_type !== 'part'));
 	}
 </script>
 
@@ -103,14 +107,20 @@
 			<input id="pool-name" bind:value={newName} placeholder="tank" />
 		</div>
 		<div class="field">
-			<span class="field-label">Devices</span>
+			<div class="field-header">
+				<span class="field-label">Devices</span>
+				<label class="toggle-option">
+					<input type="checkbox" bind:checked={showPartitions} />
+					Show partitions
+				</label>
+			</div>
 			{#if availableDevices().length === 0}
 				<p class="muted">No available devices</p>
 			{:else}
 				{#each availableDevices() as dev}
 					<label class="device-option">
 						<input type="checkbox" checked={selectedDevices.includes(dev.path)} onchange={() => toggleDevice(dev.path)} />
-						{dev.path} ({formatBytes(dev.size_bytes)}) {dev.fs_type ? `[${dev.fs_type}]` : ''}
+						{dev.path} ({formatBytes(dev.size_bytes)}) {dev.dev_type === 'part' ? '[part]' : ''} {dev.fs_type ? `[${dev.fs_type}]` : ''}
 					</label>
 				{/each}
 			{/if}
@@ -118,11 +128,14 @@
 		<div class="field-row">
 			<div class="field">
 				<label for="replicas">Replicas</label>
-				<select id="replicas" bind:value={replicas}>
+				<select id="replicas" bind:value={replicas} disabled={selectedDevices.length <= 1}>
 					<option value={1}>1 (no redundancy)</option>
 					<option value={2}>2 (mirrored)</option>
 					<option value={3}>3</option>
 				</select>
+				{#if selectedDevices.length <= 1}
+					<span class="hint">Requires multiple devices</span>
+				{/if}
 			</div>
 			<div class="field">
 				<label for="compression">Compression</label>
@@ -200,6 +213,10 @@
 	.field input, .field select { width: 100%; box-sizing: border-box; }
 	.field-row { display: flex; gap: 1rem; }
 	.field-row .field { flex: 1; }
+	.field-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem; }
+	.toggle-option { display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; color: #6b7280; cursor: pointer; }
+	.toggle-option input { width: auto; }
+	.hint { display: block; font-size: 0.75rem; color: #6b7280; margin-top: 0.25rem; }
 	.device-option { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; cursor: pointer; font-size: 0.875rem; }
 	.device-option input[type="checkbox"] { width: auto; }
 	.mono { font-family: monospace; font-size: 0.8rem; }
