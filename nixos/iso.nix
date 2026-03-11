@@ -117,6 +117,7 @@ in
       mount "$PART1" /mnt/boot
 
       echo "==> Copying NASty source..."
+      mkdir -p /mnt/etc
       cp -r /etc/nasty-src /mnt/etc/nixos
       chmod -R u+w /mnt/etc/nixos
 
