@@ -8,7 +8,7 @@ let
   tlsCertFile = if cfg.tls.certFile != null then cfg.tls.certFile else "/var/lib/nasty/tls/cert.pem";
   tlsKeyFile = if cfg.tls.keyFile != null then cfg.tls.keyFile else "/var/lib/nasty/tls/key.pem";
 
-  # targetcli 3.0.2 passes `exclusive=` to rtslib-fb, but nixpkgs ships
+  # targetcli-fb 3.0.2 passes `exclusive=` to rtslib-fb, but nixpkgs ships
   # rtslib-fb 2.2.3 which lacks that parameter.  Bump rtslib to 2.2.4+.
   rtslib-fb-latest = pkgs.python3Packages.rtslib-fb.overrideAttrs (old: rec {
     version = "2.2.4";
@@ -18,7 +18,7 @@ let
       hash = "sha256-k3T1YcNpF+qZ9BVSd8MxY6nnkCwhOWj2HZrlGZKxN8U=";
     };
   });
-  targetcli = pkgs.targetcli.override {
+  targetcli-fixed = pkgs.targetcli-fb.override {
     python3Packages = pkgs.python3Packages // {
       rtslib-fb = rtslib-fb-latest;
     };
@@ -127,7 +127,7 @@ in {
       smartmontools  # smartctl for disk health
     ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
       ++ lib.optionals cfg.smb.enable [ samba ]
-      ++ lib.optionals cfg.iscsi.enable [ targetcli ]
+      ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
       ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ];
 
     # ── State directory ────────────────────────────────────────
@@ -205,7 +205,7 @@ in {
         curl             # for update check (GitHub API, TODO: remove when repo is public)
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba ]
-        ++ lib.optionals cfg.iscsi.enable [ targetcli ]
+        ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
         ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ];
 
       environment = {
