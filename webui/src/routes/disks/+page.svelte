@@ -3,21 +3,41 @@
 	import { getClient } from '$lib/client';
 	import { formatBytes } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
-	import type { DiskHealth } from '$lib/types';
+	import type { DiskHealth, Settings } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 
 	let disks: DiskHealth[] = $state([]);
+	let settings: Settings | null = $state(null);
 	let loading = $state(true);
 	let expandedDisk = $state<string | null>(null);
 
 	const client = getClient();
 
 	onMount(async () => {
+		await loadSettings();
 		await refresh();
 		loading = false;
 	});
+
+	async function loadSettings() {
+		await withToast(async () => {
+			settings = await client.call<Settings>('system.settings.get');
+		});
+	}
+
+	async function toggleSmart() {
+		if (!settings) return;
+		const ok = await withToast(
+			() => client.call<Settings>('system.settings.update', { smart_enabled: !settings!.smart_enabled }),
+			`SMART monitoring ${settings.smart_enabled ? 'disabled' : 'enabled'}`
+		);
+		if (ok !== undefined) {
+			settings = ok;
+			await refresh();
+		}
+	}
 
 	async function refresh() {
 		await withToast(async () => {
@@ -38,12 +58,30 @@
 
 <h1 class="mb-4 text-2xl font-bold">Disk Health</h1>
 
+{#if settings}
+	<Card class="mb-4">
+		<CardContent class="flex items-center gap-4 py-3">
+			<Badge variant={settings.smart_enabled ? 'default' : 'secondary'}>
+				{settings.smart_enabled ? 'Enabled' : 'Disabled'}
+			</Badge>
+			<span class="text-sm text-muted-foreground">
+				SMART disk health monitoring
+			</span>
+			<Button variant="secondary" size="sm" onclick={toggleSmart}>
+				{settings.smart_enabled ? 'Disable' : 'Enable'}
+			</Button>
+		</CardContent>
+	</Card>
+{/if}
+
 <div class="mb-4">
 	<Button onclick={refresh}>Refresh</Button>
 </div>
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
+{:else if !settings?.smart_enabled}
+	<p class="text-muted-foreground">SMART monitoring is disabled. Enable it above to see disk health data.</p>
 {:else if disks.length === 0}
 	<p class="text-muted-foreground">No disks detected or smartctl not available.</p>
 {:else}

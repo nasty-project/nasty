@@ -280,6 +280,10 @@ export interface ProtocolStatus {
 	running: boolean;
 }
 
+export interface Settings {
+	smart_enabled: boolean;
+}
+
 export interface AlertRule {
 	id: string;
 	name: string;

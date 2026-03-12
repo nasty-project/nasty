@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { formatBytes, formatUptime, formatPercent } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
-	import type { SystemInfo, SystemHealth, SystemStats, Pool, DiskHealth, DiskIoStats, NetIfStats, ActiveAlert } from '$lib/types';
+	import type { SystemInfo, SystemHealth, SystemStats, Pool, DiskHealth, DiskIoStats, NetIfStats, ActiveAlert, Settings } from '$lib/types';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 
@@ -12,6 +12,7 @@
 	let stats: SystemStats | null = $state(null);
 	let pools: Pool[] = $state([]);
 	let disks: DiskHealth[] = $state([]);
+	let settings: Settings | null = $state(null);
 	let alerts: ActiveAlert[] = $state([]);
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -31,12 +32,13 @@
 
 	async function loadAll() {
 		await withToast(async () => {
-			[info, health, stats, pools, disks, alerts] = await Promise.all([
+			[info, health, stats, pools, disks, settings, alerts] = await Promise.all([
 				client.call<SystemInfo>('system.info'),
 				client.call<SystemHealth>('system.health'),
 				client.call<SystemStats>('system.stats'),
 				client.call<Pool[]>('pool.list'),
 				client.call<DiskHealth[]>('system.disks'),
+				client.call<Settings>('system.settings.get'),
 				client.call<ActiveAlert[]>('system.alerts'),
 			]);
 		});
@@ -323,7 +325,7 @@
 		</Card>
 	{/if}
 
-	{#if disks.length > 0}
+	{#if settings?.smart_enabled && disks.length > 0}
 		<Card>
 			<CardHeader class="pb-2">
 				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Disk Health</CardTitle>

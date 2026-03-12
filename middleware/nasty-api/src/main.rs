@@ -24,6 +24,7 @@ use router::handle_rpc_request;
 pub struct AppState {
     pub auth: AuthService,
     pub system: nasty_system::SystemService,
+    pub settings: nasty_system::settings::SettingsService,
     pub alerts: nasty_system::alerts::AlertService,
     pub protocols: nasty_system::protocol::ProtocolService,
     pub updates: nasty_system::update::UpdateService,
@@ -47,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         auth: AuthService::new().await,
         system: nasty_system::SystemService::new(),
+        settings: nasty_system::settings::SettingsService::new().await,
         alerts: nasty_system::alerts::AlertService::new().await,
         protocols: nasty_system::protocol::ProtocolService::new(),
         updates: nasty_system::update::UpdateService::new(),

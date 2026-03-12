@@ -30,7 +30,7 @@ fn is_read_only(method: &str) -> bool {
         || matches!(
             method,
             "system.info" | "system.health" | "system.stats" | "system.disks"
-            | "system.alerts" | "alert.rules.list"
+            | "system.alerts" | "system.settings.get" | "alert.rules.list"
             | "device.list" | "auth.me" | "auth.list_users"
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
             | "service.protocol.list" | "subvolume.list_all"
@@ -116,7 +116,23 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "system.info" => ok(req, state.system.info().await),
         "system.health" => ok(req, state.system.health().await),
         "system.stats" => ok(req, state.system.stats().await),
-        "system.disks" => ok(req, state.system.disks().await),
+        "system.disks" => {
+            if state.settings.get().await.smart_enabled {
+                ok(req, state.system.disks().await)
+            } else {
+                ok(req, Vec::<nasty_system::DiskHealth>::new())
+            }
+        }
+
+        // ── Settings ──────────────────────────────────────────────
+        "system.settings.get" => ok(req, state.settings.get().await),
+        "system.settings.update" => match parse_params(req) {
+            Ok(p) => match state.settings.update(p).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
 
         // ── System Update ─────────────────────────────────────────
         "system.update.version" => ok(req, state.updates.version().await),
@@ -156,7 +172,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             // Evaluate current alert rules against live system state
             let stats = state.system.stats().await;
             let pools_list = state.pools.list().await;
-            let disk_health = state.system.disks().await;
+            let disk_health = if state.settings.get().await.smart_enabled {
+                state.system.disks().await
+            } else {
+                Vec::new()
+            };
 
             let pool_usage: Vec<nasty_system::alerts::PoolUsage> = pools_list
                 .unwrap_or_default()

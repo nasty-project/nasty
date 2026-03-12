@@ -96,41 +96,51 @@ in
 
       echo ""
       echo "==> Partitioning $DISK..."
+      # Partition layout: 1=BIOS boot (1MiB), 2=ESP (512MiB), 3=root, [4=data]
       if [ "$PART_MODE" = "1" ]; then
         parted -s "$DISK" -- \
           mklabel gpt \
-          mkpart ESP fat32 1MiB 512MiB \
-          set 1 esp on \
-          mkpart root ext4 512MiB 100%
+          mkpart bios 1MiB 2MiB \
+          set 1 bios_grub on \
+          mkpart ESP fat32 2MiB 514MiB \
+          set 2 esp on \
+          mkpart root ext4 514MiB 100%
       else
         parted -s "$DISK" -- \
           mklabel gpt \
-          mkpart ESP fat32 1MiB 512MiB \
-          set 1 esp on \
-          mkpart root ext4 512MiB 8GiB \
+          mkpart bios 1MiB 2MiB \
+          set 1 bios_grub on \
+          mkpart ESP fat32 2MiB 514MiB \
+          set 2 esp on \
+          mkpart root ext4 514MiB 8GiB \
           mkpart data 8GiB 100%
       fi
 
-      PART1="''${DISK}''${PSEP}1"
-      PART2="''${DISK}''${PSEP}2"
+      PART_ESP="''${DISK}''${PSEP}2"
+      PART_ROOT="''${DISK}''${PSEP}3"
 
       echo "==> Formatting partitions..."
-      mkfs.fat -F32 "$PART1"
-      mkfs.ext4 -F "$PART2"
+      mkfs.fat -F32 "$PART_ESP"
+      mkfs.ext4 -F "$PART_ROOT"
 
       if [ "$PART_MODE" = "2" ]; then
-        PART3="''${DISK}''${PSEP}3"
-        echo "==> Data partition: $PART3 (left unformatted for pool creation via WebUI)"
+        PART_DATA="''${DISK}''${PSEP}4"
+        echo "==> Data partition: $PART_DATA (left unformatted for pool creation via WebUI)"
       fi
 
       echo "==> Mounting..."
-      mount "$PART2" /mnt
+      mount "$PART_ROOT" /mnt
       mkdir -p /mnt/boot
-      mount "$PART1" /mnt/boot
+      mount "$PART_ESP" /mnt/boot
 
       echo "==> Copying NASty source..."
       mkdir -p /mnt/etc/nixos
       cp -rL --no-preserve=mode /etc/nasty-src/* /mnt/etc/nixos/
+
+      # Write GRUB device config for hybrid BIOS+UEFI boot
+      cat > /mnt/etc/nixos/nixos/grub-device.nix <<GRUBEOF
+      { ... }: { boot.loader.grub.device = "$DISK"; }
+      GRUBEOF
 
       # TODO: Remove once repo is public — copy GitHub token for update support
       if [ -f /etc/nasty-src/nixos/github-token ]; then
@@ -163,7 +173,7 @@ in
       echo "  Default login: admin / admin"
       echo ""
       if [ "$PART_MODE" = "2" ]; then
-        echo "  Data partition: $PART3 (create a pool via WebUI)"
+        echo "  Data partition: $PART_DATA (create a pool via WebUI)"
         echo ""
       fi
       echo "  To reconfigure later:"
@@ -176,6 +186,7 @@ in
       fi
 
       echo ""
+      echo "Installation finished. The system will boot in both UEFI and legacy BIOS mode."
       echo "Run 'reboot' when ready."
     '')
   ];
@@ -184,16 +195,41 @@ in
   networking.wireless.enable = pkgs.lib.mkForce false;
   networking.useDHCP = pkgs.lib.mkForce true;
 
-  # Installer welcome message
+  # Auto-launch the installer on tty1
+  services.getty.autologinUser = lib.mkForce "root";
+  programs.bash.loginShellInit = ''
+    # Auto-launch installer on tty1 (only once)
+    if [ "$(tty)" = "/dev/tty1" ] && [ ! -f /tmp/.nasty-installer-ran ]; then
+      touch /tmp/.nasty-installer-ran
+      echo ""
+      cat <<'BANNER'
+
+     _   _           _____ _
+    | \ | |   /\    / ____| |
+    |  \| |  /  \  | (___ | |_ _   _
+    | . ` | / /\ \  \___ \| __| | | |
+    | |\  |/ ____ \ ____) | |_| |_| |
+    |_| \_/_/    \_\_____/ \__|\__, |
+                                __/ |
+                               |___/
+    NASty NAS Installer
+
+BANNER
+      nasty-install
+    fi
+  '';
+
+  # Installer welcome message (for other ttys)
   services.getty.helpLine = ''
 
-    ███╗   ██╗ █████╗ ███████╗████████╗██╗   ██╗
-    ████╗  ██║██╔══██╗██╔════╝╚══██╔══╝╚██╗ ██╔╝
-    ██╔██╗ ██║███████║███████╗   ██║    ╚████╔╝
-    ██║╚██╗██║██╔══██║╚════██║   ██║     ╚██╔╝
-    ██║ ╚████║██║  ██║███████║   ██║      ██║
-    ╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝   ╚═╝      ╚═╝
-
+     _   _           _____ _
+    | \ | |   /\    / ____| |
+    |  \| |  /  \  | (___ | |_ _   _
+    | . ` | / /\ \  \___ \| __| | | |
+    | |\  |/ ____ \ ____) | |_| |_| |
+    |_| \_/_/    \_\_____/ \__|\__, |
+                                __/ |
+                               |___/
     NASty NAS Installer
 
     Run the guided installer:  nasty-install
