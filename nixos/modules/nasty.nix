@@ -327,7 +327,7 @@ in {
           # If no state file, fall back to mounting all known pools
           if [ ! -f "$STATE" ]; then
             echo "No pool state file, discovering and mounting all bcachefs pools"
-            ${pkgs.util-linux}/bin/blkid -t TYPE=bcachefs -o device 2>/dev/null | while IFS= read -r dev; do
+            (${pkgs.util-linux}/bin/blkid -t TYPE=bcachefs -o device 2>/dev/null || true) | while IFS= read -r dev; do
               for mp in "$MOUNT_BASE"/*/; do
                 [ -d "$mp" ] || continue
                 POOL_NAME=$(basename "$mp")
