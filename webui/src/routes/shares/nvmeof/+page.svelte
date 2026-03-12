@@ -13,16 +13,33 @@
 	let blockSubvolumes: Subvolume[] = $state([]);
 	let showCreate = $state(false);
 	let loading = $state(true);
+	let expanded: Record<string, boolean> = $state({});
 
+	// Create form
 	let newName = $state('');
 	let newDevice = $state('');
 	let newAddr = $state('0.0.0.0');
 	let newPort = $state(4420);
 
+	// Add Namespace form
+	let addNsSubsys = $state('');
+	let addNsDevice = $state('');
+
+	// Add Port form
+	let addPortSubsys = $state('');
+	let addPortTransport = $state('tcp');
+	let addPortAddr = $state('0.0.0.0');
+	let addPortSvcId = $state(4420);
+	let addPortFamily = $state('ipv4');
+
+	// Add Host form
+	let addHostSubsys = $state('');
+	let addHostNqn = $state('');
+
 	const client = getClient();
 
 	$effect(() => {
-		if (showCreate) {
+		if (showCreate || addNsSubsys) {
 			loadSubvolumes();
 		}
 	});
@@ -43,6 +60,10 @@
 			const all = await client.call<Subvolume[]>('subvolume.list_all');
 			blockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
 		});
+	}
+
+	function toggle(id: string) {
+		expanded[id] = !expanded[id];
 	}
 
 	function onDeviceSelect() {
@@ -78,6 +99,84 @@
 		await withToast(
 			() => client.call('share.nvmeof.delete', { id }),
 			'NVMe-oF share deleted'
+		);
+		await refresh();
+	}
+
+	// Namespace management
+	async function addNamespace() {
+		if (!addNsSubsys || !addNsDevice) return;
+		await withToast(
+			() => client.call('share.nvmeof.add_namespace', {
+				subsystem_id: addNsSubsys,
+				device_path: addNsDevice,
+			}),
+			'Namespace added'
+		);
+		addNsSubsys = '';
+		addNsDevice = '';
+		await refresh();
+	}
+
+	async function removeNamespace(subsystemId: string, nsid: number) {
+		if (!confirm(`Remove namespace ${nsid}?`)) return;
+		await withToast(
+			() => client.call('share.nvmeof.remove_namespace', { subsystem_id: subsystemId, nsid }),
+			'Namespace removed'
+		);
+		await refresh();
+	}
+
+	// Port management
+	async function addPort() {
+		if (!addPortSubsys) return;
+		await withToast(
+			() => client.call('share.nvmeof.add_port', {
+				subsystem_id: addPortSubsys,
+				transport: addPortTransport,
+				addr: addPortAddr,
+				service_id: addPortSvcId,
+				addr_family: addPortFamily,
+			}),
+			'Port added'
+		);
+		addPortSubsys = '';
+		addPortTransport = 'tcp';
+		addPortAddr = '0.0.0.0';
+		addPortSvcId = 4420;
+		addPortFamily = 'ipv4';
+		await refresh();
+	}
+
+	async function removePort(subsystemId: string, portId: number) {
+		if (!confirm(`Remove port ${portId}?`)) return;
+		await withToast(
+			() => client.call('share.nvmeof.remove_port', { subsystem_id: subsystemId, port_id: portId }),
+			'Port removed'
+		);
+		await refresh();
+	}
+
+	// Host ACL management
+	async function addHost() {
+		if (!addHostSubsys || !addHostNqn) return;
+		await withToast(
+			() => client.call('share.nvmeof.add_host', {
+				subsystem_id: addHostSubsys,
+				host_nqn: addHostNqn,
+			}),
+			'Allowed host added'
+		);
+		addHostSubsys = '';
+		addHostNqn = '';
+		await refresh();
+	}
+
+	async function removeHost(subsystemId: string, hostNqn: string) {
+		if (!confirm(`Remove access for ${hostNqn}?`)) return;
+		await withToast(
+			() => client.call('share.nvmeof.remove_host', { subsystem_id: subsystemId, host_nqn: hostNqn }),
+			'Allowed host removed'
 		);
 		await refresh();
 	}
@@ -135,41 +234,160 @@
 	{#each subsystems as subsys}
 		<Card class="mb-4">
 			<CardContent class="pt-5">
-				<div class="mb-3 flex items-start justify-between">
+				<!-- Header row (always visible) -->
+				<button class="mb-1 flex w-full items-start justify-between text-left" onclick={() => toggle(subsys.id)}>
 					<div>
 						<strong class="font-mono text-sm">{subsys.nqn}</strong>
-						<div class="text-xs text-muted-foreground">
-							{subsys.allow_any_host ? 'Any host allowed' : `${subsys.allowed_hosts.length} allowed host(s)`}
+						<div class="mt-1 text-xs text-muted-foreground">
+							{subsys.namespaces.length} namespace{subsys.namespaces.length !== 1 ? 's' : ''}
+							&middot; {subsys.ports.length} port{subsys.ports.length !== 1 ? 's' : ''}
+							&middot; {subsys.allow_any_host ? 'any host' : `${subsys.allowed_hosts.length} allowed host${subsys.allowed_hosts.length !== 1 ? 's' : ''}`}
 						</div>
 					</div>
-					<Button variant="destructive" size="sm" onclick={() => remove(subsys.id)}>Delete</Button>
-				</div>
+					<span class="ml-4 mt-1 text-muted-foreground">{expanded[subsys.id] ? '▲' : '▼'}</span>
+				</button>
 
-				{#if subsys.namespaces.length > 0}
-					<div class="mb-2">
-						<span class="text-xs uppercase tracking-wide text-muted-foreground">Devices: </span>
-						{#each subsys.namespaces as ns}
-							<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">
-								{ns.device_path}
-								<Badge variant={ns.enabled ? 'default' : 'secondary'} class="ml-1 text-[0.6rem]">
-									{ns.enabled ? 'Active' : 'Off'}
-								</Badge>
-							</span>
-						{/each}
-					</div>
-				{/if}
+				<!-- Expanded details -->
+				{#if expanded[subsys.id]}
+					<div class="mt-4 space-y-4 border-t pt-4">
+						<!-- Namespaces -->
+						<div>
+							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Namespaces</h4>
+							{#if subsys.namespaces.length === 0}
+								<p class="text-xs text-muted-foreground">No namespaces</p>
+							{:else}
+								<div class="space-y-1">
+									{#each subsys.namespaces as ns}
+										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+											<div class="text-sm">
+												<span class="font-mono text-xs font-semibold">NSID {ns.nsid}</span>
+												<span class="ml-2 text-muted-foreground">{ns.device_path}</span>
+												<Badge variant={ns.enabled ? 'default' : 'secondary'} class="ml-2 text-[0.6rem]">
+													{ns.enabled ? 'Active' : 'Off'}
+												</Badge>
+											</div>
+											<Button variant="ghost" size="sm" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removeNamespace(subsys.id, ns.nsid)}>Remove</Button>
+										</div>
+									{/each}
+								</div>
+							{/if}
 
-				{#if subsys.ports.length > 0}
-					<div>
-						<span class="text-xs uppercase tracking-wide text-muted-foreground">Listening: </span>
-						{#each subsys.ports as port}
-							<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">
-								{port.transport.toUpperCase()} {port.addr}:{port.service_id}
-							</span>
-						{/each}
+							{#if addNsSubsys === subsys.id}
+								<div class="mt-3 rounded border p-3">
+									<div class="mb-2">
+										<Label class="text-xs">Block Device</Label>
+										<select bind:value={addNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+											<option value="">Select...</option>
+											{#each blockSubvolumes as sv}
+												<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+											{/each}
+										</select>
+									</div>
+									<div class="flex gap-2">
+										<Button size="sm" class="h-7 text-xs" onclick={addNamespace} disabled={!addNsDevice}>Add</Button>
+										<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => { addNsSubsys = ''; }}>Cancel</Button>
+									</div>
+								</div>
+							{:else}
+								<Button size="sm" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addNsSubsys = subsys.id; }}>+ Add Namespace</Button>
+							{/if}
+						</div>
+
+						<!-- Ports -->
+						<div>
+							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ports</h4>
+							{#if subsys.ports.length === 0}
+								<p class="text-xs text-muted-foreground">Not listening (no ports configured)</p>
+							{:else}
+								<div class="space-y-1">
+									{#each subsys.ports as port}
+										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+											<div class="text-sm">
+												<span class="font-mono text-xs font-semibold">Port {port.port_id}</span>
+												<span class="ml-2">{port.transport.toUpperCase()} {port.addr}:{port.service_id}</span>
+												<span class="ml-1 text-xs text-muted-foreground">({port.addr_family})</span>
+											</div>
+											<Button variant="ghost" size="sm" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removePort(subsys.id, port.port_id)}>Remove</Button>
+										</div>
+									{/each}
+								</div>
+							{/if}
+
+							{#if addPortSubsys === subsys.id}
+								<div class="mt-3 rounded border p-3">
+									<div class="grid grid-cols-2 gap-2 mb-2">
+										<div>
+											<Label class="text-xs">Transport</Label>
+											<select bind:value={addPortTransport} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+												<option value="tcp">TCP</option>
+												<option value="rdma">RDMA</option>
+											</select>
+										</div>
+										<div>
+											<Label class="text-xs">Address Family</Label>
+											<select bind:value={addPortFamily} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+												<option value="ipv4">IPv4</option>
+												<option value="ipv6">IPv6</option>
+											</select>
+										</div>
+									</div>
+									<div class="grid grid-cols-2 gap-2 mb-2">
+										<div>
+											<Label class="text-xs">Listen Address</Label>
+											<Input bind:value={addPortAddr} class="mt-1 h-8 text-xs" />
+										</div>
+										<div>
+											<Label class="text-xs">Port</Label>
+											<Input type="number" bind:value={addPortSvcId} class="mt-1 h-8 text-xs" />
+										</div>
+									</div>
+									<div class="flex gap-2">
+										<Button size="sm" class="h-7 text-xs" onclick={addPort}>Add</Button>
+										<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => { addPortSubsys = ''; }}>Cancel</Button>
+									</div>
+								</div>
+							{:else}
+								<Button size="sm" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addPortSubsys = subsys.id; }}>+ Add Port</Button>
+							{/if}
+						</div>
+
+						<!-- Allowed Hosts -->
+						<div>
+							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Allowed Hosts</h4>
+							{#if subsys.allow_any_host && subsys.allowed_hosts.length === 0}
+								<p class="text-xs text-muted-foreground">Any host can connect. Add a host NQN to restrict access.</p>
+							{:else}
+								<div class="space-y-1">
+									{#each subsys.allowed_hosts as hostNqn}
+										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+											<span class="font-mono text-xs">{hostNqn}</span>
+											<Button variant="ghost" size="sm" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removeHost(subsys.id, hostNqn)}>Remove</Button>
+										</div>
+									{/each}
+								</div>
+							{/if}
+
+							{#if addHostSubsys === subsys.id}
+								<div class="mt-3 rounded border p-3">
+									<div class="mb-2">
+										<Label class="text-xs">Host NQN</Label>
+										<Input bind:value={addHostNqn} placeholder="nqn.2024-01.com.client:host1" class="mt-1 h-8 text-xs" />
+									</div>
+									<div class="flex gap-2">
+										<Button size="sm" class="h-7 text-xs" onclick={addHost} disabled={!addHostNqn}>Add</Button>
+										<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => { addHostSubsys = ''; }}>Cancel</Button>
+									</div>
+								</div>
+							{:else}
+								<Button size="sm" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addHostSubsys = subsys.id; }}>+ Add Host</Button>
+							{/if}
+						</div>
+
+						<!-- Delete -->
+						<div class="border-t pt-3">
+							<Button variant="destructive" size="sm" onclick={() => remove(subsys.id)}>Delete Share</Button>
+						</div>
 					</div>
-				{:else}
-					<span class="text-xs text-muted-foreground">Not listening (no ports)</span>
 				{/if}
 			</CardContent>
 		</Card>

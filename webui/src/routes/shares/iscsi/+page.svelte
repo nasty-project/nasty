@@ -12,14 +12,27 @@
 	let blockSubvolumes: Subvolume[] = $state([]);
 	let showCreate = $state(false);
 	let loading = $state(true);
+	let expanded: Record<string, boolean> = $state({});
 
+	// Create form
 	let newName = $state('');
 	let newDevice = $state('');
+
+	// Add LUN form
+	let addLunTarget = $state('');
+	let addLunPath = $state('');
+	let addLunType = $state('');
+
+	// Add ACL form
+	let addAclTarget = $state('');
+	let addAclIqn = $state('');
+	let addAclUser = $state('');
+	let addAclPass = $state('');
 
 	const client = getClient();
 
 	$effect(() => {
-		if (showCreate) {
+		if (showCreate || addLunTarget) {
 			loadSubvolumes();
 		}
 	});
@@ -40,6 +53,10 @@
 			const all = await client.call<Subvolume[]>('subvolume.list_all');
 			blockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
 		});
+	}
+
+	function toggle(id: string) {
+		expanded[id] = !expanded[id];
 	}
 
 	function onDeviceSelect() {
@@ -71,6 +88,60 @@
 		await withToast(
 			() => client.call('share.iscsi.delete', { id }),
 			'iSCSI target deleted'
+		);
+		await refresh();
+	}
+
+	async function addLun() {
+		if (!addLunTarget || !addLunPath) return;
+		const params: Record<string, unknown> = {
+			target_id: addLunTarget,
+			backstore_path: addLunPath,
+		};
+		if (addLunType) params.backstore_type = addLunType;
+		await withToast(
+			() => client.call('share.iscsi.add_lun', params),
+			'LUN added'
+		);
+		addLunTarget = '';
+		addLunPath = '';
+		addLunType = '';
+		await refresh();
+	}
+
+	async function removeLun(targetId: string, lunId: number) {
+		if (!confirm(`Remove LUN ${lunId}?`)) return;
+		await withToast(
+			() => client.call('share.iscsi.remove_lun', { target_id: targetId, lun_id: lunId }),
+			'LUN removed'
+		);
+		await refresh();
+	}
+
+	async function addAcl() {
+		if (!addAclTarget || !addAclIqn) return;
+		const params: Record<string, unknown> = {
+			target_id: addAclTarget,
+			initiator_iqn: addAclIqn,
+		};
+		if (addAclUser) params.userid = addAclUser;
+		if (addAclPass) params.password = addAclPass;
+		await withToast(
+			() => client.call('share.iscsi.add_acl', params),
+			'ACL added'
+		);
+		addAclTarget = '';
+		addAclIqn = '';
+		addAclUser = '';
+		addAclPass = '';
+		await refresh();
+	}
+
+	async function removeAcl(targetId: string, initiatorIqn: string) {
+		if (!confirm(`Remove ACL for ${initiatorIqn}?`)) return;
+		await withToast(
+			() => client.call('share.iscsi.remove_acl', { target_id: targetId, initiator_iqn: initiatorIqn }),
+			'ACL removed'
 		);
 		await refresh();
 	}
@@ -118,44 +189,142 @@
 	{#each targets as target}
 		<Card class="mb-4">
 			<CardContent class="pt-5">
-				<div class="mb-3 flex items-start justify-between">
+				<!-- Header row (always visible) -->
+				<button class="mb-1 flex w-full items-start justify-between text-left" onclick={() => toggle(target.id)}>
 					<div>
 						<strong class="font-mono text-sm">{target.iqn}</strong>
 						{#if target.alias}<span class="text-muted-foreground"> ({target.alias})</span>{/if}
+						<div class="mt-1 text-xs text-muted-foreground">
+							{target.luns.length} LUN{target.luns.length !== 1 ? 's' : ''}
+							&middot; {target.portals.length} portal{target.portals.length !== 1 ? 's' : ''}
+							&middot; {target.acls.length === 0 ? 'open (any initiator)' : `${target.acls.length} ACL${target.acls.length !== 1 ? 's' : ''}`}
+						</div>
 					</div>
-					<Button variant="destructive" size="sm" onclick={() => remove(target.id)}>Delete</Button>
-				</div>
+					<span class="ml-4 mt-1 text-muted-foreground">{expanded[target.id] ? '▲' : '▼'}</span>
+				</button>
 
-				<div class="mb-2">
-					<span class="text-xs uppercase tracking-wide text-muted-foreground">Portals: </span>
-					{#each target.portals as p}
-						<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">{p.ip}:{p.port}</span>
-					{/each}
-					{#if target.portals.length === 0}
-						<span class="text-xs text-muted-foreground">None</span>
-					{/if}
-				</div>
+				<!-- Expanded details -->
+				{#if expanded[target.id]}
+					<div class="mt-4 space-y-4 border-t pt-4">
+						<!-- Portals -->
+						<div>
+							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Portals</h4>
+							{#if target.portals.length === 0}
+								<p class="text-xs text-muted-foreground">None</p>
+							{:else}
+								<div class="space-y-1">
+									{#each target.portals as p}
+										<div class="flex items-center gap-2 text-sm">
+											<span class="rounded bg-secondary px-2 py-0.5 font-mono text-xs">{p.ip}:{p.port}</span>
+										</div>
+									{/each}
+								</div>
+							{/if}
+						</div>
 
-				{#if target.luns.length > 0}
-					<div class="mb-2">
-						<span class="text-xs uppercase tracking-wide text-muted-foreground">LUNs: </span>
-						{#each target.luns as lun}
-							<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">
-								LUN {lun.lun_id}: {lun.backstore_path} ({lun.backstore_type})
-							</span>
-						{/each}
+						<!-- LUNs -->
+						<div>
+							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">LUNs</h4>
+							{#if target.luns.length === 0}
+								<p class="text-xs text-muted-foreground">No LUNs</p>
+							{:else}
+								<div class="space-y-1">
+									{#each target.luns as lun}
+										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+											<div class="text-sm">
+												<span class="font-mono text-xs font-semibold">LUN {lun.lun_id}</span>
+												<span class="ml-2 text-muted-foreground">{lun.backstore_path}</span>
+												<span class="ml-1 text-xs text-muted-foreground">({lun.backstore_type})</span>
+											</div>
+											<Button variant="ghost" size="sm" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removeLun(target.id, lun.lun_id)}>Remove</Button>
+										</div>
+									{/each}
+								</div>
+							{/if}
+
+							<!-- Add LUN inline form -->
+							{#if addLunTarget === target.id}
+								<div class="mt-3 rounded border p-3">
+									<div class="mb-2">
+										<Label class="text-xs">Block Device or Subvolume</Label>
+										<select bind:value={addLunPath} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+											<option value="">Select...</option>
+											{#each blockSubvolumes as sv}
+												<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+											{/each}
+										</select>
+									</div>
+									<div class="mb-2">
+										<Label class="text-xs">Type</Label>
+										<select bind:value={addLunType} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+											<option value="">Auto-detect</option>
+											<option value="block">Block</option>
+											<option value="fileio">File I/O</option>
+										</select>
+									</div>
+									<div class="flex gap-2">
+										<Button size="sm" class="h-7 text-xs" onclick={addLun} disabled={!addLunPath}>Add</Button>
+										<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => { addLunTarget = ''; }}>Cancel</Button>
+									</div>
+								</div>
+							{:else}
+								<Button size="sm" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addLunTarget = target.id; }}>+ Add LUN</Button>
+							{/if}
+						</div>
+
+						<!-- ACLs -->
+						<div>
+							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Access Control (ACLs)</h4>
+							{#if target.acls.length === 0}
+								<p class="text-xs text-muted-foreground">Open access — any initiator can connect. Add an ACL to restrict.</p>
+							{:else}
+								<div class="space-y-1">
+									{#each target.acls as acl}
+										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+											<div class="text-sm">
+												<span class="font-mono text-xs">{acl.initiator_iqn}</span>
+												{#if acl.userid}
+													<span class="ml-2 text-xs text-muted-foreground">CHAP: {acl.userid}</span>
+												{/if}
+											</div>
+											<Button variant="ghost" size="sm" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removeAcl(target.id, acl.initiator_iqn)}>Remove</Button>
+										</div>
+									{/each}
+								</div>
+							{/if}
+
+							<!-- Add ACL inline form -->
+							{#if addAclTarget === target.id}
+								<div class="mt-3 rounded border p-3">
+									<div class="mb-2">
+										<Label class="text-xs">Initiator IQN</Label>
+										<Input bind:value={addAclIqn} placeholder="iqn.2024-01.com.client:initiator1" class="mt-1 h-8 text-xs" />
+									</div>
+									<div class="grid grid-cols-2 gap-2 mb-2">
+										<div>
+											<Label class="text-xs">CHAP User (optional)</Label>
+											<Input bind:value={addAclUser} class="mt-1 h-8 text-xs" />
+										</div>
+										<div>
+											<Label class="text-xs">CHAP Password (optional)</Label>
+											<Input bind:value={addAclPass} type="password" class="mt-1 h-8 text-xs" />
+										</div>
+									</div>
+									<div class="flex gap-2">
+										<Button size="sm" class="h-7 text-xs" onclick={addAcl} disabled={!addAclIqn}>Add</Button>
+										<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => { addAclTarget = ''; }}>Cancel</Button>
+									</div>
+								</div>
+							{:else}
+								<Button size="sm" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addAclTarget = target.id; }}>+ Add ACL</Button>
+							{/if}
+						</div>
+
+						<!-- Delete -->
+						<div class="border-t pt-3">
+							<Button variant="destructive" size="sm" onclick={() => remove(target.id)}>Delete Target</Button>
+						</div>
 					</div>
-				{/if}
-
-				{#if target.acls.length > 0}
-					<div>
-						<span class="text-xs uppercase tracking-wide text-muted-foreground">ACLs: </span>
-						{#each target.acls as acl}
-							<span class="mr-1 font-mono text-xs">{acl.initiator_iqn}</span>
-						{/each}
-					</div>
-				{:else}
-					<span class="text-xs text-muted-foreground">Open (any initiator)</span>
 				{/if}
 			</CardContent>
 		</Card>
