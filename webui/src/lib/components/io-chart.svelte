@@ -8,9 +8,11 @@
 	interface Props {
 		samples: { time: Date; in: number; out: number }[];
 		inLabel: string;
-		outLabel: string;
+		outLabel?: string;
 		inColor?: string;
 		outColor?: string;
+		yFormat?: (v: number) => string;
+		tooltipFormat?: (v: number) => string;
 	}
 
 	let {
@@ -19,12 +21,26 @@
 		outLabel,
 		inColor = 'var(--chart-1)',
 		outColor = 'var(--chart-2)',
+		yFormat = (v: number) => formatBytes(v) + '/s',
+		tooltipFormat = (v: number) => formatBytes(v) + '/s',
 	}: Props = $props();
 
-	const chartConfig = $derived({
-		in: { label: inLabel, color: inColor },
-		out: { label: outLabel, color: outColor },
-	} satisfies Chart.ChartConfig);
+	const singleSeries = $derived(!outLabel);
+
+	const chartConfig = $derived(
+		singleSeries
+			? { in: { label: inLabel, color: inColor } } satisfies Chart.ChartConfig
+			: { in: { label: inLabel, color: inColor }, out: { label: outLabel!, color: outColor } } satisfies Chart.ChartConfig
+	);
+
+	const series = $derived(
+		singleSeries
+			? [{ key: 'in', label: inLabel, color: inColor }]
+			: [
+					{ key: 'in', label: inLabel, color: inColor },
+					{ key: 'out', label: outLabel!, color: outColor },
+				]
+	);
 </script>
 
 {#if samples.length >= 2}
@@ -33,10 +49,7 @@
 			data={samples}
 			x="time"
 			xScale={scaleUtc()}
-			series={[
-				{ key: 'in', label: inLabel, color: inColor },
-				{ key: 'out', label: outLabel, color: outColor },
-			]}
+			{series}
 			props={{
 				area: {
 					curve: curveMonotoneX,
@@ -48,7 +61,7 @@
 					ticks: 4,
 				},
 				yAxis: {
-					format: (v: number) => formatBytes(v) + '/s',
+					format: yFormat,
 					ticks: 3,
 				},
 			}}
@@ -56,7 +69,7 @@
 			{#snippet tooltip()}
 				<Chart.Tooltip
 					labelFormatter={(v: Date) => v.toLocaleTimeString()}
-					valueFormatter={(v: number) => formatBytes(v) + '/s'}
+					valueFormatter={tooltipFormat}
 					indicator="line"
 				/>
 			{/snippet}

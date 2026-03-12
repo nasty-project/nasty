@@ -315,6 +315,18 @@ async fn metrics_collector(db: Arc<nasty_system::metrics::MetricsDb>) {
             db.insert("disk", &disk_samples);
         }
 
+        // CPU usage percentage (load / cores × 100)
+        let cpu_pct = (stats.cpu.load_1 / stats.cpu.count as f64) * 100.0;
+        db.insert("cpu", &[("cpu", cpu_pct.min(100.0), 0.0)]);
+
+        // Memory usage percentage
+        let mem_pct = if stats.memory.total_bytes > 0 {
+            (stats.memory.used_bytes as f64 / stats.memory.total_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
+        db.insert("mem", &[("mem", mem_pct, 0.0)]);
+
         prev_stats = stats;
         prev_time = now;
 

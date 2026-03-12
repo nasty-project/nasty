@@ -25,9 +25,13 @@
 	let netIoRates: Map<string, { rxRate: number; txRate: number }> = $state(new Map());
 	let netSamples: Map<string, { time: Date; in: number; out: number }[]> = $state(new Map());
 	let diskSamples: Map<string, { time: Date; in: number; out: number }[]> = $state(new Map());
+	let cpuChartSamples: { time: Date; in: number; out: number }[] = $state([]);
+	let memChartSamples: { time: Date; in: number; out: number }[] = $state([]);
 
 	const netHistory = createIoHistory();
 	const diskHistory = createIoHistory();
+	const cpuHistory = createIoHistory();
+	const memHistory = createIoHistory();
 
 	const client = getClient();
 
@@ -57,9 +61,11 @@
 
 		// Load persisted metrics history so charts render immediately
 		try {
-			const [netHist, diskHist] = await Promise.all([
+			const [netHist, diskHist, cpuHist, memHist] = await Promise.all([
 				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'net', duration_secs: 300 }),
 				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'disk', duration_secs: 300 }),
+				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'cpu', duration_secs: 300 }),
+				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'mem', duration_secs: 300 }),
 			]);
 			for (const rh of netHist) {
 				for (const s of rh.samples) {
@@ -71,7 +77,17 @@
 					diskHistory.push(rh.name, new Date(s.ts), s.in_rate, s.out_rate);
 				}
 			}
-			// Seed the $state sample maps so charts render
+			for (const rh of cpuHist) {
+				for (const s of rh.samples) {
+					cpuHistory.push('cpu', new Date(s.ts), s.in_rate, 0);
+				}
+			}
+			for (const rh of memHist) {
+				for (const s of rh.samples) {
+					memHistory.push('mem', new Date(s.ts), s.in_rate, 0);
+				}
+			}
+			// Seed the $state sample maps/arrays so charts render
 			if (stats) {
 				netSamples = new Map(
 					stats.network.map(n => [n.name, [...netHistory.getSamples(n.name)]])
@@ -80,6 +96,8 @@
 					stats.disk_io.map(d => [d.name, [...diskHistory.getSamples(d.name)]])
 				);
 			}
+			cpuChartSamples = [...cpuHistory.getSamples('cpu')];
+			memChartSamples = [...memHistory.getSamples('mem')];
 		} catch {
 			// Metrics history not available yet, charts will populate over time
 		}
@@ -122,6 +140,17 @@
 				netSamples = new Map(
 					newStats.network.map(n => [n.name, [...netHistory.getSamples(n.name)]])
 				);
+
+				// CPU and memory
+				const cpuPct = Math.min(100, (newStats.cpu.load_1 / newStats.cpu.count) * 100);
+				cpuHistory.push('cpu', sampleTime, cpuPct, 0);
+				cpuChartSamples = [...cpuHistory.getSamples('cpu')];
+
+				const memPct = newStats.memory.total_bytes > 0
+					? (newStats.memory.used_bytes / newStats.memory.total_bytes) * 100
+					: 0;
+				memHistory.push('mem', sampleTime, memPct, 0);
+				memChartSamples = [...memHistory.getSamples('mem')];
 			}
 
 			prevDiskIo = newStats.disk_io;
@@ -238,6 +267,15 @@
 					<span><span class="text-muted-foreground">5m</span> {stats.cpu.load_5.toFixed(2)}</span>
 					<span><span class="text-muted-foreground">15m</span> {stats.cpu.load_15.toFixed(2)}</span>
 				</div>
+				<div class="mt-3">
+					<IoChart
+						samples={cpuChartSamples}
+						inLabel="Usage"
+						inColor="var(--chart-3)"
+						yFormat={(v) => v.toFixed(0) + '%'}
+						tooltipFormat={(v) => v.toFixed(1) + '%'}
+					/>
+				</div>
 			</CardContent>
 		</Card>
 
@@ -258,6 +296,15 @@
 						Swap: {formatBytes(stats.memory.swap_used_bytes)} / {formatBytes(stats.memory.swap_total_bytes)}
 					</div>
 				{/if}
+				<div class="mt-3">
+					<IoChart
+						samples={memChartSamples}
+						inLabel="Used"
+						inColor="var(--chart-5)"
+						yFormat={(v) => v.toFixed(0) + '%'}
+						tooltipFormat={(v) => v.toFixed(1) + '%'}
+					/>
+				</div>
 			</CardContent>
 		</Card>
 
