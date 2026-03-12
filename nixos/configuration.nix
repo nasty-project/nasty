@@ -3,17 +3,11 @@
 {
   imports = [
     ./hardware-configuration.nix
-    ./grub-device.nix
   ];
 
-  # Boot loader — GRUB with hybrid BIOS + UEFI support
-  # The installer writes grub-device.nix with the correct device path.
-  boot.loader.grub = {
-    enable = true;
-    efiSupport = true;
-    efiInstallAsRemovable = true;
-  };
-  boot.loader.efi.canTouchEfiVariables = false;
+  # Boot loader — UEFI with systemd-boot
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
 
   networking.hostName = "nasty";
 
