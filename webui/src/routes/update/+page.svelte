@@ -61,6 +61,7 @@
 
 	async function applyUpdate() {
 		if (!confirm('Start system update? Services will restart when the update completes.')) return;
+		status = { state: 'running', log: '' };
 		const ok = await withToast(
 			() => client.call('system.update.apply'),
 			'Update started'
@@ -72,6 +73,7 @@
 
 	async function rollback() {
 		if (!confirm('Rollback to the previous system version?')) return;
+		status = { state: 'running', log: '' };
 		const ok = await withToast(
 			() => client.call('system.update.rollback'),
 			'Rollback started'
@@ -110,7 +112,7 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else}
-	<Card class="mb-6 max-w-2xl">
+	<Card class="mb-6 max-w-4xl">
 		<CardContent class="pt-6">
 			<div class="mb-4 flex items-center justify-between">
 				<div>
@@ -156,7 +158,7 @@
 	</Card>
 
 	{#if status && status.state !== 'idle'}
-		<Card class="max-w-2xl">
+		<Card class="max-w-4xl">
 			<CardContent class="pt-6">
 				<div class="mb-3 flex items-center gap-3">
 					<span class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
@@ -182,7 +184,7 @@
 		</Card>
 	{/if}
 
-	<p class="mt-6 max-w-2xl text-xs text-muted-foreground">
+	<p class="mt-6 max-w-4xl text-xs text-muted-foreground">
 		Updates are fetched from GitHub and applied using NixOS rebuild.
 		The system will atomically switch to the new version, restarting services as needed.
 		If anything goes wrong, use Rollback to return to the previous version.

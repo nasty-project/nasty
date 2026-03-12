@@ -115,12 +115,27 @@ impl UpdateService {
         let script = format!(
             r#"#!/bin/bash
 set -euo pipefail
-echo "Starting NASty system update..."
 echo "==> Pulling latest source..."
 cd {LOCAL_REPO}
+
+# Preserve machine-specific hardware config
+HW_CFG="nixos/hardware-configuration.nix"
+if [ -f "$HW_CFG" ]; then
+  cp "$HW_CFG" /tmp/nasty-hw-config.nix
+fi
+
 git remote set-url origin "{repo_url}"
 git fetch origin
 git reset --hard origin/main
+
+# Restore hardware config
+if [ -f /tmp/nasty-hw-config.nix ]; then
+  cp /tmp/nasty-hw-config.nix "$HW_CFG"
+fi
+
+# Flakes require all files to be tracked
+git add -A
+
 echo "==> Rebuilding system..."
 nixos-rebuild switch --flake {LOCAL_FLAKE}
 echo "==> Update complete!"
