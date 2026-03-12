@@ -244,13 +244,9 @@ async fn load_state() -> ProtocolState {
     match tokio::fs::read_to_string(STATE_PATH).await {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => {
-            // Default: all protocols enabled (matches NixOS default)
-            ProtocolState {
-                nfs: true,
-                smb: true,
-                iscsi: true,
-                nvmeof: true,
-            }
+            // Default: all protocols disabled on fresh install.
+            // User explicitly enables what they need.
+            ProtocolState::default()
         }
     }
 }

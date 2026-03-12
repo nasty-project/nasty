@@ -91,12 +91,9 @@ in {
 
     boot.supportedFilesystems = [ "bcachefs" ];
 
-    boot.kernelModules = lib.flatten [
-      (lib.optional cfg.iscsi.enable "target_core_mod")
-      (lib.optional cfg.iscsi.enable "iscsi_target_mod")
-      (lib.optional cfg.nvmeof.enable "nvmet")
-      (lib.optional cfg.nvmeof.enable "nvmet-tcp")
-    ];
+    # Kernel modules for iSCSI/NVMe-oF are NOT auto-loaded at boot.
+    # They are loaded on demand by the middleware when the user enables
+    # a protocol, keeping a clean default state on fresh installs.
 
     # ── System packages ────────────────────────────────────────
 
@@ -223,6 +220,20 @@ in {
         RemainAfterExit = true;
         ExecStart = pkgs.writeShellScript "nasty-nvmeof-restore" ''
           set -euo pipefail
+
+          # Check if NVMe-oF protocol is enabled by the user
+          PROTO_STATE="/var/lib/nasty/protocols.json"
+          if [ -f "$PROTO_STATE" ]; then
+            NVMEOF_ENABLED=$(${pkgs.jq}/bin/jq -r '.nvmeof // false' "$PROTO_STATE" 2>/dev/null)
+          else
+            NVMEOF_ENABLED="false"
+          fi
+
+          if [ "$NVMEOF_ENABLED" != "true" ]; then
+            echo "NVMe-oF protocol is disabled, skipping restore"
+            exit 0
+          fi
+
           STATE="/var/lib/nasty/nvmeof-targets.json"
 
           if [ ! -f "$STATE" ]; then
@@ -471,14 +482,14 @@ in {
           set -euo pipefail
           STATE="/var/lib/nasty/protocols.json"
 
-          if [ ! -f "$STATE" ]; then
-            echo "No protocol state file, all protocols remain at NixOS defaults"
-            exit 0
-          fi
-
-          # Read state and stop disabled services
+          # Default: all protocols disabled on fresh install (no state file).
+          # Read state and stop disabled services.
           for proto in nfs smb iscsi nvmeof; do
-            ENABLED=$(${pkgs.jq}/bin/jq -r ".$proto // true" "$STATE" 2>/dev/null)
+            if [ -f "$STATE" ]; then
+              ENABLED=$(${pkgs.jq}/bin/jq -r ".$proto // false" "$STATE" 2>/dev/null)
+            else
+              ENABLED="false"
+            fi
 
             if [ "$ENABLED" = "false" ]; then
               case "$proto" in
