@@ -252,6 +252,13 @@ async fn apply_config() -> Result<(), SmbError> {
             if share.guest_ok { "yes" } else { "no" }
         ));
 
+        // When guest access is enabled, force operations as root so guests
+        // can read/write regardless of underlying Unix permissions.
+        if share.guest_ok {
+            conf.push_str("    force user = root\n");
+            conf.push_str("    force group = root\n");
+        }
+
         if !share.valid_users.is_empty() {
             conf.push_str(&format!(
                 "    valid users = {}\n",

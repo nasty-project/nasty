@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "nasty_api=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "nasty_api=debug,nasty_storage=info,nasty_sharing=info,nasty_system=info,tower_http=debug".into()),
         )
         .init();
 

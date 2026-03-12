@@ -476,7 +476,7 @@ async fn targetcli(cmd: &str) -> Result<String, IscsiError> {
 
 /// Save the running LIO config so it persists across reboots
 async fn save_lio_config() -> Result<(), IscsiError> {
-    targetcli("/saveconfig").await?;
+    targetcli("saveconfig").await?;
     Ok(())
 }
 
