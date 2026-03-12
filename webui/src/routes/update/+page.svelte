@@ -12,8 +12,15 @@
 	let loading = $state(true);
 	let checking = $state(false);
 	let pollInterval: ReturnType<typeof setInterval> | null = $state(null);
+	let logEl: HTMLPreElement | undefined = $state();
 
 	const client = getClient();
+
+	$effect(() => {
+		if (status?.log && logEl) {
+			logEl.scrollTop = logEl.scrollHeight;
+		}
+	});
 
 	onMount(async () => {
 		await loadVersion();
@@ -169,7 +176,7 @@
 					{/if}
 				</div>
 				{#if status.log}
-					<pre class="max-h-96 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{status.log}</pre>
+					<pre bind:this={logEl} class="max-h-96 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{status.log}</pre>
 				{/if}
 			</CardContent>
 		</Card>
