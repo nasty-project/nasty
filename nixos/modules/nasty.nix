@@ -184,6 +184,8 @@ in {
         util-linux       # lsblk, blkid, wipefs, mount, umount
         bcachefs-tools   # bcachefs
         smartmontools    # smartctl
+        iproute2         # ip (for network addresses)
+        systemd          # systemctl, journalctl (for update status)
         git              # for update check (git ls-remote)
         curl             # for update check (GitHub API, TODO: remove when repo is public)
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]

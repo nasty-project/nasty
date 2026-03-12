@@ -111,6 +111,8 @@ impl UpdateService {
                 "--description",
                 "NASty system update",
                 "--property=Type=oneshot",
+                "--property=StandardOutput=journal",
+                "--property=StandardError=journal",
             ]);
 
         if !token_env.is_empty() {
@@ -164,6 +166,8 @@ impl UpdateService {
                 "--description",
                 "NASty system rollback",
                 "--property=Type=oneshot",
+                "--property=StandardOutput=journal",
+                "--property=StandardError=journal",
                 "--",
                 "nixos-rebuild",
                 "switch",
