@@ -33,7 +33,7 @@ fn is_read_only(method: &str) -> bool {
             | "system.alerts" | "alert.rules.list"
             | "device.list" | "auth.me" | "auth.list_users"
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
-            | "service.protocol.list"
+            | "service.protocol.list" | "subvolume.list_all"
         )
 }
 
@@ -304,6 +304,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
 
         // ── Subvolumes ──────────────────────────────────────────
+        "subvolume.list_all" => match state.subvolumes.list_all().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
         "subvolume.list" => match require_str(req, "pool") {
             Ok(pool) => match state.subvolumes.list(pool).await {
                 Ok(v) => ok(req, v),
@@ -450,6 +454,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+        "share.iscsi.create_quick" => match parse_params(req) {
+            Ok(p) => match state.iscsi.create_quick(p).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
         "share.iscsi.create" => match parse_params(req) {
             Ok(p) => match state.iscsi.create(p).await {
                 Ok(v) => ok(req, v),
@@ -504,6 +515,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(e) => err(req, e),
             },
             Err(r) => r,
+        },
+        "share.nvmeof.create_quick" => match parse_params(req) {
+            Ok(p) => match state.nvmeof.create_quick(p).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
         },
         "share.nvmeof.create" => match parse_params(req) {
             Ok(p) => match state.nvmeof.create(p).await {

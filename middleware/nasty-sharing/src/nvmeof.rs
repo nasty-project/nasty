@@ -66,6 +66,19 @@ pub struct CreateSubsystemRequest {
     pub allow_any_host: Option<bool>,
 }
 
+/// Simplified request: creates subsystem + namespace + port in one shot
+#[derive(Debug, Deserialize)]
+pub struct QuickCreateRequest {
+    /// Short name for the NQN
+    pub name: String,
+    /// Block device path (e.g. /dev/loop0)
+    pub device_path: String,
+    /// Listen address (default 0.0.0.0)
+    pub addr: Option<String>,
+    /// Port number (default 4420)
+    pub port: Option<u16>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DeleteSubsystemRequest {
     pub id: String,
@@ -178,6 +191,32 @@ impl NvmeofService {
         Ok(subsystem)
     }
 
+    /// Create a complete NVMe-oF share in one step: subsystem + namespace + port
+    pub async fn create_quick(&self, req: QuickCreateRequest) -> Result<NvmeofSubsystem, NvmeofError> {
+        // Create subsystem
+        let subsys = self.create(CreateSubsystemRequest {
+            name: req.name,
+            allow_any_host: Some(true),
+        }).await?;
+
+        // Add namespace with the block device
+        let subsys = self.add_namespace(AddNamespaceRequest {
+            subsystem_id: subsys.id.clone(),
+            device_path: req.device_path,
+        }).await?;
+
+        // Add a TCP port
+        let subsys = self.add_port(AddPortRequest {
+            subsystem_id: subsys.id.clone(),
+            transport: Some("tcp".to_string()),
+            addr: Some(req.addr.unwrap_or_else(|| "0.0.0.0".to_string())),
+            service_id: Some(req.port.unwrap_or(4420)),
+            addr_family: Some("ipv4".to_string()),
+        }).await?;
+
+        Ok(subsys)
+    }
+
     pub async fn delete(&self, req: DeleteSubsystemRequest) -> Result<(), NvmeofError> {
         let mut state = load_state().await;
 
@@ -195,7 +234,7 @@ impl NvmeofService {
                 "{NVMET_BASE}/ports/{}/subsystems/{}",
                 port.port_id, subsys.nqn
             );
-            let _ = configfs_rmdir(&link).await;
+            let _ = configfs_unlink(&link).await;
         }
 
         // Remove port directories if they were created solely for this subsystem
@@ -224,7 +263,7 @@ impl NvmeofService {
                 "{NVMET_BASE}/subsystems/{}/allowed_hosts/{host_nqn}",
                 subsys.nqn
             );
-            let _ = configfs_rmdir(&link).await;
+            let _ = configfs_unlink(&link).await;
         }
 
         // Remove subsystem
@@ -385,7 +424,7 @@ impl NvmeofService {
             "{NVMET_BASE}/ports/{}/subsystems/{}",
             req.port_id, subsys.nqn
         );
-        let _ = configfs_rmdir(&link_path).await;
+        let _ = configfs_unlink(&link_path).await;
 
         // Remove port dir if no other subsystems use it
         let port_subsys_dir = format!("{NVMET_BASE}/ports/{}/subsystems", req.port_id);
@@ -457,7 +496,7 @@ impl NvmeofService {
             "{NVMET_BASE}/subsystems/{}/allowed_hosts/{}",
             subsys.nqn, req.host_nqn
         );
-        configfs_rmdir(&link_path).await?;
+        configfs_unlink(&link_path).await?;
 
         subsys.allowed_hosts.retain(|h| h != &req.host_nqn);
         let result = subsys.clone();
@@ -480,6 +519,13 @@ async fn configfs_rmdir(path: &str) -> Result<(), NvmeofError> {
     tokio::fs::remove_dir(path)
         .await
         .map_err(|e| NvmeofError::ConfigFs(format!("rmdir {path}: {e}")))
+}
+
+/// Remove a symlink in configfs (e.g. port->subsystem links, allowed_hosts)
+async fn configfs_unlink(path: &str) -> Result<(), NvmeofError> {
+    tokio::fs::remove_file(path)
+        .await
+        .map_err(|e| NvmeofError::ConfigFs(format!("unlink {path}: {e}")))
 }
 
 async fn configfs_write(path: &str, value: &str) -> Result<(), NvmeofError> {

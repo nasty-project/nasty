@@ -2,24 +2,27 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { IscsiTarget } from '$lib/types';
+	import type { IscsiTarget, Subvolume } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
-	import * as Dialog from '$lib/components/ui/dialog';
 
 	let targets: IscsiTarget[] = $state([]);
+	let blockSubvolumes: Subvolume[] = $state([]);
 	let showCreate = $state(false);
 	let loading = $state(true);
 
 	let newName = $state('');
-
-	let lunTarget = $state<string | null>(null);
-	let lunPath = $state('');
-	let lunType = $state('block');
+	let newDevice = $state('');
 
 	const client = getClient();
+
+	$effect(() => {
+		if (showCreate) {
+			loadSubvolumes();
+		}
+	});
 
 	onMount(async () => {
 		await refresh();
@@ -32,15 +35,33 @@
 		});
 	}
 
+	async function loadSubvolumes() {
+		await withToast(async () => {
+			const all = await client.call<Subvolume[]>('subvolume.list_all');
+			blockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
+		});
+	}
+
+	function onDeviceSelect() {
+		if (newDevice && !newName) {
+			const sv = blockSubvolumes.find(s => s.block_device === newDevice);
+			if (sv) newName = sv.name;
+		}
+	}
+
 	async function create() {
-		if (!newName) return;
+		if (!newName || !newDevice) return;
 		const ok = await withToast(
-			() => client.call('share.iscsi.create', { name: newName }),
+			() => client.call('share.iscsi.create_quick', {
+				name: newName,
+				device_path: newDevice,
+			}),
 			'iSCSI target created'
 		);
 		if (ok !== undefined) {
 			showCreate = false;
 			newName = '';
+			newDevice = '';
 			await refresh();
 		}
 	}
@@ -50,32 +71,6 @@
 		await withToast(
 			() => client.call('share.iscsi.delete', { id }),
 			'iSCSI target deleted'
-		);
-		await refresh();
-	}
-
-	async function addLun() {
-		if (!lunTarget || !lunPath) return;
-		const ok = await withToast(
-			() => client.call('share.iscsi.add_lun', {
-				target_id: lunTarget,
-				backstore_path: lunPath,
-				backstore_type: lunType,
-			}),
-			'LUN added'
-		);
-		if (ok !== undefined) {
-			lunTarget = null;
-			lunPath = '';
-			await refresh();
-		}
-	}
-
-	async function removeLun(targetId: string, lunId: number) {
-		if (!confirm(`Remove LUN ${lunId}?`)) return;
-		await withToast(
-			() => client.call('share.iscsi.remove_lun', { target_id: targetId, lun_id: lunId }),
-			'LUN removed'
 		);
 		await refresh();
 	}
@@ -94,11 +89,23 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New iSCSI Target</h3>
 			<div class="mb-4">
-				<Label for="iscsi-name">Name</Label>
+				<Label for="iscsi-device">Block Subvolume</Label>
+				<select id="iscsi-device" bind:value={newDevice} onchange={onDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+					<option value="">Select a block subvolume...</option>
+					{#each blockSubvolumes as sv}
+						<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+					{/each}
+				</select>
+				{#if blockSubvolumes.length === 0}
+					<span class="mt-1 block text-xs text-muted-foreground">No attached block subvolumes found. Create a block subvolume and attach it first.</span>
+				{/if}
+			</div>
+			<div class="mb-4">
+				<Label for="iscsi-name">Target Name</Label>
 				<Input id="iscsi-name" bind:value={newName} placeholder="dbserver" class="mt-1" />
 				<span class="mt-1 block text-xs text-muted-foreground">IQN: iqn.2024-01.com.nasty:{newName || '...'}</span>
 			</div>
-			<Button onclick={create} disabled={!newName}>Create</Button>
+			<Button onclick={create} disabled={!newName || !newDevice}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -111,90 +118,46 @@
 	{#each targets as target}
 		<Card class="mb-4">
 			<CardContent class="pt-5">
-				<div class="mb-4 flex items-start justify-between">
+				<div class="mb-3 flex items-start justify-between">
 					<div>
 						<strong class="font-mono text-sm">{target.iqn}</strong>
 						{#if target.alias}<span class="text-muted-foreground"> ({target.alias})</span>{/if}
 					</div>
-					<div class="flex gap-2">
-						<Button variant="secondary" size="sm" onclick={() => { lunTarget = target.id; lunPath = ''; }}>Add LUN</Button>
-						<Button variant="destructive" size="sm" onclick={() => remove(target.id)}>Delete</Button>
-					</div>
+					<Button variant="destructive" size="sm" onclick={() => remove(target.id)}>Delete</Button>
 				</div>
 
-				<div class="mb-3">
-					<h4 class="mb-1.5 text-xs uppercase tracking-wide text-muted-foreground">Portals</h4>
+				<div class="mb-2">
+					<span class="text-xs uppercase tracking-wide text-muted-foreground">Portals: </span>
+					{#each target.portals as p}
+						<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">{p.ip}:{p.port}</span>
+					{/each}
 					{#if target.portals.length === 0}
-						<span class="text-sm text-muted-foreground">None</span>
-					{:else}
-						{#each target.portals as p}
-							<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">{p.ip}:{p.port}</span>
+						<span class="text-xs text-muted-foreground">None</span>
+					{/if}
+				</div>
+
+				{#if target.luns.length > 0}
+					<div class="mb-2">
+						<span class="text-xs uppercase tracking-wide text-muted-foreground">LUNs: </span>
+						{#each target.luns as lun}
+							<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">
+								LUN {lun.lun_id}: {lun.backstore_path} ({lun.backstore_type})
+							</span>
 						{/each}
-					{/if}
-				</div>
+					</div>
+				{/if}
 
-				<div class="mb-3">
-					<h4 class="mb-1.5 text-xs uppercase tracking-wide text-muted-foreground">LUNs</h4>
-					{#if target.luns.length === 0}
-						<span class="text-sm text-muted-foreground">No LUNs</span>
-					{:else}
-						<table class="w-full text-sm">
-							<thead>
-								<tr>
-									<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">LUN</th>
-									<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Type</th>
-									<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Path</th>
-									<th class="p-1.5"></th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each target.luns as lun}
-									<tr class="border-b border-border">
-										<td class="p-1.5">{lun.lun_id}</td>
-										<td class="p-1.5"><span class="rounded bg-secondary px-1.5 py-0.5 text-xs">{lun.backstore_type}</span></td>
-										<td class="p-1.5 font-mono text-xs">{lun.backstore_path}</td>
-										<td class="p-1.5"><Button variant="destructive" size="sm" onclick={() => removeLun(target.id, lun.lun_id)}>Remove</Button></td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					{/if}
-				</div>
-
-				<div>
-					<h4 class="mb-1.5 text-xs uppercase tracking-wide text-muted-foreground">ACLs</h4>
-					{#if target.acls.length === 0}
-						<span class="text-sm text-muted-foreground">Open (any initiator)</span>
-					{:else}
+				{#if target.acls.length > 0}
+					<div>
+						<span class="text-xs uppercase tracking-wide text-muted-foreground">ACLs: </span>
 						{#each target.acls as acl}
-							<div class="font-mono text-sm">{acl.initiator_iqn}</div>
+							<span class="mr-1 font-mono text-xs">{acl.initiator_iqn}</span>
 						{/each}
-					{/if}
-				</div>
+					</div>
+				{:else}
+					<span class="text-xs text-muted-foreground">Open (any initiator)</span>
+				{/if}
 			</CardContent>
 		</Card>
 	{/each}
 {/if}
-
-<Dialog.Root open={lunTarget !== null} onOpenChange={(open) => { if (!open) lunTarget = null; }}>
-	<Dialog.Content>
-		<Dialog.Header>
-			<Dialog.Title>Add LUN</Dialog.Title>
-		</Dialog.Header>
-		<div class="mb-4">
-			<Label for="lun-type">Type</Label>
-			<select id="lun-type" bind:value={lunType} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-				<option value="block">Block Device</option>
-				<option value="fileio">File I/O</option>
-			</select>
-		</div>
-		<div class="mb-4">
-			<Label for="lun-path">Path</Label>
-			<Input id="lun-path" bind:value={lunPath} placeholder={lunType === 'block' ? '/dev/sdb' : '/mnt/nasty/pool/disk.img'} class="mt-1" />
-		</div>
-		<Dialog.Footer>
-			<Button onclick={addLun} disabled={!lunPath}>Add</Button>
-			<Button variant="secondary" onclick={() => lunTarget = null}>Cancel</Button>
-		</Dialog.Footer>
-	</Dialog.Content>
-</Dialog.Root>

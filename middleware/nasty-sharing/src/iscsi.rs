@@ -73,6 +73,15 @@ pub struct CreateTargetRequest {
     pub portals: Option<Vec<Portal>>,
 }
 
+/// Simplified request: creates target + LUN in one shot
+#[derive(Debug, Deserialize)]
+pub struct QuickCreateRequest {
+    /// Short name for the IQN
+    pub name: String,
+    /// Block device path (e.g. /dev/loop0)
+    pub device_path: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DeleteTargetRequest {
     pub id: String,
@@ -190,6 +199,26 @@ impl IscsiService {
         save_lio_config().await?;
 
         info!("Created iSCSI target {iqn}");
+        Ok(target)
+    }
+
+    /// Create a complete iSCSI target with a LUN in one step
+    pub async fn create_quick(&self, req: QuickCreateRequest) -> Result<IscsiTarget, IscsiError> {
+        // Create the target
+        let target = self.create(CreateTargetRequest {
+            name: req.name,
+            alias: None,
+            portals: None,
+        }).await?;
+
+        // Add the block device as a LUN
+        let target = self.add_lun(AddLunRequest {
+            target_id: target.id.clone(),
+            backstore_path: req.device_path,
+            backstore_type: Some("block".to_string()),
+            size_bytes: None,
+        }).await?;
+
         Ok(target)
     }
 
@@ -447,6 +476,7 @@ impl IscsiService {
 async fn targetcli(cmd: &str) -> Result<String, IscsiError> {
     let output = tokio::process::Command::new("targetcli")
         .args([cmd])
+        .env("TARGETCLI_HOME", "/var/lib/nasty/.targetcli")
         .output()
         .await
         .map_err(|e| IscsiError::CommandFailed(format!("failed to execute targetcli: {e}")))?;

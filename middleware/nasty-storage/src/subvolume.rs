@@ -200,6 +200,24 @@ impl SubvolumeService {
         Ok(subvolumes)
     }
 
+    /// List subvolumes across all mounted pools
+    pub async fn list_all(&self) -> Result<Vec<Subvolume>, SubvolumeError> {
+        let pools = self.pools.list().await
+            .map_err(|e| SubvolumeError::CommandFailed(e.to_string()))?;
+
+        let mut all = Vec::new();
+        for pool in pools {
+            if !pool.mounted {
+                continue;
+            }
+            match self.list(&pool.name).await {
+                Ok(mut subvols) => all.append(&mut subvols),
+                Err(_) => continue,
+            }
+        }
+        Ok(all)
+    }
+
     /// Get a single subvolume
     pub async fn get(
         &self,

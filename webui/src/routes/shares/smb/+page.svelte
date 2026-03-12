@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { SmbShare } from '$lib/types';
+	import type { SmbShare, Subvolume } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -10,16 +10,23 @@
 	import { Card, CardContent } from '$lib/components/ui/card';
 
 	let shares: SmbShare[] = $state([]);
+	let subvolumes: Subvolume[] = $state([]);
 	let showCreate = $state(false);
 	let loading = $state(true);
 
+	let newSubvolume = $state('');
 	let newName = $state('');
-	let newPath = $state('');
 	let newComment = $state('');
 	let newReadOnly = $state(false);
 	let newGuestOk = $state(false);
 
 	const client = getClient();
+
+	$effect(() => {
+		if (showCreate) {
+			loadSubvolumes();
+		}
+	});
 
 	onMount(async () => {
 		await refresh();
@@ -32,12 +39,27 @@
 		});
 	}
 
+	async function loadSubvolumes() {
+		await withToast(async () => {
+			const all = await client.call<Subvolume[]>('subvolume.list_all');
+			subvolumes = all.filter(s => s.subvolume_type === 'filesystem');
+		});
+	}
+
+	function onSubvolumeSelect() {
+		// Auto-fill share name from subvolume name if empty
+		if (newSubvolume && !newName) {
+			const sv = subvolumes.find(s => s.path === newSubvolume);
+			if (sv) newName = sv.name;
+		}
+	}
+
 	async function create() {
-		if (!newName || !newPath) return;
+		if (!newName || !newSubvolume) return;
 		const ok = await withToast(
 			() => client.call('share.smb.create', {
 				name: newName,
-				path: newPath,
+				path: newSubvolume,
 				comment: newComment || undefined,
 				read_only: newReadOnly,
 				guest_ok: newGuestOk,
@@ -46,8 +68,8 @@
 		);
 		if (ok !== undefined) {
 			showCreate = false;
+			newSubvolume = '';
 			newName = '';
-			newPath = '';
 			newComment = '';
 			await refresh();
 		}
@@ -84,12 +106,21 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New SMB Share</h3>
 			<div class="mb-4">
-				<Label for="smb-name">Share Name</Label>
-				<Input id="smb-name" bind:value={newName} placeholder="documents" class="mt-1" />
+				<Label for="smb-subvol">Subvolume</Label>
+				<select id="smb-subvol" bind:value={newSubvolume} onchange={onSubvolumeSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+					<option value="">Select a subvolume...</option>
+					{#each subvolumes as sv}
+						<option value={sv.path}>{sv.pool}/{sv.name}</option>
+					{/each}
+				</select>
+				{#if subvolumes.length === 0}
+					<span class="mt-1 block text-xs text-muted-foreground">No filesystem subvolumes found. Create one first.</span>
+				{/if}
 			</div>
 			<div class="mb-4">
-				<Label for="smb-path">Path</Label>
-				<Input id="smb-path" bind:value={newPath} placeholder="/mnt/nasty/tank/data" class="mt-1" />
+				<Label for="smb-name">Share Name</Label>
+				<Input id="smb-name" bind:value={newName} placeholder="documents" class="mt-1" />
+				<span class="mt-1 block text-xs text-muted-foreground">Name visible to network clients</span>
 			</div>
 			<div class="mb-4">
 				<Label for="smb-comment">Comment</Label>
@@ -103,7 +134,7 @@
 					<input type="checkbox" bind:checked={newGuestOk} class="h-4 w-4" /> Allow guests
 				</label>
 			</div>
-			<Button onclick={create} disabled={!newName || !newPath}>Create</Button>
+			<Button onclick={create} disabled={!newName || !newSubvolume}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}

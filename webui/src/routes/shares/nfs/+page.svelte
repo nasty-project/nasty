@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { NfsShare } from '$lib/types';
+	import type { NfsShare, Subvolume } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -10,15 +10,22 @@
 	import { Card, CardContent } from '$lib/components/ui/card';
 
 	let shares: NfsShare[] = $state([]);
+	let subvolumes: Subvolume[] = $state([]);
 	let showCreate = $state(false);
 	let loading = $state(true);
 
-	let newPath = $state('');
+	let newSubvolume = $state('');
 	let newComment = $state('');
 	let newHost = $state('');
 	let newOptions = $state('rw,sync,no_subtree_check');
 
 	const client = getClient();
+
+	$effect(() => {
+		if (showCreate) {
+			loadSubvolumes();
+		}
+	});
 
 	onMount(async () => {
 		await refresh();
@@ -31,11 +38,18 @@
 		});
 	}
 
+	async function loadSubvolumes() {
+		await withToast(async () => {
+			const all = await client.call<Subvolume[]>('subvolume.list_all');
+			subvolumes = all.filter(s => s.subvolume_type === 'filesystem');
+		});
+	}
+
 	async function create() {
-		if (!newPath || !newHost) return;
+		if (!newSubvolume || !newHost) return;
 		const ok = await withToast(
 			() => client.call('share.nfs.create', {
-				path: newPath,
+				path: newSubvolume,
 				comment: newComment || undefined,
 				clients: [{ host: newHost, options: newOptions }],
 			}),
@@ -43,7 +57,7 @@
 		);
 		if (ok !== undefined) {
 			showCreate = false;
-			newPath = '';
+			newSubvolume = '';
 			newComment = '';
 			newHost = '';
 			await refresh();
@@ -66,6 +80,11 @@
 		);
 		await refresh();
 	}
+
+	function pathLabel(path: string): string {
+		// /mnt/nasty/tank/data -> tank/data
+		return path.replace(/^\/mnt\/nasty\//, '');
+	}
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">NFS Shares</h1>
@@ -81,8 +100,16 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New NFS Share</h3>
 			<div class="mb-4">
-				<Label for="nfs-path">Path</Label>
-				<Input id="nfs-path" bind:value={newPath} placeholder="/mnt/nasty/tank/data" class="mt-1" />
+				<Label for="nfs-path">Subvolume</Label>
+				<select id="nfs-path" bind:value={newSubvolume} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+					<option value="">Select a subvolume...</option>
+					{#each subvolumes as sv}
+						<option value={sv.path}>{sv.pool}/{sv.name}</option>
+					{/each}
+				</select>
+				{#if subvolumes.length === 0}
+					<span class="mt-1 block text-xs text-muted-foreground">No filesystem subvolumes found. Create one first.</span>
+				{/if}
 			</div>
 			<div class="mb-4">
 				<Label for="nfs-comment">Comment</Label>
@@ -96,7 +123,7 @@
 				<Label for="nfs-opts">Options</Label>
 				<Input id="nfs-opts" bind:value={newOptions} class="mt-1" />
 			</div>
-			<Button onclick={create} disabled={!newPath || !newHost}>Create</Button>
+			<Button onclick={create} disabled={!newSubvolume || !newHost}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -119,7 +146,8 @@
 			{#each shares as share}
 				<tr class="border-b border-border">
 					<td class="p-3">
-						<strong class="font-mono text-sm">{share.path}</strong>
+						<strong class="text-sm">{pathLabel(share.path)}</strong>
+						<br /><span class="font-mono text-xs text-muted-foreground">{share.path}</span>
 						{#if share.comment}<br /><span class="text-xs text-muted-foreground">{share.comment}</span>{/if}
 					</td>
 					<td class="p-3">
