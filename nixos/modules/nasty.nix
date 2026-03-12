@@ -373,20 +373,30 @@ in {
           POOLS=$(${pkgs.jq}/bin/jq -r '.[]' "$STATE" 2>/dev/null) || exit 0
 
           # Build a map of UUID -> device list from blkid
+          # blkid -o export outputs blocks separated by blank lines,
+          # each block has one KEY=VALUE per line.
           declare -A UUID_DEVS
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            DEV=""
-            UUID=""
-            for kv in $line; do
-              case "$kv" in
-                DEVNAME=*) DEV="''${kv#DEVNAME=}" ;;
-                UUID=*) UUID="''${kv#UUID=}" ;;
-              esac
-            done
-            [ -z "$UUID" ] || [ -z "$DEV" ] && continue
+          DEV=""
+          UUID=""
+          while IFS= read -r line || [ -n "$DEV" ]; do
+            if [ -z "$line" ]; then
+              # End of block — store if we have both DEV and UUID
+              if [ -n "$UUID" ] && [ -n "$DEV" ]; then
+                UUID_DEVS[$UUID]="''${UUID_DEVS[$UUID]:-}:$DEV"
+              fi
+              DEV=""
+              UUID=""
+              continue
+            fi
+            case "$line" in
+              DEVNAME=*) DEV="''${line#DEVNAME=}" ;;
+              UUID=*) UUID="''${line#UUID=}" ;;
+            esac
+          done < <(${pkgs.util-linux}/bin/blkid -t TYPE=bcachefs -o export 2>/dev/null; echo)
+          # Final block (in case no trailing newline)
+          if [ -n "$UUID" ] && [ -n "$DEV" ]; then
             UUID_DEVS[$UUID]="''${UUID_DEVS[$UUID]:-}:$DEV"
-          done < <(${pkgs.util-linux}/bin/blkid -t TYPE=bcachefs -o export 2>/dev/null || true)
+          fi
 
           echo "$POOLS" | while IFS= read -r pool_name; do
             [ -z "$pool_name" ] && continue
