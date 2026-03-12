@@ -24,7 +24,7 @@ in
 
   # UEFI-only boot (no legacy BIOS support)
   isoImage.makeEfiBootable = true;
-  isoImage.makeUsbBootable = false;
+  isoImage.makeUsbBootable = lib.mkForce false;
 
   environment.systemPackages = with pkgs; [
     bcachefs-tools
