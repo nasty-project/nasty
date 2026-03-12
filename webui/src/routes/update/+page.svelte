@@ -11,6 +11,7 @@
 	let status: UpdateStatus | null = $state(null);
 	let loading = $state(true);
 	let checking = $state(false);
+	let needsRefresh = $state(false);
 	let confirmAction: 'update' | 'rollback' | null = $state(null);
 	let confirmTimer: ReturnType<typeof setTimeout> | null = null;
 	let pollInterval: ReturnType<typeof setInterval> | null = $state(null);
@@ -110,8 +111,10 @@
 				status = await client.call<UpdateStatus>('system.update.status');
 				if (status && status.state !== 'running') {
 					stopPolling();
-					// Reload version info after completion
 					await loadVersion();
+					if (status.state === 'success') {
+						needsRefresh = true;
+					}
 				}
 			} catch {
 				// Connection may drop during update, keep polling
@@ -128,6 +131,15 @@
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">System Update</h1>
+
+{#if needsRefresh}
+	<div class="mb-4 flex items-center gap-4 rounded-lg border border-blue-800 bg-blue-950 px-4 py-3 text-sm text-blue-200">
+		<span class="flex-1">Update applied. Refresh your browser to load the new WebUI.</span>
+		<Button variant="secondary" size="sm" onclick={() => location.reload()}>
+			Refresh Now
+		</Button>
+	</div>
+{/if}
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
