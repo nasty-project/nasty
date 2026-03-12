@@ -203,17 +203,12 @@ in {
         RestartSec = 5;
         StateDirectory = "nasty";
 
-        # Security hardening
+        # Security hardening — keep minimal since the engine is a privileged
+        # system manager (mounts filesystems, writes /etc/exports.d, etc.).
+        # ProtectSystem is NOT used: it creates a private mount namespace
+        # which makes pool mounts invisible to NFS/SMB/iSCSI services.
         ProtectHome = true;
         NoNewPrivileges = false;  # needs root for mount/format operations
-        ProtectSystem = "full";
-        ReadWritePaths = [
-          "/var/lib/nasty"
-          cfg.storage.mountBase
-          "/etc/exports.d"
-          "/etc/samba"
-          "/sys/kernel/config"
-        ];
       };
     };
 
