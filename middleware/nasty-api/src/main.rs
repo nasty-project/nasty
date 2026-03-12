@@ -60,6 +60,12 @@ async fn main() -> anyhow::Result<()> {
         nvmeof: nasty_sharing::NvmeofService::new(),
     });
 
+    // Restore pool mounts from previous session
+    state.pools.restore_mounts().await;
+
+    // Signal systemd that startup is complete (pools are mounted)
+    sd_notify_ready();
+
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/ws/terminal", get(terminal::terminal_handler))
@@ -74,6 +80,19 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Notify systemd that the service is ready (Type=notify).
+fn sd_notify_ready() {
+    let Some(sock_path) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    let sock = match std::os::unix::net::UnixDatagram::unbound() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = sock.send_to(b"READY=1", &sock_path);
+    info!("Notified systemd: READY");
 }
 
 async fn health() -> &'static str {

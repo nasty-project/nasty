@@ -172,6 +172,32 @@ impl PoolService {
         Self
     }
 
+    /// Mount pools that were previously tracked as mounted.
+    /// Called at startup to restore pool state across reboots.
+    pub async fn restore_mounts(&self) {
+        let pool_names = load_pool_state().await;
+        if pool_names.is_empty() {
+            info!("No pools to restore");
+            return;
+        }
+
+        for name in &pool_names {
+            let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
+
+            // Skip if already mounted
+            if is_mountpoint(&mount_point).await {
+                info!("Pool '{name}' already mounted at {mount_point}");
+                continue;
+            }
+
+            info!("Restoring pool '{name}'...");
+            match self.mount(name).await {
+                Ok(_) => info!("Pool '{name}' mounted at {mount_point}"),
+                Err(e) => tracing::warn!("Failed to mount pool '{name}': {e}"),
+            }
+        }
+    }
+
     /// List all bcachefs filesystems (mounted and known via blkid)
     pub async fn list(&self) -> Result<Vec<Pool>, PoolError> {
         let mounts = read_bcachefs_mounts().await?;
@@ -1116,6 +1142,15 @@ async fn save_pool_state(state: &[String]) -> Result<(), PoolError> {
         .map_err(|e| PoolError::CommandFailed(e.to_string()))?;
     tokio::fs::write(POOL_STATE_PATH, json).await?;
     Ok(())
+}
+
+async fn is_mountpoint(path: &str) -> bool {
+    tokio::process::Command::new("mountpoint")
+        .args(["-q", path])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Try to find pool name from existing mount point directories

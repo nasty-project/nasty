@@ -173,12 +173,7 @@ in {
     systemd.services.nasty-middleware = {
       description = "NASty Middleware";
       wantedBy = [ "multi-user.target" ];
-      after = [
-        "network.target"
-        "nasty-pool-mount.service"
-        "nasty-block-restore.service"
-        "nasty-protocol-restore.service"
-      ] ++ lib.optional cfg.nvmeof.enable "nasty-nvmeof-restore.service";
+      after = [ "network.target" ];
 
       path = with pkgs; [
         bashInteractive  # bash for terminal
@@ -201,6 +196,7 @@ in {
       };
 
       serviceConfig = {
+        Type = "notify";
         ExecStart = "${cfg.middleware.package}/bin/nasty-api";
         Restart = "always";
         RestartSec = 5;
@@ -228,10 +224,9 @@ in {
       wantedBy = [ "multi-user.target" ];
       after = [
         "sys-kernel-config.mount"
-        "nasty-pool-mount.service"
+        "nasty-middleware.service"
         "nasty-block-restore.service"
       ];
-      before = [ "nasty-middleware.service" ];
 
       # Script that reads our state file and recreates nvmet configfs entries
       serviceConfig = {
@@ -332,119 +327,14 @@ in {
       };
     };
 
-    # ── Pool auto-mount on boot ────────────────────────────────
-    # Re-mount bcachefs pools that were previously mounted (tracked by middleware)
-
-    systemd.services.nasty-pool-mount = {
-      description = "NASty pool auto-mount";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" ];
-      before = [
-        "nasty-middleware.service"
-        "nasty-block-restore.service"
-      ];
-
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = pkgs.writeShellScript "nasty-pool-mount" ''
-          set -euo pipefail
-          MOUNT_BASE="${cfg.storage.mountBase}"
-          STATE="/var/lib/nasty/pool-state.json"
-
-          # If no state file, fall back to mounting all known pools
-          if [ ! -f "$STATE" ]; then
-            echo "No pool state file, discovering and mounting all bcachefs pools"
-            (${pkgs.util-linux}/bin/blkid -t TYPE=bcachefs -o device 2>/dev/null || true) | while IFS= read -r dev; do
-              for mp in "$MOUNT_BASE"/*/; do
-                [ -d "$mp" ] || continue
-                POOL_NAME=$(basename "$mp")
-                if ! mountpoint -q "$mp" 2>/dev/null; then
-                  echo "Auto-mounting pool $POOL_NAME ($dev) at $mp"
-                  ${pkgs.bcachefs-tools}/bin/bcachefs mount "$dev" "$mp" || echo "  WARNING: failed to mount $dev"
-                fi
-              done
-            done
-            echo "Pool auto-mount complete (fallback)"
-            exit 0
-          fi
-
-          # Read pool names from state file
-          POOLS=$(${pkgs.jq}/bin/jq -r '.[]' "$STATE" 2>/dev/null) || exit 0
-
-          # Build a map of UUID -> device list from blkid
-          # blkid -o export outputs blocks separated by blank lines,
-          # each block has one KEY=VALUE per line.
-          declare -A UUID_DEVS
-          DEV=""
-          UUID=""
-          while IFS= read -r line || [ -n "$DEV" ]; do
-            if [ -z "$line" ]; then
-              # End of block — store if we have both DEV and UUID
-              if [ -n "$UUID" ] && [ -n "$DEV" ]; then
-                UUID_DEVS[$UUID]="''${UUID_DEVS[$UUID]:-}:$DEV"
-              fi
-              DEV=""
-              UUID=""
-              continue
-            fi
-            case "$line" in
-              DEVNAME=*) DEV="''${line#DEVNAME=}" ;;
-              UUID=*) UUID="''${line#UUID=}" ;;
-            esac
-          done < <(${pkgs.util-linux}/bin/blkid -t TYPE=bcachefs -o export 2>/dev/null; echo)
-          # Final block (in case no trailing newline)
-          if [ -n "$UUID" ] && [ -n "$DEV" ]; then
-            UUID_DEVS[$UUID]="''${UUID_DEVS[$UUID]:-}:$DEV"
-          fi
-
-          echo "$POOLS" | while IFS= read -r pool_name; do
-            [ -z "$pool_name" ] && continue
-            MP="$MOUNT_BASE/$pool_name"
-
-            # Skip if already mounted
-            if mountpoint -q "$MP" 2>/dev/null; then
-              echo "Pool $pool_name already mounted at $MP"
-              continue
-            fi
-
-            # Create mount point if needed
-            mkdir -p "$MP"
-
-            # Try each UUID's devices until we find one that mounts here
-            MOUNTED=false
-            for uuid in "''${!UUID_DEVS[@]}"; do
-              DEVLIST="''${UUID_DEVS[$uuid]}"
-              # Remove leading colon and use first device for mount
-              DEVLIST="''${DEVLIST#:}"
-              if ${pkgs.bcachefs-tools}/bin/bcachefs mount "$DEVLIST" "$MP" 2>/dev/null; then
-                echo "Mounted pool $pool_name (UUID $uuid) at $MP"
-                MOUNTED=true
-                break
-              fi
-            done
-
-            if [ "$MOUNTED" = false ]; then
-              echo "WARNING: could not mount pool $pool_name"
-            fi
-          done
-
-          echo "Pool auto-mount complete"
-        '';
-      };
-    };
-
     # ── Block subvolume loop device restore ──────────────────────
     # Re-attach loop devices for block subvolumes after pools are mounted
 
     systemd.services.nasty-block-restore = {
       description = "NASty block subvolume loop device restore";
       wantedBy = [ "multi-user.target" ];
-      after = [ "nasty-pool-mount.service" ];
-      before = [
-        "nasty-middleware.service"
-        "nasty-nvmeof-restore.service"
-      ];
+      after = [ "nasty-middleware.service" ];
+      before = [ "nasty-nvmeof-restore.service" ];
 
       serviceConfig = {
         Type = "oneshot";
@@ -503,10 +393,9 @@ in {
       wantedBy = [ "multi-user.target" ];
       after = [
         "network.target"
-        "nasty-pool-mount.service"
+        "nasty-middleware.service"
         "nasty-block-restore.service"
       ];
-      before = [ "nasty-middleware.service" ];
 
       serviceConfig = {
         Type = "oneshot";
