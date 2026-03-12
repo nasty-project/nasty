@@ -108,6 +108,7 @@ impl UpdateService {
         cmd.args([
                 "--unit",
                 UPDATE_UNIT,
+                "--no-block",
                 "--description",
                 "NASty system update",
                 "--property=Type=oneshot",
@@ -163,6 +164,7 @@ impl UpdateService {
             .args([
                 "--unit",
                 UPDATE_UNIT,
+                "--no-block",
                 "--description",
                 "NASty system rollback",
                 "--property=Type=oneshot",
