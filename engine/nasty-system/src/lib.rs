@@ -337,6 +337,7 @@ fn disk_io_stats() -> Vec<DiskIoStats> {
         });
     }
 
+    results.sort_by(|a, b| a.name.cmp(&b.name));
     results
 }
 

@@ -44,7 +44,7 @@
 </script>
 
 {#if samples.length >= 2}
-	<Chart.Container config={chartConfig} class="aspect-[4/1] w-full">
+	<Chart.Container config={chartConfig} class="aspect-[4/1] w-full pl-4">
 		<AreaChart
 			data={samples}
 			x="time"
