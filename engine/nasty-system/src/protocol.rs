@@ -4,9 +4,10 @@
 //! know which protocols to start.
 
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 const STATE_PATH: &str = "/var/lib/nasty/protocols.json";
+const SMB_NASTY_CONF: &str = "/etc/samba/smb.nasty.conf";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -119,9 +120,13 @@ impl ProtocolService {
 
             info!("Restoring protocol: {}", proto.display_name());
 
+            prepare_protocol(proto).await;
+
             // Start associated services
             for svc in proto.services() {
-                let _ = systemctl("start", svc).await;
+                if let Err(e) = systemctl("start", svc).await {
+                    warn!("Failed to start {svc}: {e}");
+                }
             }
 
             // Load kernel modules for iSCSI/NVMe-oF
@@ -163,10 +168,14 @@ impl ProtocolService {
         state.set(proto, true);
         save_state(&state).await?;
 
+        prepare_protocol(proto).await;
+
         // Start associated services
         for svc in proto.services() {
             info!("Starting service {svc} for protocol {}", proto.display_name());
-            let _ = systemctl("start", svc).await;
+            if let Err(e) = systemctl("start", svc).await {
+                warn!("Failed to start {svc}: {e}");
+            }
         }
 
         // For iSCSI: load kernel modules
@@ -227,6 +236,19 @@ async fn is_protocol_running(proto: Protocol) -> bool {
         Protocol::Nvmeof => {
             // NVMe-oF is "running" if nvmet configfs is available
             std::path::Path::new("/sys/kernel/config/nvmet").exists()
+        }
+    }
+}
+
+/// Ensure prerequisites exist before starting a protocol's services.
+async fn prepare_protocol(proto: Protocol) {
+    if proto == Protocol::Smb {
+        // Samba config includes smb.nasty.conf — must exist or smbd fails to start
+        if !std::path::Path::new(SMB_NASTY_CONF).exists() {
+            let header = "# Managed by NASty — do not edit manually\n";
+            if let Err(e) = tokio::fs::write(SMB_NASTY_CONF, header).await {
+                warn!("Failed to create {SMB_NASTY_CONF}: {e}");
+            }
         }
     }
 }
