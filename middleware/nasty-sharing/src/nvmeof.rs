@@ -3,7 +3,7 @@ use std::path::Path;
 use nasty_common::{HasId, StateDir};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 const STATE_DIR: &str = "/var/lib/nasty/shares/nvmeof";
@@ -156,6 +156,95 @@ pub struct NvmeofService;
 impl NvmeofService {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Restore NVMe-oF configfs state from persisted JSON files.
+    /// Called at startup — configfs is volatile and lost on reboot.
+    pub async fn restore(&self) {
+        // Only restore if the nvmeof protocol is enabled
+        let proto_state: serde_json::Value = tokio::fs::read_to_string("/var/lib/nasty/protocols.json")
+            .await
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        if proto_state.get("nvmeof").and_then(|v| v.as_bool()) != Some(true) {
+            info!("NVMe-oF protocol disabled, skipping restore");
+            return;
+        }
+
+        // Load kernel modules
+        let _ = tokio::process::Command::new("modprobe").arg("nvmet").output().await;
+        let _ = tokio::process::Command::new("modprobe").arg("nvmet-tcp").output().await;
+
+        let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
+        if subsystems.is_empty() {
+            info!("No NVMe-oF subsystems to restore");
+            return;
+        }
+
+        for subsys in &subsystems {
+            info!("Restoring NVMe-oF subsystem: {}", subsys.nqn);
+
+            // Create subsystem
+            let subsys_path = format!("{NVMET_BASE}/subsystems/{}", subsys.nqn);
+            if let Err(e) = configfs_mkdir(&subsys_path).await {
+                warn!("Failed to create subsystem {}: {e}", subsys.nqn);
+                continue;
+            }
+            let _ = configfs_write(
+                &format!("{subsys_path}/attr_allow_any_host"),
+                if subsys.allow_any_host { "1" } else { "0" },
+            ).await;
+
+            // Restore namespaces
+            for ns in &subsys.namespaces {
+                if !Path::new(&ns.device_path).exists() {
+                    warn!("  Device {} not found, skipping namespace {}", ns.device_path, ns.nsid);
+                    continue;
+                }
+                let ns_path = format!("{subsys_path}/namespaces/{}", ns.nsid);
+                if let Err(e) = configfs_mkdir(&ns_path).await {
+                    warn!("  Failed to create namespace {}: {e}", ns.nsid);
+                    continue;
+                }
+                let _ = configfs_write(&format!("{ns_path}/device_path"), &ns.device_path).await;
+                if ns.enabled {
+                    let _ = configfs_write(&format!("{ns_path}/enable"), "1").await;
+                }
+                info!("  Restored namespace {} -> {}", ns.nsid, ns.device_path);
+            }
+
+            // Restore allowed hosts
+            for host_nqn in &subsys.allowed_hosts {
+                let host_path = format!("{NVMET_BASE}/hosts/{host_nqn}");
+                let _ = configfs_mkdir(&host_path).await;
+                let link = format!("{subsys_path}/allowed_hosts/{host_nqn}");
+                let _ = configfs_symlink(&host_path, &link).await;
+            }
+
+            // Restore ports
+            for port in &subsys.ports {
+                let port_path = format!("{NVMET_BASE}/ports/{}", port.port_id);
+                if let Err(e) = configfs_mkdir(&port_path).await {
+                    warn!("  Failed to create port {}: {e}", port.port_id);
+                    continue;
+                }
+                let _ = configfs_write(&format!("{port_path}/addr_trtype"), &port.transport).await;
+                let _ = configfs_write(&format!("{port_path}/addr_traddr"), &port.addr).await;
+                let _ = configfs_write(&format!("{port_path}/addr_trsvcid"), &port.service_id).await;
+                let _ = configfs_write(&format!("{port_path}/addr_adrfam"), &port.addr_family).await;
+
+                let link = format!("{port_path}/subsystems/{}", subsys.nqn);
+                let _ = configfs_symlink(
+                    &format!("{NVMET_BASE}/subsystems/{}", subsys.nqn),
+                    &link,
+                ).await;
+                info!("  Restored port {} ({}:{})", port.port_id, port.addr, port.service_id);
+            }
+        }
+
+        info!("NVMe-oF restore complete");
     }
 
     pub async fn list(&self) -> Result<Vec<NvmeofSubsystem>, NvmeofError> {

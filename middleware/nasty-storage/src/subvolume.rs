@@ -3,7 +3,7 @@ use std::path::Path;
 use nasty_common::{HasId, StateDir};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::cmd;
 use crate::pool::PoolService;
@@ -131,6 +131,50 @@ pub struct SubvolumeService {
 impl SubvolumeService {
     pub fn new(pools: PoolService) -> Self {
         Self { pools }
+    }
+
+    /// Re-attach loop devices for block subvolumes after pools are mounted.
+    pub async fn restore_block_devices(&self) {
+        let metas: Vec<SubvolumeMeta> = state_dir().load_all().await;
+        let block_metas: Vec<_> = metas
+            .iter()
+            .filter(|m| m.subvolume_type == SubvolumeType::Block)
+            .collect();
+
+        if block_metas.is_empty() {
+            info!("No block subvolumes to restore");
+            return;
+        }
+
+        for meta in block_metas {
+            let mount_point = match self.pool_mount_point(&meta.pool).await {
+                Ok(mp) => mp,
+                Err(_) => {
+                    warn!(
+                        "Pool '{}' not mounted, skipping block restore for '{}'",
+                        meta.pool, meta.name
+                    );
+                    continue;
+                }
+            };
+
+            let img_path = format!("{mount_point}/{}/{BLOCK_FILE_NAME}", meta.name);
+            if !Path::new(&img_path).exists() {
+                warn!("Block image {img_path} not found for {}/{}", meta.pool, meta.name);
+                continue;
+            }
+
+            // Already attached?
+            if find_loop_device(&img_path).await.is_some() {
+                info!("Loop device already attached for {}/{}", meta.pool, meta.name);
+                continue;
+            }
+
+            match cmd::run_ok("losetup", &["--find", "--show", &img_path]).await {
+                Ok(dev) => info!("Attached {} for block subvolume {}/{}", dev.trim(), meta.pool, meta.name),
+                Err(e) => warn!("Failed to attach loop device for {}/{}: {e}", meta.pool, meta.name),
+            }
+        }
     }
 
     /// Get the mount point for a pool, or error if not mounted

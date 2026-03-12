@@ -107,6 +107,35 @@ impl ProtocolService {
         Self
     }
 
+    /// Restore enabled protocol services on startup.
+    /// Starts daemons and loads kernel modules for protocols the user enabled.
+    pub async fn restore(&self) {
+        let state = load_state().await;
+
+        for &proto in Protocol::ALL {
+            if !state.get(proto) {
+                continue;
+            }
+
+            info!("Restoring protocol: {}", proto.display_name());
+
+            // Start associated services
+            for svc in proto.services() {
+                let _ = systemctl("start", svc).await;
+            }
+
+            // Load kernel modules for iSCSI/NVMe-oF
+            if proto == Protocol::Iscsi {
+                let _ = modprobe("target_core_mod").await;
+                let _ = modprobe("iscsi_target_mod").await;
+            }
+            if proto == Protocol::Nvmeof {
+                let _ = modprobe("nvmet").await;
+                let _ = modprobe("nvmet-tcp").await;
+            }
+        }
+    }
+
     /// List all protocols with their enabled/running status
     pub async fn list(&self) -> Vec<ProtocolStatus> {
         let state = load_state().await;
