@@ -452,7 +452,7 @@
 {#if settings?.smart_enabled && disks.length > 0}
 	<Card>
 		<CardHeader class="pb-2">
-			<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Disk Health</CardTitle>
+			<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">S.M.A.R.T.</CardTitle>
 		</CardHeader>
 		<CardContent>
 			<div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">

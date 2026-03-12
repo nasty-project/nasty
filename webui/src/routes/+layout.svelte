@@ -83,7 +83,7 @@
 		{ href: '/shares/smb', label: 'SMB' },
 		{ href: '/shares/iscsi', label: 'iSCSI' },
 		{ href: '/shares/nvmeof', label: 'NVMe-oF' },
-		{ href: '/disks', label: 'Disks' },
+		{ href: '/disks', label: 'S.M.A.R.T.' },
 		{ href: '/alerts', label: 'Alerts' },
 		{ href: '/services', label: 'Services' },
 		{ href: '/update', label: 'Update' },
