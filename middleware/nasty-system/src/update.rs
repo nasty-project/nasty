@@ -133,7 +133,15 @@ git reset --hard origin/main
 git add -A
 
 echo "==> Rebuilding system..."
-nixos-rebuild switch --flake {LOCAL_FLAKE}
+# Exit code 4 means "switched OK but some units failed" (e.g. smartd on VMs)
+nixos-rebuild switch --flake {LOCAL_FLAKE} || {{
+  rc=$?
+  if [ $rc -eq 4 ]; then
+    echo "==> Update complete (some non-critical units failed to start)"
+    exit 0
+  fi
+  exit $rc
+}}
 echo "==> Update complete!"
 "#
         );
