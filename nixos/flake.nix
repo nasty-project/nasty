@@ -24,7 +24,7 @@
       pname = "nasty-webui";
       version = "0.1.0";
       src = ../webui;
-      npmDepsHash = ""; # Updated after adding xterm.js — get correct hash from nix build
+      npmDepsHash = "sha256-gNdGIPgAvUU7jsXnRQr+0FVG+HoHTO8FbCy4++SCSPY=";
       buildPhase = ''
         npm run prepare
         npm run build
