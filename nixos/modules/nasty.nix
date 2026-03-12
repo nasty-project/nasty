@@ -223,16 +223,17 @@ in {
 
     services.nfs.server = mkIf cfg.nfs.enable {
       enable = true;
-      # NFSv4 only — simpler, needs only port 2049 (no rpcbind/portmapper)
-      extraNfsdConfig = ''
-        vers2=n
-        vers3=n
-        vers4=y
-        vers4.1=y
-        vers4.2=y
-      '';
       # Prevent NixOS from auto-starting nfs-server
       # The engine handles start/stop via protocol management
+    };
+
+    # NFSv4 only — simpler, needs only port 2049 (no rpcbind/portmapper)
+    services.nfs.settings = mkIf cfg.nfs.enable {
+      nfsd.vers2 = false;
+      nfsd.vers3 = false;
+      nfsd.vers4 = true;
+      nfsd."vers4.1" = true;
+      nfsd."vers4.2" = true;
     };
 
     systemd.services.nfs-server.wantedBy = mkIf cfg.nfs.enable (lib.mkForce []);
