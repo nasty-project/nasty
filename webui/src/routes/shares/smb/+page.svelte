@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { SmbShare, Subvolume } from '$lib/types';
+	import type { SmbShare, Subvolume, ProtocolStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -13,6 +13,7 @@
 	let subvolumes: Subvolume[] = $state([]);
 	let showCreate = $state(false);
 	let loading = $state(true);
+	let protocol: ProtocolStatus | null = $state(null);
 
 	let newSubvolume = $state('');
 	let newName = $state('');
@@ -30,8 +31,16 @@
 
 	onMount(async () => {
 		await refresh();
+		await loadProtocol();
 		loading = false;
 	});
+
+	async function loadProtocol() {
+		try {
+			const all = await client.call<ProtocolStatus[]>('service.protocol.list');
+			protocol = all.find(p => p.name === 'smb') ?? null;
+		} catch { /* ignore */ }
+	}
 
 	async function refresh() {
 		await withToast(async () => {
@@ -94,6 +103,25 @@
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">SMB Shares</h1>
+
+{#if protocol}
+	<Card class="mb-4">
+		<CardContent class="flex items-center gap-4 py-3">
+			<Badge variant={protocol.running ? 'default' : 'destructive'}>
+				{protocol.running ? 'Running' : 'Stopped'}
+			</Badge>
+			<span class="text-sm text-muted-foreground">
+				{shares.length} share{shares.length !== 1 ? 's' : ''}
+				{#if shares.length > 0}
+					&middot; Connect with: <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">\\{window.location.hostname}\&lt;name&gt;</code>
+				{/if}
+			</span>
+			{#if !protocol.enabled}
+				<Badge variant="secondary">Disabled</Badge>
+			{/if}
+		</CardContent>
+	</Card>
+{/if}
 
 <div class="mb-4">
 	<Button onclick={() => showCreate = !showCreate}>

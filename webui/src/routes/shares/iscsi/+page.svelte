@@ -2,8 +2,9 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { IscsiTarget, Subvolume } from '$lib/types';
+	import type { IscsiTarget, Subvolume, ProtocolStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
+	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -13,6 +14,7 @@
 	let showCreate = $state(false);
 	let loading = $state(true);
 	let expanded: Record<string, boolean> = $state({});
+	let protocol: ProtocolStatus | null = $state(null);
 
 	// Create form
 	let newName = $state('');
@@ -39,8 +41,16 @@
 
 	onMount(async () => {
 		await refresh();
+		await loadProtocol();
 		loading = false;
 	});
+
+	async function loadProtocol() {
+		try {
+			const all = await client.call<ProtocolStatus[]>('service.protocol.list');
+			protocol = all.find(p => p.name === 'iscsi') ?? null;
+		} catch { /* ignore */ }
+	}
 
 	async function refresh() {
 		await withToast(async () => {
@@ -148,6 +158,23 @@
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">iSCSI Targets</h1>
+
+{#if protocol}
+	<Card class="mb-4">
+		<CardContent class="flex items-center gap-4 py-3">
+			<Badge variant={protocol.running ? 'default' : 'destructive'}>
+				{protocol.running ? 'Running' : 'Stopped'}
+			</Badge>
+			<span class="text-sm text-muted-foreground">
+				{targets.length} target{targets.length !== 1 ? 's' : ''}
+				&middot; Portal: <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">{window.location.hostname}:3260</code>
+			</span>
+			{#if !protocol.enabled}
+				<Badge variant="secondary">Disabled</Badge>
+			{/if}
+		</CardContent>
+	</Card>
+{/if}
 
 <div class="mb-4">
 	<Button onclick={() => showCreate = !showCreate}>

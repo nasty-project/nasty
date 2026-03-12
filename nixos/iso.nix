@@ -145,10 +145,13 @@ in
       echo "    (this may take a while on first install)"
       nixos-install --flake /mnt/etc/nixos/nixos#nasty --no-root-passwd
 
+      # Detect IP address to show in post-install message
+      NASTY_IP=$(${pkgs.iproute2}/bin/ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[^ ]+' || echo "<ip>")
+
       echo ""
       echo "=== Installation complete! ==="
       echo ""
-      echo "  The NASty WebUI will be available at https://<ip>/"
+      echo "  The NASty WebUI will be available at https://$NASTY_IP/"
       echo "  Default login: admin / admin"
       echo ""
       if [ "$PART_MODE" = "2" ]; then
