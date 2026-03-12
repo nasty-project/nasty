@@ -35,6 +35,8 @@
       '';
     };
 
+    nasty-version = self.shortRev or self.dirtyShortRev or "dev";
+
     mkNixosConfigs = system: let
       nasty-middleware = mkMiddleware system;
       nasty-webui = mkWebui system;
@@ -42,7 +44,7 @@
       # Full NASty appliance configuration
       nasty = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-middleware nasty-webui; };
+        specialArgs = { inherit nasty-middleware nasty-webui nasty-version; };
         modules = [
           ./modules/nasty.nix
           ./configuration.nix
@@ -52,7 +54,7 @@
       # ISO image for installation
       nasty-iso = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-middleware nasty-webui; };
+        specialArgs = { inherit nasty-middleware nasty-webui nasty-version; };
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
           ./iso.nix
@@ -62,7 +64,7 @@
       # QEMU VM for testing
       nasty-vm = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-middleware nasty-webui; };
+        specialArgs = { inherit nasty-middleware nasty-webui nasty-version; };
         modules = [
           ./modules/nasty.nix
           ./configuration.nix

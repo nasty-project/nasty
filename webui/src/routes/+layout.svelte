@@ -86,6 +86,7 @@
 		{ href: '/disks', label: 'Disks' },
 		{ href: '/alerts', label: 'Alerts' },
 		{ href: '/services', label: 'Services' },
+		{ href: '/update', label: 'Update' },
 		{ href: '/terminal', label: 'Terminal' },
 		{ href: '/users', label: 'Users' },
 	];

@@ -1,4 +1,4 @@
-{ config, lib, pkgs, nasty-middleware ? null, nasty-webui ? null, ... }:
+{ config, lib, pkgs, nasty-middleware ? null, nasty-webui ? null, nasty-version ? "dev", ... }:
 
 let
   cfg = config.services.nasty;
@@ -91,6 +91,12 @@ in {
 
     boot.supportedFilesystems = [ "bcachefs" ];
 
+    # Enable flakes for nixos-rebuild --flake
+    nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+    # Version file for update system
+    environment.etc."nasty-version".text = nasty-version;
+
     # Kernel modules for iSCSI/NVMe-oF are NOT auto-loaded at boot.
     # They are loaded on demand by the middleware when the user enables
     # a protocol, keeping a clean default state on fresh installs.
@@ -172,6 +178,7 @@ in {
         util-linux       # lsblk, blkid, wipefs, mount, umount
         bcachefs-tools   # bcachefs
         smartmontools    # smartctl
+        git              # for update check (git ls-remote)
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fb ]

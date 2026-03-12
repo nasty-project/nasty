@@ -34,6 +34,7 @@ fn is_read_only(method: &str) -> bool {
             | "device.list" | "auth.me" | "auth.list_users"
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
             | "service.protocol.list" | "subvolume.list_all"
+            | "system.update.version" | "system.update.status"
         )
 }
 
@@ -116,6 +117,22 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "system.health" => ok(req, state.system.health().await),
         "system.stats" => ok(req, state.system.stats().await),
         "system.disks" => ok(req, state.system.disks().await),
+
+        // ── System Update ─────────────────────────────────────────
+        "system.update.version" => ok(req, state.updates.version().await),
+        "system.update.check" => match state.updates.check().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
+        "system.update.apply" => match state.updates.apply().await {
+            Ok(()) => ok(req, "ok"),
+            Err(e) => err(req, e),
+        },
+        "system.update.rollback" => match state.updates.rollback().await {
+            Ok(()) => ok(req, "ok"),
+            Err(e) => err(req, e),
+        },
+        "system.update.status" => ok(req, state.updates.status().await),
 
         // ── Protocols ────────────────────────────────────────────
         "service.protocol.list" => ok(req, state.protocols.list().await),

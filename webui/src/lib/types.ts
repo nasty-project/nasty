@@ -261,6 +261,18 @@ export interface SmartAttribute {
 	failing: boolean;
 }
 
+export interface UpdateInfo {
+	current_version: string;
+	latest_version: string | null;
+	update_available: boolean | null;
+}
+
+export interface UpdateStatus {
+	/** "idle", "running", "success", "failed" */
+	state: string;
+	log: string;
+}
+
 export interface ProtocolStatus {
 	name: string;
 	display_name: string;
