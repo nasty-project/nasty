@@ -118,19 +118,31 @@ set -euo pipefail
 echo "==> Pulling latest source..."
 cd {LOCAL_REPO}
 
-# Preserve machine-specific hardware config
+# Preserve machine-specific files before reset
 HW_CFG="nixos/hardware-configuration.nix"
-if [ -f "$HW_CFG" ]; then
-  cp "$HW_CFG" /tmp/nasty-hw-config.nix
-fi
+FLAKE="nixos/flake.nix"
+[ -f "$HW_CFG" ] && cp "$HW_CFG" /tmp/nasty-hw-config.nix
+# Save current npmDepsHash (computed during ISO build)
+NPM_HASH=$(grep -oP 'npmDepsHash = "\K[^"]+' "$FLAKE" 2>/dev/null || true)
 
 git remote set-url origin "{repo_url}"
 git fetch origin
 git reset --hard origin/main
 
-# Restore hardware config
-if [ -f /tmp/nasty-hw-config.nix ]; then
-  cp /tmp/nasty-hw-config.nix "$HW_CFG"
+# Restore machine-specific hardware config
+[ -f /tmp/nasty-hw-config.nix ] && cp /tmp/nasty-hw-config.nix "$HW_CFG"
+
+# Restore npmDepsHash if the repo has an empty placeholder
+CURRENT_HASH=$(grep -oP 'npmDepsHash = "\K[^"]+' "$FLAKE" 2>/dev/null || true)
+if [ -z "$CURRENT_HASH" ] && [ -n "$NPM_HASH" ]; then
+  sed -i "s|npmDepsHash = \".*\"|npmDepsHash = \"$NPM_HASH\"|" "$FLAKE"
+elif [ -z "$CURRENT_HASH" ]; then
+  # Compute hash fresh using prefetch-npm-deps
+  echo "==> Computing npm dependency hash..."
+  HASH=$(nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json 2>/dev/null || true)
+  if [ -n "$HASH" ]; then
+    sed -i "s|npmDepsHash = \".*\"|npmDepsHash = \"$HASH\"|" "$FLAKE"
+  fi
 fi
 
 # Flakes require all files to be tracked
