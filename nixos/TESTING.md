@@ -27,9 +27,9 @@ Default WebUI login: `admin` / `admin`
 # SSH into the VM
 ssh -p 2222 root@localhost
 
-# 1. Check middleware is running
-systemctl status nasty-middleware
-journalctl -u nasty-middleware --no-pager -n 20
+# 1. Check engine is running
+systemctl status nasty-engine
+journalctl -u nasty-engine --no-pager -n 20
 
 # 2. Check nginx/TLS is working
 curl -k https://localhost/health
@@ -119,16 +119,16 @@ Then: `sudo nixos-rebuild switch --flake .#mynas`
 
 ## Troubleshooting
 
-### Middleware won't start
+### Engine won't start
 ```bash
-journalctl -u nasty-middleware -f
+journalctl -u nasty-engine -f
 # Check state directory exists
 ls -la /var/lib/nasty/
 ```
 
-### WebUI shows "Connecting to middleware..."
+### WebUI shows "Connecting to engine..."
 ```bash
-# Check middleware is listening
+# Check engine is listening
 ss -tlnp | grep 2137
 # Check nginx is proxying
 journalctl -u nginx -f
@@ -155,8 +155,8 @@ cat /proc/filesystems | grep bcachefs
 You can verify the components build on any system:
 
 ```bash
-# Middleware (requires Rust toolchain)
-cd middleware && cargo build
+# Engine (requires Rust toolchain)
+cd engine && cargo build
 
 # WebUI (requires Node.js)
 cd webui && npm install && npm run build

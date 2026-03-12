@@ -1,4 +1,4 @@
-{ config, lib, pkgs, nasty-middleware ? null, nasty-webui ? null, nasty-version ? "dev", ... }:
+{ config, lib, pkgs, nasty-engine ? null, nasty-webui ? null, nasty-version ? "dev", ... }:
 
 let
   cfg = config.services.nasty;
@@ -11,11 +11,11 @@ in {
   options.services.nasty = {
     enable = mkEnableOption "NASty NAS management system";
 
-    middleware = {
+    engine = {
       package = mkOption {
         type = types.package;
-        default = nasty-middleware;
-        description = "NASty middleware package";
+        default = nasty-engine;
+        description = "NASty engine package";
       };
 
       port = mkOption {
@@ -27,7 +27,7 @@ in {
       logLevel = mkOption {
         type = types.str;
         default = "nasty_api=info";
-        description = "RUST_LOG filter for middleware";
+        description = "RUST_LOG filter for engine";
       };
     };
 
@@ -80,7 +80,7 @@ in {
     };
 
     # Protocol options control whether packages/firewall rules are available.
-    # Actual service start/stop is managed by the middleware via protocols.json.
+    # Actual service start/stop is managed by the engine via protocols.json.
     nfs.enable = mkEnableOption "NFS server for NASty shares" // { default = true; };
     smb.enable = mkEnableOption "Samba server for NASty shares" // { default = true; };
     iscsi.enable = mkEnableOption "iSCSI target (LIO) for NASty" // { default = true; };
@@ -100,7 +100,7 @@ in {
     environment.etc."nasty-version".text = nasty-version;
 
     # Kernel modules for iSCSI/NVMe-oF are NOT auto-loaded at boot.
-    # They are loaded on demand by the middleware when the user enables
+    # They are loaded on demand by the engine when the user enables
     # a protocol, keeping a clean default state on fresh installs.
 
     # ── System packages ────────────────────────────────────────
@@ -169,10 +169,10 @@ in {
       };
     };
 
-    # ── NASty Middleware service ─────────────────────────────────
+    # ── NASty Engine service ─────────────────────────────────
 
-    systemd.services.nasty-middleware = {
-      description = "NASty Middleware";
+    systemd.services.nasty-engine = {
+      description = "NASty Engine";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
 
@@ -193,12 +193,12 @@ in {
         ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ];
 
       environment = {
-        RUST_LOG = cfg.middleware.logLevel;
+        RUST_LOG = cfg.engine.logLevel;
       };
 
       serviceConfig = {
         Type = "notify";
-        ExecStart = "${cfg.middleware.package}/bin/nasty-api";
+        ExecStart = "${cfg.engine.package}/bin/nasty-api";
         Restart = "always";
         RestartSec = 5;
         StateDirectory = "nasty";
@@ -218,7 +218,7 @@ in {
     };
 
     # ── NFS server ─────────────────────────────────────────────
-    # NFS service is NOT auto-started by NixOS — the middleware manages it.
+    # NFS service is NOT auto-started by NixOS — the engine manages it.
     # We still declare the server config so nfsd is available when started.
 
     services.nfs.server = mkIf cfg.nfs.enable {
@@ -232,7 +232,7 @@ in {
         vers4.2=y
       '';
       # Prevent NixOS from auto-starting nfs-server
-      # The middleware / protocol-restore service handles start/stop
+      # The engine handles start/stop via protocol management
     };
 
     systemd.services.nfs-server.wantedBy = mkIf cfg.nfs.enable (lib.mkForce []);
@@ -283,26 +283,26 @@ in {
           tryFiles = "$uri $uri/ /index.html";
         };
 
-        # Proxy WebSocket to middleware
+        # Proxy WebSocket to engine
         locations."/ws" = {
-          proxyPass = "http://127.0.0.1:${toString cfg.middleware.port}";
+          proxyPass = "http://127.0.0.1:${toString cfg.engine.port}";
           proxyWebsockets = true;
           priority = 500;
         };
 
         locations."/ws/terminal" = {
-          proxyPass = "http://127.0.0.1:${toString cfg.middleware.port}";
+          proxyPass = "http://127.0.0.1:${toString cfg.engine.port}";
           proxyWebsockets = true;
           priority = 400;
         };
 
-        # Proxy API calls to middleware
+        # Proxy API calls to engine
         locations."/api/" = {
-          proxyPass = "http://127.0.0.1:${toString cfg.middleware.port}";
+          proxyPass = "http://127.0.0.1:${toString cfg.engine.port}";
         };
 
         locations."/health" = {
-          proxyPass = "http://127.0.0.1:${toString cfg.middleware.port}";
+          proxyPass = "http://127.0.0.1:${toString cfg.engine.port}";
         };
       };
     };

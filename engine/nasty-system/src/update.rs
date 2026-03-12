@@ -157,7 +157,7 @@ echo "==> Update complete!"
             .map_err(|e| UpdateError::CommandFailed(format!("failed to write update script: {e}")))?;
 
         // Launch as a transient systemd service
-        // This avoids the middleware's ProtectSystem restrictions
+        // This avoids the engine's ProtectSystem restrictions
         let mut cmd = tokio::process::Command::new("systemd-run");
         cmd.args([
                 "--unit",
@@ -170,7 +170,7 @@ echo "==> Update complete!"
                 "--property=StandardError=journal",
             ]);
 
-        // Pass middleware's PATH so the script can find git, nixos-rebuild, etc.
+        // Pass engine's PATH so the script can find git, nixos-rebuild, etc.
         let path = std::env::var("PATH").unwrap_or_default();
         cmd.args(["--setenv", &format!("PATH={path}")]);
 

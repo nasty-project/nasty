@@ -1,4 +1,4 @@
-{ config, pkgs, nasty-middleware, nasty-webui ? null, ... }:
+{ config, pkgs, nasty-engine, nasty-webui ? null, ... }:
 
 {
   imports = [
@@ -15,8 +15,8 @@
   services.nasty = {
     enable = true;
 
-    middleware = {
-      package = nasty-middleware;
+    engine = {
+      package = nasty-engine;
       port = 2137;
       logLevel = "nasty_api=info,tower_http=info";
     };

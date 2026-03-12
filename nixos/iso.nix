@@ -1,4 +1,4 @@
-{ config, pkgs, lib, nasty-middleware, nasty-webui, ... }:
+{ config, pkgs, lib, nasty-engine, nasty-webui, ... }:
 
 let
   nastySrc = lib.cleanSource ./..;
@@ -6,7 +6,7 @@ in
 {
   # Pre-built packages in the ISO's Nix store so nixos-install
   # can reuse them instead of recompiling from source.
-  system.extraDependencies = [ nasty-middleware ]
+  system.extraDependencies = [ nasty-engine ]
     ++ lib.optional (nasty-webui != null) nasty-webui;
 
   # Bundle NASty source on the ISO for flake-based installation

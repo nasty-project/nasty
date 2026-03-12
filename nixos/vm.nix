@@ -56,8 +56,8 @@
       /dev/vdd  (1 GiB)
 
     Quick test:
-      systemctl status nasty-middleware
-      journalctl -u nasty-middleware -f
+      systemctl status nasty-engine
+      journalctl -u nasty-engine -f
       curl -k https://localhost/health
 
   '';
