@@ -473,6 +473,13 @@ impl PoolService {
 
     /// List block devices available for pool creation
     pub async fn list_devices(&self) -> Result<Vec<BlockDevice>, PoolError> {
+        // Collect all device paths already used by pools
+        let pools = self.list().await.unwrap_or_default();
+        let pool_devices: std::collections::HashSet<String> = pools
+            .iter()
+            .flat_map(|p| p.devices.iter().map(|d| d.path.clone()))
+            .collect();
+
         let output = cmd::run_ok("lsblk", &["-Jbno", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE"])
             .await
             .map_err(PoolError::CommandFailed)?;
@@ -482,7 +489,11 @@ impl PoolService {
 
         let mut devices = Vec::new();
         if let Some(blockdevices) = parsed.get("blockdevices").and_then(|v| v.as_array()) {
-            fn collect_devices(devs: &[serde_json::Value], out: &mut Vec<BlockDevice>) {
+            fn collect_devices(
+                devs: &[serde_json::Value],
+                pool_devices: &std::collections::HashSet<String>,
+                out: &mut Vec<BlockDevice>,
+            ) {
                 for dev in devs {
                     let name = dev.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     let dev_type = dev.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -494,22 +505,25 @@ impl PoolService {
                     let fstype = dev.get("fstype").and_then(|v| v.as_str()).map(String::from);
 
                     if dev_type == "disk" || dev_type == "part" {
+                        let path = format!("/dev/{name}");
+                        let has_mount = mountpoint.is_some();
+                        let in_pool = pool_devices.contains(&path);
                         out.push(BlockDevice {
-                            path: format!("/dev/{name}"),
+                            path,
                             size_bytes: size,
                             dev_type: dev_type.to_string(),
                             mount_point: mountpoint,
                             fs_type: fstype,
-                            in_use: dev.get("mountpoint").and_then(|v| v.as_str()).is_some(),
+                            in_use: has_mount || in_pool,
                         });
                     }
 
                     if let Some(children) = dev.get("children").and_then(|v| v.as_array()) {
-                        collect_devices(children, out);
+                        collect_devices(children, pool_devices, out);
                     }
                 }
             }
-            collect_devices(blockdevices, &mut devices);
+            collect_devices(blockdevices, &pool_devices, &mut devices);
         }
 
         Ok(devices)
