@@ -200,8 +200,8 @@ impl SubvolumeService {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
 
-            // Skip the .snapshots directory
-            if name == ".snapshots" {
+            // Skip system directories
+            if name == ".snapshots" || name == "lost+found" {
                 continue;
             }
 
