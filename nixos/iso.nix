@@ -202,14 +202,13 @@ in
   # Installer welcome message (for other ttys)
   services.getty.helpLine = ''
 
-     _   _           _____ _
-    | \ | |   /\    / ____| |
-    |  \| |  /  \  | (___ | |_ _   _
-    | . ` | / /\ \  \___ \| __| | | |
-    | |\  |/ ____ \ ____) | |_| |_| |
-    |_| \_/_/    \_\_____/ \__|\__, |
-                                __/ |
-                               |___/
+    \e[1;31m mm   m   mm    mmmm    m
+     #"m  #   ##   #"   " mm#mm  m   m
+     # #m #  #  #  "#mmm    #    "m m"
+     #  # #  #mm#      "#   #     #m#
+     #   ## #    # "mmm#"   "mm   "#
+                                  m"
+                                 ""\e[0m
     NASty NAS Installer
 
     Run the guided installer:  nasty-install
