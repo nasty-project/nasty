@@ -64,8 +64,10 @@ impl UpdateService {
             Err(_) => check_via_git_ls_remote().await?,
         };
 
-        let available = if current == "dev" || latest == "unknown" {
+        let available = if latest == "unknown" {
             None
+        } else if current == "dev" {
+            Some(true) // dev builds should always offer to update
         } else {
             Some(current != latest)
         };
