@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use nasty_common::{HasId, StateDir};
@@ -10,6 +11,10 @@ use crate::pool::PoolService;
 
 const STATE_DIR: &str = "/var/lib/nasty/subvolumes";
 const BLOCK_FILE_NAME: &str = "vol.img";
+
+/// POSIX xattr namespace prefix for all nasty-csi properties.
+/// E.g. logical key "nasty-csi:managed_by" → xattr "user.nasty-csi:managed_by".
+const XATTR_NS: &str = "user.";
 
 #[derive(Debug, Error)]
 pub enum SubvolumeError {
@@ -53,6 +58,10 @@ pub struct Subvolume {
     pub snapshots: Vec<String>,
     /// Token name that created this subvolume; None for subvolumes created by human users.
     pub owner: Option<String>,
+    /// Arbitrary key-value metadata stored as POSIX xattrs (user.* namespace).
+    /// Used by nasty-csi to track CSI volume metadata without sidecar files.
+    #[serde(default)]
+    pub properties: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +138,30 @@ pub struct DeleteSnapshotRequest {
     pub pool: String,
     pub subvolume: String,
     pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetPropertiesRequest {
+    pub pool: String,
+    pub name: String,
+    /// Key-value pairs to set (merged with existing properties).
+    pub properties: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemovePropertiesRequest {
+    pub pool: String,
+    pub name: String,
+    /// Property keys to remove.
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FindByPropertyRequest {
+    /// Optional pool to restrict the search to.
+    pub pool: Option<String>,
+    pub key: String,
+    pub value: String,
 }
 
 pub struct SubvolumeService {
@@ -261,6 +294,8 @@ impl SubvolumeService {
                     None
                 };
 
+                let properties = read_xattrs(&path);
+
                 subvolumes.push(Subvolume {
                     name,
                     pool: pool_name.to_string(),
@@ -273,6 +308,7 @@ impl SubvolumeService {
                     block_device,
                     snapshots: snapshots.iter().map(|s| s.name.clone()).collect(),
                     owner,
+                    properties,
                 });
             }
         }
@@ -631,6 +667,83 @@ impl SubvolumeService {
 
         Ok(all_snapshots)
     }
+
+    /// Set (merge-upsert) xattr properties on a subvolume.
+    pub async fn set_properties(
+        &self,
+        req: SetPropertiesRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<Subvolume, SubvolumeError> {
+        let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
+
+        for (key, value) in &req.properties {
+            let xattr_name = format!("{XATTR_NS}{key}");
+            xattr::set(&subvol.path, &xattr_name, value.as_bytes())
+                .map_err(|e| SubvolumeError::CommandFailed(
+                    format!("setxattr {xattr_name}: {e}")
+                ))?;
+        }
+
+        self.get(&req.pool, &req.name, owner_filter).await
+    }
+
+    /// Remove specific xattr properties from a subvolume.
+    pub async fn remove_properties(
+        &self,
+        req: RemovePropertiesRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<Subvolume, SubvolumeError> {
+        let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
+
+        for key in &req.keys {
+            let xattr_name = format!("{XATTR_NS}{key}");
+            match xattr::remove(&subvol.path, &xattr_name) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(SubvolumeError::CommandFailed(
+                    format!("removexattr {xattr_name}: {e}")
+                )),
+            }
+        }
+
+        self.get(&req.pool, &req.name, owner_filter).await
+    }
+
+    /// Find subvolumes where the given property key equals the given value.
+    /// Optionally restricted to a single pool.
+    pub async fn find_by_property(
+        &self,
+        req: FindByPropertyRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<Vec<Subvolume>, SubvolumeError> {
+        let all = self.list_all(req.pool.as_deref(), owner_filter).await?;
+        Ok(all
+            .into_iter()
+            .filter(|s| s.properties.get(&req.key).map(|v| v == &req.value).unwrap_or(false))
+            .collect())
+    }
+}
+
+/// Read all nasty-csi xattr properties from a path.
+/// Returns a map of logical key → value (strips the "user." namespace prefix).
+/// Non-UTF-8 values and unreadable xattrs are silently skipped.
+fn read_xattrs(path: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let attrs = match xattr::list(path) {
+        Ok(a) => a,
+        Err(_) => return map,
+    };
+    for name in attrs {
+        let name_str = name.to_string_lossy();
+        // Only expose user.* namespace, strip the "user." prefix for the logical key
+        let Some(key) = name_str.strip_prefix(XATTR_NS) else { continue };
+        if let Ok(Some(bytes)) = xattr::get(path, &*name_str) {
+            if let Ok(value) = String::from_utf8(bytes) {
+                map.insert(key.to_string(), value);
+            }
+        }
+    }
+    map
 }
 
 /// Check if a directory is a bcachefs subvolume.

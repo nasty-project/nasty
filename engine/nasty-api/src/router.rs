@@ -11,6 +11,7 @@ fn is_operator_allowed(method: &str) -> bool {
         || matches!(
             method,
             "subvolume.create" | "subvolume.delete" | "subvolume.attach" | "subvolume.detach"
+            | "subvolume.set_properties" | "subvolume.remove_properties"
             | "snapshot.create" | "snapshot.delete"
         )
 }
@@ -43,7 +44,7 @@ fn is_read_only(method: &str) -> bool {
             | "system.alerts" | "system.settings.get" | "system.metrics.history" | "alert.rules.list"
             | "device.list" | "auth.me" | "auth.list_users" | "auth.token.list"
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
-            | "service.protocol.list" | "subvolume.list_all"
+            | "service.protocol.list" | "subvolume.list_all" | "subvolume.find_by_property"
             | "system.update.version" | "system.update.status"
         )
 }
@@ -512,6 +513,55 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 }
             }
             (Err(r), _) | (_, Err(r)) => r,
+        },
+
+        "subvolume.set_properties" => match parse_params::<nasty_storage::subvolume::SetPropertiesRequest>(req) {
+            Ok(p) => {
+                if session.pool.as_deref().map_or(false, |sp| sp != p.pool) {
+                    err(req, "access denied")
+                } else {
+                    match state.subvolumes.set_properties(p, session.owner.as_deref()).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+            }
+            Err(e) => invalid(req, e),
+        },
+        "subvolume.remove_properties" => match parse_params::<nasty_storage::subvolume::RemovePropertiesRequest>(req) {
+            Ok(p) => {
+                if session.pool.as_deref().map_or(false, |sp| sp != p.pool) {
+                    err(req, "access denied")
+                } else {
+                    match state.subvolumes.remove_properties(p, session.owner.as_deref()).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+            }
+            Err(e) => invalid(req, e),
+        },
+        "subvolume.find_by_property" => match parse_params::<nasty_storage::subvolume::FindByPropertyRequest>(req) {
+            Ok(p) => {
+                // Enforce pool-scoped token restriction
+                let effective_pool = match (&session.pool, &p.pool) {
+                    (Some(sp), Some(rp)) if sp != rp => {
+                        return err(req, "access denied");
+                    }
+                    (Some(sp), None) => Some(nasty_storage::subvolume::FindByPropertyRequest {
+                        pool: Some(sp.clone()),
+                        key: p.key.clone(),
+                        value: p.value.clone(),
+                    }),
+                    _ => None,
+                };
+                let req_effective = effective_pool.unwrap_or(p);
+                match state.subvolumes.find_by_property(req_effective, session.owner.as_deref()).await {
+                    Ok(v) => ok(req, v),
+                    Err(e) => err(req, e),
+                }
+            }
+            Err(e) => invalid(req, e),
         },
 
         // ── Snapshots ───────────────────────────────────────────
