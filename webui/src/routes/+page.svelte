@@ -363,12 +363,12 @@
 <!-- Network & Disk I/O -->
 {#if stats}
 	<div class="mb-3 flex items-center justify-between">
-		<span class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">I/O History</span>
-		<div class="flex gap-1">
+		<span class="text-sm font-semibold">I/O History</span>
+		<div class="flex rounded-md border border-border">
 			{#each (['5m', '1h', '1d', '7d', '30d'] as const) as r}
 				<button
 					onclick={() => changeRange(r)}
-					class="rounded px-2 py-0.5 text-xs font-medium transition-colors {metricsRange === r ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}"
+					class="px-3 py-1 text-xs font-medium transition-colors first:rounded-l-md last:rounded-r-md {metricsRange === r ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
 				>{r}</button>
 			{/each}
 		</div>
