@@ -204,6 +204,7 @@ export interface ApiTokenInfo {
 	role: 'admin' | 'readonly' | 'operator';
 	created_at: number;
 	pool: string | null;
+	expires_at: number | null;
 }
 
 export interface ApiTokenCreated extends ApiTokenInfo {

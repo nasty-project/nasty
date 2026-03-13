@@ -25,6 +25,7 @@
 	let newTokenName = $state('');
 	let newTokenRole = $state<'admin' | 'readonly' | 'operator'>('operator');
 	let newTokenPool = $state('');
+	let newTokenExpiry = $state('');
 	let createdToken = $state<ApiTokenCreated | null>(null);
 	let tokenCopied = $state(false);
 
@@ -98,11 +99,13 @@
 
 	async function createToken() {
 		if (!newTokenName) return;
+		const expires_in_secs = newTokenExpiry ? parseInt(newTokenExpiry) : null;
 		const result = await withToast(
 			() => client.call<ApiTokenCreated>('auth.token.create', {
 				name: newTokenName,
 				role: newTokenRole,
 				pool: newTokenPool || null,
+				expires_in_secs,
 			}),
 			`API token "${newTokenName}" created`
 		);
@@ -112,6 +115,7 @@
 			newTokenName = '';
 			newTokenRole = 'operator';
 			newTokenPool = '';
+			newTokenExpiry = '';
 			await refresh();
 		}
 	}
@@ -252,6 +256,17 @@
 				</select>
 				<span class="mt-1 block text-xs text-muted-foreground">Restrict this token to a single pool's subvolumes</span>
 			</div>
+			<div class="mb-4">
+				<Label for="token-expiry">Expiration</Label>
+				<select id="token-expiry" bind:value={newTokenExpiry} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+					<option value="">Never</option>
+					<option value="86400">1 day</option>
+					<option value="604800">7 days</option>
+					<option value="2592000">30 days</option>
+					<option value="7776000">90 days</option>
+					<option value="31536000">1 year</option>
+				</select>
+			</div>
 			<Button onclick={createToken} disabled={!newTokenName}>Create Token</Button>
 		</CardContent>
 	</Card>
@@ -268,6 +283,7 @@
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Role</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Pool</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Created</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Expires</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
 				</tr>
 			</thead>
@@ -285,6 +301,9 @@
 						</td>
 						<td class="p-3 font-mono text-xs text-muted-foreground">{token.pool ?? '—'}</td>
 						<td class="p-3 text-xs text-muted-foreground">{formatDate(token.created_at)}</td>
+						<td class="p-3 text-xs {token.expires_at && token.expires_at * 1000 < Date.now() ? 'text-destructive' : 'text-muted-foreground'}">
+							{token.expires_at ? formatDate(token.expires_at) : '—'}
+						</td>
 						<td class="p-3">
 							<Button variant="destructive" size="sm" onclick={() => deleteToken(token.id, token.name)}>Revoke</Button>
 						</td>

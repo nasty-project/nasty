@@ -51,6 +51,9 @@ pub struct ApiToken {
     /// If set, token can only see/manage subvolumes in this pool.
     #[serde(default)]
     pub pool: Option<String>,
+    /// Unix timestamp after which the token is rejected. None = never expires.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +63,7 @@ pub struct ApiTokenInfo {
     pub role: Role,
     pub created_at: u64,
     pub pool: Option<String>,
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -134,20 +138,31 @@ impl AuthService {
             return Ok(session.clone());
         }
         // Check long-lived API tokens
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         state
             .api_tokens
             .iter()
             .find(|t| t.token == token)
-            .map(|t| Session {
-                token: t.token.clone(),
-                username: t.name.clone(),
-                role: t.role.clone(),
-                pool: t.pool.clone(),
-                // Subvolume-level isolation only applies to operator tokens.
-                // Admin tokens (even pool-scoped ones) see all subvolumes in their pool.
-                owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
-            })
             .ok_or(AuthError::InvalidToken)
+            .and_then(|t| {
+                if let Some(exp) = t.expires_at {
+                    if now >= exp {
+                        return Err(AuthError::TokenExpired);
+                    }
+                }
+                Ok(Session {
+                    token: t.token.clone(),
+                    username: t.name.clone(),
+                    role: t.role.clone(),
+                    pool: t.pool.clone(),
+                    // Subvolume-level isolation only applies to operator tokens.
+                    // Admin tokens (even pool-scoped ones) see all subvolumes in their pool.
+                    owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
+                })
+            })
     }
 
     /// Create a long-lived API token (admin only). Returns the token value — shown only once.
@@ -157,6 +172,7 @@ impl AuthService {
         name: &str,
         role: Role,
         pool: Option<String>,
+        expires_in_secs: Option<u64>,
     ) -> Result<ApiToken, AuthError> {
         if session.role != Role::Admin {
             return Err(AuthError::Forbidden);
@@ -174,6 +190,8 @@ impl AuthService {
             .unwrap_or_default()
             .as_secs();
 
+        let expires_at = expires_in_secs.map(|s| created_at + s);
+
         let api_token = ApiToken {
             id: id.clone(),
             name: name.to_string(),
@@ -181,6 +199,7 @@ impl AuthService {
             role,
             created_at,
             pool,
+            expires_at,
         };
 
         state.api_tokens.push(api_token.clone());
@@ -205,6 +224,7 @@ impl AuthService {
                 role: t.role.clone(),
                 created_at: t.created_at,
                 pool: t.pool.clone(),
+                expires_at: t.expires_at,
             })
             .collect())
     }
@@ -365,8 +385,10 @@ pub struct UserInfo {
 pub enum AuthError {
     #[error("invalid username or password")]
     InvalidCredentials,
-    #[error("invalid or expired token")]
+    #[error("invalid token")]
     InvalidToken,
+    #[error("token has expired")]
+    TokenExpired,
     #[error("forbidden")]
     Forbidden,
     #[error("user not found")]
