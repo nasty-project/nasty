@@ -366,64 +366,66 @@
 						{#if healthLoading}
 							<p class="text-sm text-muted-foreground">Loading health data...</p>
 						{:else}
-							<div class="flex flex-wrap gap-6">
-								{#if fsUsage}
-									<div class="min-w-[200px] flex-1">
-										<h4 class="mb-2 text-xs uppercase tracking-wide text-muted-foreground">Filesystem Usage</h4>
-										{#if fsUsage.devices.length > 0}
-											<table class="w-full text-sm">
-												<thead>
+							{#if fsUsage}
+								<div class="mb-4">
+									<h4 class="mb-2 text-xs uppercase tracking-wide text-muted-foreground">Filesystem Usage</h4>
+									{#if fsUsage.devices.length > 0}
+										<table class="w-full text-sm">
+											<thead>
+												<tr>
+													<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Device</th>
+													<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Used</th>
+													<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Free</th>
+													<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Total</th>
+												</tr>
+											</thead>
+											<tbody>
+												{#each fsUsage.devices as dev}
 													<tr>
-														<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Device</th>
-														<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Used</th>
-														<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Free</th>
-														<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Total</th>
+														<td class="p-1.5 font-mono text-xs">{dev.path}</td>
+														<td class="p-1.5 text-xs">{formatBytes(dev.used_bytes)}</td>
+														<td class="p-1.5 text-xs">{formatBytes(dev.free_bytes)}</td>
+														<td class="p-1.5 text-xs">{formatBytes(dev.total_bytes)}</td>
 													</tr>
-												</thead>
-												<tbody>
-													{#each fsUsage.devices as dev}
-														<tr>
-															<td class="p-1.5 font-mono text-xs">{dev.path}</td>
-															<td class="p-1.5 text-xs">{formatBytes(dev.used_bytes)}</td>
-															<td class="p-1.5 text-xs">{formatBytes(dev.free_bytes)}</td>
-															<td class="p-1.5 text-xs">{formatBytes(dev.total_bytes)}</td>
-														</tr>
-													{/each}
-												</tbody>
-											</table>
-										{/if}
-										<div class="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs">
-											<span class="text-muted-foreground">Data</span>
-											<span>{formatBytes(fsUsage.data_bytes)}</span>
-											<span class="text-muted-foreground">Metadata</span>
-											<span>{formatBytes(fsUsage.metadata_bytes)}</span>
-											<span class="text-muted-foreground">Reserved</span>
-											<span>{formatBytes(fsUsage.reserved_bytes)}</span>
-										</div>
+												{/each}
+											</tbody>
+										</table>
+									{/if}
+									<div class="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs">
+										<span class="text-muted-foreground">Data</span>
+										<span>{formatBytes(fsUsage.data_bytes)}</span>
+										<span class="text-muted-foreground">Metadata</span>
+										<span>{formatBytes(fsUsage.metadata_bytes)}</span>
+										<span class="text-muted-foreground">Reserved</span>
+										<span>{formatBytes(fsUsage.reserved_bytes)}</span>
 									</div>
-								{/if}
-								<div class="min-w-[200px] flex-1">
-									<h4 class="mb-2 text-xs uppercase tracking-wide text-muted-foreground">Scrub</h4>
-									{#if scrubStatus}
-										<div class="mb-2">
+								</div>
+							{/if}
+							<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+								<div class="rounded-lg border border-border p-4">
+									<div class="mb-2 flex items-center justify-between">
+										<h4 class="text-xs uppercase tracking-wide text-muted-foreground">Scrub</h4>
+										{#if scrubStatus}
 											<Badge variant={scrubStatus.running ? 'destructive' : 'default'}>
 												{scrubStatus.running ? 'Running' : 'Idle'}
 											</Badge>
-										</div>
-										{#if scrubStatus.raw}
-											<pre class="mb-2 max-h-[200px] overflow-auto whitespace-pre-wrap rounded bg-secondary p-2 font-mono text-xs text-muted-foreground">{scrubStatus.raw}</pre>
 										{/if}
+									</div>
+									{#if scrubStatus?.raw}
+										<pre class="mb-3 max-h-[200px] overflow-auto whitespace-pre-wrap rounded bg-secondary p-2 font-mono text-xs text-muted-foreground">{scrubStatus.raw}</pre>
 									{/if}
 									<Button size="sm" onclick={() => startScrub(pool.name)}>Start Scrub</Button>
 								</div>
-								<div class="min-w-[200px] flex-1">
+								<div class="rounded-lg border border-border p-4">
 									<h4 class="mb-2 text-xs uppercase tracking-wide text-muted-foreground">Reconcile</h4>
-									{#if reconcileStatus}
+									{#if reconcileStatus?.raw}
 										<pre class="max-h-[200px] overflow-auto whitespace-pre-wrap rounded bg-secondary p-2 font-mono text-xs text-muted-foreground">{reconcileStatus.raw}</pre>
+									{:else}
+										<p class="text-xs text-muted-foreground">No reconcile data available</p>
 									{/if}
 								</div>
 							</div>
-							<Button variant="secondary" size="sm" class="mt-2" onclick={() => refreshHealth(pool.name)}>Refresh</Button>
+							<Button variant="secondary" size="sm" class="mt-4" onclick={() => refreshHealth(pool.name)}>Refresh</Button>
 						{/if}
 					</div>
 				{/if}
