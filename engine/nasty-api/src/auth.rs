@@ -31,10 +31,29 @@ pub struct Session {
     pub role: Role,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub name: String,
+    /// The actual token value — stored, shown only once on creation
+    pub token: String,
+    pub role: Role,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiTokenInfo {
+    pub id: String,
+    pub name: String,
+    pub role: Role,
+    pub created_at: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AuthState {
     users: Vec<User>,
     sessions: Vec<Session>,
+    api_tokens: Vec<ApiToken>,
     initialized: bool,
 }
 
@@ -92,15 +111,102 @@ impl AuthService {
         Ok(token)
     }
 
-    /// Validate a token and return the session
+    /// Validate a token and return the session (checks both login sessions and API tokens)
     pub async fn validate(&self, token: &str) -> Result<Session, AuthError> {
         let state = self.state.read().await;
+        // Check login sessions first
+        if let Some(session) = state.sessions.iter().find(|s| s.token == token) {
+            return Ok(session.clone());
+        }
+        // Check long-lived API tokens
         state
-            .sessions
+            .api_tokens
             .iter()
-            .find(|s| s.token == token)
-            .cloned()
+            .find(|t| t.token == token)
+            .map(|t| Session {
+                token: t.token.clone(),
+                username: t.name.clone(),
+                role: t.role.clone(),
+            })
             .ok_or(AuthError::InvalidToken)
+    }
+
+    /// Create a long-lived API token (admin only). Returns the token value — shown only once.
+    pub async fn create_api_token(
+        &self,
+        session: &Session,
+        name: &str,
+        role: Role,
+    ) -> Result<ApiToken, AuthError> {
+        if session.role != Role::Admin {
+            return Err(AuthError::Forbidden);
+        }
+
+        let mut state = self.state.write().await;
+        if state.api_tokens.iter().any(|t| t.name == name) {
+            return Err(AuthError::UserExists); // reuse: token name already taken
+        }
+
+        let id = generate_id();
+        let token = generate_token();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let api_token = ApiToken {
+            id: id.clone(),
+            name: name.to_string(),
+            token,
+            role,
+            created_at,
+        };
+
+        state.api_tokens.push(api_token.clone());
+        save_state(&state).await?;
+
+        info!("Created API token '{name}'");
+        Ok(api_token)
+    }
+
+    /// List API tokens without exposing the token value
+    pub async fn list_api_tokens(&self, session: &Session) -> Result<Vec<ApiTokenInfo>, AuthError> {
+        if session.role != Role::Admin {
+            return Err(AuthError::Forbidden);
+        }
+        let state = self.state.read().await;
+        Ok(state
+            .api_tokens
+            .iter()
+            .map(|t| ApiTokenInfo {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                role: t.role.clone(),
+                created_at: t.created_at,
+            })
+            .collect())
+    }
+
+    /// Delete an API token by ID (admin only)
+    pub async fn delete_api_token(
+        &self,
+        session: &Session,
+        id: &str,
+    ) -> Result<(), AuthError> {
+        if session.role != Role::Admin {
+            return Err(AuthError::Forbidden);
+        }
+
+        let mut state = self.state.write().await;
+        let len_before = state.api_tokens.len();
+        state.api_tokens.retain(|t| t.id != id);
+        if state.api_tokens.len() == len_before {
+            return Err(AuthError::UserNotFound);
+        }
+        save_state(&state).await?;
+
+        info!("Deleted API token '{id}'");
+        Ok(())
     }
 
     /// Revoke a token (logout)
@@ -277,6 +383,12 @@ fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     rand::fill(&mut bytes);
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
+}
+
+fn generate_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::fill(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 async fn load_state() -> AuthState {

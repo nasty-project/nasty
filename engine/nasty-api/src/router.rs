@@ -31,7 +31,7 @@ fn is_read_only(method: &str) -> bool {
             method,
             "system.info" | "system.health" | "system.stats" | "system.disks"
             | "system.alerts" | "system.settings.get" | "system.metrics.history" | "alert.rules.list"
-            | "device.list" | "auth.me" | "auth.list_users"
+            | "device.list" | "auth.me" | "auth.list_users" | "auth.token.list"
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
             | "service.protocol.list" | "subvolume.list_all"
             | "system.update.version" | "system.update.status"
@@ -138,6 +138,28 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "auth.list_users" => ok(req, state.auth.list_users().await),
+        "auth.token.list" => match state.auth.list_api_tokens(session).await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
+        "auth.token.create" => {
+            #[derive(Deserialize)]
+            struct P { name: String, role: Role }
+            match parse_params::<P>(req) {
+                Ok(p) => match state.auth.create_api_token(session, &p.name, p.role).await {
+                    Ok(t) => ok(req, t),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "auth.token.delete" => match require_str(req, "id") {
+            Ok(id) => match state.auth.delete_api_token(session, id).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
 
         // ── System ──────────────────────────────────────────────
         "system.info" => ok(req, state.system.info().await),

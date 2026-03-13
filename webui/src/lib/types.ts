@@ -197,6 +197,17 @@ export interface UserInfo {
 	role: 'admin' | 'readonly';
 }
 
+export interface ApiTokenInfo {
+	id: string;
+	name: string;
+	role: 'admin' | 'readonly';
+	created_at: number;
+}
+
+export interface ApiTokenCreated extends ApiTokenInfo {
+	token: string;
+}
+
 export interface SystemStats {
 	cpu: CpuStats;
 	memory: MemoryStats;
