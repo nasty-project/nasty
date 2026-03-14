@@ -23,6 +23,48 @@ let
       rtslib-fb = rtslib-fb-latest;
     };
   };
+
+  # ── Plymouth boot splash ────────────────────────────────────
+  nasty-logo-png = pkgs.runCommand "nasty-logo.png" {
+    nativeBuildInputs = [ pkgs.librsvg ];
+  } ''
+    rsvg-convert -w 300 -h 300 ${../../webui/src/lib/assets/nasty.svg} -o $out
+  '';
+
+  nasty-plymouth-theme = pkgs.stdenv.mkDerivation {
+    name = "plymouth-theme-nasty";
+    dontUnpack = true;
+    installPhase = ''
+      themeDir=$out/share/plymouth/themes/nasty
+      mkdir -p "$themeDir"
+
+      cp ${nasty-logo-png} "$themeDir/nasty.png"
+
+      cat > "$themeDir/nasty.plymouth" << 'EOF'
+[Plymouth Theme]
+Name=nasty
+Description=NASty NAS System
+ModuleName=script
+
+[script]
+ImageDir=@PLYMOUTH_THEME_PATH@
+ScriptFile=@PLYMOUTH_THEME_PATH@/nasty.script
+EOF
+
+      cat > "$themeDir/nasty.script" << 'EOF'
+bg_image = Rectangle(Window.GetWidth(), Window.GetHeight(), 0.07, 0.07, 0.09, 1.0);
+bg_sprite = Sprite();
+bg_sprite.SetImage(bg_image);
+bg_sprite.SetZ(-100);
+
+logo.image = Image("nasty.png");
+logo.sprite = Sprite(logo.image);
+logo.sprite.SetX(Window.GetWidth()  / 2 - logo.image.GetWidth()  / 2);
+logo.sprite.SetY(Window.GetHeight() / 2 - logo.image.GetHeight() / 2);
+EOF
+    '';
+  };
+
 in {
   options.services.nasty = {
     enable = mkEnableOption "NASty NAS management system";
@@ -108,6 +150,15 @@ in {
     # ── Required kernel support ────────────────────────────────
 
     boot.supportedFilesystems = [ "bcachefs" ];
+
+    # ── Boot splash ────────────────────────────────────────────
+    boot.plymouth = {
+      enable = true;
+      theme = "nasty";
+      themePackages = [ nasty-plymouth-theme ];
+    };
+    boot.kernelParams = [ "quiet" "splash" ];
+    boot.initrd.verbose = false;
 
     # Enable flakes for nixos-rebuild --flake
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
