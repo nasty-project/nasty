@@ -25,6 +25,7 @@
       version = "0.1.0";
       src = ../webui;
       npmDepsHash = "sha256-FtC3N6WVeRPJG1LaTPckw+AP5rAC0Vf73vyTm3pxRco=";
+      npmFlags = [ "--legacy-peer-deps" ];
       buildPhase = ''
         npm run prepare
         npm run build
