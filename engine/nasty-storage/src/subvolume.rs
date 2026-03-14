@@ -11,6 +11,19 @@ use crate::pool::PoolService;
 
 const STATE_DIR: &str = "/var/lib/nasty/subvolumes";
 const BLOCK_FILE_NAME: &str = "vol.img";
+const SUBVOLUMES_DIR: &str = "subvolumes";
+
+fn subvolumes_dir(mount_point: &str) -> String {
+    format!("{mount_point}/{SUBVOLUMES_DIR}")
+}
+
+fn subvol_path(mount_point: &str, name: &str) -> String {
+    format!("{mount_point}/{SUBVOLUMES_DIR}/{name}")
+}
+
+fn snap_path(mount_point: &str, subvol: &str, snap: &str) -> String {
+    format!("{mount_point}/{SUBVOLUMES_DIR}/{subvol}@{snap}")
+}
 
 /// POSIX xattr namespace prefix for all nasty-csi properties.
 /// E.g. logical key "nasty-csi:managed_by" → xattr "user.nasty-csi:managed_by".
@@ -141,6 +154,14 @@ pub struct DeleteSnapshotRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CloneSnapshotRequest {
+    pub pool: String,
+    pub subvolume: String,
+    pub snapshot: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SetPropertiesRequest {
     pub pool: String,
     pub name: String,
@@ -199,7 +220,7 @@ impl SubvolumeService {
             };
             // owner_filter = None: restore runs as system, not bound to any token
 
-            let img_path = format!("{mount_point}/{}/{BLOCK_FILE_NAME}", meta.name);
+            let img_path = format!("{}/{BLOCK_FILE_NAME}", subvol_path(&mount_point, &meta.name));
             if !Path::new(&img_path).exists() {
                 warn!("Block image {img_path} not found for {}/{}", meta.pool, meta.name);
                 continue;
@@ -237,13 +258,15 @@ impl SubvolumeService {
         let state: Vec<SubvolumeMeta> = state_dir().load_all().await;
         let mut subvolumes = Vec::new();
 
-        let mut entries = tokio::fs::read_dir(&mount_point).await?;
+        let subvol_dir = subvolumes_dir(&mount_point);
+        tokio::fs::create_dir_all(&subvol_dir).await?;
+        let mut entries = tokio::fs::read_dir(&subvol_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
 
-            // Skip system directories
-            if name == ".snapshots" || name == "lost+found" {
+            // Snapshot siblings use '@' naming — skip them here
+            if name.contains('@') {
                 continue;
             }
 
@@ -363,8 +386,16 @@ impl SubvolumeService {
     /// Create a new subvolume.
     /// `owner`: if Some, records this token name as the subvolume owner.
     pub async fn create(&self, req: CreateSubvolumeRequest, owner: Option<String>) -> Result<Subvolume, SubvolumeError> {
+        if req.name.contains('@') {
+            return Err(SubvolumeError::CommandFailed(
+                "subvolume name may not contain '@'".to_string(),
+            ));
+        }
+
         let mount_point = self.pool_mount_point(&req.pool).await?;
-        let subvol_path = format!("{mount_point}/{}", req.name);
+        let subvol_dir = subvolumes_dir(&mount_point);
+        tokio::fs::create_dir_all(&subvol_dir).await?;
+        let subvol_path = subvol_path(&mount_point, &req.name);
 
         if Path::new(&subvol_path).exists() {
             return Err(SubvolumeError::AlreadyExists(req.name.clone()));
@@ -444,7 +475,7 @@ impl SubvolumeService {
         }
 
         let mount_point = self.pool_mount_point(&req.pool).await?;
-        let subvol_path = format!("{mount_point}/{}", req.name);
+        let subvol_path = subvol_path(&mount_point, &req.name);
 
         // Delete all snapshots for this subvolume first
         let snapshots = self
@@ -526,9 +557,8 @@ impl SubvolumeService {
         self.get(&req.pool, &req.subvolume, owner_filter).await?;
 
         let mount_point = self.pool_mount_point(&req.pool).await?;
-        let source_path = format!("{mount_point}/{}", req.subvolume);
-        let snap_dir = format!("{mount_point}/.snapshots/{}", req.subvolume);
-        let snap_path = format!("{snap_dir}/{}", req.name);
+        let source_path = subvol_path(&mount_point, &req.subvolume);
+        let snap_path = snap_path(&mount_point, &req.subvolume, &req.name);
 
         if !Path::new(&source_path).exists() {
             return Err(SubvolumeError::NotFound(req.subvolume.clone()));
@@ -537,9 +567,6 @@ impl SubvolumeService {
         if Path::new(&snap_path).exists() {
             return Err(SubvolumeError::AlreadyExists(req.name.clone()));
         }
-
-        // Ensure snapshot directory exists
-        tokio::fs::create_dir_all(&snap_dir).await?;
 
         let mut args = vec!["subvolume", "snapshot"];
         if req.read_only == Some(true) {
@@ -574,10 +601,7 @@ impl SubvolumeService {
     ) -> Result<(), SubvolumeError> {
         self.get(&req.pool, &req.subvolume, owner_filter).await?;
         let mount_point = self.pool_mount_point(&req.pool).await?;
-        let snap_path = format!(
-            "{mount_point}/.snapshots/{}/{}",
-            req.subvolume, req.name
-        );
+        let snap_path = snap_path(&mount_point, &req.subvolume, &req.name);
 
         if !Path::new(&snap_path).exists() {
             return Err(SubvolumeError::NotFound(req.name.clone()));
@@ -594,26 +618,29 @@ impl SubvolumeService {
         Ok(())
     }
 
-    /// List snapshots for a specific subvolume
+    /// List snapshots for a specific subvolume.
+    /// Scans the subvolumes/ directory for sibling entries named `<subvol>@<snap>`.
     pub async fn list_snapshots_for(
         &self,
         pool_name: &str,
         subvol_name: &str,
     ) -> Result<Vec<Snapshot>, SubvolumeError> {
         let mount_point = self.pool_mount_point(pool_name).await?;
-        let snap_dir = format!("{mount_point}/.snapshots/{subvol_name}");
+        let subvol_dir = subvolumes_dir(&mount_point);
+        let prefix = format!("{subvol_name}@");
 
-        if !Path::new(&snap_dir).exists() {
+        if !Path::new(&subvol_dir).exists() {
             return Ok(vec![]);
         }
 
         let mut snapshots = Vec::new();
-        let mut entries = tokio::fs::read_dir(&snap_dir).await?;
+        let mut entries = tokio::fs::read_dir(&subvol_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
-            if entry.path().is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) && entry.path().is_dir() {
+                let snap_name = name[prefix.len()..].to_string();
                 snapshots.push(Snapshot {
-                    name,
+                    name: snap_name,
                     subvolume: subvol_name.to_string(),
                     pool: pool_name.to_string(),
                     path: entry.path().to_string_lossy().to_string(),
@@ -627,15 +654,16 @@ impl SubvolumeService {
 
     /// List all snapshots across all subvolumes in a pool.
     /// `owner_filter`: if Some, only returns snapshots whose parent subvolume is owned by that token.
+    /// Single-pass scan of the subvolumes/ directory for entries containing '@'.
     pub async fn list_snapshots(
         &self,
         pool_name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Vec<Snapshot>, SubvolumeError> {
         let mount_point = self.pool_mount_point(pool_name).await?;
-        let snap_base = format!("{mount_point}/.snapshots");
+        let subvol_dir = subvolumes_dir(&mount_point);
 
-        if !Path::new(&snap_base).exists() {
+        if !Path::new(&subvol_dir).exists() {
             return Ok(vec![]);
         }
 
@@ -648,24 +676,83 @@ impl SubvolumeService {
         };
 
         let mut all_snapshots = Vec::new();
-        let mut entries = tokio::fs::read_dir(&snap_base).await?;
+        let mut entries = tokio::fs::read_dir(&subvol_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
-            if entry.path().is_dir() {
-                let subvol_name = entry.file_name().to_string_lossy().to_string();
-                if let Some(ref set) = owned {
-                    if !set.contains(&subvol_name) {
-                        continue;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(at_pos) = name.find('@') {
+                if entry.path().is_dir() {
+                    let subvol_name = name[..at_pos].to_string();
+                    let snap_name = name[at_pos + 1..].to_string();
+                    if let Some(ref set) = owned {
+                        if !set.contains(&subvol_name) {
+                            continue;
+                        }
                     }
+                    all_snapshots.push(Snapshot {
+                        name: snap_name,
+                        subvolume: subvol_name,
+                        pool: pool_name.to_string(),
+                        path: entry.path().to_string_lossy().to_string(),
+                        read_only: false, // TODO: detect from bcachefs attributes
+                    });
                 }
-                let mut snaps = self
-                    .list_snapshots_for(pool_name, &subvol_name)
-                    .await
-                    .unwrap_or_default();
-                all_snapshots.append(&mut snaps);
             }
         }
 
         Ok(all_snapshots)
+    }
+
+    /// Clone a snapshot into a new writable subvolume.
+    /// `owner_filter`: if Some, verifies the caller owns the parent subvolume.
+    pub async fn clone_snapshot(
+        &self,
+        req: CloneSnapshotRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<Subvolume, SubvolumeError> {
+        if req.new_name.contains('@') {
+            return Err(SubvolumeError::CommandFailed(
+                "subvolume name may not contain '@'".to_string(),
+            ));
+        }
+
+        // Verify ownership of the parent subvolume
+        self.get(&req.pool, &req.subvolume, owner_filter).await?;
+
+        let mount_point = self.pool_mount_point(&req.pool).await?;
+        let snap_path = snap_path(&mount_point, &req.subvolume, &req.snapshot);
+        let new_subvol_path = subvol_path(&mount_point, &req.new_name);
+
+        if !Path::new(&snap_path).exists() {
+            return Err(SubvolumeError::NotFound(req.snapshot.clone()));
+        }
+        if Path::new(&new_subvol_path).exists() {
+            return Err(SubvolumeError::AlreadyExists(req.new_name.clone()));
+        }
+
+        info!(
+            "Cloning snapshot '{}/{}@{}' to new subvolume '{}'",
+            req.pool, req.subvolume, req.snapshot, req.new_name
+        );
+        // bcachefs subvolume snapshot without -r creates a writable subvolume from snapshot
+        cmd::run_ok("bcachefs", &["subvolume", "snapshot", &snap_path, &new_subvol_path])
+            .await
+            .map_err(SubvolumeError::CommandFailed)?;
+
+        // Save metadata for the new subvolume (inherits Filesystem type; no volsize)
+        let id = SubvolumeMeta::make_id(&req.pool, &req.new_name);
+        let meta = SubvolumeMeta {
+            id: id.clone(),
+            name: req.new_name.clone(),
+            pool: req.pool.clone(),
+            subvolume_type: SubvolumeType::Filesystem,
+            volsize_bytes: None,
+            compression: None,
+            comments: None,
+            owner: owner_filter.map(|s| s.to_string()),
+        };
+        state_dir().save(&id, &meta).await?;
+
+        self.get(&req.pool, &req.new_name, None).await
     }
 
     /// Set (merge-upsert) xattr properties on a subvolume.

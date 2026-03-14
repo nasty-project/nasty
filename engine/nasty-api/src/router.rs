@@ -12,7 +12,7 @@ fn is_operator_allowed(method: &str) -> bool {
             method,
             "subvolume.create" | "subvolume.delete" | "subvolume.attach" | "subvolume.detach"
             | "subvolume.set_properties" | "subvolume.remove_properties"
-            | "snapshot.create" | "snapshot.delete"
+            | "snapshot.create" | "snapshot.delete" | "snapshot.clone"
         )
 }
 
@@ -600,6 +600,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "snapshot.delete" => match parse_params(req) {
             Ok(p) => match state.subvolumes.delete_snapshot(p, session.owner.as_deref()).await {
                 Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
+        "snapshot.clone" => match parse_params(req) {
+            Ok(p) => match state.subvolumes.clone_snapshot(p, session.owner.as_deref()).await {
+                Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             },
             Err(e) => invalid(req, e),
