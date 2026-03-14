@@ -170,7 +170,7 @@ in {
       sysstat           # iostat, pidstat
       lsof              # open file handles
       strace            # syscall tracing
-      dstat             # system resource stats
+      dool              # system resource stats (dstat successor)
       magic-wormhole-rs # share files/output with devs: wormhole send
     ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
       ++ lib.optionals cfg.smb.enable [ samba ]
