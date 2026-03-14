@@ -292,17 +292,18 @@ async def test_nfs(ctx: TestContext):
                        "" if found else f"snapshot '{snap_names[i]}' not found in listing")
 
         # Delete snapshots
-        for i in range(N):
-            label = f"NFS[{i+1}]"
-            try:
-                await ctx.client.call("snapshot.delete", {
-                    "pool": ctx.pool,
-                    "subvolume": sv_names[i],
-                    "name": snap_names[i],
-                })
-                ctx.record(f"{label}: snapshot deleted", True)
-            except Exception as e:
-                ctx.record(f"{label}: snapshot deleted", False, str(e))
+        if not ctx.skip_delete:
+            for i in range(N):
+                label = f"NFS[{i+1}]"
+                try:
+                    await ctx.client.call("snapshot.delete", {
+                        "pool": ctx.pool,
+                        "subvolume": sv_names[i],
+                        "name": snap_names[i],
+                    })
+                    ctx.record(f"{label}: snapshot deleted", True)
+                except Exception as e:
+                    ctx.record(f"{label}: snapshot deleted", False, str(e))
 
     except Exception as e:
         ctx.record("NFS: test", False, str(e))
@@ -426,17 +427,18 @@ async def test_smb(ctx: TestContext):
                        "" if found else f"snapshot '{snap_names[i]}' not found in listing")
 
         # Delete snapshots
-        for i in range(N):
-            label = f"SMB[{i+1}]"
-            try:
-                await ctx.client.call("snapshot.delete", {
-                    "pool": ctx.pool,
-                    "subvolume": sv_names[i],
-                    "name": snap_names[i],
-                })
-                ctx.record(f"{label}: snapshot deleted", True)
-            except Exception as e:
-                ctx.record(f"{label}: snapshot deleted", False, str(e))
+        if not ctx.skip_delete:
+            for i in range(N):
+                label = f"SMB[{i+1}]"
+                try:
+                    await ctx.client.call("snapshot.delete", {
+                        "pool": ctx.pool,
+                        "subvolume": sv_names[i],
+                        "name": snap_names[i],
+                    })
+                    ctx.record(f"{label}: snapshot deleted", True)
+                except Exception as e:
+                    ctx.record(f"{label}: snapshot deleted", False, str(e))
 
     except Exception as e:
         ctx.record("SMB: test", False, str(e))
@@ -627,17 +629,18 @@ async def test_iscsi(ctx: TestContext):
                        "" if found else f"snapshot '{snap_names[i]}' not found in listing")
 
         # Delete snapshots
-        for i in range(N):
-            label = f"iSCSI[{i+1}]"
-            try:
-                await ctx.client.call("snapshot.delete", {
-                    "pool": ctx.pool,
-                    "subvolume": sv_names[i],
-                    "name": snap_names[i],
-                })
-                ctx.record(f"{label}: snapshot deleted", True)
-            except Exception as e:
-                ctx.record(f"{label}: snapshot deleted", False, str(e))
+        if not ctx.skip_delete:
+            for i in range(N):
+                label = f"iSCSI[{i+1}]"
+                try:
+                    await ctx.client.call("snapshot.delete", {
+                        "pool": ctx.pool,
+                        "subvolume": sv_names[i],
+                        "name": snap_names[i],
+                    })
+                    ctx.record(f"{label}: snapshot deleted", True)
+                except Exception as e:
+                    ctx.record(f"{label}: snapshot deleted", False, str(e))
 
     except Exception as e:
         ctx.record("iSCSI: test", False, str(e))
@@ -846,17 +849,18 @@ async def test_nvmeof(ctx: TestContext):
                        "" if found else f"snapshot '{snap_names[i]}' not found in listing")
 
         # Delete snapshots
-        for i in range(N):
-            label = f"NVMe-oF[{i+1}]"
-            try:
-                await ctx.client.call("snapshot.delete", {
-                    "pool": ctx.pool,
-                    "subvolume": sv_names[i],
-                    "name": snap_names[i],
-                })
-                ctx.record(f"{label}: snapshot deleted", True)
-            except Exception as e:
-                ctx.record(f"{label}: snapshot deleted", False, str(e))
+        if not ctx.skip_delete:
+            for i in range(N):
+                label = f"NVMe-oF[{i+1}]"
+                try:
+                    await ctx.client.call("snapshot.delete", {
+                        "pool": ctx.pool,
+                        "subvolume": sv_names[i],
+                        "name": snap_names[i],
+                    })
+                    ctx.record(f"{label}: snapshot deleted", True)
+                except Exception as e:
+                    ctx.record(f"{label}: snapshot deleted", False, str(e))
 
     except Exception as e:
         ctx.record("NVMe-oF: test", False, str(e))
