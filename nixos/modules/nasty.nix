@@ -123,8 +123,16 @@ in {
 
     environment.systemPackages = with pkgs; [
       bcachefs-tools
-      util-linux   # lsblk, blkid, wipefs
-      smartmontools  # smartctl for disk health
+      util-linux      # lsblk, blkid, wipefs
+      smartmontools   # smartctl for disk health
+      htop
+      # bcachefs debugging
+      fio             # storage benchmarking
+      iotop           # per-process I/O monitoring
+      sysstat         # iostat, pidstat
+      lsof            # open file handles
+      strace          # syscall tracing
+      dstat           # system resource stats
     ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
       ++ lib.optionals cfg.smb.enable [ samba ]
       ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
