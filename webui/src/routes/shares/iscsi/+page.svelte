@@ -8,6 +8,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
+	import { ChevronsUpDown, ChevronUp, ChevronDown } from '@lucide/svelte';
 
 	let targets: IscsiTarget[] = $state([]);
 	let blockSubvolumes: Subvolume[] = $state([]);
@@ -156,6 +157,31 @@
 		await refresh();
 	}
 
+	let search = $state('');
+	let sortDir = $state<'asc' | 'desc' | null>(null);
+
+	function toggleSort() {
+		if (sortDir === null) sortDir = 'asc';
+		else if (sortDir === 'asc') sortDir = 'desc';
+		else sortDir = null;
+	}
+
+	const filtered = $derived(
+		search.trim()
+			? targets.filter(t =>
+				t.iqn.toLowerCase().includes(search.toLowerCase()) ||
+				t.alias?.toLowerCase().includes(search.toLowerCase()))
+			: targets
+	);
+
+	const sorted = $derived.by(() => {
+		if (!sortDir) return filtered;
+		return [...filtered].sort((a, b) => {
+			const cmp = a.iqn.localeCompare(b.iqn);
+			return sortDir === 'asc' ? cmp : -cmp;
+		});
+	});
+
 	async function removeAcl(targetId: string, initiatorIqn: string) {
 		if (!confirm(`Remove ACL for ${initiatorIqn}?`)) return;
 		await withToast(
@@ -185,10 +211,17 @@
 	</Card>
 {/if}
 
-<div class="mb-4">
+<div class="mb-4 flex items-center gap-3">
 	<Button onclick={() => showCreate = !showCreate}>
 		{showCreate ? 'Cancel' : 'Create Target'}
 	</Button>
+	<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
+	{#if targets.length > 1}
+		<button class="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" onclick={toggleSort}>
+			Sort by IQN
+			{#if sortDir === 'asc'}<ChevronUp size={13} />{:else if sortDir === 'desc'}<ChevronDown size={13} />{:else}<ChevronsUpDown size={13} class="opacity-30" />{/if}
+		</button>
+	{/if}
 </div>
 
 {#if showCreate}
@@ -222,7 +255,7 @@
 {:else if targets.length === 0}
 	<p class="text-muted-foreground">No iSCSI targets configured.</p>
 {:else}
-	{#each targets as target}
+	{#each sorted as target}
 		<Card class="mb-4">
 			<CardContent class="pt-5">
 				<!-- Header row (always visible) -->

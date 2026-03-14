@@ -10,6 +10,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import SortTh from '$lib/components/SortTh.svelte';
 
 	let pools: Pool[] = $state([]);
 	let selectedPool = $state('');
@@ -145,6 +146,44 @@
 	}
 
 	const mountedPools = $derived(pools.filter(p => p.mounted));
+
+	let search = $state('');
+
+	type SortKey = 'name' | 'type' | 'size';
+	let sortKey = $state<SortKey | null>(null);
+	let sortDir = $state<'asc' | 'desc'>('asc');
+
+	function toggleSort(key: SortKey) {
+		if (sortKey === key) {
+			sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+		} else {
+			sortKey = key;
+			sortDir = 'asc';
+		}
+	}
+
+	function svSize(sv: Subvolume): number {
+		return sv.subvolume_type === 'block' ? (sv.volsize_bytes ?? 0) : (sv.used_bytes ?? 0);
+	}
+
+	const filtered = $derived(
+		search.trim()
+			? subvolumes.filter(sv =>
+				sv.name.toLowerCase().includes(search.toLowerCase()) ||
+				sv.comments?.toLowerCase().includes(search.toLowerCase()))
+			: subvolumes
+	);
+
+	const sorted = $derived.by(() => {
+		if (!sortKey) return filtered;
+		return [...filtered].sort((a, b) => {
+			let cmp = 0;
+			if (sortKey === 'name') cmp = a.name.localeCompare(b.name);
+			else if (sortKey === 'type') cmp = a.subvolume_type.localeCompare(b.subvolume_type);
+			else if (sortKey === 'size') cmp = svSize(a) - svSize(b);
+			return sortDir === 'asc' ? cmp : -cmp;
+		});
+	});
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">Subvolumes</h1>
@@ -159,6 +198,7 @@
 		<Button onclick={() => showCreate = !showCreate}>
 			{showCreate ? 'Cancel' : 'Create Subvolume'}
 		</Button>
+		<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
 	</div>
 {/if}
 
@@ -213,16 +253,16 @@
 	<table class="w-full text-sm">
 		<thead>
 			<tr>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Name</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Type</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Size</th>
+				<SortTh label="Name" active={sortKey === 'name'} dir={sortDir} onclick={() => toggleSort('name')} />
+				<SortTh label="Type" active={sortKey === 'type'} dir={sortDir} onclick={() => toggleSort('type')} />
+				<SortTh label="Size" active={sortKey === 'size'} dir={sortDir} onclick={() => toggleSort('size')} />
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Block Device</th>
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Snapshots</th>
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
 			</tr>
 		</thead>
 		<tbody>
-			{#each subvolumes as sv}
+			{#each sorted as sv}
 				<tr class="border-b border-border">
 					<td class="p-3">
 						<strong>{sv.name}</strong>

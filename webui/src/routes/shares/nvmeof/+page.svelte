@@ -8,6 +8,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
+	import { ChevronsUpDown, ChevronUp, ChevronDown } from '@lucide/svelte';
 
 	let subsystems: NvmeofSubsystem[] = $state([]);
 	let blockSubvolumes: Subvolume[] = $state([]);
@@ -190,6 +191,29 @@
 		await refresh();
 	}
 
+	let search = $state('');
+	let sortDir = $state<'asc' | 'desc' | null>(null);
+
+	function toggleSort() {
+		if (sortDir === null) sortDir = 'asc';
+		else if (sortDir === 'asc') sortDir = 'desc';
+		else sortDir = null;
+	}
+
+	const filtered = $derived(
+		search.trim()
+			? subsystems.filter(s => s.nqn.toLowerCase().includes(search.toLowerCase()))
+			: subsystems
+	);
+
+	const sorted = $derived.by(() => {
+		if (!sortDir) return filtered;
+		return [...filtered].sort((a, b) => {
+			const cmp = a.nqn.localeCompare(b.nqn);
+			return sortDir === 'asc' ? cmp : -cmp;
+		});
+	});
+
 	async function removeHost(subsystemId: string, hostNqn: string) {
 		if (!confirm(`Remove access for ${hostNqn}?`)) return;
 		await withToast(
@@ -219,10 +243,17 @@
 	</Card>
 {/if}
 
-<div class="mb-4">
+<div class="mb-4 flex items-center gap-3">
 	<Button onclick={() => showCreate = !showCreate}>
 		{showCreate ? 'Cancel' : 'Create Share'}
 	</Button>
+	<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
+	{#if subsystems.length > 1}
+		<button class="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" onclick={toggleSort}>
+			Sort by NQN
+			{#if sortDir === 'asc'}<ChevronUp size={13} />{:else if sortDir === 'desc'}<ChevronDown size={13} />{:else}<ChevronsUpDown size={13} class="opacity-30" />{/if}
+		</button>
+	{/if}
 </div>
 
 {#if showCreate}
@@ -266,7 +297,7 @@
 {:else if subsystems.length === 0}
 	<p class="text-muted-foreground">No NVMe-oF shares configured.</p>
 {:else}
-	{#each subsystems as subsys}
+	{#each sorted as subsys}
 		<Card class="mb-4">
 			<CardContent class="pt-5">
 				<!-- Header row (always visible) -->

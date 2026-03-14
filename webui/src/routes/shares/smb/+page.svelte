@@ -8,6 +8,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
+	import SortTh from '$lib/components/SortTh.svelte';
 
 	let shares: SmbShare[] = $state([]);
 	let subvolumes: Subvolume[] = $state([]);
@@ -109,6 +110,37 @@
 		);
 		await refresh();
 	}
+
+	let search = $state('');
+
+	type SortKey = 'name' | 'path' | 'status';
+	let sortKey = $state<SortKey | null>(null);
+	let sortDir = $state<'asc' | 'desc'>('asc');
+
+	function toggleSort(key: SortKey) {
+		if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+		else { sortKey = key; sortDir = 'asc'; }
+	}
+
+	const filtered = $derived(
+		search.trim()
+			? shares.filter(s =>
+				s.name.toLowerCase().includes(search.toLowerCase()) ||
+				s.path.toLowerCase().includes(search.toLowerCase()) ||
+				s.comment?.toLowerCase().includes(search.toLowerCase()))
+			: shares
+	);
+
+	const sorted = $derived.by(() => {
+		if (!sortKey) return filtered;
+		return [...filtered].sort((a, b) => {
+			let cmp = 0;
+			if (sortKey === 'name') cmp = a.name.localeCompare(b.name);
+			else if (sortKey === 'path') cmp = a.path.localeCompare(b.path);
+			else if (sortKey === 'status') cmp = Number(b.enabled) - Number(a.enabled);
+			return sortDir === 'asc' ? cmp : -cmp;
+		});
+	});
 </script>
 
 <h1 class="mb-4 text-2xl font-bold">SMB Shares</h1>
@@ -132,10 +164,11 @@
 	</Card>
 {/if}
 
-<div class="mb-4">
+<div class="mb-4 flex items-center gap-3">
 	<Button onclick={() => showCreate = !showCreate}>
 		{showCreate ? 'Cancel' : 'Create Share'}
 	</Button>
+	<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
 </div>
 
 {#if showCreate}
@@ -184,15 +217,15 @@
 	<table class="w-full text-sm">
 		<thead>
 			<tr>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Name</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Path</th>
+				<SortTh label="Name" active={sortKey === 'name'} dir={sortDir} onclick={() => toggleSort('name')} />
+				<SortTh label="Path" active={sortKey === 'path'} dir={sortDir} onclick={() => toggleSort('path')} />
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Access</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
+				<SortTh label="Status" active={sortKey === 'status'} dir={sortDir} onclick={() => toggleSort('status')} />
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
 			</tr>
 		</thead>
 		<tbody>
-			{#each shares as share}
+			{#each sorted as share}
 				<tr class="border-b border-border">
 					<td class="p-3">
 						<strong>{share.name}</strong>
