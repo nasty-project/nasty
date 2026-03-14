@@ -3,9 +3,11 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, ... }: let
+  outputs = { self, nixpkgs, bcachefs-tools, ... }: let
     # Helper to build packages for a given system
     mkPkgs = system: nixpkgs.legacyPackages.${system};
 
@@ -41,11 +43,12 @@
     mkNixosConfigs = system: let
       nasty-engine = mkEngine system;
       nasty-webui = mkWebui system;
+      nasty-bcachefs-tools = bcachefs-tools.packages.${system}.bcachefs-tools;
     in {
       # Full NASty appliance configuration
       nasty = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
         modules = [
           ./modules/nasty.nix
           ./configuration.nix
@@ -55,7 +58,7 @@
       # ISO image for installation
       nasty-iso = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
           ./iso.nix
@@ -65,7 +68,7 @@
       # QEMU VM for testing
       nasty-vm = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
         modules = [
           ./modules/nasty.nix
           ./configuration.nix

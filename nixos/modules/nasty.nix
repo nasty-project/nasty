@@ -1,4 +1,4 @@
-{ config, lib, pkgs, nasty-engine ? null, nasty-webui ? null, nasty-version ? "dev", ... }:
+{ config, lib, pkgs, nasty-engine ? null, nasty-webui ? null, nasty-version ? "dev", nasty-bcachefs-tools ? pkgs.bcachefs-tools, ... }:
 
 let
   cfg = config.services.nasty;
@@ -271,7 +271,7 @@ in {
     # ── System packages ────────────────────────────────────────
 
     environment.systemPackages = with pkgs; [
-      bcachefs-tools
+      nasty-bcachefs-tools
       util-linux        # lsblk, blkid, wipefs
       smartmontools     # smartctl for disk health
       htop
@@ -355,7 +355,7 @@ in {
       path = with pkgs; [
         bashInteractive  # bash for terminal
         util-linux       # lsblk, blkid, wipefs, mount, umount
-        bcachefs-tools   # bcachefs
+        nasty-bcachefs-tools   # bcachefs
         smartmontools    # smartctl
         iproute2         # ip (for network addresses)
         kmod             # modprobe (for iSCSI/NVMe-oF kernel modules)
