@@ -139,7 +139,7 @@ HW_CFG="nixos/hardware-configuration.nix"
 [ -f "$HW_CFG" ] && cp "$HW_CFG" /tmp/nasty-hw-config.nix
 
 git remote set-url origin "{repo_url}" 2>/dev/null || git remote add origin "{repo_url}"
-GIT_TERMINAL_PROMPT=0 git fetch origin
+GIT_TERMINAL_PROMPT=0 git -c credential.helper= fetch origin
 git reset --hard origin/main
 
 # Restore hardware config
@@ -449,8 +449,8 @@ async fn check_via_github_api() -> Result<String, UpdateError> {
 /// Direct git ls-remote — works for public repos without auth.
 async fn check_via_git_ls_remote(url: &str) -> Result<String, UpdateError> {
     let output = tokio::process::Command::new("git")
-        .args(["ls-remote", url, "refs/heads/main"])
-        .env("GIT_TERMINAL_PROMPT", "0")  // fail fast instead of hanging on password prompt
+        .args(["-c", "credential.helper=", "ls-remote", url, "refs/heads/main"])
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("git ls-remote: {e}")))?;
