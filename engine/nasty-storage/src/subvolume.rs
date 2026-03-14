@@ -11,18 +11,13 @@ use crate::pool::PoolService;
 
 const STATE_DIR: &str = "/var/lib/nasty/subvolumes";
 const BLOCK_FILE_NAME: &str = "vol.img";
-const SUBVOLUMES_DIR: &str = "subvolumes";
-
-fn subvolumes_dir(mount_point: &str) -> String {
-    format!("{mount_point}/{SUBVOLUMES_DIR}")
-}
 
 fn subvol_path(mount_point: &str, name: &str) -> String {
-    format!("{mount_point}/{SUBVOLUMES_DIR}/{name}")
+    format!("{mount_point}/{name}")
 }
 
 fn snap_path(mount_point: &str, subvol: &str, snap: &str) -> String {
-    format!("{mount_point}/{SUBVOLUMES_DIR}/{subvol}@{snap}")
+    format!("{mount_point}/{subvol}@{snap}")
 }
 
 /// POSIX xattr namespace prefix for all nasty-csi properties.
@@ -258,19 +253,16 @@ impl SubvolumeService {
         let state: Vec<SubvolumeMeta> = state_dir().load_all().await;
         let mut subvolumes = Vec::new();
 
-        // Ensure the subvolumes directory exists
-        tokio::fs::create_dir_all(&subvolumes_dir(&mount_point)).await?;
-
         // Ask bcachefs which paths are real subvolumes (filters out plain dirs)
-        let known = bcachefs_subvol_paths(&mount_point).await;
-        let svdir_prefix = format!("{SUBVOLUMES_DIR}/");
+        let info = bcachefs_list_all(&mount_point).await;
 
-        for rel_path in known.iter().filter(|p| p.starts_with(&svdir_prefix) && !p.contains('@')) {
-            let name = &rel_path[svdir_prefix.len()..];
-            let path_str = format!("{mount_point}/{rel_path}");
+        // Subvolumes sit directly at the pool root — no subdirectory prefix.
+        // Exclude anything with '/' (nested) or '@' (snapshot).
+        for name in info.subvol_paths.iter().filter(|p| !p.is_empty() && !p.contains('/') && !p.contains('@')) {
+            let path_str = subvol_path(&mount_point, name);
             let path = Path::new(&path_str);
 
-            let meta = state.iter().find(|m| m.pool == pool_name && m.name == name);
+            let meta = state.iter().find(|m| m.pool == pool_name && m.name == name.as_str());
 
             // Apply owner filter: operators only see their own subvolumes
             if let Some(filter) = owner_filter {
@@ -280,7 +272,23 @@ impl SubvolumeService {
                 }
             }
 
-            let snapshots = self.list_snapshots_for(pool_name, name).await.unwrap_or_default();
+            // Build snapshot list from the already-fetched bcachefs data
+            let snap_prefix = format!("{name}@");
+            let snapshots: Vec<Snapshot> = info
+                .snapshot_flags
+                .iter()
+                .filter(|(p, _)| p.starts_with(&snap_prefix) && !p.contains('/'))
+                .map(|(p, &read_only)| {
+                    let snap_name = p[snap_prefix.len()..].to_string();
+                    Snapshot {
+                        name: snap_name.clone(),
+                        subvolume: name.to_string(),
+                        pool: pool_name.to_string(),
+                        path: snap_path(&mount_point, name, &snap_name),
+                        read_only,
+                    }
+                })
+                .collect();
             let size = dir_usage(path).await;
 
             let (subvolume_type, volsize_bytes, compression, comments, owner) =
@@ -378,8 +386,6 @@ impl SubvolumeService {
         }
 
         let mount_point = self.pool_mount_point(&req.pool).await?;
-        let subvol_dir = subvolumes_dir(&mount_point);
-        tokio::fs::create_dir_all(&subvol_dir).await?;
         let subvol_path = subvol_path(&mount_point, &req.name);
 
         if Path::new(&subvol_path).exists() {
@@ -616,15 +622,21 @@ impl SubvolumeService {
             return Ok(vec![]);
         }
 
-        let snapshots = bcachefs_snapshot_names(&subvol_path)
-            .await
+        let info = bcachefs_list_all(&mount_point).await;
+        let snap_prefix = format!("{subvol_name}@");
+        let snapshots = info
+            .snapshot_flags
             .into_iter()
-            .map(|snap_name| Snapshot {
-                path: snap_path(&mount_point, subvol_name, &snap_name),
-                name: snap_name,
-                subvolume: subvol_name.to_string(),
-                pool: pool_name.to_string(),
-                read_only: false, // TODO: not exposed by list-snapshots output
+            .filter(|(p, _)| p.starts_with(&snap_prefix) && !p.contains('/'))
+            .map(|(p, read_only)| {
+                let snap_name = p[snap_prefix.len()..].to_string();
+                Snapshot {
+                    path: snap_path(&mount_point, subvol_name, &snap_name),
+                    name: snap_name,
+                    subvolume: subvol_name.to_string(),
+                    pool: pool_name.to_string(),
+                    read_only,
+                }
             })
             .collect();
 
@@ -640,11 +652,6 @@ impl SubvolumeService {
         owner_filter: Option<&str>,
     ) -> Result<Vec<Snapshot>, SubvolumeError> {
         let mount_point = self.pool_mount_point(pool_name).await?;
-        let subvol_dir = subvolumes_dir(&mount_point);
-
-        if !Path::new(&subvol_dir).exists() {
-            return Ok(vec![]);
-        }
 
         // Get owned subvolume names if filter is active
         let owned: Option<std::collections::HashSet<String>> = if owner_filter.is_some() {
@@ -654,28 +661,29 @@ impl SubvolumeService {
             None
         };
 
+        let info = bcachefs_list_all(&mount_point).await;
+
         let mut all_snapshots = Vec::new();
-        let mut entries = tokio::fs::read_dir(&subvol_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(at_pos) = name.find('@') {
-                if entry.path().is_dir() {
-                    let subvol_name = name[..at_pos].to_string();
-                    let snap_name = name[at_pos + 1..].to_string();
-                    if let Some(ref set) = owned {
-                        if !set.contains(&subvol_name) {
-                            continue;
-                        }
-                    }
-                    all_snapshots.push(Snapshot {
-                        name: snap_name,
-                        subvolume: subvol_name,
-                        pool: pool_name.to_string(),
-                        path: entry.path().to_string_lossy().to_string(),
-                        read_only: false, // TODO: detect from bcachefs attributes
-                    });
+        for (rel_path, read_only) in info.snapshot_flags {
+            // Snapshots live directly at pool root: "subvol@snap" (no '/')
+            if rel_path.contains('/') {
+                continue;
+            }
+            let Some(at_pos) = rel_path.find('@') else { continue };
+            let subvol_name = rel_path[..at_pos].to_string();
+            let snap_name = rel_path[at_pos + 1..].to_string();
+            if let Some(ref set) = owned {
+                if !set.contains(&subvol_name) {
+                    continue;
                 }
             }
+            all_snapshots.push(Snapshot {
+                name: snap_name.clone(),
+                subvolume: subvol_name.clone(),
+                pool: pool_name.to_string(),
+                path: snap_path(&mount_point, &subvol_name, &snap_name),
+                read_only,
+            });
         }
 
         Ok(all_snapshots)
@@ -812,40 +820,48 @@ fn read_xattrs(path: &Path) -> HashMap<String, String> {
     map
 }
 
-/// Run `bcachefs subvolume list <mount_point>` and return the set of
-/// relative paths (e.g. "subvolumes/foo") that are real bcachefs subvolumes.
-/// Returns an empty set if the command fails (kernel ioctl not supported, etc.).
-async fn bcachefs_subvol_paths(mount_point: &str) -> std::collections::HashSet<String> {
-    let Ok(output) = cmd::run_ok("bcachefs", &["subvolume", "list", mount_point]).await else {
-        return std::collections::HashSet::new();
-    };
-    // Output: header line then "path  ID  date  time  flags  size" rows
-    output
-        .lines()
-        .skip(1)
-        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
-        .collect()
+/// Parsed result from `bcachefs subvolume list --snapshots --json`.
+struct BcachefsInfo {
+    /// Relative paths of non-snapshot subvolumes (e.g. "foo").
+    subvol_paths: std::collections::HashSet<String>,
+    /// Relative path of each snapshot → read_only flag (e.g. "foo@snap" → true).
+    snapshot_flags: std::collections::HashMap<String, bool>,
 }
 
-/// Run `bcachefs subvolume list-snapshots <subvol_path>` and return snapshot names.
-/// Output is a tree; snapshot entries contain '@'. Returns empty vec on error.
-async fn bcachefs_snapshot_names(subvol_path: &str) -> Vec<String> {
-    let Ok(output) = cmd::run_ok("bcachefs", &["subvolume", "list-snapshots", subvol_path]).await else {
-        return vec![];
-    };
-    let mut names = Vec::new();
-    for line in output.lines().skip(1) {
-        // Each line looks like: "├── /subvolumes/foo@snapname [0B]"
-        // Find the path (starts with '/') and strip the trailing " [size]"
-        if let Some(slash) = line.find('/') {
-            let rest = &line[slash..];
-            let path = rest[..rest.rfind('[').unwrap_or(rest.len())].trim_end();
-            if let Some(at) = path.rfind('@') {
-                names.push(path[at + 1..].to_string());
-            }
+/// Run `bcachefs subvolume list --snapshots --json <mount_point>` once and
+/// return both the subvolume paths and per-snapshot read_only flags.
+/// On any error returns empty collections so callers degrade gracefully.
+async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        path: String,
+        #[serde(default)]
+        flags: Option<String>,
+        snapshot_parent: Option<String>,
+    }
+
+    let output = cmd::run_ok(
+        "bcachefs",
+        &["subvolume", "list", "--snapshots", "--json", mount_point],
+    )
+    .await
+    .unwrap_or_default();
+
+    let entries: Vec<Entry> = serde_json::from_str(&output).unwrap_or_default();
+
+    let mut subvol_paths = std::collections::HashSet::new();
+    let mut snapshot_flags = std::collections::HashMap::new();
+
+    for entry in entries {
+        if entry.snapshot_parent.is_some() {
+            let read_only = entry.flags.as_deref() == Some("ro");
+            snapshot_flags.insert(entry.path, read_only);
+        } else {
+            subvol_paths.insert(entry.path);
         }
     }
-    names
+
+    BcachefsInfo { subvol_paths, snapshot_flags }
 }
 
 /// Get disk usage for a directory using `du`
