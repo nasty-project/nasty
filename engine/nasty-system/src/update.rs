@@ -65,11 +65,8 @@ impl UpdateService {
         let latest = match check_via_github_api().await {
             Ok(sha) => sha,
             Err(_) => {
-                let url = match read_github_token().await {
-                    Some(t) => format!("https://{}@github.com/nasty-project/nasty.git", t),
-                    None => REPO_URL.to_string(),
-                };
-                check_via_git_ls_remote(&url).await?
+                let token = read_github_token().await;
+                check_via_git_ls_remote(token.as_deref()).await?
             }
         };
 
@@ -117,15 +114,16 @@ impl UpdateService {
         // 1. Pull latest source into /etc/nixos
         // 2. Rebuild from local flake (which has hardware-configuration.nix)
         let token = read_github_token().await;
-        let repo_url = if let Some(ref t) = token {
-            format!("https://{}@github.com/nasty-project/nasty.git", t)
-        } else {
-            REPO_URL.to_string()
-        };
 
         // TODO: Remove token env var once repo is public.
-        let token_env = token
+        let token_env = token.as_ref()
             .map(|t| format!("access-tokens = github.com={t}"))
+            .unwrap_or_default();
+
+        // Build the git credential config for non-interactive auth (engine has no TTY).
+        // url.insteadOf rewrites the remote URL so x-access-token auth works without prompts.
+        let git_insteadof = token.as_ref()
+            .map(|t| format!("-c \"url.https://x-access-token:{t}@github.com/.insteadOf=https://github.com/\""))
             .unwrap_or_default();
 
         let script = format!(
@@ -138,8 +136,8 @@ cd {LOCAL_REPO}
 HW_CFG="nixos/hardware-configuration.nix"
 [ -f "$HW_CFG" ] && cp "$HW_CFG" /tmp/nasty-hw-config.nix
 
-git remote set-url origin "{repo_url}" 2>/dev/null || git remote add origin "{repo_url}"
-GIT_TERMINAL_PROMPT=0 git -c credential.helper= fetch origin
+git remote set-url origin "{REPO_URL}" 2>/dev/null || git remote add origin "{REPO_URL}"
+GIT_TERMINAL_PROMPT=0 git -c credential.helper= {git_insteadof} fetch origin
 git reset --hard origin/main
 
 # Restore hardware config
@@ -447,10 +445,19 @@ async fn check_via_github_api() -> Result<String, UpdateError> {
 }
 
 /// Direct git ls-remote — works for public repos without auth.
-async fn check_via_git_ls_remote(url: &str) -> Result<String, UpdateError> {
-    let output = tokio::process::Command::new("git")
-        .args(["-c", "credential.helper=", "ls-remote", url, "refs/heads/main"])
-        .env("GIT_TERMINAL_PROMPT", "0")
+/// If a token is provided, uses url.insteadOf for non-interactive x-access-token auth.
+async fn check_via_git_ls_remote(token: Option<&str>) -> Result<String, UpdateError> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.args(["-c", "credential.helper="]);
+    if let Some(t) = token {
+        cmd.arg("-c").arg(format!(
+            "url.https://x-access-token:{t}@github.com/.insteadOf=https://github.com/"
+        ));
+    }
+    cmd.args(["ls-remote", REPO_URL, "refs/heads/main"]);
+
+    let output = cmd
         .output()
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("git ls-remote: {e}")))?;
