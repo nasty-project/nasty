@@ -5,7 +5,7 @@ use tracing::info;
 const VERSION_PATH: &str = "/etc/nasty-version";
 const UPDATE_UNIT: &str = "nasty-update";
 const LOCAL_FLAKE: &str = "/etc/nixos/nixos#nasty";
-const REPO_URL: &str = "https://github.com/fenio/nasty.git";
+const REPO_URL: &str = "https://github.com/nasty-project/nasty.git";
 const LOCAL_REPO: &str = "/etc/nixos";
 
 // TODO: Remove token-based auth once the repo is public.
@@ -13,7 +13,7 @@ const LOCAL_REPO: &str = "/etc/nixos";
 // When removing, delete check_via_github_api(), GITHUB_TOKEN_PATH,
 // and revert check() to use git ls-remote directly.
 const GITHUB_TOKEN_PATH: &str = "/var/lib/nasty/github-token";
-const GITHUB_API_REPO: &str = "https://api.github.com/repos/fenio/nasty/commits/main";
+const GITHUB_API_REPO: &str = "https://api.github.com/repos/nasty-project/nasty/commits/main";
 
 #[derive(Debug, Error)]
 pub enum UpdateError {
@@ -64,7 +64,13 @@ impl UpdateService {
         // Try GitHub API with token first (for private repo), fall back to git ls-remote
         let latest = match check_via_github_api().await {
             Ok(sha) => sha,
-            Err(_) => check_via_git_ls_remote().await?,
+            Err(_) => {
+                let url = match read_github_token().await {
+                    Some(t) => format!("https://{}@github.com/nasty-project/nasty.git", t),
+                    None => REPO_URL.to_string(),
+                };
+                check_via_git_ls_remote(&url).await?
+            }
         };
 
         // Strip "-dirty" suffix for comparison — the local build has a dirty
@@ -107,7 +113,7 @@ impl UpdateService {
         // 2. Rebuild from local flake (which has hardware-configuration.nix)
         let token = read_github_token().await;
         let repo_url = if let Some(ref t) = token {
-            format!("https://{}@github.com/fenio/nasty.git", t)
+            format!("https://{}@github.com/nasty-project/nasty.git", t)
         } else {
             REPO_URL.to_string()
         };
@@ -386,9 +392,9 @@ async fn check_via_github_api() -> Result<String, UpdateError> {
 }
 
 /// Direct git ls-remote — works for public repos without auth.
-async fn check_via_git_ls_remote() -> Result<String, UpdateError> {
+async fn check_via_git_ls_remote(url: &str) -> Result<String, UpdateError> {
     let output = tokio::process::Command::new("git")
-        .args(["ls-remote", REPO_URL, "refs/heads/main"])
+        .args(["ls-remote", url, "refs/heads/main"])
         .output()
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("git ls-remote: {e}")))?;

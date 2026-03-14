@@ -6,6 +6,7 @@
 	import Toasts from '$lib/components/Toasts.svelte';
 	import type { AuthResult } from '$lib/rpc';
 	import favicon from '$lib/assets/favicon.svg';
+	import logo from '$lib/assets/nasty.svg';
 	import '../app.css';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -102,7 +103,7 @@
 {#if showLogin}
 	<div class="flex min-h-screen items-center justify-center">
 		<div class="w-[340px] rounded-xl border border-border bg-card p-8">
-			<h1 class="mb-1 text-2xl font-bold text-foreground">NASty</h1>
+			<img src={logo} alt="NASty" class="mb-1 h-16" />
 			<p class="mb-6 text-sm text-muted-foreground">Sign in to manage your storage</p>
 			{#if loginError}
 				<p class="mb-4 text-sm text-destructive">{loginError}</p>
@@ -123,7 +124,9 @@
 {:else}
 	<div class="flex min-h-screen">
 		<aside class="flex w-[200px] shrink-0 flex-col border-r border-border bg-card py-4">
-			<div class="mb-2 border-b border-border px-4 pb-4 text-xl font-bold">NASty</div>
+			<div class="mb-2 border-b border-border px-4 pb-4">
+				<img src={logo} alt="NASty" class="h-10" />
+			</div>
 			<nav class="flex flex-1 flex-col">
 				{#each nav as item}
 					<a href={item.href} class="px-4 py-2 text-sm text-muted-foreground no-underline transition-colors hover:bg-accent hover:text-accent-foreground">{item.label}</a>
