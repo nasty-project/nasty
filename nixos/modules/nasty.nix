@@ -143,6 +143,7 @@ in {
          iotop -o
          iostat -x 1
          fio --name=test --rw=randread --bs=4k --size=1g --filename=/mnt/<pool>/fiotest
+         dool -dny 1
 
        share findings with devs
          dmesg | wormhole send -
