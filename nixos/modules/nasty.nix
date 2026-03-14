@@ -161,7 +161,7 @@ in {
       themePackages = [ nasty-plymouth-theme ];
     };
     # Plymouth NixOS module adds "splash" automatically; we only add "quiet".
-    boot.kernelParams = [ "quiet" ];
+    boot.kernelParams = [ "quiet" "plymouth:debug" ];
     boot.initrd.verbose = false;
     # Systemd in initrd: required for Plymouth to start early enough to
     # intercept boot messages. Without this Plymouth starts after systemd
