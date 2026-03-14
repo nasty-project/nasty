@@ -159,6 +159,10 @@ in {
     };
     boot.kernelParams = [ "quiet" "splash" ];
     boot.initrd.verbose = false;
+    # Systemd in initrd: required for Plymouth to start early enough to
+    # intercept boot messages. Without this Plymouth starts after systemd
+    # is already printing to the console.
+    boot.initrd.systemd.enable = true;
     # Load GPU drivers early so Plymouth has a framebuffer to draw on.
     # virtio_gpu covers QEMU/KVM VMs; simpledrm covers physical hardware
     # with UEFI GOP (covers most x86 systems without vendor-specific drivers).
