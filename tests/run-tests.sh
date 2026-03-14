@@ -64,6 +64,8 @@ if [[ "$*" != *"--host"* ]]; then
     echo "  --skip-smb         Skip SMB tests"
     echo "  --skip-iscsi       Skip iSCSI tests"
     echo "  --skip-nvmeof      Skip NVMe-oF tests"
+    echo "  --skip-delete      Leave subvolumes/shares behind after tests"
+    echo "  --delete-only      Delete test-* leftovers from a prior --skip-delete run"
     exit 1
 fi
 

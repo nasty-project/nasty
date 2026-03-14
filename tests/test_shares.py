@@ -13,6 +13,8 @@ Usage:
   sudo python3 test_shares.py --host 10.10.10.46
   sudo python3 test_shares.py --host 10.10.10.46 --pool mypool
   sudo python3 test_shares.py --host 10.10.10.46 --skip-nfs --skip-smb
+  sudo python3 test_shares.py --host 10.10.10.46 --skip-delete   # leave subvolumes behind
+  sudo python3 test_shares.py --host 10.10.10.46 --delete-only   # clean up leftovers
 """
 
 import argparse
@@ -152,10 +154,11 @@ def cmd_exists(name: str) -> bool:
 # ── Test functions ────────────────────────────────────────────────
 
 class TestContext:
-    def __init__(self, client: NastyClient, host: str, pool: str):
+    def __init__(self, client: NastyClient, host: str, pool: str, skip_delete: bool = False):
         self.client = client
         self.host = host
         self.pool = pool
+        self.skip_delete = skip_delete
         self.tag = uuid.uuid4().hex[:6]
         self.results: list[tuple[str, bool, str]] = []
 
@@ -309,15 +312,16 @@ async def test_nfs(ctx: TestContext):
                 run(["umount", mount_points[i]], check=False)
             if os.path.isdir(mount_points[i]):
                 os.rmdir(mount_points[i])
-            if share_ids[i]:
+            if not ctx.skip_delete:
+                if share_ids[i]:
+                    try:
+                        await ctx.client.call("share.nfs.delete", {"id": share_ids[i]})
+                    except Exception:
+                        pass
                 try:
-                    await ctx.client.call("share.nfs.delete", {"id": share_ids[i]})
+                    await ctx.client.call("subvolume.delete", {"pool": ctx.pool, "name": sv_names[i]})
                 except Exception:
                     pass
-            try:
-                await ctx.client.call("subvolume.delete", {"pool": ctx.pool, "name": sv_names[i]})
-            except Exception:
-                pass
 
 
 async def test_smb(ctx: TestContext):
@@ -442,15 +446,16 @@ async def test_smb(ctx: TestContext):
                 run(["umount", mount_points[i]], check=False)
             if os.path.isdir(mount_points[i]):
                 os.rmdir(mount_points[i])
-            if share_ids[i]:
+            if not ctx.skip_delete:
+                if share_ids[i]:
+                    try:
+                        await ctx.client.call("share.smb.delete", {"id": share_ids[i]})
+                    except Exception:
+                        pass
                 try:
-                    await ctx.client.call("share.smb.delete", {"id": share_ids[i]})
+                    await ctx.client.call("subvolume.delete", {"pool": ctx.pool, "name": sv_names[i]})
                 except Exception:
                     pass
-            try:
-                await ctx.client.call("subvolume.delete", {"pool": ctx.pool, "name": sv_names[i]})
-            except Exception:
-                pass
 
 
 def find_iscsi_device(iqn: str) -> str | None:
@@ -651,19 +656,20 @@ async def test_iscsi(ctx: TestContext):
                 ["iscsiadm", "-m", "node", "-T", iqns[i], "-p", f"{ctx.host}:3260", "-o", "delete"],
                 check=False,
             )
-            if target_ids[i]:
+            if not ctx.skip_delete:
+                if target_ids[i]:
+                    try:
+                        await ctx.client.call("share.iscsi.delete", {"id": target_ids[i]})
+                    except Exception:
+                        pass
                 try:
-                    await ctx.client.call("share.iscsi.delete", {"id": target_ids[i]})
+                    await ctx.client.call("subvolume.detach", {"pool": ctx.pool, "name": sv_names[i]})
                 except Exception:
                     pass
-            try:
-                await ctx.client.call("subvolume.detach", {"pool": ctx.pool, "name": sv_names[i]})
-            except Exception:
-                pass
-            try:
-                await ctx.client.call("subvolume.delete", {"pool": ctx.pool, "name": sv_names[i]})
-            except Exception:
-                pass
+                try:
+                    await ctx.client.call("subvolume.delete", {"pool": ctx.pool, "name": sv_names[i]})
+                except Exception:
+                    pass
 
 
 def find_nvme_device(nqn: str) -> str | None:
@@ -862,19 +868,69 @@ async def test_nvmeof(ctx: TestContext):
                 os.rmdir(mount_points[i])
             if connected[i]:
                 run(["nvme", "disconnect", "-n", nqns[i]], check=False)
-            if subsys_ids[i]:
+            if not ctx.skip_delete:
+                if subsys_ids[i]:
+                    try:
+                        await ctx.client.call("share.nvmeof.delete", {"id": subsys_ids[i]})
+                    except Exception:
+                        pass
                 try:
-                    await ctx.client.call("share.nvmeof.delete", {"id": subsys_ids[i]})
+                    await ctx.client.call("subvolume.detach", {"pool": ctx.pool, "name": sv_names[i]})
                 except Exception:
                     pass
+                try:
+                    await ctx.client.call("subvolume.delete", {"pool": ctx.pool, "name": sv_names[i]})
+                except Exception:
+                    pass
+
+
+# ── Leftover cleanup ──────────────────────────────────────────────
+
+async def delete_leftovers(client: NastyClient, pool_name: str):
+    """Delete all test-* subvolumes and their shares left behind by --skip-delete runs."""
+    header("Cleanup: Deleting test leftovers")
+    TEST_PREFIX = "test-"
+
+    subvolumes = await client.call("subvolume.list", {"pool": pool_name})
+    test_svs = [sv for sv in subvolumes if sv["name"].startswith(TEST_PREFIX)]
+    if not test_svs:
+        info("No test subvolumes found.")
+        return
+
+    test_paths = {sv["path"] for sv in test_svs}
+
+    for proto, list_method, delete_method, path_key in [
+        ("NFS",     "share.nfs.list",    "share.nfs.delete",    "path"),
+        ("SMB",     "share.smb.list",    "share.smb.delete",    "path"),
+        ("iSCSI",   "share.iscsi.list",  "share.iscsi.delete",  None),
+        ("NVMe-oF", "share.nvmeof.list", "share.nvmeof.delete", None),
+    ]:
+        try:
+            shares = await client.call(list_method)
+            for share in shares:
+                match = (
+                    share.get("path") in test_paths if path_key
+                    else share.get("name", "").startswith(TEST_PREFIX)
+                )
+                if match:
+                    info(f"Deleting {proto} share '{share.get('name') or share['id']}'...")
+                    await client.call(delete_method, {"id": share["id"]})
+                    ok("Deleted")
+        except Exception as e:
+            warn(f"{proto} share cleanup: {e}")
+
+    for sv in test_svs:
+        info(f"Deleting subvolume '{sv['name']}'...")
+        if sv.get("subvolume_type") == "block":
             try:
-                await ctx.client.call("subvolume.detach", {"pool": ctx.pool, "name": sv_names[i]})
+                await client.call("subvolume.detach", {"pool": pool_name, "name": sv["name"]})
             except Exception:
                 pass
-            try:
-                await ctx.client.call("subvolume.delete", {"pool": ctx.pool, "name": sv_names[i]})
-            except Exception:
-                pass
+        try:
+            await client.call("subvolume.delete", {"pool": pool_name, "name": sv["name"]})
+            ok(f"Deleted '{sv['name']}'")
+        except Exception as e:
+            warn(f"Delete '{sv['name']}': {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────
@@ -889,6 +945,10 @@ async def main():
     parser.add_argument("--skip-smb", action="store_true")
     parser.add_argument("--skip-iscsi", action="store_true")
     parser.add_argument("--skip-nvmeof", action="store_true")
+    parser.add_argument("--skip-delete", action="store_true",
+                        help="Skip server-side deletions after tests (leave subvolumes/shares behind)")
+    parser.add_argument("--delete-only", action="store_true",
+                        help="Delete all test-* leftovers from a prior --skip-delete run, then exit")
     args = parser.parse_args()
 
     # Check prerequisites
@@ -933,7 +993,16 @@ async def main():
         pool_name = mounted[0]["name"]
         info(f"Auto-detected pool: {pool_name}")
 
-    ctx = TestContext(client, args.host, pool_name)
+    if args.delete_only:
+        try:
+            await delete_leftovers(client, pool_name)
+        finally:
+            await client.close()
+        return
+
+    ctx = TestContext(client, args.host, pool_name, skip_delete=args.skip_delete)
+    if args.skip_delete:
+        warn("--skip-delete: subvolumes and shares will NOT be deleted after tests")
 
     try:
         await test_setup(ctx)
