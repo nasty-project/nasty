@@ -45,6 +45,7 @@ fn is_read_only(method: &str) -> bool {
             | "system.alerts" | "system.settings.get" | "system.metrics.history" | "alert.rules.list"
             | "device.list" | "auth.me" | "auth.list_users" | "auth.token.list"
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
+            | "bcachefs.usage" | "bcachefs.top" | "bcachefs.timestats"
             | "service.protocol.list" | "subvolume.list_all" | "subvolume.find_by_property"
             | "system.update.version" | "system.update.status"
             | "system.settings.timezones"
@@ -433,6 +434,29 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "pool.reconcile.status" => match require_str(req, "name") {
             Ok(name) => match state.pools.reconcile_status(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+
+        // ── bcachefs diagnostics ────────────────────────────────
+        "bcachefs.usage" => match require_str(req, "name") {
+            Ok(name) => match state.pools.bcachefs_usage(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "bcachefs.top" => match require_str(req, "name") {
+            Ok(name) => match state.pools.bcachefs_top(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "bcachefs.timestats" => match require_str(req, "name") {
+            Ok(name) => match state.pools.bcachefs_timestats(name).await {
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             },

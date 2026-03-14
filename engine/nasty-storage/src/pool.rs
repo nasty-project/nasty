@@ -898,6 +898,81 @@ impl PoolService {
 
         Ok(ReconcileStatus { raw })
     }
+
+    /// Raw output of `bcachefs fs usage <mount>` — space breakdown by data type and device.
+    pub async fn bcachefs_usage(&self, name: &str) -> Result<String, PoolError> {
+        let pool = self.get(name).await?;
+        if !pool.mounted {
+            return Err(PoolError::CommandFailed(
+                "pool must be mounted".to_string(),
+            ));
+        }
+        let mount_point = pool.mount_point.as_ref().unwrap();
+        let raw = cmd::run_ok("bcachefs", &["fs", "usage", "-h", mount_point])
+            .await
+            .map_err(PoolError::CommandFailed)?;
+        Ok(raw)
+    }
+
+    /// One-shot snapshot of `bcachefs fs top <mount>` — btree ops by process.
+    /// Runs for ~2 s via `timeout` to capture at least one sampling interval.
+    pub async fn bcachefs_top(&self, name: &str) -> Result<String, PoolError> {
+        let pool = self.get(name).await?;
+        if !pool.mounted {
+            return Err(PoolError::CommandFailed(
+                "pool must be mounted".to_string(),
+            ));
+        }
+        let mount_point = pool.mount_point.as_ref().unwrap();
+        // timeout(1) returns exit 124 when it kills the process — that's expected.
+        let output = tokio::process::Command::new("timeout")
+            .args(["2", "bcachefs", "fs", "top", mount_point])
+            .env("TERM", "dumb")
+            .output()
+            .await
+            .map_err(|e| PoolError::CommandFailed(e.to_string()))?;
+        let raw = String::from_utf8_lossy(&output.stdout);
+        Ok(strip_ansi(raw.as_ref()))
+    }
+
+    /// One-shot snapshot of `bcachefs fs timestats <mount>` — operation latency stats.
+    /// Runs for ~2 s via `timeout` to capture one statistics window.
+    pub async fn bcachefs_timestats(&self, name: &str) -> Result<String, PoolError> {
+        let pool = self.get(name).await?;
+        if !pool.mounted {
+            return Err(PoolError::CommandFailed(
+                "pool must be mounted".to_string(),
+            ));
+        }
+        let mount_point = pool.mount_point.as_ref().unwrap();
+        let output = tokio::process::Command::new("timeout")
+            .args(["2", "bcachefs", "fs", "timestats", mount_point])
+            .env("TERM", "dumb")
+            .output()
+            .await
+            .map_err(|e| PoolError::CommandFailed(e.to_string()))?;
+        let raw = String::from_utf8_lossy(&output.stdout);
+        Ok(strip_ansi(raw.as_ref()))
+    }
+}
+
+/// Strip ANSI escape sequences from terminal output (e.g. from bcachefs fs top/timestats).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() { break; }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Parse a device usage line like "/dev/sda: 123 used  456 free  789 total"

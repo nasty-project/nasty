@@ -27,6 +27,7 @@
 		Network,
 		Cpu,
 		Zap,
+		Activity,
 	} from '@lucide/svelte';
 
 	let { children } = $props();
@@ -100,7 +101,8 @@
 		{ href: '/shares/smb',    label: 'SMB',            icon: Share2 },
 		{ href: '/shares/iscsi',  label: 'iSCSI',          icon: Server },
 		{ href: '/shares/nvmeof', label: 'NVMe-oF',        icon: Zap },
-		{ href: '/disks',         label: 'S.M.A.R.T.',     icon: HardDrive },
+		{ href: '/bcachefs',      label: 'bcachefs',        icon: Activity },
+	{ href: '/disks',         label: 'S.M.A.R.T.',     icon: HardDrive },
 		{ href: '/alerts',        label: 'Alerts',          icon: Bell },
 		{ href: '/services',      label: 'Services',        icon: Network },
 		{ href: '/update',        label: 'Update',          icon: RefreshCw },
