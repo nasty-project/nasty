@@ -164,10 +164,10 @@ in {
     # is already printing to the console.
     boot.initrd.systemd.enable = true;
     # Load GPU drivers early so Plymouth has a framebuffer to draw on.
-    # bochs-drm: primary QEMU/KVM VGA (most common VM display) → card0
-    # virtio_gpu: virtio-vga display
-    # simpledrm: physical hardware with UEFI GOP
-    boot.initrd.kernelModules = [ "bochs-drm" "virtio_gpu" "simpledrm" ];
+    # Only virtio_gpu here so it claims card0 (Plymouth's default device).
+    # simpledrm is intentionally omitted — when present it consumes card0
+    # even without a usable EFI framebuffer, pushing virtio_gpu to card1.
+    boot.initrd.kernelModules = [ "virtio_gpu" ];
 
     # Enable flakes for nixos-rebuild --flake
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
