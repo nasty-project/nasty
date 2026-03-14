@@ -112,6 +112,30 @@ in {
     # Enable flakes for nixos-rebuild --flake
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
+    # ── NTP ────────────────────────────────────────────────────
+    services.timesyncd.enable = true;
+
+    # Apply timezone saved in settings.json on every boot.
+    # Runs before the engine so the correct timezone is set when it starts.
+    systemd.services.nasty-apply-timezone = {
+      description = "Apply NASty saved timezone";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "nasty-engine.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = pkgs.writeShellScript "nasty-apply-timezone" ''
+          SETTINGS=/var/lib/nasty/settings.json
+          TZ="UTC"
+          if [ -f "$SETTINGS" ]; then
+            SAVED=$(${pkgs.jq}/bin/jq -r '.timezone // "UTC"' "$SETTINGS" 2>/dev/null)
+            [ -n "$SAVED" ] && TZ="$SAVED"
+          fi
+          ${pkgs.systemd}/bin/timedatectl set-timezone "$TZ"
+        '';
+      };
+    };
+
     # Version file for update system
     environment.etc."nasty-version".text = nasty-version;
 

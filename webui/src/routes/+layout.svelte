@@ -90,6 +90,7 @@
 		{ href: '/update', label: 'Update' },
 		{ href: '/terminal', label: 'Terminal' },
 		{ href: '/users', label: 'Users' },
+		{ href: '/settings', label: 'Settings' },
 	];
 </script>
 

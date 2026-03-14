@@ -5,6 +5,8 @@ export interface SystemInfo {
 	version: string;
 	uptime_seconds: number;
 	kernel: string;
+	timezone: string;
+	ntp_synced: boolean;
 }
 
 export interface SystemHealth {
@@ -310,6 +312,7 @@ export interface ProtocolStatus {
 
 export interface Settings {
 	smart_enabled: boolean;
+	timezone: string;
 }
 
 export interface AlertRule {

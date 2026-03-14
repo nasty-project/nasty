@@ -14,6 +14,8 @@ pub struct SystemInfo {
     pub version: String,
     pub uptime_seconds: u64,
     pub kernel: String,
+    pub timezone: String,
+    pub ntp_synced: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,12 +115,15 @@ impl SystemService {
         let hostname = hostname();
         let kernel = kernel_version();
         let uptime = uptime_seconds();
+        let (timezone, ntp_synced) = timedatectl_info().await;
 
         SystemInfo {
             hostname,
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: uptime,
             kernel,
+            timezone,
+            ntp_synced,
         }
     }
 
@@ -157,6 +162,30 @@ fn kernel_version() -> String {
                 .to_string()
         })
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+async fn timedatectl_info() -> (String, bool) {
+    let output = tokio::process::Command::new("timedatectl")
+        .args(["show", "--property=Timezone,NTPSynchronized"])
+        .output()
+        .await;
+
+    let mut timezone = "UTC".to_string();
+    let mut ntp_synced = false;
+
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if let Some(tz) = line.strip_prefix("Timezone=") {
+                timezone = tz.trim().to_string();
+            }
+            if let Some(v) = line.strip_prefix("NTPSynchronized=") {
+                ntp_synced = v.trim() == "yes";
+            }
+        }
+    }
+
+    (timezone, ntp_synced)
 }
 
 fn uptime_seconds() -> u64 {

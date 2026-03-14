@@ -9,12 +9,19 @@ const STATE_DIR: &str = "/var/lib/nasty";
 pub struct Settings {
     #[serde(default)]
     pub smart_enabled: bool,
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+}
+
+fn default_timezone() -> String {
+    "UTC".to_string()
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             smart_enabled: false,
+            timezone: default_timezone(),
         }
     }
 }
@@ -23,6 +30,7 @@ impl Default for Settings {
 pub struct SettingsUpdate {
     #[serde(default)]
     pub smart_enabled: Option<bool>,
+    pub timezone: Option<String>,
 }
 
 pub struct SettingsService {
@@ -46,9 +54,36 @@ impl SettingsService {
         if let Some(v) = update.smart_enabled {
             settings.smart_enabled = v;
         }
+        if let Some(tz) = update.timezone {
+            apply_timezone(&tz).await?;
+            settings.timezone = tz;
+        }
         save(&settings).await.map_err(|e| e.to_string())?;
         Ok(settings.clone())
     }
+}
+
+pub async fn list_timezones() -> Result<Vec<String>, String> {
+    let output = tokio::process::Command::new("timedatectl")
+        .args(["list-timezones"])
+        .output()
+        .await
+        .map_err(|e| format!("timedatectl: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().map(|s| s.to_string()).collect())
+}
+
+async fn apply_timezone(tz: &str) -> Result<(), String> {
+    let output = tokio::process::Command::new("timedatectl")
+        .args(["set-timezone", tz])
+        .output()
+        .await
+        .map_err(|e| format!("timedatectl: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("failed to set timezone: {stderr}"));
+    }
+    Ok(())
 }
 
 async fn load() -> Settings {

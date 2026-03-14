@@ -46,6 +46,7 @@ fn is_read_only(method: &str) -> bool {
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
             | "service.protocol.list" | "subvolume.list_all" | "subvolume.find_by_property"
             | "system.update.version" | "system.update.status"
+            | "system.settings.timezones"
         )
 }
 
@@ -196,6 +197,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
 
         // ── Settings ──────────────────────────────────────────────
+        "system.settings.timezones" => match nasty_system::settings::list_timezones().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
         "system.settings.get" => ok(req, state.settings.get().await),
         "system.settings.update" => match parse_params(req) {
             Ok(p) => match state.settings.update(p).await {

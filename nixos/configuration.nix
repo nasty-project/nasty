@@ -41,9 +41,6 @@
   # Useful tools
   environment.systemPackages = with pkgs; [ vim ];
 
-  # Additional system configuration
-  time.timeZone = "UTC";
-
   # Allow SSH for management
   services.openssh = {
     enable = true;
