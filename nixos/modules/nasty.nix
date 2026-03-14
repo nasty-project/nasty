@@ -28,7 +28,7 @@ let
   nasty-logo-png = pkgs.runCommand "nasty-logo.png" {
     nativeBuildInputs = [ pkgs.librsvg ];
   } ''
-    rsvg-convert -w 300 -h 300 ${../../webui/src/lib/assets/nasty.svg} -o $out
+    rsvg-convert -w 300 -h 300 ${../../webui/src/lib/assets/nasty-white.svg} -o $out
   '';
 
   nasty-plymouth-theme = pkgs.stdenv.mkDerivation {
