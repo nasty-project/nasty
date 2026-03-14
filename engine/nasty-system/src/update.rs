@@ -143,8 +143,10 @@ git reset --hard origin/main
 # Restore hardware config
 [ -f /tmp/nasty-hw-config.nix ] && cp /tmp/nasty-hw-config.nix "$HW_CFG"
 
-# Flakes require all files to be tracked
+# Flakes require all files to be tracked; commit so the tree is clean (no dirty warning)
 git add -A
+git -c user.email="nasty@localhost" -c user.name="NASty" \
+  commit -m "local: hardware-configuration.nix" --allow-empty-message 2>/dev/null || true
 
 echo "==> Rebuilding system..."
 # Exit code 4 means "switched OK but some units failed" (e.g. smartd on VMs)
