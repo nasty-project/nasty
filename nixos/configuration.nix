@@ -57,8 +57,9 @@
 
   networking.firewall.allowedTCPPorts = [ 22 ];
 
-  # Enable SMART monitoring
+  # Enable SMART monitoring; skip silently on VMs (no SMART-capable devices)
   services.smartd.enable = true;
+  systemd.services.smartd.unitConfig.ConditionVirtualization = "no";
 
   system.stateVersion = "24.11";
 }

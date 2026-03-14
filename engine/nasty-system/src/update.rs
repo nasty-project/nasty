@@ -149,15 +149,7 @@ git -c user.email="nasty@localhost" -c user.name="NASty" \
   commit -m "local: hardware-configuration.nix" --allow-empty-message 2>/dev/null || true
 
 echo "==> Rebuilding system..."
-# Exit code 4 means "switched OK but some units failed" (e.g. smartd on VMs)
-set +e
 nixos-rebuild switch --flake {LOCAL_FLAKE}
-rc=$?
-set -e
-if [ $rc -ne 0 ] && [ $rc -ne 4 ]; then
-  echo "==> Rebuild failed (exit code $rc)"
-  exit $rc
-fi
 echo "==> Update complete!"
 "#
         );
