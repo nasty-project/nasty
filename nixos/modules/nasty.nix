@@ -115,6 +115,43 @@ in {
     # Version file for update system
     environment.etc."nasty-version".text = nasty-version;
 
+    # ── WebUI terminal welcome ──────────────────────────────────
+
+    environment.etc."nasty/terminal-rc".text = ''
+      # Source system-wide bashrc to get correct PATH for all tools
+      [ -f /etc/bashrc ] && source /etc/bashrc
+
+      cat /etc/nasty/motd
+    '';
+
+    environment.etc."nasty/motd".text = ''
+
+      ╔══════════════════════════════════════════════════════╗
+      ║              NASty Debugging Cheat Sheet             ║
+      ╚══════════════════════════════════════════════════════╝
+
+       bcachefs status
+         bcachefs fs usage /mnt/<pool>
+         bcachefs show-super /dev/<disk>
+         dmesg | grep -i bcachefs
+
+       perf profiling
+         perf record -e 'bcachefs:*' -- sleep 5 && perf script
+         perf record -g -p $(pgrep -f bcachefs) && perf report
+
+       I/O monitoring
+         iotop -o
+         iostat -x 1
+         fio --name=test --rw=randread --bs=4k --size=1g --filename=/mnt/<pool>/fiotest
+
+       share findings with devs
+         dmesg | wormhole send -
+         perf script | wormhole send -
+         journalctl -u nasty-engine | wormhole send -
+
+    '';
+
+
     # Kernel modules for iSCSI/NVMe-oF are NOT auto-loaded at boot.
     # They are loaded on demand by the engine when the user enables
     # a protocol, keeping a clean default state on fresh installs.
@@ -123,16 +160,18 @@ in {
 
     environment.systemPackages = with pkgs; [
       bcachefs-tools
-      util-linux      # lsblk, blkid, wipefs
-      smartmontools   # smartctl for disk health
+      util-linux        # lsblk, blkid, wipefs
+      smartmontools     # smartctl for disk health
       htop
       # bcachefs debugging
-      fio             # storage benchmarking
-      iotop           # per-process I/O monitoring
-      sysstat         # iostat, pidstat
-      lsof            # open file handles
-      strace          # syscall tracing
-      dstat           # system resource stats
+      linuxPackages.perf  # perf record/report/script
+      fio               # storage benchmarking
+      iotop             # per-process I/O monitoring
+      sysstat           # iostat, pidstat
+      lsof              # open file handles
+      strace            # syscall tracing
+      dstat             # system resource stats
+      magic-wormhole-rs # share files/output with devs: wormhole send
     ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
       ++ lib.optionals cfg.smb.enable [ samba ]
       ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]

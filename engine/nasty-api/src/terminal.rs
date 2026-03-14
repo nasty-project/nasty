@@ -75,6 +75,7 @@ async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>) {
     };
 
     let mut cmd = CommandBuilder::new("bash");
+    cmd.args(["--rcfile", "/etc/nasty/terminal-rc"]);
     cmd.env("TERM", "xterm-256color");
 
     let mut child = match pair.slave.spawn_command(cmd) {
