@@ -919,16 +919,33 @@ async fn dir_usage(path: &Path) -> Option<u64> {
         .and_then(|s| s.parse().ok())
 }
 
-/// Find the loop device attached to a given file
+/// Find the loop device attached to a given file, matched by backing-file PATH.
+///
+/// bcachefs COW clones preserve inode numbers, so `losetup -j` (which matches
+/// by device+inode) incorrectly returns the original subvolume's loop device
+/// when called on a clone's vol.img. We instead parse `losetup --list` output
+/// and match by the exact canonical file path to avoid this false-positive.
 async fn find_loop_device(file_path: &str) -> Option<String> {
-    let output = cmd::run_ok("losetup", &["-j", file_path]).await.ok()?;
-    let line = output.lines().next()?;
-    let dev = line.split(':').next()?;
-    if dev.starts_with("/dev/loop") {
-        Some(dev.to_string())
-    } else {
-        None
+    // Canonicalize the target path so symlinks / relative paths don't matter
+    let canonical = std::fs::canonicalize(file_path).ok()?;
+    let canonical_str = canonical.to_string_lossy();
+
+    let output = cmd::run_ok(
+        "losetup",
+        &["--list", "--output", "NAME,BACK-FILE", "--noheadings"],
+    )
+    .await
+    .ok()?;
+
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        let dev = parts.next()?;
+        let back = parts.next()?;
+        if back == canonical_str {
+            return Some(dev.to_string());
+        }
     }
+    None
 }
 
 /// Get file size
