@@ -52,8 +52,8 @@ ScriptFile=@PLYMOUTH_THEME_PATH@/nasty.script
 EOF
 
       cat > "$themeDir/nasty.script" << 'EOF'
-Window.SetBackgroundTopColor(0.07, 0.07, 0.09);
-Window.SetBackgroundBottomColor(0.07, 0.07, 0.09);
+Window.SetBackgroundTopColor(0.0, 0.2, 0.6);
+Window.SetBackgroundBottomColor(0.0, 0.1, 0.4);
 
 logo_image = Image("nasty.png");
 logo_sprite = Sprite(logo_image);
