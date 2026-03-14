@@ -160,14 +160,16 @@ in {
       theme = "nasty";
       themePackages = [ nasty-plymouth-theme ];
     };
-    boot.kernelParams = [ "quiet" "splash" ];
+    # Plymouth NixOS module adds "splash" automatically; we only add "quiet".
+    boot.kernelParams = [ "quiet" ];
     boot.initrd.verbose = false;
     # Systemd in initrd: required for Plymouth to start early enough to
     # intercept boot messages. Without this Plymouth starts after systemd
     # is already printing to the console.
     boot.initrd.systemd.enable = true;
-    # No extra GPU modules needed — the Bochs VGA (QEMU 1234:1111) is
-    # handled by a built-in kernel driver, and /dev/fb0 is created early.
+    # simpledrm uses the UEFI/OVMF EFI framebuffer (confirmed: system boots
+    # via OVMF). Must be loaded in the initrd so Plymouth has a DRM device.
+    boot.initrd.kernelModules = [ "simpledrm" ];
 
     # Enable flakes for nixos-rebuild --flake
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
