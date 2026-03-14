@@ -143,6 +143,9 @@ async def test_iscsi(ctx: TestContext):
                        "" if got == expected else f"expected '{expected}', got '{got}'")
 
         # ── Snapshots ─────────────────────────────────────────────
+        # Flush initiator page cache to the iSCSI targets before snapshotting
+        run(["sync"], check=False)
+
         snap_names = [[f"snap-iscsi{i+1}-s{j+1}-{ctx.tag}" for j in range(S)] for i in range(N)]
         for i in range(N):
             for j in range(S):

@@ -146,6 +146,9 @@ async def test_nvmeof(ctx: TestContext):
                        "" if got == expected else f"expected '{expected}', got '{got}'")
 
         # ── Snapshots ─────────────────────────────────────────────
+        # Flush initiator page cache to the NVMe-oF targets before snapshotting
+        run(["sync"], check=False)
+
         snap_names = [[f"snap-nvme{i+1}-s{j+1}-{ctx.tag}" for j in range(S)] for i in range(N)]
         for i in range(N):
             for j in range(S):
