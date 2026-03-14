@@ -276,7 +276,7 @@ in {
       smartmontools     # smartctl for disk health
       htop
       # bcachefs debugging
-      linuxPackages.perf  # perf record/report/script
+      perf               # perf record/report/script
       fio               # storage benchmarking
       iotop             # per-process I/O monitoring
       sysstat           # iostat, pidstat
