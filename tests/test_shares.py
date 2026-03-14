@@ -201,9 +201,10 @@ async def test_setup(ctx: TestContext):
 
 
 async def test_nfs(ctx: TestContext):
-    """Create 4 NFS shares simultaneously, mount all, write/read all, cleanup."""
-    header("NFS Tests (x4 concurrent)")
-    N = 4
+    """Create 5 NFS shares simultaneously, mount all, write/read all, cleanup."""
+    header("NFS Tests (x5 concurrent)")
+    N = 5
+    S = 2
     sv_names = [f"test-nfs{i}-{ctx.tag}" for i in range(1, N + 1)]
     mount_points = [f"/tmp/nasty-test-nfs{i}-{ctx.tag}" for i in range(1, N + 1)]
     share_ids = [None] * N
@@ -267,43 +268,46 @@ async def test_nfs(ctx: TestContext):
             else:
                 ctx.record(f"{label}: read/verify", False, f"expected '{test_data}', got '{read_back}'")
 
-        # Snapshot all subvolumes
-        snap_names = [f"snap-nfs{i+1}-{ctx.tag}" for i in range(N)]
+        # Snapshot all subvolumes (S snapshots each)
+        snap_names = [[f"snap-nfs{i+1}-s{j+1}-{ctx.tag}" for j in range(S)] for i in range(N)]
         for i in range(N):
-            label = f"NFS[{i+1}]"
-            info(f"Creating snapshot '{snap_names[i]}' of '{sv_names[i]}'...")
-            try:
-                snap = await ctx.client.call("snapshot.create", {
-                    "pool": ctx.pool,
-                    "subvolume": sv_names[i],
-                    "name": snap_names[i],
-                    "read_only": True,
-                })
-                ctx.record(f"{label}: snapshot created", True)
-            except Exception as e:
-                ctx.record(f"{label}: snapshot created", False, str(e))
+            for j in range(S):
+                label = f"NFS[{i+1}]"
+                info(f"Creating snapshot '{snap_names[i][j]}' of '{sv_names[i]}'...")
+                try:
+                    await ctx.client.call("snapshot.create", {
+                        "pool": ctx.pool,
+                        "subvolume": sv_names[i],
+                        "name": snap_names[i][j],
+                        "read_only": True,
+                    })
+                    ctx.record(f"{label}: snapshot {j+1} created", True)
+                except Exception as e:
+                    ctx.record(f"{label}: snapshot {j+1} created", False, str(e))
 
         # Verify snapshots appear in listing
         snapshots = await ctx.client.call("snapshot.list", {"pool": ctx.pool})
         for i in range(N):
             label = f"NFS[{i+1}]"
-            found = any(s["name"] == snap_names[i] and s["subvolume"] == sv_names[i] for s in snapshots)
-            ctx.record(f"{label}: snapshot listed", found,
-                       "" if found else f"snapshot '{snap_names[i]}' not found in listing")
+            for j in range(S):
+                found = any(s["name"] == snap_names[i][j] and s["subvolume"] == sv_names[i] for s in snapshots)
+                ctx.record(f"{label}: snapshot {j+1} listed", found,
+                           "" if found else f"snapshot '{snap_names[i][j]}' not found in listing")
 
         # Delete snapshots
         if not ctx.skip_delete:
             for i in range(N):
                 label = f"NFS[{i+1}]"
-                try:
-                    await ctx.client.call("snapshot.delete", {
-                        "pool": ctx.pool,
-                        "subvolume": sv_names[i],
-                        "name": snap_names[i],
-                    })
-                    ctx.record(f"{label}: snapshot deleted", True)
-                except Exception as e:
-                    ctx.record(f"{label}: snapshot deleted", False, str(e))
+                for j in range(S):
+                    try:
+                        await ctx.client.call("snapshot.delete", {
+                            "pool": ctx.pool,
+                            "subvolume": sv_names[i],
+                            "name": snap_names[i][j],
+                        })
+                        ctx.record(f"{label}: snapshot {j+1} deleted", True)
+                    except Exception as e:
+                        ctx.record(f"{label}: snapshot {j+1} deleted", False, str(e))
 
     except Exception as e:
         ctx.record("NFS: test", False, str(e))
@@ -326,9 +330,10 @@ async def test_nfs(ctx: TestContext):
 
 
 async def test_smb(ctx: TestContext):
-    """Create 4 SMB shares simultaneously, mount all, write/read all, cleanup."""
-    header("SMB Tests (x4 concurrent)")
-    N = 4
+    """Create 5 SMB shares simultaneously, mount all, write/read all, cleanup."""
+    header("SMB Tests (x5 concurrent)")
+    N = 5
+    S = 2
     sv_names = [f"test-smb{i}-{ctx.tag}" for i in range(1, N + 1)]
     share_names = [f"tsmb{i}{ctx.tag}" for i in range(1, N + 1)]
     mount_points = [f"/tmp/nasty-test-smb{i}-{ctx.tag}" for i in range(1, N + 1)]
@@ -402,43 +407,46 @@ async def test_smb(ctx: TestContext):
             else:
                 ctx.record(f"{label}: read/verify", False, f"expected '{test_data}', got '{read_back}'")
 
-        # Snapshot all subvolumes
-        snap_names = [f"snap-smb{i+1}-{ctx.tag}" for i in range(N)]
+        # Snapshot all subvolumes (S snapshots each)
+        snap_names = [[f"snap-smb{i+1}-s{j+1}-{ctx.tag}" for j in range(S)] for i in range(N)]
         for i in range(N):
-            label = f"SMB[{i+1}]"
-            info(f"Creating snapshot '{snap_names[i]}' of '{sv_names[i]}'...")
-            try:
-                await ctx.client.call("snapshot.create", {
-                    "pool": ctx.pool,
-                    "subvolume": sv_names[i],
-                    "name": snap_names[i],
-                    "read_only": True,
-                })
-                ctx.record(f"{label}: snapshot created", True)
-            except Exception as e:
-                ctx.record(f"{label}: snapshot created", False, str(e))
+            for j in range(S):
+                label = f"SMB[{i+1}]"
+                info(f"Creating snapshot '{snap_names[i][j]}' of '{sv_names[i]}'...")
+                try:
+                    await ctx.client.call("snapshot.create", {
+                        "pool": ctx.pool,
+                        "subvolume": sv_names[i],
+                        "name": snap_names[i][j],
+                        "read_only": True,
+                    })
+                    ctx.record(f"{label}: snapshot {j+1} created", True)
+                except Exception as e:
+                    ctx.record(f"{label}: snapshot {j+1} created", False, str(e))
 
         # Verify snapshots appear in listing
         snapshots = await ctx.client.call("snapshot.list", {"pool": ctx.pool})
         for i in range(N):
             label = f"SMB[{i+1}]"
-            found = any(s["name"] == snap_names[i] and s["subvolume"] == sv_names[i] for s in snapshots)
-            ctx.record(f"{label}: snapshot listed", found,
-                       "" if found else f"snapshot '{snap_names[i]}' not found in listing")
+            for j in range(S):
+                found = any(s["name"] == snap_names[i][j] and s["subvolume"] == sv_names[i] for s in snapshots)
+                ctx.record(f"{label}: snapshot {j+1} listed", found,
+                           "" if found else f"snapshot '{snap_names[i][j]}' not found in listing")
 
         # Delete snapshots
         if not ctx.skip_delete:
             for i in range(N):
                 label = f"SMB[{i+1}]"
-                try:
-                    await ctx.client.call("snapshot.delete", {
-                        "pool": ctx.pool,
-                        "subvolume": sv_names[i],
-                        "name": snap_names[i],
-                    })
-                    ctx.record(f"{label}: snapshot deleted", True)
-                except Exception as e:
-                    ctx.record(f"{label}: snapshot deleted", False, str(e))
+                for j in range(S):
+                    try:
+                        await ctx.client.call("snapshot.delete", {
+                            "pool": ctx.pool,
+                            "subvolume": sv_names[i],
+                            "name": snap_names[i][j],
+                        })
+                        ctx.record(f"{label}: snapshot {j+1} deleted", True)
+                    except Exception as e:
+                        ctx.record(f"{label}: snapshot {j+1} deleted", False, str(e))
 
     except Exception as e:
         ctx.record("SMB: test", False, str(e))
@@ -482,9 +490,10 @@ def find_iscsi_device(iqn: str) -> str | None:
 
 
 async def test_iscsi(ctx: TestContext):
-    """Create 4 iSCSI targets simultaneously, login all, format+write/read all, cleanup."""
-    header("iSCSI Tests (x4 concurrent)")
-    N = 4
+    """Create 5 iSCSI targets simultaneously, login all, format+write/read all, cleanup."""
+    header("iSCSI Tests (x5 concurrent)")
+    N = 5
+    S = 2
     sv_names = [f"test-iscsi{i}-{ctx.tag}" for i in range(1, N + 1)]
     target_names = [f"test-iscsi{i}-{ctx.tag}" for i in range(1, N + 1)]
     iqns = [f"iqn.2024-01.com.nasty:{n}" for n in target_names]
@@ -604,43 +613,46 @@ async def test_iscsi(ctx: TestContext):
             else:
                 ctx.record(f"{label}: read/verify", False, f"expected '{test_data}', got '{read_back}'")
 
-        # Snapshot all subvolumes
-        snap_names = [f"snap-iscsi{i+1}-{ctx.tag}" for i in range(N)]
+        # Snapshot all subvolumes (S snapshots each)
+        snap_names = [[f"snap-iscsi{i+1}-s{j+1}-{ctx.tag}" for j in range(S)] for i in range(N)]
         for i in range(N):
-            label = f"iSCSI[{i+1}]"
-            info(f"Creating snapshot '{snap_names[i]}' of '{sv_names[i]}'...")
-            try:
-                await ctx.client.call("snapshot.create", {
-                    "pool": ctx.pool,
-                    "subvolume": sv_names[i],
-                    "name": snap_names[i],
-                    "read_only": True,
-                })
-                ctx.record(f"{label}: snapshot created", True)
-            except Exception as e:
-                ctx.record(f"{label}: snapshot created", False, str(e))
+            for j in range(S):
+                label = f"iSCSI[{i+1}]"
+                info(f"Creating snapshot '{snap_names[i][j]}' of '{sv_names[i]}'...")
+                try:
+                    await ctx.client.call("snapshot.create", {
+                        "pool": ctx.pool,
+                        "subvolume": sv_names[i],
+                        "name": snap_names[i][j],
+                        "read_only": True,
+                    })
+                    ctx.record(f"{label}: snapshot {j+1} created", True)
+                except Exception as e:
+                    ctx.record(f"{label}: snapshot {j+1} created", False, str(e))
 
         # Verify snapshots appear in listing
         snapshots = await ctx.client.call("snapshot.list", {"pool": ctx.pool})
         for i in range(N):
             label = f"iSCSI[{i+1}]"
-            found = any(s["name"] == snap_names[i] and s["subvolume"] == sv_names[i] for s in snapshots)
-            ctx.record(f"{label}: snapshot listed", found,
-                       "" if found else f"snapshot '{snap_names[i]}' not found in listing")
+            for j in range(S):
+                found = any(s["name"] == snap_names[i][j] and s["subvolume"] == sv_names[i] for s in snapshots)
+                ctx.record(f"{label}: snapshot {j+1} listed", found,
+                           "" if found else f"snapshot '{snap_names[i][j]}' not found in listing")
 
         # Delete snapshots
         if not ctx.skip_delete:
             for i in range(N):
                 label = f"iSCSI[{i+1}]"
-                try:
-                    await ctx.client.call("snapshot.delete", {
-                        "pool": ctx.pool,
-                        "subvolume": sv_names[i],
-                        "name": snap_names[i],
-                    })
-                    ctx.record(f"{label}: snapshot deleted", True)
-                except Exception as e:
-                    ctx.record(f"{label}: snapshot deleted", False, str(e))
+                for j in range(S):
+                    try:
+                        await ctx.client.call("snapshot.delete", {
+                            "pool": ctx.pool,
+                            "subvolume": sv_names[i],
+                            "name": snap_names[i][j],
+                        })
+                        ctx.record(f"{label}: snapshot {j+1} deleted", True)
+                    except Exception as e:
+                        ctx.record(f"{label}: snapshot {j+1} deleted", False, str(e))
 
     except Exception as e:
         ctx.record("iSCSI: test", False, str(e))
@@ -714,9 +726,10 @@ def find_nvme_device(nqn: str) -> str | None:
 
 
 async def test_nvmeof(ctx: TestContext):
-    """Create 4 NVMe-oF shares simultaneously, connect all, format+write/read all, cleanup."""
-    header("NVMe-oF Tests (x4 concurrent)")
-    N = 4
+    """Create 5 NVMe-oF shares simultaneously, connect all, format+write/read all, cleanup."""
+    header("NVMe-oF Tests (x5 concurrent)")
+    N = 5
+    S = 2
     sv_names = [f"test-nvme{i}-{ctx.tag}" for i in range(1, N + 1)]
     subsys_names = [f"test-nvme{i}-{ctx.tag}" for i in range(1, N + 1)]
     nqns = [f"nqn.2024-01.com.nasty:{n}" for n in subsys_names]
@@ -824,43 +837,46 @@ async def test_nvmeof(ctx: TestContext):
             else:
                 ctx.record(f"{label}: read/verify", False, f"expected '{test_data}', got '{read_back}'")
 
-        # Snapshot all subvolumes
-        snap_names = [f"snap-nvme{i+1}-{ctx.tag}" for i in range(N)]
+        # Snapshot all subvolumes (S snapshots each)
+        snap_names = [[f"snap-nvme{i+1}-s{j+1}-{ctx.tag}" for j in range(S)] for i in range(N)]
         for i in range(N):
-            label = f"NVMe-oF[{i+1}]"
-            info(f"Creating snapshot '{snap_names[i]}' of '{sv_names[i]}'...")
-            try:
-                await ctx.client.call("snapshot.create", {
-                    "pool": ctx.pool,
-                    "subvolume": sv_names[i],
-                    "name": snap_names[i],
-                    "read_only": True,
-                })
-                ctx.record(f"{label}: snapshot created", True)
-            except Exception as e:
-                ctx.record(f"{label}: snapshot created", False, str(e))
+            for j in range(S):
+                label = f"NVMe-oF[{i+1}]"
+                info(f"Creating snapshot '{snap_names[i][j]}' of '{sv_names[i]}'...")
+                try:
+                    await ctx.client.call("snapshot.create", {
+                        "pool": ctx.pool,
+                        "subvolume": sv_names[i],
+                        "name": snap_names[i][j],
+                        "read_only": True,
+                    })
+                    ctx.record(f"{label}: snapshot {j+1} created", True)
+                except Exception as e:
+                    ctx.record(f"{label}: snapshot {j+1} created", False, str(e))
 
         # Verify snapshots appear in listing
         snapshots = await ctx.client.call("snapshot.list", {"pool": ctx.pool})
         for i in range(N):
             label = f"NVMe-oF[{i+1}]"
-            found = any(s["name"] == snap_names[i] and s["subvolume"] == sv_names[i] for s in snapshots)
-            ctx.record(f"{label}: snapshot listed", found,
-                       "" if found else f"snapshot '{snap_names[i]}' not found in listing")
+            for j in range(S):
+                found = any(s["name"] == snap_names[i][j] and s["subvolume"] == sv_names[i] for s in snapshots)
+                ctx.record(f"{label}: snapshot {j+1} listed", found,
+                           "" if found else f"snapshot '{snap_names[i][j]}' not found in listing")
 
         # Delete snapshots
         if not ctx.skip_delete:
             for i in range(N):
                 label = f"NVMe-oF[{i+1}]"
-                try:
-                    await ctx.client.call("snapshot.delete", {
-                        "pool": ctx.pool,
-                        "subvolume": sv_names[i],
-                        "name": snap_names[i],
-                    })
-                    ctx.record(f"{label}: snapshot deleted", True)
-                except Exception as e:
-                    ctx.record(f"{label}: snapshot deleted", False, str(e))
+                for j in range(S):
+                    try:
+                        await ctx.client.call("snapshot.delete", {
+                            "pool": ctx.pool,
+                            "subvolume": sv_names[i],
+                            "name": snap_names[i][j],
+                        })
+                        ctx.record(f"{label}: snapshot {j+1} deleted", True)
+                    except Exception as e:
+                        ctx.record(f"{label}: snapshot {j+1} deleted", False, str(e))
 
     except Exception as e:
         ctx.record("NVMe-oF: test", False, str(e))
