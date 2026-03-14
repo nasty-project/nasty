@@ -66,7 +66,7 @@ impl UpdateService {
             Ok(sha) => sha,
             Err(_) => {
                 let url = match read_github_token().await {
-                    Some(t) => format!("https://x-access-token:{}@github.com/nasty-project/nasty.git", t),
+                    Some(t) => format!("https://{}@github.com/nasty-project/nasty.git", t),
                     None => REPO_URL.to_string(),
                 };
                 check_via_git_ls_remote(&url).await?
@@ -118,7 +118,7 @@ impl UpdateService {
         // 2. Rebuild from local flake (which has hardware-configuration.nix)
         let token = read_github_token().await;
         let repo_url = if let Some(ref t) = token {
-            format!("https://x-access-token:{}@github.com/nasty-project/nasty.git", t)
+            format!("https://{}@github.com/nasty-project/nasty.git", t)
         } else {
             REPO_URL.to_string()
         };
