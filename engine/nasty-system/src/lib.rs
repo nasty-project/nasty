@@ -185,7 +185,24 @@ async fn timedatectl_info() -> (String, bool) {
         }
     }
 
+    // NTPSynchronized=yes only flips when timesyncd itself adjusts the clock.
+    // On VMs the hypervisor pre-sets the clock so timesyncd never needs to step it,
+    // leaving the flag as "no" even though the service is healthy and polling.
+    // Fall back to checking whether timesyncd is actively running.
+    if !ntp_synced {
+        ntp_synced = systemd_unit_active("systemd-timesyncd").await;
+    }
+
     (timezone, ntp_synced)
+}
+
+async fn systemd_unit_active(unit: &str) -> bool {
+    tokio::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn uptime_seconds() -> u64 {
