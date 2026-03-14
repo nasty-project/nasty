@@ -131,12 +131,18 @@ impl ProtocolService {
 
             // Load kernel modules for iSCSI/NVMe-oF
             if proto == Protocol::Iscsi {
-                let _ = modprobe("target_core_mod").await;
-                let _ = modprobe("iscsi_target_mod").await;
+                for module in &["target_core_mod", "iscsi_target_mod"] {
+                    if let Err(e) = modprobe(module).await {
+                        warn!("{e}");
+                    }
+                }
             }
             if proto == Protocol::Nvmeof {
-                let _ = modprobe("nvmet").await;
-                let _ = modprobe("nvmet-tcp").await;
+                for module in &["nvmet", "nvmet-tcp"] {
+                    if let Err(e) = modprobe(module).await {
+                        warn!("{e}");
+                    }
+                }
             }
         }
     }
@@ -180,14 +186,20 @@ impl ProtocolService {
 
         // For iSCSI: load kernel modules
         if proto == Protocol::Iscsi {
-            let _ = modprobe("target_core_mod").await;
-            let _ = modprobe("iscsi_target_mod").await;
+            for module in &["target_core_mod", "iscsi_target_mod"] {
+                if let Err(e) = modprobe(module).await {
+                    warn!("{e}");
+                }
+            }
         }
 
         // For NVMe-oF: load kernel modules
         if proto == Protocol::Nvmeof {
-            let _ = modprobe("nvmet").await;
-            let _ = modprobe("nvmet-tcp").await;
+            for module in &["nvmet", "nvmet-tcp"] {
+                if let Err(e) = modprobe(module).await {
+                    warn!("{e}");
+                }
+            }
         }
 
         let running = is_protocol_running(proto).await;
@@ -211,7 +223,9 @@ impl ProtocolService {
         // Stop associated services
         for svc in proto.services() {
             info!("Stopping service {svc} for protocol {}", proto.display_name());
-            let _ = systemctl("stop", svc).await;
+            if let Err(e) = systemctl("stop", svc).await {
+                warn!("Failed to stop {svc}: {e}");
+            }
         }
 
         let running = is_protocol_running(proto).await;
@@ -293,7 +307,13 @@ async fn modprobe(module: &str) -> Result<(), String> {
 
 async fn load_state() -> ProtocolState {
     match tokio::fs::read_to_string(STATE_PATH).await {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(state) => state,
+            Err(e) => {
+                warn!("Failed to parse protocol state, resetting to defaults: {e}");
+                ProtocolState::default()
+            }
+        },
         Err(_) => {
             // Default: all protocols disabled on fresh install.
             // User explicitly enables what they need.

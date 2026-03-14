@@ -52,7 +52,7 @@ impl MetricsDb {
 
     /// Insert a batch of I/O rate samples.
     pub fn insert(&self, kind: &str, samples: &[(&str, f64, f64)]) {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("metrics db mutex poisoned");
         let ts = now_ms();
         let mut stmt = match conn.prepare(
             "INSERT INTO io_samples (ts, kind, name, in_rate, out_rate) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -73,7 +73,7 @@ impl MetricsDb {
     /// Prune samples older than the retention period.
     pub fn prune(&self) {
         let cutoff = now_ms() - RETENTION_SECS * 1000;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("metrics db mutex poisoned");
         match conn.execute("DELETE FROM io_samples WHERE ts < ?1", [cutoff]) {
             Ok(n) if n > 0 => info!("Pruned {n} old metric samples"),
             Err(e) => warn!("Failed to prune metrics: {e}"),
@@ -94,32 +94,39 @@ impl MetricsDb {
     ) -> Vec<ResourceHistory> {
         let (duration_ms, bucket_ms) = range_to_params(range);
         let since = now_ms() - duration_ms;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().expect("metrics db mutex poisoned");
 
         // Collect distinct resource names in range
         let names: Vec<String> = if let Some(n) = name {
             vec![n.to_string()]
         } else {
-            let mut stmt = conn
-                .prepare("SELECT DISTINCT name FROM io_samples WHERE kind = ?1 AND ts >= ?2")
-                .unwrap();
-            stmt.query_map(rusqlite::params![kind, since], |row| row.get(0))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect()
+            match conn.prepare("SELECT DISTINCT name FROM io_samples WHERE kind = ?1 AND ts >= ?2") {
+                Ok(mut stmt) => stmt
+                    .query_map(rusqlite::params![kind, since], |row| row.get(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default(),
+                Err(e) => {
+                    warn!("Failed to query metric names for {kind}: {e}");
+                    return Vec::new();
+                }
+            }
         };
 
         let mut results = Vec::new();
 
         if bucket_ms == 0 {
             // Raw samples — no bucketing
-            let mut stmt = conn
-                .prepare(
-                    "SELECT ts, in_rate, out_rate FROM io_samples
-                     WHERE kind = ?1 AND name = ?2 AND ts >= ?3
-                     ORDER BY ts",
-                )
-                .unwrap();
+            let mut stmt = match conn.prepare(
+                "SELECT ts, in_rate, out_rate FROM io_samples
+                 WHERE kind = ?1 AND name = ?2 AND ts >= ?3
+                 ORDER BY ts",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Failed to prepare raw metrics query: {e}");
+                    return Vec::new();
+                }
+            };
 
             for n in &names {
                 let samples: Vec<IoSample> = stmt
@@ -130,24 +137,27 @@ impl MetricsDb {
                             out_rate: row.get(2)?,
                         })
                     })
-                    .unwrap()
-                    .filter_map(|r| r.ok())
-                    .collect();
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default();
 
                 results.push(ResourceHistory { name: n.clone(), samples });
             }
         } else {
             // Bucketed averages
-            let mut stmt = conn
-                .prepare(
-                    "SELECT (ts / ?4) * ?4 AS bucket,
-                            AVG(in_rate), AVG(out_rate)
-                     FROM io_samples
-                     WHERE kind = ?1 AND name = ?2 AND ts >= ?3
-                     GROUP BY bucket
-                     ORDER BY bucket",
-                )
-                .unwrap();
+            let mut stmt = match conn.prepare(
+                "SELECT (ts / ?4) * ?4 AS bucket,
+                        AVG(in_rate), AVG(out_rate)
+                 FROM io_samples
+                 WHERE kind = ?1 AND name = ?2 AND ts >= ?3
+                 GROUP BY bucket
+                 ORDER BY bucket",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Failed to prepare bucketed metrics query: {e}");
+                    return Vec::new();
+                }
+            };
 
             for n in &names {
                 let samples: Vec<IoSample> = stmt
@@ -158,9 +168,8 @@ impl MetricsDb {
                             out_rate: row.get(2)?,
                         })
                     })
-                    .unwrap()
-                    .filter_map(|r| r.ok())
-                    .collect();
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default();
 
                 results.push(ResourceHistory { name: n.clone(), samples });
             }
@@ -191,6 +200,6 @@ fn range_to_params(range: &str) -> (i64, i64) {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock is before Unix epoch")
         .as_millis() as i64
 }

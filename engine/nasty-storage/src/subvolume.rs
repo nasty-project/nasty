@@ -468,7 +468,9 @@ impl SubvolumeService {
         if subvol.subvolume_type == SubvolumeType::Block {
             if let Some(ref loop_dev) = subvol.block_device {
                 info!("Detaching loop device {} for '{}'", loop_dev, req.name);
-                let _ = cmd::run_ok("losetup", &["-d", loop_dev]).await;
+                if let Err(e) = cmd::run_ok("losetup", &["-d", loop_dev]).await {
+                    warn!("Failed to detach loop device {loop_dev}: {e}");
+                }
             }
         }
 
@@ -478,8 +480,7 @@ impl SubvolumeService {
         // Delete all snapshots for this subvolume first
         let snapshots = self
             .list_snapshots_for(&req.pool, &req.name)
-            .await
-            .unwrap_or_default();
+            .await?;
         for snap in snapshots {
             info!("Deleting snapshot '{}' before subvolume deletion", snap.name);
             cmd::run_ok("bcachefs", &["subvolume", "delete", &snap.path])
@@ -570,7 +571,9 @@ impl SubvolumeService {
         // If loop device is attached, inform the kernel of the new size
         if let Some(ref loop_dev) = subvol.block_device {
             info!("Updating loop device {} capacity for '{}'", loop_dev, req.name);
-            let _ = cmd::run_ok("losetup", &["--set-capacity", loop_dev]).await;
+            cmd::run_ok("losetup", &["--set-capacity", loop_dev])
+                .await
+                .map_err(SubvolumeError::CommandFailed)?;
         }
 
         // Update stored metadata
@@ -613,7 +616,9 @@ impl SubvolumeService {
         if subvol.subvolume_type == SubvolumeType::Block {
             if let Some(ref loop_dev) = subvol.block_device {
                 info!("Flushing block device {} before snapshot", loop_dev);
-                let _ = cmd::run_ok("blockdev", &["--flushbufs", loop_dev]).await;
+                if let Err(e) = cmd::run_ok("blockdev", &["--flushbufs", loop_dev]).await {
+                    warn!("Failed to flush {loop_dev} before snapshot, proceeding anyway: {e}");
+                }
             }
         }
 

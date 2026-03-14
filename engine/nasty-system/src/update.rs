@@ -146,7 +146,7 @@ git reset --hard origin/main
 # Flakes require all files to be tracked; commit so the tree is clean (no dirty warning)
 git add -A
 git -c user.email="nasty@localhost" -c user.name="NASty" \
-  commit -m "local: hardware-configuration.nix" --allow-empty-message 2>/dev/null || true
+  commit -m "local: hardware-configuration.nix" || true
 
 echo "==> Rebuilding system..."
 nixos-rebuild switch --flake {LOCAL_FLAKE}
@@ -365,7 +365,9 @@ async fn sanitize_hardware_config() {
     let sanitized = strip_pool_mounts(&content);
     if sanitized != content {
         info!("Removed pool mount entries from hardware-configuration.nix to prevent boot failure");
-        let _ = tokio::fs::write(&path, sanitized).await;
+        if let Err(e) = tokio::fs::write(&path, sanitized).await {
+            tracing::warn!("Failed to write sanitized hardware-configuration.nix: {e}");
+        }
     }
 }
 
