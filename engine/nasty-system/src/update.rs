@@ -150,6 +150,16 @@ git -c user.email="nasty@localhost" -c user.name="NASty" \
 
 echo "==> Rebuilding system..."
 nixos-rebuild switch --flake {LOCAL_FLAKE}
+
+# Write the upstream SHA as the installed version.
+# The flake bakes the local HEAD (which includes the hw-config commit) into
+# /etc/nasty-version, but the update checker compares against origin/main.
+# Overwrite the NixOS-managed symlink with the real upstream SHA so the two
+# always agree after a successful update.
+UPSTREAM_SHA=$(git rev-parse --short origin/main)
+rm -f {VERSION_PATH}
+echo "$UPSTREAM_SHA" > {VERSION_PATH}
+
 echo "==> Update complete!"
 "#
         );
