@@ -49,6 +49,7 @@ fn is_read_only(method: &str) -> bool {
             | "service.protocol.list" | "subvolume.list_all" | "subvolume.find_by_property"
             | "system.update.version" | "system.update.status"
             | "system.settings.timezones"
+            | "bcachefs.tools.info" | "bcachefs.tools.status"
         )
 }
 
@@ -227,6 +228,18 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => err(req, e),
         },
         "system.update.status" => ok(req, state.updates.status().await),
+
+        // ── bcachefs-tools version switching ──────────────────────
+        "bcachefs.tools.info" => ok(req, state.updates.bcachefs_info().await),
+        "bcachefs.tools.switch" => match parse_params::<nasty_system::update::BcachefsToolsSwitchRequest>(req) {
+            Ok(p) => match state.updates.bcachefs_switch(p).await {
+                Ok(()) => ok(req, serde_json::json!({"status": "started"})),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
+        "bcachefs.tools.status" => ok(req, state.updates.bcachefs_status().await),
+
         "system.reboot" => match state.updates.reboot().await {
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),

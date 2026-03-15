@@ -310,6 +310,12 @@ export interface UpdateInfo {
 	update_available: boolean | null;
 }
 
+export interface BcachefsToolsInfo {
+	pinned_ref: string | null;
+	pinned_rev: string | null;
+	running_version: string;
+}
+
 export interface UpdateStatus {
 	/** "idle", "running", "success", "failed" */
 	state: string;

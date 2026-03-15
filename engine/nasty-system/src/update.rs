@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
 
@@ -10,6 +10,9 @@ const UPDATE_UNIT: &str = "nasty-update";
 const LOCAL_FLAKE: &str = "/etc/nixos/nixos#nasty";
 const REPO_URL: &str = "https://github.com/nasty-project/nasty.git";
 const LOCAL_REPO: &str = "/etc/nixos";
+const BCACHEFS_SWITCH_UNIT: &str = "nasty-bcachefs-switch";
+const NIXOS_FLAKE_DIR: &str = "/etc/nixos/nixos";
+const BCACHEFS_TOOLS_REPO: &str = "github:koverstreet/bcachefs-tools";
 
 // TODO: Remove token-based auth once the repo is public.
 // The token file is only needed for private repo access.
@@ -17,6 +20,22 @@ const LOCAL_REPO: &str = "/etc/nixos";
 // and revert check() to use git ls-remote directly.
 const GITHUB_TOKEN_PATH: &str = "/var/lib/nasty/github-token";
 const GITHUB_API_REPO: &str = "https://api.github.com/repos/nasty-project/nasty/commits/main";
+
+#[derive(Debug, Serialize)]
+pub struct BcachefsToolsInfo {
+    /// The ref in flake.lock original (e.g. "v1.37.0", "master", commit sha)
+    pub pinned_ref: Option<String>,
+    /// The resolved full commit sha from flake.lock locked
+    pub pinned_rev: Option<String>,
+    /// Output of `bcachefs version`
+    pub running_version: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BcachefsToolsSwitchRequest {
+    /// A git ref: tag (v1.37.0), branch (master), or commit hash
+    pub git_ref: String,
+}
 
 #[derive(Debug, Error)]
 pub enum UpdateError {
@@ -304,6 +323,126 @@ echo "==> Update complete!"
         Ok(())
     }
 
+    pub async fn bcachefs_info(&self) -> BcachefsToolsInfo {
+        let running_version = bcachefs_version().await;
+        let (pinned_ref, pinned_rev) = read_flake_lock_bcachefs().await;
+        BcachefsToolsInfo { pinned_ref, pinned_rev, running_version }
+    }
+
+    pub async fn bcachefs_switch(&self, req: BcachefsToolsSwitchRequest) -> Result<(), UpdateError> {
+        // Refuse if either update unit is running
+        let update_status = self.status().await;
+        let switch_status = self.bcachefs_status().await;
+        if update_status.state == "running" || switch_status.state == "running" {
+            return Err(UpdateError::AlreadyRunning);
+        }
+
+        let git_ref = req.git_ref.trim().to_string();
+        if git_ref.is_empty() {
+            return Err(UpdateError::CommandFailed("git_ref must not be empty".into()));
+        }
+
+        // Clean up previous unit
+        for action in &["reset-failed", "stop"] {
+            let _ = tokio::process::Command::new("systemctl")
+                .args([action, BCACHEFS_SWITCH_UNIT])
+                .output().await;
+        }
+
+        let input_url = format!("{BCACHEFS_TOOLS_REPO}/{git_ref}");
+        let script = format!(
+            r#"#!/bin/bash
+set -euo pipefail
+echo "==> Switching bcachefs-tools to {git_ref}..."
+cd {NIXOS_FLAKE_DIR}
+nix flake lock --override-input bcachefs-tools "{input_url}"
+# Commit the updated flake.lock so the tree stays clean for the next rebuild
+git add flake.lock
+git -c user.email="nasty@localhost" -c user.name="NASty" \
+  commit -m "bcachefs-tools: switch to {git_ref}" || true
+echo "==> Rebuilding system..."
+nixos-rebuild switch --flake {LOCAL_FLAKE}
+echo "==> bcachefs-tools switch complete!"
+"#
+        );
+
+        let script_path = "/tmp/nasty-bcachefs-switch.sh";
+        tokio::fs::write(script_path, &script).await
+            .map_err(|e| UpdateError::CommandFailed(format!("write script: {e}")))?;
+
+        let path = std::env::var("PATH").unwrap_or_default();
+        let output = tokio::process::Command::new("systemd-run")
+            .args([
+                "--unit", BCACHEFS_SWITCH_UNIT,
+                "--no-block",
+                "--description", "NASty bcachefs-tools version switch",
+                "--property=Type=oneshot",
+                "--property=StandardOutput=journal",
+                "--property=StandardError=journal",
+                "--setenv", &format!("PATH={path}"),
+                "--", "bash", script_path,
+            ])
+            .output().await
+            .map_err(|e| UpdateError::CommandFailed(format!("systemd-run: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(UpdateError::CommandFailed(format!("failed to start: {stderr}")));
+        }
+        info!("bcachefs-tools switch to {git_ref} started");
+        Ok(())
+    }
+
+    pub async fn bcachefs_status(&self) -> UpdateStatus {
+        let output = tokio::process::Command::new("systemctl")
+            .args(["show", BCACHEFS_SWITCH_UNIT, "--property=ActiveState,SubState,Result"])
+            .output().await;
+
+        let state = match output {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let mut active_state = "";
+                let mut result = "";
+                for line in text.lines() {
+                    if let Some(val) = line.strip_prefix("ActiveState=") { active_state = val.trim(); }
+                    if let Some(val) = line.strip_prefix("Result=") { result = val.trim(); }
+                }
+                match active_state {
+                    "active" | "activating" | "reloading" => "running".to_string(),
+                    "inactive" | "deactivating" => {
+                        if result == "success" { "success".to_string() } else { "idle".to_string() }
+                    }
+                    "failed" => "failed".to_string(),
+                    _ => "idle".to_string(),
+                }
+            }
+            Err(_) => "idle".to_string(),
+        };
+
+        let invocation_id = tokio::process::Command::new("systemctl")
+            .args(["show", BCACHEFS_SWITCH_UNIT, "--property=InvocationID", "--value"])
+            .output().await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        let mut journal_args = vec![
+            "-u".to_string(), BCACHEFS_SWITCH_UNIT.to_string(),
+            "--no-pager".to_string(), "--output=cat".to_string(),
+        ];
+        if !invocation_id.is_empty() {
+            journal_args.push(format!("_SYSTEMD_INVOCATION_ID={invocation_id}"));
+        } else {
+            journal_args.extend(["-n".to_string(), "200".to_string()]);
+        }
+
+        let log = tokio::process::Command::new("journalctl")
+            .args(&journal_args).output().await
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        UpdateStatus { state, log, reboot_required: is_reboot_required().await }
+    }
+
     /// Get the current status of a running/completed update
     pub async fn status(&self) -> UpdateStatus {
         // Use systemctl show to get detailed state
@@ -541,4 +680,39 @@ async fn read_github_token() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Run `bcachefs version` and return its output (trimmed), or "unknown" on failure.
+async fn bcachefs_version() -> String {
+    tokio::process::Command::new("bcachefs")
+        .arg("version")
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Parse flake.lock to extract the bcachefs-tools pinned ref and rev.
+async fn read_flake_lock_bcachefs() -> (Option<String>, Option<String>) {
+    let path = format!("{NIXOS_FLAKE_DIR}/flake.lock");
+    let content = match tokio::fs::read_to_string(&path).await {
+        Ok(c) => c,
+        Err(_) => return (None, None),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let node = &v["nodes"]["bcachefs-tools"];
+    let pinned_ref = node["original"]["ref"].as_str().map(|s| s.to_string());
+    let pinned_rev = node["locked"]["rev"].as_str()
+        .map(|s| s[..s.len().min(12)].to_string()); // short rev, 12 chars
+    (pinned_ref, pinned_rev)
 }
