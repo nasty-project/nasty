@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { Terminal } from '@xterm/xterm';
 	import { FitAddon } from '@xterm/addon-fit';
 	import { getClient } from '$lib/client';
@@ -90,12 +90,15 @@
 	// ── Terminal tab (fs top / fs timestats) ──────────────────
 
 	function mountPool() {
-		return pools.find(p => p.name === selectedPool)?.mount_point ?? `/mnt/nasty/${selectedPool}`;
+		return pools.find(p => p.name === selectedPool)?.mount_point ?? `/storage/${selectedPool}`;
 	}
 
-	function startTerm() {
-		if (!termEl || !selectedPool) return;
+	async function startTerm() {
+		if (!selectedPool) return;
 		killTerm();
+		termStatus = 'running';
+		await tick(); // wait for termEl div to appear in the DOM
+		if (!termEl) return;
 
 		term = new Terminal({
 			cursorBlink: false,
