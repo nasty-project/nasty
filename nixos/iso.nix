@@ -134,7 +134,9 @@ in
 
       echo "==> Copying NASty source..."
       mkdir -p /mnt/etc/nixos
-      cp -rL --no-preserve=mode /etc/nasty-src/* /mnt/etc/nixos/
+      for dir in engine webui nixos; do
+        cp -rL --no-preserve=mode /etc/nasty-src/$dir /mnt/etc/nixos/
+      done
 
       # TODO: Remove once repo is public — copy GitHub token for update support
       if [ -f /etc/nasty-src/nixos/github-token ]; then
@@ -166,10 +168,14 @@ in
 
       cp /tmp/hw-config/hardware-configuration.nix /mnt/etc/nixos/nixos/hardware-configuration.nix
 
-      # Flakes require a git repo to resolve paths
+      # Flakes require a git repo to resolve paths.
+      # Sparse checkout ensures future updates don't materialize dev-only files
+      # (tests/, CLAUDE.md, build-iso.sh) that have no place on an appliance.
       cd /mnt/etc/nixos
       git init -q
       git remote add origin https://github.com/nasty-project/nasty.git
+      git sparse-checkout init --cone
+      git sparse-checkout set engine webui nixos
       git add .
 
       echo "==> Installing NASty..."

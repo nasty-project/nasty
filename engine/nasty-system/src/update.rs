@@ -141,6 +141,13 @@ HW_CFG="nixos/hardware-configuration.nix"
 
 git remote set-url origin "{REPO_URL}" 2>/dev/null || git remote add origin "{REPO_URL}"
 GIT_TERMINAL_PROMPT=0 git -c credential.helper= {git_insteadof} fetch origin
+
+# Ensure only appliance-relevant directories are materialized.
+# This removes tests/, CLAUDE.md, build-iso.sh etc. on existing installs
+# and keeps new ones clean going forward.
+git sparse-checkout init --cone
+git sparse-checkout set engine webui nixos
+
 git reset --hard origin/main
 
 # Restore hardware config
