@@ -117,6 +117,7 @@
 		term.loadAddon(fitAddon);
 		term.open(termEl);
 		fitAddon.fit();
+		term.focus();
 
 		const { cols, rows } = term;
 		const mp = mountPool();
@@ -141,6 +142,13 @@
 
 		termWs.onclose = () => { termStatus = 'done'; };
 		termWs.onerror = () => { termStatus = 'done'; };
+
+		// Forward keystrokes to PTY
+		term.onData((data) => {
+			if (termWs?.readyState === WebSocket.OPEN) {
+				termWs.send(data);
+			}
+		});
 
 		const resizeObserver = new ResizeObserver(() => {
 			fitAddon?.fit();
