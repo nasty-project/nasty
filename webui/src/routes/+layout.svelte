@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { getClient, resetClient } from '$lib/client';
 	import { getToken, clearToken, login as doLogin } from '$lib/auth';
 	import { error as showError } from '$lib/toast.svelte';
@@ -25,21 +26,23 @@
 		Terminal,
 		ShieldCheck,
 		Network,
-		Cpu,
 		Zap,
-
+		Power,
+		LogOut,
 	} from '@lucide/svelte';
 
 	let { children } = $props();
 	let connected = $state(false);
 	let authInfo: AuthResult | null = $state(null);
-	let error = $state('');
 
 	// Login form
 	let showLogin = $state(false);
 	let loginUser = $state('admin');
 	let loginPass = $state('');
 	let loginError = $state('');
+
+	// Reboot
+	let rebooting = $state(false);
 
 	onMount(() => {
 		tryConnect();
@@ -48,11 +51,7 @@
 
 	async function tryConnect() {
 		const token = getToken();
-		if (!token) {
-			showLogin = true;
-			return;
-		}
-
+		if (!token) { showLogin = true; return; }
 		try {
 			const client = getClient();
 			authInfo = await client.connect(token);
@@ -80,17 +79,18 @@
 	}
 
 	async function handleLogout() {
-		try {
-			const client = getClient();
-			await client.call('auth.logout');
-		} catch {
-			// Ignore errors during logout
-		}
+		try { await getClient().call('auth.logout'); } catch { /* ignore */ }
 		clearToken();
 		resetClient();
 		connected = false;
 		authInfo = null;
 		showLogin = true;
+	}
+
+	async function handleReboot() {
+		if (!confirm('Reboot NASty now?\n\nAll active connections will be dropped.')) return;
+		rebooting = true;
+		try { await getClient().call('system.reboot'); } catch { /* expected — engine dies */ }
 	}
 
 	const nav = [
@@ -109,6 +109,14 @@
 		{ href: '/users',         label: 'Access Control',  icon: ShieldCheck },
 		{ href: '/settings',      label: 'Settings',        icon: Settings },
 	];
+
+	// Derive current nav entry from path
+	const currentNav = $derived.by(() => {
+		const path = $page.url.pathname;
+		// Match longest prefix first
+		return [...nav].sort((a, b) => b.href.length - a.href.length)
+			.find(n => path === n.href || (n.href !== '/' && path.startsWith(n.href))) ?? nav[0];
+	});
 </script>
 
 <svelte:head>
@@ -140,39 +148,87 @@
 		</div>
 	</div>
 {:else}
-	<div class="flex min-h-screen">
-		<aside class="flex w-[200px] shrink-0 flex-col border-r border-border bg-card py-4">
-			<div class="mb-2 border-b border-border px-4 pb-4">
+	<div class="flex h-screen overflow-hidden">
+		<!-- Sidebar -->
+		<aside class="flex w-[200px] shrink-0 flex-col border-r border-border bg-card">
+			<!-- Logo -->
+			<div class="shrink-0 border-b border-border px-4 py-4">
 				<img src={logo} alt="NASty" class="h-40" />
 			</div>
-			<nav class="flex flex-1 flex-col">
+
+			<!-- Nav — scrollable -->
+			<nav class="flex-1 overflow-y-auto py-2">
 				{#each nav as item}
 					{@const Icon = item.icon}
-					<a href={item.href} class="flex items-center gap-2.5 px-4 py-2 text-sm text-muted-foreground no-underline transition-colors hover:bg-accent hover:text-accent-foreground">
+					{@const active = currentNav.href === item.href}
+					<a
+						href={item.href}
+						class="flex items-center gap-2.5 px-4 py-2 text-sm no-underline transition-colors
+							{active
+								? 'bg-accent text-accent-foreground font-medium'
+								: 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'}"
+					>
 						<Icon size={15} class="shrink-0" />
 						{item.label}
 					</a>
 				{/each}
 			</nav>
-			<div class="border-t border-border px-4 pt-3">
+
+			<!-- Footer — always visible -->
+			<div class="shrink-0 border-t border-border px-4 py-3">
 				{#if authInfo}
 					<div class="mb-2 flex items-center justify-between">
 						<span class="text-sm font-semibold">{authInfo.username}</span>
 						<span class="rounded bg-secondary px-1.5 py-0.5 text-[0.7rem] uppercase text-muted-foreground">{authInfo.role}</span>
 					</div>
 				{/if}
-				<Button variant="secondary" size="sm" class="mb-2 w-full" onclick={handleLogout}>Sign Out</Button>
-				<div class="text-xs {connected ? 'text-green-400' : 'text-muted-foreground'}">
-					{connected ? 'Connected' : 'Disconnected'}
+				<button
+					onclick={handleLogout}
+					class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+				>
+					<LogOut size={14} />
+					Sign Out
+				</button>
+				<div class="mt-2 text-xs {connected ? 'text-green-400' : 'text-muted-foreground'}">
+					{connected ? '● Connected' : '○ Disconnected'}
 				</div>
 			</div>
 		</aside>
-		<main class="flex-1 overflow-y-auto p-6">
-			{#if !connected}
-				<p class="text-muted-foreground">Connecting to middleware...</p>
-			{:else}
-				{@render children()}
-			{/if}
-		</main>
+
+		<!-- Right side: top bar + content -->
+		<div class="flex flex-1 flex-col overflow-hidden">
+			<!-- Top bar -->
+			<header class="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card px-6">
+				<div class="flex items-center gap-2 text-sm">
+					{@const Icon = currentNav.icon}
+					<Icon size={15} class="text-muted-foreground" />
+					<span class="font-medium">{currentNav.label}</span>
+				</div>
+
+				<div class="flex items-center gap-2">
+					{#if rebooting}
+						<span class="text-xs text-amber-500">Rebooting…</span>
+					{/if}
+					<button
+						onclick={handleReboot}
+						disabled={rebooting}
+						title="Reboot NASty"
+						class="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-destructive hover:text-destructive disabled:opacity-50"
+					>
+						<Power size={13} />
+						Reboot
+					</button>
+				</div>
+			</header>
+
+			<!-- Page content -->
+			<main class="flex-1 overflow-y-auto p-6">
+				{#if !connected}
+					<p class="text-muted-foreground">Connecting to middleware...</p>
+				{:else}
+					{@render children()}
+				{/if}
+			</main>
+		</div>
 	</div>
 {/if}
