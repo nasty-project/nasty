@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 const STATE_DIR: &str = "/var/lib/nasty/shares/iscsi";
-const DEFAULT_IQN_PREFIX: &str = "iqn.2137.com.nasty";
+const DEFAULT_IQN_PREFIX: &str = "iqn.2137-01.com.nasty";
 
 #[derive(Debug, Error)]
 pub enum IscsiError {
@@ -72,7 +72,7 @@ impl HasId for IscsiTarget {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTargetRequest {
-    /// Short name used to generate the IQN: iqn.2137.com.nasty:<name>
+    /// Short name used to generate the IQN: iqn.2137-01.com.nasty:<name>
     pub name: String,
     pub alias: Option<String>,
     /// Defaults to 0.0.0.0:3260

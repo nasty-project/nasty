@@ -243,7 +243,7 @@
 			<div class="mb-4">
 				<Label for="iscsi-name">Target Name</Label>
 				<Input id="iscsi-name" bind:value={newName} placeholder="dbserver" class="mt-1" />
-				<span class="mt-1 block text-xs text-muted-foreground">IQN: iqn.2137.com.nasty:{newName || '...'}</span>
+				<span class="mt-1 block text-xs text-muted-foreground">IQN: iqn.2137-01.com.nasty:{newName || '...'}</span>
 			</div>
 			<Button onclick={create} disabled={!newName || !newDevice}>Create</Button>
 		</CardContent>

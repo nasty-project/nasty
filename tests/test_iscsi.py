@@ -35,14 +35,14 @@ async def test_iscsi(ctx: TestContext):
 
     sv_names     = [f"test-iscsi{i}-{ctx.tag}"        for i in range(1, N + 1)]
     target_names = [f"test-iscsi{i}-{ctx.tag}"        for i in range(1, N + 1)]
-    iqns         = [f"iqn.2137.com.nasty:{n}"       for n in target_names]
+    iqns         = [f"iqn.2137-01.com.nasty:{n}"       for n in target_names]
     mount_points = [f"/tmp/nasty-test-iscsi{i}-{ctx.tag}" for i in range(1, N + 1)]
     target_ids      = [None] * N
     logged_in       = [False] * N
     mounted         = [False] * N
     devices         = [None] * N
     clone_sv_names  = [f"test-iscsi{i+1}-clone-{ctx.tag}" for i in range(N)]
-    clone_iqns      = [f"iqn.2137.com.nasty:test-iscsi{i+1}-clone-{ctx.tag}" for i in range(N)]
+    clone_iqns      = [f"iqn.2137-01.com.nasty:test-iscsi{i+1}-clone-{ctx.tag}" for i in range(N)]
     clone_target_ids = [None] * N
     clone_mounts    = [f"/tmp/nasty-test-iscsi{i+1}-clone-{ctx.tag}" for i in range(N)]
     clone_connected = [False] * N
