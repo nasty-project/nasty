@@ -225,7 +225,7 @@
 		<!-- Right side: top bar + content -->
 		<div class="flex flex-1 flex-col overflow-hidden">
 			<!-- Top bar -->
-			<header class="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card px-6">
+			<header class="flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-6">
 				<div class="flex items-center gap-2 text-sm">
 					<svelte:component this={currentNav.icon} size={15} class="text-muted-foreground" />
 					<span class="font-medium">{currentNav.label}</span>
