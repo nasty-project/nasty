@@ -15,13 +15,13 @@ async def test_smb(ctx: TestContext):
     header(f"SMB Tests (x{N} concurrent)")
 
     sv_names     = [f"test-smb{i}-{ctx.tag}"        for i in range(1, N + 1)]
-    share_names  = [f"tsmb{i}{ctx.tag}"              for i in range(1, N + 1)]
+    share_names  = [f"test-smb{i}-{ctx.tag}"        for i in range(1, N + 1)]
     mount_points = [f"/tmp/nasty-test-smb{i}-{ctx.tag}" for i in range(1, N + 1)]
     share_ids        = [None] * N
     svs              = [None] * N
     mounted          = [False] * N
     clone_names      = [f"test-smb{i+1}-clone-{ctx.tag}" for i in range(N)]
-    clone_share_names = [f"tsmb{i+1}clone{ctx.tag}" for i in range(N)]
+    clone_share_names = [f"test-smb{i+1}-clone-{ctx.tag}" for i in range(N)]
     clone_share_ids  = [None] * N
     clone_mounts     = [f"/tmp/nasty-test-smb{i+1}-clone-{ctx.tag}" for i in range(N)]
     clone_mounted    = [False] * N

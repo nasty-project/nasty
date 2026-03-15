@@ -215,8 +215,7 @@
 			{#each sorted as share}
 				<tr class="border-b border-border">
 					<td class="p-3">
-						<strong class="text-sm">{pathLabel(share.path)}</strong>
-						<br /><span class="font-mono text-xs text-muted-foreground">{share.path}</span>
+						<span class="font-mono text-sm">{share.path}</span>
 						{#if share.comment}<br /><span class="text-xs text-muted-foreground">{share.comment}</span>{/if}
 					</td>
 					<td class="p-3">

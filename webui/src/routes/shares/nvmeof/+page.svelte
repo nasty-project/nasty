@@ -301,16 +301,16 @@
 		<Card class="mb-4">
 			<CardContent class="pt-5">
 				<!-- Header row (always visible) -->
-				<button class="mb-1 flex w-full items-start justify-between text-left" onclick={() => toggle(subsys.id)}>
-					<div>
+				<button class="mb-1 flex w-full items-center justify-between text-left" onclick={() => toggle(subsys.id)}>
+					<div class="flex items-center gap-3 flex-wrap">
 						<strong class="font-mono text-sm">{subsys.nqn}</strong>
-						<div class="mt-1 text-xs text-muted-foreground">
+						<span class="text-xs text-muted-foreground">
 							{subsys.namespaces.length} namespace{subsys.namespaces.length !== 1 ? 's' : ''}
 							&middot; {subsys.ports.length} port{subsys.ports.length !== 1 ? 's' : ''}
 							&middot; {subsys.allow_any_host ? 'any host' : `${subsys.allowed_hosts.length} allowed host${subsys.allowed_hosts.length !== 1 ? 's' : ''}`}
-						</div>
+						</span>
 					</div>
-					<span class="ml-4 mt-1 text-muted-foreground">{expanded[subsys.id] ? '▲' : '▼'}</span>
+					<span class="ml-4 shrink-0 text-muted-foreground">{expanded[subsys.id] ? '▲' : '▼'}</span>
 				</button>
 
 				<!-- Expanded details -->

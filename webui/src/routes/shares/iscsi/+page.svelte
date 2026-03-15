@@ -259,17 +259,17 @@
 		<Card class="mb-4">
 			<CardContent class="pt-5">
 				<!-- Header row (always visible) -->
-				<button class="mb-1 flex w-full items-start justify-between text-left" onclick={() => toggle(target.id)}>
-					<div>
+				<button class="mb-1 flex w-full items-center justify-between text-left" onclick={() => toggle(target.id)}>
+					<div class="flex items-center gap-3 flex-wrap">
 						<strong class="font-mono text-sm">{target.iqn}</strong>
-						{#if target.alias}<span class="text-muted-foreground"> ({target.alias})</span>{/if}
-						<div class="mt-1 text-xs text-muted-foreground">
+						{#if target.alias}<span class="text-xs text-muted-foreground">({target.alias})</span>{/if}
+						<span class="text-xs text-muted-foreground">
 							{target.luns.length} LUN{target.luns.length !== 1 ? 's' : ''}
 							&middot; {target.portals.length} portal{target.portals.length !== 1 ? 's' : ''}
 							&middot; {target.acls.length === 0 ? 'open (any initiator)' : `${target.acls.length} ACL${target.acls.length !== 1 ? 's' : ''}`}
-						</div>
+						</span>
 					</div>
-					<span class="ml-4 mt-1 text-muted-foreground">{expanded[target.id] ? '▲' : '▼'}</span>
+					<span class="ml-4 shrink-0 text-muted-foreground">{expanded[target.id] ? '▲' : '▼'}</span>
 				</button>
 
 				<!-- Expanded details -->
