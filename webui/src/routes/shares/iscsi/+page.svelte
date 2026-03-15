@@ -255,147 +255,149 @@
 {:else if targets.length === 0}
 	<p class="text-muted-foreground">No targets configured.</p>
 {:else}
-	{#each sorted as target}
-		<Card class="mb-4">
-			<CardContent class="pt-5">
-				<!-- Header row (always visible) -->
-				<button class="mb-1 flex w-full items-center justify-between text-left" onclick={() => toggle(target.id)}>
-					<div class="flex items-center gap-3 flex-wrap">
-						<strong class="font-mono text-sm">{target.iqn}</strong>
-						{#if target.alias}<span class="text-xs text-muted-foreground">({target.alias})</span>{/if}
-						<span class="text-xs text-muted-foreground">
-							{target.luns.length} LUN{target.luns.length !== 1 ? 's' : ''}
-							&middot; {target.portals.length} portal{target.portals.length !== 1 ? 's' : ''}
-							&middot; {target.acls.length === 0 ? 'open (any initiator)' : `${target.acls.length} ACL${target.acls.length !== 1 ? 's' : ''}`}
-						</span>
-					</div>
-					<span class="ml-4 shrink-0 text-muted-foreground">{expanded[target.id] ? '▲' : '▼'}</span>
-				</button>
-
-				<!-- Expanded details -->
+	<table class="w-full text-sm">
+		<thead>
+			<tr>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">IQN</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Summary</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
+			</tr>
+		</thead>
+		<tbody>
+			{#each sorted as target}
+				<tr class="border-b border-border">
+					<td class="p-3">
+						<span class="font-mono text-sm font-semibold">{target.iqn}</span>
+						{#if target.alias}<span class="ml-2 text-xs text-muted-foreground">({target.alias})</span>{/if}
+					</td>
+					<td class="p-3 text-xs text-muted-foreground">
+						{target.luns.length} LUN{target.luns.length !== 1 ? 's' : ''}
+						&middot; {target.portals.length} portal{target.portals.length !== 1 ? 's' : ''}
+						&middot; {target.acls.length === 0 ? 'open (any initiator)' : `${target.acls.length} ACL${target.acls.length !== 1 ? 's' : ''}`}
+					</td>
+					<td class="p-3">
+						<div class="flex gap-2">
+							<Button variant="secondary" size="xs" onclick={() => toggle(target.id)}>
+								{expanded[target.id] ? 'Hide' : 'Details'}
+							</Button>
+							<Button variant="destructive" size="xs" onclick={() => remove(target.id)}>Delete</Button>
+						</div>
+					</td>
+				</tr>
 				{#if expanded[target.id]}
-					<div class="mt-4 space-y-4 border-t pt-4">
-						<!-- Portals -->
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Portals</h4>
-							{#if target.portals.length === 0}
-								<p class="text-xs text-muted-foreground">None</p>
-							{:else}
-								<div class="space-y-1">
-									{#each target.portals as p}
-										<div class="flex items-center gap-2 text-sm">
-											<span class="rounded bg-secondary px-2 py-0.5 font-mono text-xs">{p.ip}:{p.port}</span>
-										</div>
-									{/each}
-								</div>
-							{/if}
-						</div>
-
-						<!-- LUNs -->
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">LUNs</h4>
-							{#if target.luns.length === 0}
-								<p class="text-xs text-muted-foreground">No LUNs</p>
-							{:else}
-								<div class="space-y-1">
-									{#each target.luns as lun}
-										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
-											<div class="text-sm">
-												<span class="font-mono text-xs font-semibold">LUN {lun.lun_id}</span>
-												<span class="ml-2 text-muted-foreground">{lun.backstore_path}</span>
-												<span class="ml-1 text-xs text-muted-foreground">({lun.backstore_type})</span>
-											</div>
-											<Button variant="ghost" size="xs" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removeLun(target.id, lun.lun_id)}>Remove</Button>
-										</div>
-									{/each}
-								</div>
-							{/if}
-
-							<!-- Add LUN inline form -->
-							{#if addLunTarget === target.id}
-								<div class="mt-3 rounded border p-3">
-									<div class="mb-2">
-										<Label class="text-xs">Block Device or Subvolume</Label>
-										<select bind:value={addLunPath} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-											<option value="">Select...</option>
-											{#each blockSubvolumes as sv}
-												<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+					<tr class="border-b border-border bg-secondary/20">
+						<td colspan="3" class="px-4 py-4">
+							<div class="space-y-4">
+								<!-- Portals -->
+								<div>
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Portals</h4>
+									{#if target.portals.length === 0}
+										<p class="text-xs text-muted-foreground">None</p>
+									{:else}
+										<div class="flex flex-wrap gap-2">
+											{#each target.portals as p}
+												<span class="rounded bg-secondary px-2 py-0.5 font-mono text-xs">{p.ip}:{p.port}</span>
 											{/each}
-										</select>
-									</div>
-									<div class="mb-2">
-										<Label class="text-xs">Type</Label>
-										<select bind:value={addLunType} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-											<option value="">Auto-detect</option>
-											<option value="block">Block</option>
-											<option value="fileio">File I/O</option>
-										</select>
-									</div>
-									<div class="flex gap-2">
-										<Button size="xs" class="h-7 text-xs" onclick={addLun} disabled={!addLunPath}>Add</Button>
-										<Button size="xs" variant="ghost" class="h-7 text-xs" onclick={() => { addLunTarget = ''; }}>Cancel</Button>
-									</div>
+										</div>
+									{/if}
 								</div>
-							{:else}
-								<Button size="xs" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addLunTarget = target.id; }}>+ Add LUN</Button>
-							{/if}
-						</div>
 
-						<!-- ACLs -->
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Access Control (ACLs)</h4>
-							{#if target.acls.length === 0}
-								<p class="text-xs text-muted-foreground">Open access — any initiator can connect. Add an ACL to restrict.</p>
-							{:else}
-								<div class="space-y-1">
-									{#each target.acls as acl}
-										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
-											<div class="text-sm">
-												<span class="font-mono text-xs">{acl.initiator_iqn}</span>
-												{#if acl.userid}
-													<span class="ml-2 text-xs text-muted-foreground">CHAP: {acl.userid}</span>
-												{/if}
+								<!-- LUNs -->
+								<div>
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">LUNs</h4>
+									{#if target.luns.length === 0}
+										<p class="text-xs text-muted-foreground">No LUNs</p>
+									{:else}
+										<div class="space-y-1">
+											{#each target.luns as lun}
+												<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+													<div class="text-sm">
+														<span class="font-mono text-xs font-semibold">LUN {lun.lun_id}</span>
+														<span class="ml-2 text-muted-foreground">{lun.backstore_path}</span>
+														<span class="ml-1 text-xs text-muted-foreground">({lun.backstore_type})</span>
+													</div>
+													<Button variant="ghost" size="xs" class="text-destructive hover:text-destructive" onclick={() => removeLun(target.id, lun.lun_id)}>Remove</Button>
+												</div>
+											{/each}
+										</div>
+									{/if}
+									{#if addLunTarget === target.id}
+										<div class="mt-3 rounded border p-3">
+											<div class="mb-2">
+												<Label class="text-xs">Block Device or Subvolume</Label>
+												<select bind:value={addLunPath} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+													<option value="">Select...</option>
+													{#each blockSubvolumes as sv}
+														<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+													{/each}
+												</select>
 											</div>
-											<Button variant="ghost" size="xs" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removeAcl(target.id, acl.initiator_iqn)}>Remove</Button>
+											<div class="mb-2">
+												<Label class="text-xs">Type</Label>
+												<select bind:value={addLunType} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+													<option value="">Auto-detect</option>
+													<option value="block">Block</option>
+													<option value="fileio">File I/O</option>
+												</select>
+											</div>
+											<div class="flex gap-2">
+												<Button size="xs" onclick={addLun} disabled={!addLunPath}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { addLunTarget = ''; }}>Cancel</Button>
+											</div>
 										</div>
-									{/each}
+									{:else}
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => { addLunTarget = target.id; }}>+ Add LUN</Button>
+									{/if}
 								</div>
-							{/if}
 
-							<!-- Add ACL inline form -->
-							{#if addAclTarget === target.id}
-								<div class="mt-3 rounded border p-3">
-									<div class="mb-2">
-										<Label class="text-xs">Initiator IQN</Label>
-										<Input bind:value={addAclIqn} placeholder="iqn.2024-01.com.client:initiator1" class="mt-1 h-8 text-xs" />
-									</div>
-									<div class="grid grid-cols-2 gap-2 mb-2">
-										<div>
-											<Label class="text-xs">CHAP User (optional)</Label>
-											<Input bind:value={addAclUser} class="mt-1 h-8 text-xs" />
+								<!-- ACLs -->
+								<div>
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Access Control (ACLs)</h4>
+									{#if target.acls.length === 0}
+										<p class="text-xs text-muted-foreground">Open access — any initiator can connect. Add an ACL to restrict.</p>
+									{:else}
+										<div class="space-y-1">
+											{#each target.acls as acl}
+												<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+													<div class="text-sm">
+														<span class="font-mono text-xs">{acl.initiator_iqn}</span>
+														{#if acl.userid}<span class="ml-2 text-xs text-muted-foreground">CHAP: {acl.userid}</span>{/if}
+													</div>
+													<Button variant="ghost" size="xs" class="text-destructive hover:text-destructive" onclick={() => removeAcl(target.id, acl.initiator_iqn)}>Remove</Button>
+												</div>
+											{/each}
 										</div>
-										<div>
-											<Label class="text-xs">CHAP Password (optional)</Label>
-											<Input bind:value={addAclPass} type="password" class="mt-1 h-8 text-xs" />
+									{/if}
+									{#if addAclTarget === target.id}
+										<div class="mt-3 rounded border p-3">
+											<div class="mb-2">
+												<Label class="text-xs">Initiator IQN</Label>
+												<Input bind:value={addAclIqn} placeholder="iqn.2024-01.com.client:initiator1" class="mt-1 h-8 text-xs" />
+											</div>
+											<div class="grid grid-cols-2 gap-2 mb-2">
+												<div>
+													<Label class="text-xs">CHAP User (optional)</Label>
+													<Input bind:value={addAclUser} class="mt-1 h-8 text-xs" />
+												</div>
+												<div>
+													<Label class="text-xs">CHAP Password (optional)</Label>
+													<Input bind:value={addAclPass} type="password" class="mt-1 h-8 text-xs" />
+												</div>
+											</div>
+											<div class="flex gap-2">
+												<Button size="xs" onclick={addAcl} disabled={!addAclIqn}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { addAclTarget = ''; }}>Cancel</Button>
+											</div>
 										</div>
-									</div>
-									<div class="flex gap-2">
-										<Button size="xs" class="h-7 text-xs" onclick={addAcl} disabled={!addAclIqn}>Add</Button>
-										<Button size="xs" variant="ghost" class="h-7 text-xs" onclick={() => { addAclTarget = ''; }}>Cancel</Button>
-									</div>
+									{:else}
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => { addAclTarget = target.id; }}>+ Add ACL</Button>
+									{/if}
 								</div>
-							{:else}
-								<Button size="xs" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addAclTarget = target.id; }}>+ Add ACL</Button>
-							{/if}
-						</div>
-
-						<!-- Delete -->
-						<div class="border-t pt-3">
-							<Button variant="destructive" size="xs" onclick={() => remove(target.id)}>Delete Target</Button>
-						</div>
-					</div>
+							</div>
+						</td>
+					</tr>
 				{/if}
-			</CardContent>
-		</Card>
-	{/each}
+			{/each}
+		</tbody>
+	</table>
 {/if}

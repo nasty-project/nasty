@@ -297,165 +297,166 @@
 {:else if subsystems.length === 0}
 	<p class="text-muted-foreground">No shares configured.</p>
 {:else}
-	{#each sorted as subsys}
-		<Card class="mb-4">
-			<CardContent class="pt-5">
-				<!-- Header row (always visible) -->
-				<button class="mb-1 flex w-full items-center justify-between text-left" onclick={() => toggle(subsys.id)}>
-					<div class="flex items-center gap-3 flex-wrap">
-						<strong class="font-mono text-sm">{subsys.nqn}</strong>
-						<span class="text-xs text-muted-foreground">
-							{subsys.namespaces.length} namespace{subsys.namespaces.length !== 1 ? 's' : ''}
-							&middot; {subsys.ports.length} port{subsys.ports.length !== 1 ? 's' : ''}
-							&middot; {subsys.allow_any_host ? 'any host' : `${subsys.allowed_hosts.length} allowed host${subsys.allowed_hosts.length !== 1 ? 's' : ''}`}
-						</span>
-					</div>
-					<span class="ml-4 shrink-0 text-muted-foreground">{expanded[subsys.id] ? '▲' : '▼'}</span>
-				</button>
-
-				<!-- Expanded details -->
+	<table class="w-full text-sm">
+		<thead>
+			<tr>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">NQN</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Summary</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
+			</tr>
+		</thead>
+		<tbody>
+			{#each sorted as subsys}
+				<tr class="border-b border-border">
+					<td class="p-3">
+						<span class="font-mono text-sm font-semibold">{subsys.nqn}</span>
+					</td>
+					<td class="p-3 text-xs text-muted-foreground">
+						{subsys.namespaces.length} namespace{subsys.namespaces.length !== 1 ? 's' : ''}
+						&middot; {subsys.ports.length} port{subsys.ports.length !== 1 ? 's' : ''}
+						&middot; {subsys.allow_any_host ? 'any host' : `${subsys.allowed_hosts.length} allowed host${subsys.allowed_hosts.length !== 1 ? 's' : ''}`}
+					</td>
+					<td class="p-3">
+						<div class="flex gap-2">
+							<Button variant="secondary" size="xs" onclick={() => toggle(subsys.id)}>
+								{expanded[subsys.id] ? 'Hide' : 'Details'}
+							</Button>
+							<Button variant="destructive" size="xs" onclick={() => remove(subsys.id)}>Delete</Button>
+						</div>
+					</td>
+				</tr>
 				{#if expanded[subsys.id]}
-					<div class="mt-4 space-y-4 border-t pt-4">
-						<!-- Namespaces -->
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Namespaces</h4>
-							{#if subsys.namespaces.length === 0}
-								<p class="text-xs text-muted-foreground">No namespaces</p>
-							{:else}
-								<div class="space-y-1">
-									{#each subsys.namespaces as ns}
-										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
-											<div class="text-sm">
-												<span class="font-mono text-xs font-semibold">NSID {ns.nsid}</span>
-												<span class="ml-2 text-muted-foreground">{ns.device_path}</span>
-												<Badge variant={ns.enabled ? 'default' : 'secondary'} class="ml-2 text-[0.6rem]">
-													{ns.enabled ? 'Active' : 'Off'}
-												</Badge>
-											</div>
-											<Button variant="ghost" size="xs" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removeNamespace(subsys.id, ns.nsid)}>Remove</Button>
-										</div>
-									{/each}
-								</div>
-							{/if}
-
-							{#if addNsSubsys === subsys.id}
-								<div class="mt-3 rounded border p-3">
-									<div class="mb-2">
-										<Label class="text-xs">Block Device</Label>
-										<select bind:value={addNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-											<option value="">Select...</option>
-											{#each blockSubvolumes as sv}
-												<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+					<tr class="border-b border-border bg-secondary/20">
+						<td colspan="3" class="px-4 py-4">
+							<div class="space-y-4">
+								<!-- Namespaces -->
+								<div>
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Namespaces</h4>
+									{#if subsys.namespaces.length === 0}
+										<p class="text-xs text-muted-foreground">No namespaces</p>
+									{:else}
+										<div class="space-y-1">
+											{#each subsys.namespaces as ns}
+												<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+													<div class="text-sm">
+														<span class="font-mono text-xs font-semibold">NSID {ns.nsid}</span>
+														<span class="ml-2 text-muted-foreground">{ns.device_path}</span>
+														<Badge variant={ns.enabled ? 'default' : 'secondary'} class="ml-2 text-[0.6rem]">{ns.enabled ? 'Active' : 'Off'}</Badge>
+													</div>
+													<Button variant="ghost" size="xs" class="text-destructive hover:text-destructive" onclick={() => removeNamespace(subsys.id, ns.nsid)}>Remove</Button>
+												</div>
 											{/each}
-										</select>
-									</div>
-									<div class="flex gap-2">
-										<Button size="xs" class="h-7 text-xs" onclick={addNamespace} disabled={!addNsDevice}>Add</Button>
-										<Button size="xs" variant="ghost" class="h-7 text-xs" onclick={() => { addNsSubsys = ''; }}>Cancel</Button>
-									</div>
-								</div>
-							{:else}
-								<Button size="xs" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addNsSubsys = subsys.id; }}>+ Add Namespace</Button>
-							{/if}
-						</div>
-
-						<!-- Ports -->
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ports</h4>
-							{#if subsys.ports.length === 0}
-								<p class="text-xs text-muted-foreground">Not listening (no ports configured)</p>
-							{:else}
-								<div class="space-y-1">
-									{#each subsys.ports as port}
-										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
-											<div class="text-sm">
-												<span class="font-mono text-xs font-semibold">Port {port.port_id}</span>
-												<span class="ml-2">{port.transport.toUpperCase()} {port.addr}:{port.service_id}</span>
-												<span class="ml-1 text-xs text-muted-foreground">({port.addr_family})</span>
+										</div>
+									{/if}
+									{#if addNsSubsys === subsys.id}
+										<div class="mt-3 rounded border p-3">
+											<div class="mb-2">
+												<Label class="text-xs">Block Device</Label>
+												<select bind:value={addNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+													<option value="">Select...</option>
+													{#each blockSubvolumes as sv}
+														<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+													{/each}
+												</select>
 											</div>
-											<Button variant="ghost" size="xs" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removePort(subsys.id, port.port_id)}>Remove</Button>
+											<div class="flex gap-2">
+												<Button size="xs" onclick={addNamespace} disabled={!addNsDevice}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { addNsSubsys = ''; }}>Cancel</Button>
+											</div>
 										</div>
-									{/each}
+									{:else}
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => { addNsSubsys = subsys.id; }}>+ Add Namespace</Button>
+									{/if}
 								</div>
-							{/if}
 
-							{#if addPortSubsys === subsys.id}
-								<div class="mt-3 rounded border p-3">
-									<div class="grid grid-cols-2 gap-2 mb-2">
-										<div>
-											<Label class="text-xs">Transport</Label>
-											<select bind:value={addPortTransport} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-												<option value="tcp">TCP</option>
-												<option value="rdma">RDMA</option>
-											</select>
+								<!-- Ports -->
+								<div>
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ports</h4>
+									{#if subsys.ports.length === 0}
+										<p class="text-xs text-muted-foreground">Not listening (no ports configured)</p>
+									{:else}
+										<div class="flex flex-wrap gap-2">
+											{#each subsys.ports as port}
+												<div class="flex items-center gap-2 rounded bg-secondary/50 px-2 py-1">
+													<span class="font-mono text-xs">{port.transport.toUpperCase()} {port.addr}:{port.service_id}</span>
+													<Button variant="ghost" size="xs" class="h-5 text-xs text-destructive hover:text-destructive" onclick={() => removePort(subsys.id, port.port_id)}>×</Button>
+												</div>
+											{/each}
 										</div>
-										<div>
-											<Label class="text-xs">Address Family</Label>
-											<select bind:value={addPortFamily} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-												<option value="ipv4">IPv4</option>
-												<option value="ipv6">IPv6</option>
-											</select>
+									{/if}
+									{#if addPortSubsys === subsys.id}
+										<div class="mt-3 rounded border p-3">
+											<div class="grid grid-cols-2 gap-2 mb-2">
+												<div>
+													<Label class="text-xs">Transport</Label>
+													<select bind:value={addPortTransport} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+														<option value="tcp">TCP</option>
+														<option value="rdma">RDMA</option>
+													</select>
+												</div>
+												<div>
+													<Label class="text-xs">Address Family</Label>
+													<select bind:value={addPortFamily} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+														<option value="ipv4">IPv4</option>
+														<option value="ipv6">IPv6</option>
+													</select>
+												</div>
+											</div>
+											<div class="grid grid-cols-2 gap-2 mb-2">
+												<div>
+													<Label class="text-xs">Listen Address</Label>
+													<Input bind:value={addPortAddr} class="mt-1 h-8 text-xs" />
+												</div>
+												<div>
+													<Label class="text-xs">Port</Label>
+													<Input type="number" bind:value={addPortSvcId} class="mt-1 h-8 text-xs" />
+												</div>
+											</div>
+											<div class="flex gap-2">
+												<Button size="xs" onclick={addPort}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { addPortSubsys = ''; }}>Cancel</Button>
+											</div>
 										</div>
-									</div>
-									<div class="grid grid-cols-2 gap-2 mb-2">
-										<div>
-											<Label class="text-xs">Listen Address</Label>
-											<Input bind:value={addPortAddr} class="mt-1 h-8 text-xs" />
-										</div>
-										<div>
-											<Label class="text-xs">Port</Label>
-											<Input type="number" bind:value={addPortSvcId} class="mt-1 h-8 text-xs" />
-										</div>
-									</div>
-									<div class="flex gap-2">
-										<Button size="xs" class="h-7 text-xs" onclick={addPort}>Add</Button>
-										<Button size="xs" variant="ghost" class="h-7 text-xs" onclick={() => { addPortSubsys = ''; }}>Cancel</Button>
-									</div>
+									{:else}
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => { addPortSubsys = subsys.id; }}>+ Add Port</Button>
+									{/if}
 								</div>
-							{:else}
-								<Button size="xs" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addPortSubsys = subsys.id; }}>+ Add Port</Button>
-							{/if}
-						</div>
 
-						<!-- Allowed Hosts -->
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Allowed Hosts</h4>
-							{#if subsys.allow_any_host && subsys.allowed_hosts.length === 0}
-								<p class="text-xs text-muted-foreground">Any host can connect. Add a host NQN to restrict access.</p>
-							{:else}
-								<div class="space-y-1">
-									{#each subsys.allowed_hosts as hostNqn}
-										<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
-											<span class="font-mono text-xs">{hostNqn}</span>
-											<Button variant="ghost" size="xs" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => removeHost(subsys.id, hostNqn)}>Remove</Button>
+								<!-- Allowed Hosts -->
+								<div>
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Allowed Hosts</h4>
+									{#if subsys.allow_any_host && subsys.allowed_hosts.length === 0}
+										<p class="text-xs text-muted-foreground">Any host can connect. Add a host NQN to restrict access.</p>
+									{:else}
+										<div class="space-y-1">
+											{#each subsys.allowed_hosts as hostNqn}
+												<div class="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
+													<span class="font-mono text-xs">{hostNqn}</span>
+													<Button variant="ghost" size="xs" class="text-destructive hover:text-destructive" onclick={() => removeHost(subsys.id, hostNqn)}>Remove</Button>
+												</div>
+											{/each}
 										</div>
-									{/each}
+									{/if}
+									{#if addHostSubsys === subsys.id}
+										<div class="mt-3 rounded border p-3">
+											<div class="mb-2">
+												<Label class="text-xs">Host NQN</Label>
+												<Input bind:value={addHostNqn} placeholder="nqn.2024-01.com.client:host1" class="mt-1 h-8 text-xs" />
+											</div>
+											<div class="flex gap-2">
+												<Button size="xs" onclick={addHost} disabled={!addHostNqn}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { addHostSubsys = ''; }}>Cancel</Button>
+											</div>
+										</div>
+									{:else}
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => { addHostSubsys = subsys.id; }}>+ Add Host</Button>
+									{/if}
 								</div>
-							{/if}
-
-							{#if addHostSubsys === subsys.id}
-								<div class="mt-3 rounded border p-3">
-									<div class="mb-2">
-										<Label class="text-xs">Host NQN</Label>
-										<Input bind:value={addHostNqn} placeholder="nqn.2024-01.com.client:host1" class="mt-1 h-8 text-xs" />
-									</div>
-									<div class="flex gap-2">
-										<Button size="xs" class="h-7 text-xs" onclick={addHost} disabled={!addHostNqn}>Add</Button>
-										<Button size="xs" variant="ghost" class="h-7 text-xs" onclick={() => { addHostSubsys = ''; }}>Cancel</Button>
-									</div>
-								</div>
-							{:else}
-								<Button size="xs" variant="outline" class="mt-2 h-7 text-xs" onclick={() => { addHostSubsys = subsys.id; }}>+ Add Host</Button>
-							{/if}
-						</div>
-
-						<!-- Delete -->
-						<div class="border-t pt-3">
-							<Button variant="destructive" size="xs" onclick={() => remove(subsys.id)}>Delete Share</Button>
-						</div>
-					</div>
+							</div>
+						</td>
+					</tr>
 				{/if}
-			</CardContent>
-		</Card>
-	{/each}
+			{/each}
+		</tbody>
+	</table>
 {/if}
