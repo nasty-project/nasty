@@ -17,6 +17,24 @@
 	let pollInterval: ReturnType<typeof setInterval> | null = $state(null);
 	let logEl: HTMLPreElement | undefined = $state();
 
+	const phases = [
+		{ label: 'Fetch',    marker: '==> Pulling' },
+		{ label: 'Build',    marker: '==> Rebuilding' },
+		{ label: 'Activate', marker: 'activating the configuration' },
+		{ label: 'Done',     marker: '==> Update complete!' },
+	];
+
+	// Returns the index of the last phase whose marker appears in the log.
+	// -1 = none seen yet (just started), phases.length = all done.
+	const currentPhase = $derived.by(() => {
+		const log = status?.log ?? '';
+		let reached = -1;
+		for (let i = 0; i < phases.length; i++) {
+			if (log.includes(phases[i].marker)) reached = i;
+		}
+		return reached;
+	});
+
 	const client = getClient();
 
 	$effect(() => {
@@ -201,23 +219,38 @@
 	{#if status && status.state !== 'idle'}
 		<Card>
 			<CardContent class="py-5">
-				<div class="mb-3 flex items-center gap-2">
-					<span class="text-sm font-medium text-muted-foreground">Update log</span>
-					<Badge variant={
-						status.state === 'running' ? 'default' :
-						status.state === 'success' ? 'secondary' :
-						'destructive'
-					}>
-						{status.state === 'running' ? 'In progress' :
-						 status.state === 'success' ? 'Complete' :
-						 'Failed'}
-					</Badge>
-					{#if status.state === 'running'}
-						<span class="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-400"></span>
+				<!-- Phase stepper -->
+				<div class="mb-5 flex items-center">
+					{#each phases as phase, i}
+						{@const done = currentPhase >= i}
+						{@const active = status.state === 'running' && currentPhase === i - 1}
+						{@const failed = status.state === 'failed' && !done}
+						<div class="flex items-center gap-0">
+							<!-- Circle -->
+							<div class="flex flex-col items-center gap-1">
+								<div class="flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all {
+									done   ? 'border-blue-500 bg-blue-500 text-white' :
+									active ? 'border-blue-400 bg-transparent text-blue-400 animate-pulse' :
+									failed ? 'border-border bg-transparent text-muted-foreground/30' :
+									         'border-border bg-transparent text-muted-foreground/30'
+								}">
+									{#if done}✓{:else if active}…{:else}{i + 1}{/if}
+								</div>
+								<span class="text-[0.65rem] font-medium {done ? 'text-blue-400' : active ? 'text-blue-400/70' : 'text-muted-foreground/40'}">{phase.label}</span>
+							</div>
+							<!-- Connector line -->
+							{#if i < phases.length - 1}
+								<div class="mb-3.5 h-px w-12 {currentPhase > i ? 'bg-blue-500' : 'bg-border'} mx-1"></div>
+							{/if}
+						</div>
+					{/each}
+					{#if status.state === 'failed'}
+						<span class="ml-4 text-sm text-destructive">Failed</span>
 					{/if}
 				</div>
+
 				{#if status.log}
-					<pre bind:this={logEl} class="max-h-[32rem] overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{status.log}</pre>
+					<pre bind:this={logEl} class="max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{status.log}</pre>
 				{/if}
 			</CardContent>
 		</Card>
