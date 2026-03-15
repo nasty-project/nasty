@@ -14,6 +14,7 @@ pub struct SystemInfo {
     pub version: String,
     pub uptime_seconds: u64,
     pub kernel: String,
+    pub bcachefs_version: String,
     pub timezone: String,
     pub ntp_synced: bool,
 }
@@ -114,6 +115,7 @@ impl SystemService {
     pub async fn info(&self) -> SystemInfo {
         let hostname = hostname();
         let kernel = kernel_version();
+        let bcachefs_version = bcachefs_version().await;
         let uptime = uptime_seconds();
         let (timezone, ntp_synced) = timedatectl_info().await;
 
@@ -122,6 +124,7 @@ impl SystemService {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: uptime,
             kernel,
+            bcachefs_version,
             timezone,
             ntp_synced,
         }
@@ -162,6 +165,19 @@ fn kernel_version() -> String {
                 .to_string()
         })
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+async fn bcachefs_version() -> String {
+    let output = tokio::process::Command::new("bcachefs")
+        .arg("version")
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => "unknown".to_string(),
+    }
 }
 
 async fn timedatectl_info() -> (String, bool) {

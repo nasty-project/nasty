@@ -33,6 +33,7 @@
 		RotateCcw,
 		PowerOff,
 		LogOut,
+		User,
 	} from '@lucide/svelte';
 
 	let { children } = $props();
@@ -48,6 +49,18 @@
 	// Power menu
 	let powerOpen = $state(false);
 	let powering = $state(false);
+
+	// Profile menu
+	let profileOpen = $state(false);
+
+	// Version info (loaded once after connect)
+	let sysInfo: { version: string; kernel: string; bcachefs_version: string } | null = $state(null);
+
+	$effect(() => {
+		if (connected && !sysInfo) {
+			getClient().call('system.info').then((info: any) => { sysInfo = info; }).catch(() => {});
+		}
+	});
 
 	onMount(() => {
 		tryConnect();
@@ -188,24 +201,15 @@
 				{/each}
 			</nav>
 
-			<!-- Footer — always visible -->
-			<div class="shrink-0 border-t border-border px-4 py-3">
-				{#if authInfo}
-					<div class="mb-2 flex items-center justify-between">
-						<span class="text-sm font-semibold">{authInfo.username}</span>
-						<span class="rounded bg-secondary px-1.5 py-0.5 text-[0.7rem] uppercase text-muted-foreground">{authInfo.role}</span>
-					</div>
+			<!-- Footer — version info -->
+			<div class="shrink-0 border-t border-border px-4 py-3 space-y-0.5">
+				{#if sysInfo}
+					<div class="text-[0.68rem] text-muted-foreground/60">NASty {sysInfo.version}</div>
+					<div class="text-[0.68rem] text-muted-foreground/60">bcachefs {sysInfo.bcachefs_version}</div>
+					<div class="text-[0.68rem] text-muted-foreground/60 truncate" title={sysInfo.kernel}>kernel {sysInfo.kernel}</div>
+				{:else}
+					<div class="text-[0.68rem] text-muted-foreground/40">Loading…</div>
 				{/if}
-				<button
-					onclick={handleLogout}
-					class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-				>
-					<LogOut size={14} />
-					Sign Out
-				</button>
-				<div class="mt-2 text-xs {connected ? 'text-green-400' : 'text-muted-foreground'}">
-					{connected ? '● Connected' : '○ Disconnected'}
-				</div>
 			</div>
 		</aside>
 
@@ -218,41 +222,77 @@
 					<span class="font-medium">{currentNav.label}</span>
 				</div>
 
-				<div class="relative flex items-center gap-2">
+				<div class="flex items-center gap-2">
 					{#if powering}
 						<span class="text-xs text-amber-500">Shutting down…</span>
 					{/if}
-					<button
-						onclick={() => powerOpen = !powerOpen}
-						disabled={powering}
-						class="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
-					>
-						<Power size={13} />
-						Power
-					</button>
-					{#if powerOpen}
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
-						<div
-							class="absolute right-0 top-8 z-50 min-w-[160px] rounded-lg border border-border bg-card shadow-lg"
-							onmouseleave={() => powerOpen = false}
+
+					<!-- Profile button -->
+					<div class="relative">
+						<button
+							onclick={() => { profileOpen = !profileOpen; powerOpen = false; }}
+							class="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
 						>
-							<button
-								onclick={handleRestart}
-								class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground rounded-t-lg"
+							<User size={13} />
+							{authInfo?.username ?? ''}
+						</button>
+						{#if profileOpen}
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<div
+								class="absolute right-0 top-8 z-50 min-w-[160px] rounded-lg border border-border bg-card shadow-lg"
+								onmouseleave={() => profileOpen = false}
 							>
-								<RotateCcw size={14} />
-								Restart
-							</button>
-							<div class="border-t border-border"></div>
-							<button
-								onclick={handleShutdown}
-								class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-destructive transition-colors hover:bg-destructive/10 rounded-b-lg"
+								{#if authInfo}
+									<div class="border-b border-border px-4 py-2.5">
+										<div class="text-sm font-medium">{authInfo.username}</div>
+										<div class="text-xs text-muted-foreground uppercase">{authInfo.role}</div>
+									</div>
+								{/if}
+								<button
+									onclick={handleLogout}
+									class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground rounded-b-lg"
+								>
+									<LogOut size={14} />
+									Sign Out
+								</button>
+							</div>
+						{/if}
+					</div>
+
+					<!-- Power button -->
+					<div class="relative">
+						<button
+							onclick={() => { powerOpen = !powerOpen; profileOpen = false; }}
+							disabled={powering}
+							class="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+						>
+							<Power size={13} />
+							Power
+						</button>
+						{#if powerOpen}
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<div
+								class="absolute right-0 top-8 z-50 min-w-[160px] rounded-lg border border-border bg-card shadow-lg"
+								onmouseleave={() => powerOpen = false}
 							>
-								<PowerOff size={14} />
-								Shut Down
-							</button>
-						</div>
-					{/if}
+								<button
+									onclick={handleRestart}
+									class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground rounded-t-lg"
+								>
+									<RotateCcw size={14} />
+									Restart
+								</button>
+								<div class="border-t border-border"></div>
+								<button
+									onclick={handleShutdown}
+									class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-destructive transition-colors hover:bg-destructive/10 rounded-b-lg"
+								>
+									<PowerOff size={14} />
+									Shut Down
+								</button>
+							</div>
+						{/if}
+					</div>
 				</div>
 			</header>
 

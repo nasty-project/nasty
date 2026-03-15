@@ -12,7 +12,7 @@
 	let loading = $state(true);
 	let checking = $state(false);
 	let needsRefresh = $state(false);
-	let confirmAction: 'update' | 'rollback' | 'reboot' | null = $state(null);
+	let confirmAction: 'update' | 'rollback' | null = $state(null);
 	let confirmTimer: ReturnType<typeof setTimeout> | null = null;
 	let pollInterval: ReturnType<typeof setInterval> | null = $state(null);
 	let logEl: HTMLPreElement | undefined = $state();
@@ -63,15 +63,12 @@
 		checking = false;
 	}
 
-	function requestAction(action: 'update' | 'rollback' | 'reboot') {
+	function requestAction(action: 'update' | 'rollback') {
 		if (confirmAction === action) {
-			// Second click — execute
 			clearConfirm();
 			if (action === 'update') doApplyUpdate();
-			else if (action === 'rollback') doRollback();
-			else doReboot();
+			else doRollback();
 		} else {
-			// First click — ask for confirmation
 			confirmAction = action;
 			if (confirmTimer) clearTimeout(confirmTimer);
 			confirmTimer = setTimeout(clearConfirm, 4000);
@@ -103,13 +100,6 @@
 		if (ok !== undefined) {
 			startPolling();
 		}
-	}
-
-	async function doReboot() {
-		await withToast(
-			() => client.call('system.reboot'),
-			'Rebooting system...'
-		);
 	}
 
 	function startPolling() {
@@ -150,15 +140,8 @@
 {/if}
 
 {#if status?.reboot_required}
-	<div class="mb-4 flex items-center gap-4 rounded-lg border border-amber-800 bg-amber-950 px-4 py-3 text-sm text-amber-200">
-		<span class="flex-1">A kernel update was installed. Reboot to activate it.</span>
-		<Button
-			variant={confirmAction === 'reboot' ? 'destructive' : 'secondary'}
-			size="xs"
-			onclick={() => requestAction('reboot')}
-		>
-			{confirmAction === 'reboot' ? 'Confirm Reboot?' : 'Reboot Now'}
-		</Button>
+	<div class="mb-4 rounded-lg border border-amber-800 bg-amber-950 px-4 py-3 text-sm text-amber-200">
+		A kernel update was installed. Use the <strong>Power → Restart</strong> button in the top bar to activate it.
 	</div>
 {/if}
 
@@ -246,23 +229,6 @@
 			</CardContent>
 		</Card>
 	{/if}
-
-	<Card class="mt-6">
-		<CardContent class="flex items-center justify-between pt-6">
-			<div>
-				<div class="text-sm font-semibold">System Reboot</div>
-				<div class="text-xs text-muted-foreground">Reboot the NASty appliance. All services will restart.</div>
-			</div>
-			<Button
-				variant={confirmAction === 'reboot' ? 'destructive' : 'outline'}
-				size="sm"
-				onclick={() => requestAction('reboot')}
-				disabled={status?.state === 'running'}
-			>
-				{confirmAction === 'reboot' ? 'Confirm Reboot?' : 'Reboot'}
-			</Button>
-		</CardContent>
-	</Card>
 
 	<p class="mt-6 text-xs text-muted-foreground">
 		Updates are fetched from GitHub and applied using NixOS rebuild.
