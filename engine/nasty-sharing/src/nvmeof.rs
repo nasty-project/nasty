@@ -399,23 +399,26 @@ impl NvmeofService {
             }
         }
 
-        // Disable and remove namespaces
-        for ns in &subsys.namespaces {
-            let ns_path = format!(
-                "{NVMET_BASE}/subsystems/{}/namespaces/{}",
-                subsys.nqn, ns.nsid
-            );
-            let _ = configfs_write(&format!("{ns_path}/enable"), "0").await;
-            let _ = configfs_rmdir(&ns_path).await;
+        // Disable and remove all namespaces — scan configfs directly so we catch
+        // any entries that weren't in the state file (e.g. restore skipped them
+        // because the device was missing, but they still exist in configfs).
+        let ns_dir = format!("{NVMET_BASE}/subsystems/{}/namespaces", subsys.nqn);
+        if let Ok(mut entries) = tokio::fs::read_dir(&ns_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let ns_path = entry.path();
+                let ns_path_str = ns_path.to_string_lossy();
+                let _ = configfs_write(&format!("{ns_path_str}/enable"), "0").await;
+                let _ = configfs_rmdir(&ns_path_str).await;
+            }
         }
 
-        // Remove allowed hosts
-        for host_nqn in &subsys.allowed_hosts {
-            let link = format!(
-                "{NVMET_BASE}/subsystems/{}/allowed_hosts/{host_nqn}",
-                subsys.nqn
-            );
-            let _ = configfs_unlink(&link).await;
+        // Remove allowed hosts — scan configfs directly for the same reason.
+        let hosts_dir = format!("{NVMET_BASE}/subsystems/{}/allowed_hosts", subsys.nqn);
+        if let Ok(mut entries) = tokio::fs::read_dir(&hosts_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let link = entry.path();
+                let _ = tokio::fs::remove_file(&link).await;
+            }
         }
 
         // Remove subsystem
