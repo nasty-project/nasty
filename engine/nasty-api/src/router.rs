@@ -231,6 +231,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),
         },
+        "system.shutdown" => match state.updates.shutdown().await {
+            Ok(()) => ok(req, "ok"),
+            Err(e) => err(req, e),
+        },
 
         // ── Protocols ────────────────────────────────────────────
         "service.protocol.list" => ok(req, state.protocols.list().await),

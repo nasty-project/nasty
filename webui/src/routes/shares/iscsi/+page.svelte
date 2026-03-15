@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { IscsiTarget, Subvolume, ProtocolStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -104,7 +105,7 @@
 	}
 
 	async function remove(id: string) {
-		if (!confirm('Delete this iSCSI target and all its LUNs?')) return;
+		if (!await confirm('Delete iSCSI Target', 'Delete this iSCSI target and all its LUNs?')) return;
 		await withToast(
 			() => client.call('share.iscsi.delete', { id }),
 			'iSCSI target deleted'
@@ -130,7 +131,7 @@
 	}
 
 	async function removeLun(targetId: string, lunId: number) {
-		if (!confirm(`Remove LUN ${lunId}?`)) return;
+		if (!await confirm(`Remove LUN`, `Remove LUN ${lunId}?`)) return;
 		await withToast(
 			() => client.call('share.iscsi.remove_lun', { target_id: targetId, lun_id: lunId }),
 			'LUN removed'
@@ -183,7 +184,7 @@
 	});
 
 	async function removeAcl(targetId: string, initiatorIqn: string) {
-		if (!confirm(`Remove ACL for ${initiatorIqn}?`)) return;
+		if (!await confirm(`Remove ACL`, `Remove ACL for ${initiatorIqn}?`)) return;
 		await withToast(
 			() => client.call('share.iscsi.remove_acl', { target_id: targetId, initiator_iqn: initiatorIqn }),
 			'ACL removed'

@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { NvmeofSubsystem, Subvolume, ProtocolStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -114,7 +115,7 @@
 	}
 
 	async function remove(id: string) {
-		if (!confirm('Delete this NVMe-oF share?')) return;
+		if (!await confirm('Delete NVMe-oF Share', 'Delete this NVMe-oF share?')) return;
 		await withToast(
 			() => client.call('share.nvmeof.delete', { id }),
 			'NVMe-oF share deleted'
@@ -138,7 +139,7 @@
 	}
 
 	async function removeNamespace(subsystemId: string, nsid: number) {
-		if (!confirm(`Remove namespace ${nsid}?`)) return;
+		if (!await confirm(`Remove Namespace`, `Remove namespace ${nsid}?`)) return;
 		await withToast(
 			() => client.call('share.nvmeof.remove_namespace', { subsystem_id: subsystemId, nsid }),
 			'Namespace removed'
@@ -168,7 +169,7 @@
 	}
 
 	async function removePort(subsystemId: string, portId: number) {
-		if (!confirm(`Remove port ${portId}?`)) return;
+		if (!await confirm(`Remove Port`, `Remove port ${portId}?`)) return;
 		await withToast(
 			() => client.call('share.nvmeof.remove_port', { subsystem_id: subsystemId, port_id: portId }),
 			'Port removed'
@@ -215,7 +216,7 @@
 	});
 
 	async function removeHost(subsystemId: string, hostNqn: string) {
-		if (!confirm(`Remove access for ${hostNqn}?`)) return;
+		if (!await confirm(`Remove Host`, `Remove access for ${hostNqn}?`)) return;
 		await withToast(
 			() => client.call('share.nvmeof.remove_host', { subsystem_id: subsystemId, host_nqn: hostNqn }),
 			'Allowed host removed'

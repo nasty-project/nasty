@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Pool } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -72,7 +73,7 @@
 	}
 
 	async function deleteUser(username: string) {
-		if (!confirm(`Delete user "${username}"? This will revoke all their sessions.`)) return;
+		if (!await confirm(`Delete User`, `Delete user "${username}"? This will revoke all their sessions.`)) return;
 		await withToast(
 			() => client.call('auth.delete_user', { username }),
 			`User "${username}" deleted`
@@ -121,7 +122,7 @@
 	}
 
 	async function deleteToken(id: string, name: string) {
-		if (!confirm(`Revoke API token "${name}"?`)) return;
+		if (!await confirm(`Revoke API Token`, `Revoke API token "${name}"?`)) return;
 		await withToast(
 			() => client.call('auth.token.delete', { id }),
 			`API token "${name}" revoked`

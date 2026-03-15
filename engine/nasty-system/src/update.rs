@@ -287,6 +287,23 @@ echo "==> Update complete!"
         Ok(())
     }
 
+    pub async fn shutdown(&self) -> Result<(), UpdateError> {
+        info!("System shutdown requested");
+        let output = tokio::process::Command::new("systemctl")
+            .arg("poweroff")
+            .output()
+            .await
+            .map_err(|e| UpdateError::CommandFailed(format!("systemctl poweroff: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(UpdateError::CommandFailed(format!(
+                "shutdown failed: {stderr}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Get the current status of a running/completed update
     pub async fn status(&self) -> UpdateStatus {
         // Use systemctl show to get detailed state

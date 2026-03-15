@@ -5,6 +5,8 @@
 	import { getToken, clearToken, login as doLogin } from '$lib/auth';
 	import { error as showError } from '$lib/toast.svelte';
 	import Toasts from '$lib/components/Toasts.svelte';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { AuthResult } from '$lib/rpc';
 	import favicon from '$lib/assets/favicon.svg';
 	import logo from '$lib/assets/nasty-white.svg';
@@ -28,6 +30,8 @@
 		Network,
 		Zap,
 		Power,
+		RotateCcw,
+		PowerOff,
 		LogOut,
 	} from '@lucide/svelte';
 
@@ -41,8 +45,9 @@
 	let loginPass = $state('');
 	let loginError = $state('');
 
-	// Reboot
-	let rebooting = $state(false);
+	// Power menu
+	let powerOpen = $state(false);
+	let powering = $state(false);
 
 	onMount(() => {
 		tryConnect();
@@ -87,10 +92,18 @@
 		showLogin = true;
 	}
 
-	async function handleReboot() {
-		if (!confirm('Reboot NASty now?\n\nAll active connections will be dropped.')) return;
-		rebooting = true;
+	async function handleRestart() {
+		powerOpen = false;
+		if (!await confirm('Restart NASty?', 'All active connections will be dropped.')) return;
+		powering = true;
 		try { await getClient().call('system.reboot'); } catch { /* expected — engine dies */ }
+	}
+
+	async function handleShutdown() {
+		powerOpen = false;
+		if (!await confirm('Shut down NASty?', 'The system will power off. All active connections will be dropped.')) return;
+		powering = true;
+		try { await getClient().call('system.shutdown'); } catch { /* expected — engine dies */ }
 	}
 
 	const nav = [
@@ -125,6 +138,7 @@
 </svelte:head>
 
 <Toasts />
+<ConfirmDialog />
 
 {#if showLogin}
 	<div class="flex min-h-screen items-center justify-center">
@@ -204,19 +218,41 @@
 					<span class="font-medium">{currentNav.label}</span>
 				</div>
 
-				<div class="flex items-center gap-2">
-					{#if rebooting}
-						<span class="text-xs text-amber-500">Rebooting…</span>
+				<div class="relative flex items-center gap-2">
+					{#if powering}
+						<span class="text-xs text-amber-500">Shutting down…</span>
 					{/if}
 					<button
-						onclick={handleReboot}
-						disabled={rebooting}
-						title="Reboot NASty"
-						class="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-destructive hover:text-destructive disabled:opacity-50"
+						onclick={() => powerOpen = !powerOpen}
+						disabled={powering}
+						class="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
 					>
 						<Power size={13} />
-						Reboot
+						Power
 					</button>
+					{#if powerOpen}
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<div
+							class="absolute right-0 top-8 z-50 min-w-[160px] rounded-lg border border-border bg-card shadow-lg"
+							onmouseleave={() => powerOpen = false}
+						>
+							<button
+								onclick={handleRestart}
+								class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground rounded-t-lg"
+							>
+								<RotateCcw size={14} />
+								Restart
+							</button>
+							<div class="border-t border-border"></div>
+							<button
+								onclick={handleShutdown}
+								class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-destructive transition-colors hover:bg-destructive/10 rounded-b-lg"
+							>
+								<PowerOff size={14} />
+								Shut Down
+							</button>
+						</div>
+					{/if}
 				</div>
 			</header>
 

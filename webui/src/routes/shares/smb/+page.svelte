@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { SmbShare, Subvolume, ProtocolStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -103,7 +104,7 @@
 	}
 
 	async function remove(id: string) {
-		if (!confirm('Delete this SMB share?')) return;
+		if (!await confirm('Delete SMB Share', 'Delete this SMB share?')) return;
 		await withToast(
 			() => client.call('share.smb.delete', { id }),
 			'SMB share deleted'

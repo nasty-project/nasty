@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { AlertRule, ActiveAlert, AlertMetric, AlertCondition, AlertSeverity } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -90,7 +91,7 @@
 	}
 
 	async function deleteRule(id: string) {
-		if (!confirm('Delete this alert rule?')) return;
+		if (!await confirm('Delete Alert Rule', 'Delete this alert rule?')) return;
 		await withToast(
 			() => client.call('alert.rules.delete', { id }),
 			'Alert rule deleted'

@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { NfsShare, Subvolume, ProtocolStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -92,7 +93,7 @@
 	}
 
 	async function remove(id: string) {
-		if (!confirm('Delete this NFS share?')) return;
+		if (!await confirm('Delete NFS Share', 'Delete this NFS share?')) return;
 		await withToast(
 			() => client.call('share.nfs.delete', { id }),
 			'NFS share deleted'

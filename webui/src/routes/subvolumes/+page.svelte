@@ -3,6 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { formatBytes } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { Pool, Subvolume, SubvolumeType } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -90,7 +91,7 @@
 	}
 
 	async function deleteSubvolume(name: string) {
-		if (!confirm(`Delete subvolume "${name}" and all its snapshots?`)) return;
+		if (!await confirm(`Delete Subvolume`, `Delete subvolume "${name}" and all its snapshots?`)) return;
 		await withToast(
 			() => client.call('subvolume.delete', { pool: selectedPool, name }),
 			`Subvolume "${name}" deleted`
@@ -133,7 +134,7 @@
 	}
 
 	async function deleteSnapshot(subvolume: string, snap: string) {
-		if (!confirm(`Delete snapshot "${snap}"?`)) return;
+		if (!await confirm(`Delete Snapshot`, `Delete snapshot "${snap}"?`)) return;
 		await withToast(
 			() => client.call('snapshot.delete', {
 				pool: selectedPool,

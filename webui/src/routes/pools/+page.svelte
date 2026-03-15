@@ -3,6 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { formatBytes, formatPercent } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { Pool, BlockDevice, DeviceState, FsUsage, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -199,7 +200,7 @@
 	}
 
 	async function destroyPool(name: string) {
-		if (!confirm(`Destroy pool "${name}"? This will unmount it.`)) return;
+		if (!await confirm(`Destroy Pool "${name}"`, `This will unmount it.`)) return;
 		await withToast(
 			() => client.call('pool.destroy', { name, force: true }),
 			`Pool "${name}" destroyed`
@@ -209,7 +210,7 @@
 
 	async function toggleMount(pool: Pool) {
 		if (pool.mounted) {
-			if (!confirm(`Unmount pool "${pool.name}"?\n\nAny active NFS, SMB, iSCSI, and NVMe-oF shares on this pool will be stopped first.`)) return;
+			if (!await confirm(`Unmount Pool "${pool.name}"`, `Any active NFS, SMB, iSCSI, and NVMe-oF shares on this pool will be stopped first.`)) return;
 		}
 		const action = pool.mounted ? 'unmount' : 'mount';
 		await withToast(
@@ -242,7 +243,7 @@
 	}
 
 	async function removeDevice(poolName: string, devicePath: string) {
-		if (!confirm(`Remove ${devicePath} from pool "${poolName}"? Data will be evacuated first.`)) return;
+		if (!await confirm(`Remove Device`, `Remove ${devicePath} from pool "${poolName}"? Data will be evacuated first.`)) return;
 		await withToast(
 			() => client.call('pool.device.remove', { pool: poolName, device: devicePath }),
 			`Device ${devicePath} removed from "${poolName}"`
@@ -251,7 +252,7 @@
 	}
 
 	async function evacuateDevice(poolName: string, devicePath: string) {
-		if (!confirm(`Evacuate all data from ${devicePath}?`)) return;
+		if (!await confirm(`Evacuate Device`, `Evacuate all data from ${devicePath}?`)) return;
 		await withToast(
 			() => client.call('pool.device.evacuate', { pool: poolName, device: devicePath }),
 			`Device ${devicePath} evacuated`
@@ -276,7 +277,7 @@
 	}
 
 	async function offlineDevice(poolName: string, devicePath: string) {
-		if (!confirm(`Take ${devicePath} offline?`)) return;
+		if (!await confirm(`Take Device Offline`, `Take ${devicePath} offline?`)) return;
 		await withToast(
 			() => client.call('pool.device.offline', { pool: poolName, device: devicePath }),
 			`Device ${devicePath} offline`
