@@ -7,5 +7,5 @@ pub mod cmd;
 pub mod pool;
 pub mod subvolume;
 
-pub use pool::PoolService;
+pub use pool::{PoolService, PoolError};
 pub use subvolume::SubvolumeService;

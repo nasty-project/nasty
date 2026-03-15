@@ -385,10 +385,34 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
-        "pool.device.evacuate" => match parse_params(req) {
-            Ok(p) => match state.pools.device_evacuate(p).await {
-                Ok(()) => ok(req, "ok"),
-                Err(e) => err(req, e),
+        "pool.device.evacuate" => match parse_params::<nasty_storage::pool::DeviceActionRequest>(req) {
+            Ok(p) => {
+                // Validate synchronously before returning
+                match state.pools.get(&p.pool).await {
+                    Err(e) => err(req, e),
+                    Ok(pool) if !pool.mounted => err(req, nasty_storage::PoolError::CommandFailed(
+                        "pool must be mounted to evacuate a device".into(),
+                    )),
+                    Ok(_) => {
+                        // Run in background — bcachefs evacuate can take many minutes.
+                        // Emit pool events every 3 s so UI shows live device state.
+                        let pools = state.pools.clone();
+                        let events = state.events.clone();
+                        tokio::spawn(async move {
+                            let poll_events = events.clone();
+                            let poll = tokio::spawn(async move {
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    let _ = poll_events.send("pool".to_string());
+                                }
+                            });
+                            let _ = pools.device_evacuate(p).await;
+                            poll.abort();
+                            let _ = events.send("pool".to_string());
+                        });
+                        ok(req, serde_json::json!({"status": "started"}))
+                    }
+                }
             },
             Err(e) => invalid(req, e),
         },

@@ -255,7 +255,7 @@
 		if (!await confirm(`Evacuate all data from ${devicePath}?`)) return;
 		await withToast(
 			() => client.call('pool.device.evacuate', { pool: poolName, device: devicePath }),
-			`Device ${devicePath} evacuated`
+			`Evacuating ${devicePath} — this may take several minutes`
 		);
 		await refresh();
 	}
@@ -365,6 +365,7 @@
 			case 'ro': return 'bg-blue-950 text-blue-400';
 			case 'failed': return 'bg-red-950 text-red-400';
 			case 'spare': return 'bg-amber-950 text-amber-400';
+			case 'evacuating': return 'bg-yellow-950 text-yellow-400 animate-pulse';
 			default: return 'bg-secondary text-muted-foreground';
 		}
 	}

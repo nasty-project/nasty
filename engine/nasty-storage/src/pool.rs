@@ -184,6 +184,7 @@ pub struct ReconcileStatus {
     pub raw: String,
 }
 
+#[derive(Clone)]
 pub struct PoolService;
 
 impl PoolService {
