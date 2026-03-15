@@ -808,19 +808,31 @@
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Device</th>
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Label</th>
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">State</th>
-									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Actions</th>
+									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Data Allowed</th>
+									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Has Data</th>
+									<th class="p-2 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each pool.devices as dev}
 									<tr class="border-b border-border">
-										<td class="p-2 font-mono text-xs">{dev.path}</td>
+										<td class="p-2 font-mono text-xs">
+											{dev.path}
+											{#if dev.durability !== null && dev.durability !== undefined && dev.durability !== 1}
+												<span class="ml-1 rounded bg-secondary px-1 py-0.5 text-[10px] text-muted-foreground">durability={dev.durability}</span>
+											{/if}
+											{#if dev.discard}
+												<span class="ml-1 rounded bg-secondary px-1 py-0.5 text-[10px] text-muted-foreground">discard</span>
+											{/if}
+										</td>
 										<td class="p-2 text-xs">{dev.label ?? '—'}</td>
 										<td class="p-2">
 											<span class="rounded px-2 py-0.5 text-xs font-semibold {stateColor(dev.state)}">
 												{dev.state ?? '—'}
 											</span>
 										</td>
+										<td class="p-2 font-mono text-xs text-muted-foreground">{dev.data_allowed ?? '—'}</td>
+										<td class="p-2 font-mono text-xs text-muted-foreground">{dev.has_data ?? '—'}</td>
 										<td class="flex flex-wrap gap-1.5 p-2">
 											{#if pool.mounted}
 												{#if dev.state === 'rw'}

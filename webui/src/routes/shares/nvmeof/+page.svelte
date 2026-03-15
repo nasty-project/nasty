@@ -298,7 +298,7 @@
 		</thead>
 		<tbody>
 			{#each sorted as subsys}
-				<tr class="border-b border-border">
+				<tr class="border-b border-border cursor-pointer hover:bg-muted/30 transition-colors" onclick={() => toggle(subsys.id)}>
 					<td class="p-3">
 						<span class="font-mono text-sm font-semibold">{subsys.nqn}</span>
 					</td>
@@ -307,7 +307,7 @@
 						&middot; {subsys.ports.length} port{subsys.ports.length !== 1 ? 's' : ''}
 						&middot; {subsys.allow_any_host ? 'any host' : `${subsys.allowed_hosts.length} allowed host${subsys.allowed_hosts.length !== 1 ? 's' : ''}`}
 					</td>
-					<td class="p-3">
+					<td class="p-3" onclick={(e) => e.stopPropagation()}>
 						<div class="flex gap-2">
 							<Button variant="secondary" size="xs" onclick={() => toggle(subsys.id)}>
 								{expanded[subsys.id] ? 'Hide' : 'Details'}

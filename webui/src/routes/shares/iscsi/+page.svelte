@@ -256,7 +256,7 @@
 		</thead>
 		<tbody>
 			{#each sorted as target}
-				<tr class="border-b border-border">
+				<tr class="border-b border-border cursor-pointer hover:bg-muted/30 transition-colors" onclick={() => toggle(target.id)}>
 					<td class="p-3">
 						<span class="font-mono text-sm font-semibold">{target.iqn}</span>
 						{#if target.alias}<span class="ml-2 text-xs text-muted-foreground">({target.alias})</span>{/if}
@@ -266,7 +266,7 @@
 						&middot; {target.portals.length} portal{target.portals.length !== 1 ? 's' : ''}
 						&middot; {target.acls.length === 0 ? 'open (any initiator)' : `${target.acls.length} ACL${target.acls.length !== 1 ? 's' : ''}`}
 					</td>
-					<td class="p-3">
+					<td class="p-3" onclick={(e) => e.stopPropagation()}>
 						<div class="flex gap-2">
 							<Button variant="secondary" size="xs" onclick={() => toggle(target.id)}>
 								{expanded[target.id] ? 'Hide' : 'Details'}

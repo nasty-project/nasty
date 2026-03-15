@@ -70,8 +70,14 @@ pub struct PoolDevice {
     /// How many replicas a copy on this device counts for.
     /// 0 = cache only, 1 = normal (default), 2 = hardware RAID.
     pub durability: Option<u32>,
-    /// Persistent device state: rw, ro, failed, spare.
+    /// Persistent device state: rw, ro, evacuating, spare.
     pub state: Option<String>,
+    /// Which data types are allowed on this device (e.g. "journal,btree,user").
+    pub data_allowed: Option<String>,
+    /// Which data types are currently stored on this device (e.g. "btree,user").
+    pub has_data: Option<String>,
+    /// Whether TRIM/discard is enabled on this device.
+    pub discard: Option<bool>,
 }
 
 /// Specifies a device and its per-device options for pool creation.
@@ -278,6 +284,9 @@ impl PoolService {
                     label: None,
                     durability: None,
                     state: None,
+                    data_allowed: None,
+                    has_data: None,
+                    discard: None,
                 })
                 .collect();
 
@@ -415,6 +424,9 @@ impl PoolService {
                 label: d.label.clone().or_else(|| Some(default_label.to_string())),
                 durability: d.durability,
                 state: Some("rw".to_string()),
+                data_allowed: None,
+                has_data: None,
+                discard: None,
             })
             .collect();
 
@@ -1073,20 +1085,28 @@ async fn read_pool_devices(_uuid: &str, device_paths: &[String]) -> Vec<PoolDevi
             b.iter().any(|l| l.contains(dev_path.as_str()) || l.contains(dev_short))
         });
 
-        let (label, durability, state) = if let Some(block) = block {
-            let label = extract_value(block, "label");
-            let durability = extract_value(block, "durability").and_then(|s| s.parse().ok());
-            let state = extract_value(block, "state");
-            (label, durability, state)
-        } else {
-            (None, None, None)
-        };
+        let (label, durability, state, data_allowed, has_data, discard) =
+            if let Some(block) = block {
+                let label = extract_value(block, "label");
+                let durability =
+                    extract_value(block, "durability").and_then(|s| s.parse().ok());
+                let state = extract_value(block, "state");
+                let data_allowed = extract_value(block, "data allowed");
+                let has_data = extract_value(block, "has data");
+                let discard = extract_value(block, "discard").map(|s| s == "1" || s == "true");
+                (label, durability, state, data_allowed, has_data, discard)
+            } else {
+                (None, None, None, None, None, None)
+            };
 
         devices.push(PoolDevice {
             path: dev_path.clone(),
             label,
             durability,
             state,
+            data_allowed,
+            has_data,
+            discard,
         });
     }
 

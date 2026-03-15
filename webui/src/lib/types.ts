@@ -25,8 +25,14 @@ export interface PoolDevice {
 	label: string | null;
 	/** Durability: 0 = cache, 1 = normal, 2 = hardware RAID */
 	durability: number | null;
-	/** Device state: rw, ro, failed, spare */
+	/** Device state: rw, ro, evacuating, spare */
 	state: string | null;
+	/** Data types allowed on this device (e.g. "journal,btree,user") */
+	data_allowed: string | null;
+	/** Data types currently present on this device */
+	has_data: string | null;
+	/** Whether TRIM/discard is enabled */
+	discard: boolean | null;
 }
 
 export type DeviceState = 'rw' | 'ro' | 'failed' | 'spare';
