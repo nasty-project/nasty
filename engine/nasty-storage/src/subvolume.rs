@@ -549,8 +549,14 @@ impl SubvolumeService {
         self.get(pool_name, name, owner_filter).await
     }
 
-    /// Attach a block snapshot's vol.img as a read-only loop device.
-    /// Returns the snapshot with `block_device` populated.
+    /// Attach a block snapshot for read verification via a reflink staging copy.
+    ///
+    /// nvmet requires a read-write block device (always opens with FMODE_WRITE),
+    /// so we can't use losetup -r on the bcachefs read-only snapshot directly.
+    /// Instead, we cp --reflink=always the snapshot's vol.img to a staging
+    /// directory on the same bcachefs pool (instant COW duplicate, no data
+    /// copied) and attach that staging copy as a normal read-write loop device.
+    /// The initiator mounts it read-only on its side.
     pub async fn attach_snapshot(
         &self,
         pool_name: &str,
@@ -558,7 +564,6 @@ impl SubvolumeService {
         snap_name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Snapshot, SubvolumeError> {
-        // Check owner access via parent subvolume
         self.get(pool_name, subvol_name, owner_filter).await?;
         let snaps = self.list_snapshots_for(pool_name, subvol_name).await?;
         let snap = snaps
@@ -574,20 +579,30 @@ impl SubvolumeService {
             )));
         }
 
-        // Already attached?
-        if let Some(dev) = find_loop_device(&img_path).await {
+        let mount_point = self.pool_mount_point(pool_name).await?;
+        let staging_dir = format!("{mount_point}/.snap-attach");
+        tokio::fs::create_dir_all(&staging_dir).await.map_err(SubvolumeError::Io)?;
+        let staging_path = format!("{staging_dir}/{pool_name}_{subvol_name}_{snap_name}.img");
+
+        // Already attached via staging copy?
+        if let Some(dev) = find_loop_device(&staging_path).await {
             return Ok(Snapshot { block_device: Some(dev), ..snap });
         }
 
-        info!("Attaching read-only loop device for snapshot '{}'", snap_name);
-        let dev = cmd::run_ok("losetup", &["-r", "--find", "--show", &img_path])
+        // Reflink copy is instant on bcachefs (COW duplicate, no data written)
+        info!("Creating reflink staging copy of snapshot '{}' for attachment", snap_name);
+        cmd::run_ok("cp", &["--reflink=always", &img_path, &staging_path])
+            .await
+            .map_err(SubvolumeError::CommandFailed)?;
+
+        let dev = cmd::run_ok("losetup", &["--find", "--show", &staging_path])
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
         Ok(Snapshot { block_device: Some(dev.trim().to_string()), ..snap })
     }
 
-    /// Detach a block snapshot's read-only loop device.
+    /// Detach a block snapshot's staging loop device and remove the staging copy.
     pub async fn detach_snapshot(
         &self,
         pool_name: &str,
@@ -596,19 +611,19 @@ impl SubvolumeService {
         owner_filter: Option<&str>,
     ) -> Result<(), SubvolumeError> {
         self.get(pool_name, subvol_name, owner_filter).await?;
-        let snaps = self.list_snapshots_for(pool_name, subvol_name).await?;
-        let snap = snaps
-            .into_iter()
-            .find(|s| s.name == snap_name)
-            .ok_or_else(|| SubvolumeError::NotFound(snap_name.to_string()))?;
 
-        let img_path = format!("{}/{}", snap.path, BLOCK_FILE_NAME);
-        if let Some(dev) = find_loop_device(&img_path).await {
-            info!("Detaching loop device {} for snapshot '{}'", dev, snap_name);
+        let mount_point = self.pool_mount_point(pool_name).await?;
+        let staging_path = format!(
+            "{mount_point}/.snap-attach/{pool_name}_{subvol_name}_{snap_name}.img"
+        );
+
+        if let Some(dev) = find_loop_device(&staging_path).await {
+            info!("Detaching staging loop device {} for snapshot '{}'", dev, snap_name);
             cmd::run_ok("losetup", &["-d", &dev])
                 .await
                 .map_err(SubvolumeError::CommandFailed)?;
         }
+        let _ = tokio::fs::remove_file(&staging_path).await;
         Ok(())
     }
 
