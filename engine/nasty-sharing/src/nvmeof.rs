@@ -158,6 +158,41 @@ impl NvmeofService {
         Self
     }
 
+    /// Find all NVMe-oF namespaces backed by the given block device path.
+    /// Returns (nqn, nsid) pairs for each matching namespace.
+    pub async fn find_namespaces_for_device(&self, device_path: &str) -> Vec<(String, u32)> {
+        let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
+        subsystems
+            .into_iter()
+            .flat_map(|sub| {
+                sub.namespaces
+                    .iter()
+                    .filter(|ns| ns.device_path == device_path)
+                    .map(|ns| (sub.nqn.clone(), ns.nsid))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Enable or disable a namespace via nvmet configfs.
+    /// Disabling fences the namespace so initiators drain in-flight writes.
+    pub async fn set_namespace_enabled(
+        &self,
+        nqn: &str,
+        nsid: u32,
+        enabled: bool,
+    ) -> Result<(), NvmeofError> {
+        let path = format!("{NVMET_BASE}/subsystems/{nqn}/namespaces/{nsid}/enable");
+        tokio::fs::write(&path, if enabled { "1\n" } else { "0\n" })
+            .await
+            .map_err(|e| {
+                NvmeofError::ConfigFs(format!(
+                    "set namespace {nqn}/ns{nsid} enable={enabled}: {e}"
+                ))
+            })?;
+        Ok(())
+    }
+
     /// Restore NVMe-oF configfs state from persisted JSON files.
     /// Called at startup — configfs is volatile and lost on reboot.
     pub async fn restore(&self) {

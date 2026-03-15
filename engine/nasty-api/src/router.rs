@@ -607,7 +607,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 if session.pool.as_deref().map_or(false, |p| p != pool) {
                     err(req, "access denied")
                 } else {
-                    match state.subvolumes.list_snapshots(pool, session.owner.as_deref()).await {
+                    match state.snapshots.list(pool, session.owner.as_deref()).await {
                         Ok(v) => ok(req, v),
                         Err(e) => err(req, e),
                     }
@@ -616,21 +616,21 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(r) => r,
         },
         "snapshot.create" => match parse_params(req) {
-            Ok(p) => match state.subvolumes.create_snapshot(p, session.owner.as_deref()).await {
+            Ok(p) => match state.snapshots.create(p, session.owner.as_deref()).await {
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             },
             Err(e) => invalid(req, e),
         },
         "snapshot.delete" => match parse_params(req) {
-            Ok(p) => match state.subvolumes.delete_snapshot(p, session.owner.as_deref()).await {
+            Ok(p) => match state.snapshots.delete(p, session.owner.as_deref()).await {
                 Ok(()) => ok(req, "ok"),
                 Err(e) => err(req, e),
             },
             Err(e) => invalid(req, e),
         },
         "snapshot.clone" => match parse_params(req) {
-            Ok(p) => match state.subvolumes.clone_snapshot(p, session.owner.as_deref()).await {
+            Ok(p) => match state.snapshots.clone_snapshot(p, session.owner.as_deref()).await {
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             },

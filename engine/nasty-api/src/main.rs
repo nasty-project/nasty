@@ -35,11 +35,12 @@ pub struct AppState {
     pub updates: nasty_system::update::UpdateService,
     pub metrics: Arc<nasty_system::metrics::MetricsDb>,
     pub pools: nasty_storage::PoolService,
-    pub subvolumes: nasty_storage::SubvolumeService,
+    pub subvolumes: Arc<nasty_storage::SubvolumeService>,
+    pub snapshots: nasty_snapshot::SnapshotService,
     pub nfs: nasty_sharing::NfsService,
     pub smb: nasty_sharing::SmbService,
     pub iscsi: nasty_sharing::IscsiService,
-    pub nvmeof: nasty_sharing::NvmeofService,
+    pub nvmeof: Arc<nasty_sharing::NvmeofService>,
 }
 
 #[tokio::main]
@@ -58,6 +59,9 @@ async fn main() -> anyhow::Result<()> {
             .expect("failed to open metrics database"),
     );
 
+    let subvolumes = Arc::new(nasty_storage::SubvolumeService::new(nasty_storage::PoolService::new()));
+    let nvmeof = Arc::new(nasty_sharing::NvmeofService::new());
+
     let state = Arc::new(AppState {
         auth: AuthService::new().await,
         events: event_tx,
@@ -68,11 +72,12 @@ async fn main() -> anyhow::Result<()> {
         updates: nasty_system::update::UpdateService::new(),
         metrics: metrics.clone(),
         pools: nasty_storage::PoolService::new(),
-        subvolumes: nasty_storage::SubvolumeService::new(nasty_storage::PoolService::new()),
+        snapshots: nasty_snapshot::SnapshotService::new(subvolumes.clone(), nvmeof.clone()),
+        subvolumes,
         nfs: nasty_sharing::NfsService::new(),
         smb: nasty_sharing::SmbService::new(),
         iscsi: nasty_sharing::IscsiService::new(),
-        nvmeof: nasty_sharing::NvmeofService::new(),
+        nvmeof,
     });
 
     // Restore state from previous session:

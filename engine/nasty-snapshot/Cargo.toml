@@ -1,0 +1,13 @@
+[package]
+name = "nasty-snapshot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nasty-common = { path = "../nasty-common" }
+nasty-storage = { path = "../nasty-storage" }
+nasty-sharing = { path = "../nasty-sharing" }
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

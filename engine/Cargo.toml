@@ -5,6 +5,7 @@ members = [
     "nasty-common",
     "nasty-storage",
     "nasty-sharing",
+    "nasty-snapshot",
     "nasty-system",
 ]
 
