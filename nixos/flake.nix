@@ -5,11 +5,10 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # ── bcachefs override (optional) ──────────────────────────────
-    # Tracking upstream HEAD for newer subcommands not yet in a release
-    # (bcachefs subvolume list / list-snapshots added after v1.36.1).
+    # Pinned to v1.37 release tag.
     # To revert to pure nixpkgs: comment out these two lines.
     # No other changes needed — bcachefs.nix defaults to pkgs.bcachefs-tools.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.0";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -56,7 +55,7 @@
       # the out-of-tree DKMS kernel module automatically via boot.bcachefs.package.
       # importCargoLock reads Cargo.lock directly — no pre-computed vendor hash needed.
       nasty-bcachefs-tools = pkgs.bcachefs-tools.overrideAttrs (old: {
-        version = "1.36.0+${bcachefs-tools.shortRev}";
+        version = "1.37.0";
         src = bcachefs-tools;
         cargoDeps = pkgs.rustPlatform.importCargoLock {
           lockFile = "${bcachefs-tools}/Cargo.lock";
