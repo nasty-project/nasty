@@ -56,7 +56,6 @@
 	const criticalIds = new Set([5, 10, 187, 188, 196, 197, 198]);
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">Disk Health</h1>
 
 {#if settings}
 	<Card class="mb-4">

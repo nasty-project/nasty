@@ -187,7 +187,6 @@
 	});
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">Subvolumes</h1>
 
 {#if mountedPools.length > 0}
 	<div class="mb-4 flex items-center gap-4">

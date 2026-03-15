@@ -40,7 +40,6 @@
 	}
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">Services</h1>
 
 <p class="mb-6 text-sm text-muted-foreground">
 	Enable or disable sharing protocols. Disabled protocols will not start on boot.

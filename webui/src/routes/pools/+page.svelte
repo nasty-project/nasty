@@ -379,7 +379,6 @@
 	}
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">Storage Pools</h1>
 
 <div class="mb-4">
 	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}>

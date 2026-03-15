@@ -87,13 +87,13 @@
 	async function toggleEnabled(share: NfsShare) {
 		await withToast(
 			() => client.call('share.nfs.update', { id: share.id, enabled: !share.enabled }),
-			`NFS share ${share.enabled ? 'disabled' : 'enabled'}`
+			`Share ${share.enabled ? 'disabled' : 'enabled'}`
 		);
 		await refresh();
 	}
 
 	async function remove(id: string) {
-		if (!await confirm('Delete NFS Share', 'Delete this NFS share?')) return;
+		if (!await confirm('Delete Share', 'Delete this share?')) return;
 		await withToast(
 			() => client.call('share.nfs.delete', { id }),
 			'NFS share deleted'
@@ -137,7 +137,6 @@
 	});
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">NFS Shares</h1>
 
 {#if protocol}
 	<Card class="mb-4">
@@ -168,7 +167,7 @@
 {#if showCreate}
 	<Card class="mb-6 max-w-lg">
 		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New NFS Share</h3>
+			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
 			<div class="mb-4">
 				<Label for="nfs-path">Subvolume</Label>
 				<select id="nfs-path" bind:value={newSubvolume} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
@@ -201,7 +200,7 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else if shares.length === 0}
-	<p class="text-muted-foreground">No NFS shares configured.</p>
+	<p class="text-muted-foreground">No shares configured.</p>
 {:else}
 	<table class="w-full text-sm">
 		<thead>

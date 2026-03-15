@@ -128,7 +128,6 @@
 	}
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">System Update</h1>
 
 {#if needsRefresh}
 	<div class="mb-4 flex items-center gap-4 rounded-lg border border-blue-800 bg-blue-950 px-4 py-3 text-sm text-blue-200">

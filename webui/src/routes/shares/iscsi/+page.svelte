@@ -105,7 +105,7 @@
 	}
 
 	async function remove(id: string) {
-		if (!await confirm('Delete iSCSI Target', 'Delete this iSCSI target and all its LUNs?')) return;
+		if (!await confirm('Delete Target', 'Delete this target and all its LUNs?')) return;
 		await withToast(
 			() => client.call('share.iscsi.delete', { id }),
 			'iSCSI target deleted'
@@ -193,7 +193,6 @@
 	}
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">iSCSI Targets</h1>
 
 {#if protocol}
 	<Card class="mb-4">
@@ -228,7 +227,7 @@
 {#if showCreate}
 	<Card class="mb-6 max-w-lg">
 		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New iSCSI Target</h3>
+			<h3 class="mb-4 text-lg font-semibold">New Target</h3>
 			<div class="mb-4">
 				<Label for="iscsi-device">Block Subvolume</Label>
 				<select id="iscsi-device" bind:value={newDevice} onchange={onDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
@@ -254,7 +253,7 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else if targets.length === 0}
-	<p class="text-muted-foreground">No iSCSI targets configured.</p>
+	<p class="text-muted-foreground">No targets configured.</p>
 {:else}
 	{#each sorted as target}
 		<Card class="mb-4">

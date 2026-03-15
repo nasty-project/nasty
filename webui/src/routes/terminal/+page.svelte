@@ -146,17 +146,14 @@
 </script>
 
 <div class="flex h-[calc(100vh-4rem)] flex-col">
-	<div class="mb-4 flex shrink-0 items-center justify-between">
-		<h2 class="text-2xl font-bold">Terminal</h2>
-		<div class="flex items-center gap-3">
-			<span class="text-xs uppercase {
-				status === 'connected' ? 'text-green-400' :
-				status === 'connecting' ? 'text-amber-500' : 'text-muted-foreground'
-			}">{status}</span>
-			{#if status === 'disconnected'}
-				<Button size="sm" onclick={reconnect}>Reconnect</Button>
-			{/if}
-		</div>
+	<div class="mb-4 flex shrink-0 items-center gap-3">
+		<span class="text-xs uppercase {
+			status === 'connected' ? 'text-green-400' :
+			status === 'connecting' ? 'text-amber-500' : 'text-muted-foreground'
+		}">{status}</span>
+		{#if status === 'disconnected'}
+			<Button size="sm" onclick={reconnect}>Reconnect</Button>
+		{/if}
 	</div>
 	<div class="flex-1 overflow-hidden rounded-lg border border-border p-1" style="background: #0f1117" bind:this={terminalEl}></div>
 </div>

@@ -100,7 +100,6 @@
 	}
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">Alerts</h1>
 
 {#if activeAlerts.length > 0}
 	<div class="mb-6">

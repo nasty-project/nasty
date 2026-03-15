@@ -56,7 +56,6 @@
 	}
 </script>
 
-<h1 class="mb-6 text-2xl font-bold">Settings</h1>
 
 {#if !settings}
 	<p class="text-muted-foreground">Loading...</p>
