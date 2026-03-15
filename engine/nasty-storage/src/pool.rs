@@ -685,7 +685,7 @@ impl PoolService {
 
     /// Evacuate all data off a device (move to other devices in the pool).
     /// This is a prerequisite for safe device removal.
-    /// bcachefs device evacuate <mountpoint> <device>
+    /// bcachefs device evacuate <device>
     pub async fn device_evacuate(&self, req: DeviceActionRequest) -> Result<(), PoolError> {
         let pool = self.get(&req.pool).await?;
         if !pool.mounted {
@@ -693,10 +693,9 @@ impl PoolService {
                 "pool must be mounted to evacuate a device".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap();
 
         info!("Evacuating device {} in pool '{}'", req.device, req.pool);
-        cmd::run_ok("bcachefs", &["device", "evacuate", mount_point, &req.device])
+        cmd::run_ok("bcachefs", &["device", "evacuate", &req.device])
             .await
             .map_err(PoolError::CommandFailed)?;
 
