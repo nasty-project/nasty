@@ -27,7 +27,7 @@ use nasty_storage::subvolume::{
     CloneSnapshotRequest, CreateSnapshotRequest, DeleteSnapshotRequest, Snapshot, Subvolume,
     SubvolumeError, SubvolumeType,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct SnapshotService {
     subvolumes: Arc<SubvolumeService>,
@@ -50,7 +50,16 @@ impl SnapshotService {
         let fenced = if subvol.subvolume_type == SubvolumeType::Block {
             if let Some(ref loop_dev) = subvol.block_device {
                 // ── NVMe-oF: disable namespaces to drain initiator writes ──
+                debug!(
+                    "snapshot: block subvolume '{}' has loop device {}, searching NVMe-oF namespaces",
+                    req.subvolume, loop_dev
+                );
                 let namespaces = self.nvmeof.find_namespaces_for_device(loop_dev).await;
+                debug!(
+                    "snapshot: find_namespaces_for_device({loop_dev}) returned {} result(s): {:?}",
+                    namespaces.len(),
+                    namespaces
+                );
                 if !namespaces.is_empty() {
                     info!(
                         "Fencing {} NVMe-oF namespace(s) on {} for snapshot consistency",

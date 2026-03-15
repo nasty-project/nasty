@@ -3,7 +3,7 @@ use std::path::Path;
 use nasty_common::{HasId, StateDir};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 const STATE_DIR: &str = "/var/lib/nasty/shares/nvmeof";
@@ -162,6 +162,21 @@ impl NvmeofService {
     /// Returns (nqn, nsid) pairs for each matching namespace.
     pub async fn find_namespaces_for_device(&self, device_path: &str) -> Vec<(String, u32)> {
         let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
+        debug!(
+            "find_namespaces_for_device({device_path}): loaded {} subsystem(s)",
+            subsystems.len()
+        );
+        for sub in &subsystems {
+            for ns in &sub.namespaces {
+                debug!(
+                    "  subsystem '{}' ns{} device_path='{}' match={}",
+                    sub.nqn,
+                    ns.nsid,
+                    ns.device_path,
+                    ns.device_path == device_path
+                );
+            }
+        }
         subsystems
             .into_iter()
             .flat_map(|sub| {
