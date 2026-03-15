@@ -208,6 +208,9 @@
 	}
 
 	async function toggleMount(pool: Pool) {
+		if (pool.mounted) {
+			if (!confirm(`Unmount pool "${pool.name}"?\n\nAny active NFS, SMB, iSCSI, and NVMe-oF shares on this pool will be stopped first.`)) return;
+		}
 		const action = pool.mounted ? 'unmount' : 'mount';
 		await withToast(
 			() => pool.mounted

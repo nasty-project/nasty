@@ -282,6 +282,7 @@ in {
       strace            # syscall tracing
       dool              # system resource stats (dstat successor)
       netcat-gnu        # share output with devs: cmd | nc termbin.com 9999
+      psmisc            # fuser, killall
       pciutils          # lspci for hardware identification
     ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
       ++ lib.optionals cfg.smb.enable [ samba ]
