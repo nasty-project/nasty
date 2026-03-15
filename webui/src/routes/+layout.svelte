@@ -240,7 +240,7 @@
 					<div class="relative">
 						<button
 							onclick={() => { profileOpen = !profileOpen; powerOpen = false; }}
-							class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+							class="flex items-center gap-2 rounded-md border border-blue-500/30 px-3 py-1.5 text-sm text-muted-foreground transition-all hover:bg-accent hover:text-accent-foreground hover:border-blue-400/60 hover:shadow-[0_0_10px_rgba(96,165,250,0.3)] active:shadow-none"
 						>
 							<User size={15} />
 							{authInfo?.username ?? ''}
@@ -273,7 +273,7 @@
 						<button
 							onclick={() => { powerOpen = !powerOpen; profileOpen = false; }}
 							disabled={powering}
-							class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+							class="flex items-center gap-2 rounded-md border border-blue-500/30 px-3 py-1.5 text-sm text-muted-foreground transition-all hover:bg-accent hover:text-accent-foreground hover:border-blue-400/60 hover:shadow-[0_0_10px_rgba(96,165,250,0.3)] active:shadow-none disabled:opacity-50"
 						>
 							<Power size={15} />
 							Power
