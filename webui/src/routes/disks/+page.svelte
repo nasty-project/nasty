@@ -114,8 +114,8 @@
 		</thead>
 		<tbody>
 			{#each blockDevices as dev}
-				<tr class="border-b border-border">
-					<td class="p-3 font-mono text-sm">{dev.path}</td>
+				<tr class="border-b border-border {dev.dev_type === 'part' ? 'bg-muted/10' : ''}">
+					<td class="p-3 font-mono text-sm {dev.dev_type === 'part' ? 'pl-8' : ''}">{dev.path}</td>
 					<td class="p-3">{formatBytes(dev.size_bytes)}</td>
 					<td class="p-3">
 						<span class="rounded px-1.5 py-0.5 text-xs font-semibold {deviceClassBadge(dev.device_class)}">
@@ -126,10 +126,11 @@
 					<td class="p-3">
 						{#if dev.in_use}
 							<Badge variant="default">In use</Badge>
-						{:else if dev.fs_type}
-							<Badge variant="secondary">Has signatures</Badge>
 						{:else}
 							<Badge variant="secondary">Free</Badge>
+							{#if dev.fs_type}
+								<Badge variant="outline" class="ml-1 border-amber-700 text-amber-400">Has signatures</Badge>
+							{/if}
 						{/if}
 					</td>
 					<td class="p-3 w-px whitespace-nowrap">

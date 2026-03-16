@@ -636,6 +636,20 @@ impl PoolService {
             collect_devices(blockdevices, &pool_devices, &mut devices);
         }
 
+        // Mark parent disks as in_use if any of their partitions are in_use.
+        // e.g. /dev/sdc shows "Free" even though /dev/sdc1 and /dev/sdc2 are mounted.
+        let in_use_paths: std::collections::HashSet<String> = devices.iter()
+            .filter(|d| d.in_use && d.dev_type == "part")
+            .map(|d| d.path.clone())
+            .collect();
+        for dev in &mut devices {
+            if dev.dev_type == "disk" && !dev.in_use {
+                if in_use_paths.iter().any(|p| p.starts_with(&dev.path)) {
+                    dev.in_use = true;
+                }
+            }
+        }
+
         Ok(devices)
     }
 
