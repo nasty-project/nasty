@@ -168,7 +168,7 @@
 		pollInterval = setInterval(async () => {
 			try {
 				status = await client.call<UpdateStatus>('system.update.status');
-				if (status && status.state !== 'running') {
+				if (status && (status.state === 'success' || status.state === 'failed')) {
 					stopPolling();
 					await loadVersion();
 					if (status.state === 'success') {
@@ -223,7 +223,9 @@
 		bcachefsPollInterval = setInterval(async () => {
 			try {
 				bcachefsStatus = await client.call<UpdateStatus>('bcachefs.tools.status');
-				if (bcachefsStatus && bcachefsStatus.state !== 'running') {
+				// Only stop on terminal states. 'idle' can occur transiently when systemd
+				// restarts during switch-to-configuration and the unit state is briefly lost.
+				if (bcachefsStatus && (bcachefsStatus.state === 'success' || bcachefsStatus.state === 'failed')) {
 					stopBcachefsPolling();
 					await loadBcachefsInfo();
 				}

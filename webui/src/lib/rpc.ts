@@ -98,7 +98,7 @@ export class NastyClient {
 		});
 	}
 
-	async call<T = unknown>(method: string, params?: unknown): Promise<T> {
+	async call<T = unknown>(method: string, params?: unknown, timeoutMs = 10000): Promise<T> {
 		if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this._authenticated) {
 			throw new Error('Not connected or not authenticated');
 		}
@@ -112,9 +112,14 @@ export class NastyClient {
 		};
 
 		return new Promise<T>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				reject({ code: -32000, message: 'Request timed out' });
+			}, timeoutMs);
+
 			this.pending.set(id, {
-				resolve: resolve as (v: unknown) => void,
-				reject
+				resolve: (v) => { clearTimeout(timer); resolve(v as T); },
+				reject: (e) => { clearTimeout(timer); reject(e); }
 			});
 			this.ws!.send(JSON.stringify(request));
 		});
