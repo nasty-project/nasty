@@ -11,6 +11,36 @@
   boot.loader.systemd-boot.configurationLimit = 10;
   boot.loader.efi.canTouchEfiVariables = true;
 
+  # NASty background in the systemd-boot generation picker.
+  # systemd-boot v253+ reads `background` from loader.conf and displays
+  # the BMP as a full-screen backdrop behind the boot menu.
+  boot.loader.systemd-boot.extraFiles."EFI/loader/nasty-bg.bmp" =
+    let
+      # SVG → PNG (1920×1080, dark canvas with centred logo) → BMP
+      # BMP is the format systemd-boot requires for its background.
+      nasty-boot-bg = pkgs.runCommand "nasty-boot-bg.bmp" {
+        nativeBuildInputs = [ pkgs.librsvg pkgs.imagemagick ];
+      } ''
+        # Render the white SVG logo at 320×320
+        rsvg-convert -w 320 -h 320 \
+          ${../webui/src/lib/assets/nasty-white.svg} \
+          -o /tmp/logo.png
+
+        # Compose: dark background + centred logo
+        magick \
+          -size 1920x1080 xc:'#0f1117' \
+          /tmp/logo.png -gravity center -composite \
+          -type TrueColor -depth 8 \
+          BMP3:/tmp/nasty-bg.bmp
+
+        cp /tmp/nasty-bg.bmp $out
+      '';
+    in nasty-boot-bg;
+
+  boot.loader.systemd-boot.extraConfig = ''
+    background \EFI\loader\nasty-bg.bmp
+  '';
+
   # Restrict /boot (EFI) partition to root-only access.
   # nixos-generate-config defaults to fmask=0022 (world-readable), which causes
   # systemd-boot to warn that the random seed file is a security hole.
