@@ -235,7 +235,7 @@
 					stopBcachefsPolling();
 					await loadBcachefsInfo();
 					if (bcachefsStatus.state === 'success') {
-						refreshState.set();
+						// No page reload needed — only bcachefs-tools changed, not the webui JS.
 						bcachefsRef = '';
 						setTimeout(() => { bcachefsLogCollapsed = true; }, 5000);
 					}
