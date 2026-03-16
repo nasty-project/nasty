@@ -159,6 +159,36 @@ in
         exit 1
       fi
 
+      # ── Network configuration ─────────────────────────────────────
+      echo ""
+      echo "Network Configuration:"
+      echo "  1) DHCP  (automatic — recommended for most setups)"
+      echo "  2) Static IP"
+      echo ""
+      read -p "Choose [1/2, default 1]: " NET_MODE
+      NET_MODE=''${NET_MODE:-1}
+      if [ "$NET_MODE" != "1" ] && [ "$NET_MODE" != "2" ]; then
+        NET_MODE=1
+      fi
+
+      if [ "$NET_MODE" = "2" ]; then
+        NET_IFACE=$(${pkgs.iproute2}/bin/ip -4 route get 1.1.1.1 2>/dev/null \
+          | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' \
+          | head -1 || true)
+        echo ""
+        echo "  Detected interface: ''${NET_IFACE:-unknown}"
+        echo ""
+        read -p "  IP address    (e.g. 192.168.1.100): " NET_IP
+        read -p "  Prefix length (e.g. 24 for /24):   " NET_PREFIX
+        read -p "  Gateway       (e.g. 192.168.1.1):  " NET_GW
+        read -p "  DNS servers, space-separated [1.1.1.1 8.8.8.8]: " NET_DNS
+        NET_DNS=''${NET_DNS:-"1.1.1.1 8.8.8.8"}
+        if [ -z "$NET_IP" ] || [ -z "$NET_PREFIX" ] || [ -z "$NET_GW" ]; then
+          echo "Error: address, prefix length, and gateway are required for static IP."
+          exit 1
+        fi
+      fi
+
       echo ""
       echo "WARNING: This will ERASE all data on $DISK"
       read -p "Continue? (yes/no): " CONFIRM
@@ -242,6 +272,43 @@ in
         && mv /tmp/hw-clean.nix /tmp/hw-config/hardware-configuration.nix
 
       cp /tmp/hw-config/hardware-configuration.nix /mnt/etc/nixos/nixos/hardware-configuration.nix
+
+      echo "==> Writing network configuration..."
+      if [ "$NET_MODE" = "2" ]; then
+        NS_LIST=""
+        for ns in $NET_DNS; do
+          NS_LIST="$NS_LIST \"$ns\""
+        done
+        printf '%s\n' \
+          '# Managed by NASty — edit via WebUI Settings > Network' \
+          '{ ... }:' \
+          '{' \
+          '  networking.useDHCP = false;' \
+          "  networking.interfaces.''${NET_IFACE}.ipv4.addresses = [{ address = \"''${NET_IP}\"; prefixLength = ''${NET_PREFIX}; }];" \
+          "  networking.defaultGateway = \"''${NET_GW}\";" \
+          "  networking.nameservers = [''${NS_LIST} ];" \
+          '}' \
+          > /mnt/etc/nixos/nixos/networking.nix
+        # Also write networking.json so WebUI shows the configured values
+        printf '%s\n' \
+          '{' \
+          '  "dhcp": false,' \
+          "  \"interface\": \"''${NET_IFACE}\"," \
+          "  \"address\": \"''${NET_IP}\"," \
+          "  \"prefix_length\": ''${NET_PREFIX}," \
+          "  \"gateway\": \"''${NET_GW}\"," \
+          "  \"nameservers\": [$(echo "$NET_DNS" | sed 's/ /, /g; s/[^ ,][^ ,]*/\"&\"/g')]" \
+          '}' \
+          > /mnt/var/lib/nasty/networking.json
+      else
+        printf '%s\n' \
+          '# Managed by NASty — edit via WebUI Settings > Network' \
+          '{ ... }:' \
+          '{' \
+          '  networking.useDHCP = true;' \
+          '}' \
+          > /mnt/etc/nixos/nixos/networking.nix
+      fi
 
       # Flakes require a git repo to resolve paths.
       # Sparse checkout ensures future updates don't materialize dev-only files

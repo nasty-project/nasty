@@ -41,7 +41,7 @@ fn is_read_only(method: &str) -> bool {
         || method.ends_with(".get")
         || matches!(
             method,
-            "system.info" | "system.health" | "system.stats" | "system.disks"
+            "system.info" | "system.health" | "system.stats" | "system.disks" | "system.network.get"
             | "system.alerts" | "system.settings.get" | "system.metrics.history" | "alert.rules.list"
             | "device.list" | "auth.me" | "auth.list_users" | "auth.token.list"
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
@@ -185,6 +185,14 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "system.info" => ok(req, state.system.info().await),
         "system.health" => ok(req, state.system.health().await),
         "system.stats" => ok(req, state.system.stats().await),
+        "system.network.get" => ok(req, state.network.get().await),
+        "system.network.update" => match parse_params::<nasty_system::network::NetworkConfig>(req) {
+            Ok(p) => match state.network.update(p).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
         "system.metrics.history" => {
             let kind = str_param(req, "kind").unwrap_or("net");
             let name = str_param(req, "name");

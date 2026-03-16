@@ -3,6 +3,7 @@
 {
   imports = [
     ./hardware-configuration.nix
+    ./networking.nix
   ];
 
   # Boot loader — UEFI with systemd-boot

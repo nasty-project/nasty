@@ -350,6 +350,17 @@ export interface Settings {
 	hostname: string | null;
 }
 
+export interface NetworkConfig {
+	dhcp: boolean;
+	interface: string;
+	address: string | null;
+	prefix_length: number | null;
+	gateway: string | null;
+	nameservers: string[];
+	live_addresses: string[];
+	live_gateway: string | null;
+}
+
 export interface AlertRule {
 	id: string;
 	name: string;

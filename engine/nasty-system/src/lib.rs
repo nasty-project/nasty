@@ -1,5 +1,6 @@
 pub mod alerts;
 pub mod metrics;
+pub mod network;
 pub mod protocol;
 pub mod settings;
 pub mod update;
