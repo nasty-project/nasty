@@ -316,6 +316,7 @@ export interface BcachefsToolsInfo {
 	running_version: string;
 	is_custom: boolean;
 	default_ref: string;
+	kernel_rust: boolean | null;
 }
 
 export interface UpdateStatus {

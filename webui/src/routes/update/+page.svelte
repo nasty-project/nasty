@@ -442,6 +442,11 @@
 					<div>
 						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Running</div>
 						<div class="font-mono text-sm font-semibold">{bcachefsInfo?.running_version ?? 'unknown'}</div>
+					{#if bcachefsInfo?.kernel_rust != null}
+						<div class="mt-0.5 text-xs text-muted-foreground">
+							kernel Rust: <span class="{bcachefsInfo.kernel_rust ? 'text-green-400' : 'text-yellow-400'}">{bcachefsInfo.kernel_rust ? 'yes' : 'no'}</span>
+						</div>
+					{/if}
 					</div>
 					<div>
 						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Default</div>

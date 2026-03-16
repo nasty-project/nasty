@@ -36,6 +36,8 @@ pub struct BcachefsToolsInfo {
     pub is_custom: bool,
     /// The default ref from flake.nix (e.g. "v1.37.0")
     pub default_ref: String,
+    /// Whether the running kernel was built with Rust support (CONFIG_RUST=y)
+    pub kernel_rust: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,7 +355,7 @@ echo "==> Update complete!"
     }
 
     pub async fn bcachefs_info(&self) -> BcachefsToolsInfo {
-        let running_version = bcachefs_version().await;
+        let (running_version, kernel_rust) = bcachefs_version().await;
         let (lock_ref, pinned_rev) = read_flake_lock_bcachefs().await;
         let default_ref = read_flake_nix_default_ref().await;
         // Use the state file as the canonical display ref when the user has switched.
@@ -361,11 +363,19 @@ echo "==> Update complete!"
         // so it would show the old version even after a successful switch to a new rev.
         let state_ref = tokio::fs::read_to_string(BCACHEFS_REF_STATE).await
             .ok()
-            .map(|s| s.trim().to_string())
+            .map(|s| {
+                let s = s.trim().to_string();
+                // Full 40-char SHA saved by the switch script — truncate for display
+                if s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                    s[..12].to_string()
+                } else {
+                    s
+                }
+            })
             .filter(|s| !s.is_empty());
         let pinned_ref = state_ref.clone().or(lock_ref);
         let is_custom = state_ref.as_deref().map(|r| r != default_ref).unwrap_or(false);
-        BcachefsToolsInfo { pinned_ref, pinned_rev, running_version, is_custom, default_ref }
+        BcachefsToolsInfo { pinned_ref, pinned_rev, running_version, is_custom, default_ref, kernel_rust }
     }
 
     pub async fn bcachefs_switch(&self, req: BcachefsToolsSwitchRequest) -> Result<(), UpdateError> {
@@ -784,7 +794,11 @@ async fn read_github_token() -> Option<String> {
 
 /// Run `bcachefs version` and return the version string, or "unknown" on failure.
 /// Strips trailing noise like "kernel: unable to read kernel config".
-async fn bcachefs_version() -> String {
+/// Returns (version_string, kernel_rust).
+/// `bcachefs version` may emit extra lines, e.g.:
+///   "1.37.1\nkernel: CONFIG_RUST=y"
+///   "1.37.0\nkernel: unable to read kernel config"
+async fn bcachefs_version() -> (String, Option<bool>) {
     let raw = tokio::process::Command::new("bcachefs")
         .arg("version")
         .output()
@@ -798,10 +812,15 @@ async fn bcachefs_version() -> String {
             }
         })
         .unwrap_or_else(|| "unknown".to_string());
-    // bcachefs version may output extra info after the version number, e.g.:
-    //   "1.37.0 kernel: unable to read kernel config"
-    // Extract just the first whitespace-delimited token.
-    raw.split_whitespace().next().unwrap_or("unknown").to_string()
+
+    let version = raw.split_whitespace().next().unwrap_or("unknown").to_string();
+
+    // Parse optional "kernel: CONFIG_RUST=y" / "kernel: CONFIG_RUST=n" line
+    let kernel_rust = raw.lines()
+        .find(|l| l.contains("CONFIG_RUST"))
+        .map(|l| l.contains("CONFIG_RUST=y"));
+
+    (version, kernel_rust)
 }
 
 /// Parse flake.nix to extract the default bcachefs-tools ref from the input URL.
