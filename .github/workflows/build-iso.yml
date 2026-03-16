@@ -21,7 +21,6 @@ jobs:
       # Stored as a secret (not a variable) so GitHub secret scanning cannot see
       # the PAT value and auto-revoke it.
       - name: Inject GitHub token for updates
-        if: ${{ secrets.NASTY_GITHUB_TOKEN != '' }}
         run: |
           echo "${{ secrets.NASTY_GITHUB_TOKEN }}" > nixos/github-token
           git add nixos/github-token
