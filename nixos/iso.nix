@@ -14,7 +14,7 @@ let
     cp -r $nixos/icons $out/
 
     # Replace background with a solid dark canvas (1920×1080)
-    convert -size 1920x1080 xc:'#0f1117' $out/background.png
+    magick -size 1920x1080 xc:'#0f1117' $out/background.png
 
     # Replace logo with the NASty logo (200×200, white SVG on transparent → dark bg)
     rsvg-convert -w 200 -h 200 \
