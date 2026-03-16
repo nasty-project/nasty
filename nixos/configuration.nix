@@ -57,6 +57,16 @@
 
   networking.firewall.allowedTCPPorts = [ 22 ];
 
+  services.avahi = {
+    enable = true;
+    nssmdns4 = true;
+    publish = {
+      enable = true;
+      addresses = true;
+      workstation = true;
+    };
+  };
+
   # Enable SMART monitoring; skip silently on VMs (no SMART-capable devices)
   services.smartd.enable = true;
   systemd.services.smartd.unitConfig.ConditionVirtualization = "no";
