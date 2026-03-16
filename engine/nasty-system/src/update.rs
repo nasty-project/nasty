@@ -182,7 +182,9 @@ git reset --hard origin/main
 if [ -f "{BCACHEFS_REF_STATE}" ]; then
     BCACHEFS_REF=$(cat "{BCACHEFS_REF_STATE}")
     echo "==> Re-applying custom bcachefs-tools: $BCACHEFS_REF..."
+    cd {NIXOS_FLAKE_DIR}
     nix flake lock --override-input bcachefs-tools "{BCACHEFS_TOOLS_REPO}/$BCACHEFS_REF"
+    cd {LOCAL_REPO}
 fi
 
 # Flakes require all files to be tracked; commit so the tree is clean (no dirty warning)
