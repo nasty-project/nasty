@@ -16,13 +16,17 @@ let
     # can overwrite background.png and logo.png with our own versions below.
     chmod -R u+w $out/
 
-    # Replace background with a solid dark canvas (1920×1080)
-    magick -size 1920x1080 xc:'#0f1117' $out/background.png
+    # Replace background with a solid dark canvas (1920×1080).
+    # PNG24: = 8-bit RGB — GRUB requires bit depth 8 or 16.
+    magick -size 1920x1080 xc:'#0f1117' -type TrueColor -depth 8 PNG24:$out/background.png
 
-    # Replace logo with the NASty logo (200×200, white SVG on transparent → dark bg)
+    # Replace logo with the NASty logo (200×200, white SVG on transparent bg).
+    # rsvg-convert outputs raw RGBA; re-encode as 16-bit RGBA (PNG64:) so GRUB
+    # gets the full quality gradient/anti-aliasing instead of a lossy 8-bit palette.
     rsvg-convert -w 200 -h 200 \
       ${../webui/src/lib/assets/nasty-white.svg} \
-      -o $out/logo.png
+      -o /tmp/nasty-logo-raw.png
+    magick /tmp/nasty-logo-raw.png -type TrueColorAlpha -depth 16 PNG64:$out/logo.png
 
     # Rewrite theme.txt: same layout as nixos-grub2-theme but with updated
     # logo dimensions and position (200×200 instead of 319×100)
