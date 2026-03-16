@@ -18,10 +18,12 @@ jobs:
             experimental-features = nix-command flakes
 
       # TODO: Remove once repo is public — only needed for private repo updates
+      # Stored as a secret (not a variable) so GitHub secret scanning cannot see
+      # the PAT value and auto-revoke it.
       - name: Inject GitHub token for updates
-        if: ${{ vars.NASTY_GITHUB_TOKEN != '' }}
+        if: ${{ secrets.NASTY_GITHUB_TOKEN != '' }}
         run: |
-          echo "${{ vars.NASTY_GITHUB_TOKEN }}" > nixos/github-token
+          echo "${{ secrets.NASTY_GITHUB_TOKEN }}" > nixos/github-token
           git add nixos/github-token
 
       - name: Compute npm deps hash
