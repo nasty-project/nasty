@@ -12,6 +12,9 @@ let
     # Copy all theme chrome from nixos-grub2-theme (borders, fonts, icons, etc.)
     cp $nixos/*.png $nixos/*.pf2 $nixos/fonts.sh $out/
     cp -r $nixos/icons $out/
+    # Files copied from the Nix store are read-only; make them writable so we
+    # can overwrite background.png and logo.png with our own versions below.
+    chmod -R u+w $out/
 
     # Replace background with a solid dark canvas (1920×1080)
     magick -size 1920x1080 xc:'#0f1117' $out/background.png
