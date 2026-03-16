@@ -226,26 +226,28 @@
 		<!-- Right side: top bar + content -->
 		<div class="flex flex-1 flex-col overflow-hidden">
 			<!-- Top bar -->
-			<header class="flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-6">
+			<header class="relative flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-6">
 				<div class="flex items-center gap-2 text-base">
 					{#if currentNav.icon}{@const NavIcon = currentNav.icon}<NavIcon size={17} class="text-muted-foreground" />{/if}
 					<span class="font-medium">{currentNav.label}</span>
 				</div>
 
-				<div class="flex items-center gap-2.5">
-					{#if powering}
-						<span class="text-sm text-amber-500">Shutting down…</span>
-					{/if}
-
-					<!-- Reload button — shown after update or bcachefs switch -->
+				<!-- Reload button — centered, shown after update or bcachefs switch -->
+				<div class="absolute left-1/2 -translate-x-1/2">
 					{#if refreshState.needed}
 						<button
 							onclick={() => location.reload()}
 							class="flex items-center gap-2 rounded-md border-2 border-amber-500/70 px-3 py-1.5 text-sm text-amber-400 transition-all animate-pulse hover:animate-none hover:bg-amber-500/10 hover:border-amber-400 hover:shadow-[0_0_16px_rgba(251,191,36,0.5)] active:shadow-none"
 						>
 							<RefreshCw size={15} />
-							Reload
+							Reload required — click to refresh
 						</button>
+					{/if}
+				</div>
+
+				<div class="flex items-center gap-2.5">
+					{#if powering}
+						<span class="text-sm text-amber-500">Shutting down…</span>
 					{/if}
 
 					<!-- Profile button -->
