@@ -359,6 +359,11 @@
 		return devices.filter(d => !d.in_use && (showAddPartitions || d.dev_type !== 'part'));
 	}
 
+	function devDisplayState(dev: PoolDevice): string | null {
+		if (dev.state === 'evacuating' && dev.has_data === null) return 'evacuated';
+		return dev.state;
+	}
+
 	function stateColor(state: string | null): string {
 		switch (state) {
 			case 'rw': return 'bg-green-950 text-green-400';
@@ -366,6 +371,7 @@
 			case 'failed': return 'bg-red-950 text-red-400';
 			case 'spare': return 'bg-amber-950 text-amber-400';
 			case 'evacuating': return 'bg-yellow-950 text-yellow-400 animate-pulse';
+			case 'evacuated': return 'bg-teal-950 text-teal-400';
 			default: return 'bg-secondary text-muted-foreground';
 		}
 	}
@@ -827,22 +833,28 @@
 										</td>
 										<td class="p-2 text-xs">{dev.label ?? '—'}</td>
 										<td class="p-2">
-											<span class="rounded px-2 py-0.5 text-xs font-semibold {stateColor(dev.state)}">
-												{dev.state ?? '—'}
-											</span>
+											{#if dev.state !== null}
+												{@const ds = devDisplayState(dev)}
+												<span class="rounded px-2 py-0.5 text-xs font-semibold {stateColor(ds)}">
+													{ds}
+												</span>
+											{:else}
+												<span class="text-muted-foreground">—</span>
+											{/if}
 										</td>
 										<td class="p-2 font-mono text-xs text-muted-foreground">{dev.data_allowed ?? '—'}</td>
 										<td class="p-2 font-mono text-xs text-muted-foreground">{dev.has_data ?? '—'}</td>
 										<td class="p-2 w-px whitespace-nowrap">
 											<div class="flex gap-1.5 items-center">
 											{#if pool.mounted}
-												{#if dev.state === 'rw'}
+												{@const ds = devDisplayState(dev)}
+												{#if ds === 'rw'}
 													<Button variant="secondary" size="xs" onclick={() => setDeviceState(pool.name, dev.path, 'ro')}>Set RO</Button>
 													<Button variant="secondary" size="xs" onclick={() => offlineDevice(pool.name, dev.path)}>Offline</Button>
-												{:else if dev.state === 'ro'}
+												{:else if ds === 'ro'}
 													<Button variant="secondary" size="xs" onclick={() => setDeviceState(pool.name, dev.path, 'rw')}>Set RW</Button>
 												{/if}
-												{#if dev.state !== 'spare'}
+												{#if ds !== 'spare' && ds !== 'evacuated'}
 													<Button variant="secondary" size="xs" onclick={() => evacuateDevice(pool.name, dev.path)}>Evacuate</Button>
 												{/if}
 												<Button variant="destructive" size="xs" onclick={() => removeDevice(pool.name, dev.path)}>Remove</Button>
