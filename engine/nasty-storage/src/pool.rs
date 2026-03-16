@@ -678,7 +678,7 @@ impl PoolService {
 
     /// Remove a device from a mounted pool.
     /// This evacuates data first, then removes the device.
-    /// bcachefs device remove <mountpoint> <device>
+    /// bcachefs device remove <device> <mountpoint>
     pub async fn device_remove(&self, req: DeviceActionRequest) -> Result<Pool, PoolError> {
         let pool = self.get(&req.pool).await?;
         if !pool.mounted {
@@ -689,7 +689,7 @@ impl PoolService {
         let mount_point = pool.mount_point.as_ref().unwrap();
 
         info!("Removing device {} from pool '{}'", req.device, req.pool);
-        cmd::run_ok("bcachefs", &["device", "remove", mount_point, &req.device])
+        cmd::run_ok("bcachefs", &["device", "remove", &req.device, mount_point])
             .await
             .map_err(PoolError::CommandFailed)?;
 
