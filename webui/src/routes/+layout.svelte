@@ -227,7 +227,7 @@
 			<!-- Top bar -->
 			<header class="flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-6">
 				<div class="flex items-center gap-2 text-base">
-					<svelte:component this={currentNav.icon} size={17} class="text-muted-foreground" />
+					{#if currentNav.icon}{@const NavIcon = currentNav.icon}<NavIcon size={17} class="text-muted-foreground" />{/if}
 					<span class="font-medium">{currentNav.label}</span>
 				</div>
 

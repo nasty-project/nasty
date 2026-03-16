@@ -101,7 +101,7 @@ export interface BlockDevice {
 	device_class: string;
 }
 
-export type TieringProfileId = 'single' | 'write_cache' | 'full_tiering';
+export type TieringProfileId = 'single' | 'write_cache' | 'full_tiering' | 'none' | 'manual';
 
 export interface TieringProfile {
 	id: TieringProfileId;

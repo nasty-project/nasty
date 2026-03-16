@@ -477,7 +477,7 @@
 {/if}
 
 <!-- Disk Health -->
-{#if settings?.smart_enabled && disks.length > 0}
+{#if disks.length > 0}
 	<Card>
 		<CardHeader class="pb-2">
 			<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">S.M.A.R.T.</CardTitle>

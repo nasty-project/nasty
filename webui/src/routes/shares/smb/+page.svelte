@@ -300,15 +300,15 @@
 								<div>
 									<p class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Settings</p>
 									<div class="space-y-2">
-										<label class="flex cursor-pointer items-center gap-2 text-sm" onclick={(e) => e.stopPropagation()}>
+										<label class="flex cursor-pointer items-center gap-2 text-sm">
 											<input type="checkbox" checked={share.read_only} onchange={() => toggleField(share, 'read_only')} class="h-4 w-4" />
 											Read-only
 										</label>
-										<label class="flex cursor-pointer items-center gap-2 text-sm" onclick={(e) => e.stopPropagation()}>
+										<label class="flex cursor-pointer items-center gap-2 text-sm">
 											<input type="checkbox" checked={share.browseable} onchange={() => toggleField(share, 'browseable')} class="h-4 w-4" />
 											Browseable
 										</label>
-										<label class="flex cursor-pointer items-center gap-2 text-sm" onclick={(e) => e.stopPropagation()}>
+										<label class="flex cursor-pointer items-center gap-2 text-sm">
 											<input type="checkbox" checked={share.guest_ok} onchange={() => toggleField(share, 'guest_ok')} class="h-4 w-4" />
 											Allow guests
 										</label>
@@ -329,7 +329,7 @@
 										</div>
 									{/if}
 									{#if addUserShare === share.id}
-										<div class="flex items-end gap-2" onclick={(e) => e.stopPropagation()}>
+										<div class="flex items-end gap-2" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 											<div>
 												<Label class="text-xs">Username</Label>
 												<Input bind:value={addUserName} placeholder="johndoe" class="mt-1 h-8 w-40 text-xs" />

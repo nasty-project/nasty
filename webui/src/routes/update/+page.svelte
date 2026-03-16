@@ -60,7 +60,7 @@
 	});
 
 	const bcachefsWarnVisible = $derived(
-		bcachefsRef.trim() !== '' && bcachefsRef.trim() !== (bcachefsInfo?.default_ref ?? '')
+		bcachefsRef.trim() !== '' && bcachefsRef.trim() !== ((bcachefsInfo as BcachefsToolsInfo | null)?.default_ref ?? '')
 	);
 
 	const client = getClient();

@@ -4,7 +4,7 @@
 	import { formatBytes, formatPercent } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { Pool, BlockDevice, DeviceState, FsUsage, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId } from '$lib/types';
+	import type { Pool, PoolDevice, BlockDevice, DeviceState, FsUsage, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -23,6 +23,13 @@
 	let replicas = $state(1);
 	let compression = $state('');
 	let showPartitions = $state(false);
+
+	// Manual tiering state
+	let manualLabels: Record<string, string> = $state({});
+	let manualFgTarget = $state('');
+	let manualMetaTarget = $state('');
+	let manualBgTarget = $state('');
+	let manualPromoteTarget = $state('');
 
 	let expandedPool: string | null = $state(null);
 	let editOptionsPool: string | null = $state(null);
@@ -145,6 +152,32 @@
 				promote_target: ftPromote,
 				device_labels: ftLabels,
 			},
+			{
+				id: 'none',
+				name: 'No Tiering',
+				tagline: 'No labels or targets — bcachefs default behavior',
+				description: 'No device labels or IO targets are set. bcachefs will distribute data evenly across all devices using its built-in balancing. Useful when all devices are equivalent and you want the simplest possible setup.',
+				available: true,
+				recommended: false,
+				foreground_target: null,
+				metadata_target: null,
+				background_target: null,
+				promote_target: null,
+				device_labels: {},
+			},
+			{
+				id: 'manual',
+				name: 'Manual',
+				tagline: 'Set device labels and IO targets manually',
+				description: 'Assign custom labels to each device and configure foreground, metadata, background, and promote targets manually. For advanced users who want full control over tiering behavior.',
+				available: true,
+				recommended: false,
+				foreground_target: manualFgTarget || null,
+				metadata_target: manualMetaTarget || null,
+				background_target: manualBgTarget || null,
+				promote_target: manualPromoteTarget || null,
+				device_labels: { ...manualLabels },
+			},
 		];
 	}
 
@@ -176,6 +209,11 @@
 			newName = 'tank';
 			selectedPaths = [];
 			wizardProfile = 'single';
+			manualLabels = {};
+			manualFgTarget = '';
+			manualMetaTarget = '';
+			manualBgTarget = '';
+			manualPromoteTarget = '';
 			await refresh();
 		}
 	}
@@ -187,6 +225,11 @@
 		replicas = 1;
 		compression = '';
 		showPartitions = false;
+		manualLabels = {};
+		manualFgTarget = '';
+		manualMetaTarget = '';
+		manualBgTarget = '';
+		manualPromoteTarget = '';
 		wizardStep = 1;
 	}
 
@@ -545,7 +588,55 @@
 												{/if}
 											{/each}
 										</div>
-									{/if}
+									{:else if profile.id === 'none'}
+									<div class="flex flex-wrap gap-2">
+										{#each selectedDeviceObjects() as dev}
+											<div class="flex items-center gap-1.5 rounded border border-border px-2 py-1">
+												<span class="rounded px-1 py-0.5 text-[10px] font-semibold uppercase {classColor(dev.device_class)}">{dev.device_class}</span>
+												<span class="font-mono text-[10px] text-muted-foreground">{dev.path}</span>
+											</div>
+										{/each}
+									</div>
+								{:else if profile.id === 'manual'}
+									<div class="space-y-3">
+										<div>
+											<div class="mb-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">Device Labels</div>
+											<div class="space-y-1.5">
+												{#each selectedDeviceObjects() as dev}
+													<div class="flex items-center gap-2">
+														<span class="rounded px-1 py-0.5 text-[10px] font-semibold uppercase {classColor(dev.device_class)}">{dev.device_class}</span>
+														<span class="w-28 font-mono text-[10px] text-muted-foreground shrink-0">{dev.path}</span>
+														<input
+															type="text"
+															value={manualLabels[dev.path] ?? ''}
+															oninput={(e) => { manualLabels = { ...manualLabels, [dev.path]: (e.target as HTMLInputElement).value }; }}
+															placeholder="label (e.g. fast, slow)"
+															class="h-7 flex-1 rounded border border-input bg-transparent px-2 text-xs"
+														/>
+													</div>
+												{/each}
+											</div>
+										</div>
+										<div class="grid grid-cols-2 gap-2">
+											<div>
+												<div class="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Foreground Target</div>
+												<input type="text" bind:value={manualFgTarget} placeholder="label or empty" class="h-7 w-full rounded border border-input bg-transparent px-2 text-xs" />
+											</div>
+											<div>
+												<div class="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Metadata Target</div>
+												<input type="text" bind:value={manualMetaTarget} placeholder="label or empty" class="h-7 w-full rounded border border-input bg-transparent px-2 text-xs" />
+											</div>
+											<div>
+												<div class="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Background Target</div>
+												<input type="text" bind:value={manualBgTarget} placeholder="label or empty" class="h-7 w-full rounded border border-input bg-transparent px-2 text-xs" />
+											</div>
+											<div>
+												<div class="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Promote Target</div>
+												<input type="text" bind:value={manualPromoteTarget} placeholder="label or empty" class="h-7 w-full rounded border border-input bg-transparent px-2 text-xs" />
+											</div>
+										</div>
+									</div>
+								{/if}
 								</div>
 							{/if}
 						</button>
@@ -568,7 +659,7 @@
 							<span class="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-xs">
 								<span class="rounded px-1 py-0.5 text-[10px] font-semibold uppercase {classColor(dev.device_class)}">{dev.device_class}</span>
 								<span class="font-mono">{dev.path}</span>
-								<span class="text-muted-foreground">→ {profile.device_labels[dev.path] ?? newName}</span>
+								<span class="text-muted-foreground">→ {profile.device_labels[dev.path] ?? (profile.id === 'none' ? '—' : newName)}</span>
 							</span>
 						{/each}
 					</div>
@@ -640,7 +731,7 @@
 							<span class="font-mono text-xs text-muted-foreground">{pool.mount_point}</span>
 						{/if}
 					</div>
-					<div class="flex gap-2" onclick={(e) => e.stopPropagation()}>
+					<div class="flex gap-2" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 						<Button variant="secondary" size="xs" onclick={() => expandedPool = expandedPool === pool.name ? null : pool.name}>
 							{expandedPool === pool.name ? 'Hide Details' : 'Details'}
 						</Button>

@@ -27,11 +27,11 @@
 
 	const singleSeries = $derived(!outLabel);
 
-	const chartConfig = $derived(
-		singleSeries
-			? { in: { label: inLabel, color: inColor } } satisfies Chart.ChartConfig
-			: { in: { label: inLabel, color: inColor }, out: { label: outLabel!, color: outColor } } satisfies Chart.ChartConfig
-	);
+	const chartConfig = $derived.by((): Chart.ChartConfig => {
+		const cfg: Chart.ChartConfig = { in: { label: inLabel, color: inColor } };
+		if (!singleSeries) cfg.out = { label: outLabel!, color: outColor };
+		return cfg;
+	});
 
 	const series = $derived(
 		singleSeries
@@ -69,9 +69,12 @@
 			{#snippet tooltip()}
 				<Chart.Tooltip
 					labelFormatter={(v: Date) => v.toLocaleTimeString()}
-					valueFormatter={tooltipFormat}
 					indicator="line"
-				/>
+				>
+					{#snippet formatter({ value })}
+						<span class="text-foreground font-mono font-medium tabular-nums">{tooltipFormat(value as number)}</span>
+					{/snippet}
+				</Chart.Tooltip>
 			{/snippet}
 		</AreaChart>
 	</Chart.Container>
