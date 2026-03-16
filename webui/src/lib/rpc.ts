@@ -26,6 +26,8 @@ export class NastyClient {
 	private eventHandlers: EventHandler[] = [];
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private _authenticated = false;
+	/** Set to true after the first successful auth; cleared by disconnect(). */
+	private _shouldReconnect = false;
 
 	constructor(private url: string) {}
 
@@ -59,6 +61,7 @@ export class NastyClient {
 						reject(new Error(msg.error));
 					} else if (msg.authenticated) {
 						this._authenticated = true;
+						this._shouldReconnect = true;
 						resolve(msg as AuthResult);
 					} else {
 						reject(new Error('Unexpected auth response'));
@@ -90,8 +93,11 @@ export class NastyClient {
 					pending.reject({ code: -32000, message: 'WebSocket disconnected' });
 				}
 				this.pending.clear();
-				// Auto-reconnect after 3s if we were previously authenticated
-				if (authResolved) {
+				// Keep retrying as long as we haven't been explicitly disconnected.
+				// Using _shouldReconnect (set on first successful auth, cleared by disconnect())
+				// instead of the closure-local authResolved ensures we keep retrying even when
+				// the engine is still starting up and closes the socket before auth completes.
+				if (this._shouldReconnect) {
 					this.reconnectTimer = setTimeout(() => this.connect(token).catch(() => {}), 3000);
 				}
 			};
@@ -134,6 +140,7 @@ export class NastyClient {
 	}
 
 	disconnect() {
+		this._shouldReconnect = false;
 		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
 		this._authenticated = false;
 		this.ws?.close();
