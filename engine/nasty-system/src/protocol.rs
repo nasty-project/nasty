@@ -204,6 +204,10 @@ impl ProtocolService {
     }
 
     /// List all protocols with their enabled/running status
+    pub async fn is_enabled(&self, proto: Protocol) -> bool {
+        load_state().await.get(proto)
+    }
+
     pub async fn list(&self) -> Vec<ProtocolStatus> {
         let state = load_state().await;
         let mut result = Vec::new();

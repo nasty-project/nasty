@@ -192,7 +192,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             ok(req, state.metrics.query(kind, name, range))
         }
         "system.disks" => {
-            if state.settings.get().await.smart_enabled {
+            if state.protocols.is_enabled(nasty_system::protocol::Protocol::Smart).await {
                 ok(req, state.system.disks().await)
             } else {
                 ok(req, Vec::<nasty_system::DiskHealth>::new())
@@ -271,7 +271,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             // Evaluate current alert rules against live system state
             let stats = state.system.stats().await;
             let pools_list = state.pools.list().await;
-            let disk_health = if state.settings.get().await.smart_enabled {
+            let disk_health = if state.protocols.is_enabled(nasty_system::protocol::Protocol::Smart).await {
                 state.system.disks().await
             } else {
                 Vec::new()

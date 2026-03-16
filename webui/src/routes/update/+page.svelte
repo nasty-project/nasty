@@ -7,6 +7,8 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
 
+	let activeTab: 'system' | 'bcachefs' = $state('system');
+
 	let info: UpdateInfo | null = $state(null);
 	let status: UpdateStatus | null = $state(null);
 	let loading = $state(true);
@@ -32,8 +34,6 @@
 		{ label: 'Done',     marker: '==> Update complete!' },
 	];
 
-	// Returns the index of the last phase whose marker appears in the log.
-	// -1 = none seen yet (just started), phases.length = all done.
 	const currentPhase = $derived.by(() => {
 		const log = status?.log ?? '';
 		let reached = -1;
@@ -242,12 +242,11 @@
 </script>
 
 
+<!-- Global banners — shown regardless of active tab -->
 {#if needsRefresh}
 	<div class="mb-4 flex items-center gap-4 rounded-lg border border-blue-800 bg-blue-950 px-4 py-3 text-sm text-blue-200">
 		<span class="flex-1">Update applied. Refresh your browser to load the new WebUI.</span>
-		<Button variant="secondary" size="xs" onclick={() => location.reload()}>
-			Refresh Now
-		</Button>
+		<Button variant="secondary" size="xs" onclick={() => location.reload()}>Refresh Now</Button>
 	</div>
 {/if}
 
@@ -260,216 +259,239 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else}
-	<Card class="mb-6">
-		<CardContent class="py-5">
-			<!-- Version + status row -->
-			<div class="mb-5 flex items-center gap-8">
-				<div>
-					<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed</div>
-					<div class="font-mono text-xl font-semibold">{info?.current_version ?? 'unknown'}</div>
-				</div>
-				{#if info?.latest_version}
-					<div class="text-lg text-muted-foreground/30">→</div>
-					<div>
-						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Available</div>
-						<div class="font-mono text-xl font-semibold {info.update_available ? 'text-blue-400' : ''}">{info.latest_version}</div>
-					</div>
-				{/if}
-				<div class="flex items-end pb-0.5">
-					{#if info?.update_available === true}
-						<Badge variant="default">Update available</Badge>
-					{:else if info?.update_available === false}
-						<Badge variant="secondary">Up to date</Badge>
-					{/if}
-				</div>
-			</div>
+	<!-- Tab bar -->
+	<div class="mb-6 flex gap-1 border-b border-border">
+		<button
+			onclick={() => activeTab = 'system'}
+			class="px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px
+				{activeTab === 'system'
+					? 'border-primary text-foreground'
+					: 'border-transparent text-muted-foreground hover:text-foreground'}"
+		>
+			System
+		</button>
+		<button
+			onclick={() => activeTab = 'bcachefs'}
+			class="flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px
+				{activeTab === 'bcachefs'
+					? 'border-primary text-foreground'
+					: 'border-transparent text-muted-foreground hover:text-foreground'}"
+		>
+			bcachefs
+			{#if bcachefsInfo?.is_custom}
+				<span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>
+			{/if}
+		</button>
+	</div>
 
-			<!-- Actions -->
-			<div class="flex gap-2">
-				<Button size="sm" onclick={checkForUpdates} disabled={checking || status?.state === 'running'}>
-					{checking ? 'Checking...' : 'Check for Updates'}
-				</Button>
-				{#if info?.update_available}
-					<Button
-						variant={confirmAction === 'update' ? 'destructive' : 'default'}
-						size="sm"
-						onclick={() => requestAction('update')}
-						disabled={status?.state === 'running'}
-					>
-						{confirmAction === 'update' ? 'Confirm?' : 'Update Now'}
-					</Button>
-				{/if}
-				<Button
-					variant={confirmAction === 'rollback' ? 'destructive' : 'secondary'}
-					size="sm"
-					onclick={() => requestAction('rollback')}
-					disabled={status?.state === 'running'}
-				>
-					{confirmAction === 'rollback' ? 'Confirm?' : 'Rollback'}
-				</Button>
-			</div>
-		</CardContent>
-	</Card>
-
-	{#if status && status.state !== 'idle'}
-		<Card>
+	<!-- System tab -->
+	{#if activeTab === 'system'}
+		<Card class="mb-6">
 			<CardContent class="py-5">
-				<!-- Phase stepper -->
-				<div class="mb-5 flex items-center">
-					{#each phases as phase, i}
-						{@const done = currentPhase >= i}
-						{@const active = status.state === 'running' && currentPhase === i - 1}
-						{@const failed = status.state === 'failed' && !done}
-						<div class="flex items-center gap-0">
-							<!-- Circle -->
-							<div class="flex flex-col items-center gap-1">
-								<div class="flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all {
-									done   ? 'border-blue-500 bg-blue-500 text-white' :
-									active ? 'border-blue-400 bg-transparent text-blue-400 animate-pulse' :
-									failed ? 'border-border bg-transparent text-muted-foreground/30' :
-									         'border-border bg-transparent text-muted-foreground/30'
-								}">
-									{#if done}✓{:else if active}…{:else}{i + 1}{/if}
-								</div>
-								<span class="text-[0.65rem] font-medium {done ? 'text-blue-400' : active ? 'text-blue-400/70' : 'text-muted-foreground/40'}">{phase.label}</span>
-							</div>
-							<!-- Connector line -->
-							{#if i < phases.length - 1}
-								<div class="mb-3.5 h-px w-12 {currentPhase > i ? 'bg-blue-500' : 'bg-border'} mx-1"></div>
-							{/if}
+				<div class="mb-5 flex items-center gap-8">
+					<div>
+						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed</div>
+						<div class="font-mono text-xl font-semibold">{info?.current_version ?? 'unknown'}</div>
+					</div>
+					{#if info?.latest_version}
+						<div class="text-lg text-muted-foreground/30">→</div>
+						<div>
+							<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Available</div>
+							<div class="font-mono text-xl font-semibold {info.update_available ? 'text-blue-400' : ''}">{info.latest_version}</div>
 						</div>
-					{/each}
-					{#if status.state === 'failed'}
-						<span class="ml-4 text-sm text-destructive">Failed</span>
 					{/if}
-				</div>
-
-				{#if status.log}
-					<pre bind:this={logEl} class="max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{status.log}</pre>
-				{/if}
-			</CardContent>
-		</Card>
-	{/if}
-
-	<p class="mt-6 text-xs text-muted-foreground">
-		Updates are fetched from GitHub and applied using NixOS rebuild.
-		The system will atomically switch to the new version, restarting services as needed.
-		If anything goes wrong, use Rollback to return to the previous version.
-	</p>
-
-	<!-- bcachefs Tools version switching -->
-	<h2 class="mt-8 mb-3 text-base font-semibold">bcachefs Tools</h2>
-	{#if bcachefsInfo?.is_custom}
-		<div class="mb-3 flex items-center gap-3 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200">
-			<span class="flex-1"><strong>Non-standard version in use.</strong> You are running a custom bcachefs-tools version ({bcachefsInfo.pinned_ref ?? 'unknown'}) instead of the default ({bcachefsInfo.default_ref}). Switch back when stability is more important than bleeding-edge fixes.</span>
-			<Button variant="secondary" size="xs" onclick={() => { bcachefsRef = bcachefsInfo!.default_ref; }} disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}>
-				Restore default
-			</Button>
-		</div>
-	{/if}
-	<Card class="mb-6">
-		<CardContent class="py-5">
-			<!-- Current version info -->
-			<div class="mb-5 flex flex-wrap items-start gap-6">
-				<div>
-					<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Pinned</div>
-					<div class="font-mono text-sm font-semibold">
-						{#if bcachefsInfo?.pinned_ref}
-							{bcachefsInfo.pinned_ref}{#if bcachefsInfo.pinned_rev} <span class="text-muted-foreground">({bcachefsInfo.pinned_rev})</span>{/if}
-						{:else}
-							<span class="text-muted-foreground">unknown</span>
+					<div class="flex items-end pb-0.5">
+						{#if info?.update_available === true}
+							<Badge variant="default">Update available</Badge>
+						{:else if info?.update_available === false}
+							<Badge variant="secondary">Up to date</Badge>
 						{/if}
 					</div>
 				</div>
-				<div>
-					<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Running</div>
-					<div class="font-mono text-sm font-semibold">{bcachefsInfo?.running_version ?? 'unknown'}</div>
-				</div>
-			</div>
 
-			<!-- Ref input and preset buttons -->
-			<div class="mb-3 flex flex-wrap gap-2">
-				<input
-					type="text"
-					class="h-9 w-64 rounded-md border border-input bg-background px-3 py-1 font-mono text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-					placeholder="e.g. v1.38.0, master, abc1234"
-					bind:value={bcachefsRef}
-					disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
-				/>
-				{#if bcachefsInfo?.pinned_ref}
+				<div class="flex gap-2">
+					<Button size="sm" onclick={checkForUpdates} disabled={checking || status?.state === 'running'}>
+						{checking ? 'Checking...' : 'Check for Updates'}
+					</Button>
+					{#if info?.update_available}
+						<Button
+							variant={confirmAction === 'update' ? 'destructive' : 'default'}
+							size="sm"
+							onclick={() => requestAction('update')}
+							disabled={status?.state === 'running'}
+						>
+							{confirmAction === 'update' ? 'Confirm?' : 'Update Now'}
+						</Button>
+					{/if}
+					<Button
+						variant={confirmAction === 'rollback' ? 'destructive' : 'secondary'}
+						size="sm"
+						onclick={() => requestAction('rollback')}
+						disabled={status?.state === 'running'}
+					>
+						{confirmAction === 'rollback' ? 'Confirm?' : 'Rollback'}
+					</Button>
+				</div>
+			</CardContent>
+		</Card>
+
+		{#if status && status.state !== 'idle'}
+			<Card class="mb-6">
+				<CardContent class="py-5">
+					<div class="mb-5 flex items-center">
+						{#each phases as phase, i}
+							{@const done = currentPhase >= i}
+							{@const active = status.state === 'running' && currentPhase === i - 1}
+							{@const failed = status.state === 'failed' && !done}
+							<div class="flex items-center gap-0">
+								<div class="flex flex-col items-center gap-1">
+									<div class="flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all {
+										done   ? 'border-blue-500 bg-blue-500 text-white' :
+										active ? 'border-blue-400 bg-transparent text-blue-400 animate-pulse' :
+										failed ? 'border-border bg-transparent text-muted-foreground/30' :
+										         'border-border bg-transparent text-muted-foreground/30'
+									}">
+										{#if done}✓{:else if active}…{:else}{i + 1}{/if}
+									</div>
+									<span class="text-[0.65rem] font-medium {done ? 'text-blue-400' : active ? 'text-blue-400/70' : 'text-muted-foreground/40'}">{phase.label}</span>
+								</div>
+								{#if i < phases.length - 1}
+									<div class="mb-3.5 h-px w-12 {currentPhase > i ? 'bg-blue-500' : 'bg-border'} mx-1"></div>
+								{/if}
+							</div>
+						{/each}
+						{#if status.state === 'failed'}
+							<span class="ml-4 text-sm text-destructive">Failed</span>
+						{/if}
+					</div>
+
+					{#if status.log}
+						<pre bind:this={logEl} class="max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{status.log}</pre>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
+
+		<p class="text-xs text-muted-foreground">
+			Updates are fetched from GitHub and applied using NixOS rebuild.
+			The system will atomically switch to the new version, restarting services as needed.
+			If anything goes wrong, use Rollback to return to the previous version.
+		</p>
+
+	<!-- bcachefs tab -->
+	{:else if activeTab === 'bcachefs'}
+		{#if bcachefsInfo?.is_custom}
+			<div class="mb-4 flex items-center gap-3 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200">
+				<span class="flex-1"><strong>Non-standard version in use.</strong> You are running a custom bcachefs-tools version ({bcachefsInfo.pinned_ref ?? 'unknown'}) instead of the default ({bcachefsInfo.default_ref}). Switch back when stability is more important than bleeding-edge fixes.</span>
+				<Button variant="secondary" size="xs" onclick={() => { bcachefsRef = bcachefsInfo!.default_ref; }} disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}>
+					Restore default
+				</Button>
+			</div>
+		{/if}
+
+		<Card class="mb-6">
+			<CardContent class="py-5">
+				<div class="mb-5 flex flex-wrap items-start gap-6">
+					<div>
+						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Pinned</div>
+						<div class="font-mono text-sm font-semibold">
+							{#if bcachefsInfo?.pinned_ref}
+								{bcachefsInfo.pinned_ref}{#if bcachefsInfo.pinned_rev} <span class="text-muted-foreground">({bcachefsInfo.pinned_rev})</span>{/if}
+							{:else}
+								<span class="text-muted-foreground">unknown</span>
+							{/if}
+						</div>
+					</div>
+					<div>
+						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Running</div>
+						<div class="font-mono text-sm font-semibold">{bcachefsInfo?.running_version ?? 'unknown'}</div>
+					</div>
+					<div>
+						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Default</div>
+						<div class="font-mono text-sm font-semibold text-muted-foreground">{bcachefsInfo?.default_ref ?? 'unknown'}</div>
+					</div>
+				</div>
+
+				<div class="mb-3 flex flex-wrap gap-2">
+					<input
+						type="text"
+						class="h-9 w-64 rounded-md border border-input bg-background px-3 py-1 font-mono text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+						placeholder="e.g. v1.38.0, master, abc1234"
+						bind:value={bcachefsRef}
+						disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
+					/>
+					{#if bcachefsInfo?.default_ref}
+						<Button
+							variant="secondary"
+							size="sm"
+							onclick={() => { bcachefsRef = bcachefsInfo!.default_ref; }}
+							disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
+						>
+							{bcachefsInfo.default_ref}
+						</Button>
+					{/if}
 					<Button
 						variant="secondary"
 						size="sm"
-						onclick={() => { bcachefsRef = bcachefsInfo!.pinned_ref!; }}
+						onclick={() => { bcachefsRef = 'master'; }}
 						disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
 					>
-						Restore default ({bcachefsInfo.pinned_ref})
+						master
 					</Button>
+				</div>
+
+				{#if bcachefsWarnVisible}
+					<div class="mb-4 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200">
+						<strong>Warning:</strong> Switching versions carries risk. Downgrading after a newer format version
+						was written to your pools may leave them unmountable. Consult the bcachefs author before downgrading.
+					</div>
 				{/if}
+
 				<Button
-					variant="secondary"
 					size="sm"
-					onclick={() => { bcachefsRef = 'master'; }}
-					disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
+					onclick={doBcachefsSwitch}
+					disabled={!bcachefsRef.trim() || bcachefsSwitching || bcachefsStatus?.state === 'running'}
 				>
-					master
+					{bcachefsSwitching ? 'Starting...' : 'Switch'}
 				</Button>
-			</div>
-
-			<!-- Warning box -->
-			{#if bcachefsWarnVisible}
-				<div class="mb-4 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200">
-					<strong>Warning:</strong> Switching versions carries risk. Downgrading after a newer format version
-					was written to your pools may leave them unmountable. Consult the bcachefs author before downgrading.
-				</div>
-			{/if}
-
-			<!-- Switch button -->
-			<Button
-				size="sm"
-				onclick={doBcachefsSwitch}
-				disabled={!bcachefsRef.trim() || bcachefsSwitching || bcachefsStatus?.state === 'running'}
-			>
-				{bcachefsSwitching ? 'Starting...' : 'Switch'}
-			</Button>
-		</CardContent>
-	</Card>
-
-	{#if bcachefsStatus && bcachefsStatus.state !== 'idle'}
-		<Card class="mb-6">
-			<CardContent class="py-5">
-				<!-- Phase stepper -->
-				<div class="mb-5 flex items-center">
-					{#each bcachefsPhases as phase, i}
-						{@const done = bcachefsCurrentPhase >= i}
-						{@const active = bcachefsStatus.state === 'running' && bcachefsCurrentPhase === i - 1}
-						{@const failed = bcachefsStatus.state === 'failed' && !done}
-						<div class="flex items-center gap-0">
-							<div class="flex flex-col items-center gap-1">
-								<div class="flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all {
-									done   ? 'border-blue-500 bg-blue-500 text-white' :
-									active ? 'border-blue-400 bg-transparent text-blue-400 animate-pulse' :
-									failed ? 'border-border bg-transparent text-muted-foreground/30' :
-									         'border-border bg-transparent text-muted-foreground/30'
-								}">
-									{#if done}✓{:else if active}…{:else}{i + 1}{/if}
-								</div>
-								<span class="text-[0.65rem] font-medium {done ? 'text-blue-400' : active ? 'text-blue-400/70' : 'text-muted-foreground/40'}">{phase.label}</span>
-							</div>
-							{#if i < bcachefsPhases.length - 1}
-								<div class="mb-3.5 h-px w-12 {bcachefsCurrentPhase > i ? 'bg-blue-500' : 'bg-border'} mx-1"></div>
-							{/if}
-						</div>
-					{/each}
-					{#if bcachefsStatus.state === 'failed'}
-						<span class="ml-4 text-sm text-destructive">Failed</span>
-					{/if}
-				</div>
-
-				{#if bcachefsStatus.log}
-					<pre bind:this={bcachefsLogEl} class="max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{bcachefsStatus.log}</pre>
-				{/if}
 			</CardContent>
 		</Card>
+
+		{#if bcachefsStatus && bcachefsStatus.state !== 'idle'}
+			<Card class="mb-6">
+				<CardContent class="py-5">
+					<div class="mb-5 flex items-center">
+						{#each bcachefsPhases as phase, i}
+							{@const done = bcachefsCurrentPhase >= i}
+							{@const active = bcachefsStatus.state === 'running' && bcachefsCurrentPhase === i - 1}
+							{@const failed = bcachefsStatus.state === 'failed' && !done}
+							<div class="flex items-center gap-0">
+								<div class="flex flex-col items-center gap-1">
+									<div class="flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all {
+										done   ? 'border-blue-500 bg-blue-500 text-white' :
+										active ? 'border-blue-400 bg-transparent text-blue-400 animate-pulse' :
+										failed ? 'border-border bg-transparent text-muted-foreground/30' :
+										         'border-border bg-transparent text-muted-foreground/30'
+									}">
+										{#if done}✓{:else if active}…{:else}{i + 1}{/if}
+									</div>
+									<span class="text-[0.65rem] font-medium {done ? 'text-blue-400' : active ? 'text-blue-400/70' : 'text-muted-foreground/40'}">{phase.label}</span>
+								</div>
+								{#if i < bcachefsPhases.length - 1}
+									<div class="mb-3.5 h-px w-12 {bcachefsCurrentPhase > i ? 'bg-blue-500' : 'bg-border'} mx-1"></div>
+								{/if}
+							</div>
+						{/each}
+						{#if bcachefsStatus.state === 'failed'}
+							<span class="ml-4 text-sm text-destructive">Failed</span>
+						{/if}
+					</div>
+
+					{#if bcachefsStatus.log}
+						<pre bind:this={bcachefsLogEl} class="max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{bcachefsStatus.log}</pre>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
 	{/if}
 {/if}
