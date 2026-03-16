@@ -18,6 +18,7 @@
 	let confirmTimer: ReturnType<typeof setTimeout> | null = null;
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
 	let logEl: HTMLPreElement | undefined = $state();
+	let logCollapsed = $state(false);
 
 	// bcachefs-tools switching state
 	let bcachefsInfo: BcachefsToolsInfo | null = $state(null);
@@ -26,6 +27,7 @@
 	let bcachefsSwitching = $state(false);
 	let bcachefsLogEl: HTMLPreElement | undefined = $state();
 	let bcachefsPollInterval: ReturnType<typeof setInterval> | null = null;
+	let bcachefsLogCollapsed = $state(false);
 
 	const phases = [
 		{ label: 'Fetch',    marker: '==> Pulling' },
@@ -142,6 +144,7 @@
 	}
 
 	async function doApplyUpdate() {
+		logCollapsed = false;
 		status = { state: 'running', log: '', reboot_required: false };
 		const ok = await withToast(
 			() => client.call('system.update.apply'),
@@ -153,6 +156,7 @@
 	}
 
 	async function doRollback() {
+		logCollapsed = false;
 		status = { state: 'running', log: '', reboot_required: false };
 		const ok = await withToast(
 			() => client.call('system.update.rollback'),
@@ -173,7 +177,7 @@
 					await loadVersion();
 					if (status.state === 'success') {
 						refreshState.set();
-						setTimeout(() => { status = { state: 'idle', log: '', reboot_required: false }; }, 5000);
+						setTimeout(() => { logCollapsed = true; }, 5000);
 					}
 				}
 			} catch {
@@ -208,6 +212,7 @@
 		const ref = bcachefsRef.trim();
 		if (!ref) return;
 		bcachefsSwitching = true;
+		bcachefsLogCollapsed = false;
 		bcachefsStatus = { state: 'running', log: '', reboot_required: false };
 		const result = await withToast(
 			() => client.call('bcachefs.tools.switch', { git_ref: ref }),
@@ -232,7 +237,7 @@
 					if (bcachefsStatus.state === 'success') {
 						refreshState.set();
 						bcachefsRef = '';
-						setTimeout(() => { bcachefsStatus = { state: 'idle', log: '', reboot_required: false }; }, 5000);
+						setTimeout(() => { bcachefsLogCollapsed = true; }, 5000);
 					}
 				}
 			} catch {
@@ -376,7 +381,18 @@
 					</div>
 
 					{#if status.log}
-						<pre bind:this={logEl} class="max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{formatLog(status.log)}</pre>
+						{#if status.state !== 'running'}
+							<button
+								onclick={() => logCollapsed = !logCollapsed}
+								class="mt-3 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+							>
+								<span class="transition-transform {logCollapsed ? '' : 'rotate-180'} inline-block">▾</span>
+								{logCollapsed ? 'Show output' : 'Hide output'}
+							</button>
+						{/if}
+						{#if status.state === 'running' || !logCollapsed}
+							<pre bind:this={logEl} class="mt-3 max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{formatLog(status.log)}</pre>
+						{/if}
 					{/if}
 					{#if status.state === 'failed'}
 						<div class="mt-4 flex gap-2">
@@ -504,7 +520,18 @@
 					</div>
 
 					{#if bcachefsStatus.log}
-						<pre bind:this={bcachefsLogEl} class="max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{formatLog(bcachefsStatus.log)}</pre>
+						{#if bcachefsStatus.state !== 'running'}
+							<button
+								onclick={() => bcachefsLogCollapsed = !bcachefsLogCollapsed}
+								class="mt-3 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+							>
+								<span class="transition-transform {bcachefsLogCollapsed ? '' : 'rotate-180'} inline-block">▾</span>
+								{bcachefsLogCollapsed ? 'Show output' : 'Hide output'}
+							</button>
+						{/if}
+						{#if bcachefsStatus.state === 'running' || !bcachefsLogCollapsed}
+							<pre bind:this={bcachefsLogEl} class="mt-3 max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{formatLog(bcachefsStatus.log)}</pre>
+						{/if}
 					{/if}
 					{#if bcachefsStatus.state === 'failed'}
 						<div class="mt-4 flex gap-2">
