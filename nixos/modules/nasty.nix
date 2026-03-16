@@ -526,9 +526,11 @@ in {
       };
     };
 
-    systemd.services.samba-smbd.wantedBy = mkIf cfg.smb.enable (lib.mkForce []);
-    systemd.services.samba-nmbd.wantedBy = mkIf cfg.smb.enable (lib.mkForce []);
-    systemd.services.samba-winbindd.wantedBy = mkIf cfg.smb.enable (lib.mkForce []);
+    # Prevent Samba from auto-starting at boot. NixOS enables samba.target in
+    # multi-user.target, which then pulls in all three daemons via samba.target.wants.
+    # Override the target's wantedBy to break that chain; the engine starts Samba
+    # on demand when the user enables the protocol.
+    systemd.targets.samba.wantedBy = mkIf cfg.smb.enable (lib.mkForce []);
 
     # ── iSCSI / LIO ───────────────────────────────────────────
     # target.service: restore LIO config from /etc/target/saveconfig.json.
