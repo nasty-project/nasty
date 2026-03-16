@@ -1,4 +1,4 @@
-// Mirrors middleware Rust types
+// Mirrors engine Rust types
 
 export interface SystemInfo {
 	hostname: string;

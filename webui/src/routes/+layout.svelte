@@ -339,7 +339,7 @@
 			<!-- Page content -->
 			<main class="flex-1 overflow-y-auto p-6">
 				{#if !connected}
-					<p class="text-muted-foreground">Connecting to middleware...</p>
+					<p class="text-muted-foreground">Connecting to engine...</p>
 				{:else}
 					{@render children()}
 				{/if}
