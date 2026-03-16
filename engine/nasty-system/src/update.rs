@@ -453,21 +453,33 @@ echo "==> bcachefs-tools switch complete!"
                 }
                 match active_state {
                     "active" | "activating" | "reloading" => "running".to_string(),
-                    "inactive" | "deactivating" => {
-                        if result == "success" { "success".to_string() } else { "idle".to_string() }
-                    }
-                    "failed" => "failed".to_string(),
                     _ => {
-                        // Unit not found — may have been garbage-collected by systemd
-                        // daemon-reload.  Fall back to the result file written by the script.
-                        tokio::fs::read_to_string(BCACHEFS_SWITCH_RESULT).await
-                            .ok()
-                            .map(|s| match s.trim() {
-                                "success" => "success".to_string(),
-                                "failed"  => "failed".to_string(),
-                                _         => "idle".to_string(),
-                            })
-                            .unwrap_or_else(|| "idle".to_string())
+                        // Unit finished, missing, or never ran.
+                        // systemd Result=success is reliable when the unit still exists;
+                        // for cleaned-up or missing units it may be empty.
+                        // The result file is the authoritative fallback: the script writes
+                        // "failed" at the top and overwrites with "success" at the bottom,
+                        // so it always reflects the true outcome.
+                        // We remove it after reading a terminal state so stale results
+                        // don't surface on the next page load.
+                        let state = if result == "success" {
+                            "success".to_string()
+                        } else if active_state == "failed" {
+                            "failed".to_string()
+                        } else {
+                            tokio::fs::read_to_string(BCACHEFS_SWITCH_RESULT).await
+                                .ok()
+                                .map(|s| match s.trim() {
+                                    "success" => "success".to_string(),
+                                    "failed"  => "failed".to_string(),
+                                    _         => "idle".to_string(),
+                                })
+                                .unwrap_or_else(|| "idle".to_string())
+                        };
+                        if state == "success" || state == "failed" {
+                            let _ = tokio::fs::remove_file(BCACHEFS_SWITCH_RESULT).await;
+                        }
+                        state
                     }
                 }
             }
