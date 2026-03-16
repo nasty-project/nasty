@@ -190,14 +190,14 @@
 
 {#if mountedPools.length > 0}
 	<div class="mb-4 flex items-center gap-4">
+		<Button size="sm" onclick={() => showCreate = !showCreate}>
+			{showCreate ? 'Cancel' : 'Create Subvolume'}
+		</Button>
 		<select value={selectedPool} onchange={(e) => selectPool((e.target as HTMLSelectElement).value)} class="h-9 w-auto rounded-md border border-input bg-transparent px-3 text-sm">
 			{#each mountedPools as p}
 				<option value={p.name}>{p.name}</option>
 			{/each}
 		</select>
-		<Button size="sm" onclick={() => showCreate = !showCreate}>
-			{showCreate ? 'Cancel' : 'Create Subvolume'}
-		</Button>
 		<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
 	</div>
 {/if}
