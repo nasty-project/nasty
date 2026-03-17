@@ -459,8 +459,8 @@
 				<div class="mb-3 flex flex-wrap gap-2">
 					<input
 						type="text"
-						class="h-9 w-64 rounded-md border border-input bg-background px-3 py-1 font-mono text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-						placeholder="e.g. v1.38.0, master, abc1234"
+						class="h-9 w-96 rounded-md border border-input bg-background px-3 py-1 font-mono text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+						placeholder="e.g. v1.38.0, master, 098dad22ef7725620930587a047813469fceedce"
 						bind:value={bcachefsRef}
 						disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
 					/>
