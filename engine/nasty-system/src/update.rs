@@ -419,6 +419,9 @@ export PATH="/run/current-system/sw/bin:$PATH"
 # Survives engine restarts so polling can read the outcome even after
 # the transient systemd unit has been garbage-collected.
 echo "failed" > {BCACHEFS_SWITCH_RESULT}
+SWITCH_LOG=/var/lib/nasty/bcachefs-switch.log
+PREV_REF=$(cat {BCACHEFS_REF_STATE} 2>/dev/null || echo "{default_ref}")
+printf '%s  started  %s  (was: %s)\n' "$(date -u '+%Y-%m-%d %H:%M:%S')" "{git_ref}" "$PREV_REF" >> "$SWITCH_LOG"
 echo "==> Switching bcachefs-tools to {git_ref}..."
 cd {NIXOS_FLAKE_DIR}
 nix flake lock --override-input bcachefs-tools "{input_url}"
@@ -442,6 +445,7 @@ git -c user.email="nasty@localhost" -c user.name="NASty" \
 echo "==> Rebuilding system..."
 nixos-rebuild switch --flake {LOCAL_FLAKE}
 echo "success" > {BCACHEFS_SWITCH_RESULT}
+printf '%s  success  %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S')" "{git_ref}" >> "$SWITCH_LOG"
 echo "==> bcachefs-tools switch complete!"
 "#
         );

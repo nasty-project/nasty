@@ -286,9 +286,11 @@ in {
          dmesg | grep -A 50 "RIP:" | nc termbin.com 9999
 
        share findings with devs
+         cat /var/lib/nasty/bcachefs-switch.log       bcachefs version switch history
          dmesg | nc termbin.com 9999
          perf script | nc termbin.com 9999
          journalctl -u nasty-engine | nc termbin.com 9999
+         journalctl -u nasty-bcachefs-switch | nc termbin.com 9999
 
     '';
 
