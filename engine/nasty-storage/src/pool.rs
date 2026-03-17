@@ -757,7 +757,7 @@ impl PoolService {
                 "pool must be mounted to add a device".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap();
+        let mount_point = pool.mount_point.as_ref().unwrap().clone();
 
         if !Path::new(&req.device.path).exists() {
             return Err(PoolError::DeviceNotFound(req.device.path.clone()));
@@ -827,8 +827,6 @@ impl PoolService {
             ));
         }
 
-        let mount_point = pool.mount_point.as_ref().unwrap().clone();
-
         info!("Evacuating device {} in pool '{}'", req.device, req.pool);
         cmd::run_ok("bcachefs", &["device", "evacuate", &req.device])
             .await
@@ -864,8 +862,6 @@ impl PoolService {
                 "pool must be mounted to change device state".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap();
-
         info!(
             "Setting device {} state to '{}' in pool '{}'",
             req.device, req.state, req.pool
@@ -907,8 +903,6 @@ impl PoolService {
                 "pool must be mounted to offline a device".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap();
-
         info!("Offlining device {} in pool '{}'", req.device, req.pool);
         cmd::run_ok("bcachefs", &["device", "offline", &req.device])
             .await
