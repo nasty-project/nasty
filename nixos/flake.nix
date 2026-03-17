@@ -54,11 +54,26 @@
       # `passthru.kernelModule` that the NixOS bcachefs module needs to build
       # the out-of-tree DKMS kernel module automatically via boot.bcachefs.package.
       # importCargoLock reads Cargo.lock directly — no pre-computed vendor hash needed.
-      nasty-bcachefs-tools = pkgs.bcachefs-tools.overrideAttrs (old: {
-        version = (builtins.fromTOML (builtins.readFile "${bcachefs-tools}/Cargo.toml")).package.version;
-        src = bcachefs-tools;
-        cargoDeps = pkgs.rustPlatform.importCargoLock {
-          lockFile = "${bcachefs-tools}/Cargo.lock";
+      #
+      # CONFIG_BCACHEFS_QUOTA: bcachefs is an out-of-tree DKMS module, so
+      # its own Kconfig is never processed by the host kernel's build system.
+      # We patch the DKMS Makefile to inject -DCONFIG_BCACHEFS_QUOTA directly,
+      # enabling the VFS quotactl_ops (sb->s_qcop) that setquota/repquota need.
+      nasty-bcachefs-tools = let
+        base = pkgs.bcachefs-tools.overrideAttrs (old: {
+          version = (builtins.fromTOML (builtins.readFile "${bcachefs-tools}/Cargo.toml")).package.version;
+          src = bcachefs-tools;
+          cargoDeps = pkgs.rustPlatform.importCargoLock {
+            lockFile = "${bcachefs-tools}/Cargo.lock";
+          };
+        });
+      in base.overrideAttrs (old: {
+        passthru = old.passthru // {
+          kernelModule = args: (old.passthru.kernelModule args).overrideAttrs (kOld: {
+            postPatch = (kOld.postPatch or "") + ''
+              sed -i '/ccflags-y := -I/a ccflags-y += -DCONFIG_BCACHEFS_QUOTA' Makefile
+            '';
+          });
         };
       });
     in {
