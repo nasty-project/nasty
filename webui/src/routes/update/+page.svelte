@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import type { UpdateInfo, UpdateStatus, BcachefsToolsInfo } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -15,8 +16,6 @@
 	let status: UpdateStatus | null = $state(null);
 	let loading = $state(true);
 	let checking = $state(false);
-	let confirmAction: 'update' | 'rollback' | null = $state(null);
-	let confirmTimer: ReturnType<typeof setTimeout> | null = null;
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
 	let logEl: HTMLPreElement | undefined = $state();
 	let logCollapsed = $state(false);
@@ -26,8 +25,6 @@
 	let bcachefsStatus: UpdateStatus | null = $state(null);
 	let bcachefsRef = $state('');
 	let bcachefsSwitching = $state(false);
-	let bcachefsConfirm = $state(false);
-	let bcachefsConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 	let bcachefsLogEl: HTMLPreElement | undefined = $state();
 	let bcachefsPollInterval: ReturnType<typeof setInterval> | null = null;
 	let bcachefsLogCollapsed = $state(false);
@@ -108,8 +105,6 @@
 	onDestroy(() => {
 		stopPolling();
 		stopBcachefsPolling();
-		if (confirmTimer) clearTimeout(confirmTimer);
-		if (bcachefsConfirmTimer) clearTimeout(bcachefsConfirmTimer);
 	});
 
 	async function loadVersion() {
@@ -139,21 +134,14 @@
 		checking = false;
 	}
 
-	function requestAction(action: 'update' | 'rollback') {
-		if (confirmAction === action) {
-			clearConfirm();
-			if (action === 'update') doApplyUpdate();
-			else doRollback();
-		} else {
-			confirmAction = action;
-			if (confirmTimer) clearTimeout(confirmTimer);
-			confirmTimer = setTimeout(clearConfirm, 4000);
-		}
+	async function applyUpdate() {
+		if (!await confirm('Apply System Update?', 'NASty will fetch and apply the latest version. Services will restart and the page may reload. This can take several minutes.')) return;
+		doApplyUpdate();
 	}
 
-	function clearConfirm() {
-		confirmAction = null;
-		if (confirmTimer) { clearTimeout(confirmTimer); confirmTimer = null; }
+	async function rollback() {
+		if (!await confirm('Roll Back to Previous Version?', 'The system will revert to the previously installed NixOS generation. Services will restart.')) return;
+		doRollback();
 	}
 
 	async function doApplyUpdate() {
@@ -222,16 +210,14 @@
 		});
 	}
 
-	function requestBcachefsSwitch() {
-		if (bcachefsConfirm) {
-			bcachefsConfirm = false;
-			if (bcachefsConfirmTimer) { clearTimeout(bcachefsConfirmTimer); bcachefsConfirmTimer = null; }
-			doBcachefsSwitch();
-		} else {
-			bcachefsConfirm = true;
-			if (bcachefsConfirmTimer) clearTimeout(bcachefsConfirmTimer);
-			bcachefsConfirmTimer = setTimeout(() => { bcachefsConfirm = false; }, 4000);
-		}
+	async function requestBcachefsSwitch() {
+		const ref = bcachefsRef.trim();
+		if (!ref) return;
+		if (!await confirm(
+			`Switch bcachefs-tools to ${ref}?`,
+			'The system will rebuild with the new version. The first build may take 10–30 minutes. If the new version introduced an incompatible on-disk format, downgrading may leave pools unmountable.'
+		)) return;
+		doBcachefsSwitch();
 	}
 
 	async function doBcachefsSwitch() {
@@ -352,21 +338,21 @@
 					</Button>
 					{#if info?.update_available}
 						<Button
-							variant={confirmAction === 'update' ? 'destructive' : 'default'}
+							variant="default"
 							size="sm"
-							onclick={() => requestAction('update')}
+							onclick={applyUpdate}
 							disabled={status?.state === 'running'}
 						>
-							{confirmAction === 'update' ? 'Confirm?' : 'Update Now'}
+							Update Now
 						</Button>
 					{/if}
 					<Button
-						variant={confirmAction === 'rollback' ? 'destructive' : 'secondary'}
+						variant="secondary"
 						size="sm"
-						onclick={() => requestAction('rollback')}
+						onclick={rollback}
 						disabled={status?.state === 'running'}
 					>
-						{confirmAction === 'rollback' ? 'Confirm?' : 'Rollback'}
+						Rollback
 					</Button>
 				</div>
 			</CardContent>
@@ -477,7 +463,6 @@
 						class="h-9 w-96 rounded-md border border-input bg-background px-3 py-1 font-mono text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
 						placeholder="e.g. v1.38.0, master, 098dad22ef7725620930587a047813469fceedce"
 						bind:value={bcachefsRef}
-						oninput={() => { bcachefsConfirm = false; }}
 						disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
 					/>
 					{#if bcachefsInfo?.default_ref}
@@ -515,12 +500,12 @@
 				{/if}
 
 				<Button
-					variant={bcachefsConfirm ? 'destructive' : 'default'}
+					variant="default"
 					size="sm"
 					onclick={requestBcachefsSwitch}
 					disabled={!bcachefsRef.trim() || bcachefsSwitching || bcachefsStatus?.state === 'running'}
 				>
-					{bcachefsSwitching ? 'Starting...' : bcachefsConfirm ? 'Confirm?' : 'Switch'}
+					{bcachefsSwitching ? 'Starting...' : 'Switch'}
 				</Button>
 			</CardContent>
 		</Card>
