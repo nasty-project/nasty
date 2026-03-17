@@ -215,6 +215,9 @@
 			<div class="mb-4">
 				<Label for="nfs-opts">Options</Label>
 				<Input id="nfs-opts" bind:value={newOptions} class="mt-1" />
+				{#if newOptions.includes('no_root_squash')}
+					<p class="mt-1 text-xs text-yellow-500">Warning: <code>no_root_squash</code> disables quota enforcement for root NFS clients.</p>
+				{/if}
 			</div>
 			<Button onclick={create} disabled={!newSubvolume || !newHost}>Create</Button>
 		</CardContent>
@@ -277,6 +280,9 @@
 										<div class="flex items-center gap-3">
 											<code class="text-xs">{c.host}</code>
 											<span class="text-xs text-muted-foreground">({c.options})</span>
+											{#if c.options.includes('no_root_squash')}
+												<span class="text-xs text-yellow-500" title="no_root_squash disables quota enforcement for root clients">⚠ quota</span>
+											{/if}
 											<Button variant="destructive" size="xs" onclick={() => removeClient(share, c.host)}>Remove</Button>
 										</div>
 									{/each}
@@ -295,6 +301,9 @@
 									<Button size="xs" onclick={() => addClient(share)} disabled={!addClientHost}>Add</Button>
 									<Button variant="secondary" size="xs" onclick={() => { addClientShare = null; addClientHost = ''; }}>Cancel</Button>
 								</div>
+								{#if addClientOptions.includes('no_root_squash')}
+									<p class="mt-1 text-xs text-yellow-500">Warning: <code>no_root_squash</code> disables quota enforcement for root NFS clients.</p>
+								{/if}
 							{:else}
 								<Button variant="secondary" size="xs" onclick={() => { addClientShare = share.id; addClientHost = ''; addClientOptions = 'rw,sync,no_subtree_check'; }}>
 									Add Client
