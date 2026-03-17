@@ -164,10 +164,16 @@ impl UpdateService {
 set -euo pipefail
 export PATH="/run/current-system/sw/bin:$PATH"
 # Capture current webui store path before rebuild so we can detect if it changed.
-# NixOS nginx uses a store-path config (not /etc/nginx/nginx.conf), so we read
-# the config path from the running nginx unit and grep the webui store path from it.
-_NGINX_CONF=$(systemctl show nginx --property=ExecStart --value 2>/dev/null | grep -o "/nix/store/[^']*nginx\.conf" || true)
-WEBUI_BEFORE=$([ -n "$_NGINX_CONF" ] && grep 'nasty-webui' "$_NGINX_CONF" 2>/dev/null | head -1 || echo "")
+# Read from /run/current-system/etc/systemd/system/nginx.service — the unit file
+# uses single-quoted paths so the regex terminates cleanly at the closing quote.
+# After nixos-rebuild switch the /run/current-system symlink is updated before we
+# read the AFTER value, so we always compare old vs new closure.
+_nginx_conf() {{
+    grep -o "/nix/store/[^' ]*nginx\.conf" \
+        /run/current-system/etc/systemd/system/nginx.service 2>/dev/null | head -1 || true
+}}
+_NGINX_CONF_BEFORE=$(_nginx_conf)
+WEBUI_BEFORE=$([ -n "$_NGINX_CONF_BEFORE" ] && grep 'nasty-webui' "$_NGINX_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
 echo "==> Pulling latest source..."
 cd {LOCAL_REPO}
 
@@ -207,8 +213,9 @@ echo "==> Rebuilding system..."
 nixos-rebuild switch --flake {LOCAL_FLAKE}
 
 # Detect if the webui store path changed so the frontend knows whether to prompt a reload.
-_NGINX_CONF=$(systemctl show nginx --property=ExecStart --value 2>/dev/null | grep -o "/nix/store/[^']*nginx\.conf" || true)
-WEBUI_AFTER=$([ -n "$_NGINX_CONF" ] && grep 'nasty-webui' "$_NGINX_CONF" 2>/dev/null | head -1 || echo "")
+# /run/current-system now points to the newly activated closure.
+_NGINX_CONF_AFTER=$(_nginx_conf)
+WEBUI_AFTER=$([ -n "$_NGINX_CONF_AFTER" ] && grep 'nasty-webui' "$_NGINX_CONF_AFTER" 2>/dev/null | head -1 || echo "")
 if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
     echo "true" > {UPDATE_WEBUI_CHANGED}
 else
