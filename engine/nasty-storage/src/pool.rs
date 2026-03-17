@@ -478,7 +478,7 @@ impl PoolService {
             .collect::<Vec<_>>()
             .join(":");
         info!("Mounting pool '{}' at {}", req.name, mount_point);
-        cmd::run_ok("bcachefs", &["mount", &device_arg, &mount_point])
+        cmd::run_ok("bcachefs", &["mount", "-o", "prjquota", &device_arg, &mount_point])
             .await
             .map_err(PoolError::CommandFailed)?;
 
@@ -564,7 +564,7 @@ impl PoolService {
             .map(|d| d.path.as_str())
             .collect::<Vec<_>>()
             .join(":");
-        cmd::run_ok("bcachefs", &["mount", &device_arg, &mount_point])
+        cmd::run_ok("bcachefs", &["mount", "-o", "prjquota", &device_arg, &mount_point])
             .await
             .map_err(PoolError::CommandFailed)?;
 

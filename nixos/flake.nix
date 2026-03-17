@@ -68,6 +68,7 @@
         specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
         modules = [
           ./modules/bcachefs.nix
+          ./modules/linuxquota.nix
           ./modules/nasty.nix
           ./configuration.nix
         ];
@@ -79,6 +80,7 @@
         specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
         modules = [
           ./modules/bcachefs.nix
+          ./modules/linuxquota.nix
           "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
           ./iso.nix
         ];
@@ -90,6 +92,7 @@
         specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
         modules = [
           ./modules/bcachefs.nix
+          ./modules/linuxquota.nix
           ./modules/nasty.nix
           ./configuration.nix
           ./vm.nix

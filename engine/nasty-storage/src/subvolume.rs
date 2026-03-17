@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use nasty_common::{HasId, StateDir};
@@ -198,9 +200,9 @@ pub struct CloneSnapshotRequest {
 pub struct ResizeSubvolumeRequest {
     /// Name of the pool containing the subvolume.
     pub pool: String,
-    /// Name of the block subvolume to resize.
+    /// Name of the subvolume to resize.
     pub name: String,
-    /// New size of the backing sparse image in bytes.
+    /// New size in bytes. For block subvolumes: sparse image size. For filesystem subvolumes: bcachefs quota limit.
     pub volsize_bytes: u64,
 }
 
@@ -486,6 +488,14 @@ impl SubvolumeService {
             .await;
         }
 
+        // For filesystem subvolumes: enforce size via bcachefs project quota
+        if req.subvolume_type == SubvolumeType::Filesystem {
+            if let Some(size) = req.volsize_bytes {
+                let projid = project_id_for(&req.pool, &req.name);
+                set_project_quota(&mount_point, &subvol_path, projid, size).await;
+            }
+        }
+
         // For block subvolumes: create sparse file and attach loop device
         if req.subvolume_type == SubvolumeType::Block {
             let volsize = req.volsize_bytes.unwrap();
@@ -556,6 +566,12 @@ impl SubvolumeService {
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
+        // Remove project quota registration if this was a filesystem subvolume
+        if subvol.subvolume_type == SubvolumeType::Filesystem {
+            let projid = project_id_for(&req.pool, &req.name);
+            unregister_project(projid);
+        }
+
         // Remove from state
         let id = SubvolumeMeta::make_id(&req.pool, &req.name);
         state_dir().remove(&id).await?;
@@ -608,7 +624,9 @@ impl SubvolumeService {
         self.get(pool_name, name, owner_filter).await
     }
 
-    /// Resize a block subvolume's underlying sparse image.
+    /// Resize a subvolume.
+    /// For block subvolumes: resizes the sparse image and updates the loop device.
+    /// For filesystem subvolumes: updates the bcachefs project quota limit.
     /// `owner_filter`: if Some, returns `AccessDenied` if the subvolume has a different owner.
     pub async fn resize(
         &self,
@@ -616,27 +634,42 @@ impl SubvolumeService {
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
         let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
-        if subvol.subvolume_type != SubvolumeType::Block {
-            return Err(SubvolumeError::CommandFailed(
-                "only block subvolumes can be resized".to_string(),
-            ));
-        }
 
-        let img_path = format!("{}/{}", subvol.path, BLOCK_FILE_NAME);
-        info!(
-            "Resizing block subvolume '{}' to {} bytes",
-            req.name, req.volsize_bytes
-        );
-        cmd::run_ok("truncate", &["-s", &req.volsize_bytes.to_string(), &img_path])
-            .await
-            .map_err(SubvolumeError::CommandFailed)?;
+        match subvol.subvolume_type {
+            SubvolumeType::Block => {
+                let img_path = format!("{}/{}", subvol.path, BLOCK_FILE_NAME);
+                info!(
+                    "Resizing block subvolume '{}' to {} bytes",
+                    req.name, req.volsize_bytes
+                );
+                cmd::run_ok("truncate", &["-s", &req.volsize_bytes.to_string(), &img_path])
+                    .await
+                    .map_err(SubvolumeError::CommandFailed)?;
 
-        // If loop device is attached, inform the kernel of the new size
-        if let Some(ref loop_dev) = subvol.block_device {
-            info!("Updating loop device {} capacity for '{}'", loop_dev, req.name);
-            cmd::run_ok("losetup", &["--set-capacity", loop_dev])
-                .await
-                .map_err(SubvolumeError::CommandFailed)?;
+                // If loop device is attached, inform the kernel of the new size
+                if let Some(ref loop_dev) = subvol.block_device {
+                    info!("Updating loop device {} capacity for '{}'", loop_dev, req.name);
+                    cmd::run_ok("losetup", &["--set-capacity", loop_dev])
+                        .await
+                        .map_err(SubvolumeError::CommandFailed)?;
+                }
+            }
+            SubvolumeType::Filesystem => {
+                info!(
+                    "Resizing filesystem subvolume '{}' quota to {} bytes",
+                    req.name, req.volsize_bytes
+                );
+                let mount_point = self.pool_mount_point(&req.pool).await?;
+                let projid = project_id_for(&req.pool, &req.name);
+                let proj_name = format!("nasty-{projid}");
+                let bytes_str = req.volsize_bytes.to_string();
+                if let Err(e) = cmd::run_ok(
+                    "setquota",
+                    &["-P", &proj_name, &bytes_str, &bytes_str, "0", "0", &mount_point],
+                ).await {
+                    warn!("setquota failed for project {proj_name} on {mount_point}: {e}");
+                }
+            }
         }
 
         // Update stored metadata
@@ -990,6 +1023,85 @@ async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
     }
 
     BcachefsInfo { subvol_paths, snapshot_flags }
+}
+
+/// Derive a stable 32-bit project ID from pool + subvolume name.
+/// Zero is reserved by the kernel so we ensure the result is ≥ 1.
+fn project_id_for(pool: &str, name: &str) -> u32 {
+    let mut h = DefaultHasher::new();
+    pool.hash(&mut h);
+    name.hash(&mut h);
+    let v = (h.finish() & 0xFFFF_FFFF) as u32;
+    v.max(1)
+}
+
+/// Assign a bcachefs project ID to a subvolume directory and set its quota limit.
+///
+/// Uses `setproject` (from Kent Overstreet's linuxquota fork) to assign the
+/// project ID, then `setquota` to set the hard block limit. Both tools must be
+/// present on the system (provided via nixos/modules/linuxquota.nix).
+///
+/// Best-effort: logs a warning on failure rather than returning an error, since
+/// quota enforcement requires `prjquota` mount option. Volume creation must not
+/// fail if quota tools are unavailable.
+async fn set_project_quota(mount_point: &str, dir_path: &str, projid: u32, bytes: u64) {
+    // Register the project name in /etc/projid so that standard quota tools
+    // (repquota, edquota) can display human-readable names.
+    let proj_name = format!("nasty-{projid}");
+    register_project(&proj_name, projid);
+
+    // setproject -c -P <name> <path>
+    // -c: create the project in /etc/projid if not present (idempotent)
+    match cmd::run_ok("setproject", &["-c", "-P", &proj_name, dir_path]).await {
+        Ok(_) => info!("set project {proj_name} (id={projid}) on {dir_path}"),
+        Err(e) => {
+            warn!("setproject failed on {dir_path}: {e}");
+            return;
+        }
+    }
+
+    // setquota -P <name> <soft> <hard> <isoft> <ihard> <mountpoint>
+    // soft == hard (no grace period), no inode limits
+    let bytes_str = bytes.to_string();
+    match cmd::run_ok("setquota", &["-P", &proj_name, &bytes_str, &bytes_str, "0", "0", mount_point]).await {
+        Ok(_) => info!("set quota {bytes} bytes for project {proj_name} on {mount_point}"),
+        Err(e) => warn!("setquota failed for project {proj_name} on {mount_point}: {e}"),
+    }
+}
+
+/// Write a `name:id` entry to /etc/projid if not already present.
+/// This allows standard quota tools to resolve project IDs to names.
+fn register_project(name: &str, projid: u32) {
+    let entry = format!("{name}:{projid}\n");
+    let path = "/etc/projid";
+
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    // Check by both name and ID to avoid duplicates
+    let name_prefix = format!("{name}:");
+    let id_suffix = format!(":{projid}");
+    if existing.lines().any(|l| l.starts_with(&name_prefix) || l.ends_with(&id_suffix)) {
+        return;
+    }
+    if let Err(e) = std::fs::OpenOptions::new().append(true).create(true).open(path)
+        .and_then(|mut f| { use std::io::Write; f.write_all(entry.as_bytes()) })
+    {
+        warn!("register_project: could not write to {path}: {e}");
+    }
+}
+
+/// Remove a project entry from /etc/projid on subvolume deletion.
+fn unregister_project(projid: u32) {
+    let path = "/etc/projid";
+    let id_suffix = format!(":{projid}");
+    let Ok(existing) = std::fs::read_to_string(path) else { return };
+    let filtered: String = existing
+        .lines()
+        .filter(|l| !l.ends_with(&id_suffix))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if let Err(e) = std::fs::write(path, filtered) {
+        warn!("unregister_project: could not write to {path}: {e}");
+    }
 }
 
 /// Get disk usage for a directory using `du`
