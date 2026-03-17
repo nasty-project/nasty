@@ -218,9 +218,11 @@
 				{/each}
 			</nav>
 
+			<!-- Clock — centered above the footer separator -->
+			<div class="shrink-0 px-4 pt-2 pb-1 text-center font-mono text-sm tabular-nums text-muted-foreground/60">{clockFmt.format(now)}</div>
+
 			<!-- Footer — version info -->
 			<div class="shrink-0 border-t border-border px-4 py-3">
-				<div class="mb-2 font-mono text-sm tabular-nums text-muted-foreground/60">{clockFmt.format(now)}</div>
 				{#if sysInfo}
 					<div class="flex items-center justify-between">
 						<span class="text-[0.68rem] text-muted-foreground/50">NASty</span>
