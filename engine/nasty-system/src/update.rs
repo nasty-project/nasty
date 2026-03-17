@@ -709,23 +709,16 @@ async fn check_via_github_api() -> Result<String, UpdateError> {
         return Err(UpdateError::CommandFailed("empty github token".into()));
     }
 
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-sf",
-            "-H", &format!("Authorization: Bearer {token}"),
-            "-H", "Accept: application/vnd.github.v3+json",
-            GITHUB_API_REPO,
-        ])
-        .output()
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(GITHUB_API_REPO)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "nasty-engine")
+        .send()
         .await
-        .map_err(|e| UpdateError::CommandFailed(format!("curl: {e}")))?;
-
-    if !output.status.success() {
-        return Err(UpdateError::CommandFailed("GitHub API request failed".into()));
-    }
-
-    // Parse just the "sha" field from the JSON response
-    let body: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| UpdateError::CommandFailed(format!("GitHub API request failed: {e}")))?
+        .json()
+        .await
         .map_err(|e| UpdateError::CommandFailed(format!("failed to parse GitHub response: {e}")))?;
 
     let sha = body["sha"]

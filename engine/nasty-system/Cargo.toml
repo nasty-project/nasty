@@ -12,3 +12,4 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 rusqlite.workspace = true
+reqwest.workspace = true

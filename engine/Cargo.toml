@@ -31,3 +31,5 @@ tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 portable-pty = "0.9"
 rusqlite = { version = "0.34", features = ["bundled"] }
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

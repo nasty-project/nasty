@@ -78,7 +78,8 @@ impl SnapshotService {
                 // ── iSCSI: flush acknowledged writes to disk ──────────────
                 // LIO has no per-LUN quiesce; sync ensures anything the target
                 // has received is persisted before the snapshot.
-                let _ = tokio::process::Command::new("sync").output().await;
+                // SAFETY: sync(2) has no preconditions and always succeeds.
+                unsafe { libc::sync() };
 
                 namespaces
             } else {

@@ -1382,12 +1382,13 @@ async fn save_pool_state(state: &[String]) -> Result<(), PoolError> {
 }
 
 async fn is_mountpoint(path: &str) -> bool {
-    tokio::process::Command::new("mountpoint")
-        .args(["-q", path])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+    use std::os::unix::fs::MetadataExt;
+    // A path is a mount point when its device ID differs from its parent's,
+    // or when it is the filesystem root (path == parent, same inode).
+    let Ok(meta) = tokio::fs::metadata(path).await else { return false; };
+    let parent = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("/"));
+    let Ok(parent_meta) = tokio::fs::metadata(parent).await else { return false; };
+    meta.dev() != parent_meta.dev() || meta.ino() == parent_meta.ino()
 }
 
 /// Try to find pool name from existing mount point directories

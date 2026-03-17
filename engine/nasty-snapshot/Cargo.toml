@@ -9,5 +9,6 @@ nasty-common = { path = "../nasty-common" }
 nasty-storage = { path = "../nasty-storage" }
 nasty-sharing = { path = "../nasty-sharing" }
 tokio.workspace = true
+libc.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
