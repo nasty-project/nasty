@@ -27,6 +27,7 @@ let
     nativeBuildInputs = with pkgs; [
       autoconf
       automake
+      gettext
       libtool
       pkg-config
     ];
