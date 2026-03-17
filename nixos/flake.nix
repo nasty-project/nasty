@@ -74,7 +74,12 @@
           kernelModule = { lib, stdenv, kernelModuleMakeFlags, kernel }:
             (old.passthru.kernelModule { inherit lib stdenv kernelModuleMakeFlags kernel; }).overrideAttrs (kOld: {
               postPatch = (kOld.postPatch or "") + ''
-                sed -i '/ccflags-y := -I/a ccflags-y += -DCONFIG_BCACHEFS_QUOTA' Makefile
+                # ccflags-y in the top-level Makefile only covers objects built
+                # there.  The actual compilation happens in src/fs/bcachefs/,
+                # so we patch that subdir's Makefile, inside the BCACHEFS_DKMS
+                # block where CONFIG_BCACHEFS_FS is already set.
+                sed -i 's|# Enable other features here?|# Enable other features here?\n\tCONFIG_BCACHEFS_QUOTA := y\n\tccflags-y += -DCONFIG_BCACHEFS_QUOTA|' \
+                  src/fs/bcachefs/Makefile
               '';
             });
         };
