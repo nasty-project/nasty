@@ -232,10 +232,18 @@
 						<span class="text-[0.68rem] text-muted-foreground/50">kernel</span>
 						<span class="text-[0.68rem] font-mono text-muted-foreground/70 truncate ml-2 text-right" title={sysInfo.kernel}>{sysInfo.kernel}</span>
 					</div>
-					<div class="mt-0.5">
-						<span class="text-[0.68rem] text-muted-foreground/50">bcachefs</span>
-						<div class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.bcachefs_version}{sysInfo.bcachefs_is_custom && sysInfo.bcachefs_commit && !/^v\d/.test(sysInfo.bcachefs_pinned_ref ?? '') ? ' @ ' + sysInfo.bcachefs_commit : ''}</div>
-					</div>
+					{@const bcachefsCommit = sysInfo.bcachefs_is_custom && sysInfo.bcachefs_commit && !/^v\d/.test(sysInfo.bcachefs_pinned_ref ?? '') ? sysInfo.bcachefs_commit : null}
+					{#if bcachefsCommit}
+						<div class="mt-0.5">
+							<span class="text-[0.68rem] text-muted-foreground/50">bcachefs</span>
+							<div class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.bcachefs_version} @ {bcachefsCommit}</div>
+						</div>
+					{:else}
+						<div class="flex items-center justify-between mt-0.5">
+							<span class="text-[0.68rem] text-muted-foreground/50">bcachefs</span>
+							<span class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.bcachefs_version}</span>
+						</div>
+					{/if}
 				{:else}
 					<div class="text-[0.68rem] text-muted-foreground/40">Loading…</div>
 				{/if}
