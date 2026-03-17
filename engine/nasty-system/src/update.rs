@@ -425,7 +425,7 @@ nix flake lock --override-input bcachefs-tools "{input_url}"
 # Resolve the symbolic ref (e.g. "master") to the exact commit SHA that was
 # just pinned in flake.lock. Store the SHA so future system updates re-use
 # the same commit rather than advancing with the branch tip.
-RESOLVED_SHA=$(python3 -c "import json,sys; d=json.load(open('flake.lock')); print(d['nodes']['bcachefs-tools']['locked']['rev'])" 2>/dev/null || true)
+RESOLVED_SHA=$(awk '/"bcachefs-tools"/{f=1} f&&/"locked"/{l=1} l&&/"rev"/{gsub(/.*"rev": "/,""); gsub(/".*$/,""); print; exit}' flake.lock 2>/dev/null || true)
 if [ "{git_ref}" != "{default_ref}" ]; then
     if echo "{git_ref}" | grep -qE '^v[0-9]'; then
         echo "{git_ref}" > {BCACHEFS_REF_STATE}

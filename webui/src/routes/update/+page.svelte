@@ -7,6 +7,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { refreshState } from '$lib/refresh.svelte';
+	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 
 	let activeTab: 'system' | 'bcachefs' = $state('system');
 
@@ -246,6 +247,7 @@
 					if (bcachefsStatus.state === 'success') {
 						// No page reload needed — only bcachefs-tools changed, not the webui JS.
 						bcachefsRef = '';
+						sysInfoRefresh.trigger(); // refresh sidebar version display
 						setTimeout(() => { bcachefsLogCollapsed = true; }, 5000);
 					}
 				}
