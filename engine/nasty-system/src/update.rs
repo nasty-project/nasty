@@ -788,16 +788,26 @@ async fn read_current_version() -> String {
     "dev".to_string()
 }
 
-/// Check if the booted kernel differs from the activated system's kernel.
+/// Check if the booted kernel or kernel modules differ from the activated system.
 /// On NixOS, /run/booted-system is the system we booted into and
 /// /run/current-system is the latest activated profile (after nixos-rebuild switch).
+/// kernel-modules includes boot.extraModulePackages (e.g. the bcachefs DKMS module),
+/// so this catches module-only changes such as a new bcachefs build.
 async fn is_reboot_required() -> bool {
-    let booted = tokio::fs::read_link("/run/booted-system/kernel").await;
-    let current = tokio::fs::read_link("/run/current-system/kernel").await;
-    match (booted, current) {
-        (Ok(b), Ok(c)) => b != c,
-        _ => false,
+    let paths = [
+        ("/run/booted-system/kernel", "/run/current-system/kernel"),
+        ("/run/booted-system/kernel-modules", "/run/current-system/kernel-modules"),
+    ];
+    for (booted_path, current_path) in paths {
+        let booted = tokio::fs::read_link(booted_path).await;
+        let current = tokio::fs::read_link(current_path).await;
+        if let (Ok(b), Ok(c)) = (booted, current) {
+            if b != c {
+                return true;
+            }
+        }
     }
+    false
 }
 
 /// TODO: Remove once repo is public.
