@@ -220,6 +220,7 @@
 
 			<!-- Footer — version info -->
 			<div class="shrink-0 border-t border-border px-4 py-3">
+				<div class="mb-2 font-mono text-sm tabular-nums text-muted-foreground/60">{clockFmt.format(now)}</div>
 				{#if sysInfo}
 					<div class="flex items-center justify-between">
 						<span class="text-[0.68rem] text-muted-foreground/50">NASty</span>
@@ -243,12 +244,9 @@
 		<div class="flex flex-1 flex-col overflow-hidden">
 			<!-- Top bar -->
 			<header class="relative flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-6">
-				<div class="flex items-center gap-4">
-					<div class="flex items-center gap-2 text-base">
-						{#if currentNav.icon}{@const NavIcon = currentNav.icon}<NavIcon size={17} class="text-muted-foreground" />{/if}
-						<span class="font-medium">{currentNav.label}</span>
-					</div>
-					<span class="font-mono text-sm text-muted-foreground tabular-nums">{clockFmt.format(now)}</span>
+				<div class="flex items-center gap-2 text-base">
+					{#if currentNav.icon}{@const NavIcon = currentNav.icon}<NavIcon size={17} class="text-muted-foreground" />{/if}
+					<span class="font-medium">{currentNav.label}</span>
 				</div>
 
 				<!-- Reload button — centered, shown after update or bcachefs switch -->
