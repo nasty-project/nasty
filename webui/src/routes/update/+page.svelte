@@ -485,9 +485,9 @@
 				</div>
 
 				{#if bcachefsWarnVisible}
-					<div class="mb-3 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200">
-						<strong>Warning:</strong> Switching versions carries risk. Downgrading after a newer format version
-						was written to your pools may leave them unmountable. Consult the bcachefs author before downgrading.
+					<div class="mb-3 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200 space-y-1.5">
+						<div><strong>Build time:</strong> bcachefs-tools is compiled from source — the first build can take 10–30 minutes depending on your hardware.</div>
+						<div><strong>Compatibility risk:</strong> If a newer on-disk format was already written to your pools, downgrading may leave them unmountable. Reach out to the bcachefs devs if you run into problems.</div>
 					</div>
 				{/if}
 				{#if bcachefsRefIsBranch}
