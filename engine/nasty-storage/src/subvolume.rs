@@ -3,7 +3,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use nasty_common::{HasId, StateDir};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -12,7 +11,6 @@ use tracing::{info, warn};
 use crate::cmd;
 use crate::pool::PoolService;
 
-const STATE_DIR: &str = "/var/lib/nasty/subvolumes";
 const BLOCK_FILE_NAME: &str = "vol.img";
 
 fn subvol_path(mount_point: &str, name: &str) -> String {
@@ -23,9 +21,19 @@ fn snap_path(mount_point: &str, subvol: &str, snap: &str) -> String {
     format!("{mount_point}/{subvol}@{snap}")
 }
 
-/// POSIX xattr namespace prefix for all nasty-csi properties.
-/// E.g. logical key "nasty-csi:managed_by" → xattr "user.nasty-csi:managed_by".
+/// POSIX xattr namespace prefix for all user properties.
 const XATTR_NS: &str = "user.";
+
+/// Reserved xattr keys for NASty-internal subvolume metadata.
+const XATTR_NASTY_TYPE:        &str = "user.nasty.type";
+const XATTR_NASTY_VOLSIZE:     &str = "user.nasty.volsize";
+const XATTR_NASTY_COMPRESSION: &str = "user.nasty.compression";
+const XATTR_NASTY_COMMENT:     &str = "user.nasty.comment";
+const XATTR_NASTY_OWNER:       &str = "user.nasty.owner";
+
+/// Logical key prefix that maps to the reserved nasty.* xattrs.
+/// Excluded from the user-visible `properties` map.
+const NASTY_KEY_PREFIX: &str = "nasty.";
 
 #[derive(Debug, Error)]
 pub enum SubvolumeError {
@@ -102,35 +110,80 @@ pub struct Snapshot {
     pub block_device: Option<String>,
 }
 
-/// Persisted metadata for subvolumes (things bcachefs doesn't track)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// In-memory metadata read from xattrs on the subvolume directory.
 struct SubvolumeMeta {
-    id: String,
-    name: String,
-    pool: String,
     subvolume_type: SubvolumeType,
     volsize_bytes: Option<u64>,
     compression: Option<String>,
     comments: Option<String>,
-    /// Token name that created this subvolume; None for human-created subvolumes.
-    #[serde(default)]
     owner: Option<String>,
 }
 
-impl SubvolumeMeta {
-    fn make_id(pool: &str, name: &str) -> String {
-        format!("{pool}_{name}")
+/// Read NASty-internal metadata from the reserved `user.nasty.*` xattrs.
+fn read_meta_xattrs(path: &Path) -> SubvolumeMeta {
+    let get = |key: &str| -> Option<String> {
+        xattr::get(path, key)
+            .ok()
+            .flatten()
+            .and_then(|b| String::from_utf8(b).ok())
+    };
+
+    let subvolume_type = match get(XATTR_NASTY_TYPE).as_deref() {
+        Some("block") => SubvolumeType::Block,
+        Some("filesystem") => SubvolumeType::Filesystem,
+        _ => {
+            // Auto-detect for subvolumes created before xattr metadata: presence of
+            // vol.img means block, otherwise filesystem.
+            if path.join(BLOCK_FILE_NAME).exists() {
+                SubvolumeType::Block
+            } else {
+                SubvolumeType::Filesystem
+            }
+        }
+    };
+
+    SubvolumeMeta {
+        subvolume_type,
+        volsize_bytes: get(XATTR_NASTY_VOLSIZE).and_then(|s| s.parse().ok()),
+        compression: get(XATTR_NASTY_COMPRESSION),
+        comments: get(XATTR_NASTY_COMMENT),
+        owner: get(XATTR_NASTY_OWNER),
     }
 }
 
-impl HasId for SubvolumeMeta {
-    fn id(&self) -> &str {
-        &self.id
-    }
-}
+/// Write NASty-internal metadata as reserved `user.nasty.*` xattrs.
+fn write_meta_xattrs(
+    path: &str,
+    subvolume_type: &SubvolumeType,
+    volsize_bytes: Option<u64>,
+    compression: Option<&str>,
+    comments: Option<&str>,
+    owner: Option<&str>,
+) -> Result<(), SubvolumeError> {
+    let type_str = match subvolume_type {
+        SubvolumeType::Filesystem => "filesystem",
+        SubvolumeType::Block => "block",
+    };
+    xattr::set(path, XATTR_NASTY_TYPE, type_str.as_bytes())
+        .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr type: {e}")))?;
 
-fn state_dir() -> StateDir {
-    StateDir::new(STATE_DIR)
+    if let Some(v) = volsize_bytes {
+        xattr::set(path, XATTR_NASTY_VOLSIZE, v.to_string().as_bytes())
+            .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr volsize: {e}")))?;
+    }
+    if let Some(c) = compression {
+        xattr::set(path, XATTR_NASTY_COMPRESSION, c.as_bytes())
+            .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr compression: {e}")))?;
+    }
+    if let Some(c) = comments {
+        xattr::set(path, XATTR_NASTY_COMMENT, c.as_bytes())
+            .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr comment: {e}")))?;
+    }
+    if let Some(o) = owner {
+        xattr::set(path, XATTR_NASTY_OWNER, o.as_bytes())
+            .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr owner: {e}")))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -246,60 +299,55 @@ impl SubvolumeService {
     }
 
     /// Re-attach loop devices for block subvolumes after pools are mounted.
-    /// Re-attach loop devices for all block subvolumes after a reboot.
     /// Returns a map of subvolume_name → current loop device path so callers
     /// can patch NVMe-oF / iSCSI state files before those services start.
     pub async fn restore_block_devices(&self) -> std::collections::HashMap<String, String> {
-        let metas: Vec<SubvolumeMeta> = state_dir().load_all().await;
-        let block_metas: Vec<_> = metas
-            .iter()
-            .filter(|m| m.subvolume_type == SubvolumeType::Block)
+        let all = match self.list_all(None, None).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("restore_block_devices: failed to list subvolumes: {e}");
+                return std::collections::HashMap::new();
+            }
+        };
+
+        let block_subvols: Vec<_> = all
+            .into_iter()
+            .filter(|s| s.subvolume_type == SubvolumeType::Block)
             .collect();
 
         let mut dev_map = std::collections::HashMap::new();
 
-        if block_metas.is_empty() {
+        if block_subvols.is_empty() {
             info!("No block subvolumes to restore");
             return dev_map;
         }
 
-        for meta in block_metas {
-            let mount_point = match self.pool_mount_point(&meta.pool).await {
-                Ok(mp) => mp,
-                Err(_) => {
-                    warn!(
-                        "Pool '{}' not mounted, skipping block restore for '{}'",
-                        meta.pool, meta.name
-                    );
-                    continue;
-                }
-            };
-
-            let img_path = format!("{}/{BLOCK_FILE_NAME}", subvol_path(&mount_point, &meta.name));
+        for subvol in block_subvols {
+            let img_path = format!("{}/{BLOCK_FILE_NAME}", subvol.path);
             if !Path::new(&img_path).exists() {
-                warn!("Block image {img_path} not found for {}/{}", meta.pool, meta.name);
+                warn!("Block image {img_path} not found for {}/{}", subvol.pool, subvol.name);
                 continue;
             }
 
             // Use existing loop device if already attached (engine restart, not reboot)
             let loop_dev = if let Some(existing) = find_loop_device(&img_path).await {
-                info!("Loop device already attached for {}/{}", meta.pool, meta.name);
+                info!("Loop device already attached for {}/{}", subvol.pool, subvol.name);
                 existing
             } else {
                 match cmd::run_ok("losetup", &["--find", "--show", &img_path]).await {
                     Ok(dev) => {
                         let dev = dev.trim().to_string();
-                        info!("Attached {} for block subvolume {}/{}", dev, meta.pool, meta.name);
+                        info!("Attached {} for block subvolume {}/{}", dev, subvol.pool, subvol.name);
                         dev
                     }
                     Err(e) => {
-                        warn!("Failed to attach loop device for {}/{}: {e}", meta.pool, meta.name);
+                        warn!("Failed to attach loop device for {}/{}: {e}", subvol.pool, subvol.name);
                         continue;
                     }
                 }
             };
 
-            dev_map.insert(meta.name.clone(), loop_dev);
+            dev_map.insert(subvol.name.clone(), loop_dev);
         }
 
         dev_map
@@ -321,7 +369,6 @@ impl SubvolumeService {
     /// `owner_filter`: if Some, only return subvolumes owned by that token.
     pub async fn list(&self, pool_name: &str, owner_filter: Option<&str>) -> Result<Vec<Subvolume>, SubvolumeError> {
         let mount_point = self.pool_mount_point(pool_name).await?;
-        let state: Vec<SubvolumeMeta> = state_dir().load_all().await;
         let mut subvolumes = Vec::new();
 
         // Ask bcachefs which paths are real subvolumes (filters out plain dirs)
@@ -333,13 +380,12 @@ impl SubvolumeService {
             let path_str = subvol_path(&mount_point, name);
             let path = Path::new(&path_str);
 
-            let meta = state.iter().find(|m| m.pool == pool_name && m.name == name.as_str());
+            let meta = read_meta_xattrs(path);
 
             // Apply owner filter: operators only see their own subvolumes
             if let Some(filter) = owner_filter {
-                match meta {
-                    Some(m) if m.owner.as_deref() == Some(filter) => {}
-                    _ => continue,
+                if meta.owner.as_deref() != Some(filter) {
+                    continue;
                 }
             }
 
@@ -363,20 +409,7 @@ impl SubvolumeService {
                 .collect();
             let size = dir_usage(path).await;
 
-            let (subvolume_type, volsize_bytes, compression, comments, owner) =
-                if let Some(m) = meta {
-                    (m.subvolume_type.clone(), m.volsize_bytes, m.compression.clone(), m.comments.clone(), m.owner.clone())
-                } else {
-                    // Auto-detect: if vol.img exists, it's a block subvolume
-                    let img_path = format!("{path_str}/{BLOCK_FILE_NAME}");
-                    if Path::new(&img_path).exists() {
-                        (SubvolumeType::Block, file_size(&img_path).await, None, None, None)
-                    } else {
-                        (SubvolumeType::Filesystem, None, None, None, None)
-                    }
-                };
-
-            let block_device = if subvolume_type == SubvolumeType::Block {
+            let block_device = if meta.subvolume_type == SubvolumeType::Block {
                 let img_path = format!("{path_str}/{BLOCK_FILE_NAME}");
                 find_loop_device(&img_path).await
             } else {
@@ -388,15 +421,15 @@ impl SubvolumeService {
             subvolumes.push(Subvolume {
                 name: name.to_string(),
                 pool: pool_name.to_string(),
-                subvolume_type,
+                subvolume_type: meta.subvolume_type,
                 path: path_str,
                 used_bytes: size,
-                compression,
-                comments,
-                volsize_bytes,
+                compression: meta.compression,
+                comments: meta.comments,
+                volsize_bytes: meta.volsize_bytes,
                 block_device,
                 snapshots: snapshots.iter().map(|s| s.name.clone()).collect(),
-                owner,
+                owner: meta.owner,
                 properties,
             });
         }
@@ -515,19 +548,15 @@ impl SubvolumeService {
                 .map_err(SubvolumeError::CommandFailed)?;
         }
 
-        // Save metadata
-        let id = SubvolumeMeta::make_id(&req.pool, &req.name);
-        let meta = SubvolumeMeta {
-            id: id.clone(),
-            name: req.name.clone(),
-            pool: req.pool.clone(),
-            subvolume_type: req.subvolume_type,
-            volsize_bytes: req.volsize_bytes,
-            compression: req.compression,
-            comments: req.comments,
-            owner,
-        };
-        state_dir().save(&id, &meta).await?;
+        // Save metadata as xattrs on the subvolume directory
+        write_meta_xattrs(
+            &subvol_path,
+            &req.subvolume_type,
+            req.volsize_bytes,
+            req.compression.as_deref(),
+            req.comments.as_deref(),
+            owner.as_deref(),
+        )?;
 
         self.get(&req.pool, &req.name, None).await
     }
@@ -572,9 +601,7 @@ impl SubvolumeService {
             unregister_project(projid);
         }
 
-        // Remove from state
-        let id = SubvolumeMeta::make_id(&req.pool, &req.name);
-        state_dir().remove(&id).await?;
+        // Xattrs are deleted automatically with the subvolume inode — no cleanup needed.
 
         Ok(())
     }
@@ -672,12 +699,10 @@ impl SubvolumeService {
             }
         }
 
-        // Update stored metadata
-        let id = SubvolumeMeta::make_id(&req.pool, &req.name);
-        if let Some(mut meta) = state_dir().load::<SubvolumeMeta>(&id).await {
-            meta.volsize_bytes = Some(req.volsize_bytes);
-            state_dir().save(&id, &meta).await?;
-        }
+        // Update volsize xattr
+        let path = subvol_path(&self.pool_mount_point(&req.pool).await?, &req.name);
+        xattr::set(&path, XATTR_NASTY_VOLSIZE, req.volsize_bytes.to_string().as_bytes())
+            .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr volsize: {e}")))?;
 
         self.get(&req.pool, &req.name, owner_filter).await
     }
@@ -881,19 +906,18 @@ impl SubvolumeService {
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
-        // Save metadata for the new subvolume, inheriting the parent's type and size
-        let id = SubvolumeMeta::make_id(&req.pool, &req.new_name);
-        let meta = SubvolumeMeta {
-            id: id.clone(),
-            name: req.new_name.clone(),
-            pool: req.pool.clone(),
-            subvolume_type: parent.subvolume_type,
-            volsize_bytes: parent.volsize_bytes,
-            compression: parent.compression,
-            comments: None,
-            owner: owner_filter.map(|s| s.to_string()),
-        };
-        state_dir().save(&id, &meta).await?;
+        // Write metadata xattrs for the new subvolume, inheriting the parent's type and size.
+        // Note: bcachefs snapshot (writable clone) copies the source inode xattrs, so
+        // user.nasty.* are already present. We overwrite them to clear comments and set
+        // the correct owner for the new subvolume.
+        write_meta_xattrs(
+            &new_subvol_path,
+            &parent.subvolume_type,
+            parent.volsize_bytes,
+            parent.compression.as_deref(),
+            None,
+            owner_filter,
+        )?;
 
         self.get(&req.pool, &req.new_name, None).await
     }
@@ -954,8 +978,9 @@ impl SubvolumeService {
     }
 }
 
-/// Read all nasty-csi xattr properties from a path.
-/// Returns a map of logical key → value (strips the "user." namespace prefix).
+/// Read user-defined xattr properties from a path.
+/// Returns a map of logical key → value (strips the "user." prefix).
+/// Excludes the reserved "user.nasty.*" keys (those are first-class struct fields).
 /// Non-UTF-8 values and unreadable xattrs are silently skipped.
 fn read_xattrs(path: &Path) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -965,8 +990,11 @@ fn read_xattrs(path: &Path) -> HashMap<String, String> {
     };
     for name in attrs {
         let name_str = name.to_string_lossy();
-        // Only expose user.* namespace, strip the "user." prefix for the logical key
         let Some(key) = name_str.strip_prefix(XATTR_NS) else { continue };
+        // Skip reserved nasty.* keys — surfaced as first-class struct fields instead
+        if key.starts_with(NASTY_KEY_PREFIX) {
+            continue;
+        }
         if let Ok(Some(bytes)) = xattr::get(path, &*name_str) {
             if let Ok(value) = String::from_utf8(bytes) {
                 map.insert(key.to_string(), value);
@@ -1143,10 +1171,3 @@ async fn find_loop_device(file_path: &str) -> Option<String> {
     None
 }
 
-/// Get file size
-async fn file_size(path: &str) -> Option<u64> {
-    tokio::fs::metadata(path)
-        .await
-        .ok()
-        .map(|m| m.len())
-}
