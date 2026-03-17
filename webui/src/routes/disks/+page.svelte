@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { formatBytes } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
@@ -14,12 +14,18 @@
 	let smartProtocol: ProtocolStatus | null = $state(null);
 	let loading = $state(true);
 	let expandedDisk = $state<string | null>(null);
+	let pollInterval: ReturnType<typeof setInterval> | null = null;
 
 	const client = getClient();
 
 	onMount(async () => {
 		await Promise.all([loadBlockDevices(), loadSmartProtocol()]);
 		loading = false;
+		pollInterval = setInterval(refresh, 5000);
+	});
+
+	onDestroy(() => {
+		if (pollInterval) clearInterval(pollInterval);
 	});
 
 	async function loadBlockDevices() {
