@@ -376,10 +376,14 @@ echo "==> Update complete!"
     }
 
     pub async fn bcachefs_info(&self) -> BcachefsToolsInfo {
-        let (_, kernel_rust) = bcachefs_version().await;
-        let running_version = bcachefs_loaded_module_version().await;
-        let (lock_ref, pinned_rev) = read_flake_lock_bcachefs().await;
-        let default_ref = read_flake_nix_default_ref().await;
+        // Run subprocess calls and file reads concurrently — modinfo and bcachefs
+        // version are the expensive ones (xz-compressed kernel module decompression).
+        let ((_, kernel_rust), running_version, (lock_ref, pinned_rev), default_ref) = tokio::join!(
+            bcachefs_version(),
+            bcachefs_loaded_module_version(),
+            read_flake_lock_bcachefs(),
+            read_flake_nix_default_ref(),
+        );
         // Use the state file as the canonical display ref when the user has switched.
         // flake.lock's original.ref always mirrors flake.nix (not updated by --override-input),
         // so it would show the old version even after a successful switch to a new rev.

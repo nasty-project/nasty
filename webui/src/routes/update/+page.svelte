@@ -96,15 +96,11 @@
 	});
 
 	onMount(async () => {
-		await loadVersion();
-		await loadStatus();
-		await loadBcachefsInfo();
-		await loadBcachefsStatus();
+		await Promise.all([loadVersion(), loadStatus(), loadBcachefsInfo(), loadBcachefsStatus()]);
 		loading = false;
 
-		const onReconnect = async () => {
-			await loadVersion();
-			await loadBcachefsInfo();
+		const onReconnect = () => {
+			Promise.all([loadVersion(), loadBcachefsInfo()]);
 		};
 		client.onReconnect(onReconnect);
 		return () => client.offReconnect(onReconnect);
