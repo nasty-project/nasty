@@ -41,8 +41,9 @@ jobs:
           ls -lh "$IMAGE_FILE"
 
           SHORT_SHA=$(git rev-parse --short HEAD)
-          DEST="nasty-cloud-x86_64-${SHORT_SHA}.qcow2"
-          cp "$IMAGE_FILE" "$DEST"
+          DEST="nasty-cloud-x86_64-${SHORT_SHA}.qcow2.zst"
+          zstd -T0 "$IMAGE_FILE" -o "$DEST"
+          ls -lh "$DEST"
           echo "image_dest=$DEST" >> "$GITHUB_ENV"
 
       - name: Upload as release
