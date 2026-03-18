@@ -16,25 +16,8 @@
 { config, lib, pkgs, nasty-engine, nasty-webui ? null, ... }:
 
 {
-  # GRUB is used instead of Limine here because disk image builds run in a
-  # sandbox without real EFI hardware — Limine's installer requires efibootmgr
-  # which cannot register boot entries without actual EFI variables.
-  boot.loader.grub = {
-    enable = true;
-    device = "nodev";
-    efiSupport = true;
-    efiInstallAsRemovable = true;
-  };
-  boot.loader.efi.canTouchEfiVariables = false;
-
   # virtio drivers so the cloud VM can see its disks and network
   boot.initrd.availableKernelModules = [ "virtio_pci" "virtio_blk" "virtio_net" "virtio_scsi" ];
-
-  # Root filesystem on /dev/vda (first virtio disk — the image itself)
-  fileSystems."/" = {
-    device = "/dev/vda";
-    fsType = "ext4";
-  };
 
   networking.hostName = "nasty-cloud";
   networking.useDHCP = true;
@@ -64,9 +47,6 @@
     iscsi.enable = true;
     nvmeof.enable = true;
   };
-
-  # Disk image size — enough for NixOS + NASty closure
-  virtualisation.diskSize = 8 * 1024; # 8 GiB
 
   system.nixos.distroName = "NASty";
   system.nixos.distroId = "nasty";

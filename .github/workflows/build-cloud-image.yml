@@ -30,17 +30,13 @@ jobs:
 
       - name: Build QCOW2 image
         run: |
-          set -o pipefail
           cd nixos
-          nix build .#nasty-cloud-image \
-            --no-link --print-out-paths -L 2>&1 | tee /tmp/build.log
-          grep '^/nix/store' /tmp/build.log | tail -1 > /tmp/image-path.txt
-          cat /tmp/image-path.txt
+          nix build .#nasty-cloud-image --print-out-paths -L
+          echo "image_store=$(readlink -f result)" >> "$GITHUB_ENV"
 
       - name: Prepare image
         run: |
-          IMAGE_DIR=$(cat /tmp/image-path.txt)
-          IMAGE_FILE=$(find "$IMAGE_DIR" -name "*.qcow2" -type f | head -1)
+          IMAGE_FILE=$(find "${{ env.image_store }}" -name "*.qcow2" -type f | head -1)
           echo "Image: $IMAGE_FILE"
           ls -lh "$IMAGE_FILE"
 

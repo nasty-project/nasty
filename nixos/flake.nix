@@ -10,9 +10,13 @@
     # No other changes needed — bcachefs.nix defaults to pkgs.bcachefs-tools.
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.2";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+
+    # ── disk image builder ────────────────────────────────────────
+    nixos-generators.url = "github:nix-community/nixos-generators";
+    nixos-generators.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, bcachefs-tools, ... }: let
+  outputs = { self, nixpkgs, bcachefs-tools, nixos-generators, ... }: let
     # Helper to build packages for a given system
     mkPkgs = system: nixpkgs.legacyPackages.${system};
 
@@ -125,14 +129,14 @@
       };
 
       # Cloud/CI QCOW2 disk image
-      nasty-cloud = nixpkgs.lib.nixosSystem {
+      nasty-cloud = nixos-generators.nixosGenerate {
         inherit system;
+        format = "qcow";
         specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
         modules = [
           ./modules/bcachefs.nix
           ./modules/linuxquota.nix
           ./modules/nasty.nix
-          "${nixpkgs}/nixos/modules/image/qcow2.nix"
           ./cloud.nix
         ];
       };
@@ -143,7 +147,7 @@
     packages.x86_64-linux = let pkgs = mkPkgs "x86_64-linux"; in {
       engine = mkEngine "x86_64-linux";
       webui = mkWebui "x86_64-linux";
-      nasty-cloud-image = (mkNixosConfigs "x86_64-linux").nasty-cloud.config.system.build.qcow2Image;
+      nasty-cloud-image = (mkNixosConfigs "x86_64-linux").nasty-cloud;
       default = mkEngine "x86_64-linux";
     };
 
