@@ -37,6 +37,8 @@
 		User,
 		Sun,
 		Moon,
+		PanelLeftClose,
+		PanelLeftOpen,
 	} from '@lucide/svelte';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
@@ -59,6 +61,20 @@
 
 	// Profile menu
 	let profileOpen = $state(false);
+
+	// Sidebar collapse — default collapsed on mobile (<768px), expanded on desktop.
+	// Persisted in localStorage so the user's choice sticks.
+	const SIDEBAR_KEY = 'nasty:sidebar_collapsed';
+	let sidebarCollapsed = $state(
+		typeof localStorage !== 'undefined'
+			? localStorage.getItem(SIDEBAR_KEY) === '1'
+				|| (localStorage.getItem(SIDEBAR_KEY) === null && typeof window !== 'undefined' && window.innerWidth < 768)
+			: false
+	);
+	function toggleSidebar() {
+		sidebarCollapsed = !sidebarCollapsed;
+		localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? '1' : '0');
+	}
 
 	// Version info (loaded once after connect)
 	let sysInfo: { version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_is_custom: boolean } | null = $state(null);
@@ -216,11 +232,22 @@
 {:else}
 	<div class="flex h-screen overflow-hidden">
 		<!-- Sidebar -->
-		<aside class="flex w-[200px] shrink-0 flex-col border-r border-border bg-card">
-			<!-- Logo -->
-			<div class="shrink-0 border-b border-border px-4 py-4">
-				<img src={theme.isDark ? logoDark : logoLight} alt="NASty" class="h-40" />
-			</div>
+		<aside class="flex {sidebarCollapsed ? 'w-[52px]' : 'w-[200px]'} shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200">
+			<!-- Logo / collapse toggle -->
+			{#if sidebarCollapsed}
+				<div class="shrink-0 border-b border-border flex items-center justify-center py-3">
+					<button onclick={toggleSidebar} class="text-muted-foreground hover:text-foreground transition-colors" title="Expand sidebar">
+						<PanelLeftOpen size={18} />
+					</button>
+				</div>
+			{:else}
+				<div class="shrink-0 border-b border-border px-4 py-4 relative">
+					<img src={theme.isDark ? logoDark : logoLight} alt="NASty" class="h-40" />
+					<button onclick={toggleSidebar} class="absolute top-2 right-2 text-muted-foreground/50 hover:text-foreground transition-colors" title="Collapse sidebar">
+						<PanelLeftClose size={15} />
+					</button>
+				</div>
+			{/if}
 
 			<!-- Nav — scrollable -->
 			<nav class="flex-1 overflow-y-auto py-2">
@@ -229,47 +256,51 @@
 					{@const active = currentNav.href === item.href}
 					<a
 						href={item.href}
-						class="relative mx-2 flex items-center gap-2.5 rounded-md py-2 pl-4 pr-4 text-sm no-underline transition-all border-2
+						title={sidebarCollapsed ? item.label : undefined}
+						class="relative mx-2 flex items-center rounded-md py-2 text-sm no-underline transition-all border-2
+							{sidebarCollapsed ? 'justify-center px-0' : 'gap-2.5 pl-4 pr-4'}
 							{active
 								? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
 								: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
 					>
 						<Icon size={15} class="shrink-0" />
-						{item.label}
+						{#if !sidebarCollapsed}{item.label}{/if}
 					</a>
 				{/each}
 			</nav>
 
-			<!-- Clock — centered above the footer separator -->
-			<div class="shrink-0 px-4 pt-2 pb-1 text-center font-mono text-sm tabular-nums text-muted-foreground/60">{clockFmt.format(now)}</div>
+			{#if !sidebarCollapsed}
+				<!-- Clock — centered above the footer separator -->
+				<div class="shrink-0 px-4 pt-2 pb-1 text-center font-mono text-sm tabular-nums text-muted-foreground/60">{clockFmt.format(now)}</div>
 
-			<!-- Footer — version info -->
-			<div class="shrink-0 border-t border-border px-4 py-3">
-				{#if sysInfo}
-					<div class="flex items-center justify-between">
-						<span class="text-[0.68rem] text-muted-foreground/50">NASty</span>
-						<span class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.version}</span>
-					</div>
-					<div class="flex items-center justify-between mt-0.5">
-						<span class="text-[0.68rem] text-muted-foreground/50">kernel</span>
-						<span class="text-[0.68rem] font-mono text-muted-foreground/70 truncate ml-2 text-right" title={sysInfo.kernel}>{sysInfo.kernel}</span>
-					</div>
-					{@const bcachefsCommit = sysInfo.bcachefs_is_custom && sysInfo.bcachefs_commit && !/^v\d/.test(sysInfo.bcachefs_pinned_ref ?? '') ? sysInfo.bcachefs_commit : null}
-					{#if bcachefsCommit}
-						<div class="mt-0.5">
-							<span class="text-[0.68rem] text-muted-foreground/50">bcachefs</span>
-							<div class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.bcachefs_version} @ {bcachefsCommit}</div>
+				<!-- Footer — version info -->
+				<div class="shrink-0 border-t border-border px-4 py-3">
+					{#if sysInfo}
+						<div class="flex items-center justify-between">
+							<span class="text-[0.68rem] text-muted-foreground/50">NASty</span>
+							<span class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.version}</span>
 						</div>
-					{:else}
 						<div class="flex items-center justify-between mt-0.5">
-							<span class="text-[0.68rem] text-muted-foreground/50">bcachefs</span>
-							<span class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.bcachefs_version}</span>
+							<span class="text-[0.68rem] text-muted-foreground/50">kernel</span>
+							<span class="text-[0.68rem] font-mono text-muted-foreground/70 truncate ml-2 text-right" title={sysInfo.kernel}>{sysInfo.kernel}</span>
 						</div>
+						{@const bcachefsCommit = sysInfo.bcachefs_is_custom && sysInfo.bcachefs_commit && !/^v\d/.test(sysInfo.bcachefs_pinned_ref ?? '') ? sysInfo.bcachefs_commit : null}
+						{#if bcachefsCommit}
+							<div class="mt-0.5">
+								<span class="text-[0.68rem] text-muted-foreground/50">bcachefs</span>
+								<div class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.bcachefs_version} @ {bcachefsCommit}</div>
+							</div>
+						{:else}
+							<div class="flex items-center justify-between mt-0.5">
+								<span class="text-[0.68rem] text-muted-foreground/50">bcachefs</span>
+								<span class="text-[0.68rem] font-mono text-muted-foreground/70">{sysInfo.bcachefs_version}</span>
+							</div>
+						{/if}
+					{:else}
+						<div class="text-[0.68rem] text-muted-foreground/40">Loading…</div>
 					{/if}
-				{:else}
-					<div class="text-[0.68rem] text-muted-foreground/40">Loading…</div>
-				{/if}
-			</div>
+				</div>
+			{/if}
 		</aside>
 
 		<!-- Right side: top bar + content -->
