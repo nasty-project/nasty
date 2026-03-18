@@ -127,6 +127,7 @@
 		powerOpen = false;
 		if (!await confirm('Restart NASty?', 'All active connections will be dropped.')) return;
 		powering = true;
+		rebootState.clear();
 		try { await getClient().call('system.reboot'); } catch { /* expected — engine dies */ }
 	}
 
