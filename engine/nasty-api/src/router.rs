@@ -228,11 +228,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => err(req, e),
         },
         "system.update.apply" => match state.updates.apply().await {
-            Ok(()) => ok(req, "ok"),
+            Ok(()) => { state.system.invalidate_bcachefs_cache().await; ok(req, "ok") }
             Err(e) => err(req, e),
         },
         "system.update.rollback" => match state.updates.rollback().await {
-            Ok(()) => ok(req, "ok"),
+            Ok(()) => { state.system.invalidate_bcachefs_cache().await; ok(req, "ok") }
             Err(e) => err(req, e),
         },
         "system.update.status" => ok(req, state.updates.status().await),
@@ -242,7 +242,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "bcachefs.tools.info" => ok(req, state.updates.bcachefs_info().await),
         "bcachefs.tools.switch" => match parse_params::<nasty_system::update::BcachefsToolsSwitchRequest>(req) {
             Ok(p) => match state.updates.bcachefs_switch(p).await {
-                Ok(()) => ok(req, serde_json::json!({"status": "started"})),
+                Ok(()) => {
+                    state.system.invalidate_bcachefs_cache().await;
+                    ok(req, serde_json::json!({"status": "started"}))
+                }
                 Err(e) => err(req, e),
             },
             Err(e) => invalid(req, e),

@@ -8,7 +8,21 @@ pub mod update;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub struct SystemService;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// Cached values that only change on bcachefs switch or reboot.
+#[derive(Clone)]
+struct CachedInfo {
+    bcachefs_version: String,
+    bcachefs_commit: Option<String>,
+    bcachefs_pinned_ref: Option<String>,
+    bcachefs_is_custom: bool,
+}
+
+pub struct SystemService {
+    cached: Arc<RwLock<Option<CachedInfo>>>,
+}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SystemInfo {
@@ -168,7 +182,41 @@ pub struct SmartAttribute {
 
 impl SystemService {
     pub fn new() -> Self {
-        Self
+        Self { cached: Arc::new(RwLock::new(None)) }
+    }
+
+    /// Invalidate cached bcachefs info — call after bcachefs switch or reboot.
+    pub async fn invalidate_bcachefs_cache(&self) {
+        *self.cached.write().await = None;
+    }
+
+    async fn get_cached_bcachefs(&self) -> CachedInfo {
+        {
+            let guard = self.cached.read().await;
+            if let Some(ref c) = *guard {
+                return c.clone();
+            }
+        }
+        // Compute — run subprocess calls in parallel.
+        let (bcachefs_version, bcachefs_commit, pinned_ref_raw) = tokio::join!(
+            bcachefs_version(),
+            read_bcachefs_commit(),
+            async {
+                tokio::fs::read_to_string("/var/lib/nasty/bcachefs-tools-ref").await
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            },
+        );
+        let bcachefs_is_custom = pinned_ref_raw.is_some();
+        let info = CachedInfo {
+            bcachefs_version,
+            bcachefs_commit,
+            bcachefs_pinned_ref: pinned_ref_raw,
+            bcachefs_is_custom,
+        };
+        *self.cached.write().await = Some(info.clone());
+        info
     }
 
     pub async fn disks(&self) -> Vec<DiskHealth> {
@@ -176,27 +224,18 @@ impl SystemService {
     }
 
     pub async fn info(&self) -> SystemInfo {
-        let hostname = hostname();
-        let kernel = kernel_version();
-        let bcachefs_version = bcachefs_version().await;
-        let bcachefs_commit = read_bcachefs_commit().await;
-        let bcachefs_pinned_ref = tokio::fs::read_to_string("/var/lib/nasty/bcachefs-tools-ref").await
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let bcachefs_is_custom = bcachefs_pinned_ref.is_some();
-        let uptime = uptime_seconds();
+        let cached = self.get_cached_bcachefs().await;
         let (timezone, ntp_synced) = timedatectl_info().await;
 
         SystemInfo {
-            hostname,
+            hostname: hostname(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            uptime_seconds: uptime,
-            kernel,
-            bcachefs_version,
-            bcachefs_commit,
-            bcachefs_pinned_ref,
-            bcachefs_is_custom,
+            uptime_seconds: uptime_seconds(),
+            kernel: kernel_version(),
+            bcachefs_version: cached.bcachefs_version,
+            bcachefs_commit: cached.bcachefs_commit,
+            bcachefs_pinned_ref: cached.bcachefs_pinned_ref,
+            bcachefs_is_custom: cached.bcachefs_is_custom,
             timezone,
             ntp_synced,
         }
