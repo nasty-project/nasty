@@ -8,6 +8,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { refreshState } from '$lib/refresh.svelte';
+	import { rebootState } from '$lib/reboot.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 
 	let activeTab: 'system' | 'bcachefs' = $state('system');
@@ -178,6 +179,7 @@
 					await loadVersion();
 					if (status.state === 'success') {
 						if (status.webui_changed) refreshState.set();
+						if (status.reboot_required) rebootState.set();
 						setTimeout(() => { logCollapsed = true; }, 5000);
 					}
 				}
@@ -248,6 +250,7 @@
 					await loadBcachefsInfo();
 					if (bcachefsStatus.state === 'success') {
 						// No page reload needed — only bcachefs-tools changed, not the webui JS.
+						if (bcachefsStatus.reboot_required) rebootState.set();
 						bcachefsRef = '';
 						setTimeout(() => { bcachefsLogCollapsed = true; }, 5000);
 					}
@@ -277,11 +280,6 @@
 
 <!-- Global banners — shown regardless of active tab -->
 
-{#if status?.reboot_required || bcachefsStatus?.reboot_required}
-	<div class="mb-4 rounded-lg border border-amber-800 bg-amber-950 px-4 py-3 text-sm text-amber-200">
-		A kernel module update was installed. Use the <strong>Power → Restart</strong> button in the top bar to activate it.
-	</div>
-{/if}
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>

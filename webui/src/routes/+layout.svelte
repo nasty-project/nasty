@@ -39,6 +39,7 @@
 		Moon,
 	} from '@lucide/svelte';
 	import { refreshState } from '$lib/refresh.svelte';
+	import { rebootState } from '$lib/reboot.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import { theme } from '$lib/theme.svelte';
 
@@ -259,8 +260,8 @@
 					<span class="font-medium">{currentNav.label}</span>
 				</div>
 
-				<!-- Reload button — centered, shown after update or bcachefs switch -->
-				<div class="absolute left-1/2 -translate-x-1/2">
+				<!-- Centered banners — reload and reboot notifications -->
+				<div class="absolute left-1/2 -translate-x-1/2 flex items-center gap-3">
 					{#if refreshState.needed}
 						<button
 							onclick={() => location.reload()}
@@ -268,6 +269,15 @@
 						>
 							<RefreshCw size={15} />
 							Reload required — click to refresh
+						</button>
+					{/if}
+					{#if rebootState.needed}
+						<button
+							onclick={handleRestart}
+							class="flex items-center gap-2 rounded-md border-2 border-amber-500/70 px-3 py-1.5 text-sm text-amber-400 transition-all animate-pulse hover:animate-none hover:bg-amber-500/10 hover:border-amber-400 hover:shadow-[0_0_16px_rgba(251,191,36,0.5)] active:shadow-none"
+						>
+							<RotateCcw size={15} />
+							Kernel/driver update — click to restart
 						</button>
 					{/if}
 				</div>
