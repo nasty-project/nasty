@@ -240,15 +240,16 @@ fn kernel_version() -> String {
 }
 
 async fn bcachefs_version() -> String {
-    let output = tokio::process::Command::new("bcachefs")
-        .arg("version")
+    // Read the version of the currently loaded kernel module — this is the authoritative
+    // running version. bcachefs version (userspace) can differ when a reboot is pending.
+    let output = tokio::process::Command::new("modinfo")
+        .args(["bcachefs", "--field", "version"])
         .output()
         .await;
     match output {
-        Ok(o) => {
-            // First line of stdout is the version; ignore kernel config warnings on subsequent lines
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().next().unwrap_or("unknown").trim().to_string()
+        Ok(o) if o.status.success() => {
+            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if v.is_empty() { "unknown".to_string() } else { v }
         }
         _ => "unknown".to_string(),
     }

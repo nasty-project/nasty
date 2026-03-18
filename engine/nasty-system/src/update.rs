@@ -31,7 +31,7 @@ pub struct BcachefsToolsInfo {
     pub pinned_ref: Option<String>,
     /// The resolved full commit sha from flake.lock locked
     pub pinned_rev: Option<String>,
-    /// Output of `bcachefs version`
+    /// Version of the bcachefs kernel module currently loaded (from modinfo)
     pub running_version: String,
     /// True when the user has overridden the default bcachefs-tools version
     pub is_custom: bool,
@@ -376,7 +376,8 @@ echo "==> Update complete!"
     }
 
     pub async fn bcachefs_info(&self) -> BcachefsToolsInfo {
-        let (running_version, kernel_rust) = bcachefs_version().await;
+        let (_, kernel_rust) = bcachefs_version().await;
+        let running_version = bcachefs_loaded_module_version().await;
         let (lock_ref, pinned_rev) = read_flake_lock_bcachefs().await;
         let default_ref = read_flake_nix_default_ref().await;
         // Use the state file as the canonical display ref when the user has switched.
@@ -831,6 +832,27 @@ async fn read_github_token() -> Option<String> {
 /// `bcachefs version` may emit extra lines, e.g.:
 ///   "1.37.1\nkernel: CONFIG_RUST=y"
 ///   "1.37.0\nkernel: unable to read kernel config"
+/// Returns the version of the bcachefs kernel module that is currently loaded,
+/// by reading the version field from modinfo. This is the authoritative running
+/// version — it reflects what is actually mounted and active, not what is
+/// installed in current-system (which may differ when a reboot is pending).
+async fn bcachefs_loaded_module_version() -> String {
+    tokio::process::Command::new("modinfo")
+        .args(["bcachefs", "--field", "version"])
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if v.is_empty() { None } else { Some(v) }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 async fn bcachefs_version() -> (String, Option<bool>) {
     let raw = tokio::process::Command::new("bcachefs")
         .arg("version")
