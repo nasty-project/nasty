@@ -48,6 +48,9 @@
     nvmeof.enable = true;
   };
 
+  # cloud-init for cloud provider provisioning (hostname, SSH keys, etc.)
+  services.cloud-init.enable = true;
+
   system.nixos.distroName = "NASty";
   system.nixos.distroId = "nasty";
   system.stateVersion = "24.11";

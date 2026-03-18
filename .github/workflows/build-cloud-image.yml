@@ -34,6 +34,9 @@ jobs:
           nix build .#nasty-cloud-image --print-out-paths -L
           echo "image_store=$(readlink -f result)" >> "$GITHUB_ENV"
 
+      - name: Install 7zip
+        run: sudo apt-get install -y p7zip-full
+
       - name: Prepare image
         run: |
           IMAGE_FILE=$(find "${{ env.image_store }}" -name "*.qcow2" -type f | head -1)
@@ -41,8 +44,8 @@ jobs:
           ls -lh "$IMAGE_FILE"
 
           SHORT_SHA=$(git rev-parse --short HEAD)
-          DEST="nasty-cloud-x86_64-${SHORT_SHA}.qcow2.zst"
-          zstd -T0 "$IMAGE_FILE" -o "$DEST"
+          DEST="nasty-cloud-x86_64-${SHORT_SHA}.qcow2.7z"
+          7z a -mx=9 "$DEST" "$IMAGE_FILE"
           ls -lh "$DEST"
           echo "image_dest=$DEST" >> "$GITHUB_ENV"
 
