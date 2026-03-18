@@ -28,6 +28,9 @@ export class NastyClient {
 	private _authenticated = false;
 	/** Set to true after the first successful auth; cleared by disconnect(). */
 	private _shouldReconnect = false;
+	/** Resolves when the next successful auth completes; replaced on each disconnect. */
+	private _readyResolve: (() => void) | null = null;
+	private _readyPromise: Promise<void> = Promise.resolve();
 
 	constructor(private url: string) {}
 
@@ -62,6 +65,8 @@ export class NastyClient {
 					} else if (msg.authenticated) {
 						this._authenticated = true;
 						this._shouldReconnect = true;
+						this._readyResolve?.();
+						this._readyResolve = null;
 						resolve(msg as AuthResult);
 					} else {
 						reject(new Error('Unexpected auth response'));
@@ -94,10 +99,9 @@ export class NastyClient {
 				}
 				this.pending.clear();
 				// Keep retrying as long as we haven't been explicitly disconnected.
-				// Using _shouldReconnect (set on first successful auth, cleared by disconnect())
-				// instead of the closure-local authResolved ensures we keep retrying even when
-				// the engine is still starting up and closes the socket before auth completes.
 				if (this._shouldReconnect) {
+					// Prepare a new ready-promise so calls made while reconnecting will wait.
+					this._readyPromise = new Promise((res) => { this._readyResolve = res; });
 					this.reconnectTimer = setTimeout(() => this.connect(token).catch(() => {}), 3000);
 				}
 			};
@@ -105,6 +109,11 @@ export class NastyClient {
 	}
 
 	async call<T = unknown>(method: string, params?: unknown, timeoutMs = 10000): Promise<T> {
+		// If mid-reconnect, wait for the connection to come back rather than failing immediately.
+		if (!this._authenticated && this._shouldReconnect) {
+			await this._readyPromise;
+		}
+
 		if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this._authenticated) {
 			throw new Error('Not connected or not authenticated');
 		}
@@ -141,6 +150,8 @@ export class NastyClient {
 
 	disconnect() {
 		this._shouldReconnect = false;
+		this._readyResolve = null;
+		this._readyPromise = Promise.resolve();
 		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
 		this._authenticated = false;
 		this.ws?.close();
