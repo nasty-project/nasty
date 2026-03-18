@@ -123,6 +123,19 @@
           ./vm.nix
         ];
       };
+
+      # Cloud/CI QCOW2 disk image
+      nasty-cloud = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
+        modules = [
+          ./modules/bcachefs.nix
+          ./modules/linuxquota.nix
+          ./modules/nasty.nix
+          "${nixpkgs}/nixos/modules/image/qcow2.nix"
+          ./cloud.nix
+        ];
+      };
     };
 
   in {
@@ -130,6 +143,7 @@
     packages.x86_64-linux = let pkgs = mkPkgs "x86_64-linux"; in {
       engine = mkEngine "x86_64-linux";
       webui = mkWebui "x86_64-linux";
+      nasty-cloud-image = (mkNixosConfigs "x86_64-linux").nasty-cloud.config.system.build.qcow2Image;
       default = mkEngine "x86_64-linux";
     };
 
