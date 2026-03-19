@@ -33,9 +33,20 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Add swap space
+      - name: Free disk space and add swap
         if: matrix.arch == 'aarch64' && steps.check.outputs.skip != 'true'
         run: |
+          echo "==> Disk before cleanup:"
+          df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/share/boost \
+            /usr/local/.ghcup
+          sudo docker image prune -af 2>/dev/null || true
+          echo "==> Disk after cleanup:"
+          df -h /
           sudo fallocate -l 16G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
