@@ -107,14 +107,19 @@
 		hour12: !clock24h,
 	}));
 
+	let reconnecting = $state(false);
+
 	onMount(() => {
 		tryConnect();
-		const onReconnect = () => { powering = false; };
+		const onReconnect = () => { powering = false; reconnecting = false; };
+		const onDisconnect = () => { reconnecting = true; };
 		getClient().onReconnect(onReconnect);
+		getClient().onDisconnect(onDisconnect);
 		const tick = setInterval(() => { now = new Date(); }, 1000);
 		const rebootPoll = setInterval(checkRebootRequired, 30_000);
 		return () => {
 			getClient().offReconnect(onReconnect);
+			getClient().offDisconnect(onDisconnect);
 			getClient().disconnect();
 			clearInterval(tick);
 			clearInterval(rebootPoll);
@@ -422,11 +427,19 @@
 			</header>
 
 			<!-- Page content -->
-			<main class="flex-1 overflow-y-auto p-6">
+			<main class="relative flex-1 overflow-y-auto p-6">
 				{#if !connected}
 					<p class="text-muted-foreground">Connecting to engine...</p>
 				{:else}
 					{@render children()}
+				{/if}
+				{#if reconnecting}
+					<div class="absolute inset-0 z-40 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+						<div class="flex flex-col items-center gap-3">
+							<div class="h-8 w-8 animate-spin rounded-full border-4 border-muted-foreground/30 border-t-primary"></div>
+							<span class="text-sm text-muted-foreground">Reconnecting to engine...</span>
+						</div>
+					</div>
 				{/if}
 			</main>
 		</div>

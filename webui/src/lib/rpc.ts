@@ -25,6 +25,7 @@ export class NastyClient {
 	private pending = new Map<number, PendingCall>();
 	private eventHandlers: EventHandler[] = [];
 	private reconnectHandlers: (() => void)[] = [];
+	private disconnectHandlers: (() => void)[] = [];
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private _authenticated = false;
 	/** Set to true after the first successful auth; cleared by disconnect(). */
@@ -105,6 +106,7 @@ export class NastyClient {
 				this.pending.clear();
 				// Keep retrying as long as we haven't been explicitly disconnected.
 				if (this._shouldReconnect) {
+					for (const h of this.disconnectHandlers) h();
 					// Prepare a new ready-promise so calls made while reconnecting will wait.
 					this._readyPromise = new Promise((res) => { this._readyResolve = res; });
 					this.reconnectTimer = setTimeout(() => this.connect(token).catch(() => {}), 3000);
@@ -160,6 +162,15 @@ export class NastyClient {
 
 	offReconnect(handler: () => void) {
 		this.reconnectHandlers = this.reconnectHandlers.filter((h) => h !== handler);
+	}
+
+	/** Called when the connection drops and auto-reconnect begins. */
+	onDisconnect(handler: () => void) {
+		this.disconnectHandlers.push(handler);
+	}
+
+	offDisconnect(handler: () => void) {
+		this.disconnectHandlers = this.disconnectHandlers.filter((h) => h !== handler);
 	}
 
 	disconnect() {
