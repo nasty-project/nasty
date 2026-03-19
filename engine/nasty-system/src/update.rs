@@ -943,24 +943,11 @@ async fn read_flake_nix_default_ref() -> String {
 /// Read debug checks state. Checks both the state file (authoritative, survives git reset)
 /// and the flake.nix marker (in case state file was lost).
 async fn read_debug_checks_enabled() -> bool {
-    // State file is the authoritative source — survives git reset --hard
-    if tokio::fs::metadata(BCACHEFS_DEBUG_CHECKS_STATE).await.is_ok() {
-        return true;
-    }
-    // Fallback: check flake.nix marker
-    let path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
-    let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-    if content.lines().any(|l| l.contains("@NASTY_DEBUG_CHECKS@") && l.contains("sed -i")) {
-        return true;
-    }
-    // Last resort: detect from the loaded module (handles upgrades from before
-    // the state file was introduced — the module has debug checks but no state file).
-    // If detected, create the state file so future checks are fast.
-    if crate::bcachefs_has_debug_checks().await {
-        let _ = tokio::fs::write(BCACHEFS_DEBUG_CHECKS_STATE, "1").await;
-        return true;
-    }
-    false
+    // State file is the sole source of truth — survives git reset --hard.
+    // We cannot detect CONFIG_BCACHEFS_DEBUG from modinfo because the
+    // debug_check_* module parameters (static_key_t) are always present
+    // in bcachefs regardless of the compile flag.
+    tokio::fs::metadata(BCACHEFS_DEBUG_CHECKS_STATE).await.is_ok()
 }
 
 /// Parse flake.lock to extract the bcachefs-tools pinned ref and rev.
