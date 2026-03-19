@@ -324,6 +324,7 @@ export interface BcachefsToolsInfo {
 	kernel_rust: boolean | null;
 	debug_symbols: boolean;
 	debug_checks: boolean;
+	debug_checks_running: boolean;
 }
 
 export interface UpdateStatus {

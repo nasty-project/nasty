@@ -443,9 +443,9 @@
 				</Button>
 			</div>
 		{/if}
-		{#if bcachefsInfo?.debug_checks}
+		{#if bcachefsInfo?.debug_checks_running}
 			<div class="mb-4 rounded-lg border border-blue-800 bg-blue-950 px-4 py-3 text-sm text-blue-200">
-				<strong>Debug checks enabled.</strong> The bcachefs kernel module will be built with extra runtime assertions (CONFIG_BCACHEFS_DEBUG). This adds overhead to every filesystem operation. Disable when no longer needed for development or debugging.
+				<strong>Debug checks enabled.</strong> The bcachefs kernel module is running with extra runtime assertions (CONFIG_BCACHEFS_DEBUG). This adds overhead to every filesystem operation. Disable when no longer needed for development or debugging.
 			</div>
 		{/if}
 

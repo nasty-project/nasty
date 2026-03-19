@@ -42,10 +42,12 @@ pub struct BcachefsToolsInfo {
     pub default_ref: String,
     /// Whether the running kernel was built with Rust support (CONFIG_RUST=y)
     pub kernel_rust: Option<bool>,
-    /// Whether the DKMS module was built with debug symbols (-g)
+    /// Whether the loaded module has debug symbols (-g)
     pub debug_symbols: bool,
-    /// Whether the DKMS module was built with CONFIG_BCACHEFS_DEBUG
+    /// Whether debug checks are configured for the next build
     pub debug_checks: bool,
+    /// Whether the loaded module has CONFIG_BCACHEFS_DEBUG
+    pub debug_checks_running: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -395,7 +397,7 @@ echo "==> Update complete!"
 
     pub async fn bcachefs_info(&self, system: &crate::SystemService) -> BcachefsToolsInfo {
         // Run subprocess calls and file reads concurrently.
-        let ((_, kernel_rust), running_version, (lock_ref, pinned_rev), default_ref, debug_checks, (debug_symbols, _)) = tokio::join!(
+        let ((_, kernel_rust), running_version, (lock_ref, pinned_rev), default_ref, debug_checks, (debug_symbols, debug_checks_running)) = tokio::join!(
             bcachefs_version(),
             bcachefs_loaded_module_version(),
             read_flake_lock_bcachefs(),
@@ -426,7 +428,7 @@ echo "==> Update complete!"
         // Compare loaded module version against default (strip 'v' prefix for comparison)
         let default_bare = default_ref.strip_prefix('v').unwrap_or(&default_ref);
         let is_custom_running = running_version != default_bare && running_version != "unknown";
-        BcachefsToolsInfo { pinned_ref, pinned_rev, running_version, is_custom, is_custom_running, default_ref, kernel_rust, debug_symbols, debug_checks }
+        BcachefsToolsInfo { pinned_ref, pinned_rev, running_version, is_custom, is_custom_running, default_ref, kernel_rust, debug_symbols, debug_checks, debug_checks_running }
     }
 
     pub async fn bcachefs_switch(&self, req: BcachefsToolsSwitchRequest) -> Result<(), UpdateError> {
