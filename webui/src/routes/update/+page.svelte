@@ -437,7 +437,7 @@
 	{:else if activeTab === 'bcachefs'}
 		{#if bcachefsInfo?.is_custom_running}
 			<div class="mb-4 flex items-center gap-3 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200">
-				<span class="flex-1"><strong>Non-standard version in use.</strong> You are running a custom bcachefs version ({bcachefsInfo.pinned_ref ?? 'unknown'}) instead of the default ({bcachefsInfo.default_ref}). Switch back when stability is more important than bleeding-edge fixes.</span>
+				<span class="flex-1"><strong>Non-standard version in use.</strong> You are running a custom bcachefs version ({bcachefsInfo.running_version}) instead of the default ({bcachefsInfo.default_ref}). Switch back when stability is more important than bleeding-edge fixes.</span>
 				<Button variant="secondary" size="xs" onclick={() => { bcachefsRef = bcachefsInfo!.default_ref; }} disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}>
 					Restore default
 				</Button>
