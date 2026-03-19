@@ -154,6 +154,7 @@
     packages.aarch64-linux = let pkgs = mkPkgs "aarch64-linux"; in {
       engine = mkEngine "aarch64-linux";
       webui = mkWebui "aarch64-linux";
+      nasty-cloud-image = (mkNixosConfigs "aarch64-linux").nasty-cloud;
       default = mkEngine "aarch64-linux";
     };
 
@@ -166,6 +167,7 @@
         "nasty-aarch64" = configs.nasty;
         "nasty-iso-aarch64" = configs.nasty-iso;
         "nasty-vm-aarch64" = configs.nasty-vm;
+        "nasty-cloud-aarch64" = configs.nasty-cloud;
       }
     );
   };

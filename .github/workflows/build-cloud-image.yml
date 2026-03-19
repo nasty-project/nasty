@@ -2,10 +2,30 @@ name: Build NASty Cloud Image
 
 on:
   workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Architecture to build'
+        type: choice
+        options:
+          - both
+          - x86_64
+          - aarch64
+        default: both
 
 jobs:
-  build-cloud-image:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            nix_system: x86_64-linux
+          - arch: aarch64
+            nix_system: aarch64-linux
     runs-on: ubuntu-latest
+    if: >-
+      inputs.arch == 'both' ||
+      inputs.arch == matrix.arch
     permissions:
       contents: write
     steps:
@@ -16,6 +36,14 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
+            extra-platforms = aarch64-linux
+
+      - name: Set up QEMU for aarch64
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+          sudo systemctl restart systemd-binfmt
 
       - name: Inject GitHub token for updates
         run: |
@@ -28,10 +56,11 @@ jobs:
           sed -i "s|npmDepsHash = \".*\"|npmDepsHash = \"$HASH\"|" nixos/flake.nix
           git add nixos/flake.nix
 
-      - name: Build QCOW2 image
+      - name: Build QCOW2 image (${{ matrix.arch }})
         run: |
           cd nixos
-          nix build .#nasty-cloud-image --print-out-paths -L
+          nix build .#packages.${{ matrix.nix_system }}.nasty-cloud-image \
+            --print-out-paths -L
           echo "image_store=$(readlink -f result)" >> "$GITHUB_ENV"
 
       - name: Install 7zip
@@ -44,7 +73,7 @@ jobs:
           ls -lh "$IMAGE_FILE"
 
           SHORT_SHA=$(git rev-parse --short HEAD)
-          DEST="nasty-cloud-x86_64-${SHORT_SHA}.qcow2.7z"
+          DEST="nasty-cloud-${{ matrix.arch }}-${SHORT_SHA}.qcow2.7z"
           7z a -mx=9 "$DEST" "$IMAGE_FILE"
           ls -lh "$DEST"
           echo "image_dest=$DEST" >> "$GITHUB_ENV"
@@ -53,7 +82,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="cloud-$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
-          gh release create "$TAG" "${{ env.image_dest }}" \
-            --title "NASty Cloud Image $TAG" \
-            --notes "Automated QCOW2 build from commit $(git rev-parse --short HEAD)"
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TAG="cloud-$(date +%Y%m%d)-${SHORT_SHA}"
+
+          # Create release if it doesn't exist yet (first arch to finish creates it)
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" \
+              --title "NASty Cloud Image $TAG" \
+              --notes "Automated QCOW2 build from commit ${SHORT_SHA}"
+
+          # Upload this architecture's image
+          gh release upload "$TAG" "${{ env.image_dest }}"
