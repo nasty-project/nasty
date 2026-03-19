@@ -228,10 +228,13 @@
 	}
 
 	async function requestBcachefsSwitch() {
-		const ref = bcachefsRef.trim();
+		const ref = bcachefsRef.trim() || bcachefsInfo?.pinned_ref || bcachefsInfo?.default_ref || '';
 		if (!ref) return;
+		const desc = bcachefsRef.trim()
+			? `Switch bcachefs-tools to ${ref}?`
+			: `Rebuild bcachefs-tools ${ref} with updated build flags?`;
 		if (!await confirm(
-			`Switch bcachefs-tools to ${ref}?`,
+			desc,
 			'The system will rebuild with the new version. The first build may take 10–30 minutes. If the new version introduced an incompatible on-disk format, downgrading may leave pools unmountable.'
 		)) return;
 		doBcachefsSwitch();
