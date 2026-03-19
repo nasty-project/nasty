@@ -452,27 +452,28 @@
 		{#if reconnecting}
 			<div class="absolute inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
 				<div class="relative flex items-center justify-center">
-					<!-- Outer ring — gradient comet trail -->
+					<!-- Outer comet -->
 					<div class="absolute h-44 w-44 animate-[spin_2.5s_linear_infinite] rounded-full"
-						style="background: conic-gradient(from 0deg, transparent 40%, #3b82f6 85%, #60a5fa 100%);
+						style="background: conic-gradient(from 0deg, transparent 40%, #3b82f640 70%, #3b82f6 90%, #93c5fd 100%);
 							-webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
 							mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));"
 					></div>
-					<!-- Middle ring — counter-spin -->
-					<div class="absolute h-36 w-36 animate-[spin_4s_linear_infinite_reverse] rounded-full"
-						style="background: conic-gradient(from 180deg, transparent 50%, #3b82f680 90%, #3b82f6 100%);
-							-webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
-							mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));"
+					<!-- Inner comet — same style, counter-spin -->
+					<div class="absolute h-36 w-36 animate-[spin_3.5s_linear_infinite_reverse] rounded-full"
+						style="background: conic-gradient(from 0deg, transparent 40%, #3b82f640 70%, #3b82f6 90%, #93c5fd 100%);
+							-webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+							mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));"
 					></div>
-					<!-- Static base ring -->
+					<!-- Static base rings -->
 					<div class="absolute h-44 w-44 rounded-full border border-blue-500/10"></div>
-					<!-- Orbiting dot with glow -->
+					<div class="absolute h-36 w-36 rounded-full border border-blue-500/8"></div>
+					<!-- Outer comet head -->
 					<div class="absolute h-44 w-44 animate-[spin_2.5s_linear_infinite]">
-						<div class="absolute -top-1.5 left-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-blue-400 shadow-[0_0_12px_#3b82f6,0_0_24px_#3b82f6,0_0_48px_#3b82f680]"></div>
+						<div class="absolute -top-1.5 left-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-blue-300 shadow-[0_0_10px_#93c5fd,0_0_24px_#3b82f6,0_0_48px_#3b82f680]"></div>
 					</div>
-					<!-- Second orbiting dot — middle ring -->
-					<div class="absolute h-36 w-36 animate-[spin_4s_linear_infinite_reverse]">
-						<div class="absolute -top-1 left-1/2 -translate-x-1/2 h-2 w-2 rounded-full bg-blue-300 shadow-[0_0_8px_#60a5fa,0_0_20px_#3b82f680]"></div>
+					<!-- Inner comet head -->
+					<div class="absolute h-36 w-36 animate-[spin_3.5s_linear_infinite_reverse]">
+						<div class="absolute -top-1 left-1/2 -translate-x-1/2 h-2.5 w-2.5 rounded-full bg-blue-300 shadow-[0_0_8px_#93c5fd,0_0_20px_#3b82f6,0_0_40px_#3b82f680]"></div>
 					</div>
 					<span class="text-sm text-muted-foreground">Reconnecting...</span>
 				</div>
