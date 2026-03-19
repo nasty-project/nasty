@@ -348,13 +348,19 @@ pub async fn bcachefs_has_debug_symbols() -> bool {
 }
 
 /// Detect whether the loaded bcachefs kernel module was built with CONFIG_BCACHEFS_DEBUG.
-/// When enabled, bcachefs exposes debug_check_* module parameters.
-/// Check if debug checks are enabled by reading the state file.
-/// The debug_check_* module parameters in modinfo are always present
-/// (static_key_t) regardless of CONFIG_BCACHEFS_DEBUG, so we cannot
-/// detect it from the loaded module.
+/// BCH_DEBUG_PARAMS_DEBUG() params (e.g. journal_seq_verify) are only compiled in
+/// when CONFIG_BCACHEFS_DEBUG is set, so their presence in modinfo is a reliable indicator.
 pub async fn bcachefs_has_debug_checks() -> bool {
-    tokio::fs::metadata("/var/lib/nasty/bcachefs-debug-checks").await.is_ok()
+    let output = tokio::process::Command::new("modinfo")
+        .args(["bcachefs", "--field", "parm"])
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).contains("journal_seq_verify")
+        }
+        _ => false,
+    }
 }
 
 async fn timedatectl_info() -> (String, bool) {

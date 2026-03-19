@@ -948,15 +948,10 @@ async fn read_flake_nix_default_ref() -> String {
     "unknown".to_string()
 }
 
-/// Read debug flag markers from flake.nix to determine current build flags.
-/// A marker is "active" when it contains a sed command (not just a comment).
-/// Read debug checks state. Checks both the state file (authoritative, survives git reset)
-/// and the flake.nix marker (in case state file was lost).
+/// Read debug checks *configured* state (what the next DKMS build will use).
+/// State file is the sole source of truth — survives git reset --hard.
+/// Note: the *running* module state is detected separately via modinfo in lib.rs.
 async fn read_debug_checks_enabled() -> bool {
-    // State file is the sole source of truth — survives git reset --hard.
-    // We cannot detect CONFIG_BCACHEFS_DEBUG from modinfo because the
-    // debug_check_* module parameters (static_key_t) are always present
-    // in bcachefs regardless of the compile flag.
     tokio::fs::metadata(BCACHEFS_DEBUG_CHECKS_STATE).await.is_ok()
 }
 
