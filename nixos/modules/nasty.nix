@@ -755,8 +755,8 @@ in {
           proxyWebsockets = true;
           priority = 400;
           extraConfig = ''
-            proxy_read_timeout 86400s;
-            proxy_send_timeout 86400s;
+            proxy_read_timeout 28800s;
+            proxy_send_timeout 28800s;
           '';
         };
 
