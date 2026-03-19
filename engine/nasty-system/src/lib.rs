@@ -235,8 +235,9 @@ impl SystemService {
         // Strip leading 'v' from default ref for comparison (e.g. "v1.37.2" vs "1.37.2").
         let default_bare = default_ref.strip_prefix('v').unwrap_or(&default_ref);
         let bcachefs_is_custom_running = bcachefs_version != default_bare && bcachefs_version != "unknown";
-        // Debug checks running: state file exists AND we've rebooted into it (no pending reboot).
-        let bcachefs_debug_checks_running = debug_checks && !reboot_required;
+        // Debug checks running: sysfs reflects the actually loaded module, so no
+        // reboot_required guard needed (unlike the old state-file approach).
+        let bcachefs_debug_checks_running = debug_checks;
         let info = CachedInfo {
             bcachefs_version,
             bcachefs_commit,
