@@ -303,10 +303,9 @@ in {
          xz -dc $(modinfo bcachefs -F filename) | file - | grep -q debug_info && echo "YES" || echo "NO"
 
        bcachefs module: debug checks (CONFIG_BCACHEFS_DEBUG)
-         # State file (authoritative — survives rebuilds):
-         test -f /var/lib/nasty/bcachefs-debug-checks && echo "ENABLED" || echo "DISABLED"
-         # Verify in the DKMS source (what will be compiled next):
-         grep -q CONFIG_BCACHEFS_DEBUG /etc/nixos/nasty/nixos/flake.nix && echo "ENABLED in flake" || echo "DISABLED in flake"
+         # Debug-only module params (journal_seq_verify, inject_invalid_keys, etc.)
+         # are only compiled in when CONFIG_BCACHEFS_DEBUG is set:
+         modinfo bcachefs -F parm | grep -q journal_seq_verify && echo "YES" || echo "NO"
 
        share findings with devs
          cat /var/lib/nasty/bcachefs-switch.log       # bcachefs version switch history
