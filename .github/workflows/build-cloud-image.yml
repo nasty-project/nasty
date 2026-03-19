@@ -20,11 +20,9 @@ jobs:
         include:
           - arch: x86_64
             nix_system: x86_64-linux
-            runner: ubuntu-latest
           - arch: aarch64
             nix_system: aarch64-linux
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -34,6 +32,15 @@ jobs:
           if [[ "${{ inputs.arch }}" != "both" && "${{ inputs.arch }}" != "${{ matrix.arch }}" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Add swap space
+        if: matrix.arch == 'aarch64' && steps.check.outputs.skip != 'true'
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled: $(swapon --show)"
 
       - uses: actions/checkout@v5
         if: steps.check.outputs.skip != 'true'
@@ -45,15 +52,14 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             system-features = nixos-test benchmark big-parallel kvm
+            extra-platforms = aarch64-linux
 
-      - name: Check KVM availability
-        if: steps.check.outputs.skip != 'true'
+      - name: Set up QEMU for aarch64
+        if: matrix.arch == 'aarch64' && steps.check.outputs.skip != 'true'
         run: |
-          if [ ! -e /dev/kvm ]; then
-            echo "::error::/dev/kvm not available — QCOW2 image build requires KVM"
-            exit 1
-          fi
-          echo "KVM is available"
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+          sudo systemctl restart systemd-binfmt
 
       - name: Inject GitHub token for updates
         if: steps.check.outputs.skip != 'true'
@@ -73,7 +79,8 @@ jobs:
         run: |
           cd nixos
           nix build .#packages.${{ matrix.nix_system }}.nasty-cloud-image \
-            --print-out-paths -L
+            --print-out-paths -L \
+            ${{ matrix.arch == 'aarch64' && '--cores 1' || '' }}
           echo "image_store=$(readlink -f result)" >> "$GITHUB_ENV"
 
       - name: Install 7zip
