@@ -1,12 +1,5 @@
 <p align="center">
-  <img src="webui/src/lib/assets/nasty-white.svg" width="200" alt="NASty logo" />
-</p>
-
-<h1 align="center">NASty</h1>
-<p align="center"><em>Storage with attitude.</em></p>
-
-<p align="center">
-  A modern NAS appliance built on bcachefs, designed for homelabs and small teams.
+  <img src="webui/src/lib/assets/nasty-white.svg" width="300" alt="NASty — Storage with attitude. A modern NAS appliance built on bcachefs, designed for homelabs and small teams." />
 </p>
 
 ---
