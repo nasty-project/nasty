@@ -20,9 +20,11 @@ jobs:
         include:
           - arch: x86_64
             nix_system: x86_64-linux
+            runner: ubuntu-latest
           - arch: aarch64
             nix_system: aarch64-linux
-    runs-on: ubuntu-latest
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     steps:
@@ -42,14 +44,6 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
-            extra-platforms = aarch64-linux
-
-      - name: Set up QEMU for aarch64
-        if: matrix.arch == 'aarch64' && steps.check.outputs.skip != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support
-          sudo systemctl restart systemd-binfmt
 
       - name: Inject GitHub token for updates
         if: steps.check.outputs.skip != 'true'
