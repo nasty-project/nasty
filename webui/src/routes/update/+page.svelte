@@ -155,7 +155,7 @@
 	}
 
 	async function rollback() {
-		if (!await confirm('Roll Back to Previous Version?', 'The system will revert to the previously installed NixOS generation. Services will restart.')) return;
+		if (!await confirm('Roll Back to Previous Version?', 'The system will revert to the previous version. Services will restart.')) return;
 		doRollback();
 	}
 
@@ -428,7 +428,7 @@
 		{/if}
 
 		<p class="text-xs text-muted-foreground">
-			Updates are fetched from GitHub and applied using NixOS rebuild.
+			Updates are fetched and applied atomically.
 			The system will atomically switch to the new version, restarting services as needed.
 			If anything goes wrong, use Rollback to return to the previous version.
 		</p>
