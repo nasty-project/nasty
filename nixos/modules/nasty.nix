@@ -296,6 +296,18 @@ in {
          # Capture full oops for the bcachefs devs:
          dmesg | grep -A 50 "RIP:" | nc termbin.com 9999
 
+       bcachefs module: debug symbols
+         # Check if the loaded .ko has DWARF debug info (needed for faddr2line source lines)
+         xz -dc $(modinfo bcachefs -F filename) | file -    # look for "with debug_info" in output
+         # Quick yes/no:
+         xz -dc $(modinfo bcachefs -F filename) | file - | grep -q debug_info && echo "YES" || echo "NO"
+
+       bcachefs module: debug checks (CONFIG_BCACHEFS_DEBUG)
+         # State file (authoritative — survives rebuilds):
+         test -f /var/lib/nasty/bcachefs-debug-checks && echo "ENABLED" || echo "DISABLED"
+         # Verify in the DKMS source (what will be compiled next):
+         grep -q CONFIG_BCACHEFS_DEBUG /etc/nixos/nasty/nixos/flake.nix && echo "ENABLED in flake" || echo "DISABLED in flake"
+
        share findings with devs
          cat /var/lib/nasty/bcachefs-switch.log       # bcachefs version switch history
          dmesg | nc termbin.com 9999
