@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -26,7 +28,7 @@ const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
 const GITHUB_TOKEN_PATH: &str = "/var/lib/nasty/github-token";
 const GITHUB_API_REPO: &str = "https://api.github.com/repos/nasty-project/nasty/commits/main";
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BcachefsToolsInfo {
     /// The ref in flake.lock original (e.g. "v1.37.0", "master", commit sha)
     pub pinned_ref: Option<String>,
@@ -90,11 +92,20 @@ pub struct UpdateStatus {
     pub webui_changed: bool,
 }
 
-pub struct UpdateService;
+pub struct UpdateService {
+    cached_info: Arc<RwLock<Option<BcachefsToolsInfo>>>,
+}
 
 impl UpdateService {
     pub fn new() -> Self {
-        Self
+        Self {
+            cached_info: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Invalidate cached bcachefs info — call after switch or rebuild.
+    pub async fn invalidate_bcachefs_cache(&self) {
+        *self.cached_info.write().await = None;
     }
 
     /// Get current installed version
@@ -396,6 +407,18 @@ echo "==> Update complete!"
     }
 
     pub async fn bcachefs_info(&self, system: &crate::SystemService) -> BcachefsToolsInfo {
+        {
+            let guard = self.cached_info.read().await;
+            if let Some(ref cached) = *guard {
+                return cached.clone();
+            }
+        }
+        let info = self.bcachefs_info_uncached(system).await;
+        *self.cached_info.write().await = Some(info.clone());
+        info
+    }
+
+    async fn bcachefs_info_uncached(&self, system: &crate::SystemService) -> BcachefsToolsInfo {
         // Run subprocess calls and file reads concurrently.
         let ((_, kernel_rust), running_version, (lock_ref, pinned_rev), default_ref, debug_checks, (debug_symbols, debug_checks_running)) = tokio::join!(
             bcachefs_version(),

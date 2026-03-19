@@ -99,6 +99,16 @@ async fn main() -> anyhow::Result<()> {
     state.protocols.restore().await;
     state.nvmeof.restore().await;
 
+    // Pre-warm caches so first page loads are fast.
+    // Runs before sd_notify_ready() — nginx won't serve until this completes.
+    info!("Warming caches...");
+    let t0 = std::time::Instant::now();
+    tokio::join!(
+        state.system.info(),
+        state.updates.bcachefs_info(&state.system),
+    );
+    info!("Caches warm in {}ms", t0.elapsed().as_millis());
+
     // Background metrics collector: samples I/O rates every 5s, writes to SQLite
     tokio::spawn(metrics_collector(metrics));
 
