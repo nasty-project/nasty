@@ -522,7 +522,7 @@
 						/>
 						<span>
 							<span class="text-muted-foreground font-medium">Debug symbols</span>
-							<span class="block text-xs text-muted-foreground/50 mt-0.5">Inherited from NixOS kernel config (CONFIG_DEBUG_INFO=y). Adds source-level debug info for readable stack traces. No runtime cost.</span>
+							<span class="block text-xs text-muted-foreground/50 mt-0.5">Inherited from NixOS kernel config (CONFIG_DEBUG_INFO=y).<br/>Adds source-level debug info for readable stack traces.<br/>No runtime cost.</span>
 						</span>
 					</label>
 					<label class="flex items-start gap-2 text-sm text-muted-foreground cursor-pointer">
@@ -534,7 +534,7 @@
 						/>
 						<span>
 							<span class="text-foreground font-medium">Debug checks</span>
-							<span class="block text-xs text-muted-foreground/70 mt-0.5">Enables extra runtime assertions inside bcachefs (btree locking, iterator validation, bkey verification). <strong>Has performance cost</strong> — use for development and debugging, not production.</span>
+							<span class="block text-xs text-muted-foreground/70 mt-0.5">Enables extra runtime assertions inside bcachefs<br/>(btree locking, iterator validation, bkey verification).<br/><strong>Has performance cost</strong> — use for development and debugging, not production.</span>
 						</span>
 					</label>
 				</div>
