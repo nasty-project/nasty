@@ -1,10 +1,20 @@
 <script lang="ts">
 	// Each ring starts spinning from a random angle so they don't all begin aligned.
+	function makeRing(size: number, color: string, head: string, glow: string, dur: number, cw: boolean, dot: number, trail: number) {
+		const startDeg = Math.floor(Math.random() * 360);
+		return {
+			size, color, head, glow, dur, dir: cw ? '' : 'reverse', dot, trail,
+			border: color + '18', startDeg,
+			gradient: cw
+				? `transparent 40%, ${color}40 70%, ${color} 90%, ${head} 100%`
+				: `${head} 0%, ${color} 10%, ${color}40 30%, transparent 60%`,
+		};
+	}
 	const rings = [
-		{ size: 208, color: '#eab308', head: '#fde047', glow: '#eab30880', dur: 2.5, dir: '', dot: 12, trail: 3, border: '#eab30818', startDeg: Math.floor(Math.random() * 360) },
-		{ size: 176, color: '#f97316', head: '#fdba74', glow: '#f9731680', dur: 3,   dir: 'reverse', dot: 10, trail: 2.5, border: '#f9731618', startDeg: Math.floor(Math.random() * 360) },
-		{ size: 144, color: '#ef4444', head: '#fca5a5', glow: '#ef444480', dur: 3.5, dir: '', dot: 10, trail: 2.5, border: '#ef444418', startDeg: Math.floor(Math.random() * 360) },
-		{ size: 112, color: '#22c55e', head: '#86efac', glow: '#22c55e80', dur: 4,   dir: 'reverse', dot: 8, trail: 2, border: '#22c55e18', startDeg: Math.floor(Math.random() * 360) },
+		makeRing(208, '#eab308', '#fde047', '#eab30880', 2.5, true,  12, 3),
+		makeRing(176, '#f97316', '#fdba74', '#f9731680', 3,   false, 10, 2.5),
+		makeRing(144, '#ef4444', '#fca5a5', '#ef444480', 3.5, true,  10, 2.5),
+		makeRing(112, '#22c55e', '#86efac', '#22c55e80', 4,   false, 8,  2),
 	];
 </script>
 
@@ -26,12 +36,11 @@
 				animation: spin {ring.dur}s linear infinite {ring.dir};
 			"
 		>
-			<!-- Trail — clockwise rings get reversed gradient so the bright head leads -->
-			{@const cw = ring.dir === ''}
+			<!-- Trail -->
 			<div
 				class="absolute inset-0 rounded-full"
 				style="
-					background: conic-gradient(from {ring.startDeg}deg, {cw ? `transparent 40%, ${ring.color}40 70%, ${ring.color} 90%, ${ring.head} 100%` : `${ring.head} 0%, ${ring.color} 10%, ${ring.color}40 30%, transparent 60%`});
+					background: conic-gradient(from {ring.startDeg}deg, {ring.gradient});
 					-webkit-mask: radial-gradient(farthest-side, transparent calc(100% - {ring.trail}px), #000 calc(100% - {ring.trail}px));
 					mask: radial-gradient(farthest-side, transparent calc(100% - {ring.trail}px), #000 calc(100% - {ring.trail}px));
 				"
