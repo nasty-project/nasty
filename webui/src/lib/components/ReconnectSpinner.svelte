@@ -11,14 +11,15 @@
 		};
 	}
 	const rings = [
-		makeRing(208, '#eab308', '#fde047', '#eab30880', 2.5, true,  12, 3),
-		makeRing(176, '#f97316', '#fdba74', '#f9731680', 3,   false, 10, 2.5),
-		makeRing(144, '#ef4444', '#fca5a5', '#ef444480', 3.5, true,  10, 2.5),
-		makeRing(112, '#22c55e', '#86efac', '#22c55e80', 4,   false, 8,  2),
+		makeRing(256, '#3b82f6', '#93c5fd', '#3b82f680', 2.2, false, 14, 3),
+		makeRing(224, '#eab308', '#fde047', '#eab30880', 2.5, true,  12, 3),
+		makeRing(192, '#f97316', '#fdba74', '#f9731680', 3,   false, 10, 2.5),
+		makeRing(160, '#ef4444', '#fca5a5', '#ef444480', 3.5, true,  10, 2.5),
+		makeRing(128, '#22c55e', '#86efac', '#22c55e80', 4,   false, 8,  2),
 	];
 </script>
 
-<div class="relative flex items-center justify-center" style="width: 220px; height: 220px;">
+<div class="relative flex items-center justify-center" style="width: 270px; height: 270px;">
 	{#each rings as ring}
 		{@const r = ring.size / 2}
 		{@const dotR = ring.dot / 2}
