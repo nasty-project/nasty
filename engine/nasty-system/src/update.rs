@@ -15,6 +15,7 @@ const BCACHEFS_SWITCH_UNIT: &str = "nasty-bcachefs-switch";
 const NIXOS_FLAKE_DIR: &str = "/etc/nixos/nixos";
 const BCACHEFS_TOOLS_REPO: &str = "github:koverstreet/bcachefs-tools";
 const BCACHEFS_REF_STATE: &str = "/var/lib/nasty/bcachefs-tools-ref";
+const BCACHEFS_DEBUG_CHECKS_STATE: &str = "/var/lib/nasty/bcachefs-debug-checks";
 const BCACHEFS_SWITCH_RESULT: &str = "/var/lib/nasty/bcachefs-switch-result";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
 
@@ -215,6 +216,14 @@ if [ -f "{BCACHEFS_REF_STATE}" ]; then
     cd {LOCAL_REPO}
 fi
 
+# Re-apply debug checks flag if the user had it enabled
+if [ -f "{BCACHEFS_DEBUG_CHECKS_STATE}" ]; then
+    echo "==> Re-applying bcachefs debug checks..."
+    cd {NIXOS_FLAKE_DIR}
+    sed -i 's|.*@NASTY_DEBUG_CHECKS@.*|                sed -i '"'"'/# Enable other features here?/a\\tccflags-y += -DCONFIG_BCACHEFS_DEBUG'"'"' src/fs/bcachefs/Makefile  # @NASTY_DEBUG_CHECKS@|' flake.nix
+    cd {LOCAL_REPO}
+fi
+
 # Flakes require all files to be tracked; commit so the tree is clean (no dirty warning)
 git add -A
 git -c user.email="nasty@localhost" -c user.name="NASty" \
@@ -409,7 +418,7 @@ echo "==> Update complete!"
         let pinned_ref = state_ref.clone().or(lock_ref);
         let is_custom = state_ref.as_deref().map(|r| r != default_ref).unwrap_or(false);
         // debug_checks from flake.nix marker: reflects what will be built next (controls toggle)
-        let (_, debug_checks) = read_flake_nix_debug_flags().await;
+        let debug_checks = read_debug_checks_enabled().await;
         // debug_symbols from the loaded module: reflects actual state (read-only indicator)
         let debug_symbols = crate::bcachefs_has_debug_symbols().await;
         BcachefsToolsInfo { pinned_ref, pinned_rev, running_version, is_custom, default_ref, kernel_rust, debug_symbols, debug_checks }
@@ -457,6 +466,11 @@ echo "==> Update complete!"
         } else {
             r#"sed -i 's|.*@NASTY_DEBUG_CHECKS@.*|                # @NASTY_DEBUG_CHECKS@|' flake.nix"#
         };
+        let debug_checks_state = if req.debug_checks {
+            format!(r#"echo "1" > {BCACHEFS_DEBUG_CHECKS_STATE}"#)
+        } else {
+            format!(r#"rm -f {BCACHEFS_DEBUG_CHECKS_STATE}"#)
+        };
 
         let script = format!(
             r#"#!/bin/bash
@@ -485,8 +499,9 @@ if [ "{git_ref}" != "{default_ref}" ]; then
         echo "==> Pinned to commit $RESOLVED_SHA"
     fi
 fi
-# Update debug checks flag in flake.nix
+# Update debug checks flag in flake.nix and persist state
 {debug_checks_sed}
+{debug_checks_state}
 # Commit the updated flake.lock and flake.nix so the tree stays clean for the next rebuild
 git add flake.lock flake.nix
 git -c user.email="nasty@localhost" -c user.name="NASty" \
@@ -925,18 +940,17 @@ async fn read_flake_nix_default_ref() -> String {
 
 /// Read debug flag markers from flake.nix to determine current build flags.
 /// A marker is "active" when it contains a sed command (not just a comment).
-/// Read debug checks marker from flake.nix to determine if the next build
-/// will include CONFIG_BCACHEFS_DEBUG. Returns (debug_symbols_placeholder, debug_checks).
-async fn read_flake_nix_debug_flags() -> (bool, bool) {
+/// Read debug checks state. Checks both the state file (authoritative, survives git reset)
+/// and the flake.nix marker (in case state file was lost).
+async fn read_debug_checks_enabled() -> bool {
+    // State file is the authoritative source — survives git reset --hard
+    if tokio::fs::metadata(BCACHEFS_DEBUG_CHECKS_STATE).await.is_ok() {
+        return true;
+    }
+    // Fallback: check flake.nix marker
     let path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
     let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-    let mut debug_checks = false;
-    for line in content.lines() {
-        if line.contains("@NASTY_DEBUG_CHECKS@") && line.contains("sed -i") {
-            debug_checks = true;
-        }
-    }
-    (false, debug_checks)
+    content.lines().any(|l| l.contains("@NASTY_DEBUG_CHECKS@") && l.contains("sed -i"))
 }
 
 /// Parse flake.lock to extract the bcachefs-tools pinned ref and rev.
