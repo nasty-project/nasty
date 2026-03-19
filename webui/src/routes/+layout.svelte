@@ -447,7 +447,7 @@
 		</div>
 
 		{#if reconnecting}
-			<div class="absolute inset-0 z-50 flex items-center justify-center bg-background/50 backdrop-blur-[2px]">
+			<div class="absolute inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
 				<div class="flex flex-col items-center gap-3">
 					<div class="h-8 w-8 animate-spin rounded-full border-4 border-muted-foreground/30 border-t-primary"></div>
 					<span class="text-sm text-muted-foreground">Reconnecting to engine...</span>
