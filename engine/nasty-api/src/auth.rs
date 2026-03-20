@@ -51,6 +51,9 @@ pub struct Session {
     /// When true, the user must change their password before doing anything else.
     #[serde(default)]
     pub must_change_password: bool,
+    /// Client IP that created this session. Requests from other IPs are rejected.
+    #[serde(default)]
+    pub client_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -126,7 +129,7 @@ impl AuthService {
     }
 
     /// Authenticate with username/password, returns a session token
-    pub async fn login(&self, username: &str, password: &str) -> Result<String, AuthError> {
+    pub async fn login(&self, username: &str, password: &str, client_ip: &str) -> Result<String, AuthError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -181,6 +184,7 @@ impl AuthService {
             owner: None,
             created_at: Some(now),
             must_change_password: user.must_change_password,
+            client_ip: Some(client_ip.to_string()),
         };
 
         // Prune expired sessions while we hold the write lock
@@ -196,7 +200,7 @@ impl AuthService {
     }
 
     /// Validate a token and return the session (checks both login sessions and API tokens)
-    pub async fn validate(&self, token: &str) -> Result<Session, AuthError> {
+    pub async fn validate(&self, token: &str, client_ip: &str) -> Result<Session, AuthError> {
         let state = self.state.read().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -215,9 +219,19 @@ impl AuthService {
                     return Err(AuthError::TokenExpired);
                 }
             }
+            // Verify client IP matches the one that created this session
+            if let Some(ref bound_ip) = session.client_ip {
+                if bound_ip != client_ip {
+                    tracing::warn!(
+                        "Session for '{}' rejected: IP mismatch (bound={}, request={})",
+                        session.username, bound_ip, client_ip
+                    );
+                    return Err(AuthError::InvalidToken);
+                }
+            }
             return Ok(session.clone());
         }
-        // Check long-lived API tokens — Argon2 verify against each stored hash
+        // Check long-lived API tokens (no IP binding — CSI pods have varying IPs) — Argon2 verify against each stored hash
         let t = state.api_tokens.iter()
             .find(|t| verify_password(token, &t.token).is_ok())
             .ok_or(AuthError::InvalidToken)?;
@@ -235,7 +249,8 @@ impl AuthService {
             pool: t.pool.clone(),
             owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
             created_at: Some(t.created_at),
-            must_change_password: false, // API tokens never require password change
+            must_change_password: false,
+            client_ip: None, // API tokens are not IP-bound
         })
     }
 
@@ -472,8 +487,8 @@ impl AuthService {
     }
 
     /// Check if the token has admin role
-    pub async fn require_admin(&self, token: &str) -> Result<Session, AuthError> {
-        let session = self.validate(token).await?;
+    pub async fn require_admin(&self, token: &str, client_ip: &str) -> Result<Session, AuthError> {
+        let session = self.validate(token, client_ip).await?;
         if session.role != Role::Admin {
             return Err(AuthError::Forbidden);
         }

@@ -741,6 +741,7 @@ in {
 
         extraConfig = ''
           add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+          proxy_set_header X-Real-IP $remote_addr;
         '';
 
         locations."/" = {

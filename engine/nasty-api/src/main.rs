@@ -157,10 +157,12 @@ struct LoginRequest {
 }
 
 async fn login_handler(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    match state.auth.login(&req.username, &req.password).await {
+    let client_ip = headers.get("x-real-ip").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+    match state.auth.login(&req.username, &req.password, client_ip).await {
         Ok(token) => (StatusCode::OK, Json(serde_json::json!({ "token": token }))).into_response(),
         Err(_) => (
             StatusCode::UNAUTHORIZED,
@@ -172,18 +174,27 @@ async fn login_handler(
 
 // ── WebSocket with auth ─────────────────────────────────────────
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, client_ip: String) {
     use futures_util::{SinkExt, StreamExt};
     use nasty_common::Notification;
 
-    info!("WebSocket client connected, awaiting authentication");
+    info!("WebSocket client connected from {client_ip}, awaiting authentication");
 
     // First message must be an auth token
-    let session = match wait_for_auth(&mut socket, &state).await {
+    let session = match wait_for_auth(&mut socket, &state, &client_ip).await {
         Some(s) => s,
         None => return,
     };
@@ -227,7 +238,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
 /// Wait for the first message which must be: {"token": "..."}
 /// Returns the session if valid, or None if auth failed (socket is closed).
-async fn wait_for_auth(socket: &mut WebSocket, state: &AppState) -> Option<Session> {
+async fn wait_for_auth(socket: &mut WebSocket, state: &AppState, client_ip: &str) -> Option<Session> {
     let msg = tokio::time::timeout(std::time::Duration::from_secs(10), socket.recv())
         .await
         .ok()??
@@ -262,7 +273,7 @@ async fn wait_for_auth(socket: &mut WebSocket, state: &AppState) -> Option<Sessi
         }
     };
 
-    match state.auth.validate(&auth_msg.token).await {
+    match state.auth.validate(&auth_msg.token, client_ip).await {
         Ok(session) => {
             let _ = socket
                 .send(Message::Text(

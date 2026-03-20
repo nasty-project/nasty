@@ -14,9 +14,15 @@ use crate::AppState;
 
 pub async fn terminal_handler(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_terminal(socket, state))
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    ws.on_upgrade(move |socket| handle_terminal(socket, state, client_ip))
 }
 
 #[derive(Deserialize)]
@@ -48,9 +54,9 @@ struct ControlMessage {
     rows: u16,
 }
 
-async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>) {
+async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>, client_ip: String) {
     // Phase 1: authenticate and get terminal size
-    let auth = match wait_for_terminal_auth(&mut socket, &state).await {
+    let auth = match wait_for_terminal_auth(&mut socket, &state, &client_ip).await {
         Some(a) => a,
         None => return,
     };
@@ -204,6 +210,7 @@ struct TerminalAuthResult {
 async fn wait_for_terminal_auth(
     socket: &mut WebSocket,
     state: &AppState,
+    client_ip: &str,
 ) -> Option<TerminalAuthResult> {
     let msg = tokio::time::timeout(std::time::Duration::from_secs(10), socket.recv())
         .await
@@ -234,7 +241,7 @@ async fn wait_for_terminal_auth(
         }
     };
 
-    match state.auth.validate(&auth.token).await {
+    match state.auth.validate(&auth.token, client_ip).await {
         Ok(session) => {
             let _ = socket
                 .send(Message::Text(r#"{"authenticated":true}"#.into()))
