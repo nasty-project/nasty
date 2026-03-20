@@ -51,7 +51,8 @@ pub struct Session {
 pub struct ApiToken {
     pub id: String,
     pub name: String,
-    /// The actual token value — stored, shown only once on creation
+    /// Argon2 hash of the token value. The raw token is returned only once on creation.
+    /// Legacy tokens stored in plaintext are auto-migrated on next validation.
     pub token: String,
     pub role: Role,
     pub created_at: u64,
@@ -61,6 +62,9 @@ pub struct ApiToken {
     /// Unix timestamp after which the token is rejected. None = never expires.
     #[serde(default)]
     pub expires_at: Option<u64>,
+    /// True when the token field contains an Argon2 hash (not plaintext).
+    #[serde(default)]
+    pub hashed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -210,26 +214,48 @@ impl AuthService {
             return Ok(session.clone());
         }
         // Check long-lived API tokens (these have their own expiry via expires_at, not SESSION_TTL)
-        state
-            .api_tokens
-            .iter()
-            .find(|t| t.token == token)
-            .ok_or(AuthError::InvalidToken)
-            .and_then(|t| {
-                if let Some(exp) = t.expires_at {
-                    if now >= exp {
-                        return Err(AuthError::TokenExpired);
-                    }
+        // Try each stored token: hashed ones use Argon2 verify, legacy plaintext uses ==
+        let matched = state.api_tokens.iter().find(|t| {
+            if t.hashed {
+                verify_password(token, &t.token).is_ok()
+            } else {
+                t.token == token
+            }
+        });
+
+        let t = matched.ok_or(AuthError::InvalidToken)?;
+
+        if let Some(exp) = t.expires_at {
+            if now >= exp {
+                return Err(AuthError::TokenExpired);
+            }
+        }
+
+        let session = Session {
+            token: token.to_string(),
+            username: t.name.clone(),
+            role: t.role.clone(),
+            pool: t.pool.clone(),
+            owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
+            created_at: Some(t.created_at),
+        };
+
+        // Auto-migrate legacy plaintext token to hashed
+        if !t.hashed {
+            let name = t.name.clone();
+            drop(state);
+            let mut state = self.state.write().await;
+            if let Some(t) = state.api_tokens.iter_mut().find(|t| t.name == name && !t.hashed) {
+                if let Ok(h) = hash_password(token) {
+                    t.token = h;
+                    t.hashed = true;
+                    save_state(&state).await.ok();
+                    info!("Auto-migrated API token '{}' to hashed storage", name);
                 }
-                Ok(Session {
-                    token: t.token.clone(),
-                    username: t.name.clone(),
-                    role: t.role.clone(),
-                    pool: t.pool.clone(),
-                    owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
-                    created_at: Some(t.created_at),
-                })
-            })
+            }
+        }
+
+        Ok(session)
     }
 
     /// Create a long-lived API token (admin only). Returns the token value — shown only once.
@@ -251,7 +277,8 @@ impl AuthService {
         }
 
         let id = generate_id();
-        let token = generate_token();
+        let raw_token = generate_token();
+        let token_hash = hash_password(&raw_token)?;
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -259,21 +286,33 @@ impl AuthService {
 
         let expires_at = expires_in_secs.map(|s| created_at + s);
 
-        let api_token = ApiToken {
+        let stored = ApiToken {
             id: id.clone(),
             name: name.to_string(),
-            token,
+            token: token_hash,
+            role: role.clone(),
+            created_at,
+            pool: pool.clone(),
+            expires_at,
+            hashed: true,
+        };
+
+        state.api_tokens.push(stored);
+        save_state(&state).await?;
+
+        info!("Created API token '{name}'");
+
+        // Return the raw token to the caller — shown only once, never stored
+        Ok(ApiToken {
+            id,
+            name: name.to_string(),
+            token: raw_token,
             role,
             created_at,
             pool,
             expires_at,
-        };
-
-        state.api_tokens.push(api_token.clone());
-        save_state(&state).await?;
-
-        info!("Created API token '{name}'");
-        Ok(api_token)
+            hashed: false, // the returned copy has the raw value
+        })
     }
 
     /// List API tokens without exposing the token value
