@@ -36,20 +36,17 @@ jobs:
           echo "image_store=$(readlink -f result)" >> "$GITHUB_ENV"
 
       - name: Install tools
-        run: sudo apt-get install -y p7zip-full qemu-utils
+        run: sudo apt-get install -y p7zip-full
 
       - name: Prepare image
         run: |
-          RAW_FILE=$(find "${{ env.image_store }}" -type f \( -name "*.img" -o -name "*.raw" \) | head -1)
-          echo "Image: $RAW_FILE"
-          ls -lh "$RAW_FILE"
-
-          qemu-img convert -f raw -O qcow2 -c "$RAW_FILE" /tmp/nasty.qcow2
-          ls -lh /tmp/nasty.qcow2
+          IMAGE_FILE=$(find "${{ env.image_store }}" -type f \( -name "*.qcow2" -o -name "*.img" -o -name "*.raw" \) | head -1)
+          echo "Image: $IMAGE_FILE"
+          ls -lh "$IMAGE_FILE"
 
           SHORT_SHA=$(git rev-parse --short HEAD)
           DEST="nasty-cloud-x86_64-${SHORT_SHA}.qcow2.7z"
-          7z a -mx=9 "$DEST" /tmp/nasty.qcow2
+          7z a -mx=9 "$DEST" "$IMAGE_FILE"
           ls -lh "$DEST"
           echo "image_dest=$DEST" >> "$GITHUB_ENV"
 

@@ -126,11 +126,12 @@
         ];
       };
 
-      # Cloud/CI UEFI-bootable disk image
+      # Cloud/CI disk image (Oracle Cloud compatible)
       nasty-cloud = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
         modules = [
+          "${nixpkgs}/nixos/modules/virtualisation/oci-image.nix"
           ./modules/bcachefs.nix
           ./modules/linuxquota.nix
           ./modules/nasty.nix
@@ -141,39 +142,17 @@
 
   in {
     # Export packages for both architectures
-    packages.x86_64-linux = let
-      pkgs = mkPkgs "x86_64-linux";
-      cloudConfig = (mkNixosConfigs "x86_64-linux").nasty-cloud.config;
-    in {
+    packages.x86_64-linux = let pkgs = mkPkgs "x86_64-linux"; in {
       engine = mkEngine "x86_64-linux";
       webui = mkWebui "x86_64-linux";
-      nasty-cloud-image = import "${nixpkgs}/nixos/lib/make-disk-image.nix" {
-        inherit pkgs;
-        inherit (pkgs) lib;
-        config = cloudConfig;
-        format = "raw";
-        partitionTableType = "efi";
-        diskSize = "auto";
-        additionalSpace = "1G";
-      };
+      nasty-cloud-image = (mkNixosConfigs "x86_64-linux").nasty-cloud.config.system.build.ociImage;
       default = mkEngine "x86_64-linux";
     };
 
-    packages.aarch64-linux = let
-      pkgs = mkPkgs "aarch64-linux";
-      cloudConfig = (mkNixosConfigs "aarch64-linux").nasty-cloud.config;
-    in {
+    packages.aarch64-linux = let pkgs = mkPkgs "aarch64-linux"; in {
       engine = mkEngine "aarch64-linux";
       webui = mkWebui "aarch64-linux";
-      nasty-cloud-image = import "${nixpkgs}/nixos/lib/make-disk-image.nix" {
-        inherit pkgs;
-        inherit (pkgs) lib;
-        config = cloudConfig;
-        format = "raw";
-        partitionTableType = "efi";
-        diskSize = "auto";
-        additionalSpace = "1G";
-      };
+      nasty-cloud-image = (mkNixosConfigs "aarch64-linux").nasty-cloud.config.system.build.ociImage;
       default = mkEngine "aarch64-linux";
     };
 
