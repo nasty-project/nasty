@@ -88,6 +88,18 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
 
     debug!("RPC call: {} (user: {})", request.method, session.username);
 
+    // Force password change — only allow auth methods until the password is changed
+    if session.must_change_password
+        && !matches!(request.method.as_str(), "auth.change_password" | "auth.me" | "auth.logout")
+    {
+        let resp = Response::error(
+            request.id,
+            ErrorCode::InternalError,
+            "Password change required",
+        );
+        return serde_json::to_string(&resp).unwrap();
+    }
+
     // Enforce role permissions
     let denied = match session.role {
         Role::Admin => false,

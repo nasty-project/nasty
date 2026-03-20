@@ -16,6 +16,9 @@ pub struct User {
     /// Argon2 password hash
     pub password_hash: String,
     pub role: Role,
+    /// When true, the user must change their password before accessing anything else.
+    #[serde(default)]
+    pub must_change_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -45,6 +48,9 @@ pub struct Session {
     /// Unix timestamp when this session was created. None for legacy sessions.
     #[serde(default)]
     pub created_at: Option<u64>,
+    /// When true, the user must change their password before doing anything else.
+    #[serde(default)]
+    pub must_change_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -109,6 +115,7 @@ impl AuthService {
                 username: "admin".to_string(),
                 password_hash: hash,
                 role: Role::Admin,
+                must_change_password: true,
             });
             st.initialized = true;
             save_state(&st).await.ok();
@@ -173,6 +180,7 @@ impl AuthService {
             pool: None,
             owner: None,
             created_at: Some(now),
+            must_change_password: user.must_change_password,
         };
 
         // Prune expired sessions while we hold the write lock
@@ -227,6 +235,7 @@ impl AuthService {
             pool: t.pool.clone(),
             owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
             created_at: Some(t.created_at),
+            must_change_password: false, // API tokens never require password change
         })
     }
 
@@ -362,6 +371,13 @@ impl AuthService {
             .ok_or(AuthError::UserNotFound)?;
 
         user.password_hash = hash_password(new_password)?;
+        user.must_change_password = false;
+
+        // Also clear the flag on any active sessions for this user
+        for s in state.sessions.iter_mut().filter(|s| s.username == username) {
+            s.must_change_password = false;
+        }
+
         save_state(&state).await?;
 
         info!("Password changed for user '{username}'");
@@ -393,6 +409,7 @@ impl AuthService {
             username: username.to_string(),
             password_hash: hash_password(password)?,
             role,
+            must_change_password: false,
         });
         save_state(&state).await?;
 

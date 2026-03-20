@@ -65,6 +65,12 @@
 	// Profile menu
 	let profileOpen = $state(false);
 
+	// Forced password change
+	let showPasswordChange = $state(false);
+	let newPassword = $state('');
+	let confirmPassword = $state('');
+	let passwordError = $state('');
+
 	// Sidebar collapse — default collapsed on mobile (<768px), expanded on desktop.
 	// Persisted in localStorage so the user's choice sticks.
 	const SIDEBAR_KEY = 'nasty:sidebar_collapsed';
@@ -137,6 +143,9 @@
 			authInfo = await client.connect(token);
 			connected = true;
 			showLogin = false;
+			if (authInfo?.must_change_password) {
+				showPasswordChange = true;
+			}
 		} catch (e) {
 			clearToken();
 			resetClient();
@@ -155,6 +164,29 @@
 			await tryConnect();
 		} catch (e) {
 			loginError = e instanceof Error ? e.message : 'Login failed';
+		}
+	}
+
+	async function handlePasswordChange() {
+		passwordError = '';
+		if (newPassword.length < 8) {
+			passwordError = 'Password must be at least 8 characters';
+			return;
+		}
+		if (newPassword !== confirmPassword) {
+			passwordError = 'Passwords do not match';
+			return;
+		}
+		try {
+			await getClient().call('auth.change_password', {
+				username: authInfo?.username,
+				new_password: newPassword,
+			});
+			showPasswordChange = false;
+			newPassword = '';
+			confirmPassword = '';
+		} catch (e) {
+			passwordError = e instanceof Error ? e.message : 'Failed to change password';
 		}
 	}
 
@@ -234,6 +266,28 @@
 					<Input id="password" type="password" bind:value={loginPass} autocomplete="current-password" class="mt-1" />
 				</div>
 				<Button type="submit" class="w-full">Sign In</Button>
+			</form>
+		</div>
+	</div>
+{:else if showPasswordChange}
+	<div class="flex min-h-screen items-center justify-center">
+		<div class="w-[380px] rounded-xl border border-border bg-card p-8">
+			<img src={theme.isDark ? logoDark : logoLight} alt="NASty" class="mb-4 h-48 mx-auto" />
+			<h2 class="mb-2 text-lg font-semibold">Change your password</h2>
+			<p class="mb-6 text-sm text-muted-foreground">The default password must be changed before continuing.</p>
+			{#if passwordError}
+				<p class="mb-4 text-sm text-destructive">{passwordError}</p>
+			{/if}
+			<form onsubmit={(e) => { e.preventDefault(); handlePasswordChange(); }}>
+				<div class="mb-4">
+					<Label for="new-password">New password</Label>
+					<Input id="new-password" type="password" bind:value={newPassword} autocomplete="new-password" class="mt-1" />
+				</div>
+				<div class="mb-4">
+					<Label for="confirm-password">Confirm password</Label>
+					<Input id="confirm-password" type="password" bind:value={confirmPassword} autocomplete="new-password" class="mt-1" />
+				</div>
+				<Button type="submit" class="w-full">Set password</Button>
 			</form>
 		</div>
 	</div>

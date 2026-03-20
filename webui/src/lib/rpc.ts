@@ -17,6 +17,7 @@ export interface AuthResult {
 	authenticated: boolean;
 	username: string;
 	role: string;
+	must_change_password?: boolean;
 }
 
 export class NastyClient {

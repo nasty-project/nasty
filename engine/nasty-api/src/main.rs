@@ -269,7 +269,8 @@ async fn wait_for_auth(socket: &mut WebSocket, state: &AppState) -> Option<Sessi
                     serde_json::json!({
                         "authenticated": true,
                         "username": session.username,
-                        "role": session.role
+                        "role": session.role,
+                        "must_change_password": session.must_change_password
                     })
                     .to_string()
                     .into(),
