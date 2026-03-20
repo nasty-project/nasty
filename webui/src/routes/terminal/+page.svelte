@@ -151,7 +151,7 @@
 </script>
 
 <div class="{fullscreen ? 'fixed inset-0 z-50 flex flex-col bg-[#0f1117] p-4' : 'flex h-full flex-col'}">
-	<div class="mb-2 flex shrink-0 items-center gap-3">
+	<div class="mb-1 flex shrink-0 items-center gap-3">
 		{#if status === 'disconnected'}
 			<Button size="sm" onclick={reconnect}>Reconnect</Button>
 		{/if}

@@ -448,7 +448,7 @@
 			</header>
 
 			<!-- Page content -->
-			<main class="flex-1 overflow-y-auto p-6">
+			<main class="flex-1 overflow-y-auto {currentNav.href === '/terminal' ? 'p-2' : 'p-6'}">
 				{#if !connected}
 					<p class="text-muted-foreground">Connecting to engine...</p>
 				{:else}
