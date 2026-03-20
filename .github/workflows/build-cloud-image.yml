@@ -100,9 +100,17 @@ jobs:
       - name: Prepare image
         if: steps.check.outputs.skip != 'true'
         run: |
-          RAW_FILE=$(find "${{ env.image_store }}" -name "*.img" -o -name "*.raw" | head -1)
-          echo "Raw image: $RAW_FILE"
+          # Find the image (may be .img, .raw, or .img.zst)
+          RAW_FILE=$(find "${{ env.image_store }}" -name "*.img" -o -name "*.raw" -o -name "*.img.zst" | head -1)
+          echo "Found: $RAW_FILE"
           ls -lh "$RAW_FILE"
+
+          # Decompress if zstd-compressed
+          if [[ "$RAW_FILE" == *.zst ]]; then
+            zstd -d "$RAW_FILE" -o /tmp/nasty-raw.img
+            RAW_FILE=/tmp/nasty-raw.img
+            ls -lh "$RAW_FILE"
+          fi
 
           # Convert raw to qcow2 (compressed)
           qemu-img convert -f raw -O qcow2 -c "$RAW_FILE" /tmp/nasty.qcow2
