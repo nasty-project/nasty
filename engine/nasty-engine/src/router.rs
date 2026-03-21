@@ -14,6 +14,15 @@ fn is_operator_allowed(method: &str) -> bool {
             | "subvolume.resize" | "subvolume.clone"
             | "subvolume.set_properties" | "subvolume.remove_properties"
             | "snapshot.create" | "snapshot.delete" | "snapshot.clone"
+            | "share.nfs.create" | "share.nfs.update" | "share.nfs.delete"
+            | "share.smb.create" | "share.smb.update" | "share.smb.delete"
+            | "share.iscsi.create" | "share.iscsi.create_quick" | "share.iscsi.delete"
+            | "share.iscsi.add_lun" | "share.iscsi.remove_lun"
+            | "share.iscsi.add_acl" | "share.iscsi.remove_acl"
+            | "share.nvmeof.create" | "share.nvmeof.create_quick" | "share.nvmeof.delete"
+            | "share.nvmeof.add_namespace" | "share.nvmeof.remove_namespace"
+            | "share.nvmeof.add_port" | "share.nvmeof.remove_port"
+            | "share.nvmeof.add_host" | "share.nvmeof.remove_host"
         )
 }
 
