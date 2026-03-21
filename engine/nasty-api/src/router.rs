@@ -42,7 +42,7 @@ fn is_read_only(method: &str) -> bool {
         || matches!(
             method,
             "system.info" | "system.health" | "system.stats" | "system.disks" | "system.network.get"
-            | "system.alerts" | "system.settings.get" | "system.metrics.history" | "alert.rules.list"
+            | "system.alerts" | "system.settings.get" | "system.metrics.history" | "system.metrics.prometheus" | "alert.rules.list"
             | "device.list" | "auth.me" | "auth.list_users" | "auth.token.list"
             | "pool.usage" | "pool.scrub.status" | "pool.reconcile.status"
             | "bcachefs.usage"
@@ -217,6 +217,16 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
+        "system.metrics.prometheus" => {
+            let url = format!("{}/metrics", crate::METRICS_BASE);
+            match state.metrics_client.get(&url).send().await {
+                Ok(resp) => match resp.text().await {
+                    Ok(text) => ok(req, text),
+                    Err(e) => err(req, format!("metrics read error: {e}")),
+                },
+                Err(e) => err(req, format!("metrics service unavailable: {e}")),
+            }
+        }
         "system.metrics.history" => {
             let kind = str_param(req, "kind").unwrap_or("net");
             let name = str_param(req, "name");
