@@ -10,7 +10,9 @@ const VERSION_PATH: &str = "/var/lib/nasty/version";
 /// Fallback version path — baked in by NixOS at build time (may be a local SHA).
 const VERSION_PATH_FALLBACK: &str = "/etc/nasty-version";
 const UPDATE_UNIT: &str = "nasty-update";
-const LOCAL_FLAKE: &str = "/etc/nixos/nixos#nasty";
+const LOCAL_FLAKE_DIR: &str = "/etc/nixos/nixos";
+const SYSTEM_CONFIG_PATH: &str = "/var/lib/nasty/system-config";
+const DEFAULT_CONFIG: &str = "nasty";
 const REPO_URL: &str = "https://github.com/nasty-project/nasty.git";
 const LOCAL_REPO: &str = "/etc/nixos";
 const BCACHEFS_SWITCH_UNIT: &str = "nasty-bcachefs-switch";
@@ -221,6 +223,7 @@ impl UpdateService {
             .map(|t| format!("-c \"url.https://x-access-token:{t}@github.com/.insteadOf=https://github.com/\""))
             .unwrap_or_default();
 
+        let local_flake = local_flake().await;
         let script = format!(
             r#"#!/bin/bash
 set -euo pipefail
@@ -280,7 +283,7 @@ git -c user.email="nasty@localhost" -c user.name="NASty" \
   commit -m "local: hardware-configuration.nix" || true
 
 echo "==> Rebuilding system..."
-nixos-rebuild switch --flake {LOCAL_FLAKE}
+nixos-rebuild switch --flake {local_flake}
 
 # Detect if the webui store path changed so the frontend knows whether to prompt a reload.
 # /run/current-system now points to the newly activated closure.
@@ -724,6 +727,7 @@ echo "==> Switch to generation {gen_id} complete!"
             format!(r#"rm -f {BCACHEFS_DEBUG_CHECKS_STATE}"#)
         };
 
+        let local_flake = local_flake().await;
         let script = format!(
             r#"#!/bin/bash
 set -euo pipefail
@@ -759,7 +763,7 @@ git add flake.lock flake.nix
 git -c user.email="nasty@localhost" -c user.name="NASty" \
   commit -m "bcachefs-tools: switch to {git_ref} (${{RESOLVED_SHA:-unknown}})" || true
 echo "==> Rebuilding system..."
-nixos-rebuild switch --flake {LOCAL_FLAKE}
+nixos-rebuild switch --flake {local_flake}
 echo "success" > {BCACHEFS_SWITCH_RESULT}
 printf '%s  success  %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S')" "{git_ref}" >> "$SWITCH_LOG"
 echo "==> bcachefs switch complete!"
@@ -1173,6 +1177,21 @@ async fn bcachefs_version() -> (String, Option<bool>) {
 }
 
 /// Public wrapper for use by lib.rs cached info.
+/// Read the system config name from the state file, defaulting to "nasty" (bare metal).
+async fn read_system_config() -> String {
+    tokio::fs::read_to_string(SYSTEM_CONFIG_PATH).await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_CONFIG.to_string())
+}
+
+/// Build the full flake reference for nixos-rebuild.
+async fn local_flake() -> String {
+    let config = read_system_config().await;
+    format!("{LOCAL_FLAKE_DIR}#{config}")
+}
+
 pub async fn read_flake_nix_default_ref_pub() -> String {
     read_flake_nix_default_ref().await
 }

@@ -46,6 +46,15 @@
     nvmeof.enable = true;
   };
 
+  # Tell the update engine which flake config to rebuild.
+  # aarch64 uses nasty-cloud-aarch64, x86_64 uses nasty-cloud.
+  system.activationScripts.nasty-system-config = ''
+    mkdir -p /var/lib/nasty
+    CFG="nasty-cloud"
+    [ "$(uname -m)" = "aarch64" ] && CFG="nasty-cloud-aarch64"
+    echo "$CFG" > /var/lib/nasty/system-config
+  '';
+
   system.nixos.distroName = "NASty";
   system.nixos.distroId = "nasty";
   system.stateVersion = "24.11";
