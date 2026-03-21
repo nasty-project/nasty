@@ -258,7 +258,9 @@ git reset --hard origin/main
 # Remove files not needed on the appliance. The build only needs
 # engine/, webui/, nixos/. Delete and stage the removals so the
 # tree stays clean for Nix (avoids -dirty version suffix).
-git rm -rf --quiet tests/ docs/ .github/ .claude/ build-iso.sh README.md CLAUDE.md 2>/dev/null || true
+for f in tests docs .github .claude build-iso.sh README.md CLAUDE.md; do
+    [ -e "$f" ] && git rm -rf --quiet "$f" 2>/dev/null || true
+done
 
 # Restore hardware config
 [ -f /tmp/nasty-hw-config.nix ] && cp /tmp/nasty-hw-config.nix "$HW_CFG"
