@@ -283,9 +283,12 @@ async fn apply_config() -> Result<(), SmbError> {
 
         // When guest access is enabled, force operations as root so guests
         // can read/write regardless of underlying Unix permissions.
+        // Clear "invalid users" to override the NixOS global default that
+        // blocks root — without this, force user = root is rejected.
         if share.guest_ok {
             conf.push_str("    force user = root\n");
             conf.push_str("    force group = root\n");
+            conf.push_str("    invalid users =\n");
         }
 
         if !share.valid_users.is_empty() {
