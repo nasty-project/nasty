@@ -662,6 +662,7 @@ in {
         bashInteractive  # bash for terminal
         util-linux       # lsblk, blkid, wipefs, mount, umount
         nasty-bcachefs-tools  # bcachefs
+        iproute2         # ip (for network config detection)
         kmod             # modprobe (for iSCSI/NVMe-oF kernel modules)
         systemd          # systemctl, journalctl (for update status)
         nixos-rebuild-ng # nixos-rebuild (for system updates)
