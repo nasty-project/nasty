@@ -2,9 +2,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 const STATE_PATH: &str = "/var/lib/nasty/settings.json";
 const STATE_DIR: &str = "/var/lib/nasty";
+const TLS_NIX_PATH: &str = "/etc/nixos/nixos/tls.nix";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Settings {
@@ -16,6 +18,15 @@ pub struct Settings {
     /// Whether to display clocks in 24-hour format.
     #[serde(default = "default_clock_24h")]
     pub clock_24h: bool,
+    /// Domain name for Let's Encrypt TLS (e.g. "nasty.example.com"). Empty = self-signed.
+    #[serde(default)]
+    pub tls_domain: Option<String>,
+    /// Email address for Let's Encrypt ACME notifications.
+    #[serde(default)]
+    pub tls_acme_email: Option<String>,
+    /// Whether Let's Encrypt is enabled. Requires tls_domain and tls_acme_email.
+    #[serde(default)]
+    pub tls_acme_enabled: bool,
 }
 
 fn default_timezone() -> String {
@@ -32,6 +43,9 @@ impl Default for Settings {
             timezone: default_timezone(),
             hostname: None,
             clock_24h: default_clock_24h(),
+            tls_domain: None,
+            tls_acme_email: None,
+            tls_acme_enabled: false,
         }
     }
 }
@@ -44,6 +58,12 @@ pub struct SettingsUpdate {
     pub hostname: Option<String>,
     /// Whether to use 24-hour clock display (optional).
     pub clock_24h: Option<bool>,
+    /// Domain name for Let's Encrypt TLS (set to empty string to disable).
+    pub tls_domain: Option<String>,
+    /// Email address for ACME notifications.
+    pub tls_acme_email: Option<String>,
+    /// Enable/disable Let's Encrypt.
+    pub tls_acme_enabled: Option<bool>,
 }
 
 pub struct SettingsService {
@@ -87,7 +107,31 @@ impl SettingsService {
         if let Some(h24) = update.clock_24h {
             settings.clock_24h = h24;
         }
+        let mut tls_changed = false;
+        if let Some(domain) = update.tls_domain {
+            let domain = if domain.trim().is_empty() { None } else { Some(domain.trim().to_string()) };
+            if settings.tls_domain != domain {
+                settings.tls_domain = domain;
+                tls_changed = true;
+            }
+        }
+        if let Some(email) = update.tls_acme_email {
+            let email = if email.trim().is_empty() { None } else { Some(email.trim().to_string()) };
+            if settings.tls_acme_email != email {
+                settings.tls_acme_email = email;
+                tls_changed = true;
+            }
+        }
+        if let Some(enabled) = update.tls_acme_enabled {
+            if settings.tls_acme_enabled != enabled {
+                settings.tls_acme_enabled = enabled;
+                tls_changed = true;
+            }
+        }
         save(&settings).await.map_err(|e| e.to_string())?;
+        if tls_changed {
+            write_tls_nix(&settings).await;
+        }
         Ok(settings.clone())
     }
 }
@@ -140,4 +184,36 @@ async fn save(settings: &Settings) -> Result<(), std::io::Error> {
     let json = serde_json::to_string_pretty(settings).unwrap();
     tokio::fs::write(STATE_PATH, json).await?;
     Ok(())
+}
+
+/// Write /etc/nixos/nixos/tls.nix based on current TLS settings.
+/// When ACME is enabled with a domain and email, generates the Let's Encrypt config.
+/// Otherwise generates a no-op module (self-signed cert is the default in nasty.nix).
+async fn write_tls_nix(settings: &Settings) {
+    let nix = generate_tls_nix(settings);
+    if let Err(e) = tokio::fs::write(TLS_NIX_PATH, &nix).await {
+        warn!("Failed to write {TLS_NIX_PATH}: {e}");
+    }
+}
+
+fn generate_tls_nix(settings: &Settings) -> String {
+    let mut out = String::from(
+        "# Managed by NASty — edit via WebUI Settings > TLS\n{ ... }:\n{\n",
+    );
+
+    if settings.tls_acme_enabled {
+        if let (Some(domain), Some(email)) = (&settings.tls_domain, &settings.tls_acme_email) {
+            out.push_str(&format!("  security.acme.acceptTerms = true;\n"));
+            out.push_str(&format!("  security.acme.defaults.email = \"{email}\";\n"));
+            out.push_str(&format!("  security.acme.certs.\"{domain}\" = {{\n"));
+            out.push_str(&format!("    tlsChallenge = true;\n"));
+            out.push_str(&format!("  }};\n"));
+            out.push_str(&format!("  services.nasty.tls.certFile = \"/var/lib/acme/{domain}/fullchain.pem\";\n"));
+            out.push_str(&format!("  services.nasty.tls.keyFile = \"/var/lib/acme/{domain}/key.pem\";\n"));
+            out.push_str(&format!("  services.nasty.tls.selfSigned = false;\n"));
+        }
+    }
+
+    out.push_str("}\n");
+    out
 }

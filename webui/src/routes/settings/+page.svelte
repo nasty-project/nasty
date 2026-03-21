@@ -26,6 +26,13 @@
 	let netNameservers = $state('');
 	let netChanged = $state(false);
 
+	// TLS
+	let tlsDomain = $state('');
+	let tlsAcmeEmail = $state('');
+	let tlsAcmeEnabled = $state(false);
+	let savingTls = $state(false);
+	let tlsChanged = $state(false);
+
 	// ── Metrics tab state ───────────────────────────────────
 	let metricsText = $state('');
 	let metricsLoading = $state(false);
@@ -96,6 +103,9 @@
 				client.call<NetworkConfig>('system.network.get'),
 			]);
 			hostnameInput = settings.hostname ?? info.hostname;
+			tlsDomain = settings?.tls_domain ?? '';
+			tlsAcmeEmail = settings?.tls_acme_email ?? '';
+			tlsAcmeEnabled = settings?.tls_acme_enabled ?? false;
 			syncNetworkForm();
 		});
 	});
@@ -138,6 +148,23 @@
 			() => client.call('system.settings.update', { clock_24h: val }),
 			val ? '24-hour clock enabled' : '12-hour clock enabled'
 		);
+	}
+
+	async function saveTls() {
+		savingTls = true;
+		const result = await withToast(
+			() => client.call<Settings>('system.settings.update', {
+				tls_domain: tlsDomain || null,
+				tls_acme_email: tlsAcmeEmail || null,
+				tls_acme_enabled: tlsAcmeEnabled,
+			}),
+			tlsAcmeEnabled ? 'Let\'s Encrypt enabled — rebuild required to apply' : 'TLS settings saved'
+		);
+		if (result !== undefined) {
+			settings = result;
+			tlsChanged = false;
+		}
+		savingTls = false;
 	}
 
 	async function saveNetwork() {
@@ -387,6 +414,68 @@
 				</Button>
 			</section>
 			{/if}
+
+			<!-- TLS -->
+			<section class="rounded-lg border border-border p-5">
+				<h2 class="mb-4 text-base font-semibold">TLS Certificate</h2>
+
+				<p class="mb-4 text-xs text-muted-foreground">
+					By default NASty uses a self-signed certificate. To use a trusted Let's Encrypt certificate,
+					enter your domain name and email. The domain must resolve to this machine and port 443 must be
+					reachable from the internet.
+				</p>
+
+				<div class="mb-4">
+					<label for="tls-domain" class="mb-1 block text-xs text-muted-foreground">Domain Name</label>
+					<input
+						id="tls-domain"
+						type="text"
+						bind:value={tlsDomain}
+						oninput={() => tlsChanged = true}
+						class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+						placeholder="nasty.example.com"
+					/>
+				</div>
+
+				<div class="mb-4">
+					<label for="tls-email" class="mb-1 block text-xs text-muted-foreground">ACME Email</label>
+					<input
+						id="tls-email"
+						type="email"
+						bind:value={tlsAcmeEmail}
+						oninput={() => tlsChanged = true}
+						class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+						placeholder="admin@example.com"
+					/>
+					<span class="mt-1 block text-xs text-muted-foreground">Let's Encrypt will send expiry warnings to this address.</span>
+				</div>
+
+				<div class="mb-4">
+					<label class="flex items-center gap-2 text-sm cursor-pointer">
+						<input
+							type="checkbox"
+							bind:checked={tlsAcmeEnabled}
+							onchange={() => tlsChanged = true}
+							disabled={!tlsDomain.trim() || !tlsAcmeEmail.trim()}
+							class="rounded border-input"
+						/>
+						Enable Let's Encrypt
+					</label>
+					{#if tlsAcmeEnabled && (!tlsDomain.trim() || !tlsAcmeEmail.trim())}
+						<span class="mt-1 block text-xs text-destructive">Domain and email are required.</span>
+					{/if}
+				</div>
+
+				{#if tlsAcmeEnabled}
+					<p class="mb-3 text-xs text-amber-500">
+						A system rebuild is required to apply TLS changes. Use Update → Check for Updates after saving.
+					</p>
+				{/if}
+
+				<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged}>
+					{savingTls ? 'Saving…' : 'Save TLS Settings'}
+				</Button>
+			</section>
 
 		</div>
 	{/if}

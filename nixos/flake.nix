@@ -135,6 +135,7 @@
           ./modules/bcachefs.nix
           ./modules/linuxquota.nix
           ./modules/nasty.nix
+          ./tls.nix
           ./cloud.nix
         ];
       };

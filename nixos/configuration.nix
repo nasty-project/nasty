@@ -4,6 +4,7 @@
   imports = [
     ./hardware-configuration.nix
     ./networking.nix
+    ./tls.nix
   ];
 
   # Boot loader — UEFI with Limine

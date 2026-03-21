@@ -376,6 +376,9 @@ export interface Settings {
 	timezone: string;
 	hostname: string | null;
 	clock_24h: boolean;
+	tls_domain: string | null;
+	tls_acme_email: string | null;
+	tls_acme_enabled: boolean;
 }
 
 export interface NetworkConfig {
