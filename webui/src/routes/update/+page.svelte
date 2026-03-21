@@ -21,8 +21,20 @@
 	// ── Generations tab state ───────────────────────────────
 	let generations: Generation[] = $state([]);
 	let generationsLoading = $state(false);
+	let generationsLoaded = $state(false);
 	let editingLabel: number | null = $state(null);
 	let editLabelValue = $state('');
+	let labelFilter = $state('');
+
+	const filteredGenerations = $derived(
+		labelFilter
+			? generations.filter(g => g.label?.toLowerCase().includes(labelFilter.toLowerCase()))
+			: generations
+	);
+
+	const availableLabels = $derived(
+		[...new Set(generations.map(g => g.label).filter((l): l is string => !!l))].sort()
+	);
 
 	let info: UpdateInfo | null = $state(null);
 	let status: UpdateStatus | null = $state(null);
@@ -317,6 +329,7 @@
 			generations = [];
 		}
 		generationsLoading = false;
+		generationsLoaded = true;
 	}
 
 	async function switchGeneration(gen: number) {
@@ -383,7 +396,7 @@
 			System
 		</button>
 		<button
-			onclick={() => { activeTab = 'generations'; if (generations.length === 0) loadGenerations(); }}
+			onclick={() => { activeTab = 'generations'; loadGenerations(); }}
 			class="px-5 py-1.5 font-medium transition-colors
 				{activeTab === 'generations' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
 		>
@@ -509,15 +522,28 @@
 						<h2 class="text-base font-semibold">System Generations</h2>
 						<p class="text-xs text-muted-foreground">Each update creates a new generation. Switch to any previous version or label known-good configurations.</p>
 					</div>
-					<Button size="sm" variant="outline" onclick={loadGenerations} disabled={generationsLoading}>
-						{generationsLoading ? 'Loading…' : 'Refresh'}
-					</Button>
+					<div class="flex items-center gap-2">
+						{#if availableLabels.length > 0}
+							<select
+								bind:value={labelFilter}
+								class="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+							>
+								<option value="">All labels</option>
+								{#each availableLabels as label}
+									<option value={label}>{label}</option>
+								{/each}
+							</select>
+						{/if}
+						<Button size="sm" variant="outline" onclick={loadGenerations} disabled={generationsLoading}>
+							{generationsLoading ? 'Loading…' : 'Refresh'}
+						</Button>
+					</div>
 				</div>
 
-				{#if generationsLoading && generations.length === 0}
+				{#if generationsLoading && !generationsLoaded}
 					<p class="text-sm text-muted-foreground">Loading generations...</p>
-				{:else if generations.length === 0}
-					<p class="text-sm text-muted-foreground">No generations found.</p>
+				{:else if filteredGenerations.length === 0}
+					<p class="text-sm text-muted-foreground">{labelFilter ? 'No generations match this label.' : 'No generations found.'}</p>
 				{:else}
 					<div class="overflow-x-auto">
 						<table class="w-full text-sm">
@@ -533,7 +559,7 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each generations as gen}
+								{#each filteredGenerations as gen}
 									<tr class="border-b border-border/50 {gen.current ? 'bg-blue-500/5' : ''} {gen.booted && !gen.current ? 'bg-amber-500/5' : ''}">
 										<td class="py-2.5 pr-4 font-mono font-semibold">{gen.generation}</td>
 										<td class="py-2.5 pr-4 font-mono text-xs">{gen.date}</td>
