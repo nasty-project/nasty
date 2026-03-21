@@ -719,15 +719,23 @@ in {
 
     services.samba = mkIf cfg.smb.enable {
       enable = true;
-      settings.global = {
-        "server string" = "NASty NAS";
-        "map to guest" = "Bad User";
-        "guest account" = "nobody";
-        "server min protocol" = "SMB2";
-        # macOS Finder requires the server to advertise SMB signing as optional,
-        # otherwise it refuses guest/anonymous connections entirely.
-        "server signing" = "auto";
-        "include" = "/etc/samba/smb.nasty.conf";
+      settings = {
+        global = {
+          "server string" = "NASty NAS";
+          "map to guest" = "Bad User";
+          "guest account" = "nobody";
+          "server min protocol" = "SMB2";
+          # macOS Finder requires SMB signing as optional for guest access.
+          "server signing" = "auto";
+        };
+        # NASty-managed shares live in a separate conf file included here.
+        # This section is written to smb-shares.conf (after smb-global.conf),
+        # ensuring all global params are parsed before the include pulls in
+        # share definitions. The [nasty] section name is unused by Samba —
+        # the include immediately introduces [sharename] sections that override it.
+        nasty = {
+          "include" = "/etc/samba/smb.nasty.conf";
+        };
       };
     };
 
