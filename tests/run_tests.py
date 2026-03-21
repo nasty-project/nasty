@@ -26,6 +26,7 @@ from test_nvmeof import test_nvmeof
 from test_subvolume import test_subvolume
 from test_snapshots import test_snapshots
 from test_storage import test_storage
+from test_multiprotocol import test_multiprotocol
 from test_cleanup import delete_leftovers
 
 
@@ -174,6 +175,10 @@ async def main():
 
         if not args.skip_smb:    await test_smb(ctx)
         else:                    warn("SMB: skipped")
+
+        if not args.skip_nfs and not args.skip_smb and not args.remount:
+            await test_multiprotocol(ctx)
+        else:                    warn("Multi-protocol: skipped")
 
         if not args.skip_iscsi:  await test_iscsi(ctx)
         else:                    warn("iSCSI: skipped")

@@ -900,11 +900,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
-        "share.iscsi.create_quick" => match parse_params(req) {
-            Ok(p) => match state.iscsi.create_quick(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
+        "share.iscsi.create_quick" => match parse_params::<nasty_sharing::iscsi::QuickCreateRequest>(req) {
+            Ok(p) => {
+                if let Some(conflict) = check_block_device_conflict(state, &p.device_path, "iscsi").await {
+                    err(req, conflict)
+                } else {
+                    match state.iscsi.create_quick(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+            }
             Err(e) => invalid(req, e),
         },
         "share.iscsi.create" => match parse_params(req) {
@@ -921,11 +927,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
-        "share.iscsi.add_lun" => match parse_params(req) {
-            Ok(p) => match state.iscsi.add_lun(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
+        "share.iscsi.add_lun" => match parse_params::<nasty_sharing::iscsi::AddLunRequest>(req) {
+            Ok(p) => {
+                if let Some(conflict) = check_block_device_conflict(state, &p.backstore_path, "iscsi").await {
+                    err(req, conflict)
+                } else {
+                    match state.iscsi.add_lun(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+            }
             Err(e) => invalid(req, e),
         },
         "share.iscsi.remove_lun" => match parse_params(req) {
@@ -962,11 +974,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
-        "share.nvmeof.create_quick" => match parse_params(req) {
-            Ok(p) => match state.nvmeof.create_quick(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
+        "share.nvmeof.create_quick" => match parse_params::<nasty_sharing::nvmeof::QuickCreateRequest>(req) {
+            Ok(p) => {
+                if let Some(conflict) = check_block_device_conflict(state, &p.device_path, "nvmeof").await {
+                    err(req, conflict)
+                } else {
+                    match state.nvmeof.create_quick(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+            }
             Err(e) => invalid(req, e),
         },
         "share.nvmeof.create" => match parse_params(req) {
@@ -983,11 +1001,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
-        "share.nvmeof.add_namespace" => match parse_params(req) {
-            Ok(p) => match state.nvmeof.add_namespace(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
+        "share.nvmeof.add_namespace" => match parse_params::<nasty_sharing::nvmeof::AddNamespaceRequest>(req) {
+            Ok(p) => {
+                if let Some(conflict) = check_block_device_conflict(state, &p.device_path, "nvmeof").await {
+                    err(req, conflict)
+                } else {
+                    match state.nvmeof.add_namespace(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+            }
             Err(e) => invalid(req, e),
         },
         "share.nvmeof.remove_namespace" => match parse_params(req) {
@@ -1079,4 +1103,44 @@ async fn fetch_metrics_json<T: serde::de::DeserializeOwned>(
     resp.json::<T>()
         .await
         .map_err(|e| format!("metrics parse error: {e}"))
+}
+
+/// Check if a block device is already exported by another block protocol.
+/// Returns an error message if the device is in use, None if it's free.
+async fn check_block_device_conflict(
+    state: &AppState,
+    device_path: &str,
+    exclude_protocol: &str,
+) -> Option<String> {
+    if exclude_protocol != "iscsi" {
+        if let Ok(targets) = state.iscsi.list().await {
+            for target in &targets {
+                for lun in &target.luns {
+                    if lun.backstore_path == device_path {
+                        return Some(format!(
+                            "device {} is already exported via iSCSI (target '{}')",
+                            device_path, target.iqn
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if exclude_protocol != "nvmeof" {
+        if let Ok(subsystems) = state.nvmeof.list().await {
+            for sub in &subsystems {
+                for ns in &sub.namespaces {
+                    if ns.device_path == device_path {
+                        return Some(format!(
+                            "device {} is already exported via NVMe-oF (subsystem '{}')",
+                            device_path, sub.nqn
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
