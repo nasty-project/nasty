@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 const STATE_DIR: &str = "/var/lib/nasty/shares/iscsi";
 const DEFAULT_IQN_PREFIX: &str = "iqn.2137-04.storage.nasty";
+const ISCSI_BASE: &str = "/sys/kernel/config/target/iscsi";
+const CORE_BASE: &str = "/sys/kernel/config/target/core";
 
 #[derive(Debug, Error)]
 pub enum IscsiError {
@@ -20,7 +22,9 @@ pub enum IscsiError {
     BackstoreNotFound(String),
     #[error("path is not within a NASty pool: {0}")]
     PathNotInPool(String),
-    #[error("targetcli command failed: {0}")]
+    #[error("configfs error: {0}")]
+    ConfigFs(String),
+    #[error("command failed: {0}")]
     CommandFailed(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -183,17 +187,14 @@ impl IscsiService {
                 let _ = state_dir().save(&target.id, target).await;
             }
         }
-        // Patch saveconfig.json so target.service picks up the corrected device on boot.
         patch_saveconfig(dev_map).await;
     }
 
     pub async fn list(&self) -> Result<Vec<IscsiTarget>, IscsiError> {
-
         Ok(state_dir().load_all().await)
     }
 
     pub async fn get(&self, id: &str) -> Result<IscsiTarget, IscsiError> {
-
         state_dir()
             .load::<IscsiTarget>(id)
             .await
@@ -201,7 +202,6 @@ impl IscsiService {
     }
 
     pub async fn create(&self, req: CreateTargetRequest) -> Result<IscsiTarget, IscsiError> {
-
         let targets: Vec<IscsiTarget> = state_dir().load_all().await;
         let iqn = format!("{DEFAULT_IQN_PREFIX}:{}", req.name);
 
@@ -217,27 +217,23 @@ impl IscsiService {
             }]
         });
 
-        // Create the iSCSI target in LIO
-        targetcli(&format!("/iscsi create {iqn}")).await?;
+        // Create target and TPG in configfs
+        let tpg_path = format!("{ISCSI_BASE}/{iqn}/tpgt_1");
+        configfs_mkdir(&tpg_path).await?;
 
-        // Create portals (tpg1 is created automatically)
+        // Create portals
         for portal in &portals {
-            // Default portal 0.0.0.0:3260 is auto-created, skip it
-            if portal.ip == "0.0.0.0" && portal.port == 3260 {
-                continue;
-            }
-            targetcli(&format!(
-                "/iscsi/{iqn}/tpg1/portals create {} {}",
-                portal.ip, portal.port
-            ))
-            .await?;
+            let np_path = format!("{tpg_path}/np/{}:{}", portal.ip, portal.port);
+            configfs_mkdir(&np_path).await?;
         }
 
-        // Disable authentication by default (can be enabled via ACLs)
-        targetcli(&format!(
-            "/iscsi/{iqn}/tpg1 set attribute authentication=0 demo_mode_write_protect=0 generate_node_acls=1"
-        ))
-        .await?;
+        // Disable authentication, allow any initiator, allow writes
+        configfs_write(&format!("{tpg_path}/attrib/authentication"), "0").await?;
+        configfs_write(&format!("{tpg_path}/attrib/generate_node_acls"), "1").await?;
+        configfs_write(&format!("{tpg_path}/attrib/demo_mode_write_protect"), "0").await?;
+
+        // Enable the TPG
+        configfs_write(&format!("{tpg_path}/enable"), "1").await?;
 
         let target = IscsiTarget {
             id: Uuid::new_v4().to_string(),
@@ -250,7 +246,7 @@ impl IscsiService {
         };
 
         state_dir().save(&target.id, &target).await?;
-        save_lio_config().await?;
+        save_lio_config().await;
 
         info!("Created iSCSI target {iqn}");
         Ok(target)
@@ -259,7 +255,6 @@ impl IscsiService {
     /// Create a complete iSCSI target with a LUN in one step.
     /// Waits for the target to become discoverable before returning.
     pub async fn create_quick(&self, req: QuickCreateRequest) -> Result<IscsiTarget, IscsiError> {
-        // Create the target (idempotent — returns existing if name matches)
         let target = self.create(CreateTargetRequest {
             name: req.name,
             alias: None,
@@ -279,43 +274,68 @@ impl IscsiService {
             target
         };
 
-        // Wait for the target to be discoverable via iscsiadm.
-        // LIO may take a moment after targetcli to expose the target on port 3260.
         wait_for_target_ready(&target.iqn).await;
 
         Ok(target)
     }
 
     pub async fn delete(&self, req: DeleteTargetRequest) -> Result<(), IscsiError> {
-
         let target: IscsiTarget = state_dir()
             .load(&req.id)
             .await
             .ok_or_else(|| IscsiError::NotFound(req.id.clone()))?;
 
-        // Remove the target first — this releases all LUN mappings.
-        // Backstores cannot be deleted while a target still references them.
-        if let Err(e) = targetcli(&format!("/iscsi delete {}", target.iqn)).await {
-            tracing::warn!("targetcli delete failed (may already be gone): {e}");
+        let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
+
+        // Remove ACL dirs first (must be empty before TPG removal)
+        for acl in &target.acls {
+            let acl_path = format!("{tpg_path}/acls/{}", acl.initiator_iqn);
+            let _ = configfs_rmdir(&acl_path).await;
         }
 
-        // Now remove backstores (loop devices are released here)
+        // Unlink and remove LUN dirs
         for lun in &target.luns {
-            let _ = targetcli(&format!(
-                "/backstores/{} delete {}",
-                lun.backstore_type, lun.backstore_name
-            )).await;
+            let lun_path = format!("{tpg_path}/lun/lun_{}", lun.lun_id);
+            // Remove the backstore symlink inside the LUN dir
+            let link = format!("{lun_path}/{}", lun.backstore_name);
+            let _ = configfs_unlink(&link).await;
+            let _ = configfs_rmdir(&lun_path).await;
+        }
+
+        // Remove portals
+        for portal in &target.portals {
+            let np_path = format!("{tpg_path}/np/{}:{}", portal.ip, portal.port);
+            let _ = configfs_rmdir(&np_path).await;
+        }
+
+        // Remove TPG, then target
+        let _ = configfs_rmdir(&tpg_path).await;
+        let _ = configfs_rmdir(&format!("{ISCSI_BASE}/{}", target.iqn)).await;
+
+        // Remove backstores
+        for lun in &target.luns {
+            let hba_type = backstore_hba_type(&lun.backstore_type);
+            // Find which HBA index this backstore lives under
+            if let Some(hba_idx) = find_backstore_hba(&hba_type, &lun.backstore_name).await {
+                let bs_path = format!("{CORE_BASE}/{hba_type}_{hba_idx}/{}", lun.backstore_name);
+                let _ = configfs_write(&format!("{bs_path}/enable"), "0").await;
+                let _ = configfs_rmdir(&bs_path).await;
+                // Remove the HBA dir if empty (only has hba_info and hba_mode)
+                let hba_path = format!("{CORE_BASE}/{hba_type}_{hba_idx}");
+                if hba_is_empty(&hba_path).await {
+                    let _ = configfs_rmdir(&hba_path).await;
+                }
+            }
         }
 
         state_dir().remove(&req.id).await?;
-        let _ = save_lio_config().await;
+        save_lio_config().await;
 
         info!("Deleted iSCSI target '{}'", req.id);
         Ok(())
     }
 
     pub async fn add_lun(&self, req: AddLunRequest) -> Result<IscsiTarget, IscsiError> {
-
         let mut target: IscsiTarget = state_dir()
             .load(&req.target_id)
             .await
@@ -341,7 +361,6 @@ impl IscsiService {
                 }
             }
             "fileio" => {
-                // For fileio, the parent directory must exist
                 if let Some(parent) = Path::new(&req.backstore_path).parent() {
                     if !parent.exists() {
                         return Err(IscsiError::BackstoreNotFound(
@@ -367,40 +386,43 @@ impl IscsiService {
 
         let backstore_name = format!(
             "nasty_{}_lun{}",
-            target
-                .iqn
-                .rsplit(':')
-                .next()
-                .unwrap_or("unknown"),
+            target.iqn.rsplit(':').next().unwrap_or("unknown"),
             lun_id
         );
 
-        // Create backstore
+        let hba_type = backstore_hba_type(&backstore_type);
+        let hba_idx = next_hba_index(&hba_type).await;
+
+        // Create backstore in configfs
+        let bs_path = format!("{CORE_BASE}/{hba_type}_{hba_idx}/{backstore_name}");
+        configfs_mkdir(&bs_path).await?;
+
         match backstore_type.as_str() {
             "block" => {
-                targetcli(&format!(
-                    "/backstores/block create name={backstore_name} dev={}",
-                    req.backstore_path
-                ))
-                .await?;
+                configfs_write(
+                    &format!("{bs_path}/control"),
+                    &format!("udev_path={}", req.backstore_path),
+                ).await?;
             }
             "fileio" => {
-                let size = req.size_bytes.unwrap_or(1_073_741_824); // 1GB default
-                targetcli(&format!(
-                    "/backstores/fileio create name={backstore_name} file_or_dev={} size={size}",
-                    req.backstore_path
-                ))
-                .await?;
+                let size = req.size_bytes.unwrap_or(1_073_741_824);
+                configfs_write(
+                    &format!("{bs_path}/control"),
+                    &format!("fd_dev_name={},fd_dev_size={size}", req.backstore_path),
+                ).await?;
             }
             _ => unreachable!(),
         }
 
-        // Map LUN to target
-        targetcli(&format!(
-            "/iscsi/{}/tpg1/luns create /backstores/{backstore_type}/{backstore_name}",
+        configfs_write(&format!("{bs_path}/enable"), "1").await?;
+
+        // Create LUN in TPG and symlink to backstore
+        let lun_path = format!(
+            "{ISCSI_BASE}/{}/tpgt_1/lun/lun_{lun_id}",
             target.iqn
-        ))
-        .await?;
+        );
+        configfs_mkdir(&lun_path).await?;
+        configfs_symlink(&bs_path, &format!("{lun_path}/{backstore_name}")).await?;
 
         let lun = Lun {
             lun_id,
@@ -413,14 +435,13 @@ impl IscsiService {
         target.luns.push(lun);
 
         state_dir().save(&target.id, &target).await?;
-        save_lio_config().await?;
+        save_lio_config().await;
 
         info!("Added LUN {} to target '{}'", target.luns.len() - 1, target.iqn);
         Ok(target)
     }
 
     pub async fn remove_lun(&self, req: RemoveLunRequest) -> Result<IscsiTarget, IscsiError> {
-
         let mut target: IscsiTarget = state_dir()
             .load(&req.target_id)
             .await
@@ -436,49 +457,53 @@ impl IscsiService {
 
         let lun = &target.luns[lun_idx];
 
-        // Remove LUN mapping
-        let _ = targetcli(&format!(
-            "/iscsi/{}/tpg1/luns delete lun{}",
+        // Remove symlink and LUN dir
+        let lun_path = format!(
+            "{ISCSI_BASE}/{}/tpgt_1/lun/lun_{}",
             target.iqn, lun.lun_id
-        ))
-        .await;
+        );
+        let _ = configfs_unlink(&format!("{lun_path}/{}", lun.backstore_name)).await;
+        let _ = configfs_rmdir(&lun_path).await;
 
         // Remove backstore
-        let _ = targetcli(&format!(
-            "/backstores/{} delete {}",
-            lun.backstore_type, lun.backstore_name
-        ))
-        .await;
+        let hba_type = backstore_hba_type(&lun.backstore_type);
+        if let Some(hba_idx) = find_backstore_hba(&hba_type, &lun.backstore_name).await {
+            let bs_path = format!("{CORE_BASE}/{hba_type}_{hba_idx}/{}", lun.backstore_name);
+            let _ = configfs_write(&format!("{bs_path}/enable"), "0").await;
+            let _ = configfs_rmdir(&bs_path).await;
+            let hba_path = format!("{CORE_BASE}/{hba_type}_{hba_idx}");
+            if hba_is_empty(&hba_path).await {
+                let _ = configfs_rmdir(&hba_path).await;
+            }
+        }
 
         target.luns.remove(lun_idx);
 
         state_dir().save(&target.id, &target).await?;
-        save_lio_config().await?;
+        save_lio_config().await;
 
         info!("Removed LUN {} from target '{}'", req.lun_id, target.iqn);
         Ok(target)
     }
 
     pub async fn add_acl(&self, req: AddAclRequest) -> Result<IscsiTarget, IscsiError> {
-
         let mut target: IscsiTarget = state_dir()
             .load(&req.target_id)
             .await
             .ok_or_else(|| IscsiError::NotFound(req.target_id.clone()))?;
 
-        targetcli(&format!(
-            "/iscsi/{}/tpg1/acls create {}",
-            target.iqn, req.initiator_iqn
-        ))
-        .await?;
+        let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
+        let acl_path = format!("{tpg_path}/acls/{}", req.initiator_iqn);
+        configfs_mkdir(&acl_path).await?;
 
         if let (Some(userid), Some(password)) = (&req.userid, &req.password) {
-            targetcli(&format!(
-                "/iscsi/{}/tpg1/acls/{} set auth userid={userid} password={password}",
-                target.iqn, req.initiator_iqn
-            ))
-            .await?;
+            configfs_write(&format!("{acl_path}/auth/userid"), userid).await?;
+            configfs_write(&format!("{acl_path}/auth/password"), password).await?;
         }
+
+        // Disable generate_node_acls when explicit ACLs are added
+        configfs_write(&format!("{tpg_path}/attrib/generate_node_acls"), "0").await?;
+        configfs_write(&format!("{tpg_path}/attrib/authentication"), "0").await?;
 
         target.acls.push(Acl {
             initiator_iqn: req.initiator_iqn,
@@ -487,67 +512,152 @@ impl IscsiService {
         });
 
         state_dir().save(&target.id, &target).await?;
-        save_lio_config().await?;
+        save_lio_config().await;
 
         info!("Added ACL to target '{}'", target.iqn);
         Ok(target)
     }
 
     pub async fn remove_acl(&self, req: RemoveAclRequest) -> Result<IscsiTarget, IscsiError> {
-
         let mut target: IscsiTarget = state_dir()
             .load(&req.target_id)
             .await
             .ok_or_else(|| IscsiError::NotFound(req.target_id.clone()))?;
 
-        targetcli(&format!(
-            "/iscsi/{}/tpg1/acls delete {}",
-            target.iqn, req.initiator_iqn
-        ))
-        .await?;
+        let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
+        let acl_path = format!("{tpg_path}/acls/{}", req.initiator_iqn);
+        let _ = configfs_rmdir(&acl_path).await;
 
         target.acls.retain(|a| a.initiator_iqn != req.initiator_iqn);
 
+        // Re-enable generate_node_acls if no ACLs remain
+        if target.acls.is_empty() {
+            configfs_write(&format!("{tpg_path}/attrib/generate_node_acls"), "1").await?;
+        }
+
         state_dir().save(&target.id, &target).await?;
-        save_lio_config().await?;
+        save_lio_config().await;
 
         info!("Removed ACL from target '{}'", target.iqn);
         Ok(target)
     }
 }
 
-// ── targetcli helpers ───────────────────────────────────────────
+// ── configfs helpers ────────────────────────────────────────────
 
-async fn targetcli(cmd: &str) -> Result<String, IscsiError> {
-    let output = tokio::process::Command::new("targetcli")
-        .args([cmd])
-        .env("TARGETCLI_HOME", "/var/lib/nasty/.targetcli")
-        .output()
+async fn configfs_mkdir(path: &str) -> Result<(), IscsiError> {
+    tokio::fs::create_dir_all(path)
         .await
-        .map_err(|e| IscsiError::CommandFailed(format!("failed to execute targetcli: {e}")))?;
+        .map_err(|e| IscsiError::ConfigFs(format!("mkdir {path}: {e}")))
+}
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(IscsiError::CommandFailed(format!(
-            "targetcli `{cmd}` failed: {stderr} {stdout}"
-        )))
+async fn configfs_rmdir(path: &str) -> Result<(), IscsiError> {
+    tokio::fs::remove_dir(path)
+        .await
+        .map_err(|e| IscsiError::ConfigFs(format!("rmdir {path}: {e}")))
+}
+
+async fn configfs_write(path: &str, value: &str) -> Result<(), IscsiError> {
+    tokio::fs::write(path, value)
+        .await
+        .map_err(|e| IscsiError::ConfigFs(format!("write {path}={value}: {e}")))
+}
+
+async fn configfs_symlink(target: &str, link: &str) -> Result<(), IscsiError> {
+    tokio::fs::symlink(target, link)
+        .await
+        .map_err(|e| IscsiError::ConfigFs(format!("symlink {link} -> {target}: {e}")))
+}
+
+async fn configfs_unlink(path: &str) -> Result<(), IscsiError> {
+    tokio::fs::remove_file(path)
+        .await
+        .map_err(|e| IscsiError::ConfigFs(format!("unlink {path}: {e}")))
+}
+
+/// Map our backstore type names to LIO HBA type prefixes.
+fn backstore_hba_type(bs_type: &str) -> &str {
+    match bs_type {
+        "block" => "iblock",
+        "fileio" => "fileio",
+        _ => "iblock",
     }
 }
 
-/// Save the running LIO config so it persists across reboots
-async fn save_lio_config() -> Result<(), IscsiError> {
-    targetcli("saveconfig").await?;
-    Ok(())
+/// Find the next available HBA index by scanning /sys/kernel/config/target/core/
+async fn next_hba_index(hba_type: &str) -> u32 {
+    let mut max_idx: Option<u32> = None;
+    if let Ok(mut entries) = tokio::fs::read_dir(CORE_BASE).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(name) = entry.file_name().to_str() {
+                let prefix = format!("{hba_type}_");
+                if let Some(suffix) = name.strip_prefix(&prefix) {
+                    if let Ok(idx) = suffix.parse::<u32>() {
+                        max_idx = Some(max_idx.map_or(idx, |m: u32| m.max(idx)));
+                    }
+                }
+            }
+        }
+    }
+    max_idx.map_or(0, |m| m + 1)
+}
+
+/// Find which HBA index contains a named backstore.
+async fn find_backstore_hba(hba_type: &str, bs_name: &str) -> Option<u32> {
+    if let Ok(mut entries) = tokio::fs::read_dir(CORE_BASE).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(name) = entry.file_name().to_str() {
+                let prefix = format!("{hba_type}_");
+                if let Some(suffix) = name.strip_prefix(&prefix) {
+                    if let Ok(idx) = suffix.parse::<u32>() {
+                        let bs_path = format!("{CORE_BASE}/{name}/{bs_name}");
+                        if Path::new(&bs_path).exists() {
+                            return Some(idx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check if an HBA directory contains no backstores (only hba_info and hba_mode).
+async fn hba_is_empty(hba_path: &str) -> bool {
+    let mut count = 0;
+    if let Ok(mut entries) = tokio::fs::read_dir(hba_path).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let name = name.to_str().unwrap_or("");
+            if name != "hba_info" && name != "hba_mode" {
+                return false;
+            }
+            count += 1;
+        }
+    }
+    count <= 2
+}
+
+/// Save the running LIO config so it persists across reboots.
+/// Uses targetcli saveconfig — the only remaining targetcli dependency.
+async fn save_lio_config() {
+    let result = tokio::process::Command::new("targetcli")
+        .args(["saveconfig"])
+        .output()
+        .await;
+    match result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("targetcli saveconfig failed: {stderr}");
+        }
+        Err(e) => warn!("Failed to run targetcli saveconfig: {e}"),
+    }
 }
 
 /// Wait for an iSCSI target to be ready for initiator connections.
-/// Checks that the target's TPG and LUN are visible in the LIO configfs.
-/// Polls up to 5 seconds — LIO typically exposes targets within milliseconds.
 async fn wait_for_target_ready(iqn: &str) {
-    let tpg_path = format!("/sys/kernel/config/target/iscsi/{iqn}/tpgt_1/enable");
+    let tpg_path = format!("{ISCSI_BASE}/{iqn}/tpgt_1/enable");
 
     for attempt in 1..=10 {
         match tokio::fs::read_to_string(&tpg_path).await {
@@ -564,13 +674,11 @@ async fn wait_for_target_ready(iqn: &str) {
 }
 
 /// Patch /etc/target/saveconfig.json to fix stale loop device paths.
-/// storage_objects entries look like: {"dev": "/dev/loop2", "name": "nasty_<subvol>_lun0", ...}
-/// We match by name containing the subvolume name and update the "dev" field.
 async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
     const SAVECONFIG: &str = "/etc/target/saveconfig.json";
     let text = match tokio::fs::read_to_string(SAVECONFIG).await {
         Ok(t) => t,
-        Err(_) => return, // file doesn't exist yet (iSCSI never used)
+        Err(_) => return,
     };
     let mut json: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
@@ -582,7 +690,6 @@ async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
     let mut changed = false;
     for obj in objects.iter_mut() {
         let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        // backstore names follow "nasty_<subvol_name>_lun<n>" convention
         for (subvol_name, new_dev) in dev_map {
             let expected_prefix = format!("nasty_{subvol_name}_");
             if name.starts_with(&expected_prefix) {
@@ -603,4 +710,3 @@ async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
         }
     }
 }
-
