@@ -256,7 +256,8 @@ impl IscsiService {
         Ok(target)
     }
 
-    /// Create a complete iSCSI target with a LUN in one step
+    /// Create a complete iSCSI target with a LUN in one step.
+    /// Waits for the target to become discoverable before returning.
     pub async fn create_quick(&self, req: QuickCreateRequest) -> Result<IscsiTarget, IscsiError> {
         // Create the target (idempotent — returns existing if name matches)
         let target = self.create(CreateTargetRequest {
@@ -277,6 +278,10 @@ impl IscsiService {
             info!("iSCSI target {} already has {} LUN(s), skipping", target.iqn, target.luns.len());
             target
         };
+
+        // Wait for the target to be discoverable via iscsiadm.
+        // LIO may take a moment after targetcli to expose the target on port 3260.
+        wait_for_target_ready(&target.iqn).await;
 
         Ok(target)
     }
@@ -536,6 +541,26 @@ async fn targetcli(cmd: &str) -> Result<String, IscsiError> {
 async fn save_lio_config() -> Result<(), IscsiError> {
     targetcli("saveconfig").await?;
     Ok(())
+}
+
+/// Wait for an iSCSI target to be ready for initiator connections.
+/// Checks that the target's TPG and LUN are visible in the LIO configfs.
+/// Polls up to 5 seconds — LIO typically exposes targets within milliseconds.
+async fn wait_for_target_ready(iqn: &str) {
+    let tpg_path = format!("/sys/kernel/config/target/iscsi/{iqn}/tpgt_1/enable");
+
+    for attempt in 1..=10 {
+        match tokio::fs::read_to_string(&tpg_path).await {
+            Ok(val) if val.trim() == "1" => {
+                info!("iSCSI target {iqn} is ready (attempt {attempt})");
+                return;
+            }
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+    warn!("iSCSI target {iqn} readiness check timed out — proceeding anyway");
 }
 
 /// Patch /etc/target/saveconfig.json to fix stale loop device paths.
