@@ -938,6 +938,17 @@ impl SubvolumeService {
             owner_filter,
         )?;
 
+        // For block subvolumes, attach a loop device to the restored clone's sparse image
+        if sub_type == SubvolumeType::Block {
+            let img_path = format!("{new_subvol_path}/{BLOCK_FILE_NAME}");
+            if Path::new(&img_path).exists() {
+                info!("Attaching loop device for restored block subvolume '{}'", req.new_name);
+                cmd::run_ok("losetup", &["--find", "--show", &img_path])
+                    .await
+                    .map_err(SubvolumeError::CommandFailed)?;
+            }
+        }
+
         self.get(&req.pool, &req.new_name, None).await
     }
 
@@ -996,6 +1007,18 @@ impl SubvolumeService {
             None,
             owner_filter,
         )?;
+
+        // For block subvolumes, attach a loop device to the clone's sparse image
+        // so it's immediately usable as an independent block device.
+        if parent.subvolume_type == SubvolumeType::Block {
+            let img_path = format!("{new_subvol_path}/{BLOCK_FILE_NAME}");
+            if Path::new(&img_path).exists() {
+                info!("Attaching loop device for cloned block subvolume '{}'", req.new_name);
+                cmd::run_ok("losetup", &["--find", "--show", &img_path])
+                    .await
+                    .map_err(SubvolumeError::CommandFailed)?;
+            }
+        }
 
         self.get(&req.pool, &req.new_name, None).await
     }
