@@ -438,6 +438,9 @@ impl NvmeofService {
             subsys
         };
 
+        // Wait for the subsystem to be ready for initiator connections.
+        wait_for_subsystem_ready(&subsys.nqn).await;
+
         Ok(subsys)
     }
 
@@ -818,6 +821,25 @@ async fn dir_is_empty(path: &str) -> bool {
         Ok(mut entries) => entries.next_entry().await.ok().flatten().is_none(),
         Err(_) => true,
     }
+}
+
+/// Wait for an NVMe-oF subsystem to be ready for initiator connections.
+/// Checks that namespace 1 is enabled in configfs. Polls up to 5 seconds.
+async fn wait_for_subsystem_ready(nqn: &str) {
+    let ns_enable = format!("{NVMET_BASE}/subsystems/{nqn}/namespaces/1/enable");
+
+    for attempt in 1..=10 {
+        match tokio::fs::read_to_string(&ns_enable).await {
+            Ok(val) if val.trim() == "1" => {
+                info!("NVMe-oF subsystem {nqn} is ready (attempt {attempt})");
+                return;
+            }
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+    warn!("NVMe-oF subsystem {nqn} readiness check timed out — proceeding anyway");
 }
 
 /// Detect the primary IPv4 address via `ip route get 1.1.1.1`.
