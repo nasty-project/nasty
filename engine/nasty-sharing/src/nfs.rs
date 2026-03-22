@@ -4,7 +4,7 @@ use nasty_common::{HasId, StateDir};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 const NASTY_EXPORTS_PATH: &str = "/etc/exports.d/nasty.exports";
@@ -192,6 +192,13 @@ async fn apply_exports() -> Result<(), NfsError> {
 
     for share in &shares {
         if !share.enabled {
+            continue;
+        }
+
+        // Skip shares whose path no longer exists — stale exports cause
+        // exportfs -ra to fail for ALL exports, not just the broken one.
+        if !Path::new(&share.path).exists() {
+            warn!("NFS share '{}' path {} no longer exists, skipping export", share.id, share.path);
             continue;
         }
 
