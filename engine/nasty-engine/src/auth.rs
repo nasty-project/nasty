@@ -241,9 +241,11 @@ impl AuthService {
             }
             return Ok(session.clone());
         }
-        // Check long-lived API tokens — Argon2 verify against each stored hash
+        // Check long-lived API tokens — SHA-256 comparison (tokens are high-entropy,
+        // don't need Argon2's brute-force resistance, and Argon2 is too slow for O(n) scan)
+        let incoming_hash = hash_token(token);
         let t = state.api_tokens.iter()
-            .find(|t| verify_password(token, &t.token).is_ok())
+            .find(|t| t.token == incoming_hash)
             .ok_or(AuthError::InvalidToken)?;
 
         if let Some(exp) = t.expires_at {
@@ -295,7 +297,7 @@ impl AuthService {
 
         let id = generate_id();
         let raw_token = generate_token();
-        let token_hash = hash_password(&raw_token)?;
+        let token_hash = hash_token(&raw_token);
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -592,6 +594,15 @@ fn verify_password(password: &str, hash: &str) -> Result<(), AuthError> {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .map_err(|_| AuthError::InvalidCredentials)
+}
+
+/// SHA-256 hash for API tokens. Tokens are 32 random bytes — high entropy,
+/// no need for Argon2's brute-force resistance. Instant O(1) comparison.
+fn hash_token(token: &str) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn generate_token() -> String {
