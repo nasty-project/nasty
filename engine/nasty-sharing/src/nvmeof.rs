@@ -8,7 +8,6 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 const STATE_DIR: &str = "/var/lib/nasty/shares/nvmeof";
-const PORT_COUNTER_PATH: &str = "/var/lib/nasty/shares/nvmeof/.next_port_id";
 const NVMET_BASE: &str = "/sys/kernel/config/nvmet";
 const DEFAULT_NQN_PREFIX: &str = "nqn.2137-04.storage.nasty";
 
@@ -167,16 +166,20 @@ fn state_dir() -> StateDir {
     StateDir::new(STATE_DIR)
 }
 
-/// Atomic port ID counter (separate from per-subsystem state)
+/// Derive next port ID by scanning existing ports in configfs.
 async fn next_port_id() -> u16 {
-    let current = tokio::fs::read_to_string(PORT_COUNTER_PATH)
-        .await
-        .ok()
-        .and_then(|s| s.trim().parse::<u16>().ok())
-        .unwrap_or(0);
-    let next = current + 1;
-    let _ = tokio::fs::write(PORT_COUNTER_PATH, next.to_string()).await;
-    current
+    let ports_dir = format!("{NVMET_BASE}/ports");
+    let mut max_id: u16 = 0;
+    if let Ok(mut entries) = tokio::fs::read_dir(&ports_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Ok(id) = name.parse::<u16>() {
+                    max_id = max_id.max(id);
+                }
+            }
+        }
+    }
+    max_id + 1
 }
 
 // ── Service ─────────────────────────────────────────────────────
