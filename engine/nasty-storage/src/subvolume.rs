@@ -105,6 +105,9 @@ pub struct Snapshot {
     pub path: String,
     /// Whether this snapshot is read-only.
     pub read_only: bool,
+    /// Parent subvolume path as tracked by bcachefs (from snapshot_parent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     /// Loop device path if this snapshot's vol.img is currently attached (block snapshots only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_device: Option<String>,
@@ -407,12 +410,14 @@ impl SubvolumeService {
                 .filter(|(p, _)| p.starts_with(&snap_prefix) && !p.contains('/'))
                 .map(|(p, &read_only)| {
                     let snap_name = p[snap_prefix.len()..].to_string();
+                    let parent = info.snapshot_parents.get(p).cloned();
                     Snapshot {
                         name: snap_name.clone(),
                         subvolume: name.to_string(),
                         pool: pool_name.to_string(),
                         path: snap_path(&mount_point, name, &snap_name),
                         read_only,
+                        parent,
                         block_device: None,
                     }
                 })
@@ -765,10 +770,11 @@ impl SubvolumeService {
 
         Ok(Snapshot {
             name: req.name,
-            subvolume: req.subvolume,
+            subvolume: req.subvolume.clone(),
             pool: req.pool,
             path: snap_path,
             read_only: true,
+            parent: Some(req.subvolume),
             block_device: None,
         })
     }
@@ -826,6 +832,7 @@ impl SubvolumeService {
                     subvolume: subvol_name.to_string(),
                     pool: pool_name.to_string(),
                     read_only,
+                    parent: Some(subvol_name.to_string()),
                     block_device: None,
                 }
             })
@@ -868,12 +875,14 @@ impl SubvolumeService {
                     continue;
                 }
             }
+            let parent = info.snapshot_parents.get(&rel_path).cloned();
             all_snapshots.push(Snapshot {
                 name: snap_name.clone(),
                 subvolume: subvol_name.clone(),
                 pool: pool_name.to_string(),
                 path: snap_path(&mount_point, &subvol_name, &snap_name),
                 read_only,
+                parent,
                 block_device: None,
             });
         }
@@ -1111,6 +1120,8 @@ struct BcachefsInfo {
     subvol_paths: std::collections::HashSet<String>,
     /// Relative path of each snapshot → read_only flag (e.g. "foo@snap" → true).
     snapshot_flags: std::collections::HashMap<String, bool>,
+    /// Relative path of each snapshot → parent path (from bcachefs snapshot_parent).
+    snapshot_parents: std::collections::HashMap<String, String>,
 }
 
 /// Run `bcachefs subvolume list --snapshots --json <mount_point>` once and
@@ -1136,22 +1147,28 @@ async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
 
     let mut subvol_paths = std::collections::HashSet::new();
     let mut snapshot_flags = std::collections::HashMap::new();
+    let mut snapshot_parents = std::collections::HashMap::new();
 
     for entry in entries {
         let is_ro = entry.flags.as_deref() == Some("ro");
-        if entry.snapshot_parent.is_some() && is_ro {
-            // Read-only snapshot
-            snapshot_flags.insert(entry.path, true);
-        } else if entry.snapshot_parent.is_some() {
-            // Writable clone (bcachefs subvolume snapshot without -r):
-            // has snapshot_parent but is not ro — treat as a regular subvolume
-            subvol_paths.insert(entry.path);
+        if let Some(ref parent) = entry.snapshot_parent {
+            if is_ro {
+                // Read-only snapshot
+                snapshot_flags.insert(entry.path.clone(), true);
+            } else {
+                // Writable clone — treat as regular subvolume
+                subvol_paths.insert(entry.path.clone());
+            }
+            // Track parent for all snapshots/clones
+            // snapshot_parent comes as "/parent-name", strip the leading "/"
+            let parent_name = parent.strip_prefix('/').unwrap_or(parent).to_string();
+            snapshot_parents.insert(entry.path, parent_name);
         } else {
             subvol_paths.insert(entry.path);
         }
     }
 
-    BcachefsInfo { subvol_paths, snapshot_flags }
+    BcachefsInfo { subvol_paths, snapshot_flags, snapshot_parents }
 }
 
 /// Derive a stable 32-bit project ID from pool + subvolume name.
