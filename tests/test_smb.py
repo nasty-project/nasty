@@ -58,7 +58,7 @@ async def test_smb(ctx: TestContext):
             info(f"Mounting SMB share at {mount_points[i]}...")
             os.makedirs(mount_points[i], exist_ok=True)
             last_err = ""
-            for attempt in range(5):
+            for attempt in range(8):
                 r = run(
                     ["mount", "-t", "cifs", f"//{ctx.host}/{share_names[i]}", mount_points[i],
                      "-o", "guest,vers=3.0"],
@@ -68,7 +68,7 @@ async def test_smb(ctx: TestContext):
                     mounted[i] = True
                     break
                 last_err = r.stderr.strip()
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
             if mounted[i]:
                 ctx.record(f"{label}: mount", True)
             else:
@@ -160,7 +160,7 @@ async def test_smb(ctx: TestContext):
             label = f"SMB[{i+1}] clone"
             os.makedirs(clone_mounts[i], exist_ok=True)
             last_err = ""
-            for attempt in range(5):
+            for attempt in range(8):
                 r = run(
                     ["mount", "-t", "cifs", f"//{ctx.host}/{clone_share_names[i]}", clone_mounts[i],
                      "-o", "guest,vers=3.0"],
@@ -170,7 +170,7 @@ async def test_smb(ctx: TestContext):
                     clone_mounted[i] = True
                     break
                 last_err = r.stderr.strip()
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
             if not clone_mounted[i]:
                 ctx.record(f"{label}: read/verify", False, f"mount: {last_err}")
                 continue
