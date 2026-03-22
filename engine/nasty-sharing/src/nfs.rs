@@ -7,7 +7,6 @@ use thiserror::Error;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-const NASTY_EXPORTS_PATH: &str = "/etc/exports.d/nasty.exports";
 const NASTY_EXPORTS_DIR: &str = "/etc/exports.d";
 const STATE_DIR: &str = "/var/lib/nasty/shares/nfs";
 
@@ -92,6 +91,12 @@ pub struct NfsService;
 
 impl NfsService {
     pub fn new() -> Self {
+        // Clean up legacy monolithic exports file if it exists.
+        // Per-share files in /etc/exports.d/nasty-{id}.exports replace it.
+        let legacy = format!("{NASTY_EXPORTS_DIR}/nasty.exports");
+        if Path::new(&legacy).exists() {
+            let _ = std::fs::remove_file(&legacy);
+        }
         Self
     }
 
@@ -136,7 +141,8 @@ impl NfsService {
         };
 
         state_dir().save(&share.id, &share).await?;
-        apply_exports().await?;
+        write_export_file(&share).await?;
+        reload_exports().await?;
 
         info!("Created NFS share '{}' for {}", share.id, share.path);
         Ok(share)
@@ -161,7 +167,8 @@ impl NfsService {
         }
 
         state_dir().save(&share.id, &share).await?;
-        apply_exports().await?;
+        write_export_file(&share).await?;
+        reload_exports().await?;
 
         info!("Updated NFS share '{}'", share.id);
         Ok(share)
@@ -176,64 +183,67 @@ impl NfsService {
             .ok_or_else(|| NfsError::NotFound(req.id.clone()))?;
 
         state_dir().remove(&req.id).await?;
-        apply_exports().await?;
+        remove_export_file(&req.id).await;
+        reload_exports().await?;
 
         info!("Deleted NFS share '{}'", req.id);
         Ok(())
     }
 }
 
-/// Generate /etc/exports.d/nasty.exports and reload NFS
-async fn apply_exports() -> Result<(), NfsError> {
+/// Write a single export file for one share: /etc/exports.d/nasty-{id}.exports
+async fn write_export_file(share: &NfsShare) -> Result<(), NfsError> {
     tokio::fs::create_dir_all(NASTY_EXPORTS_DIR).await?;
 
-    let shares: Vec<NfsShare> = state_dir().load_all().await;
-    let mut content = String::from("# Managed by NASty — do not edit manually\n\n");
+    let path = export_file_path(&share.id);
 
-    for share in &shares {
-        if !share.enabled {
-            continue;
-        }
-
-        // Skip shares whose path no longer exists — stale exports cause
-        // exportfs -ra to fail for ALL exports, not just the broken one.
-        if !Path::new(&share.path).exists() {
-            warn!("NFS share '{}' path {} no longer exists, skipping export", share.id, share.path);
-            continue;
-        }
-
-        if let Some(ref comment) = share.comment {
-            content.push_str(&format!("# {comment}\n"));
-        }
-
-        // Generate a stable fsid from the share ID so NFS can identify
-        // bcachefs subvolumes (which are separate filesystem entities).
-        let fsid = stable_fsid(&share.id);
-
-        let clients: Vec<String> = share
-            .clients
-            .iter()
-            .map(|c| {
-                let mut opts = c.options.clone();
-                if !opts.contains("fsid=") {
-                    opts = format!("{opts},fsid={fsid}");
-                }
-                // Default to insecure (allow non-privileged ports) — the
-                // traditional port-check adds no real security on a LAN NAS.
-                if !opts.contains("insecure") && !opts.contains("secure") {
-                    opts = format!("{opts},insecure");
-                }
-                format!("{}({})", c.host, opts)
-            })
-            .collect();
-
-        content.push_str(&format!("{}\t{}\n", share.path, clients.join(" ")));
+    if !share.enabled || !Path::new(&share.path).exists() {
+        // Disabled or stale — remove the file if it exists
+        let _ = tokio::fs::remove_file(&path).await;
+        return Ok(());
     }
 
-    tokio::fs::write(NASTY_EXPORTS_PATH, &content).await?;
-    reload_exports().await?;
+    let fsid = stable_fsid(&share.id);
 
+    let clients: Vec<String> = share
+        .clients
+        .iter()
+        .map(|c| {
+            let mut opts = c.options.clone();
+            if !opts.contains("fsid=") {
+                opts = format!("{opts},fsid={fsid}");
+            }
+            if !opts.contains("insecure") && !opts.contains("secure") {
+                opts = format!("{opts},insecure");
+            }
+            format!("{}({})", c.host, opts)
+        })
+        .collect();
+
+    let content = format!(
+        "# NASty share {}\n{}\t{}\n",
+        share.id,
+        share.path,
+        clients.join(" ")
+    );
+
+    tokio::fs::write(&path, &content).await?;
     Ok(())
+}
+
+/// Remove the export file for a share.
+async fn remove_export_file(id: &str) {
+    let path = export_file_path(id);
+    if let Err(e) = tokio::fs::remove_file(&path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!("Failed to remove export file {path}: {e}");
+        }
+    }
+}
+
+/// Path to the per-share export file.
+fn export_file_path(id: &str) -> String {
+    format!("{NASTY_EXPORTS_DIR}/nasty-{id}.exports")
 }
 
 /// Derive a stable numeric fsid (1–2^31) from a share ID string.
