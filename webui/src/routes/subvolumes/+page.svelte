@@ -12,7 +12,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import SortTh from '$lib/components/SortTh.svelte';
-	import { X, Camera, Copy, Trash2 } from '@lucide/svelte';
+	import { Camera, Copy, Trash2, Pencil, Check, X } from '@lucide/svelte';
 
 	let pools: Pool[] = $state([]);
 	let selectedPool = $state('');
@@ -31,10 +31,47 @@
 	let showClone = $state<string | null>(null);
 	let cloneName = $state('');
 
-	// Detail panel
+	// Inline expanded detail
+	let expandedName = $state<string | null>(null);
 	let detailSv = $state<Subvolume | null>(null);
 	let detailSnapshots = $state<Snapshot[]>([]);
 	let detailTab = $state<'info' | 'snapshots' | 'shares' | 'browse' | 'properties'>('info');
+
+	// Inline editing
+	let editingField = $state<'compression' | 'comments' | null>(null);
+	let editValue = $state('');
+
+	function startEdit(field: 'compression' | 'comments') {
+		editingField = field;
+		editValue = field === 'compression'
+			? (detailSv?.compression ?? '')
+			: (detailSv?.comments ?? '');
+	}
+
+	async function saveEdit() {
+		if (!detailSv || !editingField) return;
+		const params: Record<string, string> = {
+			pool: selectedPool,
+			name: detailSv.name,
+		};
+		params[editingField] = editValue;
+		const ok = await withToast(
+			() => client.call('subvolume.update', params),
+			`${editingField === 'compression' ? 'Compression' : 'Comments'} updated`
+		);
+		if (ok !== undefined) {
+			editingField = null;
+			await refresh();
+			const updated = subvolumes.find(sv => sv.name === detailSv!.name);
+			if (updated) {
+				detailSv = updated;
+			}
+		}
+	}
+
+	function cancelEdit() {
+		editingField = null;
+	}
 
 	// Shares linked to the detail subvolume
 	interface LinkedShares {
@@ -81,6 +118,12 @@
 	);
 
 	async function openDetail(sv: Subvolume) {
+		if (expandedName === sv.name) {
+			expandedName = null;
+			detailSv = null;
+			return;
+		}
+		expandedName = sv.name;
 		detailSv = sv;
 		detailTab = 'info';
 		detailSnapshots = [];
@@ -117,6 +160,7 @@
 	}
 
 	function closeDetail() {
+		expandedName = null;
 		detailSv = null;
 	}
 
@@ -200,6 +244,7 @@
 	}
 
 	async function detachSubvolume(name: string) {
+		if (!await confirm(`Detach loop device for "${name}"?`, 'Any active iSCSI/NVMe-oF connections using this device will break.')) return;
 		await withToast(
 			() => client.call('subvolume.detach', { pool: selectedPool, name }),
 			`Loop device detached for "${name}"`
@@ -227,14 +272,25 @@
 
 	async function cloneSubvolume() {
 		if (!showClone || !cloneName) return;
-		const ok = await withToast(
-			() => client.call('subvolume.clone', {
-				pool: selectedPool,
-				name: showClone,
-				new_name: cloneName,
-			}),
-			`Clone "${cloneName}" created`
-		);
+		const isSnapshotClone = showClone.includes('@');
+		const ok = isSnapshotClone
+			? await withToast(() => {
+				const [subvolume, snapshot] = showClone!.split('@');
+				return client.call('snapshot.clone', {
+					pool: selectedPool,
+					subvolume,
+					snapshot,
+					new_name: cloneName,
+				});
+			}, `Clone "${cloneName}" created from snapshot`)
+			: await withToast(
+				() => client.call('subvolume.clone', {
+					pool: selectedPool,
+					name: showClone,
+					new_name: cloneName,
+				}),
+				`Clone "${cloneName}" created`
+			);
 		if (ok !== undefined) {
 			showClone = null;
 			cloneName = '';
@@ -409,7 +465,7 @@
 						{#if sv.subvolume_type === 'block'}
 							{#if sv.block_device}
 								<span class="font-mono text-xs">{sv.block_device}</span>
-								<Button variant="secondary" size="xs" class="ml-2" onclick={() => detachSubvolume(sv.name)}>Detach</Button>
+								<Button variant="destructive" size="xs" class="ml-2" onclick={() => detachSubvolume(sv.name)}>Detach</Button>
 							{:else}
 								<span class="text-muted-foreground">Detached</span>
 								<Button variant="secondary" size="xs" class="ml-2" onclick={() => attachSubvolume(sv.name)}>Attach</Button>
@@ -436,326 +492,229 @@
 					</td>
 					<td class="p-3">
 						<div class="flex gap-2">
-							<Button variant="secondary" size="xs" onclick={() => { showSnap = sv.name; snapName = ''; }}>Snapshot</Button>
+							<Button variant="secondary" size="xs" onclick={() => openDetail(sv)}>
+								{expandedName === sv.name ? 'Hide' : 'Details'}
+							</Button>
 							<Button variant="destructive" size="xs" onclick={() => deleteSubvolume(sv.name)}>Delete</Button>
 						</div>
 					</td>
 				</tr>
+				{#if expandedName === sv.name && detailSv}
+					<tr>
+						<td colspan="6" class="border-b border-border bg-muted/20 p-0">
+							<div class="p-4">
+								<!-- Tabs -->
+								<div class="mb-4 flex border-b border-border">
+									{#each [['info', 'Info'], ['snapshots', `Snapshots (${detailSv.snapshots.length})`], ['shares', `Shares${detailShareCount > 0 ? ` (${detailShareCount})` : ''}`], ['browse', 'Browse'], ['properties', 'Properties']] as [key, label]}
+										<button
+											onclick={() => detailTab = key as typeof detailTab}
+											class="px-3 py-1.5 text-xs font-medium transition-colors {detailTab === key
+												? 'border-b-2 border-primary text-foreground'
+												: 'text-muted-foreground hover:text-foreground'}"
+										>{label}</button>
+									{/each}
+								</div>
+
+								{#if detailTab === 'info'}
+									<div class="grid grid-cols-[auto_1fr_auto_1fr] gap-x-6 gap-y-1.5 text-sm">
+										<span class="text-muted-foreground">Type</span>
+										<span>
+											<Badge variant={detailSv.subvolume_type === 'filesystem' ? 'secondary' : 'outline'}
+												class={detailSv.subvolume_type === 'filesystem' ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}>
+												{detailSv.subvolume_type === 'filesystem' ? 'Filesystem' : 'Block'}
+											</Badge>
+										</span>
+										<span class="text-muted-foreground">Path</span>
+										<span class="font-mono text-xs">{detailSv.path}</span>
+
+										<span class="text-muted-foreground">Compression</span>
+										<span>
+											{#if editingField === 'compression'}
+												<span class="flex items-center gap-1">
+													<select bind:value={editValue} class="h-7 rounded-md border border-input bg-transparent px-2 text-xs">
+														<option value="">None</option>
+														<option value="lz4">LZ4</option>
+														<option value="zstd">Zstd</option>
+														<option value="gzip">Gzip</option>
+													</select>
+													<button onclick={saveEdit} class="p-0.5 text-green-400 hover:text-green-300"><Check class="h-3.5 w-3.5" /></button>
+													<button onclick={cancelEdit} class="p-0.5 text-muted-foreground hover:text-foreground"><X class="h-3.5 w-3.5" /></button>
+												</span>
+											{:else}
+												<button class="group flex items-center gap-1 hover:text-blue-400 transition-colors" onclick={() => startEdit('compression')}>
+													{detailSv.compression ?? 'None'}
+													<Pencil class="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+												</button>
+											{/if}
+										</span>
+										{#if detailSv.subvolume_type === 'block' && detailSv.volsize_bytes}
+											<span class="text-muted-foreground">Volume Size</span>
+											<span>{formatBytes(detailSv.volsize_bytes)}</span>
+										{/if}
+										{#if detailSv.used_bytes !== null}
+											<span class="text-muted-foreground">Used</span>
+											<span>{formatBytes(detailSv.used_bytes)}</span>
+										{/if}
+										{#if detailSv.block_device}
+											<span class="text-muted-foreground">Block Device</span>
+											<span class="font-mono text-xs">{detailSv.block_device}</span>
+										{/if}
+										{#if detailSv.owner}
+											<span class="text-muted-foreground">Owner</span>
+											<span class="font-mono text-xs">{detailSv.owner}</span>
+										{/if}
+										{#if detailSv.parent}
+											<span class="text-muted-foreground">Parent</span>
+											<button class="font-mono text-xs text-blue-400 hover:text-blue-300 text-left" onclick={() => { const p = subvolumes.find(s => s.name === detailSv!.parent); if (p) openDetail(p); }}>{detailSv.parent}</button>
+										{/if}
+										<span class="text-muted-foreground">Comments</span>
+										<span>
+											{#if editingField === 'comments'}
+												<span class="flex items-center gap-1">
+													<Input bind:value={editValue} class="h-7 text-xs" placeholder="Optional description" />
+													<button onclick={saveEdit} class="p-0.5 text-green-400 hover:text-green-300"><Check class="h-3.5 w-3.5" /></button>
+													<button onclick={cancelEdit} class="p-0.5 text-muted-foreground hover:text-foreground"><X class="h-3.5 w-3.5" /></button>
+												</span>
+											{:else}
+												<button class="group flex items-center gap-1 text-xs hover:text-blue-400 transition-colors text-left" onclick={() => startEdit('comments')}>
+													{detailSv.comments || '—'}
+													<Pencil class="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+												</button>
+											{/if}
+										</span>
+									</div>
+									<div class="mt-3 flex gap-2">
+										<Button size="xs" variant="secondary" onclick={() => { showSnap = detailSv?.name ?? null; snapName = ''; }}>
+											<Camera class="mr-1 h-3 w-3" />Snapshot
+										</Button>
+										<Button size="xs" variant="secondary" onclick={() => { showClone = detailSv?.name ?? null; cloneName = ''; }}>
+											<Copy class="mr-1 h-3 w-3" />Clone
+										</Button>
+									</div>
+
+								{:else if detailTab === 'snapshots'}
+									{#if detailSv.snapshots.length === 0}
+										<p class="text-sm text-muted-foreground">No snapshots.</p>
+									{:else}
+										<div class="space-y-1.5">
+											{#each detailSnapshots.length > 0 ? detailSnapshots : detailSv.snapshots.map(s => ({ name: s, subvolume: detailSv!.name, pool: selectedPool, path: '', read_only: true, parent: null })) as snap}
+												<div class="flex items-center justify-between rounded-md border border-border px-3 py-2">
+													<div>
+														<span class="font-mono text-xs">{snap.name}</span>
+														<span class="ml-2 text-xs text-muted-foreground">{snap.read_only ? 'read-only' : 'writable'}</span>
+													</div>
+													<div class="flex gap-1">
+														<Button variant="secondary" size="xs" onclick={() => { showClone = `${detailSv!.name}@${snap.name}`; cloneName = ''; }}>
+															<Copy class="mr-1 h-3 w-3" />Clone
+														</Button>
+														<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(detailSv!.name, snap.name)}>
+															<Trash2 class="h-3 w-3" />
+														</Button>
+													</div>
+												</div>
+											{/each}
+										</div>
+									{/if}
+
+								{:else if detailTab === 'shares'}
+									{#if detailShareCount === 0}
+										<p class="text-sm text-muted-foreground">No shares linked to this subvolume.</p>
+									{:else}
+										<div class="space-y-1.5">
+											{#each detailShares.nfs as share}
+												<div class="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+													<Badge class="bg-green-950 text-green-400 text-[0.6rem]">NFS</Badge>
+													<span class="font-mono text-xs">{share.path}</span>
+													<span class="text-xs text-muted-foreground">{share.clients.length} client(s)</span>
+												</div>
+											{/each}
+											{#each detailShares.smb as share}
+												<div class="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+													<Badge class="bg-amber-950 text-amber-400 text-[0.6rem]">SMB</Badge>
+													<span class="text-sm">{share.name}</span>
+													<span class="text-xs text-muted-foreground">{share.guest_ok ? 'guest' : share.valid_users.join(', ') || 'auth'}</span>
+												</div>
+											{/each}
+											{#each detailShares.iscsi as target}
+												<div class="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+													<Badge class="bg-purple-950 text-purple-400 text-[0.6rem]">iSCSI</Badge>
+													<span class="font-mono text-xs truncate">{target.iqn}</span>
+												</div>
+											{/each}
+											{#each detailShares.nvmeof as sub}
+												<div class="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+													<Badge class="bg-cyan-950 text-cyan-400 text-[0.6rem]">NVMe-oF</Badge>
+													<span class="font-mono text-xs truncate">{sub.nqn}</span>
+												</div>
+											{/each}
+										</div>
+									{/if}
+
+								{:else if detailTab === 'browse'}
+									<div class="space-y-3">
+										{#if detailParentChain.length > 0 || detailSv.parent}
+											<div>
+												<h4 class="mb-1 text-xs font-semibold uppercase text-muted-foreground">Lineage</h4>
+												{#each detailParentChain as ancestor, i}
+													<div class="flex items-center gap-1" style="padding-left: {i * 16}px">
+														<span class="text-muted-foreground text-xs">└─</span>
+														<button class="font-mono text-xs text-blue-400 hover:text-blue-300" onclick={() => { const s = subvolumes.find(x => x.name === ancestor); if (s) openDetail(s); }}>{ancestor}</button>
+													</div>
+												{/each}
+												<div class="flex items-center gap-1" style="padding-left: {detailParentChain.length * 16}px">
+													<span class="text-muted-foreground text-xs">└─</span>
+													<span class="font-mono text-xs font-semibold">{detailSv.name}</span>
+													<Badge variant="outline" class="text-[0.55rem]">current</Badge>
+												</div>
+											</div>
+										{:else}
+											<div class="flex items-center gap-1">
+												<span class="font-mono text-xs font-semibold">{detailSv.name}</span>
+												<Badge variant="outline" class="text-[0.55rem]">root</Badge>
+											</div>
+										{/if}
+										{#if detailChildren.length > 0}
+											<div>
+												<h4 class="mb-1 text-xs font-semibold uppercase text-muted-foreground">Children ({detailChildren.length})</h4>
+												{#each detailChildren as child}
+													<div class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 mb-1">
+														<Badge class="{child.type === 'snapshot' ? 'bg-amber-950 text-amber-400' : 'bg-green-950 text-green-400'} text-[0.55rem]">{child.type}</Badge>
+														{#if child.type === 'clone'}
+															<button class="font-mono text-xs text-blue-400 hover:text-blue-300" onclick={() => { const s = subvolumes.find(x => x.name === child.name); if (s) openDetail(s); }}>{child.name}</button>
+														{:else}
+															<span class="font-mono text-xs">{child.name}</span>
+														{/if}
+													</div>
+												{/each}
+											</div>
+										{:else}
+											<p class="text-xs text-muted-foreground">No children.</p>
+										{/if}
+									</div>
+
+								{:else if detailTab === 'properties'}
+									{#if detailSv.properties && Object.keys(detailSv.properties).length > 0}
+										<div class="space-y-1">
+											{#each Object.entries(detailSv.properties).sort(([a], [b]) => a.localeCompare(b)) as [key, value]}
+												<div class="flex items-start justify-between gap-2 rounded-md border border-border px-3 py-1.5">
+													<span class="font-mono text-xs text-muted-foreground break-all">{key}</span>
+													<span class="font-mono text-xs text-right break-all">{value}</span>
+												</div>
+											{/each}
+										</div>
+									{:else}
+										<p class="text-sm text-muted-foreground">No properties.</p>
+									{/if}
+								{/if}
+							</div>
+						</td>
+					</tr>
+				{/if}
 			{/each}
 		</tbody>
 	</table>
 {/if}
 
-<!-- Detail Panel -->
-{#if detailSv}
-	<div class="fixed inset-y-0 right-0 z-40 flex w-[480px] flex-col border-l border-border bg-background shadow-xl">
-		<!-- Header -->
-		<div class="flex items-center justify-between border-b border-border px-5 py-4">
-			<div>
-				<h2 class="text-lg font-semibold">{detailSv.name}</h2>
-				<span class="text-xs text-muted-foreground font-mono">{detailSv.path}</span>
-			</div>
-			<button onclick={closeDetail} class="rounded-md p-1 hover:bg-accent transition-colors">
-				<X class="h-5 w-5" />
-			</button>
-		</div>
-
-		<!-- Tabs -->
-		<div class="flex border-b border-border">
-			<button
-				onclick={() => detailTab = 'info'}
-				class="px-4 py-2 text-sm font-medium transition-colors {detailTab === 'info'
-					? 'border-b-2 border-primary text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
-			>Info</button>
-			<button
-				onclick={() => detailTab = 'snapshots'}
-				class="px-4 py-2 text-sm font-medium transition-colors {detailTab === 'snapshots'
-					? 'border-b-2 border-primary text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
-			>Snapshots ({detailSv.snapshots.length})</button>
-			<button
-				onclick={() => detailTab = 'shares'}
-				class="px-4 py-2 text-sm font-medium transition-colors {detailTab === 'shares'
-					? 'border-b-2 border-primary text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
-			>Shares{#if detailShareCount > 0} ({detailShareCount}){/if}</button>
-			<button
-				onclick={() => detailTab = 'browse'}
-				class="px-4 py-2 text-sm font-medium transition-colors {detailTab === 'browse'
-					? 'border-b-2 border-primary text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
-			>Browse</button>
-			<button
-				onclick={() => detailTab = 'properties'}
-				class="px-4 py-2 text-sm font-medium transition-colors {detailTab === 'properties'
-					? 'border-b-2 border-primary text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
-			>Properties</button>
-		</div>
-
-		<!-- Tab content -->
-		<div class="flex-1 overflow-y-auto p-5">
-			{#if detailTab === 'info'}
-				<div class="space-y-3">
-					<div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-						<div class="text-muted-foreground">Pool</div>
-						<div class="font-mono">{detailSv.pool}</div>
-
-						<div class="text-muted-foreground">Type</div>
-						<div>
-							<Badge variant={detailSv.subvolume_type === 'filesystem' ? 'secondary' : 'outline'}
-								class={detailSv.subvolume_type === 'filesystem' ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}>
-								{detailSv.subvolume_type === 'filesystem' ? 'Filesystem' : 'Block'}
-							</Badge>
-						</div>
-
-						{#if detailSv.compression}
-							<div class="text-muted-foreground">Compression</div>
-							<div>{detailSv.compression}</div>
-						{/if}
-
-						{#if detailSv.subvolume_type === 'block' && detailSv.volsize_bytes}
-							<div class="text-muted-foreground">Volume Size</div>
-							<div>{formatBytes(detailSv.volsize_bytes)}</div>
-						{/if}
-
-						{#if detailSv.used_bytes !== null}
-							<div class="text-muted-foreground">Used</div>
-							<div>{formatBytes(detailSv.used_bytes)}</div>
-						{/if}
-
-						{#if detailSv.block_device}
-							<div class="text-muted-foreground">Block Device</div>
-							<div class="font-mono text-xs">{detailSv.block_device}</div>
-						{/if}
-
-						{#if detailSv.owner}
-							<div class="text-muted-foreground">Owner</div>
-							<div class="font-mono text-xs">{detailSv.owner}</div>
-						{/if}
-
-						{#if detailSv.comments}
-							<div class="text-muted-foreground">Comments</div>
-							<div class="text-xs">{detailSv.comments}</div>
-						{/if}
-					</div>
-
-					<div class="mt-4 flex gap-2">
-						<Button size="sm" variant="secondary" onclick={() => { showSnap = detailSv?.name ?? null; snapName = ''; }}>
-							<Camera class="mr-1.5 h-3.5 w-3.5" />Snapshot
-						</Button>
-						<Button size="sm" variant="secondary" onclick={() => { showClone = detailSv?.name ?? null; cloneName = ''; }}>
-							<Copy class="mr-1.5 h-3.5 w-3.5" />Clone
-						</Button>
-						<Button size="sm" variant="destructive" onclick={() => { if (detailSv) { closeDetail(); deleteSubvolume(detailSv.name); } }}>
-							<Trash2 class="mr-1.5 h-3.5 w-3.5" />Delete
-						</Button>
-					</div>
-				</div>
-
-			{:else if detailTab === 'snapshots'}
-				{#if detailSv.snapshots.length === 0}
-					<p class="text-sm text-muted-foreground">No snapshots.</p>
-				{:else}
-					<div class="space-y-2">
-						{#each detailSnapshots as snap}
-							<div class="flex items-center justify-between rounded-md border border-border p-3">
-								<div>
-									<div class="font-mono text-sm">{snap.name}</div>
-									<div class="text-xs text-muted-foreground">
-										{snap.read_only ? 'Read-only' : 'Writable'}
-										{#if snap.parent}
-											· Parent: {snap.parent}
-										{/if}
-									</div>
-									<div class="font-mono text-xs text-muted-foreground">{snap.path}</div>
-								</div>
-								<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(detailSv!.name, snap.name)}>
-									<Trash2 class="h-3.5 w-3.5" />
-								</Button>
-							</div>
-						{/each}
-						{#if detailSnapshots.length === 0 && detailSv.snapshots.length > 0}
-							<!-- Fallback: show names from subvolume data if snapshot list didn't load -->
-							{#each detailSv.snapshots as snapName}
-								<div class="flex items-center justify-between rounded-md border border-border p-3">
-									<span class="font-mono text-sm">{snapName}</span>
-									<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(detailSv!.name, snapName)}>
-										<Trash2 class="h-3.5 w-3.5" />
-									</Button>
-								</div>
-							{/each}
-						{/if}
-					</div>
-				{/if}
-
-			{:else if detailTab === 'shares'}
-				{#if detailShareCount === 0}
-					<p class="text-sm text-muted-foreground">No shares linked to this subvolume.</p>
-				{:else}
-					<div class="space-y-3">
-						{#if detailShares.nfs.length > 0}
-							<div>
-								<h4 class="mb-2 text-xs font-semibold uppercase text-muted-foreground">NFS</h4>
-								{#each detailShares.nfs as share}
-									<div class="mb-2 rounded-md border border-border p-3">
-										<div class="flex items-center gap-2">
-											<Badge class="bg-green-950 text-green-400">NFS</Badge>
-											<span class="font-mono text-xs">{share.path}</span>
-										</div>
-										{#if share.comment}
-											<div class="mt-1 text-xs text-muted-foreground">{share.comment}</div>
-										{/if}
-										<div class="mt-1 text-xs text-muted-foreground">
-											{share.clients.length} client(s) · {share.enabled ? 'Enabled' : 'Disabled'}
-										</div>
-									</div>
-								{/each}
-							</div>
-						{/if}
-
-						{#if detailShares.smb.length > 0}
-							<div>
-								<h4 class="mb-2 text-xs font-semibold uppercase text-muted-foreground">SMB</h4>
-								{#each detailShares.smb as share}
-									<div class="mb-2 rounded-md border border-border p-3">
-										<div class="flex items-center gap-2">
-											<Badge class="bg-amber-950 text-amber-400">SMB</Badge>
-											<span class="font-medium text-sm">{share.name}</span>
-										</div>
-										<div class="mt-1 font-mono text-xs text-muted-foreground">{share.path}</div>
-										<div class="mt-1 text-xs text-muted-foreground">
-											{share.guest_ok ? 'Guest access' : share.valid_users.length > 0 ? `Users: ${share.valid_users.join(', ')}` : 'Authenticated'}
-											· {share.read_only ? 'Read-only' : 'Read/Write'}
-										</div>
-									</div>
-								{/each}
-							</div>
-						{/if}
-
-						{#if detailShares.iscsi.length > 0}
-							<div>
-								<h4 class="mb-2 text-xs font-semibold uppercase text-muted-foreground">iSCSI</h4>
-								{#each detailShares.iscsi as target}
-									<div class="mb-2 rounded-md border border-border p-3">
-										<div class="flex items-center gap-2">
-											<Badge class="bg-purple-950 text-purple-400">iSCSI</Badge>
-										</div>
-										<div class="mt-1 font-mono text-xs">{target.iqn}</div>
-										<div class="mt-1 text-xs text-muted-foreground">
-											{target.luns.length} LUN(s) · {target.acls.length} ACL(s) · {target.enabled ? 'Enabled' : 'Disabled'}
-										</div>
-									</div>
-								{/each}
-							</div>
-						{/if}
-
-						{#if detailShares.nvmeof.length > 0}
-							<div>
-								<h4 class="mb-2 text-xs font-semibold uppercase text-muted-foreground">NVMe-oF</h4>
-								{#each detailShares.nvmeof as sub}
-									<div class="mb-2 rounded-md border border-border p-3">
-										<div class="flex items-center gap-2">
-											<Badge class="bg-cyan-950 text-cyan-400">NVMe-oF</Badge>
-										</div>
-										<div class="mt-1 font-mono text-xs">{sub.nqn}</div>
-										<div class="mt-1 text-xs text-muted-foreground">
-											{sub.namespaces.length} namespace(s) · {sub.ports.length} port(s)
-											· {sub.allow_any_host ? 'Any host' : `${sub.allowed_hosts.length} host(s)`}
-										</div>
-									</div>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				{/if}
-
-			{:else if detailTab === 'browse'}
-				<div class="space-y-4">
-					<!-- Parent chain -->
-					{#if detailParentChain.length > 0 || detailSv?.parent}
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Lineage</h4>
-							<div class="space-y-1">
-								{#each detailParentChain as ancestor, i}
-									<div class="flex items-center gap-1" style="padding-left: {i * 16}px">
-										<span class="text-muted-foreground">└─</span>
-										<button
-											class="font-mono text-sm text-blue-400 hover:text-blue-300 transition-colors"
-											onclick={() => { const sv = subvolumes.find(s => s.name === ancestor); if (sv) openDetail(sv); }}
-										>{ancestor}</button>
-									</div>
-								{/each}
-								<!-- Current subvolume -->
-								<div class="flex items-center gap-1" style="padding-left: {detailParentChain.length * 16}px">
-									<span class="text-muted-foreground">└─</span>
-									<span class="font-mono text-sm font-semibold">{detailSv?.name}</span>
-									<Badge variant="outline" class="ml-1 text-[0.6rem]">current</Badge>
-								</div>
-							</div>
-						</div>
-					{:else}
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Lineage</h4>
-							<div class="flex items-center gap-1">
-								<span class="font-mono text-sm font-semibold">{detailSv?.name}</span>
-								<Badge variant="outline" class="ml-1 text-[0.6rem]">root</Badge>
-							</div>
-						</div>
-					{/if}
-
-					<!-- Children -->
-					{#if detailChildren.length > 0}
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Children ({detailChildren.length})</h4>
-							<div class="space-y-1">
-								{#each detailChildren as child}
-									<div class="flex items-center gap-2 rounded-md border border-border px-3 py-2">
-										{#if child.type === 'snapshot'}
-											<Badge class="bg-amber-950 text-amber-400 text-[0.6rem]">snapshot</Badge>
-										{:else}
-											<Badge class="bg-green-950 text-green-400 text-[0.6rem]">clone</Badge>
-										{/if}
-										{#if child.type === 'clone'}
-											<button
-												class="font-mono text-sm text-blue-400 hover:text-blue-300 transition-colors"
-												onclick={() => { const sv = subvolumes.find(s => s.name === child.name); if (sv) openDetail(sv); }}
-											>{child.name}</button>
-										{:else}
-											<span class="font-mono text-sm">{child.name}</span>
-										{/if}
-									</div>
-								{/each}
-							</div>
-						</div>
-					{:else}
-						<div>
-							<h4 class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Children</h4>
-							<p class="text-sm text-muted-foreground">No snapshots or clones.</p>
-						</div>
-					{/if}
-				</div>
-
-			{:else if detailTab === 'properties'}
-				{#if detailSv.properties && Object.keys(detailSv.properties).length > 0}
-					<div class="space-y-1">
-						{#each Object.entries(detailSv.properties).sort(([a], [b]) => a.localeCompare(b)) as [key, value]}
-							<div class="flex items-start justify-between gap-2 rounded-md border border-border px-3 py-2">
-								<span class="font-mono text-xs text-muted-foreground break-all">{key}</span>
-								<span class="font-mono text-xs text-right break-all">{value}</span>
-							</div>
-						{/each}
-					</div>
-				{:else}
-					<p class="text-sm text-muted-foreground">No properties set.</p>
-				{/if}
-			{/if}
-		</div>
-	</div>
-	<!-- Backdrop -->
-	<button class="fixed inset-0 z-30 bg-black/30" onclick={closeDetail}></button>
-{/if}
 
 <Dialog.Root open={showSnap !== null} onOpenChange={(open) => { if (!open) showSnap = null; }}>
 	<Dialog.Content>

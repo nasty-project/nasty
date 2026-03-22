@@ -553,7 +553,7 @@
 				</div>
 
 				<div class="mb-4">
-					<label class="mb-1 block text-xs text-muted-foreground">Challenge Type</label>
+					<span class="mb-1 block text-xs text-muted-foreground">Challenge Type</span>
 					<div class="flex w-fit rounded-md border border-border text-sm">
 						<button
 							onclick={() => { tlsChallengeType = 'tls-alpn'; tlsChanged = true; }}

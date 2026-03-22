@@ -276,6 +276,18 @@ pub struct ResizeSubvolumeRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateSubvolumeRequest {
+    /// Name of the pool containing the subvolume.
+    pub pool: String,
+    /// Name of the subvolume to update.
+    pub name: String,
+    /// New compression algorithm (e.g. `lz4`, `zstd`, `none`). `none` clears compression.
+    pub compression: Option<String>,
+    /// New description for the subvolume. Empty string clears the comment.
+    pub comments: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetPropertiesRequest {
     /// Name of the pool containing the subvolume.
     pub pool: String,
@@ -725,6 +737,49 @@ impl SubvolumeService {
         let path = subvol_path(&self.pool_mount_point(&req.pool).await?, &req.name);
         xattr::set(&path, XATTR_NASTY_VOLSIZE, req.volsize_bytes.to_string().as_bytes())
             .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr volsize: {e}")))?;
+
+        self.get(&req.pool, &req.name, owner_filter).await
+    }
+
+    /// Update compression and/or comments on an existing subvolume.
+    pub async fn update(
+        &self,
+        req: UpdateSubvolumeRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<Subvolume, SubvolumeError> {
+        let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
+        let path = &subvol.path;
+
+        if let Some(ref comp) = req.compression {
+            let comp_value = if comp == "none" || comp.is_empty() {
+                "none"
+            } else {
+                comp.as_str()
+            };
+            info!("Setting compression={} on subvolume '{}'", comp_value, req.name);
+            cmd::run_ok(
+                "bcachefs",
+                &["set-file-option", &format!("--compression={comp_value}"), path],
+            )
+            .await
+            .map_err(SubvolumeError::CommandFailed)?;
+
+            if comp_value == "none" {
+                let _ = xattr::remove(path, XATTR_NASTY_COMPRESSION);
+            } else {
+                xattr::set(path, XATTR_NASTY_COMPRESSION, comp_value.as_bytes())
+                    .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr compression: {e}")))?;
+            }
+        }
+
+        if let Some(ref comments) = req.comments {
+            if comments.is_empty() {
+                let _ = xattr::remove(path, XATTR_NASTY_COMMENT);
+            } else {
+                xattr::set(path, XATTR_NASTY_COMMENT, comments.as_bytes())
+                    .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr comment: {e}")))?;
+            }
+        }
 
         self.get(&req.pool, &req.name, owner_filter).await
     }

@@ -979,6 +979,7 @@
 										</td>
 										<td class="p-2 text-xs">
 										{#if pool.mounted && editingLabel === `${pool.name}|${dev.path}`}
+											<!-- svelte-ignore a11y_autofocus -->
 											<input
 												class="w-28 rounded border border-input bg-background px-1.5 py-0.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring"
 												bind:value={editLabelValue}

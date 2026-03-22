@@ -102,7 +102,7 @@
 	});
 
 	const bcachefsDebugChanged = $derived(
-		bcachefsInfo != null && bcachefsDebugChecks !== bcachefsInfo.debug_checks
+		bcachefsInfo != null && bcachefsDebugChecks !== (bcachefsInfo as BcachefsToolsInfo).debug_checks
 	);
 
 	const bcachefsCanSwitch = $derived(
@@ -142,17 +142,18 @@
 		}
 	});
 
-	onMount(async () => {
-		const t0 = performance.now();
-		await Promise.all([loadVersion(), loadStatus(), loadBcachefsInfo(), loadBcachefsStatus()]);
-		if (localStorage.getItem('nasty-debug') === '1') {
-			console.debug(`[page] update: ${(performance.now() - t0).toFixed(0)}ms total`);
-		}
-		loading = false;
+	const onReconnect = () => {
+		Promise.all([loadVersion(), loadBcachefsInfo()]);
+	};
 
-		const onReconnect = () => {
-			Promise.all([loadVersion(), loadBcachefsInfo()]);
-		};
+	onMount(() => {
+		const t0 = performance.now();
+		Promise.all([loadVersion(), loadStatus(), loadBcachefsInfo(), loadBcachefsStatus()]).then(() => {
+			if (localStorage.getItem('nasty-debug') === '1') {
+				console.debug(`[page] update: ${(performance.now() - t0).toFixed(0)}ms total`);
+			}
+			loading = false;
+		});
 		client.onReconnect(onReconnect);
 		return () => client.offReconnect(onReconnect);
 	});
