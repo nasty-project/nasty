@@ -413,18 +413,30 @@ impl NvmeofService {
             allow_any_host: Some(true),
         }).await?;
 
-        let subsys = self.add_namespace(AddNamespaceRequest {
-            subsystem_id: subsys.id.clone(),
-            device_path: req.device_path,
-        }).await?;
+        // Skip adding namespace if one already exists (idempotent retry)
+        let subsys = if subsys.namespaces.is_empty() {
+            self.add_namespace(AddNamespaceRequest {
+                subsystem_id: subsys.id.clone(),
+                device_path: req.device_path,
+            }).await?
+        } else {
+            info!("Subsystem {} already has {} namespace(s), skipping", subsys.nqn, subsys.namespaces.len());
+            subsys
+        };
 
-        let subsys = self.add_port(AddPortRequest {
-            subsystem_id: subsys.id.clone(),
-            transport: Some("tcp".to_string()),
-            addr: Some(req.addr.unwrap_or_else(|| "0.0.0.0".to_string())),
-            service_id: Some(req.port.unwrap_or(4420)),
-            addr_family: Some("ipv4".to_string()),
-        }).await?;
+        // Skip adding port if one already exists (idempotent retry)
+        let subsys = if subsys.ports.is_empty() {
+            self.add_port(AddPortRequest {
+                subsystem_id: subsys.id.clone(),
+                transport: Some("tcp".to_string()),
+                addr: Some(req.addr.unwrap_or_else(|| "0.0.0.0".to_string())),
+                service_id: Some(req.port.unwrap_or(4420)),
+                addr_family: Some("ipv4".to_string()),
+            }).await?
+        } else {
+            info!("Subsystem {} already has {} port(s), skipping", subsys.nqn, subsys.ports.len());
+            subsys
+        };
 
         Ok(subsys)
     }

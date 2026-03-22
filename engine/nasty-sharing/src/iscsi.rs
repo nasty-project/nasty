@@ -258,20 +258,25 @@ impl IscsiService {
 
     /// Create a complete iSCSI target with a LUN in one step
     pub async fn create_quick(&self, req: QuickCreateRequest) -> Result<IscsiTarget, IscsiError> {
-        // Create the target
+        // Create the target (idempotent — returns existing if name matches)
         let target = self.create(CreateTargetRequest {
             name: req.name,
             alias: None,
             portals: None,
         }).await?;
 
-        // Add the block device as a LUN
-        let target = self.add_lun(AddLunRequest {
-            target_id: target.id.clone(),
-            backstore_path: req.device_path,
-            backstore_type: Some("block".to_string()),
-            size_bytes: None,
-        }).await?;
+        // Skip adding LUN if one already exists (idempotent retry)
+        let target = if target.luns.is_empty() {
+            self.add_lun(AddLunRequest {
+                target_id: target.id.clone(),
+                backstore_path: req.device_path,
+                backstore_type: Some("block".to_string()),
+                size_bytes: None,
+            }).await?
+        } else {
+            info!("iSCSI target {} already has {} LUN(s), skipping", target.iqn, target.luns.len());
+            target
+        };
 
         Ok(target)
     }
