@@ -925,9 +925,9 @@ impl SubvolumeService {
         // Write metadata xattrs for the new subvolume.
         // bcachefs snapshot copies source inode xattrs, so user.nasty.* are already present.
         // Inherit parent metadata if available, otherwise use defaults.
-        let (sub_type, volsize, compression) = match &parent {
+        let (sub_type, volsize, compression): (SubvolumeType, Option<u64>, Option<String>) = match &parent {
             Some(p) => (p.subvolume_type.clone(), p.volsize_bytes, p.compression.clone()),
-            None => ("filesystem".to_string(), None, None),
+            None => (SubvolumeType::Filesystem, None, None),
         };
         write_meta_xattrs(
             &new_subvol_path,
