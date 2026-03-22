@@ -9,6 +9,7 @@ use tracing::info;
 use uuid::Uuid;
 
 const NASTY_SMB_CONF_PATH: &str = "/etc/samba/smb.nasty.conf";
+const NASTY_SMB_SHARE_DIR: &str = "/etc/samba/nasty.d";
 const STATE_DIR: &str = "/var/lib/nasty/shares/smb";
 
 #[derive(Debug, Error)]
@@ -164,7 +165,9 @@ impl SmbService {
         };
 
         state_dir().save(&share.id, &share).await?;
-        apply_config().await?;
+        write_share_conf(&share).await?;
+        rebuild_include_list().await?;
+        reload_samba().await?;
 
         info!("Created SMB share '{}' at {}", share.name, share.path);
         Ok(share)
@@ -218,7 +221,9 @@ impl SmbService {
         }
 
         state_dir().save(&share.id, &share).await?;
-        apply_config().await?;
+        write_share_conf(&share).await?;
+        rebuild_include_list().await?;
+        reload_samba().await?;
 
         info!("Updated SMB share '{}'", share.name);
         Ok(share)
@@ -232,7 +237,9 @@ impl SmbService {
             .ok_or_else(|| SmbError::NotFound(req.id.clone()))?;
 
         state_dir().remove(&req.id).await?;
-        apply_config().await?;
+        remove_share_conf(&req.id).await;
+        rebuild_include_list().await?;
+        reload_samba().await?;
 
         info!("Deleted SMB share '{}'", req.id);
         Ok(())
@@ -251,75 +258,104 @@ fn validate_share_name(name: &str) -> Result<(), SmbError> {
     Ok(())
 }
 
-/// Generate smb.nasty.conf from all share files and reload samba
-async fn apply_config() -> Result<(), SmbError> {
-    let shares: Vec<SmbShare> = state_dir().load_all().await;
+/// Write a single share config file: /etc/samba/nasty.d/{id}.conf
+async fn write_share_conf(share: &SmbShare) -> Result<(), SmbError> {
+    tokio::fs::create_dir_all(NASTY_SMB_SHARE_DIR).await?;
 
-    let mut conf = String::from("# Managed by NASty — do not edit manually\n\n");
+    let path = share_conf_path(&share.id);
 
-    for share in &shares {
-        if !share.enabled {
-            continue;
-        }
-
-        conf.push_str(&format!("[{}]\n", share.name));
-        conf.push_str(&format!("    path = {}\n", share.path));
-
-        if let Some(ref comment) = share.comment {
-            conf.push_str(&format!("    comment = {comment}\n"));
-        }
-
-        conf.push_str(&format!(
-            "    read only = {}\n",
-            if share.read_only { "yes" } else { "no" }
-        ));
-        conf.push_str(&format!(
-            "    browseable = {}\n",
-            if share.browseable { "yes" } else { "no" }
-        ));
-        conf.push_str(&format!(
-            "    guest ok = {}\n",
-            if share.guest_ok { "yes" } else { "no" }
-        ));
-
-        // When guest access is enabled, run as nobody/nogroup and make
-        // the directory world-writable so guests can read/write.
-        if share.guest_ok {
-            conf.push_str("    force user = nobody\n");
-            conf.push_str("    force group = nogroup\n");
-            conf.push_str("    create mask = 0666\n");
-            conf.push_str("    directory mask = 0777\n");
-        }
-
-        if !share.valid_users.is_empty() {
-            conf.push_str(&format!(
-                "    valid users = {}\n",
-                share.valid_users.join(" ")
-            ));
-        }
-
-        let mut extra: Vec<_> = share.extra_params.iter().collect();
-        extra.sort_by_key(|(k, _)| *k);
-        for (key, value) in extra {
-            conf.push_str(&format!("    {key} = {value}\n"));
-        }
-
-        conf.push('\n');
+    if !share.enabled {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Ok(());
     }
 
-    // Ensure guest share directories are world-writable so nobody can write
-    for share in &shares {
-        if share.enabled && share.guest_ok {
-            let _ = tokio::process::Command::new("chmod")
-                .args(["0777", &share.path])
-                .output()
-                .await;
-        }
+    let mut conf = format!("[{}]\n", share.name);
+    conf.push_str(&format!("    path = {}\n", share.path));
+
+    if let Some(ref comment) = share.comment {
+        conf.push_str(&format!("    comment = {comment}\n"));
     }
 
-    tokio::fs::write(NASTY_SMB_CONF_PATH, &conf).await?;
-    reload_samba().await?;
+    conf.push_str(&format!(
+        "    read only = {}\n",
+        if share.read_only { "yes" } else { "no" }
+    ));
+    conf.push_str(&format!(
+        "    browseable = {}\n",
+        if share.browseable { "yes" } else { "no" }
+    ));
+    conf.push_str(&format!(
+        "    guest ok = {}\n",
+        if share.guest_ok { "yes" } else { "no" }
+    ));
+
+    if share.guest_ok {
+        conf.push_str("    force user = nobody\n");
+        conf.push_str("    force group = nogroup\n");
+        conf.push_str("    create mask = 0666\n");
+        conf.push_str("    directory mask = 0777\n");
+    }
+
+    if !share.valid_users.is_empty() {
+        conf.push_str(&format!(
+            "    valid users = {}\n",
+            share.valid_users.join(" ")
+        ));
+    }
+
+    let mut extra: Vec<_> = share.extra_params.iter().collect();
+    extra.sort_by_key(|(k, _)| *k);
+    for (key, value) in extra {
+        conf.push_str(&format!("    {key} = {value}\n"));
+    }
+
+    tokio::fs::write(&path, &conf).await?;
+
+    // Ensure guest share directories are world-writable
+    if share.guest_ok {
+        let _ = tokio::process::Command::new("chmod")
+            .args(["0777", &share.path])
+            .output()
+            .await;
+    }
+
     Ok(())
+}
+
+/// Remove the config file for a share.
+async fn remove_share_conf(id: &str) {
+    let path = share_conf_path(id);
+    if let Err(e) = tokio::fs::remove_file(&path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("Failed to remove share conf {path}: {e}");
+        }
+    }
+}
+
+/// Rebuild smb.nasty.conf as a list of includes from per-share files.
+/// This is the only shared file — it's just a directory listing, no parsing.
+async fn rebuild_include_list() -> Result<(), SmbError> {
+    tokio::fs::create_dir_all(NASTY_SMB_SHARE_DIR).await?;
+
+    let mut includes = String::from("# Managed by NASty — do not edit manually\n");
+    includes.push_str("# Per-share configs in /etc/samba/nasty.d/\n\n");
+
+    let mut dir = tokio::fs::read_dir(NASTY_SMB_SHARE_DIR).await?;
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".conf") {
+            includes.push_str(&format!("include = {NASTY_SMB_SHARE_DIR}/{name}\n"));
+        }
+    }
+
+    tokio::fs::write(NASTY_SMB_CONF_PATH, &includes).await?;
+    Ok(())
+}
+
+/// Path to the per-share SMB config file.
+fn share_conf_path(id: &str) -> String {
+    format!("{NASTY_SMB_SHARE_DIR}/{id}.conf")
 }
 
 async fn reload_samba() -> Result<(), SmbError> {

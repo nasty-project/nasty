@@ -583,6 +583,7 @@ in {
       "d /etc/exports.d 0755 root root -"
       "d /etc/target 0750 root root -"
       "f /etc/samba/smb.nasty.conf 0644 root root -"
+      "d /etc/samba/nasty.d 0755 root root -"
     ];
 
     # ── Self-signed TLS certificate ───────────────────────────
