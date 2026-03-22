@@ -26,6 +26,15 @@
 	let netNameservers = $state('');
 	let netChanged = $state(false);
 
+	// Log level
+	let logFilter = $state('');
+	let savingLog = $state(false);
+	const logPresets = [
+		{ label: 'Normal', value: 'nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,tower_http=info' },
+		{ label: 'Debug', value: 'nasty_engine=debug,nasty_storage=debug,nasty_sharing=debug,nasty_snapshot=debug,nasty_system=debug,tower_http=debug' },
+		{ label: 'Trace', value: 'nasty_engine=trace,nasty_storage=trace,nasty_sharing=trace,nasty_snapshot=trace,nasty_system=trace,tower_http=trace' },
+	];
+
 	// TLS
 	let tlsDomain = $state('');
 	let tlsAcmeEmail = $state('');
@@ -172,6 +181,16 @@
 			() => client.call('system.settings.update', { clock_24h: val }),
 			val ? '24-hour clock enabled' : '12-hour clock enabled'
 		);
+	}
+
+	async function applyLogLevel() {
+		if (!logFilter.trim()) return;
+		savingLog = true;
+		await withToast(
+			() => client.call('system.log.set_level', { filter: logFilter }),
+			'Log level updated'
+		);
+		savingLog = false;
 	}
 
 	async function saveTls() {
@@ -344,6 +363,39 @@
 							{saving ? 'Saving…' : 'Apply'}
 						</Button>
 					</div>
+				</section>
+
+				<!-- Log Level -->
+				<section class="rounded-lg border border-border p-5">
+					<h2 class="mb-4 text-base font-semibold">Log Level</h2>
+
+					<div class="mb-3 flex flex-wrap gap-2">
+						{#each logPresets as preset}
+							<button
+								onclick={() => logFilter = preset.value}
+								class="rounded-md border px-3 py-1 text-xs transition-colors
+									{logFilter === preset.value
+										? 'border-primary bg-primary text-primary-foreground'
+										: 'border-border text-muted-foreground hover:bg-accent'}"
+							>{preset.label}</button>
+						{/each}
+					</div>
+
+					<div class="mb-3">
+						<input
+							type="text"
+							bind:value={logFilter}
+							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+							placeholder="nasty_engine=debug,nasty_system=trace"
+						/>
+						<span class="mt-1 block text-xs text-muted-foreground">
+							Uses <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html" target="_blank" class="text-blue-400 hover:underline">tracing EnvFilter</a> syntax. Applied immediately, resets on engine restart.
+						</span>
+					</div>
+
+					<Button size="sm" onclick={applyLogLevel} disabled={savingLog || !logFilter.trim()}>
+						{savingLog ? 'Applying…' : 'Apply'}
+					</Button>
 				</section>
 
 			</div>
