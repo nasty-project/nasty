@@ -91,6 +91,9 @@ pub struct Subvolume {
     /// Used by nasty-csi to track CSI volume metadata without sidecar files.
     #[serde(default)]
     pub properties: HashMap<String, String>,
+    /// Parent subvolume name if this is a clone (from bcachefs snapshot_parent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -433,6 +436,8 @@ impl SubvolumeService {
 
             let properties = read_xattrs(path);
 
+            let parent = info.snapshot_parents.get(name.as_str()).cloned();
+
             subvolumes.push(Subvolume {
                 name: name.to_string(),
                 pool: pool_name.to_string(),
@@ -446,6 +451,7 @@ impl SubvolumeService {
                 snapshots: snapshots.iter().map(|s| s.name.clone()).collect(),
                 owner: meta.owner,
                 properties,
+                parent,
             });
         }
 
