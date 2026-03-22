@@ -415,7 +415,7 @@
 									<span class="ml-1 text-muted-foreground">via {network.live_gateway}</span>
 								{/if}
 							</div>
-							<div class="text-xs text-muted-foreground">{network.interface || '—'}</div>
+							{#if network.interface}<div class="text-xs text-muted-foreground">{network.interface}</div>{/if}
 						</div>
 					</div>
 				{/if}
