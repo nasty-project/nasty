@@ -172,7 +172,7 @@
 	let search = $state('');
 
 	type SortKey = 'name' | 'type' | 'size';
-	let sortKey = $state<SortKey | null>(null);
+	let sortKey = $state<SortKey | null>('name');
 	let sortDir = $state<'asc' | 'desc'>('asc');
 
 	function toggleSort(key: SortKey) {
