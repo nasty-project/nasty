@@ -68,6 +68,8 @@ async def test_smb(ctx: TestContext):
                     mounted[i] = True
                     break
                 last_err = r.stderr.strip()
+                if attempt < 7:
+                    info(f"  {label}: mount attempt {attempt+1} failed: {last_err}, retrying...")
                 await asyncio.sleep(3)
             if mounted[i]:
                 ctx.record(f"{label}: mount", True)
