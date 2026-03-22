@@ -894,18 +894,23 @@ impl SubvolumeService {
             ));
         }
 
-        // Verify ownership of the parent subvolume and inherit its type
-        let parent = self.get(&req.pool, &req.subvolume, owner_filter).await?;
+        // Try to get the parent subvolume for metadata inheritance.
+        // The parent may have been deleted (disaster recovery scenario) —
+        // bcachefs snapshots survive parent deletion, so this is valid.
+        let parent = self.get(&req.pool, &req.subvolume, owner_filter).await.ok();
 
         let mount_point = self.pool_mount_point(&req.pool).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.snapshot);
         let new_subvol_path = subvol_path(&mount_point, &req.new_name);
 
         if !Path::new(&snap_path).exists() {
-            return Err(SubvolumeError::NotFound(req.snapshot.clone()));
+            return Err(SubvolumeError::NotFound(format!(
+                "snapshot {}@{}", req.subvolume, req.snapshot
+            )));
         }
         if Path::new(&new_subvol_path).exists() {
-            return Err(SubvolumeError::AlreadyExists(req.new_name.clone()));
+            info!("Subvolume '{}' already exists in pool '{}', returning existing (idempotent)", req.new_name, req.pool);
+            return self.get(&req.pool, &req.new_name, None).await;
         }
 
         info!(
@@ -917,15 +922,18 @@ impl SubvolumeService {
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
-        // Write metadata xattrs for the new subvolume, inheriting the parent's type and size.
-        // Note: bcachefs snapshot (writable clone) copies the source inode xattrs, so
-        // user.nasty.* are already present. We overwrite them to clear comments and set
-        // the correct owner for the new subvolume.
+        // Write metadata xattrs for the new subvolume.
+        // bcachefs snapshot copies source inode xattrs, so user.nasty.* are already present.
+        // Inherit parent metadata if available, otherwise use defaults.
+        let (sub_type, volsize, compression) = match &parent {
+            Some(p) => (p.subvolume_type.clone(), p.volsize_bytes, p.compression.clone()),
+            None => ("filesystem".to_string(), None, None),
+        };
         write_meta_xattrs(
             &new_subvol_path,
-            &parent.subvolume_type,
-            parent.volsize_bytes,
-            parent.compression.as_deref(),
+            &sub_type,
+            volsize,
+            compression.as_deref(),
             None,
             owner_filter,
         )?;
