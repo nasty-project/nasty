@@ -27,17 +27,6 @@
 	let addUserShare = $state<string | null>(null);
 	let addUserName = $state('');
 
-	// SMB Users
-	interface SmbUser { username: string; uid: number; }
-	let smbUsers: SmbUser[] = $state([]);
-	let showCreateUser = $state(false);
-	let newSmbUsername = $state('');
-	let newSmbPassword = $state('');
-	let newSmbPasswordConfirm = $state('');
-	let creatingSmbUser = $state(false);
-	let changePwUser = $state<string | null>(null);
-	let changePwValue = $state('');
-	let changePwConfirm = $state('');
 
 	const client = getClient();
 
@@ -71,10 +60,7 @@
 
 	async function refresh() {
 		await withToast(async () => {
-			[shares, smbUsers] = await Promise.all([
-				client.call<SmbShare[]>('share.smb.list'),
-				client.call<SmbUser[]>('smb.user.list'),
-			]);
+			shares = await client.call<SmbShare[]>('share.smb.list');
 		});
 	}
 
@@ -83,40 +69,6 @@
 			const all = await client.call<Subvolume[]>('subvolume.list_all');
 			subvolumes = all.filter(s => s.subvolume_type === 'filesystem');
 		});
-	}
-
-	async function createSmbUser() {
-		if (!newSmbUsername || !newSmbPassword || newSmbPassword !== newSmbPasswordConfirm) return;
-		creatingSmbUser = true;
-		const ok = await withToast(
-			() => client.call('smb.user.create', { username: newSmbUsername, password: newSmbPassword }),
-			`SMB user "${newSmbUsername}" created`
-		);
-		if (ok !== undefined) {
-			showCreateUser = false;
-			newSmbUsername = '';
-			newSmbPassword = '';
-			newSmbPasswordConfirm = '';
-			await refresh();
-		}
-		creatingSmbUser = false;
-	}
-
-	async function deleteSmbUser(username: string) {
-		if (!await confirm(`Delete SMB user "${username}"?`, 'The user will lose access to all SMB shares.')) return;
-		await withToast(() => client.call('smb.user.delete', { username }), `SMB user "${username}" deleted`);
-		await refresh();
-	}
-
-	async function changeSmbPassword() {
-		if (!changePwUser || !changePwValue || changePwValue !== changePwConfirm) return;
-		await withToast(
-			() => client.call('smb.user.set_password', { username: changePwUser, password: changePwValue }),
-			`Password changed for "${changePwUser}"`
-		);
-		changePwUser = null;
-		changePwValue = '';
-		changePwConfirm = '';
 	}
 
 	function onSubvolumeSelect() {
@@ -401,94 +353,3 @@
 	</table>
 {/if}
 
-<!-- SMB Users -->
-<h2 class="mt-10 mb-3 text-xl font-semibold">SMB Users</h2>
-<p class="mb-4 text-sm text-muted-foreground">
-	System users with Samba access. Required for non-guest SMB shares — add users here, then reference them in share "Valid Users".
-</p>
-
-<div class="mb-4">
-	<Button size="sm" onclick={() => { showCreateUser = !showCreateUser; }}>
-		{showCreateUser ? 'Cancel' : 'Create SMB User'}
-	</Button>
-</div>
-
-{#if showCreateUser}
-	<Card class="mb-6 max-w-md">
-		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New SMB User</h3>
-			<div class="mb-4">
-				<Label for="smb-username">Username</Label>
-				<Input id="smb-username" bind:value={newSmbUsername} placeholder="nasty-csi" autocomplete="off" class="mt-1" />
-			</div>
-			<div class="mb-4">
-				<Label for="smb-password">Password</Label>
-				<Input id="smb-password" type="password" bind:value={newSmbPassword} autocomplete="new-password" class="mt-1" />
-			</div>
-			<div class="mb-4">
-				<Label for="smb-password-confirm">Confirm Password</Label>
-				<Input id="smb-password-confirm" type="password" bind:value={newSmbPasswordConfirm} autocomplete="new-password" class="mt-1" />
-				{#if newSmbPasswordConfirm && newSmbPassword !== newSmbPasswordConfirm}
-					<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
-				{/if}
-			</div>
-			<Button onclick={createSmbUser} disabled={creatingSmbUser || !newSmbUsername || !newSmbPassword || newSmbPassword !== newSmbPasswordConfirm}>
-				{creatingSmbUser ? 'Creating…' : 'Create'}
-			</Button>
-		</CardContent>
-	</Card>
-{/if}
-
-{#if smbUsers.length === 0}
-	<p class="text-sm text-muted-foreground">No SMB users configured. Guest access is available for shares with "Guest OK" enabled.</p>
-{:else}
-	<table class="w-full text-sm">
-		<thead>
-			<tr>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Username</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">UID</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each smbUsers as user}
-				<tr class="border-b border-border">
-					<td class="p-3 font-mono text-xs"><strong>{user.username}</strong></td>
-					<td class="p-3 text-xs text-muted-foreground">{user.uid}</td>
-					<td class="p-3">
-						<div class="flex gap-2">
-							<Button variant="secondary" size="xs" onclick={() => { changePwUser = user.username; changePwValue = ''; changePwConfirm = ''; }}>
-								Change Password
-							</Button>
-							<Button variant="destructive" size="xs" onclick={() => deleteSmbUser(user.username)}>Delete</Button>
-						</div>
-					</td>
-				</tr>
-			{/each}
-		</tbody>
-	</table>
-{/if}
-
-<!-- Change SMB Password Dialog -->
-{#if changePwUser}
-	<Card class="mt-4 max-w-md">
-		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">Change Password for "{changePwUser}"</h3>
-			<div class="mb-4">
-				<Label for="smb-pw-new">New Password</Label>
-				<Input id="smb-pw-new" type="password" bind:value={changePwValue} autocomplete="new-password" class="mt-1" />
-			</div>
-			<div class="mb-4">
-				<Label for="smb-pw-confirm">Confirm Password</Label>
-				<Input id="smb-pw-confirm" type="password" bind:value={changePwConfirm} autocomplete="new-password" class="mt-1" />
-				{#if changePwConfirm && changePwValue !== changePwConfirm}
-					<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
-				{/if}
-			</div>
-			<div class="flex gap-2">
-				<Button size="sm" onclick={changeSmbPassword} disabled={!changePwValue || changePwValue !== changePwConfirm}>Change Password</Button>
-				<Button variant="secondary" size="sm" onclick={() => changePwUser = null}>Cancel</Button>
-			</div>
-		</CardContent>
-	</Card>
-{/if}

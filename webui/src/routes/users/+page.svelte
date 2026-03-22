@@ -35,6 +35,19 @@
 	let pwNew = $state('');
 	let pwConfirm = $state('');
 
+	// System users (protocol access)
+	interface SystemUser { username: string; uid: number; }
+	let systemUsers: SystemUser[] = $state([]);
+	let showCreateSystemUser = $state(false);
+	let newSysUsername = $state('');
+	let newSysPassword = $state('');
+	let newSysPasswordConfirm = $state('');
+	let newSysSmbAccess = $state(true);
+	let creatingSysUser = $state(false);
+	let sysPwUser = $state<string | null>(null);
+	let sysPwNew = $state('');
+	let sysPwConfirm = $state('');
+
 	const client = getClient();
 
 	onMount(async () => {
@@ -44,10 +57,11 @@
 
 	async function refresh() {
 		await withToast(async () => {
-			[users, apiTokens, pools] = await Promise.all([
+			[users, apiTokens, pools, systemUsers] = await Promise.all([
 				client.call<UserInfo[]>('auth.list_users'),
 				client.call<ApiTokenInfo[]>('auth.token.list'),
 				client.call<Pool[]>('pool.list'),
+				client.call<SystemUser[]>('smb.user.list').catch(() => [] as SystemUser[]),
 			]);
 		});
 	}
@@ -141,6 +155,41 @@
 		await navigator.clipboard.writeText(createdToken.token);
 		tokenCopied = true;
 		setTimeout(() => tokenCopied = false, 2000);
+	}
+
+	async function createSystemUser() {
+		if (!newSysUsername || !newSysPassword || newSysPassword !== newSysPasswordConfirm) return;
+		creatingSysUser = true;
+		const ok = await withToast(
+			() => client.call('smb.user.create', { username: newSysUsername, password: newSysPassword }),
+			`System user "${newSysUsername}" created`
+		);
+		if (ok !== undefined) {
+			showCreateSystemUser = false;
+			newSysUsername = '';
+			newSysPassword = '';
+			newSysPasswordConfirm = '';
+			newSysSmbAccess = true;
+			await refresh();
+		}
+		creatingSysUser = false;
+	}
+
+	async function deleteSystemUser(username: string) {
+		if (!await confirm(`Delete system user "${username}"?`, 'The user will lose access to all protocol shares.')) return;
+		await withToast(() => client.call('smb.user.delete', { username }), `System user "${username}" deleted`);
+		await refresh();
+	}
+
+	async function changeSysPassword() {
+		if (!sysPwUser || !sysPwNew || sysPwNew !== sysPwConfirm) return;
+		await withToast(
+			() => client.call('smb.user.set_password', { username: sysPwUser, password: sysPwNew }),
+			`Password changed for "${sysPwUser}"`
+		);
+		sysPwUser = null;
+		sysPwNew = '';
+		sysPwConfirm = '';
 	}
 
 	function formatDate(ts: number): string {
@@ -373,6 +422,113 @@
 		<Dialog.Footer>
 			<Button size="sm" onclick={copyToken}>{tokenCopied ? 'Copied!' : 'Copy to Clipboard'}</Button>
 			<Button variant="secondary" size="sm" onclick={() => createdToken = null}>Close</Button>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- System Users -->
+<h2 class="mb-3 text-xl font-semibold">System Users</h2>
+<p class="mb-4 text-sm text-muted-foreground">
+	Linux users for protocol access (SMB). Create users here, then reference them in share "Valid Users" for authenticated access.
+</p>
+
+<div class="mb-4">
+	<Button size="sm" onclick={() => showCreateSystemUser = !showCreateSystemUser}>
+		{showCreateSystemUser ? 'Cancel' : 'Create System User'}
+	</Button>
+</div>
+
+{#if showCreateSystemUser}
+	<Card class="mb-6 max-w-md">
+		<CardContent class="pt-6">
+			<h3 class="mb-4 text-lg font-semibold">New System User</h3>
+			<div class="mb-4">
+				<Label for="sys-username">Username</Label>
+				<Input id="sys-username" bind:value={newSysUsername} placeholder="nasty-csi" autocomplete="off" class="mt-1" />
+			</div>
+			<div class="mb-4">
+				<Label for="sys-password">Password</Label>
+				<Input id="sys-password" type="password" bind:value={newSysPassword} autocomplete="new-password" class="mt-1" />
+			</div>
+			<div class="mb-4">
+				<Label for="sys-password-confirm">Confirm Password</Label>
+				<Input id="sys-password-confirm" type="password" bind:value={newSysPasswordConfirm} autocomplete="new-password" class="mt-1" />
+				{#if newSysPasswordConfirm && newSysPassword !== newSysPasswordConfirm}
+					<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
+				{/if}
+			</div>
+			<div class="mb-4">
+				<h4 class="mb-2 text-sm font-medium">Allow Access</h4>
+				<label class="flex items-center gap-2 text-sm cursor-pointer">
+					<input type="checkbox" bind:checked={newSysSmbAccess} class="rounded border-input" />
+					SMB Access
+				</label>
+			</div>
+			<Button onclick={createSystemUser} disabled={creatingSysUser || !newSysUsername || !newSysPassword || newSysPassword !== newSysPasswordConfirm}>
+				{creatingSysUser ? 'Creating…' : 'Create'}
+			</Button>
+		</CardContent>
+	</Card>
+{/if}
+
+{#if !loading}
+	{#if systemUsers.length === 0}
+		<p class="text-sm text-muted-foreground">No system users configured.</p>
+	{:else}
+		<table class="w-full text-sm">
+			<thead>
+				<tr>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Username</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">UID</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Access</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each systemUsers as user}
+					<tr class="border-b border-border">
+						<td class="p-3 font-mono text-xs"><strong>{user.username}</strong></td>
+						<td class="p-3 text-xs text-muted-foreground">{user.uid}</td>
+						<td class="p-3">
+							<Badge variant="secondary" class="bg-blue-950 text-blue-400">SMB</Badge>
+						</td>
+						<td class="p-3">
+							<div class="flex gap-2">
+								<Button variant="secondary" size="xs" onclick={() => { sysPwUser = user.username; sysPwNew = ''; sysPwConfirm = ''; }}>
+									Change Password
+								</Button>
+								<Button variant="destructive" size="xs" onclick={() => deleteSystemUser(user.username)}>Delete</Button>
+							</div>
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/if}
+{/if}
+
+<!-- Change System User Password Dialog -->
+<Dialog.Root open={sysPwUser !== null} onOpenChange={(open) => { if (!open) sysPwUser = null; }}>
+	<Dialog.Content>
+		<Dialog.Header>
+			<Dialog.Title>Change Password for "{sysPwUser}"</Dialog.Title>
+		</Dialog.Header>
+		<div class="mb-4">
+			<Label for="sys-pw-new">New Password</Label>
+			<Input id="sys-pw-new" type="password" bind:value={sysPwNew} autocomplete="new-password" class="mt-1" />
+		</div>
+		<div class="mb-4">
+			<Label for="sys-pw-confirm">Confirm Password</Label>
+			<Input id="sys-pw-confirm" type="password" bind:value={sysPwConfirm} autocomplete="new-password" class="mt-1" />
+			{#if sysPwConfirm && sysPwNew !== sysPwConfirm}
+				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
+			{/if}
+		</div>
+		<Dialog.Footer>
+			<Button size="sm" onclick={changeSysPassword} disabled={!sysPwNew || sysPwNew !== sysPwConfirm}>
+				Change Password
+			</Button>
+			<Button variant="secondary" size="sm" onclick={() => sysPwUser = null}>Cancel</Button>
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
