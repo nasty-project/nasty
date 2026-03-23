@@ -957,11 +957,6 @@ impl SubvolumeService {
             ));
         }
 
-        // Try to get the parent subvolume for metadata inheritance.
-        // The parent may have been deleted (disaster recovery scenario) —
-        // bcachefs snapshots survive parent deletion, so this is valid.
-        let parent = self.get(&req.pool, &req.subvolume, owner_filter).await.ok();
-
         let mount_point = self.pool_mount_point(&req.pool).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.snapshot);
         let new_subvol_path = subvol_path(&mount_point, &req.new_name);
@@ -985,24 +980,18 @@ impl SubvolumeService {
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
-        // Write metadata xattrs for the new subvolume.
-        // bcachefs snapshot copies source inode xattrs, so user.nasty.* are already present.
-        // Inherit parent metadata if available, otherwise use defaults.
-        let (sub_type, volsize, compression): (SubvolumeType, Option<u64>, Option<String>) = match &parent {
-            Some(p) => (p.subvolume_type.clone(), p.volsize_bytes, p.compression.clone()),
-            None => (SubvolumeType::Filesystem, None, None),
-        };
-        write_meta_xattrs(
-            &new_subvol_path,
-            &sub_type,
-            volsize,
-            compression.as_deref(),
-            None,
-            owner_filter,
-        )?;
+        // Read metadata from the snapshot itself — it inherits xattrs from the source.
+        // This works even when the parent subvolume has been deleted (DR scenario).
+        let snap_meta = read_meta_xattrs(Path::new(&snap_path));
+
+        // The new subvolume already has the correct xattrs (copied by bcachefs snapshot).
+        // Only update owner if an owner filter is set.
+        if let Some(owner) = owner_filter {
+            let _ = xattr::set(&new_subvol_path, XATTR_NASTY_OWNER, owner.as_bytes());
+        }
 
         // For block subvolumes, attach a loop device to the restored clone's sparse image
-        if sub_type == SubvolumeType::Block {
+        if snap_meta.subvolume_type == SubvolumeType::Block {
             let img_path = format!("{new_subvol_path}/{BLOCK_FILE_NAME}");
             if Path::new(&img_path).exists() {
                 info!("Attaching loop device for restored block subvolume '{}'", req.new_name);
