@@ -318,24 +318,15 @@ async fn write_share_conf(share: &SmbShare) -> Result<(), SmbError> {
 
     tokio::fs::write(&path, &conf).await?;
 
-    // Set directory ownership and permissions based on access mode
-    if share.guest_ok {
-        let _ = tokio::process::Command::new("chmod")
-            .args(["0777", &share.path])
-            .output()
-            .await;
-    } else if !share.valid_users.is_empty() {
-        // chown to the first valid user so they can write
-        let user = &share.valid_users[0];
-        let _ = tokio::process::Command::new("chown")
-            .args([&format!("{user}:{user}"), &share.path])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("chmod")
-            .args(["0775", &share.path])
-            .output()
-            .await;
-    }
+    // Make the directory writable by any authenticated user.
+    // Samba handles access control through its own authentication layer
+    // (valid_users, guest ok, etc.) — filesystem permissions should be permissive.
+    // Using chown with usernames fails when the user only exists in Samba's
+    // database (pdbedit) but not as a UNIX system user.
+    let _ = tokio::process::Command::new("chmod")
+        .args(["0777", &share.path])
+        .output()
+        .await;
 
     Ok(())
 }
