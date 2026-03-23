@@ -258,6 +258,11 @@ fn stable_fsid(id: &str) -> u32 {
 }
 
 async fn reload_exports() -> Result<(), NfsError> {
+    // Remove export files whose paths no longer exist on disk.
+    // Stale exports (from deleted subvolumes) cause exportfs -ra to fail
+    // because it validates ALL exports and aborts on any missing path.
+    cleanup_stale_exports().await;
+
     let output = tokio::process::Command::new("exportfs")
         .args(["-ra"])
         .output()
@@ -270,4 +275,28 @@ async fn reload_exports() -> Result<(), NfsError> {
 
     info!("NFS exports reloaded");
     Ok(())
+}
+
+/// Remove per-share export files whose exported path no longer exists on disk.
+async fn cleanup_stale_exports() {
+    let mut entries = match tokio::fs::read_dir(NASTY_EXPORTS_DIR).await {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.starts_with("nasty-") || !name.ends_with(".exports") {
+            continue;
+        }
+        // First line of the export file is: /path/to/subvol  client(options)
+        if let Ok(contents) = tokio::fs::read_to_string(&path).await {
+            if let Some(export_path) = contents.split_whitespace().next() {
+                if !Path::new(export_path).exists() {
+                    warn!("Removing stale NFS export {} (path {} no longer exists)", name, export_path);
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+            }
+        }
+    }
 }
