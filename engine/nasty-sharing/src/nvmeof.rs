@@ -285,7 +285,7 @@ impl NvmeofService {
                     continue;
                 }
                 let _ = configfs_write(&format!("{ns_path}/device_path"), &ns.device_path).await;
-                let _ = configfs_write(&format!("{ns_path}/buffered_io"), "1").await;
+                let _ = configfs_write(&format!("{ns_path}/buffered_io"), "0").await;
                 if ns.enabled {
                     let _ = configfs_write(&format!("{ns_path}/enable"), "1").await;
                 }
@@ -533,10 +533,9 @@ impl NvmeofService {
         let ns_path = format!("{NVMET_BASE}/subsystems/{}/namespaces/{nsid}", subsys.nqn);
         configfs_mkdir(&ns_path).await?;
         configfs_write(&format!("{ns_path}/device_path"), &req.device_path).await?;
-        // Use buffered I/O — our backing devices are loop devices on bcachefs files.
-        // Buffered I/O lets the page cache absorb brief I/O stalls during snapshots
-        // instead of returning errors immediately to the initiator.
-        configfs_write(&format!("{ns_path}/buffered_io"), "1").await?;
+        // Direct I/O — vol.img has nocow set, so writes are in-place (no COW overhead).
+        // This matches TrueNAS's approach for ZVOL-backed namespaces.
+        configfs_write(&format!("{ns_path}/buffered_io"), "0").await?;
         configfs_write(&format!("{ns_path}/enable"), "1").await?;
 
         subsys.namespaces.push(Namespace {
