@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         updates: nasty_system::update::UpdateService::new(),
         metrics_client: reqwest::Client::new(),
         pools: nasty_storage::PoolService::new(),
-        snapshots: nasty_snapshot::SnapshotService::new(subvolumes.clone(), nvmeof.clone()),
+        snapshots: nasty_snapshot::SnapshotService::new(subvolumes.clone()),
         subvolumes,
         nfs: nasty_sharing::NfsService::new(),
         smb: nasty_sharing::SmbService::new(),
