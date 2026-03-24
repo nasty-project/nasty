@@ -1,0 +1,21 @@
+use std::process::Command;
+
+fn main() {
+    // Capture git commit hash at build time
+    let commit = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=NASTY_GIT_COMMIT={}", commit.trim());
+
+    // Capture build timestamp
+    let now = Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=NASTY_BUILD_DATE={}", now.trim());
+}

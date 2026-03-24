@@ -579,8 +579,9 @@ impl SubvolumeService {
             // Set nocow on the sparse image — writes go in-place, reducing I/O stall
             // duration during bcachefs snapshots. Snapshots still work (COW is forced
             // for the first write after snapshot), but subsequent writes are in-place.
-            if let Err(e) = cmd::run_ok("bcachefs", &["set-file-option", "--nocow", &img_path]).await {
-                warn!("Failed to set nocow on {img_path}: {e}");
+            match cmd::run_ok("bcachefs", &["set-file-option", "--nocow", &img_path]).await {
+                Ok(_) => info!("Set nocow on {img_path}"),
+                Err(e) => warn!("Failed to set nocow on {img_path}: {e}"),
             }
 
             info!("Attaching loop device for '{}'", req.name);

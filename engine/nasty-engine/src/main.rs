@@ -54,6 +54,10 @@ pub const METRICS_BASE: &str = "http://127.0.0.1:2138";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let commit = env!("NASTY_GIT_COMMIT");
+    let built = env!("NASTY_BUILD_DATE");
+
     let default_filter = "nasty_engine=debug,nasty_storage=debug,nasty_sharing=debug,nasty_snapshot=debug,nasty_system=info,tower_http=debug";
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| default_filter.into());
@@ -126,7 +130,8 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 2137));
-    info!("NASty engine listening on {addr}");
+    info!("NASty Engine v{version} (commit: {commit}, built: {built})");
+    info!("Listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
