@@ -4,7 +4,7 @@ use nasty_common::{HasId, StateDir};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 const STATE_DIR: &str = "/var/lib/nasty/shares/nvmeof";
@@ -186,56 +186,6 @@ pub struct NvmeofService;
 impl NvmeofService {
     pub fn new() -> Self {
         Self
-    }
-
-    /// Find all NVMe-oF namespaces backed by the given block device path.
-    /// Returns (nqn, nsid) pairs for each matching namespace.
-    pub async fn find_namespaces_for_device(&self, device_path: &str) -> Vec<(String, u32)> {
-        let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
-        debug!(
-            "find_namespaces_for_device({device_path}): loaded {} subsystem(s)",
-            subsystems.len()
-        );
-        for sub in &subsystems {
-            for ns in &sub.namespaces {
-                debug!(
-                    "  subsystem '{}' ns{} device_path='{}' match={}",
-                    sub.nqn,
-                    ns.nsid,
-                    ns.device_path,
-                    ns.device_path == device_path
-                );
-            }
-        }
-        subsystems
-            .into_iter()
-            .flat_map(|sub| {
-                sub.namespaces
-                    .iter()
-                    .filter(|ns| ns.device_path == device_path)
-                    .map(|ns| (sub.nqn.clone(), ns.nsid))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-
-    /// Enable or disable a namespace via nvmet configfs.
-    /// Disabling fences the namespace so initiators drain in-flight writes.
-    pub async fn set_namespace_enabled(
-        &self,
-        nqn: &str,
-        nsid: u32,
-        enabled: bool,
-    ) -> Result<(), NvmeofError> {
-        let path = format!("{NVMET_BASE}/subsystems/{nqn}/namespaces/{nsid}/enable");
-        tokio::fs::write(&path, if enabled { "1\n" } else { "0\n" })
-            .await
-            .map_err(|e| {
-                NvmeofError::ConfigFs(format!(
-                    "set namespace {nqn}/ns{nsid} enable={enabled}: {e}"
-                ))
-            })?;
-        Ok(())
     }
 
     /// Restore NVMe-oF configfs state from persisted JSON files.
@@ -482,7 +432,7 @@ impl NvmeofService {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let ns_path = entry.path();
                 let ns_path_str = ns_path.to_string_lossy();
-                let _ = configfs_write(&format!("{ns_path_str}/enable"), "0").await;
+                // No need to disable before removal — rmdir handles it
                 let _ = configfs_rmdir(&ns_path_str).await;
             }
         }
@@ -571,7 +521,6 @@ impl NvmeofService {
             "{NVMET_BASE}/subsystems/{}/namespaces/{}",
             subsys.nqn, req.nsid
         );
-        let _ = configfs_write(&format!("{ns_path}/enable"), "0").await;
         configfs_rmdir(&ns_path).await?;
 
         subsys.namespaces.remove(ns_idx);
