@@ -22,6 +22,7 @@
       version = "0.1.0";
       src = ../engine;
       cargoLock.lockFile = ../engine/Cargo.lock;
+      NASTY_GIT_COMMIT = self.shortRev or self.dirtyShortRev or "unknown";
       meta = {
         description = "NASty NAS engine";
         license = pkgs.lib.licenses.gpl3Only;
