@@ -34,11 +34,13 @@ Traditional NAS distros (FreeNAS/TrueNAS, OpenMediaVault) use FreeBSD or Debian 
 
 No. NASty is experimental and under active development. bcachefs itself is still maturing.
 
-That said:
-- The CSI driver passes 132/132 E2E tests across all 4 protocols
-- The engine handles subvolume management, snapshots, clones, and 4-protocol sharing
-- NixOS gives us atomic updates with rollback if something goes wrong
-- We run it on real hardware and in Oracle Cloud for CI
+That said, NASty is probably the most thoroughly tested one-person NAS project you'll find:
+
+- **132 end-to-end integration tests** across all 4 protocols (NFS, SMB, iSCSI, NVMe-oF) — snapshots, clones, volume expansion, crash simulation, concurrent operations, StatefulSets, access modes, adoption, and more
+- **76 CSI sanity tests** verifying spec compliance
+- Tests run against a real NASty instance on Oracle Cloud ARM (not mocks) with a real k3s cluster provisioning real volumes over real network protocols
+- CI/CD pipeline builds, lints, tests, and publishes container images automatically
+- Tested by an elite team consisting of me, myself, I, my alter ego, my evil twin, my inner child, my future self, my past self, my impostor syndrome, my caffeine-fueled persona, and a rubber duck named QA
 
 Use it for homelabs, development, and learning. Not for storing your only copy of irreplaceable data. Yet.
 
