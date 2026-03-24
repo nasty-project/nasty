@@ -17,7 +17,7 @@
 	let loading = $state(true);
 
 	// Wizard state
-	let newName = $state('tank');
+	let newName = $state('first');
 	let selectedPaths: string[] = $state([]);
 	let wizardProfile: TieringProfileId = $state('single');
 	let replicas = $state(1);
@@ -231,7 +231,7 @@
 		);
 		if (ok !== undefined) {
 			wizardStep = 0;
-			newName = 'tank';
+			newName = 'first';
 			selectedPaths = [];
 			wizardProfile = 'single';
 			manualLabels = {};
@@ -245,7 +245,7 @@
 	}
 
 	function openWizard() {
-		newName = 'tank';
+		newName = 'first';
 		selectedPaths = [];
 		wizardProfile = 'single';
 		replicas = 1;
