@@ -16,7 +16,7 @@
 	let showCreate = $state(false);
 
 	let newName = $state('');
-	let newMetric = $state<AlertMetric>('pool_usage_percent');
+	let newMetric = $state<AlertMetric>('fs_usage_percent');
 	let newCondition = $state<AlertCondition>('above');
 	let newThreshold = $state(80);
 	let newSeverity = $state<AlertSeverity>('warning');
@@ -24,7 +24,7 @@
 	const client = getClient();
 
 	const metricLabels: Record<AlertMetric, string> = {
-		pool_usage_percent: 'Pool Usage (%)',
+		fs_usage_percent: 'Filesystem Usage (%)',
 		cpu_load_percent: 'CPU Load (%)',
 		memory_usage_percent: 'Memory Usage (%)',
 		disk_temperature: 'Disk Temperature (°C)',

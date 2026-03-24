@@ -27,7 +27,7 @@ export interface ServiceStatus {
 	pid?: number;
 }
 
-export interface PoolDevice {
+export interface FilesystemDevice {
 	path: string;
 	/** Hierarchical label for tiering (e.g. "ssd.fast", "hdd.archive") */
 	label: string | null;
@@ -45,19 +45,19 @@ export interface PoolDevice {
 
 export type DeviceState = 'rw' | 'ro' | 'failed' | 'spare';
 
-export interface Pool {
+export interface Filesystem {
 	name: string;
 	uuid: string;
-	devices: PoolDevice[];
+	devices: FilesystemDevice[];
 	mount_point: string | null;
 	mounted: boolean;
 	total_bytes: number;
 	used_bytes: number;
 	available_bytes: number;
-	options: PoolOptions;
+	options: FilesystemOptions;
 }
 
-export interface PoolOptions {
+export interface FilesystemOptions {
 	compression: string | null;
 	background_compression: string | null;
 	data_replicas: number | null;
@@ -130,7 +130,7 @@ export type SubvolumeType = 'filesystem' | 'block';
 
 export interface Subvolume {
 	name: string;
-	pool: string;
+	filesystem: string;
 	subvolume_type: SubvolumeType;
 	path: string;
 	used_bytes: number | null;
@@ -147,7 +147,7 @@ export interface Subvolume {
 export interface Snapshot {
 	name: string;
 	subvolume: string;
-	pool: string;
+	filesystem: string;
 	path: string;
 	read_only: boolean;
 	parent: string | null;
@@ -242,7 +242,7 @@ export interface ApiTokenInfo {
 	name: string;
 	role: 'admin' | 'readonly' | 'operator';
 	created_at: number;
-	pool: string | null;
+	filesystem: string | null;
 	expires_at: number | null;
 	allowed_ips: string[];
 }
@@ -408,7 +408,7 @@ export interface AlertRule {
 	severity: AlertSeverity;
 }
 
-export type AlertMetric = 'pool_usage_percent' | 'cpu_load_percent' | 'memory_usage_percent' | 'disk_temperature' | 'smart_health' | 'swap_usage_percent';
+export type AlertMetric = 'fs_usage_percent' | 'cpu_load_percent' | 'memory_usage_percent' | 'disk_temperature' | 'smart_health' | 'swap_usage_percent';
 export type AlertCondition = 'above' | 'below' | 'equals';
 export type AlertSeverity = 'warning' | 'critical';
 

@@ -135,8 +135,8 @@ in {
     storage = {
       mountBase = mkOption {
         type = types.str;
-        default = "/storage";
-        description = "Base directory for pool mount points";
+        default = "/fs";
+        description = "Base directory for filesystem mount points";
       };
     };
 
@@ -247,24 +247,24 @@ in {
       ╚══════════════════════════════════════════════════════╝
 
        bcachefs — filesystem info
-         bcachefs fs usage /storage/<pool>        space by type (btree, data, cached, parity …)
-         bcachefs fs usage -h /storage/<pool>     human-readable sizes
+         bcachefs fs usage /fs/<filesystem>        space by type (btree, data, cached, parity …)
+         bcachefs fs usage -h /fs/<filesystem>     human-readable sizes
          bcachefs show-super /dev/<disk>           dump superblock (UUID, features, devices)
-         bcachefs device list /storage/<pool>      member devices with state and tier
+         bcachefs device list /fs/<filesystem>      member devices with state and tier
          dmesg | grep -i bcachefs                  kernel messages
 
        bcachefs — live diagnostics (interactive, q to quit)
-         bcachefs fs top /storage/<pool>           btree ops per process
-         bcachefs fs timestats /storage/<pool>     op latency (min/max/mean/stddev/EWMA)
+         bcachefs fs top /fs/<filesystem>           btree ops per process
+         bcachefs fs timestats /fs/<filesystem>     op latency (min/max/mean/stddev/EWMA)
 
        bcachefs — device management
-         bcachefs device add /storage/<pool> /dev/<disk>      add a device
-         bcachefs device remove /storage/<pool> /dev/<disk>   remove a device (triggers rebalance)
+         bcachefs device add /fs/<filesystem> /dev/<disk>      add a device
+         bcachefs device remove /fs/<filesystem> /dev/<disk>   remove a device (triggers rebalance)
          bcachefs device set-state failed /dev/<disk>         mark device failed
-         bcachefs data rereplicate /storage/<pool>            rereplicate after device change
+         bcachefs data rereplicate /fs/<filesystem>            rereplicate after device change
 
        bcachefs — subvolumes & snapshots
-         bcachefs subvolume list /storage/<pool>
+         bcachefs subvolume list /fs/<filesystem>
          bcachefs subvolume snapshot <src> <dst>
 
        I/O monitoring
@@ -327,37 +327,37 @@ in {
       ║            NASty Benchmark Reference                 ║
       ╚══════════════════════════════════════════════════════╝
 
-       fio — storage tests  (replace <pool> with your pool name)
+       fio — storage tests  (replace <filesystem> with your filesystem name)
          # Sequential read — large block, measures throughput
          fio --name=seq-read \
              --ioengine=libaio --direct=1 --rw=read \
              --bs=1024k --iodepth=8 --numjobs=1 \
              --size=1g --runtime=30 \
-             --filename=/storage/<pool>/fiotest
+             --filename=/fs/<filesystem>/fiotest
 
          # Sequential write
          fio --name=seq-write \
              --ioengine=libaio --direct=1 --rw=write \
              --bs=1024k --iodepth=8 --numjobs=1 \
              --size=1g --runtime=30 \
-             --filename=/storage/<pool>/fiotest
+             --filename=/fs/<filesystem>/fiotest
 
          # Random read — small block, measures IOPS
          fio --name=rand-read \
              --ioengine=libaio --direct=1 --rw=randread \
              --bs=4k --iodepth=32 --numjobs=4 \
              --size=1g --runtime=30 \
-             --filename=/storage/<pool>/fiotest
+             --filename=/fs/<filesystem>/fiotest
 
          # Random write
          fio --name=rand-write \
              --ioengine=libaio --direct=1 --rw=randwrite \
              --bs=4k --iodepth=32 --numjobs=4 \
              --size=1g --runtime=30 \
-             --filename=/storage/<pool>/fiotest
+             --filename=/fs/<filesystem>/fiotest
 
          # Clean up test file afterwards
-         rm -f /storage/<pool>/fiotest
+         rm -f /fs/<filesystem>/fiotest
 
        share results with devs
          fio ... | nc termbin.com 9999
@@ -398,18 +398,18 @@ in {
         section "Block Devices"
         lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || true
 
-        section "bcachefs Pools"
-        for mp in /storage/*/; do
-          pool=$(basename "$mp")
+        section "bcachefs Filesystems"
+        for mp in /fs/*/; do
+          fs=$(basename "$mp")
           echo ""
-          echo "  Pool: $pool  ($mp)"
+          echo "  Filesystem: $fs  ($mp)"
           bcachefs fs usage -h "$mp" 2>/dev/null || echo "  (not mounted or error)"
           echo ""
           echo "  Devices:"
           bcachefs device list "$mp" 2>/dev/null | sed 's/^/    /' || true
         done
-        if ! ls /storage/*/ >/dev/null 2>&1; then
-          echo "  (no mounted pools)"
+        if ! ls /fs/*/ >/dev/null 2>&1; then
+          echo "  (no mounted filesystems)"
         fi
 
         section "Engine State — Protocols"
@@ -420,7 +420,7 @@ in {
         echo "  $count subvolume(s)"
         for f in /var/lib/nasty/subvolumes/*.json; do
           [ -f "$f" ] || continue
-          ${pkgs.jq}/bin/jq -r '  "  • \(.name)  pool=\(.pool)  type=\(.subvolume_type)  \(if .volsize_bytes then "size=\(.volsize_bytes / 1048576 | floor)MiB" else "" end)"' "$f" 2>/dev/null || true
+          ${pkgs.jq}/bin/jq -r '  "  • \(.name)  filesystem=\(.filesystem)  type=\(.subvolume_type)  \(if .volsize_bytes then "size=\(.volsize_bytes / 1048576 | floor)MiB" else "" end)"' "$f" 2>/dev/null || true
         done
 
         section "Engine State — Shares"
@@ -687,7 +687,7 @@ in {
         StateDirectory = "nasty";
 
         # No filesystem sandboxing (ProtectSystem, ProtectHome, etc.) — any of
-        # these create a private mount namespace, making pool mounts invisible
+        # these create a private mount namespace, making filesystem mounts invisible
         # to NFS/SMB/iSCSI services.  The engine is a privileged system manager;
         # security is enforced at the API authentication layer.
         NoNewPrivileges = false;  # needs root for mount/format operations

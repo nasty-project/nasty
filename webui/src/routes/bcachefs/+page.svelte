@@ -5,7 +5,7 @@
 	import { getClient } from '$lib/client';
 	import { getToken } from '$lib/auth';
 	import { error as showError } from '$lib/toast.svelte';
-	import type { Pool } from '$lib/types';
+	import type { Filesystem } from '$lib/types';
 	import { RefreshCw, SquareX } from '@lucide/svelte';
 
 	type Tab = 'usage' | 'top' | 'timestats';
@@ -25,8 +25,8 @@
 		},
 	};
 
-	let pools: Pool[] = $state([]);
-	let selectedPool = $state('');
+	let filesystems: Filesystem[] = $state([]);
+	let selectedFs = $state('');
 	let activeTab: Tab = $state('usage');
 
 	// usage tab state
@@ -44,11 +44,11 @@
 
 	onMount(async () => {
 		try {
-			pools = await getClient().call('pool.list');
-			const mounted = pools.filter(p => p.mounted);
-			if (mounted.length > 0) selectedPool = mounted[0].name;
+			filesystems = await getClient().call('fs.list');
+			const mounted = filesystems.filter(p => p.mounted);
+			if (mounted.length > 0) selectedFs = mounted[0].name;
 		} catch (e) {
-			showError(e instanceof Error ? e.message : 'Failed to load pools');
+			showError(e instanceof Error ? e.message : 'Failed to load filesystems');
 		}
 	});
 
@@ -60,10 +60,10 @@
 	// ── Usage tab ──────────────────────────────────────────────
 
 	async function refreshUsage() {
-		if (!selectedPool) return;
+		if (!selectedFs) return;
 		usageLoading = true;
 		try {
-			const result = await getClient().call('bcachefs.usage', { name: selectedPool });
+			const result = await getClient().call('bcachefs.usage', { name: selectedFs });
 			usageOutput = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
 		} catch (e) {
 			usageOutput = e instanceof Error ? e.message : String(e);
@@ -89,12 +89,12 @@
 
 	// ── Terminal tab (fs top / fs timestats) ──────────────────
 
-	function mountPool() {
-		return pools.find(p => p.name === selectedPool)?.mount_point ?? `/storage/${selectedPool}`;
+	function mountPath() {
+		return filesystems.find(p => p.name === selectedFs)?.mount_point ?? `/storage/${selectedFs}`;
 	}
 
 	async function startTerm() {
-		if (!selectedPool) return;
+		if (!selectedFs) return;
 		killTerm();
 		termStatus = 'running';
 		await tick(); // wait for termEl div to appear in the DOM
@@ -120,7 +120,7 @@
 		term.focus();
 
 		const { cols, rows } = term;
-		const mp = mountPool();
+		const mp = mountPath();
 		const argv = ['bcachefs', 'fs', activeTab === 'top' ? 'top' : 'timestats', mp];
 
 		const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/terminal`;
@@ -168,9 +168,9 @@
 		termStatus = 'idle';
 	}
 
-	// Reset terminal state when pool or tab changes
+	// Reset terminal state when filesystem or tab changes
 	$effect(() => {
-		selectedPool; activeTab;
+		selectedFs; activeTab;
 		usageOutput = '';
 		if (autoRefresh && activeTab === 'usage') startAutoRefresh();
 		else stopAutoRefresh();
@@ -184,20 +184,20 @@
 		<p class="text-sm text-muted-foreground mt-0.5">Real-time filesystem health and performance</p>
 	</div>
 
-	<!-- Pool selector -->
+	<!-- Filesystem selector -->
 	<div class="flex items-center gap-3">
-		<label for="pool-select" class="text-sm font-medium shrink-0">Pool</label>
-		{#if pools.length === 0}
-			<span class="text-sm text-muted-foreground">No pools available</span>
+		<label for="fs-select" class="text-sm font-medium shrink-0">Filesystem</label>
+		{#if filesystems.length === 0}
+			<span class="text-sm text-muted-foreground">No filesystems available</span>
 		{:else}
 			<select
-				id="pool-select"
-				bind:value={selectedPool}
+				id="fs-select"
+				bind:value={selectedFs}
 				class="rounded-md border border-input bg-background px-3 py-1.5 text-sm"
 			>
-				{#each pools as pool}
-					<option value={pool.name} disabled={!pool.mounted}>
-						{pool.name}{pool.mounted ? '' : ' (unmounted)'}
+				{#each filesystems as fs}
+					<option value={fs.name} disabled={!fs.mounted}>
+						{fs.name}{fs.mounted ? '' : ' (unmounted)'}
 					</option>
 				{/each}
 			</select>
@@ -224,7 +224,7 @@
 			<div class="ml-auto flex items-center gap-2 pb-1">
 				<button
 					onclick={refreshUsage}
-					disabled={!selectedPool || usageLoading}
+					disabled={!selectedFs || usageLoading}
 					class="flex items-center gap-1.5 rounded px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 disabled:opacity-50"
 				>
 					<RefreshCw size={12} class={usageLoading ? 'animate-spin' : ''} />
@@ -232,7 +232,7 @@
 				</button>
 				<button
 					onclick={toggleAutoRefresh}
-					disabled={!selectedPool}
+					disabled={!selectedFs}
 					class="rounded px-3 py-1 text-xs disabled:opacity-50
 						{autoRefresh ? 'bg-primary text-primary-foreground' : 'bg-secondary hover:bg-secondary/80'}"
 				>
@@ -246,7 +246,7 @@
 				{#if termStatus === 'idle' || termStatus === 'done'}
 					<button
 						onclick={startTerm}
-						disabled={!selectedPool}
+						disabled={!selectedFs}
 						class="rounded px-3 py-1 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
 					>
 						{termStatus === 'done' ? 'Restart' : 'Start'}
@@ -269,8 +269,8 @@
 	<!-- usage output -->
 	{#if activeTab === 'usage'}
 		<div class="rounded-lg border border-border bg-card overflow-hidden">
-			{#if !selectedPool}
-				<p class="p-6 text-sm text-muted-foreground">Select a mounted pool to view diagnostics.</p>
+			{#if !selectedFs}
+				<p class="p-6 text-sm text-muted-foreground">Select a mounted filesystem to view diagnostics.</p>
 			{:else if usageOutput === ''}
 				<p class="p-6 text-sm text-muted-foreground">
 					{usageLoading ? 'Running…' : 'Press Refresh or enable Live to fetch data.'}
@@ -283,8 +283,8 @@
 	<!-- terminal output (top / timestats) -->
 	{:else}
 		<div class="rounded-lg border border-border bg-[#0f1117] overflow-hidden" style="min-height: 400px;">
-			{#if !selectedPool}
-				<p class="p-6 text-sm text-muted-foreground">Select a mounted pool.</p>
+			{#if !selectedFs}
+				<p class="p-6 text-sm text-muted-foreground">Select a mounted filesystem.</p>
 			{:else if termStatus === 'idle'}
 				<p class="p-6 text-sm text-muted-foreground">Press Start to launch <code class="font-mono">bcachefs fs {activeTab === 'top' ? 'top' : 'timestats'}</code> in a live terminal.</p>
 			{:else}

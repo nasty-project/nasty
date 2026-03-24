@@ -20,8 +20,8 @@ pub enum SmbError {
     NameExists(String),
     #[error("path does not exist: {0}")]
     PathNotFound(String),
-    #[error("path is not within a NASty pool: {0}")]
-    PathNotInPool(String),
+    #[error("path is not within a NASty filesystem: {0}")]
+    PathNotInFilesystem(String),
     #[error("invalid share name: {0}")]
     InvalidName(String),
     #[error("samba reload failed: {0}")]
@@ -36,7 +36,7 @@ pub struct SmbShare {
     pub id: String,
     /// Samba share name used in `\\server\name` UNC paths.
     pub name: String,
-    /// Absolute filesystem path being shared (must be under `/storage/`).
+    /// Absolute filesystem path being shared (must be under `/fs/`).
     pub path: String,
     /// Optional description shown in share listings.
     pub comment: Option<String>,
@@ -139,8 +139,8 @@ impl SmbService {
         if !Path::new(&req.path).exists() {
             return Err(SmbError::PathNotFound(req.path));
         }
-        if !req.path.starts_with("/storage/") {
-            return Err(SmbError::PathNotInPool(req.path));
+        if !req.path.starts_with("/fs/") {
+            return Err(SmbError::PathNotInFilesystem(req.path));
         }
 
 

@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Pool } from '$lib/types';
+	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Filesystem } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -13,7 +13,7 @@
 
 	let users: UserInfo[] = $state([]);
 	let apiTokens: ApiTokenInfo[] = $state([]);
-	let pools: Pool[] = $state([]);
+	let filesystems: Filesystem[] = $state([]);
 	let loading = $state(true);
 	let showCreate = $state(false);
 	let showCreateToken = $state(false);
@@ -25,7 +25,7 @@
 
 	let newTokenName = $state('');
 	let newTokenRole = $state<'admin' | 'readonly' | 'operator'>('operator');
-	let newTokenPool = $state('');
+	let newTokenFs = $state('');
 	let newTokenExpiry = $state('');
 	let newTokenAllowedIPs = $state('');
 	let createdToken = $state<ApiTokenCreated | null>(null);
@@ -57,10 +57,10 @@
 
 	async function refresh() {
 		await withToast(async () => {
-			[users, apiTokens, pools, systemUsers] = await Promise.all([
+			[users, apiTokens, filesystems, systemUsers] = await Promise.all([
 				client.call<UserInfo[]>('auth.list_users'),
 				client.call<ApiTokenInfo[]>('auth.token.list'),
-				client.call<Pool[]>('pool.list'),
+				client.call<Filesystem[]>('fs.list'),
 				client.call<SystemUser[]>('smb.user.list').catch(() => [] as SystemUser[]),
 			]);
 		});
@@ -123,7 +123,7 @@
 			() => client.call<ApiTokenCreated>('auth.token.create', {
 				name: newTokenName,
 				role: newTokenRole,
-				pool: newTokenPool || null,
+				filesystem: newTokenFs || null,
 				expires_in_secs,
 				allowed_ips,
 			}),
@@ -134,7 +134,7 @@
 			showCreateToken = false;
 			newTokenName = '';
 			newTokenRole = 'operator';
-			newTokenPool = '';
+			newTokenFs = '';
 			newTokenExpiry = '';
 			newTokenAllowedIPs = '';
 			await refresh();
@@ -302,14 +302,14 @@
 				</select>
 			</div>
 			<div class="mb-4">
-				<Label for="token-pool">Pool Restriction</Label>
-				<select id="token-pool" bind:value={newTokenPool} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-					<option value="">All pools</option>
-					{#each pools as pool}
-						<option value={pool.name}>{pool.name}</option>
+				<Label for="token-fs">Filesystem Restriction</Label>
+				<select id="token-fs" bind:value={newTokenFs} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+					<option value="">All filesystems</option>
+					{#each filesystems as fs}
+						<option value={fs.name}>{fs.name}</option>
 					{/each}
 				</select>
-				<span class="mt-1 block text-xs text-muted-foreground">Restrict this token to a single pool's subvolumes</span>
+				<span class="mt-1 block text-xs text-muted-foreground">Restrict this token to a single filesystem's subvolumes</span>
 			</div>
 			<div class="mb-4">
 				<Label for="token-expiry">Expiration</Label>
@@ -341,7 +341,7 @@
 				<tr>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Name</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Role</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Pool</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Filesystem</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Created</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Expires</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Allowed IPs</th>
@@ -360,7 +360,7 @@
 								{token.role === 'admin' ? 'Admin' : token.role === 'operator' ? 'Operator' : 'Read Only'}
 							</Badge>
 						</td>
-						<td class="p-3 font-mono text-xs text-muted-foreground">{token.pool ?? '—'}</td>
+						<td class="p-3 font-mono text-xs text-muted-foreground">{token.filesystem ?? '—'}</td>
 						<td class="p-3 text-xs text-muted-foreground">{formatDate(token.created_at)}</td>
 						<td class="p-3 text-xs {token.expires_at && token.expires_at * 1000 < Date.now() ? 'text-destructive' : 'text-muted-foreground'}">
 							{token.expires_at ? formatDate(token.expires_at) : '—'}

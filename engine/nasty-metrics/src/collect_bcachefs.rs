@@ -14,7 +14,7 @@ pub struct BcachefsFs {
     pub uuid: String,
     pub mount_point: String,
     /// Human-readable name (basename of mount_point, e.g. "tank").
-    pub pool_name: String,
+    pub fs_name: String,
     pub sysfs_path: PathBuf,
 }
 
@@ -22,7 +22,7 @@ pub struct BcachefsFs {
 #[derive(Debug, Default, Serialize)]
 pub struct BcachefsMetrics {
     pub uuid: String,
-    pub pool_name: String,
+    pub fs_name: String,
 
     /// Persistent counters (since mount).
     pub counters: HashMap<String, u64>,
@@ -115,7 +115,7 @@ pub fn discover_filesystems() -> Vec<BcachefsFs> {
         }
 
         let mount_point = parts[1].to_string();
-        let pool_name = Path::new(&mount_point)
+        let fs_name = Path::new(&mount_point)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -127,7 +127,7 @@ pub fn discover_filesystems() -> Vec<BcachefsFs> {
             result.push(BcachefsFs {
                 uuid,
                 mount_point,
-                pool_name,
+                fs_name,
                 sysfs_path,
             });
         }
@@ -382,10 +382,10 @@ pub fn read_space(mount_point: &str) -> SpaceUsage {
     }
 }
 
-// ── Pool options ────────────────────────────────────────────────
+// ── Filesystem options ────────────────────────────────────────────────
 
 /// Read filesystem options from `/sys/fs/bcachefs/<uuid>/options/`.
-pub fn read_pool_options(sysfs: &Path) -> HashMap<String, String> {
+pub fn read_fs_options(sysfs: &Path) -> HashMap<String, String> {
     let mut options = HashMap::new();
     let opts_dir = sysfs.join("options");
 
@@ -464,12 +464,12 @@ pub fn collect_all() -> Vec<BcachefsMetrics> {
     for fs in &filesystems {
         let metrics = BcachefsMetrics {
             uuid: fs.uuid.clone(),
-            pool_name: fs.pool_name.clone(),
+            fs_name: fs.fs_name.clone(),
             counters: read_counters(&fs.sysfs_path),
             time_stats: read_time_stats(&fs.sysfs_path),
             devices: read_device_stats(&fs.sysfs_path),
             space: read_space(&fs.mount_point),
-            options: read_pool_options(&fs.sysfs_path),
+            options: read_fs_options(&fs.sysfs_path),
             background: read_background_ops(&fs.sysfs_path),
             compression: read_compression_stats(&fs.sysfs_path),
         };

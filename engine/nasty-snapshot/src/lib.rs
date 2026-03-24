@@ -31,10 +31,10 @@ impl SnapshotService {
 
     pub async fn list(
         &self,
-        pool_name: &str,
+        fs_name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Vec<Snapshot>, SubvolumeError> {
-        self.subvolumes.list_snapshots(pool_name, owner_filter).await
+        self.subvolumes.list_snapshots(fs_name, owner_filter).await
     }
 
     pub async fn delete(

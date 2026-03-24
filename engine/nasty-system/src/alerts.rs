@@ -27,7 +27,7 @@ pub struct AlertRule {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertMetric {
-    PoolUsagePercent,
+    FsUsagePercent,
     CpuLoadPercent,
     MemoryUsagePercent,
     DiskTemperature,
@@ -66,7 +66,7 @@ pub struct ActiveAlert {
     pub current_value: f64,
     /// Threshold value configured in the rule.
     pub threshold: f64,
-    /// Identifier of the specific resource that triggered the alert (e.g. pool name, device path).
+    /// Identifier of the specific resource that triggered the alert (e.g. filesystem name, device path).
     pub source: String,
 }
 
@@ -157,7 +157,7 @@ impl AlertService {
     pub async fn evaluate(
         &self,
         stats: &super::SystemStats,
-        pools: &[PoolUsage],
+        filesystems: &[FsUsage],
         disk_health: &[DiskHealthSummary],
     ) -> Vec<ActiveAlert> {
         let state = self.state.read().await;
@@ -165,12 +165,12 @@ impl AlertService {
 
         for rule in state.rules.iter().filter(|r| r.enabled) {
             match rule.metric {
-                AlertMetric::PoolUsagePercent => {
-                    for pool in pools {
-                        if pool.total_bytes == 0 {
+                AlertMetric::FsUsagePercent => {
+                    for fs in filesystems {
+                        if fs.total_bytes == 0 {
                             continue;
                         }
-                        let pct = (pool.used_bytes as f64 / pool.total_bytes as f64) * 100.0;
+                        let pct = (fs.used_bytes as f64 / fs.total_bytes as f64) * 100.0;
                         if check_condition(pct, &rule.condition, rule.threshold) {
                             alerts.push(ActiveAlert {
                                 rule_id: rule.id.clone(),
@@ -178,12 +178,12 @@ impl AlertService {
                                 severity: rule.severity.clone(),
                                 metric: rule.metric.clone(),
                                 message: format!(
-                                    "Pool \"{}\" usage at {:.1}% (threshold: {:.0}%)",
-                                    pool.name, pct, rule.threshold
+                                    "Filesystem \"{}\" usage at {:.1}% (threshold: {:.0}%)",
+                                    fs.name, pct, rule.threshold
                                 ),
                                 current_value: pct,
                                 threshold: rule.threshold,
-                                source: pool.name.clone(),
+                                source: fs.name.clone(),
                             });
                         }
                     }
@@ -303,9 +303,9 @@ impl AlertService {
     }
 }
 
-/// Minimal pool info for alert evaluation
+/// Minimal filesystem info for alert evaluation
 #[derive(Debug)]
-pub struct PoolUsage {
+pub struct FsUsage {
     pub name: String,
     pub used_bytes: u64,
     pub total_bytes: u64,
@@ -348,19 +348,19 @@ fn check_condition(value: f64, condition: &AlertCondition, threshold: f64) -> bo
 fn default_rules() -> Vec<AlertRule> {
     vec![
         AlertRule {
-            id: "pool-usage-warn".into(),
-            name: "Pool usage warning".into(),
+            id: "fs-usage-warn".into(),
+            name: "Filesystem usage warning".into(),
             enabled: true,
-            metric: AlertMetric::PoolUsagePercent,
+            metric: AlertMetric::FsUsagePercent,
             condition: AlertCondition::Above,
             threshold: 80.0,
             severity: AlertSeverity::Warning,
         },
         AlertRule {
-            id: "pool-usage-crit".into(),
-            name: "Pool usage critical".into(),
+            id: "fs-usage-crit".into(),
+            name: "Filesystem usage critical".into(),
             enabled: true,
-            metric: AlertMetric::PoolUsagePercent,
+            metric: AlertMetric::FsUsagePercent,
             condition: AlertCondition::Above,
             threshold: 95.0,
             severity: AlertSeverity::Critical,

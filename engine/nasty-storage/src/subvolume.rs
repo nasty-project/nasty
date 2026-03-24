@@ -9,7 +9,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use crate::cmd;
-use crate::pool::PoolService;
+use crate::filesystem::FilesystemService;
 
 const BLOCK_FILE_NAME: &str = "vol.img";
 
@@ -37,10 +37,10 @@ const NASTY_KEY_PREFIX: &str = "nasty.";
 
 #[derive(Debug, Error)]
 pub enum SubvolumeError {
-    #[error("pool not found: {0}")]
-    PoolNotFound(String),
-    #[error("pool not mounted: {0}")]
-    PoolNotMounted(String),
+    #[error("filesystem not found: {0}")]
+    FilesystemNotFound(String),
+    #[error("filesystem not mounted: {0}")]
+    FilesystemNotMounted(String),
     #[error("subvolume already exists: {0}")]
     AlreadyExists(String),
     #[error("subvolume not found: {0}")]
@@ -64,10 +64,10 @@ pub enum SubvolumeType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Subvolume {
-    /// Subvolume name (unique within the pool).
+    /// Subvolume name (unique within the filesystem).
     pub name: String,
-    /// Name of the pool that contains this subvolume.
-    pub pool: String,
+    /// Name of the filesystem that contains this subvolume.
+    pub filesystem: String,
     /// Whether this is a filesystem or block-backed subvolume.
     pub subvolume_type: SubvolumeType,
     /// Absolute filesystem path to the subvolume directory.
@@ -102,8 +102,8 @@ pub struct Snapshot {
     pub name: String,
     /// Name of the parent subvolume.
     pub subvolume: String,
-    /// Name of the pool that contains this snapshot.
-    pub pool: String,
+    /// Name of the filesystem that contains this snapshot.
+    pub filesystem: String,
     /// Absolute filesystem path to the snapshot directory.
     pub path: String,
     /// Whether this snapshot is read-only.
@@ -194,8 +194,8 @@ fn write_meta_xattrs(
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateSubvolumeRequest {
-    /// Name of the pool to create the subvolume in.
-    pub pool: String,
+    /// Name of the filesystem to create the subvolume in.
+    pub filesystem: String,
     /// Name for the new subvolume.
     pub name: String,
     /// Whether to create a filesystem or block-backed subvolume (default: filesystem).
@@ -215,16 +215,16 @@ fn default_type() -> SubvolumeType {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeleteSubvolumeRequest {
-    /// Name of the pool containing the subvolume.
-    pub pool: String,
+    /// Name of the filesystem containing the subvolume.
+    pub filesystem: String,
     /// Name of the subvolume to delete.
     pub name: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateSnapshotRequest {
-    /// Name of the pool containing the subvolume.
-    pub pool: String,
+    /// Name of the filesystem containing the subvolume.
+    pub filesystem: String,
     /// Name of the subvolume to snapshot.
     pub subvolume: String,
     /// Name for the new snapshot.
@@ -235,8 +235,8 @@ pub struct CreateSnapshotRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeleteSnapshotRequest {
-    /// Name of the pool containing the snapshot.
-    pub pool: String,
+    /// Name of the filesystem containing the snapshot.
+    pub filesystem: String,
     /// Name of the parent subvolume.
     pub subvolume: String,
     /// Name of the snapshot to delete.
@@ -245,8 +245,8 @@ pub struct DeleteSnapshotRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CloneSnapshotRequest {
-    /// Name of the pool containing the snapshot.
-    pub pool: String,
+    /// Name of the filesystem containing the snapshot.
+    pub filesystem: String,
     /// Name of the parent subvolume.
     pub subvolume: String,
     /// Name of the snapshot to clone.
@@ -257,8 +257,8 @@ pub struct CloneSnapshotRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CloneSubvolumeRequest {
-    /// Name of the pool containing the source subvolume.
-    pub pool: String,
+    /// Name of the filesystem containing the source subvolume.
+    pub filesystem: String,
     /// Name of the subvolume to clone.
     pub name: String,
     /// Name for the new writable subvolume.
@@ -267,8 +267,8 @@ pub struct CloneSubvolumeRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResizeSubvolumeRequest {
-    /// Name of the pool containing the subvolume.
-    pub pool: String,
+    /// Name of the filesystem containing the subvolume.
+    pub filesystem: String,
     /// Name of the subvolume to resize.
     pub name: String,
     /// New size in bytes. For block subvolumes: sparse image size. For filesystem subvolumes: bcachefs quota limit.
@@ -277,8 +277,8 @@ pub struct ResizeSubvolumeRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateSubvolumeRequest {
-    /// Name of the pool containing the subvolume.
-    pub pool: String,
+    /// Name of the filesystem containing the subvolume.
+    pub filesystem: String,
     /// Name of the subvolume to update.
     pub name: String,
     /// New compression algorithm (e.g. `lz4`, `zstd`, `none`). `none` clears compression.
@@ -289,8 +289,8 @@ pub struct UpdateSubvolumeRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetPropertiesRequest {
-    /// Name of the pool containing the subvolume.
-    pub pool: String,
+    /// Name of the filesystem containing the subvolume.
+    pub filesystem: String,
     /// Name of the subvolume to update.
     pub name: String,
     /// Key-value pairs to set (merged with existing properties).
@@ -299,8 +299,8 @@ pub struct SetPropertiesRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemovePropertiesRequest {
-    /// Name of the pool containing the subvolume.
-    pub pool: String,
+    /// Name of the filesystem containing the subvolume.
+    pub filesystem: String,
     /// Name of the subvolume to update.
     pub name: String,
     /// Property keys to remove.
@@ -309,8 +309,8 @@ pub struct RemovePropertiesRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FindByPropertyRequest {
-    /// Optional pool to restrict the search to.
-    pub pool: Option<String>,
+    /// Optional filesystem to restrict the search to.
+    pub filesystem: Option<String>,
     /// xattr property key to match against.
     pub key: String,
     /// Value that the property key must equal.
@@ -318,15 +318,15 @@ pub struct FindByPropertyRequest {
 }
 
 pub struct SubvolumeService {
-    pools: PoolService,
+    filesystems: FilesystemService,
 }
 
 impl SubvolumeService {
-    pub fn new(pools: PoolService) -> Self {
-        Self { pools }
+    pub fn new(filesystems: FilesystemService) -> Self {
+        Self { filesystems }
     }
 
-    /// Re-attach loop devices for block subvolumes after pools are mounted.
+    /// Re-attach loop devices for block subvolumes after filesystems are mounted.
     /// Returns a map of subvolume_name → current loop device path so callers
     /// can patch NVMe-oF / iSCSI state files before those services start.
     pub async fn restore_block_devices(&self) -> std::collections::HashMap<String, String> {
@@ -353,23 +353,23 @@ impl SubvolumeService {
         for subvol in block_subvols {
             let img_path = format!("{}/{BLOCK_FILE_NAME}", subvol.path);
             if !Path::new(&img_path).exists() {
-                warn!("Block image {img_path} not found for {}/{}", subvol.pool, subvol.name);
+                warn!("Block image {img_path} not found for {}/{}", subvol.filesystem, subvol.name);
                 continue;
             }
 
             // Use existing loop device if already attached (engine restart, not reboot)
             let loop_dev = if let Some(existing) = find_loop_device(&img_path).await {
-                info!("Loop device already attached for {}/{}", subvol.pool, subvol.name);
+                info!("Loop device already attached for {}/{}", subvol.filesystem, subvol.name);
                 existing
             } else {
                 match cmd::run_ok("losetup", &["--find", "--show", &img_path]).await {
                     Ok(dev) => {
                         let dev = dev.trim().to_string();
-                        info!("Attached {} for block subvolume {}/{}", dev, subvol.pool, subvol.name);
+                        info!("Attached {} for block subvolume {}/{}", dev, subvol.filesystem, subvol.name);
                         dev
                     }
                     Err(e) => {
-                        warn!("Failed to attach loop device for {}/{}: {e}", subvol.pool, subvol.name);
+                        warn!("Failed to attach loop device for {}/{}: {e}", subvol.filesystem, subvol.name);
                         continue;
                     }
                 }
@@ -381,28 +381,28 @@ impl SubvolumeService {
         dev_map
     }
 
-    /// Get the mount point for a pool, or error if not mounted
-    async fn pool_mount_point(&self, pool_name: &str) -> Result<String, SubvolumeError> {
-        let pool = self
-            .pools
-            .get(pool_name)
+    /// Get the mount point for a filesystem, or error if not mounted
+    async fn fs_mount_point(&self, fs_name: &str) -> Result<String, SubvolumeError> {
+        let fs = self
+            .filesystems
+            .get(fs_name)
             .await
-            .map_err(|_| SubvolumeError::PoolNotFound(pool_name.to_string()))?;
+            .map_err(|_| SubvolumeError::FilesystemNotFound(fs_name.to_string()))?;
 
-        pool.mount_point
-            .ok_or_else(|| SubvolumeError::PoolNotMounted(pool_name.to_string()))
+        fs.mount_point
+            .ok_or_else(|| SubvolumeError::FilesystemNotMounted(fs_name.to_string()))
     }
 
-    /// List subvolumes in a pool.
+    /// List subvolumes in a filesystem.
     /// `owner_filter`: if Some, only return subvolumes owned by that token.
-    pub async fn list(&self, pool_name: &str, owner_filter: Option<&str>) -> Result<Vec<Subvolume>, SubvolumeError> {
-        let mount_point = self.pool_mount_point(pool_name).await?;
+    pub async fn list(&self, fs_name: &str, owner_filter: Option<&str>) -> Result<Vec<Subvolume>, SubvolumeError> {
+        let mount_point = self.fs_mount_point(fs_name).await?;
         let mut subvolumes = Vec::new();
 
         // Ask bcachefs which paths are real subvolumes (filters out plain dirs)
         let info = bcachefs_list_all(&mount_point).await;
 
-        // Subvolumes sit directly at the pool root — no subdirectory prefix.
+        // Subvolumes sit directly at the filesystem root — no subdirectory prefix.
         // Exclude anything with '/' (nested) or '@' (snapshot).
         for name in info.subvol_paths.iter().filter(|p| !p.is_empty() && !p.contains('/') && !p.contains('@')) {
             let path_str = subvol_path(&mount_point, name);
@@ -429,7 +429,7 @@ impl SubvolumeService {
                     Snapshot {
                         name: snap_name.clone(),
                         subvolume: name.to_string(),
-                        pool: pool_name.to_string(),
+                        filesystem: fs_name.to_string(),
                         path: snap_path(&mount_point, name, &snap_name),
                         read_only,
                         parent,
@@ -452,7 +452,7 @@ impl SubvolumeService {
 
             subvolumes.push(Subvolume {
                 name: name.to_string(),
-                pool: pool_name.to_string(),
+                filesystem: fs_name.to_string(),
                 subvolume_type: meta.subvolume_type,
                 path: path_str,
                 used_bytes: size,
@@ -470,24 +470,24 @@ impl SubvolumeService {
         Ok(subvolumes)
     }
 
-    /// List subvolumes across all mounted pools.
-    /// `pool_filter`: if Some, only include that pool.
+    /// List subvolumes across all mounted filesystems.
+    /// `fs_filter`: if Some, only include that filesystem.
     /// `owner_filter`: if Some, only include subvolumes owned by that token.
-    pub async fn list_all(&self, pool_filter: Option<&str>, owner_filter: Option<&str>) -> Result<Vec<Subvolume>, SubvolumeError> {
-        let pools = self.pools.list().await
+    pub async fn list_all(&self, fs_filter: Option<&str>, owner_filter: Option<&str>) -> Result<Vec<Subvolume>, SubvolumeError> {
+        let all_fs = self.filesystems.list().await
             .map_err(|e| SubvolumeError::CommandFailed(e.to_string()))?;
 
         let mut all = Vec::new();
-        for pool in pools {
-            if !pool.mounted {
+        for fs in all_fs {
+            if !fs.mounted {
                 continue;
             }
-            if let Some(filter) = pool_filter {
-                if pool.name != filter {
+            if let Some(filter) = fs_filter {
+                if fs.name != filter {
                     continue;
                 }
             }
-            match self.list(&pool.name, owner_filter).await {
+            match self.list(&fs.name, owner_filter).await {
                 Ok(mut subvols) => all.append(&mut subvols),
                 Err(_) => continue,
             }
@@ -499,11 +499,11 @@ impl SubvolumeService {
     /// `owner_filter`: if Some, returns `AccessDenied` if the subvolume has a different owner.
     pub async fn get(
         &self,
-        pool_name: &str,
+        fs_name: &str,
         name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        let subvolumes = self.list(pool_name, owner_filter).await?;
+        let subvolumes = self.list(fs_name, owner_filter).await?;
         subvolumes
             .into_iter()
             .find(|s| s.name == name)
@@ -523,12 +523,12 @@ impl SubvolumeService {
             ));
         }
 
-        let mount_point = self.pool_mount_point(&req.pool).await?;
+        let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let subvol_path = subvol_path(&mount_point, &req.name);
 
         if Path::new(&subvol_path).exists() {
-            info!("Subvolume '{}' already exists in pool '{}', returning existing (idempotent)", req.name, req.pool);
-            return self.get(&req.pool, &req.name, None).await;
+            info!("Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)", req.name, req.filesystem);
+            return self.get(&req.filesystem, &req.name, None).await;
         }
 
         if req.subvolume_type == SubvolumeType::Block && req.volsize_bytes.is_none() {
@@ -536,7 +536,7 @@ impl SubvolumeService {
         }
 
         // Create the bcachefs subvolume
-        info!("Creating subvolume '{}' in pool '{}'", req.name, req.pool);
+        info!("Creating subvolume '{}' in filesystem '{}'", req.name, req.filesystem);
         cmd::run_ok("bcachefs", &["subvolume", "create", &subvol_path])
             .await
             .map_err(SubvolumeError::CommandFailed)?;
@@ -558,7 +558,7 @@ impl SubvolumeService {
         // For filesystem subvolumes: enforce size via bcachefs project quota
         if req.subvolume_type == SubvolumeType::Filesystem {
             if let Some(size) = req.volsize_bytes {
-                let projid = project_id_for(&req.pool, &req.name);
+                let projid = project_id_for(&req.filesystem, &req.name);
                 set_project_quota(&mount_point, &subvol_path, projid, size).await;
             }
         }
@@ -600,13 +600,13 @@ impl SubvolumeService {
             owner.as_deref(),
         )?;
 
-        self.get(&req.pool, &req.name, None).await
+        self.get(&req.filesystem, &req.name, None).await
     }
 
     /// Delete a subvolume.
     /// `owner_filter`: if Some, returns `AccessDenied` if the subvolume has a different owner.
     pub async fn delete(&self, req: DeleteSubvolumeRequest, owner_filter: Option<&str>) -> Result<(), SubvolumeError> {
-        let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
+        let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         // For block subvolumes: detach loop device first
         if subvol.subvolume_type == SubvolumeType::Block {
@@ -618,21 +618,21 @@ impl SubvolumeService {
             }
         }
 
-        let mount_point = self.pool_mount_point(&req.pool).await?;
+        let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let subvol_path = subvol_path(&mount_point, &req.name);
 
         // bcachefs snapshots are independent first-class subvolumes — they survive
         // parent deletion. We intentionally do NOT delete snapshots here so that
         // snapshot-based restore/DR scenarios work correctly.
 
-        info!("Deleting subvolume '{}' from pool '{}'", req.name, req.pool);
+        info!("Deleting subvolume '{}' from filesystem '{}'", req.name, req.filesystem);
         cmd::run_ok("bcachefs", &["subvolume", "delete", &subvol_path])
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
         // Remove project quota registration if this was a filesystem subvolume
         if subvol.subvolume_type == SubvolumeType::Filesystem {
-            let projid = project_id_for(&req.pool, &req.name);
+            let projid = project_id_for(&req.filesystem, &req.name);
             unregister_project(projid);
         }
 
@@ -645,11 +645,11 @@ impl SubvolumeService {
     /// `owner_filter`: if Some, returns `AccessDenied` if the subvolume has a different owner.
     pub async fn attach(
         &self,
-        pool_name: &str,
+        fs_name: &str,
         name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        let subvol = self.get(pool_name, name, owner_filter).await?;
+        let subvol = self.get(fs_name, name, owner_filter).await?;
         if subvol.subvolume_type != SubvolumeType::Block {
             return Err(SubvolumeError::CommandFailed(
                 "only block subvolumes can be attached".to_string(),
@@ -665,25 +665,25 @@ impl SubvolumeService {
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
-        self.get(pool_name, name, owner_filter).await
+        self.get(fs_name, name, owner_filter).await
     }
 
     /// Detach a block subvolume's loop device.
     /// `owner_filter`: if Some, returns `AccessDenied` if the subvolume has a different owner.
     pub async fn detach(
         &self,
-        pool_name: &str,
+        fs_name: &str,
         name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        let subvol = self.get(pool_name, name, owner_filter).await?;
+        let subvol = self.get(fs_name, name, owner_filter).await?;
         if let Some(ref loop_dev) = subvol.block_device {
             info!("Detaching loop device {} for '{}'", loop_dev, name);
             cmd::run_ok("losetup", &["-d", loop_dev])
                 .await
                 .map_err(SubvolumeError::CommandFailed)?;
         }
-        self.get(pool_name, name, owner_filter).await
+        self.get(fs_name, name, owner_filter).await
     }
 
     /// Resize a subvolume.
@@ -695,7 +695,7 @@ impl SubvolumeService {
         req: ResizeSubvolumeRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
+        let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         match subvol.subvolume_type {
             SubvolumeType::Block => {
@@ -721,8 +721,8 @@ impl SubvolumeService {
                     "Resizing filesystem subvolume '{}' quota to {} bytes",
                     req.name, req.volsize_bytes
                 );
-                let mount_point = self.pool_mount_point(&req.pool).await?;
-                let projid = project_id_for(&req.pool, &req.name);
+                let mount_point = self.fs_mount_point(&req.filesystem).await?;
+                let projid = project_id_for(&req.filesystem, &req.name);
                 let proj_name = format!("nasty-{projid}");
                 let bytes_str = req.volsize_bytes.to_string();
                 if let Err(e) = cmd::run_ok(
@@ -735,11 +735,11 @@ impl SubvolumeService {
         }
 
         // Update volsize xattr
-        let path = subvol_path(&self.pool_mount_point(&req.pool).await?, &req.name);
+        let path = subvol_path(&self.fs_mount_point(&req.filesystem).await?, &req.name);
         xattr::set(&path, XATTR_NASTY_VOLSIZE, req.volsize_bytes.to_string().as_bytes())
             .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr volsize: {e}")))?;
 
-        self.get(&req.pool, &req.name, owner_filter).await
+        self.get(&req.filesystem, &req.name, owner_filter).await
     }
 
     /// Update compression and/or comments on an existing subvolume.
@@ -748,7 +748,7 @@ impl SubvolumeService {
         req: UpdateSubvolumeRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
+        let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
         let path = &subvol.path;
 
         if let Some(ref comp) = req.compression {
@@ -782,7 +782,7 @@ impl SubvolumeService {
             }
         }
 
-        self.get(&req.pool, &req.name, owner_filter).await
+        self.get(&req.filesystem, &req.name, owner_filter).await
     }
 
     /// Create a snapshot of a subvolume.
@@ -793,9 +793,9 @@ impl SubvolumeService {
         owner_filter: Option<&str>,
     ) -> Result<Snapshot, SubvolumeError> {
         // Verify ownership of the parent subvolume
-        self.get(&req.pool, &req.subvolume, owner_filter).await?;
+        self.get(&req.filesystem, &req.subvolume, owner_filter).await?;
 
-        let mount_point = self.pool_mount_point(&req.pool).await?;
+        let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let source_path = subvol_path(&mount_point, &req.subvolume);
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.name);
 
@@ -811,7 +811,7 @@ impl SubvolumeService {
         // Initiators (iSCSI, NVMe-oF) may have dirty data in their page cache
         // that hasn't been written to the backing loop device yet. A sync ensures
         // the snapshot captures a consistent state.
-        let subvol = self.get(&req.pool, &req.subvolume, owner_filter).await?;
+        let subvol = self.get(&req.filesystem, &req.subvolume, owner_filter).await?;
         if subvol.subvolume_type == SubvolumeType::Block {
             if let Some(ref loop_dev) = subvol.block_device {
                 info!("Flushing block device {} before snapshot", loop_dev);
@@ -823,7 +823,7 @@ impl SubvolumeService {
 
         info!(
             "Creating snapshot '{}' of subvolume '{}/{}'",
-            req.name, req.pool, req.subvolume
+            req.name, req.filesystem, req.subvolume
         );
         // Snapshots are always read-only; use snapshot.clone for writable copies
         cmd::run_ok("bcachefs", &["subvolume", "snapshot", "-r", &source_path, &snap_path])
@@ -833,7 +833,7 @@ impl SubvolumeService {
         Ok(Snapshot {
             name: req.name,
             subvolume: req.subvolume.clone(),
-            pool: req.pool,
+            filesystem: req.filesystem,
             path: snap_path,
             read_only: true,
             parent: Some(req.subvolume),
@@ -848,8 +848,8 @@ impl SubvolumeService {
         req: DeleteSnapshotRequest,
         owner_filter: Option<&str>,
     ) -> Result<(), SubvolumeError> {
-        self.get(&req.pool, &req.subvolume, owner_filter).await?;
-        let mount_point = self.pool_mount_point(&req.pool).await?;
+        self.get(&req.filesystem, &req.subvolume, owner_filter).await?;
+        let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.name);
 
         if !Path::new(&snap_path).exists() {
@@ -858,7 +858,7 @@ impl SubvolumeService {
 
         info!(
             "Deleting snapshot '{}' of subvolume '{}/{}'",
-            req.name, req.pool, req.subvolume
+            req.name, req.filesystem, req.subvolume
         );
         cmd::run_ok("bcachefs", &["subvolume", "delete", &snap_path])
             .await
@@ -870,10 +870,10 @@ impl SubvolumeService {
     /// List snapshots for a specific subvolume using `bcachefs subvolume list-snapshots`.
     pub async fn list_snapshots_for(
         &self,
-        pool_name: &str,
+        fs_name: &str,
         subvol_name: &str,
     ) -> Result<Vec<Snapshot>, SubvolumeError> {
-        let mount_point = self.pool_mount_point(pool_name).await?;
+        let mount_point = self.fs_mount_point(fs_name).await?;
         let subvol_path = subvol_path(&mount_point, subvol_name);
 
         if !Path::new(&subvol_path).exists() {
@@ -892,7 +892,7 @@ impl SubvolumeService {
                     path: snap_path(&mount_point, subvol_name, &snap_name),
                     name: snap_name,
                     subvolume: subvol_name.to_string(),
-                    pool: pool_name.to_string(),
+                    filesystem: fs_name.to_string(),
                     read_only,
                     parent: Some(subvol_name.to_string()),
                     block_device: None,
@@ -903,19 +903,19 @@ impl SubvolumeService {
         Ok(snapshots)
     }
 
-    /// List all snapshots across all subvolumes in a pool.
+    /// List all snapshots across all subvolumes in a filesystem.
     /// `owner_filter`: if Some, only returns snapshots whose parent subvolume is owned by that token.
     /// Single-pass scan of the subvolumes/ directory for entries containing '@'.
     pub async fn list_snapshots(
         &self,
-        pool_name: &str,
+        fs_name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Vec<Snapshot>, SubvolumeError> {
-        let mount_point = self.pool_mount_point(pool_name).await?;
+        let mount_point = self.fs_mount_point(fs_name).await?;
 
         // Get owned subvolume names if filter is active
         let owned: Option<std::collections::HashSet<String>> = if owner_filter.is_some() {
-            let owned_subvols = self.list(pool_name, owner_filter).await.unwrap_or_default();
+            let owned_subvols = self.list(fs_name, owner_filter).await.unwrap_or_default();
             Some(owned_subvols.into_iter().map(|s| s.name).collect())
         } else {
             None
@@ -925,7 +925,7 @@ impl SubvolumeService {
 
         let mut all_snapshots = Vec::new();
         for (rel_path, read_only) in info.snapshot_flags {
-            // Snapshots live directly at pool root: "subvol@snap" (no '/')
+            // Snapshots live directly at filesystem root: "subvol@snap" (no '/')
             if rel_path.contains('/') {
                 continue;
             }
@@ -941,7 +941,7 @@ impl SubvolumeService {
             all_snapshots.push(Snapshot {
                 name: snap_name.clone(),
                 subvolume: subvol_name.clone(),
-                pool: pool_name.to_string(),
+                filesystem: fs_name.to_string(),
                 path: snap_path(&mount_point, &subvol_name, &snap_name),
                 read_only,
                 parent,
@@ -965,7 +965,7 @@ impl SubvolumeService {
             ));
         }
 
-        let mount_point = self.pool_mount_point(&req.pool).await?;
+        let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.snapshot);
         let new_subvol_path = subvol_path(&mount_point, &req.new_name);
 
@@ -975,13 +975,13 @@ impl SubvolumeService {
             )));
         }
         if Path::new(&new_subvol_path).exists() {
-            info!("Subvolume '{}' already exists in pool '{}', returning existing (idempotent)", req.new_name, req.pool);
-            return self.get(&req.pool, &req.new_name, None).await;
+            info!("Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)", req.new_name, req.filesystem);
+            return self.get(&req.filesystem, &req.new_name, None).await;
         }
 
         info!(
             "Cloning snapshot '{}/{}@{}' to new subvolume '{}'",
-            req.pool, req.subvolume, req.snapshot, req.new_name
+            req.filesystem, req.subvolume, req.snapshot, req.new_name
         );
         // bcachefs subvolume snapshot without -r creates a writable subvolume from snapshot
         cmd::run_ok("bcachefs", &["subvolume", "snapshot", &snap_path, &new_subvol_path])
@@ -1009,7 +1009,7 @@ impl SubvolumeService {
             }
         }
 
-        self.get(&req.pool, &req.new_name, None).await
+        self.get(&req.filesystem, &req.new_name, None).await
     }
 
     /// Clone a subvolume into a new writable subvolume (COW).
@@ -1027,9 +1027,9 @@ impl SubvolumeService {
             ));
         }
 
-        let parent = self.get(&req.pool, &req.name, owner_filter).await?;
+        let parent = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
-        let mount_point = self.pool_mount_point(&req.pool).await?;
+        let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let source_path = subvol_path(&mount_point, &req.name);
         let new_subvol_path = subvol_path(&mount_point, &req.new_name);
 
@@ -1052,7 +1052,7 @@ impl SubvolumeService {
 
         info!(
             "Cloning subvolume '{}/{}' to new subvolume '{}'",
-            req.pool, req.name, req.new_name
+            req.filesystem, req.name, req.new_name
         );
         // Writable snapshot = COW clone
         cmd::run_ok("bcachefs", &["subvolume", "snapshot", &source_path, &new_subvol_path])
@@ -1080,7 +1080,7 @@ impl SubvolumeService {
             }
         }
 
-        self.get(&req.pool, &req.new_name, None).await
+        self.get(&req.filesystem, &req.new_name, None).await
     }
 
     /// Set (merge-upsert) xattr properties on a subvolume.
@@ -1089,7 +1089,7 @@ impl SubvolumeService {
         req: SetPropertiesRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
+        let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         for (key, value) in &req.properties {
             let xattr_name = format!("{XATTR_NS}{key}");
@@ -1099,7 +1099,7 @@ impl SubvolumeService {
                 ))?;
         }
 
-        self.get(&req.pool, &req.name, owner_filter).await
+        self.get(&req.filesystem, &req.name, owner_filter).await
     }
 
     /// Remove specific xattr properties from a subvolume.
@@ -1108,7 +1108,7 @@ impl SubvolumeService {
         req: RemovePropertiesRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        let subvol = self.get(&req.pool, &req.name, owner_filter).await?;
+        let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         for key in &req.keys {
             let xattr_name = format!("{XATTR_NS}{key}");
@@ -1121,17 +1121,17 @@ impl SubvolumeService {
             }
         }
 
-        self.get(&req.pool, &req.name, owner_filter).await
+        self.get(&req.filesystem, &req.name, owner_filter).await
     }
 
     /// Find subvolumes where the given property key equals the given value.
-    /// Optionally restricted to a single pool.
+    /// Optionally restricted to a single filesystem.
     pub async fn find_by_property(
         &self,
         req: FindByPropertyRequest,
         owner_filter: Option<&str>,
     ) -> Result<Vec<Subvolume>, SubvolumeError> {
-        let all = self.list_all(req.pool.as_deref(), owner_filter).await?;
+        let all = self.list_all(req.filesystem.as_deref(), owner_filter).await?;
         Ok(all
             .into_iter()
             .filter(|s| s.properties.get(&req.key).map(|v| v == &req.value).unwrap_or(false))
@@ -1222,11 +1222,11 @@ async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
     BcachefsInfo { subvol_paths, snapshot_flags, snapshot_parents }
 }
 
-/// Derive a stable 32-bit project ID from pool + subvolume name.
+/// Derive a stable 32-bit project ID from filesystem + subvolume name.
 /// Zero is reserved by the kernel so we ensure the result is ≥ 1.
-fn project_id_for(pool: &str, name: &str) -> u32 {
+fn project_id_for(filesystem: &str, name: &str) -> u32 {
     let mut h = DefaultHasher::new();
-    pool.hash(&mut h);
+    filesystem.hash(&mut h);
     name.hash(&mut h);
     let v = (h.finish() & 0xFFFF_FFFF) as u32;
     v.max(1)

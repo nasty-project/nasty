@@ -4,7 +4,7 @@
 	import { formatBytes } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { Pool, Subvolume, Snapshot, SubvolumeType, NfsShare, SmbShare, IscsiTarget, NvmeofSubsystem } from '$lib/types';
+	import type { Filesystem, Subvolume, Snapshot, SubvolumeType, NfsShare, SmbShare, IscsiTarget, NvmeofSubsystem } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -14,8 +14,8 @@
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { Camera, Copy, Trash2, Pencil, Check, X } from '@lucide/svelte';
 
-	let pools: Pool[] = $state([]);
-	let selectedPool = $state('');
+	let filesystems: Filesystem[] = $state([]);
+	let selectedFs = $state('');
 	let subvolumes: Subvolume[] = $state([]);
 	let loading = $state(true);
 
@@ -51,7 +51,7 @@
 	async function saveEdit() {
 		if (!detailSv || !editingField) return;
 		const params: Record<string, string> = {
-			pool: selectedPool,
+			filesystem: selectedFs,
 			name: detailSv.name,
 		};
 		params[editingField] = editValue;
@@ -131,7 +131,7 @@
 
 		// Load snapshots and shares in parallel
 		const [snapResult, nfsResult, smbResult, iscsiResult, nvmeofResult] = await Promise.allSettled([
-			client.call<Snapshot[]>('snapshot.list', { pool: selectedPool }),
+			client.call<Snapshot[]>('snapshot.list', { filesystem: selectedFs }),
 			client.call<NfsShare[]>('share.nfs.list'),
 			client.call<SmbShare[]>('share.smb.list'),
 			client.call<IscsiTarget[]>('share.iscsi.list'),
@@ -173,10 +173,10 @@
 
 	onMount(async () => {
 		client.onEvent(handleEvent);
-		pools = await client.call<Pool[]>('pool.list');
-		const mounted = pools.filter(p => p.mounted);
+		filesystems = await client.call<Filesystem[]>('fs.list');
+		const mounted = filesystems.filter(p => p.mounted);
 		if (mounted.length > 0) {
-			selectedPool = mounted[0].name;
+			selectedFs = mounted[0].name;
 			await refresh();
 		}
 		loading = false;
@@ -185,23 +185,23 @@
 	onDestroy(() => client.offEvent(handleEvent));
 
 	async function refresh() {
-		if (!selectedPool) return;
+		if (!selectedFs) return;
 		await withToast(async () => {
-			subvolumes = await client.call<Subvolume[]>('subvolume.list', { pool: selectedPool });
+			subvolumes = await client.call<Subvolume[]>('subvolume.list', { filesystem: selectedFs });
 		});
 	}
 
-	async function selectPool(name: string) {
-		selectedPool = name;
+	async function selectFs(name: string) {
+		selectedFs = name;
 		await refresh();
 	}
 
 	async function createSubvolume() {
-		if (!newName || !selectedPool) return;
+		if (!newName || !selectedFs) return;
 		if (newType === 'block' && !newVolsize) return;
 
 		const params: Record<string, unknown> = {
-			pool: selectedPool,
+			filesystem: selectedFs,
 			name: newName,
 			subvolume_type: newType,
 		};
@@ -229,7 +229,7 @@
 	async function deleteSubvolume(name: string) {
 		if (!await confirm(`Delete "${name}"?`, 'All snapshots will also be deleted.')) return;
 		await withToast(
-			() => client.call('subvolume.delete', { pool: selectedPool, name }),
+			() => client.call('subvolume.delete', { filesystem: selectedFs, name }),
 			`Subvolume "${name}" deleted`
 		);
 		await refresh();
@@ -237,7 +237,7 @@
 
 	async function attachSubvolume(name: string) {
 		await withToast(
-			() => client.call('subvolume.attach', { pool: selectedPool, name }),
+			() => client.call('subvolume.attach', { filesystem: selectedFs, name }),
 			`Loop device attached for "${name}"`
 		);
 		await refresh();
@@ -246,7 +246,7 @@
 	async function detachSubvolume(name: string) {
 		if (!await confirm(`Detach loop device for "${name}"?`, 'Any active iSCSI/NVMe-oF connections using this device will break.')) return;
 		await withToast(
-			() => client.call('subvolume.detach', { pool: selectedPool, name }),
+			() => client.call('subvolume.detach', { filesystem: selectedFs, name }),
 			`Loop device detached for "${name}"`
 		);
 		await refresh();
@@ -256,7 +256,7 @@
 		if (!showSnap || !snapName) return;
 		const ok = await withToast(
 			() => client.call('snapshot.create', {
-				pool: selectedPool,
+				filesystem: selectedFs,
 				subvolume: showSnap,
 				name: snapName,
 				read_only: true,
@@ -277,7 +277,7 @@
 			? await withToast(() => {
 				const [subvolume, snapshot] = showClone!.split('@');
 				return client.call('snapshot.clone', {
-					pool: selectedPool,
+					filesystem: selectedFs,
 					subvolume,
 					snapshot,
 					new_name: cloneName,
@@ -285,7 +285,7 @@
 			}, `Clone "${cloneName}" created from snapshot`)
 			: await withToast(
 				() => client.call('subvolume.clone', {
-					pool: selectedPool,
+					filesystem: selectedFs,
 					name: showClone,
 					new_name: cloneName,
 				}),
@@ -307,7 +307,7 @@
 		if (!await confirm(`Delete snapshot "${snap}"?`)) return;
 		await withToast(
 			() => client.call('snapshot.delete', {
-				pool: selectedPool,
+				filesystem: selectedFs,
 				subvolume,
 				name: snap,
 			}),
@@ -316,7 +316,7 @@
 		await refresh();
 	}
 
-	const mountedPools = $derived(pools.filter(p => p.mounted));
+	const mountedFilesystems = $derived(filesystems.filter(p => p.mounted));
 
 	let search = $state('');
 
@@ -358,13 +358,13 @@
 </script>
 
 
-{#if mountedPools.length > 0}
+{#if mountedFilesystems.length > 0}
 	<div class="mb-4 flex items-center gap-4">
 		<Button size="sm" onclick={() => showCreate = !showCreate}>
 			{showCreate ? 'Cancel' : 'Create Subvolume'}
 		</Button>
-		<select value={selectedPool} onchange={(e) => selectPool((e.target as HTMLSelectElement).value)} class="h-9 w-auto rounded-md border border-input bg-transparent px-3 text-sm">
-			{#each mountedPools as p}
+		<select value={selectedFs} onchange={(e) => selectFs((e.target as HTMLSelectElement).value)} class="h-9 w-auto rounded-md border border-input bg-transparent px-3 text-sm">
+			{#each mountedFilesystems as p}
 				<option value={p.name}>{p.name}</option>
 			{/each}
 		</select>
@@ -375,7 +375,7 @@
 {#if showCreate}
 	<Card class="mb-6 max-w-lg">
 		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">Create Subvolume in "{selectedPool}"</h3>
+			<h3 class="mb-4 text-lg font-semibold">Create Subvolume in "{selectedFs}"</h3>
 			<div class="mb-4">
 				<Label for="sv-name">Name</Label>
 				<Input id="sv-name" bind:value={newName} placeholder="documents" class="mt-1" />
@@ -413,12 +413,12 @@
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
-{:else if pools.length === 0}
-	<p class="text-muted-foreground">No pools configured. Create a pool first.</p>
-{:else if mountedPools.length === 0}
-	<p class="text-muted-foreground">No mounted pools. Mount a pool first.</p>
+{:else if filesystems.length === 0}
+	<p class="text-muted-foreground">No filesystems configured. Create a filesystem first.</p>
+{:else if mountedFilesystems.length === 0}
+	<p class="text-muted-foreground">No mounted filesystems. Mount a filesystem first.</p>
 {:else if subvolumes.length === 0}
-	<p class="text-muted-foreground">No subvolumes in pool "{selectedPool}".</p>
+	<p class="text-muted-foreground">No subvolumes in filesystem "{selectedFs}".</p>
 {:else}
 	<table class="w-full text-sm">
 		<thead>
@@ -597,7 +597,7 @@
 										<p class="text-sm text-muted-foreground">No snapshots.</p>
 									{:else}
 										<div class="space-y-1.5">
-											{#each detailSnapshots.length > 0 ? detailSnapshots : detailSv.snapshots.map(s => ({ name: s, subvolume: detailSv!.name, pool: selectedPool, path: '', read_only: true, parent: null })) as snap}
+											{#each detailSnapshots.length > 0 ? detailSnapshots : detailSv.snapshots.map(s => ({ name: s, subvolume: detailSv!.name, filesystem: selectedFs, path: '', read_only: true, parent: null })) as snap}
 												<div class="flex items-center justify-between rounded-md border border-border px-3 py-2">
 													<div>
 														<span class="font-mono text-xs">{snap.name}</span>

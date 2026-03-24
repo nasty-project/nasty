@@ -261,7 +261,7 @@
 			: `Rebuild bcachefs-tools ${ref} with updated build flags?`;
 		if (!await confirm(
 			desc,
-			'The system will rebuild with the new version. The first build may take 5–20 minutes. If the new version introduced an incompatible on-disk format, downgrading may leave pools unmountable.'
+			'The system will rebuild with the new version. The first build may take 5–20 minutes. If the new version introduced an incompatible on-disk format, downgrading may leave filesystems unmountable.'
 		)) return;
 		doBcachefsSwitch();
 	}
@@ -762,7 +762,7 @@
 				{#if bcachefsWarnVisible}
 					<div class="mb-3 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200 space-y-1.5">
 						<div><strong>Build time:</strong> bcachefs-tools is compiled from source — the first build can take 5–20 minutes depending on your hardware.</div>
-						<div><strong>Compatibility risk:</strong> If a newer on-disk format was already written to your pools, downgrading may leave them unmountable. Reach out to the bcachefs devs if you run into problems.</div>
+						<div><strong>Compatibility risk:</strong> If a newer on-disk format was already written to your filesystems, downgrading may leave them unmountable. Reach out to the bcachefs devs if you run into problems.</div>
 					</div>
 				{/if}
 				{#if bcachefsRefIsBranch}

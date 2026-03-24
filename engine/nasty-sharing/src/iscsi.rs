@@ -20,7 +20,7 @@ pub enum IscsiError {
     AlreadyExists(String),
     #[error("backing device/file not found: {0}")]
     BackstoreNotFound(String),
-    #[error("path is not within a NASty pool: {0}")]
+    #[error("path is not within a NASty filesystem: {0}")]
     PathNotInPool(String),
     #[error("configfs error: {0}")]
     ConfigFs(String),

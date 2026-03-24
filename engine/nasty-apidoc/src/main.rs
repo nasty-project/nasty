@@ -22,8 +22,8 @@ pub struct Session {
     pub username: String,
     /// Role assigned to this session.
     pub role: Role,
-    /// If set, token can only see subvolumes in this pool.
-    pub pool: Option<String>,
+    /// If set, token can only see subvolumes in this filesystem.
+    pub filesystem: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -38,8 +38,8 @@ pub struct ApiToken {
     pub role: Role,
     /// Unix timestamp (seconds) when the token was created.
     pub created_at: u64,
-    /// Pool this token is scoped to, if any.
-    pub pool: Option<String>,
+    /// Filesystem this token is scoped to, if any.
+    pub filesystem: Option<String>,
     /// Unix timestamp after which the token is rejected. None = never expires.
     pub expires_at: Option<u64>,
 }
@@ -54,8 +54,8 @@ pub struct ApiTokenInfo {
     pub role: Role,
     /// Unix timestamp (seconds) when the token was created.
     pub created_at: u64,
-    /// Pool this token is scoped to, if any.
-    pub pool: Option<String>,
+    /// Filesystem this token is scoped to, if any.
+    pub filesystem: Option<String>,
     /// Unix timestamp after which the token is rejected. None = never expires.
     pub expires_at: Option<u64>,
 }
@@ -88,9 +88,9 @@ pub struct ChangePasswordRequest {
 
 // ── Imports from other crates ─────────────────────────────────────
 
-use nasty_storage::pool::{
-    Pool, BlockDevice,
-    CreatePoolRequest, DestroyPoolRequest, UpdatePoolOptionsRequest,
+use nasty_storage::filesystem::{
+    Filesystem, BlockDevice,
+    CreateFilesystemRequest, DestroyFilesystemRequest, UpdateFilesystemOptionsRequest,
     DeviceAddRequest, DeviceActionRequest, DeviceSetLabelRequest,
     DeviceSetStateRequest, FsUsage, ScrubStatus, ReconcileStatus,
 };
@@ -245,64 +245,64 @@ fn methods(generator: &mut SchemaGenerator) -> Vec<(&'static str, Vec<Method>)> 
             Method { name: "device.wipe", desc: "Erase all filesystem signatures from a device (wipefs). The device must not be in use.", role: "admin",
                 params: MethodParams::Literal("`{\"path\": string}`"), result: None },
         ]),
-        ("Pools", vec![
-            Method { name: "pool.list", desc: "List all storage pools. Pool-scoped tokens see only their assigned pool.", role: "any",
-                params: MethodParams::None, result: Some(gen_schema::<Vec<Pool>>(generator)) },
-            Method { name: "pool.get", desc: "Get a single pool by name.", role: "any",
+        ("Filesystems", vec![
+            Method { name: "fs.list", desc: "List all filesystems. Filesystem-scoped tokens see only their assigned filesystem.", role: "any",
+                params: MethodParams::None, result: Some(gen_schema::<Vec<Filesystem>>(generator)) },
+            Method { name: "fs.get", desc: "Get a single filesystem by name.", role: "any",
                 params: MethodParams::Literal("`{\"name\": string}`"),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.create", desc: "Format and mount a new bcachefs pool.", role: "admin",
-                params: MethodParams::Schema(gen_schema::<CreatePoolRequest>(generator)),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.destroy", desc: "Unmount and unregister a pool. Does not wipe the devices.", role: "admin",
-                params: MethodParams::Schema(gen_schema::<DestroyPoolRequest>(generator)), result: None },
-            Method { name: "pool.mount", desc: "Mount a known pool.", role: "admin",
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.create", desc: "Format and mount a new bcachefs filesystem.", role: "admin",
+                params: MethodParams::Schema(gen_schema::<CreateFilesystemRequest>(generator)),
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.destroy", desc: "Unmount and unregister a filesystem. Does not wipe the devices.", role: "admin",
+                params: MethodParams::Schema(gen_schema::<DestroyFilesystemRequest>(generator)), result: None },
+            Method { name: "fs.mount", desc: "Mount a known filesystem.", role: "admin",
                 params: MethodParams::Literal("`{\"name\": string}`"),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.unmount", desc: "Unmount a pool.", role: "admin",
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.unmount", desc: "Unmount a filesystem.", role: "admin",
                 params: MethodParams::Literal("`{\"name\": string}`"), result: None },
-            Method { name: "pool.options.update", desc: "Update runtime-mutable bcachefs filesystem options (written to sysfs).", role: "admin",
-                params: MethodParams::Schema(gen_schema::<UpdatePoolOptionsRequest>(generator)),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.usage", desc: "Return detailed bcachefs `fs usage` breakdown.", role: "any",
+            Method { name: "fs.options.update", desc: "Update runtime-mutable bcachefs filesystem options (written to sysfs).", role: "admin",
+                params: MethodParams::Schema(gen_schema::<UpdateFilesystemOptionsRequest>(generator)),
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.usage", desc: "Return detailed bcachefs `fs usage` breakdown.", role: "any",
                 params: MethodParams::Literal("`{\"name\": string}`"),
                 result: Some(gen_schema::<FsUsage>(generator)) },
-            Method { name: "pool.scrub.start", desc: "Start a scrub on a mounted pool.", role: "admin",
+            Method { name: "fs.scrub.start", desc: "Start a scrub on a mounted filesystem.", role: "admin",
                 params: MethodParams::Literal("`{\"name\": string}`"), result: None },
-            Method { name: "pool.scrub.status", desc: "Return current scrub status.", role: "any",
+            Method { name: "fs.scrub.status", desc: "Return current scrub status.", role: "any",
                 params: MethodParams::Literal("`{\"name\": string}`"),
                 result: Some(gen_schema::<ScrubStatus>(generator)) },
-            Method { name: "pool.reconcile.status", desc: "Return bcachefs background work (reconcile) status.", role: "any",
+            Method { name: "fs.reconcile.status", desc: "Return bcachefs background work (reconcile) status.", role: "any",
                 params: MethodParams::Literal("`{\"name\": string}`"),
                 result: Some(gen_schema::<ReconcileStatus>(generator)) },
-            Method { name: "bcachefs.usage", desc: "Return raw `bcachefs fs usage` output for a pool.", role: "any",
+            Method { name: "bcachefs.usage", desc: "Return raw `bcachefs fs usage` output for a filesystem.", role: "any",
                 params: MethodParams::Literal("`{\"name\": string}`"),
                 result: Some(gen_schema::<FsUsage>(generator)) },
         ]),
-        ("Pool Devices", vec![
-            Method { name: "pool.device.add", desc: "Add a device to an existing mounted pool.", role: "admin",
+        ("Filesystem Devices", vec![
+            Method { name: "fs.device.add", desc: "Add a device to an existing mounted filesystem.", role: "admin",
                 params: MethodParams::Schema(gen_schema::<DeviceAddRequest>(generator)),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.device.remove", desc: "Remove a device from a pool. The device should be fully evacuated first.", role: "admin",
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.device.remove", desc: "Remove a device from a filesystem. The device should be fully evacuated first.", role: "admin",
                 params: MethodParams::Schema(gen_schema::<DeviceActionRequest>(generator)),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.device.evacuate", desc: "Evacuate all data from a device to the remaining pool members. Long-running — returns `{\"status\": \"started\"}` immediately. Pool events are broadcast every 3s during evacuation.", role: "admin",
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.device.evacuate", desc: "Evacuate all data from a device to the remaining filesystem members. Long-running — returns `{\"status\": \"started\"}` immediately. Filesystem events are broadcast every 3s during evacuation.", role: "admin",
                 params: MethodParams::Schema(gen_schema::<DeviceActionRequest>(generator)), result: None },
-            Method { name: "pool.device.set_state", desc: "Set persistent device state (`rw`, `ro`, `failed`, `spare`).", role: "admin",
+            Method { name: "fs.device.set_state", desc: "Set persistent device state (`rw`, `ro`, `failed`, `spare`).", role: "admin",
                 params: MethodParams::Schema(gen_schema::<DeviceSetStateRequest>(generator)),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.device.set_label", desc: "Set or update the hierarchical label on a device in a mounted pool. Written live via sysfs.", role: "admin",
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.device.set_label", desc: "Set or update the hierarchical label on a device in a mounted filesystem. Written live via sysfs.", role: "admin",
                 params: MethodParams::Schema(gen_schema::<DeviceSetLabelRequest>(generator)),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.device.online", desc: "Bring a device back online.", role: "admin",
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.device.online", desc: "Bring a device back online.", role: "admin",
                 params: MethodParams::Schema(gen_schema::<DeviceActionRequest>(generator)),
-                result: Some(gen_schema::<Pool>(generator)) },
-            Method { name: "pool.device.offline", desc: "Take a device offline.", role: "admin",
+                result: Some(gen_schema::<Filesystem>(generator)) },
+            Method { name: "fs.device.offline", desc: "Take a device offline.", role: "admin",
                 params: MethodParams::Schema(gen_schema::<DeviceActionRequest>(generator)),
-                result: Some(gen_schema::<Pool>(generator)) },
+                result: Some(gen_schema::<Filesystem>(generator)) },
         ]),
         ("Subvolumes", vec![
-            Method { name: "subvolume.list", desc: "List subvolumes in a pool.", role: "any",
+            Method { name: "subvolume.list", desc: "List subvolumes in a filesystem.", role: "any",
                 params: MethodParams::Literal("`{\"pool\": string}`"),
                 result: Some(gen_schema::<Vec<Subvolume>>(generator)) },
             Method { name: "subvolume.list_all", desc: "List all subvolumes across all pools.", role: "any",
@@ -336,7 +336,7 @@ fn methods(generator: &mut SchemaGenerator) -> Vec<(&'static str, Vec<Method>)> 
                 result: Some(gen_schema::<Vec<Subvolume>>(generator)) },
         ]),
         ("Snapshots", vec![
-            Method { name: "snapshot.list", desc: "List snapshots for all subvolumes in a pool.", role: "any",
+            Method { name: "snapshot.list", desc: "List snapshots for all subvolumes in a filesystem.", role: "any",
                 params: MethodParams::Literal("`{\"pool\": string}`"),
                 result: Some(gen_schema::<Vec<Snapshot>>(generator)) },
             Method { name: "snapshot.create", desc: "Create a snapshot of a subvolume.", role: "operator",
@@ -560,7 +560,7 @@ fn generate_markdown(groups: &[(&str, Vec<Method>)]) -> String {
     out.push_str("Connect to `ws://<host>/ws` with a valid session cookie or `Authorization: Bearer <token>` header.\n\n");
     out.push_str("**Request:**\n```json\n{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"pool.list\", \"params\": {}}\n```\n\n");
     out.push_str("**Response:**\n```json\n{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": [...]}\n```\n\n");
-    out.push_str("**Error:**\n```json\n{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32603, \"message\": \"pool not found: mypool\"}}\n```\n\n");
+    out.push_str("**Error:**\n```json\n{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32603, \"message\": \"filesystem not found: mypool\"}}\n```\n\n");
     out.push_str("## Authentication\n\n");
     out.push_str("Send `POST /api/login` with `{\"username\": \"...\", \"password\": \"...\"}` to receive a session token. ");
     out.push_str("Pass it as a cookie (`session=<token>`) or `Authorization: Bearer <token>` header on the WebSocket upgrade.\n\n");
@@ -569,13 +569,13 @@ fn generate_markdown(groups: &[(&str, Vec<Method>)]) -> String {
     out.push_str("| `admin` | Full access to all methods |\n");
     out.push_str("| `operator` | Create/delete subvolumes and snapshots; read pools. Cannot manage users, destroy pools, or change system settings. |\n");
     out.push_str("| `readonly` | Read-only access to all list/get methods |\n\n");
-    out.push_str("API tokens can additionally be scoped to a single **pool** (restricts visibility) ");
+    out.push_str("API tokens can additionally be scoped to a single **filesystem** (restricts visibility) ");
     out.push_str("and for operator tokens to a single **owner** (restricts to subvolumes owned by that token).\n\n");
     out.push_str("## Real-time Events\n\n");
     out.push_str("After any successful mutation the server broadcasts an event on the same WebSocket:\n");
     out.push_str("```json\n{\"event\": \"pool\"}\n```\n");
     out.push_str("Clients should re-fetch the relevant resource when they receive an event. ");
-    out.push_str("Event types: `pool`, `subvolume`, `snapshot`, `share.nfs`, `share.smb`, `share.iscsi`, `share.nvmeof`, `protocol`, `settings`, `alert`.\n\n");
+    out.push_str("Event types: `filesystem`, `subvolume`, `snapshot`, `share.nfs`, `share.smb`, `share.iscsi`, `share.nvmeof`, `protocol`, `settings`, `alert`.\n\n");
     out.push_str("---\n\n");
 
     // TOC

@@ -8,16 +8,16 @@ use tracing::{info, warn};
 
 use crate::cmd;
 
-const NASTY_MOUNT_BASE: &str = "/storage";
-const POOL_STATE_PATH: &str = "/var/lib/nasty/pool-state.json";
+const NASTY_MOUNT_BASE: &str = "/fs";
+const FS_STATE_PATH: &str = "/var/lib/nasty/fs-state.json";
 
 #[derive(Debug, Error)]
-pub enum PoolError {
+pub enum FilesystemError {
     #[error("bcachefs command failed: {0}")]
     CommandFailed(String),
-    #[error("pool not found: {0}")]
+    #[error("filesystem not found: {0}")]
     NotFound(String),
-    #[error("pool already exists: {0}")]
+    #[error("filesystem already exists: {0}")]
     AlreadyExists(String),
     #[error("device {0} is already in use")]
     DeviceInUse(String),
@@ -30,16 +30,16 @@ pub enum PoolError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Pool {
-    /// Human-readable pool name, derived from the mount point directory.
+pub struct Filesystem {
+    /// Human-readable filesystem name, derived from the mount point directory.
     pub name: String,
     /// bcachefs filesystem UUID.
     pub uuid: String,
-    /// Member devices of the pool.
-    pub devices: Vec<PoolDevice>,
-    /// Absolute path where the pool is mounted (e.g. `/storage/tank`).
+    /// Member devices of the filesystem.
+    pub devices: Vec<FilesystemDevice>,
+    /// Absolute path where the filesystem is mounted (e.g. `/fs/tank`).
     pub mount_point: Option<String>,
-    /// Whether the pool is currently mounted.
+    /// Whether the filesystem is currently mounted.
     pub mounted: bool,
     /// Total usable capacity in bytes.
     pub total_bytes: u64,
@@ -48,12 +48,12 @@ pub struct Pool {
     /// Bytes available for writing.
     pub available_bytes: u64,
     /// Filesystem-level options read from sysfs or show-super.
-    pub options: PoolOptions,
+    pub options: FilesystemOptions,
 }
 
-/// Filesystem-level bcachefs options for a pool.
+/// Filesystem-level bcachefs options.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct PoolOptions {
+pub struct FilesystemOptions {
     /// Foreground (inline) compression algorithm (e.g. `lz4`, `zstd`, `none`).
     pub compression: Option<String>,
     /// Background recompression algorithm applied by the background worker.
@@ -82,9 +82,9 @@ pub struct PoolOptions {
     pub error_action: Option<String>,
 }
 
-/// A device within a pool, with its per-device bcachefs configuration.
+/// A device within a filesystem, with its per-device bcachefs configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PoolDevice {
+pub struct FilesystemDevice {
     pub path: String,
     /// Hierarchical label (e.g. "ssd.fast", "hdd.archive").
     /// Used for target-based tiering.
@@ -102,7 +102,7 @@ pub struct PoolDevice {
     pub discard: Option<bool>,
 }
 
-/// Specifies a device and its per-device options for pool creation.
+/// Specifies a device and its per-device options for filesystem creation.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DeviceSpec {
     /// Absolute block device path (e.g. `/dev/sda`).
@@ -114,10 +114,10 @@ pub struct DeviceSpec {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct CreatePoolRequest {
-    /// Name for the new pool; becomes the mount point directory under `/storage/`.
+pub struct CreateFilesystemRequest {
+    /// Name for the new filesystem; becomes the mount point directory under `/fs/`.
     pub name: String,
-    /// Devices to include in the pool.
+    /// Devices to include in the filesystem.
     pub devices: Vec<DeviceSpec>,
     /// Number of data replicas (default 1).
     #[serde(default = "default_replicas")]
@@ -145,18 +145,18 @@ fn default_replicas() -> u32 {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct DestroyPoolRequest {
-    /// Name of the pool to destroy.
+pub struct DestroyFilesystemRequest {
+    /// Name of the filesystem to destroy.
     pub name: String,
     /// If true, wipe bcachefs superblocks from all member devices after unmounting.
     pub force: Option<bool>,
 }
 
-/// Update runtime-mutable filesystem options on a mounted pool.
+/// Update runtime-mutable filesystem options on a mounted filesystem.
 /// Options are written directly to sysfs (/sys/fs/bcachefs/<uuid>/options/).
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct UpdatePoolOptionsRequest {
-    /// Name of the pool to update.
+pub struct UpdateFilesystemOptionsRequest {
+    /// Name of the filesystem to update.
     pub name: String,
     /// Inline compression algorithm (e.g. `lz4`, `zstd`, `none`).
     pub compression: Option<String>,
@@ -176,40 +176,40 @@ pub struct UpdatePoolOptionsRequest {
     pub erasure_code: Option<bool>,
 }
 
-/// Add a device to an existing pool.
+/// Add a device to an existing filesystem.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeviceAddRequest {
-    /// Name of the pool to add the device to.
-    pub pool: String,
+    /// Name of the filesystem to add the device to.
+    pub filesystem: String,
     /// Device to add, with optional label and durability settings.
     pub device: DeviceSpec,
 }
 
-/// Remove/evacuate/online/offline a device in a pool.
+/// Remove/evacuate/online/offline a device in a filesystem.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeviceActionRequest {
-    /// Name of the pool containing the device.
-    pub pool: String,
+    /// Name of the filesystem containing the device.
+    pub filesystem: String,
     /// Absolute path of the block device (e.g. `/dev/sdb`).
     pub device: String,
 }
 
-/// Set a label on a device in a pool.
+/// Set a label on a device in a filesystem.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeviceSetLabelRequest {
-    /// Name of the pool containing the device.
-    pub pool: String,
+    /// Name of the filesystem containing the device.
+    pub filesystem: String,
     /// Absolute path of the block device (e.g. `/dev/sdb`).
     pub device: String,
     /// New hierarchical label (e.g. `ssd.fast`, `hdd.archive`).
     pub label: String,
 }
 
-/// Change the persistent state of a device within a pool.
+/// Change the persistent state of a device within a filesystem.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DeviceSetStateRequest {
-    /// Name of the pool containing the device.
-    pub pool: String,
+    /// Name of the filesystem containing the device.
+    pub filesystem: String,
     /// Absolute path of the block device (e.g. `/dev/sdb`).
     pub device: String,
     /// One of: rw, ro, failed, spare
@@ -260,43 +260,43 @@ pub struct ReconcileStatus {
 }
 
 #[derive(Clone)]
-pub struct PoolService;
+pub struct FilesystemService;
 
-impl PoolService {
+impl FilesystemService {
     pub fn new() -> Self {
         Self
     }
 
-    /// Mount pools that were previously tracked as mounted.
-    /// Called at startup to restore pool state across reboots.
+    /// Mount filesystems that were previously tracked as mounted.
+    /// Called at startup to restore filesystem state across reboots.
     pub async fn restore_mounts(&self) {
-        let pool_names = load_pool_state().await;
-        if pool_names.is_empty() {
-            info!("No pools to restore");
+        let fs_names = load_fs_state().await;
+        if fs_names.is_empty() {
+            info!("No filesystems to restore");
             return;
         }
 
-        for name in &pool_names {
+        for name in &fs_names {
             let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
 
             // Skip if already mounted
             if is_mountpoint(&mount_point).await {
-                info!("Pool '{name}' already mounted at {mount_point}");
+                info!("Filesystem '{name}' already mounted at {mount_point}");
                 continue;
             }
 
-            info!("Restoring pool '{name}'...");
+            info!("Restoring filesystem '{name}'...");
             match self.mount(name).await {
-                Ok(_) => info!("Pool '{name}' mounted at {mount_point}"),
-                Err(e) => tracing::warn!("Failed to mount pool '{name}': {e}"),
+                Ok(_) => info!("Filesystem '{name}' mounted at {mount_point}"),
+                Err(e) => tracing::warn!("Failed to mount filesystem '{name}': {e}"),
             }
         }
     }
 
     /// List all bcachefs filesystems (mounted and known via blkid)
-    pub async fn list(&self) -> Result<Vec<Pool>, PoolError> {
+    pub async fn list(&self) -> Result<Vec<Filesystem>, FilesystemError> {
         let mounts = read_bcachefs_mounts().await?;
-        let mut pools = Vec::new();
+        let mut filesystems = Vec::new();
         let mut seen_uuids = std::collections::HashSet::new();
 
         for (mount_point, devices) in &mounts {
@@ -315,14 +315,14 @@ impl PoolService {
                 seen_uuids.insert(uuid.clone());
             }
 
-            // Read per-device labels and fs options for mounted pools
-            let pool_devices = read_pool_devices(&uuid, devices).await;
+            // Read per-device labels and fs options for mounted filesystems
+            let fs_devices = read_fs_devices(&uuid, devices).await;
             let options = read_fs_options_sysfs(&uuid).await;
 
-            pools.push(Pool {
+            filesystems.push(Filesystem {
                 name,
                 uuid,
-                devices: pool_devices,
+                devices: fs_devices,
                 mount_point: Some(mount_point.clone()),
                 mounted: true,
                 total_bytes: total,
@@ -335,20 +335,20 @@ impl PoolService {
         // Discover unmounted bcachefs filesystems via blkid
         let unmounted = discover_unmounted_bcachefs(&seen_uuids).await;
         for (uuid, label, devices) in unmounted {
-            // Infer pool name: use label if available, else check for existing mount dir
+            // Infer filesystem name: use label if available, else check for existing mount dir
             let name = if !label.is_empty() {
                 label
             } else {
                 // Look for an existing directory under mount base
-                find_pool_name_by_devices(&devices).unwrap_or_else(|| uuid[..8].to_string())
+                find_fs_name_by_devices(&devices).unwrap_or_else(|| uuid[..8].to_string())
             };
 
             let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
             let has_mount_dir = Path::new(&mount_point).is_dir();
 
-            let pool_devices = devices
+            let fs_devices = devices
                 .iter()
-                .map(|d| PoolDevice {
+                .map(|d| FilesystemDevice {
                     path: d.clone(),
                     label: None,
                     durability: None,
@@ -359,13 +359,13 @@ impl PoolService {
                 })
                 .collect();
 
-            // For unmounted pools, try reading options from show-super
+            // For unmounted filesystems, try reading options from show-super
             let options = read_fs_options_show_super(devices.first().map(|s| s.as_str())).await;
 
-            pools.push(Pool {
+            filesystems.push(Filesystem {
                 name,
                 uuid,
-                devices: pool_devices,
+                devices: fs_devices,
                 mount_point: if has_mount_dir { Some(mount_point) } else { None },
                 mounted: false,
                 total_bytes: 0,
@@ -375,42 +375,42 @@ impl PoolService {
             });
         }
 
-        Ok(pools)
+        Ok(filesystems)
     }
 
-    /// Get a single pool by name
-    pub async fn get(&self, name: &str) -> Result<Pool, PoolError> {
-        let pools = self.list().await?;
-        pools
+    /// Get a single filesystem by name
+    pub async fn get(&self, name: &str) -> Result<Filesystem, FilesystemError> {
+        let filesystems = self.list().await?;
+        filesystems
             .into_iter()
             .find(|p| p.name == name)
-            .ok_or_else(|| PoolError::NotFound(name.to_string()))
+            .ok_or_else(|| FilesystemError::NotFound(name.to_string()))
     }
 
-    /// Create a new bcachefs pool: format devices, create mount point, mount
-    pub async fn create(&self, req: CreatePoolRequest) -> Result<Pool, PoolError> {
+    /// Create a new bcachefs filesystem: format devices, create mount point, mount
+    pub async fn create(&self, req: CreateFilesystemRequest) -> Result<Filesystem, FilesystemError> {
         if req.devices.is_empty() {
-            return Err(PoolError::NoDevices);
+            return Err(FilesystemError::NoDevices);
         }
 
         // Validate devices exist
         for dev in &req.devices {
             if !Path::new(&dev.path).exists() {
-                return Err(PoolError::DeviceNotFound(dev.path.clone()));
+                return Err(FilesystemError::DeviceNotFound(dev.path.clone()));
             }
         }
 
         // Check devices aren't already in use by a bcachefs filesystem
         for dev in &req.devices {
             if is_device_bcachefs(&dev.path).await {
-                return Err(PoolError::DeviceInUse(dev.path.clone()));
+                return Err(FilesystemError::DeviceInUse(dev.path.clone()));
             }
         }
 
         // Check mount point doesn't already exist with content
         let mount_point = format!("{NASTY_MOUNT_BASE}/{}", req.name);
         if Path::new(&mount_point).exists() {
-            return Err(PoolError::AlreadyExists(req.name.clone()));
+            return Err(FilesystemError::AlreadyExists(req.name.clone()));
         }
 
         // Build bcachefs format command
@@ -462,10 +462,10 @@ impl PoolService {
         // Format
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let dev_paths: Vec<&str> = req.devices.iter().map(|d| d.path.as_str()).collect();
-        info!("Formatting bcachefs pool '{}' on {:?}", req.name, dev_paths);
+        info!("Formatting bcachefs filesystem '{}' on {:?}", req.name, dev_paths);
         cmd::run_ok("bcachefs", &arg_refs)
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
         // Create mount point
         tokio::fs::create_dir_all(&mount_point).await?;
@@ -477,22 +477,22 @@ impl PoolService {
             .map(|d| d.path.as_str())
             .collect::<Vec<_>>()
             .join(":");
-        info!("Mounting pool '{}' at {}", req.name, mount_point);
+        info!("Mounting filesystem '{}' at {}", req.name, mount_point);
         cmd::run_ok("bcachefs", &["mount", "-o", "prjquota", &device_arg, &mount_point])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
         // Track mount state for boot reconciliation
-        save_pool_mounted(&req.name).await;
+        save_fs_mounted(&req.name).await;
 
-        // Read back the pool info
+        // Read back the filesystem info
         let uuid = get_fs_uuid(&req.devices[0].path).await.unwrap_or_default();
         let (total, used, available) = get_mount_usage(&mount_point).await.unwrap_or((0, 0, 0));
 
-        let pool_devices = req
+        let fs_devices = req
             .devices
             .iter()
-            .map(|d| PoolDevice {
+            .map(|d| FilesystemDevice {
                 path: d.path.clone(),
                 label: d.label.clone().or_else(|| Some(default_label.to_string())),
                 durability: d.durability,
@@ -503,10 +503,10 @@ impl PoolService {
             })
             .collect();
 
-        Ok(Pool {
+        Ok(Filesystem {
             name: req.name.clone(),
             uuid: uuid.clone(),
-            devices: pool_devices,
+            devices: fs_devices,
             mount_point: Some(mount_point),
             mounted: true,
             total_bytes: total,
@@ -516,22 +516,22 @@ impl PoolService {
         })
     }
 
-    /// Unmount and optionally wipe a pool
-    pub async fn destroy(&self, req: DestroyPoolRequest) -> Result<(), PoolError> {
-        let pool = self.get(&req.name).await?;
+    /// Unmount and optionally wipe a filesystem
+    pub async fn destroy(&self, req: DestroyFilesystemRequest) -> Result<(), FilesystemError> {
+        let fs = self.get(&req.name).await?;
 
         // Unmount if mounted
-        if pool.mounted {
-            if let Some(ref mp) = pool.mount_point {
-                info!("Unmounting pool '{}' from {}", req.name, mp);
+        if fs.mounted {
+            if let Some(ref mp) = fs.mount_point {
+                info!("Unmounting filesystem '{}' from {}", req.name, mp);
                 cmd::run_ok("umount", &[mp.as_str()])
                     .await
-                    .map_err(PoolError::CommandFailed)?;
+                    .map_err(FilesystemError::CommandFailed)?;
             }
         }
 
         // Track mount state
-        save_pool_unmounted(&req.name).await;
+        save_fs_unmounted(&req.name).await;
 
         // Remove mount point directory if it exists
         let mount_dir = format!("{NASTY_MOUNT_BASE}/{}", req.name);
@@ -539,7 +539,7 @@ impl PoolService {
 
         // If force, wipe the superblocks
         if req.force == Some(true) {
-            for dev in &pool.devices {
+            for dev in &fs.devices {
                 info!("Wiping bcachefs superblock on {}", dev.path);
                 let _ = cmd::run_ok("wipefs", &["-a", &dev.path]).await;
             }
@@ -548,17 +548,17 @@ impl PoolService {
         Ok(())
     }
 
-    /// Mount an existing unmounted pool
-    pub async fn mount(&self, name: &str) -> Result<Pool, PoolError> {
-        let pool = self.get(name).await?;
-        if pool.mounted {
-            return Ok(pool);
+    /// Mount an existing unmounted filesystem
+    pub async fn mount(&self, name: &str) -> Result<Filesystem, FilesystemError> {
+        let fs = self.get(name).await?;
+        if fs.mounted {
+            return Ok(fs);
         }
 
         let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
         tokio::fs::create_dir_all(&mount_point).await?;
 
-        let device_arg = pool
+        let device_arg = fs
             .devices
             .iter()
             .map(|d| d.path.as_str())
@@ -566,30 +566,30 @@ impl PoolService {
             .join(":");
         cmd::run_ok("bcachefs", &["mount", "-o", "prjquota", &device_arg, &mount_point])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
         // Track mount state for boot reconciliation
-        save_pool_mounted(name).await;
+        save_fs_mounted(name).await;
 
         self.get(name).await
     }
 
-    /// Update runtime-mutable options on a mounted pool via sysfs.
-    pub async fn update_options(&self, req: UpdatePoolOptionsRequest) -> Result<Pool, PoolError> {
-        let pool = self.get(&req.name).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to update options".to_string(),
+    /// Update runtime-mutable options on a mounted filesystem via sysfs.
+    pub async fn update_options(&self, req: UpdateFilesystemOptionsRequest) -> Result<Filesystem, FilesystemError> {
+        let fs = self.get(&req.name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to update options".to_string(),
             ));
         }
-        let uuid = &pool.uuid;
+        let uuid = &fs.uuid;
         let base = format!("/sys/fs/bcachefs/{uuid}/options");
 
-        async fn write_opt(base: &str, name: &str, value: &str) -> Result<(), PoolError> {
+        async fn write_opt(base: &str, name: &str, value: &str) -> Result<(), FilesystemError> {
             let path = format!("{base}/{name}");
             let v = if value.is_empty() { "none" } else { value };
             tokio::fs::write(&path, v).await.map_err(|e| {
-                PoolError::CommandFailed(format!("failed to set {name}: {e}"))
+                FilesystemError::CommandFailed(format!("failed to set {name}: {e}"))
             })
         }
 
@@ -621,33 +621,33 @@ impl PoolService {
         self.get(&req.name).await
     }
 
-    /// Unmount a pool
-    pub async fn unmount(&self, name: &str) -> Result<(), PoolError> {
-        let pool = self.get(name).await?;
-        if let Some(ref mp) = pool.mount_point {
+    /// Unmount a filesystem
+    pub async fn unmount(&self, name: &str) -> Result<(), FilesystemError> {
+        let fs = self.get(name).await?;
+        if let Some(ref mp) = fs.mount_point {
             cmd::run_ok("umount", &[mp.as_str()])
                 .await
-                .map_err(PoolError::CommandFailed)?;
+                .map_err(FilesystemError::CommandFailed)?;
         }
 
         // Track mount state
-        save_pool_unmounted(name).await;
+        save_fs_unmounted(name).await;
 
         Ok(())
     }
 
-    /// List block devices available for pool creation
-    pub async fn list_devices(&self) -> Result<Vec<BlockDevice>, PoolError> {
-        // Collect all device paths already used by pools
-        let pools = self.list().await.unwrap_or_default();
-        let pool_devices: std::collections::HashSet<String> = pools
+    /// List block devices available for filesystem creation
+    pub async fn list_devices(&self) -> Result<Vec<BlockDevice>, FilesystemError> {
+        // Collect all device paths already used by filesystems
+        let filesystems = self.list().await.unwrap_or_default();
+        let used_devices: std::collections::HashSet<String> = filesystems
             .iter()
-            .flat_map(|p| p.devices.iter().map(|d| d.path.clone()))
+            .flat_map(|f| f.devices.iter().map(|d| d.path.clone()))
             .collect();
 
         let output = cmd::run_ok("lsblk", &["-Jbno", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,ROTA"])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
         let parsed: serde_json::Value =
             serde_json::from_str(&output).unwrap_or(serde_json::Value::Null);
@@ -667,7 +667,7 @@ impl PoolService {
 
             fn collect_devices(
                 devs: &[serde_json::Value],
-                pool_devices: &std::collections::HashSet<String>,
+                fs_devices: &std::collections::HashSet<String>,
                 out: &mut Vec<BlockDevice>,
             ) {
                 for dev in devs {
@@ -691,25 +691,25 @@ impl PoolService {
                     if dev_type == "disk" || dev_type == "part" {
                         let path = format!("/dev/{name}");
                         let has_mount = mountpoint.is_some();
-                        let in_pool = pool_devices.contains(&path);
+                        let in_fs = fs_devices.contains(&path);
                         out.push(BlockDevice {
                             path,
                             size_bytes: size,
                             dev_type: dev_type.to_string(),
                             mount_point: mountpoint,
                             fs_type: fstype,
-                            in_use: has_mount || in_pool,
+                            in_use: has_mount || in_fs,
                             rotational,
                             device_class,
                         });
                     }
 
                     if let Some(children) = dev.get("children").and_then(|v| v.as_array()) {
-                        collect_devices(children, pool_devices, out);
+                        collect_devices(children, fs_devices, out);
                     }
                 }
             }
-            collect_devices(blockdevices, &pool_devices, &mut devices);
+            collect_devices(blockdevices, &used_devices, &mut devices);
         }
 
         // Mark parent disks as in_use if any of their partitions are in_use.
@@ -730,49 +730,49 @@ impl PoolService {
     }
 
     /// Wipe all filesystem signatures from a device.
-    /// Only allowed if the device is not currently in use by any pool.
-    pub async fn device_wipe(&self, path: &str) -> Result<(), PoolError> {
+    /// Only allowed if the device is not currently in use by any filesystem.
+    pub async fn device_wipe(&self, path: &str) -> Result<(), FilesystemError> {
         let devices = self.list_devices().await?;
         let dev = devices.iter().find(|d| d.path == path).ok_or_else(|| {
-            PoolError::CommandFailed(format!("device not found: {path}"))
+            FilesystemError::CommandFailed(format!("device not found: {path}"))
         })?;
         if dev.in_use {
-            return Err(PoolError::CommandFailed(format!(
+            return Err(FilesystemError::CommandFailed(format!(
                 "device {path} is currently in use"
             )));
         }
         info!("Wiping device {path}");
         cmd::run_ok("wipefs", &["-a", path])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
         Ok(())
     }
 
-    /// Add a device to an existing mounted pool.
+    /// Add a device to an existing mounted filesystem.
     /// bcachefs device add [--label=X] [--durability=X] <mountpoint> <device>
-    pub async fn device_add(&self, req: DeviceAddRequest) -> Result<Pool, PoolError> {
-        let pool = self.get(&req.pool).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to add a device".to_string(),
+    pub async fn device_add(&self, req: DeviceAddRequest) -> Result<Filesystem, FilesystemError> {
+        let fs = self.get(&req.filesystem).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to add a device".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap().clone();
+        let mount_point = fs.mount_point.as_ref().unwrap().clone();
 
         if !Path::new(&req.device.path).exists() {
-            return Err(PoolError::DeviceNotFound(req.device.path.clone()));
+            return Err(FilesystemError::DeviceNotFound(req.device.path.clone()));
         }
 
-        // Reject if the device is actively in use (mounted or member of a live pool).
+        // Reject if the device is actively in use (mounted or member of a live filesystem).
         let known_devices = self.list_devices().await?;
         if known_devices.iter().any(|d| d.path == req.device.path && d.in_use) {
-            return Err(PoolError::DeviceInUse(req.device.path.clone()));
+            return Err(FilesystemError::DeviceInUse(req.device.path.clone()));
         }
         // Reject if the device has a filesystem signature (including stale bcachefs superblocks
         // left over after removal). The user must explicitly wipe it via Disks → Wipe first.
         if is_device_bcachefs(&req.device.path).await {
-            return Err(PoolError::CommandFailed(format!(
-                "{} has an existing bcachefs superblock. Go to Disks → Wipe to erase it before adding it to a pool.",
+            return Err(FilesystemError::CommandFailed(format!(
+                "{} has an existing bcachefs superblock. Go to Disks → Wipe to erase it before adding it to a filesystem.",
                 req.device.path
             )));
         }
@@ -788,49 +788,49 @@ impl PoolService {
         args.push(req.device.path.clone());
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        info!("Adding device {} to pool '{}'", req.device.path, req.pool);
+        info!("Adding device {} to filesystem '{}'", req.device.path, req.filesystem);
         cmd::run_ok("bcachefs", &arg_refs)
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
-        self.get(&req.pool).await
+        self.get(&req.filesystem).await
     }
 
-    /// Remove a device from a mounted pool.
+    /// Remove a device from a mounted filesystem.
     /// This evacuates data first, then removes the device.
     /// bcachefs device remove <device> <mountpoint>
-    pub async fn device_remove(&self, req: DeviceActionRequest) -> Result<Pool, PoolError> {
-        let pool = self.get(&req.pool).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to remove a device".to_string(),
+    pub async fn device_remove(&self, req: DeviceActionRequest) -> Result<Filesystem, FilesystemError> {
+        let fs = self.get(&req.filesystem).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to remove a device".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap();
+        let mount_point = fs.mount_point.as_ref().unwrap();
 
-        info!("Removing device {} from pool '{}'", req.device, req.pool);
+        info!("Removing device {} from filesystem '{}'", req.device, req.filesystem);
         cmd::run_ok("bcachefs", &["device", "remove", &req.device, mount_point])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
-        self.get(&req.pool).await
+        self.get(&req.filesystem).await
     }
 
-    /// Evacuate all data off a device (move to other devices in the pool).
+    /// Evacuate all data off a device (move to other devices in the filesystem).
     /// This is a prerequisite for safe device removal.
     /// bcachefs device evacuate <device>
-    pub async fn device_evacuate(&self, req: DeviceActionRequest) -> Result<(), PoolError> {
-        let pool = self.get(&req.pool).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to evacuate a device".to_string(),
+    pub async fn device_evacuate(&self, req: DeviceActionRequest) -> Result<(), FilesystemError> {
+        let fs = self.get(&req.filesystem).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to evacuate a device".to_string(),
             ));
         }
 
-        info!("Evacuating device {} in pool '{}'", req.device, req.pool);
+        info!("Evacuating device {} in filesystem '{}'", req.device, req.filesystem);
         cmd::run_ok("bcachefs", &["device", "evacuate", &req.device])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
         // Mark as spare so bcachefs won't write new data to it and the UI
         // shows a clear visual change (amber "spare" instead of green "rw").
@@ -846,99 +846,99 @@ impl PoolService {
 
     /// Change the persistent state of a device (rw, ro, failed, spare).
     /// bcachefs device set-state <new_state> <device> [path]
-    pub async fn device_set_state(&self, req: DeviceSetStateRequest) -> Result<Pool, PoolError> {
+    pub async fn device_set_state(&self, req: DeviceSetStateRequest) -> Result<Filesystem, FilesystemError> {
         let valid_states = ["rw", "ro", "failed", "spare"];
         if !valid_states.contains(&req.state.as_str()) {
-            return Err(PoolError::CommandFailed(format!(
+            return Err(FilesystemError::CommandFailed(format!(
                 "invalid device state '{}', must be one of: {}",
                 req.state,
                 valid_states.join(", ")
             )));
         }
 
-        let pool = self.get(&req.pool).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to change device state".to_string(),
+        let fs = self.get(&req.filesystem).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to change device state".to_string(),
             ));
         }
         info!(
-            "Setting device {} state to '{}' in pool '{}'",
-            req.device, req.state, req.pool
+            "Setting device {} state to '{}' in filesystem '{}'",
+            req.device, req.state, req.filesystem
         );
         cmd::run_ok(
             "bcachefs",
             &["device", "set-state", &req.state, &req.device],
         )
         .await
-        .map_err(PoolError::CommandFailed)?;
+        .map_err(FilesystemError::CommandFailed)?;
 
-        self.get(&req.pool).await
+        self.get(&req.filesystem).await
     }
 
     /// Bring a device online (temporary, no membership change).
     /// bcachefs device online <device>
-    pub async fn device_online(&self, req: DeviceActionRequest) -> Result<Pool, PoolError> {
-        let pool = self.get(&req.pool).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to online a device".to_string(),
+    pub async fn device_online(&self, req: DeviceActionRequest) -> Result<Filesystem, FilesystemError> {
+        let fs = self.get(&req.filesystem).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to online a device".to_string(),
             ));
         }
 
-        info!("Onlining device {} in pool '{}'", req.device, req.pool);
+        info!("Onlining device {} in filesystem '{}'", req.device, req.filesystem);
         cmd::run_ok("bcachefs", &["device", "online", &req.device])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
-        self.get(&req.pool).await
+        self.get(&req.filesystem).await
     }
 
     /// Take a device offline (temporary, no membership change).
     /// bcachefs device offline <device>
-    pub async fn device_offline(&self, req: DeviceActionRequest) -> Result<Pool, PoolError> {
-        let pool = self.get(&req.pool).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to offline a device".to_string(),
+    pub async fn device_offline(&self, req: DeviceActionRequest) -> Result<Filesystem, FilesystemError> {
+        let fs = self.get(&req.filesystem).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to offline a device".to_string(),
             ));
         }
-        info!("Offlining device {} in pool '{}'", req.device, req.pool);
+        info!("Offlining device {} in filesystem '{}'", req.device, req.filesystem);
         cmd::run_ok("bcachefs", &["device", "offline", &req.device])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
-        self.get(&req.pool).await
+        self.get(&req.filesystem).await
     }
 
-    /// Set the label on a device of a mounted pool via the bcachefs sysfs interface.
+    /// Set the label on a device of a mounted filesystem via the bcachefs sysfs interface.
     ///
     /// Labels drive tiering target selection (e.g. "ssd.fast", "hdd.archive").
     /// The sysfs entry `/sys/fs/bcachefs/<uuid>/dev-<N>/label` is writable on a
     /// live filesystem; we find the right dev-N by matching the `block` symlink.
-    pub async fn device_set_label(&self, req: DeviceSetLabelRequest) -> Result<Pool, PoolError> {
-        let pool = self.get(&req.pool).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to set a device label".to_string(),
+    pub async fn device_set_label(&self, req: DeviceSetLabelRequest) -> Result<Filesystem, FilesystemError> {
+        let fs = self.get(&req.filesystem).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to set a device label".to_string(),
             ));
         }
 
-        // Validate: device must be a member of the pool
-        if !pool.devices.iter().any(|d| d.path == req.device) {
-            return Err(PoolError::CommandFailed(format!(
-                "{} is not a member of pool '{}'", req.device, req.pool
+        // Validate: device must be a member of the filesystem
+        if !fs.devices.iter().any(|d| d.path == req.device) {
+            return Err(FilesystemError::CommandFailed(format!(
+                "{} is not a member of filesystem '{}'", req.device, req.filesystem
             )));
         }
 
         // Find the sysfs dev-N directory whose `block` symlink resolves to our device.
         // The symlink target ends with the kernel device name (e.g. "sdc").
         let dev_name = req.device.trim_start_matches("/dev/");
-        let sysfs_base = format!("/sys/fs/bcachefs/{}", pool.uuid);
+        let sysfs_base = format!("/sys/fs/bcachefs/{}", fs.uuid);
         let mut label_path: Option<std::path::PathBuf> = None;
 
         let mut rd = tokio::fs::read_dir(&sysfs_base).await.map_err(|e| {
-            PoolError::CommandFailed(format!("failed to read sysfs {sysfs_base}: {e}"))
+            FilesystemError::CommandFailed(format!("failed to read sysfs {sysfs_base}: {e}"))
         })?;
         while let Ok(Some(entry)) = rd.next_entry().await {
             let name = entry.file_name();
@@ -955,34 +955,34 @@ impl PoolService {
         }
 
         let label_path = label_path.ok_or_else(|| {
-            PoolError::CommandFailed(format!(
-                "could not find sysfs entry for {} in pool '{}'", req.device, req.pool
+            FilesystemError::CommandFailed(format!(
+                "could not find sysfs entry for {} in filesystem '{}'", req.device, req.filesystem
             ))
         })?;
 
-        info!("Setting label '{}' on {} in pool '{}'", req.label, req.device, req.pool);
+        info!("Setting label '{}' on {} in filesystem '{}'", req.label, req.device, req.filesystem);
         tokio::fs::write(&label_path, &req.label).await.map_err(|e| {
-            PoolError::CommandFailed(format!("failed to write sysfs label: {e}"))
+            FilesystemError::CommandFailed(format!("failed to write sysfs label: {e}"))
         })?;
 
-        self.get(&req.pool).await
+        self.get(&req.filesystem).await
     }
 
-    // ── Pool health & monitoring ────────────────────────────────
+    // ── Filesystem health & monitoring ────────────────────────────────
 
     /// Get detailed filesystem usage from `bcachefs fs usage`.
-    pub async fn usage(&self, name: &str) -> Result<FsUsage, PoolError> {
-        let pool = self.get(name).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to read usage".to_string(),
+    pub async fn usage(&self, name: &str) -> Result<FsUsage, FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to read usage".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap();
+        let mount_point = fs.mount_point.as_ref().unwrap();
 
         let raw = cmd::run_ok("bcachefs", &["fs", "usage", mount_point])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
 
         let mut dev_usages = Vec::new();
         let mut data_bytes: u64 = 0;
@@ -1027,19 +1027,19 @@ impl PoolService {
         })
     }
 
-    /// Start a data scrub on a pool.
+    /// Start a data scrub on a filesystem.
     /// `bcachefs scrub <mountpoint>`
     /// Scrub runs synchronously, so we spawn it in the background.
-    pub async fn scrub_start(&self, name: &str) -> Result<(), PoolError> {
-        let pool = self.get(name).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to start scrub".to_string(),
+    pub async fn scrub_start(&self, name: &str) -> Result<(), FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to start scrub".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap().clone();
+        let mount_point = fs.mount_point.as_ref().unwrap().clone();
 
-        info!("Starting scrub on pool '{}'", name);
+        info!("Starting scrub on filesystem '{}'", name);
         tokio::spawn(async move {
             match cmd::run_ok("bcachefs", &["scrub", &mount_point]).await {
                 Ok(output) => info!("Scrub completed: {}", output),
@@ -1050,17 +1050,17 @@ impl PoolService {
         Ok(())
     }
 
-    /// Get scrub status for a pool.
+    /// Get scrub status for a filesystem.
     /// bcachefs scrub is synchronous — we check if a scrub process is running.
-    pub async fn scrub_status(&self, name: &str) -> Result<ScrubStatus, PoolError> {
-        let pool = self.get(name).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to check scrub status".to_string(),
+    pub async fn scrub_status(&self, name: &str) -> Result<ScrubStatus, FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to check scrub status".to_string(),
             ));
         }
 
-        // Check if a bcachefs scrub process is running for this pool
+        // Check if a bcachefs scrub process is running for this filesystem
         let running = cmd::run_ok("pgrep", &["-f", &format!("bcachefs scrub")])
             .await
             .is_ok();
@@ -1074,16 +1074,16 @@ impl PoolService {
         Ok(ScrubStatus { running, raw })
     }
 
-    /// Get reconcile (background work) status for a pool.
+    /// Get reconcile (background work) status for a filesystem.
     /// `bcachefs reconcile status <mountpoint>`
-    pub async fn reconcile_status(&self, name: &str) -> Result<ReconcileStatus, PoolError> {
-        let pool = self.get(name).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted to check reconcile status".to_string(),
+    pub async fn reconcile_status(&self, name: &str) -> Result<ReconcileStatus, FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to check reconcile status".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap();
+        let mount_point = fs.mount_point.as_ref().unwrap();
 
         let raw = cmd::run_ok("bcachefs", &["reconcile", "status", mount_point])
             .await
@@ -1093,17 +1093,17 @@ impl PoolService {
     }
 
     /// Raw output of `bcachefs fs usage <mount>` — space breakdown by data type and device.
-    pub async fn bcachefs_usage(&self, name: &str) -> Result<String, PoolError> {
-        let pool = self.get(name).await?;
-        if !pool.mounted {
-            return Err(PoolError::CommandFailed(
-                "pool must be mounted".to_string(),
+    pub async fn bcachefs_usage(&self, name: &str) -> Result<String, FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted".to_string(),
             ));
         }
-        let mount_point = pool.mount_point.as_ref().unwrap();
+        let mount_point = fs.mount_point.as_ref().unwrap();
         let raw = cmd::run_ok("bcachefs", &["fs", "usage", "-h", mount_point])
             .await
-            .map_err(PoolError::CommandFailed)?;
+            .map_err(FilesystemError::CommandFailed)?;
         Ok(raw)
     }
 
@@ -1178,7 +1178,7 @@ pub struct BlockDevice {
     pub mount_point: Option<String>,
     /// Filesystem type detected on the device (e.g. `bcachefs`, `ext4`).
     pub fs_type: Option<String>,
-    /// Whether the device is currently in use (mounted, in a pool, or has partitions in use).
+    /// Whether the device is currently in use (mounted, in a filesystem, or has partitions in use).
     pub in_use: bool,
     /// Whether the underlying disk spins (false for NVMe/SSD, true for HDD).
     pub rotational: bool,
@@ -1188,7 +1188,7 @@ pub struct BlockDevice {
 
 /// Read per-device info (labels, durability) for a mounted bcachefs filesystem.
 /// Uses `bcachefs show-super` on the first device to extract member info.
-async fn read_pool_devices(_uuid: &str, device_paths: &[String]) -> Vec<PoolDevice> {
+async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<FilesystemDevice> {
     let first_dev = match device_paths.first() {
         Some(d) => d.as_str(),
         None => return Vec::new(),
@@ -1251,7 +1251,7 @@ async fn read_pool_devices(_uuid: &str, device_paths: &[String]) -> Vec<PoolDevi
         None
     };
 
-    let mut devices: Vec<PoolDevice> = Vec::new();
+    let mut devices: Vec<FilesystemDevice> = Vec::new();
 
     for dev_path in device_paths {
         let dev_short = dev_path.trim_start_matches("/dev/");
@@ -1275,7 +1275,7 @@ async fn read_pool_devices(_uuid: &str, device_paths: &[String]) -> Vec<PoolDevi
                 (None, None, None, None, None, None)
             };
 
-        devices.push(PoolDevice {
+        devices.push(FilesystemDevice {
             path: dev_path.clone(),
             label,
             durability,
@@ -1291,9 +1291,9 @@ async fn read_pool_devices(_uuid: &str, device_paths: &[String]) -> Vec<PoolDevi
 
 /// Read filesystem options from sysfs for a mounted bcachefs filesystem.
 /// Options live at /sys/fs/bcachefs/<uuid>/options/<option_name>
-async fn read_fs_options_sysfs(uuid: &str) -> PoolOptions {
+async fn read_fs_options_sysfs(uuid: &str) -> FilesystemOptions {
     if uuid.is_empty() {
-        return PoolOptions::default();
+        return FilesystemOptions::default();
     }
 
     let base = format!("/sys/fs/bcachefs/{uuid}/options");
@@ -1321,7 +1321,7 @@ async fn read_fs_options_sysfs(uuid: &str) -> PoolOptions {
         read_opt(base, name).await.map(|s| s == "1" || s == "true")
     }
 
-    PoolOptions {
+    FilesystemOptions {
         compression: read_opt(&base, "compression").await,
         background_compression: read_opt(&base, "background_compression").await,
         data_replicas: read_opt_u32(&base, "data_replicas").await,
@@ -1339,18 +1339,18 @@ async fn read_fs_options_sysfs(uuid: &str) -> PoolOptions {
 }
 
 /// Read filesystem options from `bcachefs show-super` for an unmounted filesystem.
-async fn read_fs_options_show_super(device: Option<&str>) -> PoolOptions {
+async fn read_fs_options_show_super(device: Option<&str>) -> FilesystemOptions {
     let dev = match device {
         Some(d) => d,
-        None => return PoolOptions::default(),
+        None => return FilesystemOptions::default(),
     };
 
     let output = match cmd::run_ok("bcachefs", &["show-super", dev]).await {
         Ok(o) => o,
-        Err(_) => return PoolOptions::default(),
+        Err(_) => return FilesystemOptions::default(),
     };
 
-    let mut opts = PoolOptions::default();
+    let mut opts = FilesystemOptions::default();
 
     for line in output.lines() {
         let line = line.trim();
@@ -1385,7 +1385,7 @@ async fn read_fs_options_show_super(device: Option<&str>) -> PoolOptions {
 
 /// Parse /proc/mounts for bcachefs entries.
 /// Returns map of mount_point -> list of devices.
-async fn read_bcachefs_mounts() -> Result<HashMap<String, Vec<String>>, PoolError> {
+async fn read_bcachefs_mounts() -> Result<HashMap<String, Vec<String>>, FilesystemError> {
     let content = tokio::fs::read_to_string("/proc/mounts")
         .await
         .unwrap_or_default();
@@ -1484,35 +1484,35 @@ async fn discover_unmounted_bcachefs(
         .collect()
 }
 
-// ── Pool mount state persistence ────────────────────────────────
+// ── Filesystem mount state persistence ────────────────────────────────
 
-/// Track which pools should be mounted across reboots
-async fn save_pool_mounted(pool_name: &str) {
-    let mut state = load_pool_state().await;
-    let name = pool_name.to_string();
+/// Track which filesystems should be mounted across reboots
+async fn save_fs_mounted(fs_name: &str) {
+    let mut state = load_fs_state().await;
+    let name = fs_name.to_string();
     if !state.contains(&name) {
         state.push(name);
     }
-    let _ = save_pool_state(&state).await;
+    let _ = save_fs_state(&state).await;
 }
 
-async fn save_pool_unmounted(pool_name: &str) {
-    let mut state = load_pool_state().await;
-    state.retain(|n| n != pool_name);
-    let _ = save_pool_state(&state).await;
+async fn save_fs_unmounted(fs_name: &str) {
+    let mut state = load_fs_state().await;
+    state.retain(|n| n != fs_name);
+    let _ = save_fs_state(&state).await;
 }
 
-async fn load_pool_state() -> Vec<String> {
-    match tokio::fs::read_to_string(POOL_STATE_PATH).await {
+async fn load_fs_state() -> Vec<String> {
+    match tokio::fs::read_to_string(FS_STATE_PATH).await {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => Vec::new(),
     }
 }
 
-async fn save_pool_state(state: &[String]) -> Result<(), PoolError> {
+async fn save_fs_state(state: &[String]) -> Result<(), FilesystemError> {
     let json = serde_json::to_string_pretty(state)
-        .map_err(|e| PoolError::CommandFailed(e.to_string()))?;
-    tokio::fs::write(POOL_STATE_PATH, json).await?;
+        .map_err(|e| FilesystemError::CommandFailed(e.to_string()))?;
+    tokio::fs::write(FS_STATE_PATH, json).await?;
     Ok(())
 }
 
@@ -1526,8 +1526,8 @@ async fn is_mountpoint(path: &str) -> bool {
     meta.dev() != parent_meta.dev() || meta.ino() == parent_meta.ino()
 }
 
-/// Try to find pool name from existing mount point directories
-fn find_pool_name_by_devices(_devices: &[String]) -> Option<String> {
+/// Try to find filesystem name from existing mount point directories
+fn find_fs_name_by_devices(_devices: &[String]) -> Option<String> {
     // Check if any directory exists under the mount base
     let base = Path::new(NASTY_MOUNT_BASE);
     if let Ok(entries) = std::fs::read_dir(base) {

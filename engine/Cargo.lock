@@ -856,13 +856,7 @@ dependencies = [
 name = "nasty-snapshot"
 version = "0.1.0"
 dependencies = [
- "libc",
- "nasty-common",
- "nasty-sharing",
  "nasty-storage",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]

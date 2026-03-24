@@ -256,7 +256,7 @@
 				<select id="nvme-device" bind:value={newDevice} onchange={onDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 					<option value="">Select a block subvolume...</option>
 					{#each blockSubvolumes as sv}
-						<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
 					{/each}
 				</select>
 				{#if blockSubvolumes.length === 0}
@@ -346,7 +346,7 @@
 												<select bind:value={addNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
 													<option value="">Select...</option>
 													{#each blockSubvolumes as sv}
-														<option value={sv.block_device}>{sv.pool}/{sv.name} ({sv.block_device})</option>
+														<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
 													{/each}
 												</select>
 											</div>

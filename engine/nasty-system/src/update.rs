@@ -194,7 +194,7 @@ impl UpdateService {
 
         // Sanitize hardware-configuration.nix before updating.
         // If the user ever ran nixos-generate-config while pools were mounted,
-        // those fileSystems entries would block boot after pool destruction.
+        // those fileSystems entries would block boot after filesystem destruction.
         sanitize_hardware_config().await;
 
         // Clean up any previous update unit
@@ -969,9 +969,9 @@ echo "==> bcachefs switch complete!"
 
 /// Remove any `fileSystems."/storage/..."` blocks from hardware-configuration.nix.
 ///
-/// Pool mounts are managed at runtime by the engine. If a user ran
+/// Filesystem mounts are managed at runtime by the engine. If a user ran
 /// `nixos-generate-config` while pools were mounted, those entries end up in
-/// hardware-configuration.nix and will block boot after the pool is destroyed
+/// hardware-configuration.nix and will block boot after the filesystem is destroyed
 /// (systemd waits forever for a device UUID that no longer exists).
 async fn sanitize_hardware_config() {
     let path = format!("{LOCAL_REPO}/nixos/hardware-configuration.nix");
@@ -981,7 +981,7 @@ async fn sanitize_hardware_config() {
     };
     let sanitized = strip_pool_mounts(&content);
     if sanitized != content {
-        info!("Removed pool mount entries from hardware-configuration.nix to prevent boot failure");
+        info!("Removed filesystem mount entries from hardware-configuration.nix to prevent boot failure");
         if let Err(e) = tokio::fs::write(&path, sanitized).await {
             tracing::warn!("Failed to write sanitized hardware-configuration.nix: {e}");
         }

@@ -217,7 +217,7 @@
 
 	const nav = [
 		{ href: '/',              label: 'Dashboard',      icon: LayoutDashboard },
-		{ href: '/pools',         label: 'Storage Pools',  icon: Database },
+		{ href: '/filesystems',   label: 'Filesystems',    icon: Database },
 		{ href: '/subvolumes',    label: 'Subvolumes',     icon: Layers },
 		{ href: '/shares/nfs',    label: 'NFS',            icon: FolderOpen },
 		{ href: '/shares/smb',    label: 'SMB',            icon: Share2 },

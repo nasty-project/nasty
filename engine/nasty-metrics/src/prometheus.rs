@@ -111,10 +111,10 @@ fn render_smart(out: &mut String, disks: &[DiskHealth]) {
 // ── bcachefs metrics ────────────────────────────────────────────
 
 fn render_bcachefs_space(out: &mut String, fs: &BcachefsMetrics) {
-    let labels = [("pool", fs.pool_name.as_str()), ("uuid", fs.uuid.as_str())];
-    gauge(out, "nasty_bcachefs_pool_total_bytes", "Total pool capacity", &labels, fs.space.total_bytes as f64);
-    gauge(out, "nasty_bcachefs_pool_used_bytes", "Pool bytes in use", &labels, fs.space.used_bytes as f64);
-    gauge(out, "nasty_bcachefs_pool_available_bytes", "Pool bytes available", &labels, fs.space.available_bytes as f64);
+    let labels = [("filesystem", fs.fs_name.as_str()), ("uuid", fs.uuid.as_str())];
+    gauge(out, "nasty_bcachefs_fs_total_bytes", "Total pool capacity", &labels, fs.space.total_bytes as f64);
+    gauge(out, "nasty_bcachefs_fs_used_bytes", "Filesystem bytes in use", &labels, fs.space.used_bytes as f64);
+    gauge(out, "nasty_bcachefs_fs_available_bytes", "Filesystem bytes available", &labels, fs.space.available_bytes as f64);
 }
 
 fn render_bcachefs_counters(out: &mut String, fs: &BcachefsMetrics) {
@@ -126,7 +126,7 @@ fn render_bcachefs_counters(out: &mut String, fs: &BcachefsMetrics) {
     sorted.sort_by_key(|(k, _)| k.as_str());
     for (name, value) in sorted {
         metric_line(out, "nasty_bcachefs_counter",
-            &[("pool", fs.pool_name.as_str()), ("uuid", fs.uuid.as_str()), ("counter", name)],
+            &[("filesystem", fs.fs_name.as_str()), ("uuid", fs.uuid.as_str()), ("counter", name)],
             *value as f64);
     }
 }
@@ -151,7 +151,7 @@ fn render_bcachefs_time_stats(out: &mut String, fs: &BcachefsMetrics) {
                 _ => 0.0,
             };
             metric_line(out, &metric_name,
-                &[("pool", fs.pool_name.as_str()), ("uuid", fs.uuid.as_str()), ("op", name)],
+                &[("filesystem", fs.fs_name.as_str()), ("uuid", fs.uuid.as_str()), ("op", name)],
                 val);
         }
     }
@@ -165,10 +165,10 @@ fn render_bcachefs_devices(out: &mut String, fs: &BcachefsMetrics) {
     for dev in &fs.devices {
         let label_str = dev.label.as_deref().unwrap_or("");
         metric_line(out, "nasty_bcachefs_device_io_latency_ns",
-            &[("pool", fs.pool_name.as_str()), ("device", &dev.name), ("label", label_str), ("direction", "read")],
+            &[("filesystem", fs.fs_name.as_str()), ("device", &dev.name), ("label", label_str), ("direction", "read")],
             dev.io_latency_read_ns as f64);
         metric_line(out, "nasty_bcachefs_device_io_latency_ns",
-            &[("pool", fs.pool_name.as_str()), ("device", &dev.name), ("label", label_str), ("direction", "write")],
+            &[("filesystem", fs.fs_name.as_str()), ("device", &dev.name), ("label", label_str), ("direction", "write")],
             dev.io_latency_write_ns as f64);
     }
 }
@@ -180,19 +180,19 @@ fn render_bcachefs_compression(out: &mut String, fs: &BcachefsMetrics) {
     header(out, "nasty_bcachefs_compressed_bytes", "gauge", "Compressed data size on disk");
     for c in &fs.compression {
         metric_line(out, "nasty_bcachefs_compressed_bytes",
-            &[("pool", fs.pool_name.as_str()), ("algorithm", &c.algorithm)],
+            &[("filesystem", fs.fs_name.as_str()), ("algorithm", &c.algorithm)],
             c.compressed_bytes as f64);
     }
     header(out, "nasty_bcachefs_uncompressed_bytes", "gauge", "Uncompressed (logical) data size");
     for c in &fs.compression {
         metric_line(out, "nasty_bcachefs_uncompressed_bytes",
-            &[("pool", fs.pool_name.as_str()), ("algorithm", &c.algorithm)],
+            &[("filesystem", fs.fs_name.as_str()), ("algorithm", &c.algorithm)],
             c.uncompressed_bytes as f64);
     }
 }
 
 fn render_bcachefs_background(out: &mut String, fs: &BcachefsMetrics) {
-    let labels = [("pool", fs.pool_name.as_str()), ("uuid", fs.uuid.as_str())];
+    let labels = [("filesystem", fs.fs_name.as_str()), ("uuid", fs.uuid.as_str())];
     if let Some(bytes) = fs.background.btree_cache_size_bytes {
         gauge(out, "nasty_bcachefs_btree_cache_size_bytes", "Btree cache memory usage", &labels, bytes as f64);
     }
@@ -206,9 +206,9 @@ fn render_bcachefs_info(out: &mut String, fs: &BcachefsMetrics) {
     let data_checksum = fs.options.get("data_checksum").map(|s| s.as_str()).unwrap_or("crc32c");
     let encrypted = fs.options.get("encrypted").map(|s| s.as_str()).unwrap_or("0");
 
-    header(out, "nasty_bcachefs_pool_info", "gauge", "bcachefs pool configuration (labels carry values)");
-    metric_line(out, "nasty_bcachefs_pool_info",
-        &[("pool", fs.pool_name.as_str()), ("uuid", fs.uuid.as_str()),
+    header(out, "nasty_bcachefs_fs_info", "gauge", "bcachefs pool configuration (labels carry values)");
+    metric_line(out, "nasty_bcachefs_fs_info",
+        &[("filesystem", fs.fs_name.as_str()), ("uuid", fs.uuid.as_str()),
           ("compression", compression), ("data_replicas", data_replicas),
           ("metadata_replicas", metadata_replicas), ("data_checksum", data_checksum),
           ("encrypted", encrypted)],

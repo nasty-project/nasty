@@ -77,7 +77,7 @@
       package = nasty-webui;
     };
 
-    storage.mountBase = "/storage";
+    storage.mountBase = "/fs";
 
     nfs.enable = true;
     smb.enable = true;

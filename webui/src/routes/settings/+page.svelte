@@ -92,7 +92,7 @@
 				} else if (metricName.startsWith('nasty_bcachefs_counter')) {
 					title = 'bcachefs — Counters';
 				} else if (metricName.startsWith('nasty_bcachefs_')) {
-					title = 'bcachefs — Pool';
+					title = 'bcachefs — Filesystem';
 				} else if (metricName.startsWith('nasty_disk_smart_') || metricName.startsWith('nasty_disk_temperature') || metricName.startsWith('nasty_disk_power_on')) {
 					title = 'Disk Health (SMART)';
 				} else if (metricName.startsWith('nasty_disk_')) {

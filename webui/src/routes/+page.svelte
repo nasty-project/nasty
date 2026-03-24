@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { formatBytes, formatUptime, formatPercent } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
-	import type { SystemInfo, SystemHealth, SystemStats, Pool, DiskHealth, DiskIoStats, NetIfStats, ActiveAlert, Settings, ResourceHistory } from '$lib/types';
+	import type { SystemInfo, SystemHealth, SystemStats, Filesystem, DiskHealth, DiskIoStats, NetIfStats, ActiveAlert, Settings, ResourceHistory } from '$lib/types';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { createIoHistory } from '$lib/history.svelte';
@@ -14,7 +14,7 @@
 	let healthExpanded = $state(false);
 	let health: SystemHealth | null = $state(null);
 	let stats: SystemStats | null = $state(null);
-	let pools: Pool[] = $state([]);
+	let filesystems: Filesystem[] = $state([]);
 	let disks: DiskHealth[] = $state([]);
 	let settings: Settings | null = $state(null);
 	let alerts: ActiveAlert[] = $state([]);
@@ -46,11 +46,11 @@
 
 	async function loadAll() {
 		await withToast(async () => {
-			[info, health, stats, pools, disks, settings, alerts] = await Promise.all([
+			[info, health, stats, filesystems, disks, settings, alerts] = await Promise.all([
 				client.call<SystemInfo>('system.info'),
 				client.call<SystemHealth>('system.health'),
 				client.call<SystemStats>('system.stats'),
-				client.call<Pool[]>('pool.list'),
+				client.call<Filesystem[]>('fs.list'),
 				client.call<DiskHealth[]>('system.disks'),
 				client.call<Settings>('system.settings.get'),
 				client.call<ActiveAlert[]>('system.alerts'),
@@ -191,18 +191,18 @@
 		return (s.memory.used_bytes / s.memory.total_bytes) * 100;
 	}
 
-	function totalStorage(p: Pool[]): { used: number; total: number } {
+	function totalStorage(p: Filesystem[]): { used: number; total: number } {
 		let used = 0, total = 0;
-		for (const pool of p) {
-			if (pool.total_bytes > 0) {
-				used += pool.used_bytes;
-				total += pool.total_bytes;
+		for (const fs of p) {
+			if (fs.total_bytes > 0) {
+				used += fs.used_bytes;
+				total += fs.total_bytes;
 			}
 		}
 		return { used, total };
 	}
 
-	function storagePercent(p: Pool[]): number {
+	function storagePercent(p: Filesystem[]): number {
 		const s = totalStorage(p);
 		if (s.total === 0) return 0;
 		return (s.used / s.total) * 100;
@@ -321,7 +321,7 @@
 			{/each}
 		</div>
 	</div>
-	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-{pools.length > 0 ? '4' : '2'}">
+	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-{filesystems.length > 0 ? '4' : '2'}">
 		<Card>
 			<CardHeader class="pb-2">
 				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">CPU</CardTitle>
@@ -380,8 +380,8 @@
 			</CardContent>
 		</Card>
 
-		{#if pools.length > 0}
-			{@const storage = totalStorage(pools)}
+		{#if filesystems.length > 0}
+			{@const storage = totalStorage(filesystems)}
 			<Card class="sm:col-span-2">
 				<CardHeader class="pb-2">
 					<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Storage</CardTitle>
@@ -393,18 +393,18 @@
 							<span class="text-xs text-muted-foreground">{formatBytes(storage.used)} / {formatBytes(storage.total)}</span>
 						</div>
 						<div class="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
-							<div class="h-full rounded-full transition-all duration-500 {barColor(storagePercent(pools))}" style="width: {storagePercent(pools)}%"></div>
+							<div class="h-full rounded-full transition-all duration-500 {barColor(storagePercent(filesystems))}" style="width: {storagePercent(filesystems)}%"></div>
 						</div>
 					{/if}
 					<div class="mt-3 grid grid-cols-1 gap-1 sm:grid-cols-2">
-						{#each pools as pool}
+						{#each filesystems as fs}
 							<div class="flex items-center gap-2 rounded px-2 py-1 text-sm">
-								<span class="font-semibold">{pool.name}</span>
-								<Badge variant={pool.mounted ? 'default' : 'destructive'} class="text-[0.6rem]">
-									{pool.mounted ? 'Mounted' : 'Unmounted'}
+								<span class="font-semibold">{fs.name}</span>
+								<Badge variant={fs.mounted ? 'default' : 'destructive'} class="text-[0.6rem]">
+									{fs.mounted ? 'Mounted' : 'Unmounted'}
 								</Badge>
-								{#if pool.total_bytes > 0}
-									<span class="ml-auto text-xs tabular-nums text-muted-foreground">{formatBytes(pool.used_bytes)} / {formatBytes(pool.total_bytes)}</span>
+								{#if fs.total_bytes > 0}
+									<span class="ml-auto text-xs tabular-nums text-muted-foreground">{formatBytes(fs.used_bytes)} / {formatBytes(fs.total_bytes)}</span>
 								{/if}
 							</div>
 						{/each}

@@ -26,7 +26,7 @@ use router::handle_rpc_request;
 pub type LogReloadHandle = reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
 
 /// Broadcast channel for notifying all WebSocket clients of state changes.
-/// The payload is the collection name (e.g. "pool", "subvolume", "share.nfs").
+/// The payload is the collection name (e.g. "filesystem", "subvolume", "share.nfs").
 pub type EventBus = tokio::sync::broadcast::Sender<String>;
 
 pub struct AppState {
@@ -40,7 +40,7 @@ pub struct AppState {
     pub protocols: nasty_system::protocol::ProtocolService,
     pub updates: nasty_system::update::UpdateService,
     pub metrics_client: reqwest::Client,
-    pub pools: nasty_storage::PoolService,
+    pub filesystems: nasty_storage::FilesystemService,
     pub subvolumes: Arc<nasty_storage::SubvolumeService>,
     pub snapshots: nasty_snapshot::SnapshotService,
     pub nfs: nasty_sharing::NfsService,
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (event_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
-    let subvolumes = Arc::new(nasty_storage::SubvolumeService::new(nasty_storage::PoolService::new()));
+    let subvolumes = Arc::new(nasty_storage::SubvolumeService::new(nasty_storage::FilesystemService::new()));
     let nvmeof = Arc::new(nasty_sharing::NvmeofService::new());
 
     let state = Arc::new(AppState {
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         protocols: nasty_system::protocol::ProtocolService::new(),
         updates: nasty_system::update::UpdateService::new(),
         metrics_client: reqwest::Client::new(),
-        pools: nasty_storage::PoolService::new(),
+        filesystems: nasty_storage::FilesystemService::new(),
         snapshots: nasty_snapshot::SnapshotService::new(subvolumes.clone()),
         subvolumes,
         nfs: nasty_sharing::NfsService::new(),
@@ -93,11 +93,11 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Restore state from previous session:
-    // 1. Mount pools tracked in pool-state.json
+    // 1. Mount filesystems tracked in fs-state.json
     // 2. Re-attach loop devices for block subvolumes
     // 3. Start enabled protocols (services + kernel modules)
     // 4. Restore NVMe-oF configfs (volatile, needs modules from step 3)
-    state.pools.restore_mounts().await;
+    state.filesystems.restore_mounts().await;
     // Re-attach loop devices and get the current name→device mapping.
     // Loop device numbers change across reboots, so NVMe-oF and iSCSI state
     // files must be patched before their respective restore steps run.

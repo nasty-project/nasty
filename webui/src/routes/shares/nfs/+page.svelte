@@ -197,7 +197,7 @@
 				<select id="nfs-path" bind:value={newSubvolume} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 					<option value="">Select a subvolume...</option>
 					{#each subvolumes as sv}
-						<option value={sv.path}>{sv.pool}/{sv.name}</option>
+						<option value={sv.path}>{sv.filesystem}/{sv.name}</option>
 					{/each}
 				</select>
 				{#if subvolumes.length === 0}

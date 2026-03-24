@@ -18,8 +18,8 @@ pub enum NfsError {
     AlreadyExists(String),
     #[error("path does not exist: {0}")]
     PathNotFound(String),
-    #[error("path is not within a NASty pool: {0}")]
-    PathNotInPool(String),
+    #[error("path is not within a NASty filesystem: {0}")]
+    PathNotInFilesystem(String),
     #[error("exportfs failed: {0}")]
     ExportFailed(String),
     #[error("io error: {0}")]
@@ -30,7 +30,7 @@ pub enum NfsError {
 pub struct NfsShare {
     /// Unique share identifier (UUID).
     pub id: String,
-    /// Absolute filesystem path being exported (must be under `/storage/`).
+    /// Absolute filesystem path being exported (must be under `/fs/`).
     pub path: String,
     /// Optional description of the share.
     pub comment: Option<String>,
@@ -120,8 +120,8 @@ impl NfsService {
         if !Path::new(&req.path).exists() {
             return Err(NfsError::PathNotFound(req.path));
         }
-        if !req.path.starts_with("/storage/") {
-            return Err(NfsError::PathNotInPool(req.path));
+        if !req.path.starts_with("/fs/") {
+            return Err(NfsError::PathNotInFilesystem(req.path));
         }
 
 

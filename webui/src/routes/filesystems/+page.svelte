@@ -4,14 +4,14 @@
 	import { formatBytes, formatPercent } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { Pool, PoolDevice, BlockDevice, DeviceState, FsUsage, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId } from '$lib/types';
+	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, FsUsage, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 
-	let pools: Pool[] = $state([]);
+	let filesystems: Filesystem[] = $state([]);
 	let devices: BlockDevice[] = $state([]);
 	let wizardStep: 0 | 1 | 2 | 3 = $state(0); // 0=hidden, 1=name+devices, 2=profile, 3=review
 	let loading = $state(true);
@@ -32,38 +32,38 @@
 	let manualBgTarget = $state('');
 	let manualPromoteTarget = $state('');
 
-	let expandedPool: string | null = $state(null);
-	let editOptionsPool: string | null = $state(null);
+	let expandedFs: string | null = $state(null);
+	let editOptionsFs: string | null = $state(null);
 	let editCompression = $state('');
 	let editBgCompression = $state('');
-	let addDevicePool: string | null = $state(null);
+	let addDeviceFs: string | null = $state(null);
 	let addDevicePath = $state('');
 	let addDeviceLabel = $state('');
 	let showAddPartitions = $state(false);
 	let editErasureCode = $state(false);
 
-	// Inline label editing: key is "poolName|devicePath"
+	// Inline label editing: key is "fsName|devicePath"
 	let editingLabel: string | null = $state(null);
 	let editLabelValue = $state('');
 
-	async function saveDeviceLabel(poolName: string, devicePath: string) {
-		const key = `${poolName}|${devicePath}`;
+	async function saveDeviceLabel(fsName: string, devicePath: string) {
+		const key = `${fsName}|${devicePath}`;
 		if (editingLabel !== key) return;
 		editingLabel = null;
 		const label = editLabelValue.trim();
 		await withToast(
-			() => client.call('pool.device.set_label', { pool: poolName, device: devicePath, label }),
+			() => client.call('fs.device.set_label', { filesystem: fsName, device: devicePath, label }),
 			`Label updated for ${devicePath}`
 		);
 		await refresh();
 	}
 
-	function startEditLabel(poolName: string, dev: PoolDevice) {
-		editingLabel = `${poolName}|${dev.path}`;
+	function startEditLabel(fsName: string, dev: FilesystemDevice) {
+		editingLabel = `${fsName}|${dev.path}`;
 		editLabelValue = dev.label ?? '';
 	}
 
-	let healthPool: string | null = $state(null);
+	let healthFs: string | null = $state(null);
 	let fsUsage: FsUsage | null = $state(null);
 	let scrubStatus: ScrubStatus | null = $state(null);
 	let reconcileStatus: ReconcileStatus | null = $state(null);
@@ -73,7 +73,7 @@
 
 	function handleEvent(_: string, params: unknown) {
 		const p = params as { collection?: string };
-		if (p?.collection === 'pool') refresh();
+		if (p?.collection === 'filesystem') refresh();
 	}
 
 	onMount(async () => {
@@ -86,7 +86,7 @@
 
 	async function refresh() {
 		await withToast(async () => {
-			pools = await client.call<Pool[]>('pool.list');
+			filesystems = await client.call<Filesystem[]>('fs.list');
 			devices = await client.call<BlockDevice[]>('device.list');
 		});
 	}
@@ -108,7 +108,7 @@
 		const hasSlow = hasHdd;
 		const has3Tiers = hasNvme && (hasSsd || hasHdd);
 
-		// Single label for single-tier: use pool name as group
+		// Single label for single-tier: use filesystem name as group
 		const singleLabels: Record<string, string> = {};
 		sel.forEach(d => { singleLabels[d.path] = newName; });
 
@@ -139,7 +139,7 @@
 			{
 				id: 'single',
 				name: 'Single Tier',
-				tagline: 'Simple — all devices in one pool',
+				tagline: 'Simple — all devices in one filesystem',
 				description: 'All devices are treated as equal peers. bcachefs stripes data across them based on capacity. No performance tiers.',
 				available: true,
 				recommended: recommended === 'single',
@@ -154,6 +154,7 @@
 				name: 'Write Cache + Cold Storage',
 				tagline: 'Writes land on fast devices, cold data migrates to slow',
 				description: 'Writes go to the fast tier first (NVMe/SSD). Over time, background I/O migrates cold data to the slow tier (HDD), freeing fast space for new writes.',
+
 				available: hasFast && hasSlow,
 				recommended: recommended === 'write_cache',
 				foreground_target: 'fast',
@@ -208,11 +209,11 @@
 		return buildProfiles().find(p => p.id === wizardProfile) ?? buildProfiles()[0];
 	}
 
-	async function createPool() {
+	async function createFs() {
 		if (!newName || selectedPaths.length === 0) return;
 		const profile = activeProfile();
 		const ok = await withToast(
-			() => client.call('pool.create', {
+			() => client.call('fs.create', {
 				name: newName,
 				devices: selectedPaths.map(path => ({
 					path,
@@ -226,7 +227,7 @@
 				promote_target: profile.promote_target || undefined,
 				erasure_code: erasureCode || undefined,
 			}),
-			`Pool "${newName}" created`
+			`Filesystem "${newName}" created`
 		);
 		if (ok !== undefined) {
 			wizardStep = 0;
@@ -268,139 +269,139 @@
 		wizardStep = (wizardStep + 1) as 1 | 2 | 3;
 	}
 
-	async function destroyPool(name: string) {
-		if (!await confirm(`Destroy Pool "${name}"`, `This will unmount it.`)) return;
+	async function destroyFs(name: string) {
+		if (!await confirm(`Destroy Filesystem "${name}"`, `This will unmount it.`)) return;
 		await withToast(
-			() => client.call('pool.destroy', { name, force: true }),
-			`Pool "${name}" destroyed`
+			() => client.call('fs.destroy', { name, force: true }),
+			`Filesystem "${name}" destroyed`
 		);
 		await refresh();
 	}
 
-	async function toggleMount(pool: Pool) {
-		if (pool.mounted) {
-			if (!await confirm(`Unmount Pool "${pool.name}"`, `Any active NFS, SMB, iSCSI, and NVMe-oF shares on this pool will be stopped first.`)) return;
+	async function toggleMount(fs: Filesystem) {
+		if (fs.mounted) {
+			if (!await confirm(`Unmount Filesystem "${fs.name}"`, `Any active NFS, SMB, iSCSI, and NVMe-oF shares on this filesystem will be stopped first.`)) return;
 		}
-		const action = pool.mounted ? 'unmount' : 'mount';
+		const action = fs.mounted ? 'unmount' : 'mount';
 		await withToast(
-			() => pool.mounted
-				? client.call('pool.unmount', { name: pool.name })
-				: client.call('pool.mount', { name: pool.name }),
-			`Pool "${pool.name}" ${action}ed`
+			() => fs.mounted
+				? client.call('fs.unmount', { name: fs.name })
+				: client.call('fs.mount', { name: fs.name }),
+			`Filesystem "${fs.name}" ${action}ed`
 		);
 		await refresh();
 	}
 
-	async function addDevice(poolName: string) {
+	async function addDevice(fsName: string) {
 		if (!addDevicePath) return;
 		const ok = await withToast(
-			() => client.call('pool.device.add', {
-				pool: poolName,
+			() => client.call('fs.device.add', {
+				filesystem: fsName,
 				device: {
 					path: addDevicePath,
 					label: addDeviceLabel || undefined,
 				},
 			}),
-			`Device ${addDevicePath} added to "${poolName}"`
+			`Device ${addDevicePath} added to "${fsName}"`
 		);
 		if (ok !== undefined) {
-			addDevicePool = null;
+			addDeviceFs = null;
 			addDevicePath = '';
 			addDeviceLabel = '';
 			await refresh();
 		}
 	}
 
-	async function removeDevice(poolName: string, devicePath: string) {
-		if (!await confirm(`Remove ${devicePath}?`, `Data will be evacuated from pool "${poolName}" first.`)) return;
+	async function removeDevice(fsName: string, devicePath: string) {
+		if (!await confirm(`Remove ${devicePath}?`, `Data will be evacuated from filesystem "${fsName}" first.`)) return;
 		await withToast(
-			() => client.call('pool.device.remove', { pool: poolName, device: devicePath }),
-			`Device ${devicePath} removed from "${poolName}"`
+			() => client.call('fs.device.remove', { filesystem: fsName, device: devicePath }),
+			`Device ${devicePath} removed from "${fsName}"`
 		);
 		await refresh();
 	}
 
-	async function evacuateDevice(poolName: string, devicePath: string) {
+	async function evacuateDevice(fsName: string, devicePath: string) {
 		if (!await confirm(`Evacuate all data from ${devicePath}?`)) return;
 		await withToast(
-			() => client.call('pool.device.evacuate', { pool: poolName, device: devicePath }),
+			() => client.call('fs.device.evacuate', { filesystem: fsName, device: devicePath }),
 			`Evacuating ${devicePath} — this may take several minutes`
 		);
 		await refresh();
 	}
 
-	async function setDeviceState(poolName: string, devicePath: string, state: DeviceState) {
+	async function setDeviceState(fsName: string, devicePath: string, state: DeviceState) {
 		if (state === 'ro') {
 			if (!await confirm(`Set ${devicePath} read-only?`, `The device will stop accepting writes. Use Set RW to revert.`)) return;
 		}
 		await withToast(
-			() => client.call('pool.device.set_state', { pool: poolName, device: devicePath, state }),
+			() => client.call('fs.device.set_state', { filesystem: fsName, device: devicePath, state }),
 			`Device ${devicePath} set to ${state}`
 		);
 		await refresh();
 	}
 
-	async function onlineDevice(poolName: string, devicePath: string) {
+	async function onlineDevice(fsName: string, devicePath: string) {
 		await withToast(
-			() => client.call('pool.device.online', { pool: poolName, device: devicePath }),
+			() => client.call('fs.device.online', { filesystem: fsName, device: devicePath }),
 			`Device ${devicePath} online`
 		);
 		await refresh();
 	}
 
-	async function offlineDevice(poolName: string, devicePath: string) {
+	async function offlineDevice(fsName: string, devicePath: string) {
 		if (!await confirm(`Take ${devicePath} offline?`)) return;
 		await withToast(
-			() => client.call('pool.device.offline', { pool: poolName, device: devicePath }),
+			() => client.call('fs.device.offline', { filesystem: fsName, device: devicePath }),
 			`Device ${devicePath} offline`
 		);
 		await refresh();
 	}
 
-	function openEditOptions(pool: Pool) {
-		if (editOptionsPool === pool.name) {
-			editOptionsPool = null;
+	function openEditOptions(fs: Filesystem) {
+		if (editOptionsFs === fs.name) {
+			editOptionsFs = null;
 			return;
 		}
-		editOptionsPool = pool.name;
-		editCompression = pool.options.compression ?? '';
-		editBgCompression = pool.options.background_compression ?? '';
-	editErasureCode = pool.options.erasure_code ?? false;
+		editOptionsFs = fs.name;
+		editCompression = fs.options.compression ?? '';
+		editBgCompression = fs.options.background_compression ?? '';
+	editErasureCode = fs.options.erasure_code ?? false;
 	}
 
-	async function saveOptions(poolName: string) {
+	async function saveOptions(fsName: string) {
 		await withToast(
-			() => client.call('pool.options.update', {
-				name: poolName,
+			() => client.call('fs.options.update', {
+				name: fsName,
 				compression: editCompression || 'none',
 				background_compression: editBgCompression || 'none',
 				erasure_code: editErasureCode,
 			}),
-			`Options updated for "${poolName}"`
+			`Options updated for "${fsName}"`
 		);
-		editOptionsPool = null;
+		editOptionsFs = null;
 		await refresh();
 	}
 
-	async function toggleHealth(poolName: string) {
-		if (healthPool === poolName) {
-			healthPool = null;
+	async function toggleHealth(fsName: string) {
+		if (healthFs === fsName) {
+			healthFs = null;
 			fsUsage = null;
 			scrubStatus = null;
 			reconcileStatus = null;
 			return;
 		}
-		healthPool = poolName;
-		await refreshHealth(poolName);
+		healthFs = fsName;
+		await refreshHealth(fsName);
 	}
 
-	async function refreshHealth(poolName: string) {
+	async function refreshHealth(fsName: string) {
 		healthLoading = true;
 		try {
 			[fsUsage, scrubStatus, reconcileStatus] = await Promise.all([
-				client.call<FsUsage>('pool.usage', { name: poolName }),
-				client.call<ScrubStatus>('pool.scrub.status', { name: poolName }),
-				client.call<ReconcileStatus>('pool.reconcile.status', { name: poolName }),
+				client.call<FsUsage>('fs.usage', { name: fsName }),
+				client.call<ScrubStatus>('fs.scrub.status', { name: fsName }),
+				client.call<ReconcileStatus>('fs.reconcile.status', { name: fsName }),
 			]);
 		} catch {
 			// Individual calls may fail
@@ -408,12 +409,12 @@
 		healthLoading = false;
 	}
 
-	async function startScrub(poolName: string) {
+	async function startScrub(fsName: string) {
 		await withToast(
-			() => client.call('pool.scrub.start', { name: poolName }),
-			`Scrub started on "${poolName}"`
+			() => client.call('fs.scrub.start', { name: fsName }),
+			`Scrub started on "${fsName}"`
 		);
-		await refreshHealth(poolName);
+		await refreshHealth(fsName);
 	}
 
 	function toggleDevice(path: string) {
@@ -433,7 +434,7 @@
 		return devices.filter(d => !d.in_use && (showAddPartitions || d.dev_type !== 'part'));
 	}
 
-	function devDisplayState(dev: PoolDevice): string | null {
+	function devDisplayState(dev: FilesystemDevice): string | null {
 		if (dev.state === 'evacuating' && dev.has_data === null) return 'evacuated';
 		return dev.state;
 	}
@@ -463,7 +464,7 @@
 
 <div class="mb-4">
 	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}>
-		{wizardStep !== 0 ? 'Cancel' : 'Create Pool'}
+		{wizardStep !== 0 ? 'Cancel' : 'Create Filesystem'}
 	</Button>
 </div>
 
@@ -493,8 +494,8 @@
 			<!-- Step 1: Name + Devices -->
 			{#if wizardStep === 1}
 				<div class="mb-4">
-					<Label for="pool-name">Pool Name</Label>
-					<Input id="pool-name" bind:value={newName} class="mt-1 max-w-xs" />
+					<Label for="fs-name">Filesystem Name</Label>
+					<Input id="fs-name" bind:value={newName} class="mt-1 max-w-xs" />
 				</div>
 				<div class="mb-4">
 					<div class="mb-2 flex items-center justify-between">
@@ -752,7 +753,7 @@
 
 				<div class="flex gap-2">
 					<Button variant="secondary" size="sm" onclick={() => wizardStep = 2}>← Back</Button>
-					<Button size="sm" onclick={createPool}>Create Pool</Button>
+					<Button size="sm" onclick={createFs}>Create Filesystem</Button>
 				</div>
 			{/if}
 		</CardContent>
@@ -761,63 +762,63 @@
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
-{:else if pools.length === 0}
-	<p class="text-muted-foreground">No pools configured yet.</p>
+{:else if filesystems.length === 0}
+	<p class="text-muted-foreground">No filesystems configured yet.</p>
 {:else}
-	{#each pools as pool}
+	{#each filesystems as fs}
 		<Card class="mb-4">
 			<CardContent class="pt-4">
 				<div class="flex flex-wrap items-center justify-between gap-4">
 					<div class="flex cursor-pointer items-center gap-3" role="button" tabindex="0"
-						onclick={() => expandedPool = expandedPool === pool.name ? null : pool.name}
-						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') expandedPool = expandedPool === pool.name ? null : pool.name; }}>
-						<strong class="text-lg">{pool.name}</strong>
-						<Badge variant={pool.mounted ? 'default' : 'destructive'}>
-							{pool.mounted ? 'Mounted' : 'Unmounted'}
+						onclick={() => expandedFs = expandedFs === fs.name ? null : fs.name}
+						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') expandedFs = expandedFs === fs.name ? null : fs.name; }}>
+						<strong class="text-lg">{fs.name}</strong>
+						<Badge variant={fs.mounted ? 'default' : 'destructive'}>
+							{fs.mounted ? 'Mounted' : 'Unmounted'}
 						</Badge>
-						{#if pool.mounted && pool.mount_point}
-							<span class="font-mono text-xs text-muted-foreground">{pool.mount_point}</span>
+						{#if fs.mounted && fs.mount_point}
+							<span class="font-mono text-xs text-muted-foreground">{fs.mount_point}</span>
 						{/if}
 					</div>
 					<div class="flex gap-2">
-						<Button variant="secondary" size="xs" onclick={() => expandedPool = expandedPool === pool.name ? null : pool.name}>
-							{expandedPool === pool.name ? 'Hide Details' : 'Details'}
+						<Button variant="secondary" size="xs" onclick={() => expandedFs = expandedFs === fs.name ? null : fs.name}>
+							{expandedFs === fs.name ? 'Hide Details' : 'Details'}
 						</Button>
-						{#if pool.mounted}
-							<Button variant="secondary" size="xs" onclick={() => openEditOptions(pool)}>
-								{editOptionsPool === pool.name ? 'Hide Options' : 'Options'}
+						{#if fs.mounted}
+							<Button variant="secondary" size="xs" onclick={() => openEditOptions(fs)}>
+								{editOptionsFs === fs.name ? 'Hide Options' : 'Options'}
 							</Button>
-							<Button variant="secondary" size="xs" onclick={() => toggleHealth(pool.name)}>
-								{healthPool === pool.name ? 'Hide Health' : 'Health'}
+							<Button variant="secondary" size="xs" onclick={() => toggleHealth(fs.name)}>
+								{healthFs === fs.name ? 'Hide Health' : 'Health'}
 							</Button>
 						{/if}
-						<Button variant="secondary" size="xs" onclick={() => toggleMount(pool)}>
-							{pool.mounted ? 'Unmount' : 'Mount'}
+						<Button variant="secondary" size="xs" onclick={() => toggleMount(fs)}>
+							{fs.mounted ? 'Unmount' : 'Mount'}
 						</Button>
-						<Button variant="destructive" size="xs" onclick={() => destroyPool(pool.name)}>Destroy</Button>
+						<Button variant="destructive" size="xs" onclick={() => destroyFs(fs.name)}>Destroy</Button>
 					</div>
 				</div>
 
-				{#if pool.total_bytes > 0}
+				{#if fs.total_bytes > 0}
 					<div class="mt-3">
 						<div class="mb-1 h-1.5 overflow-hidden rounded-full bg-secondary">
-							<div class="h-full rounded-full bg-primary" style="width: {(pool.used_bytes / pool.total_bytes) * 100}%"></div>
+							<div class="h-full rounded-full bg-primary" style="width: {(fs.used_bytes / fs.total_bytes) * 100}%"></div>
 						</div>
 						<span class="text-xs text-muted-foreground">
-							{formatBytes(pool.used_bytes)} / {formatBytes(pool.total_bytes)} ({formatPercent(pool.used_bytes, pool.total_bytes)})
-							{#if pool.options.data_replicas && pool.options.data_replicas > 1} · {pool.options.data_replicas} replicas{/if}
-							{#if pool.options.compression} · {pool.options.compression}{/if}
+							{formatBytes(fs.used_bytes)} / {formatBytes(fs.total_bytes)} ({formatPercent(fs.used_bytes, fs.total_bytes)})
+							{#if fs.options.data_replicas && fs.options.data_replicas > 1} · {fs.options.data_replicas} replicas{/if}
+							{#if fs.options.compression} · {fs.options.compression}{/if}
 						</span>
 					</div>
 				{/if}
 
-				{#if editOptionsPool === pool.name}
+				{#if editOptionsFs === fs.name}
 				<div class="mt-4 border-t border-border pt-4">
 					<h4 class="mb-3 text-xs uppercase tracking-wide text-muted-foreground">Edit Options</h4>
 					<div class="flex flex-wrap gap-4">
 						<div>
-							<label for="edit-compression-{pool.name}" class="mb-1 block text-xs text-muted-foreground">Compression</label>
-							<select id="edit-compression-{pool.name}" bind:value={editCompression} class="h-9 rounded-md border border-input bg-transparent px-3 text-sm">
+							<label for="edit-compression-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Compression</label>
+							<select id="edit-compression-{fs.name}" bind:value={editCompression} class="h-9 rounded-md border border-input bg-transparent px-3 text-sm">
 								<option value="">None</option>
 								<option value="lz4">LZ4</option>
 								<option value="zstd">Zstd</option>
@@ -825,8 +826,8 @@
 							</select>
 						</div>
 						<div>
-							<label for="edit-bg-compression-{pool.name}" class="mb-1 block text-xs text-muted-foreground">Background Compression</label>
-							<select id="edit-bg-compression-{pool.name}" bind:value={editBgCompression} class="h-9 rounded-md border border-input bg-transparent px-3 text-sm">
+							<label for="edit-bg-compression-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Background Compression</label>
+							<select id="edit-bg-compression-{fs.name}" bind:value={editBgCompression} class="h-9 rounded-md border border-input bg-transparent px-3 text-sm">
 								<option value="">None</option>
 								<option value="lz4">LZ4</option>
 								<option value="zstd">Zstd</option>
@@ -834,21 +835,21 @@
 							</select>
 						</div>
 						<div>
-							<label for="edit-erasure-{pool.name}" class="mb-1 block text-xs text-muted-foreground">Erasure Coding</label>
+							<label for="edit-erasure-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Erasure Coding</label>
 							<label class="flex cursor-pointer items-center gap-2 text-sm">
-								<input id="edit-erasure-{pool.name}" type="checkbox" bind:checked={editErasureCode} class="h-4 w-4" />
+								<input id="edit-erasure-{fs.name}" type="checkbox" bind:checked={editErasureCode} class="h-4 w-4" />
 								Enabled
 							</label>
 						</div>
 					</div>
 					<div class="mt-3 flex gap-2">
-						<Button size="xs" onclick={() => saveOptions(pool.name)}>Save</Button>
-						<Button variant="secondary" size="xs" onclick={() => editOptionsPool = null}>Cancel</Button>
+						<Button size="xs" onclick={() => saveOptions(fs.name)}>Save</Button>
+						<Button variant="secondary" size="xs" onclick={() => editOptionsFs = null}>Cancel</Button>
 					</div>
 				</div>
 			{/if}
 
-			{#if healthPool === pool.name}
+			{#if healthFs === fs.name}
 					<div class="mt-4 border-t border-border pt-4">
 						{#if healthLoading}
 							<p class="text-sm text-muted-foreground">Loading health data...</p>
@@ -901,7 +902,7 @@
 									{#if scrubStatus?.raw}
 										<pre class="mb-3 max-h-[200px] overflow-auto whitespace-pre-wrap rounded bg-secondary p-2 font-mono text-xs text-muted-foreground">{scrubStatus.raw}</pre>
 									{/if}
-									<Button size="xs" onclick={() => startScrub(pool.name)}>Start Scrub</Button>
+									<Button size="xs" onclick={() => startScrub(fs.name)}>Start Scrub</Button>
 								</div>
 								<div class="rounded-lg border border-border p-4">
 									<h4 class="mb-2 text-xs uppercase tracking-wide text-muted-foreground">Reconcile</h4>
@@ -912,45 +913,45 @@
 									{/if}
 								</div>
 							</div>
-							<Button variant="secondary" size="xs" class="mt-4" onclick={() => refreshHealth(pool.name)}>Refresh</Button>
+							<Button variant="secondary" size="xs" class="mt-4" onclick={() => refreshHealth(fs.name)}>Refresh</Button>
 						{/if}
 					</div>
 				{/if}
 
-				{#if expandedPool === pool.name}
+				{#if expandedFs === fs.name}
 					<div class="mt-4 border-t border-border pt-4">
 						<div class="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs">
 							<span class="text-muted-foreground">Replicas</span>
-							<span>{pool.options.data_replicas ?? 1}</span>
+							<span>{fs.options.data_replicas ?? 1}</span>
 							<span class="text-muted-foreground">Checksum</span>
-							<span>{pool.options.data_checksum ?? '—'}</span>
+							<span>{fs.options.data_checksum ?? '—'}</span>
 							<span class="text-muted-foreground">Compression</span>
-							<span>{pool.options.compression ?? 'none'}{#if pool.options.background_compression} / bg: {pool.options.background_compression}{/if}</span>
+							<span>{fs.options.compression ?? 'none'}{#if fs.options.background_compression} / bg: {fs.options.background_compression}{/if}</span>
 							<span class="text-muted-foreground">Encrypted</span>
-							<span>{pool.options.encrypted ? 'Yes' : 'No'}</span>
-							{#if pool.options.foreground_target}
+							<span>{fs.options.encrypted ? 'Yes' : 'No'}</span>
+							{#if fs.options.foreground_target}
 								<span class="text-muted-foreground">FG Target</span>
-								<span>{pool.options.foreground_target}</span>
+								<span>{fs.options.foreground_target}</span>
 							{/if}
-							{#if pool.options.background_target}
+							{#if fs.options.background_target}
 								<span class="text-muted-foreground">BG Target</span>
-								<span>{pool.options.background_target}</span>
+								<span>{fs.options.background_target}</span>
 							{/if}
-							{#if pool.options.promote_target}
+							{#if fs.options.promote_target}
 								<span class="text-muted-foreground">Promote Target</span>
-								<span>{pool.options.promote_target}</span>
+								<span>{fs.options.promote_target}</span>
 							{/if}
-							{#if pool.options.metadata_target}
+							{#if fs.options.metadata_target}
 								<span class="text-muted-foreground">Meta Target</span>
-								<span>{pool.options.metadata_target}</span>
+								<span>{fs.options.metadata_target}</span>
 							{/if}
-							{#if pool.options.erasure_code}
+							{#if fs.options.erasure_code}
 								<span class="text-muted-foreground">Erasure Code</span>
 								<span>Enabled</span>
 							{/if}
-							{#if pool.options.error_action}
+							{#if fs.options.error_action}
 								<span class="text-muted-foreground">Error Action</span>
-								<span>{pool.options.error_action}</span>
+								<span>{fs.options.error_action}</span>
 							{/if}
 						</div>
 
@@ -966,7 +967,7 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each pool.devices as dev}
+								{#each fs.devices as dev}
 									<tr class="border-b border-border">
 										<td class="p-2 font-mono text-xs">
 											{dev.path}
@@ -978,20 +979,20 @@
 											{/if}
 										</td>
 										<td class="p-2 text-xs">
-										{#if pool.mounted && editingLabel === `${pool.name}|${dev.path}`}
+										{#if fs.mounted && editingLabel === `${fs.name}|${dev.path}`}
 											<!-- svelte-ignore a11y_autofocus -->
 											<input
 												class="w-28 rounded border border-input bg-background px-1.5 py-0.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring"
 												bind:value={editLabelValue}
-												onblur={() => saveDeviceLabel(pool.name, dev.path)}
-												onkeydown={(e) => { if (e.key === 'Enter') saveDeviceLabel(pool.name, dev.path); if (e.key === 'Escape') editingLabel = null; }}
+												onblur={() => saveDeviceLabel(fs.name, dev.path)}
+												onkeydown={(e) => { if (e.key === 'Enter') saveDeviceLabel(fs.name, dev.path); if (e.key === 'Escape') editingLabel = null; }}
 												autofocus
 											/>
 										{:else}
 											<button
-												class="rounded px-1 py-0.5 text-left hover:bg-secondary {dev.label ? '' : 'text-muted-foreground'} {pool.mounted ? 'cursor-text' : 'cursor-default'}"
-												onclick={() => { if (pool.mounted) startEditLabel(pool.name, dev); }}
-												title={pool.mounted ? 'Click to edit label' : ''}
+												class="rounded px-1 py-0.5 text-left hover:bg-secondary {dev.label ? '' : 'text-muted-foreground'} {fs.mounted ? 'cursor-text' : 'cursor-default'}"
+												onclick={() => { if (fs.mounted) startEditLabel(fs.name, dev); }}
+												title={fs.mounted ? 'Click to edit label' : ''}
 											>
 												{dev.label ?? '—'}
 											</button>
@@ -1011,18 +1012,18 @@
 										<td class="p-2 font-mono text-xs text-muted-foreground">{dev.has_data ?? '—'}</td>
 										<td class="p-2 w-px whitespace-nowrap">
 											<div class="flex gap-1.5 items-center">
-											{#if pool.mounted}
+											{#if fs.mounted}
 												{@const ds = devDisplayState(dev)}
 												{#if ds === 'rw'}
-													<Button variant="secondary" size="xs" onclick={() => setDeviceState(pool.name, dev.path, 'ro')}>Set RO</Button>
-													<Button variant="secondary" size="xs" onclick={() => offlineDevice(pool.name, dev.path)}>Offline</Button>
+													<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'ro')}>Set RO</Button>
+													<Button variant="secondary" size="xs" onclick={() => offlineDevice(fs.name, dev.path)}>Offline</Button>
 												{:else if ds === 'ro'}
-													<Button variant="secondary" size="xs" onclick={() => setDeviceState(pool.name, dev.path, 'rw')}>Set RW</Button>
+													<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'rw')}>Set RW</Button>
 												{/if}
 												{#if ds !== 'spare' && ds !== 'evacuated'}
-													<Button variant="secondary" size="xs" onclick={() => evacuateDevice(pool.name, dev.path)}>Evacuate</Button>
+													<Button variant="secondary" size="xs" onclick={() => evacuateDevice(fs.name, dev.path)}>Evacuate</Button>
 												{/if}
-												<Button variant="destructive" size="xs" onclick={() => removeDevice(pool.name, dev.path)}>Remove</Button>
+												<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 											{/if}
 											</div>
 										</td>
@@ -1031,8 +1032,8 @@
 							</tbody>
 						</table>
 
-						{#if pool.mounted}
-							{#if addDevicePool === pool.name}
+						{#if fs.mounted}
+							{#if addDeviceFs === fs.name}
 								<div class="mt-3 rounded-lg bg-secondary p-3">
 									<div class="mb-2 flex items-center justify-between">
 										<Label>Add Device</Label>
@@ -1058,12 +1059,12 @@
 										</div>
 									{/if}
 									<div class="mt-2 flex gap-2">
-										<Button size="xs" onclick={() => addDevice(pool.name)} disabled={!addDevicePath}>Add</Button>
-										<Button variant="secondary" size="xs" onclick={() => { addDevicePool = null; addDevicePath = ''; addDeviceLabel = ''; }}>Cancel</Button>
+										<Button size="xs" onclick={() => addDevice(fs.name)} disabled={!addDevicePath}>Add</Button>
+										<Button variant="secondary" size="xs" onclick={() => { addDeviceFs = null; addDevicePath = ''; addDeviceLabel = ''; }}>Cancel</Button>
 									</div>
 								</div>
 							{:else}
-								<Button variant="secondary" size="xs" class="mt-3" onclick={() => addDevicePool = pool.name}>+ Add Device</Button>
+								<Button variant="secondary" size="xs" class="mt-3" onclick={() => addDeviceFs = fs.name}>+ Add Device</Button>
 							{/if}
 						{/if}
 					</div>

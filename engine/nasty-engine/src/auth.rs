@@ -27,8 +27,8 @@ pub struct User {
 pub enum Role {
     Admin,
     ReadOnly,
-    /// Can create/delete/attach subvolumes and snapshots, read pools.
-    /// Cannot destroy pools, manage users, or touch system settings.
+    /// Can create/delete/attach subvolumes and snapshots, read filesystems.
+    /// Cannot destroy filesystems, manage users, or touch system settings.
     Operator,
 }
 
@@ -40,9 +40,9 @@ pub struct Session {
     pub token: String,
     pub username: String,
     pub role: Role,
-    /// For API tokens: restricts pool visibility to a single pool.
+    /// For API tokens: restricts filesystem visibility to a single filesystem.
     #[serde(default)]
-    pub pool: Option<String>,
+    pub filesystem: Option<String>,
     /// For API tokens: only subvolumes with this owner are visible/manageable.
     #[serde(default)]
     pub owner: Option<String>,
@@ -65,9 +65,9 @@ pub struct ApiToken {
     pub token: String,
     pub role: Role,
     pub created_at: u64,
-    /// If set, token can only see/manage subvolumes in this pool.
+    /// If set, token can only see/manage subvolumes in this filesystem.
     #[serde(default)]
-    pub pool: Option<String>,
+    pub filesystem: Option<String>,
     /// Unix timestamp after which the token is rejected. None = never expires.
     #[serde(default)]
     pub expires_at: Option<u64>,
@@ -82,7 +82,7 @@ pub struct ApiTokenInfo {
     pub name: String,
     pub role: Role,
     pub created_at: u64,
-    pub pool: Option<String>,
+    pub filesystem: Option<String>,
     pub expires_at: Option<u64>,
     pub allowed_ips: Vec<String>,
 }
@@ -188,7 +188,7 @@ impl AuthService {
             token: token.clone(),
             username: user.username.clone(),
             role: user.role.clone(),
-            pool: None,
+            filesystem: None,
             owner: None,
             created_at: Some(now),
             must_change_password: user.must_change_password,
@@ -268,7 +268,7 @@ impl AuthService {
             token: token.to_string(),
             username: t.name.clone(),
             role: t.role.clone(),
-            pool: t.pool.clone(),
+            filesystem: t.filesystem.clone(),
             owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
             created_at: Some(t.created_at),
             must_change_password: false,
@@ -282,7 +282,7 @@ impl AuthService {
         session: &Session,
         name: &str,
         role: Role,
-        pool: Option<String>,
+        filesystem: Option<String>,
         expires_in_secs: Option<u64>,
         allowed_ips: Vec<String>,
     ) -> Result<ApiToken, AuthError> {
@@ -311,7 +311,7 @@ impl AuthService {
             token: token_hash,
             role: role.clone(),
             created_at,
-            pool: pool.clone(),
+            filesystem: filesystem.clone(),
             expires_at,
             allowed_ips: allowed_ips.clone(),
         };
@@ -329,7 +329,7 @@ impl AuthService {
             token: raw_token,
             role,
             created_at,
-            pool,
+            filesystem,
             expires_at,
             allowed_ips,
         })
@@ -349,7 +349,7 @@ impl AuthService {
                 name: t.name.clone(),
                 role: t.role.clone(),
                 created_at: t.created_at,
-                pool: t.pool.clone(),
+                filesystem: t.filesystem.clone(),
                 expires_at: t.expires_at,
                 allowed_ips: t.allowed_ips.clone(),
             })
