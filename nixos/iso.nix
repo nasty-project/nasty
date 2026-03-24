@@ -160,8 +160,8 @@ in
         exit 1
       fi
 
-      if [ "$PART_MODE" = "2" ] && [ "$DISK_SIZE_G" -lt 16 ]; then
-        echo "Error: disk too small for split mode (need at least 16 GiB, have ''${DISK_SIZE_G} GiB)"
+      if [ "$PART_MODE" = "2" ] && [ "$DISK_SIZE_G" -lt 24 ]; then
+        echo "Error: disk too small for split mode (need at least 24 GiB for 20 GiB OS + data, have ''${DISK_SIZE_G} GiB)"
         exit 1
       fi
 
