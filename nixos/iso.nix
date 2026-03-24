@@ -102,9 +102,9 @@ in
 
   boot.supportedFilesystems = [ "bcachefs" ];
 
-  # UEFI-only boot (no legacy BIOS support)
+  # Support both UEFI and legacy BIOS boot
   isoImage.makeEfiBootable = true;
-  isoImage.makeUsbBootable = lib.mkForce false;
+  isoImage.makeUsbBootable = true;
   isoImage.grubTheme = nasty-grub-theme;
 
   environment.systemPackages = with pkgs; [
@@ -235,7 +235,7 @@ in
 
       if [ "$PART_MODE" = "2" ]; then
         PART3="''${DISK}''${PSEP}3"
-        echo "==> Data partition: $PART3 (left unformatted for pool creation via WebUI)"
+        echo "==> Data partition: $PART3 (left unformatted for filesystem creation via WebUI)"
       fi
 
       echo "==> Mounting..."
@@ -260,11 +260,11 @@ in
       echo "==> Generating hardware configuration..."
       nixos-generate-config --root /mnt --dir /tmp/hw-config
 
-      # Strip any /storage/ pool mount entries from the generated config.
-      # Pool mounts are managed at runtime by the engine; if left in
-      # hardware-configuration.nix they will block boot after pool destruction.
+      # Strip any /fs/ mount entries from the generated config.
+      # Filesystem mounts are managed at runtime by the engine; if left in
+      # hardware-configuration.nix they will block boot after filesystem destruction.
       awk '
-        /fileSystems\."\/storage\// { skip=1; depth=0 }
+        /fileSystems\."\/fs\// { skip=1; depth=0 }
         skip {
           for (i=1; i<=length($0); i++) {
             c = substr($0, i, 1)
@@ -340,7 +340,7 @@ in
       echo "  Default login: admin / admin"
       echo ""
       if [ "$PART_MODE" = "2" ]; then
-        echo "  Data partition: $PART3 (create a pool via WebUI)"
+        echo "  Data partition: $PART3 (create a filesystem via WebUI)"
         echo ""
       fi
       echo "  To reconfigure later:"
