@@ -206,6 +206,36 @@ pub struct UpdateVmRequest {
     pub autostart: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SnapshotVmRequest {
+    /// VM ID.
+    pub id: String,
+    /// Snapshot name (applied to all disk subvolumes).
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CloneVmRequest {
+    /// Source VM ID.
+    pub id: String,
+    /// Name for the cloned VM.
+    pub new_name: String,
+}
+
+/// Disk info resolved from a VM's disk path back to filesystem/subvolume.
+/// Block subvolumes use loop devices, so the path is `/dev/loopX`.
+/// We track the filesystem and subvolume name in the VM disk path comments
+/// or resolve them from the subvolume service at runtime.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct VmDiskSubvolume {
+    /// Filesystem name.
+    pub filesystem: String,
+    /// Subvolume name.
+    pub subvolume: String,
+    /// Block device path.
+    pub device: String,
+}
+
 // ── Capabilities ────────────────────────────────────────────────
 
 /// Runtime capabilities — what the host supports.

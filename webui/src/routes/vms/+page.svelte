@@ -27,6 +27,9 @@
 	let newCpus = $state(1);
 	let newMemory = $state(1024);
 	let newDisk = $state('');
+	let newDiskCreate = $state(false);
+	let newDiskFs = $state('');
+	let newDiskSize = $state(10); // GiB
 	let newIso = $state('');
 	let newDescription = $state('');
 	let newBootOrder = $state('disk');
@@ -35,6 +38,12 @@
 
 	// Passthrough edit state (for running/stopped VM detail view)
 	let editPtVm = $state<string | null>(null);
+
+	// Snapshot/clone dialogs
+	let snapshotVm = $state<string | null>(null);
+	let snapshotName = $state('');
+	let cloneVm = $state<string | null>(null);
+	let cloneName = $state('');
 
 	// Console state
 	let consoleVm: VmStatus | null = $state(null);
@@ -49,9 +58,21 @@
 
 	const client = getClient();
 
+	let filesystems: { name: string; mounted: boolean }[] = $state([]);
+
 	$effect(() => {
-		if (showCreate) loadSubvolumes();
+		if (showCreate) {
+			loadSubvolumes();
+			loadFilesystems();
+		}
 	});
+
+	async function loadFilesystems() {
+		try {
+			filesystems = await client.call<{ name: string; mounted: boolean }[]>('fs.list');
+			filesystems = filesystems.filter(f => f.mounted);
+		} catch { /* ignore */ }
+	}
 
 	// Initialize serial console (xterm) when element mounts
 	$effect(() => {
@@ -169,6 +190,30 @@
 
 	async function create() {
 		if (!newName) return;
+
+		let diskPath = newDisk;
+
+		// Create a new block subvolume if requested
+		if (newDiskCreate && newDiskFs && newDiskSize > 0) {
+			const svName = `vm-${newName}`;
+			const sizeBytes = newDiskSize * 1024 * 1024 * 1024;
+			const svResult = await withToast(
+				() => client.call('subvolume.create', {
+					filesystem: newDiskFs,
+					name: svName,
+					subvolume_type: 'block',
+					volsize_bytes: sizeBytes,
+				}),
+				'Disk subvolume created'
+			);
+			if (svResult === undefined) return; // creation failed
+			diskPath = (svResult as any).block_device ?? '';
+			if (!diskPath) {
+				await withToast(async () => { throw new Error('Block device not attached'); }, '');
+				return;
+			}
+		}
+
 		const params: Record<string, unknown> = {
 			name: newName,
 			cpus: newCpus,
@@ -176,8 +221,8 @@
 			boot_order: newBootOrder,
 			autostart: newAutostart,
 		};
-		if (newDisk) {
-			params.disks = [{ path: newDisk, interface: 'virtio', readonly: false }];
+		if (diskPath) {
+			params.disks = [{ path: diskPath, interface: 'virtio', readonly: false }];
 		}
 		if (newIso) {
 			params.boot_iso = newIso;
@@ -198,6 +243,7 @@
 		if (ok !== undefined) {
 			showCreate = false;
 			newName = ''; newCpus = 1; newMemory = 1024; newDisk = '';
+			newDiskCreate = false; newDiskFs = ''; newDiskSize = 10;
 			newIso = ''; newDescription = ''; newBootOrder = 'disk';
 			newAutostart = false; newPassthrough = [];
 			await refresh();
@@ -242,6 +288,27 @@
 			() => client.call('vm.delete', { id }),
 			'VM deleted'
 		);
+		await refresh();
+	}
+
+	async function snapshotVmAction() {
+		if (!snapshotVm || !snapshotName) return;
+		await withToast(
+			() => client.call('vm.snapshot', { id: snapshotVm, name: snapshotName }),
+			'VM snapshot created'
+		);
+		snapshotVm = null;
+		snapshotName = '';
+	}
+
+	async function cloneVmAction() {
+		if (!cloneVm || !cloneName) return;
+		await withToast(
+			() => client.call('vm.clone', { id: cloneVm, new_name: cloneName }),
+			'VM cloned'
+		);
+		cloneVm = null;
+		cloneName = '';
 		await refresh();
 	}
 
@@ -385,13 +452,38 @@
 				</div>
 			</div>
 			<div class="mb-4">
-				<Label for="vm-disk">Boot Disk (block subvolume)</Label>
-				<select id="vm-disk" bind:value={newDisk} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-					<option value="">None (ISO boot only)</option>
-					{#each blockSubvolumes as sv}
-						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
-					{/each}
-				</select>
+				<div class="flex items-center justify-between">
+					<Label>Boot Disk</Label>
+					<label class="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+						<input type="checkbox" bind:checked={newDiskCreate} class="rounded border-input" />
+						Create new disk
+					</label>
+				</div>
+				{#if newDiskCreate}
+					<div class="grid grid-cols-2 gap-3 mt-1">
+						<div>
+							<Label class="text-xs">Filesystem</Label>
+							<select bind:value={newDiskFs} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="">Select...</option>
+								{#each filesystems as fs}
+									<option value={fs.name}>{fs.name}</option>
+								{/each}
+							</select>
+						</div>
+						<div>
+							<Label class="text-xs">Size (GiB)</Label>
+							<Input type="number" bind:value={newDiskSize} min={1} class="mt-1" />
+						</div>
+					</div>
+					<span class="mt-1 block text-xs text-muted-foreground">A block subvolume named "vm-{newName || '...'}" will be created.</span>
+				{:else}
+					<select bind:value={newDisk} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+						<option value="">None (ISO boot only)</option>
+						{#each blockSubvolumes as sv}
+							<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
+						{/each}
+					</select>
+				{/if}
 			</div>
 			<div class="mb-4">
 				<Label for="vm-iso">Boot ISO (optional)</Label>
@@ -611,11 +703,51 @@
 								</div>
 
 								<!-- Actions -->
-								<div class="flex gap-2 pt-2">
+								<div class="flex flex-wrap gap-2 pt-2">
 									<Button size="xs" variant="outline" onclick={() => toggleAutostart(vm)}>
 										{vm.autostart ? 'Disable Autostart' : 'Enable Autostart'}
 									</Button>
+									{#if vm.disks.length > 0}
+										<Button size="xs" variant="outline" onclick={() => { snapshotVm = vm.id; snapshotName = ''; }}>
+											Snapshot
+										</Button>
+									{/if}
+									{#if !vm.running && vm.disks.length > 0}
+										<Button size="xs" variant="outline" onclick={() => { cloneVm = vm.id; cloneName = ''; }}>
+											Clone
+										</Button>
+									{/if}
 								</div>
+
+								<!-- Inline snapshot form -->
+								{#if snapshotVm === vm.id}
+									<div class="mt-3 rounded border p-3 max-w-sm">
+										<Label class="text-xs">Snapshot Name</Label>
+										<div class="flex gap-2 mt-1">
+											<Input bind:value={snapshotName} placeholder="before-upgrade" class="h-8 text-xs" />
+											<Button size="xs" onclick={snapshotVmAction} disabled={!snapshotName}>Create</Button>
+											<Button size="xs" variant="ghost" onclick={() => snapshotVm = null}>Cancel</Button>
+										</div>
+										<span class="mt-1 block text-xs text-muted-foreground">
+											{vm.running ? 'Snapshot will attempt to freeze guest filesystems first.' : 'VM is stopped — snapshot will be crash-consistent.'}
+										</span>
+									</div>
+								{/if}
+
+								<!-- Inline clone form -->
+								{#if cloneVm === vm.id}
+									<div class="mt-3 rounded border p-3 max-w-sm">
+										<Label class="text-xs">Clone Name</Label>
+										<div class="flex gap-2 mt-1">
+											<Input bind:value={cloneName} placeholder="my-vm-copy" class="h-8 text-xs" />
+											<Button size="xs" onclick={cloneVmAction} disabled={!cloneName}>Clone</Button>
+											<Button size="xs" variant="ghost" onclick={() => cloneVm = null}>Cancel</Button>
+										</div>
+										<span class="mt-1 block text-xs text-muted-foreground">
+											Creates a new VM with COW-cloned disk subvolumes. Passthrough devices are not copied.
+										</span>
+									</div>
+								{/if}
 							</div>
 						</td>
 					</tr>

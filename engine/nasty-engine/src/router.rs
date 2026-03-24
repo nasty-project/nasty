@@ -26,6 +26,7 @@ fn is_operator_allowed(method: &str) -> bool {
             | "share.nvmeof.add_host" | "share.nvmeof.remove_host"
             | "vm.create" | "vm.update" | "vm.delete"
             | "vm.start" | "vm.stop" | "vm.kill"
+            | "vm.snapshot" | "vm.clone"
         )
 }
 
@@ -1181,6 +1182,20 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+        "vm.snapshot" => match parse_params::<nasty_vm::SnapshotVmRequest>(req) {
+            Ok(p) => match vm_snapshot(state, &p).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
+        "vm.clone" => match parse_params::<nasty_vm::CloneVmRequest>(req) {
+            Ok(p) => match vm_clone(state, &p).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
 
         // ── Unknown ─────────────────────────────────────────────
         _ => Response::error(
@@ -1275,4 +1290,129 @@ async fn check_block_device_conflict(
     }
 
     None
+}
+
+// ── VM storage integration ──────────────────────────────────────
+
+/// Resolve VM disk paths to filesystem/subvolume pairs by matching
+/// against all block subvolumes' attached loop devices.
+async fn resolve_vm_disks(
+    state: &AppState,
+    vm: &nasty_vm::VmConfig,
+) -> Vec<nasty_vm::VmDiskSubvolume> {
+    let all_subvols = state.subvolumes.list_all(None, None).await.unwrap_or_default();
+    let mut resolved = Vec::new();
+    for disk in &vm.disks {
+        for sv in &all_subvols {
+            if let Some(ref bd) = sv.block_device {
+                if bd == &disk.path {
+                    resolved.push(nasty_vm::VmDiskSubvolume {
+                        filesystem: sv.filesystem.clone(),
+                        subvolume: sv.name.clone(),
+                        device: disk.path.clone(),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+    resolved
+}
+
+/// Snapshot all block subvolumes belonging to a VM.
+async fn vm_snapshot(
+    state: &AppState,
+    req: &nasty_vm::SnapshotVmRequest,
+) -> Result<Vec<nasty_vm::VmDiskSubvolume>, String> {
+    let vm_status = state.vms.get(&req.id).await.map_err(|e| e.to_string())?;
+    let disks = resolve_vm_disks(state, &vm_status.config).await;
+
+    if disks.is_empty() {
+        return Err("no block subvolumes found for this VM".to_string());
+    }
+
+    // VM should ideally be stopped or paused for consistent snapshots
+    if vm_status.running {
+        // Send sync to guest via QMP if possible (best-effort)
+        let _ = nasty_vm::qmp::execute(
+            &format!("/run/nasty/vm/{}.qmp", req.id),
+            "guest-fsfreeze-freeze",
+            None,
+        ).await;
+    }
+
+    for disk in &disks {
+        let snap_req = nasty_storage::subvolume::CreateSnapshotRequest {
+            filesystem: disk.filesystem.clone(),
+            subvolume: disk.subvolume.clone(),
+            name: req.name.clone(),
+            read_only: Some(true),
+        };
+        state.snapshots.create(snap_req, None).await.map_err(|e| {
+            format!("failed to snapshot {}/{}: {e}", disk.filesystem, disk.subvolume)
+        })?;
+    }
+
+    // Thaw if we froze
+    if vm_status.running {
+        let _ = nasty_vm::qmp::execute(
+            &format!("/run/nasty/vm/{}.qmp", req.id),
+            "guest-fsfreeze-thaw",
+            None,
+        ).await;
+    }
+
+    Ok(disks)
+}
+
+/// Clone a VM: create a new VM config with COW-cloned disk subvolumes.
+async fn vm_clone(
+    state: &AppState,
+    req: &nasty_vm::CloneVmRequest,
+) -> Result<nasty_vm::VmConfig, String> {
+    let vm_status = state.vms.get(&req.id).await.map_err(|e| e.to_string())?;
+
+    if vm_status.running {
+        return Err("stop the VM before cloning".to_string());
+    }
+
+    let disks = resolve_vm_disks(state, &vm_status.config).await;
+
+    // Clone each block subvolume
+    let mut new_disks = Vec::new();
+    for disk in &disks {
+        let clone_name = format!("{}-{}", disk.subvolume, req.new_name);
+        let clone_req = nasty_storage::subvolume::CloneSubvolumeRequest {
+            filesystem: disk.filesystem.clone(),
+            name: disk.subvolume.clone(),
+            new_name: clone_name.clone(),
+        };
+        let cloned = state.subvolumes.clone_subvolume(clone_req, None).await.map_err(|e| {
+            format!("failed to clone {}/{}: {e}", disk.filesystem, disk.subvolume)
+        })?;
+
+        new_disks.push(nasty_vm::VmDisk {
+            path: cloned.block_device.unwrap_or_default(),
+            interface: "virtio".to_string(),
+            readonly: false,
+        });
+    }
+
+    // Create new VM config based on the source, with cloned disks
+    let src = &vm_status.config;
+    let create_req = nasty_vm::CreateVmRequest {
+        name: req.new_name.clone(),
+        cpus: Some(src.cpus),
+        memory_mib: Some(src.memory_mib),
+        disks: if new_disks.is_empty() { None } else { Some(new_disks) },
+        networks: Some(src.networks.clone()),
+        passthrough_devices: None, // Don't clone passthrough — can't share devices
+        boot_iso: None,
+        boot_order: Some(src.boot_order.clone()),
+        uefi: Some(src.uefi),
+        description: Some(format!("Clone of {}", src.name)),
+        autostart: Some(false),
+    };
+
+    state.vms.create(create_req).await.map_err(|e| e.to_string())
 }
