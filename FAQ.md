@@ -12,7 +12,7 @@ NASty wraps bcachefs in a real appliance: WebUI, 4-protocol sharing (NFS, SMB, i
 
 ZFS is battle-tested and great. We're not here to trash it. But:
 
-- **bcachefs is native Linux.** No out-of-tree kernel modules, no CDDL license friction, no DKMS rebuilds on kernel upgrades.
+- **bcachefs is GPL Linux.** No CDDL license friction. Kernel module builds are fully automated on NixOS — no manual DKMS steps.
 - **Simpler model.** A "filesystem" is just a filesystem. Subvolumes are just directories. Snapshots are just snapshots. No datasets, zvols, pools-within-pools, or property inheritance trees.
 - **Modern features out of the box.** Tiering (move cold data to slow disks automatically), erasure coding, and online filesystem repair — things that ZFS either doesn't have or requires third-party tools.
 - **Active development.** Kent Overstreet is shipping features at a pace ZFS hasn't seen in years.
