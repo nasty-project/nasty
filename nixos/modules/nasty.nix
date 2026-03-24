@@ -372,6 +372,22 @@ in {
     # They are loaded on demand by the engine when the user enables
     # a protocol, keeping a clean default state on fresh installs.
 
+    # ── k3s (app runtime, disabled by default) ─────────────────
+    # k3s is installed but NOT started automatically. The engine starts it
+    # via systemctl when the user enables apps from the WebUI.
+    services.k3s = {
+      enable = true;
+      role = "server";
+      extraFlags = builtins.toString [
+        "--disable=traefik"         # NASty has its own nginx
+        "--disable=servicelb"       # Use NodePort instead
+        "--disable=metrics-server"  # Not needed for app workloads
+        "--write-kubeconfig-mode=644"
+      ];
+    };
+    # Prevent k3s from starting on boot — engine manages this.
+    systemd.services.k3s.wantedBy = lib.mkForce [];
+
     # ── VM support (OVMF firmware symlinks) ────────────────────
     # The engine expects OVMF firmware at a well-known path. NixOS stores
     # it in the Nix store, so we create stable symlinks.
@@ -388,6 +404,9 @@ in {
       qemu              # QEMU/KVM for virtual machines
       OVMF              # UEFI firmware for VMs
       pciutils          # lspci for passthrough device discovery
+      k3s               # lightweight Kubernetes for app runtime (optional)
+      helm              # Helm chart manager for app deployment
+      kubectl           # Kubernetes CLI
 
       (writeShellScriptBin "nasty-report" ''
         set -euo pipefail
@@ -683,6 +702,7 @@ in {
         nix              # nix flake lock (for bcachefs-tools version switching)
         git              # for update check (git ls-remote)
         curl             # for update check (GitHub API, TODO: remove when repo is public)
+        qemu             # QEMU/KVM for virtual machines
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
