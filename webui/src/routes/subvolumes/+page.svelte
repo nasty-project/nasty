@@ -324,6 +324,11 @@
 			snapName = '';
 		}
 		await refresh();
+		// Update detail view so tab count reflects the new snapshot
+		if (detailSv) {
+			const updated = subvolumes.find(sv => sv.name === detailSv!.name);
+			if (updated) detailSv = updated;
+		}
 	}
 
 	async function cloneSubvolume() {
@@ -370,6 +375,10 @@
 			`Snapshot "${snap}" deleted`
 		);
 		await refresh();
+		if (detailSv) {
+			const updated = subvolumes.find(sv => sv.name === detailSv!.name);
+			if (updated) detailSv = updated;
+		}
 	}
 
 	const mountedFilesystems = $derived(filesystems.filter(p => p.mounted));
