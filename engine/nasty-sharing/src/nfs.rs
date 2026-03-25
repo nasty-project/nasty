@@ -56,7 +56,7 @@ pub struct NfsClient {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateNfsShareRequest {
-    /// Absolute path to export (must exist and be under `/storage/`).
+    /// Absolute path to export (must exist and be under `/fs/`).
     pub path: String,
     /// Optional description.
     pub comment: Option<String>,

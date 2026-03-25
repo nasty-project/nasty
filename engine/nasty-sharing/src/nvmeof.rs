@@ -484,7 +484,7 @@ impl NvmeofService {
         configfs_mkdir(&ns_path).await?;
         configfs_write(&format!("{ns_path}/device_path"), &req.device_path).await?;
         // Direct I/O — vol.img has nocow set, so writes are in-place (no COW overhead).
-        // This matches TrueNAS's approach for ZVOL-backed namespaces.
+        // This matches TrueNAS's approach for block subvolume-backed namespaces.
         configfs_write(&format!("{ns_path}/buffered_io"), "0").await?;
         configfs_write(&format!("{ns_path}/enable"), "1").await?;
 

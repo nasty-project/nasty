@@ -479,7 +479,7 @@
 			</div>
 			<div class="mb-4">
 				<Label for="vm-iso">Boot ISO (optional)</Label>
-				<Input id="vm-iso" bind:value={newIso} placeholder="/storage/tank/isos/ubuntu.iso" class="mt-1" />
+				<Input id="vm-iso" bind:value={newIso} placeholder="/fs/first/isos/ubuntu.iso" class="mt-1" />
 				<span class="mt-1 block text-xs text-muted-foreground">Path to an ISO image for OS installation.</span>
 			</div>
 			<div class="mb-4">

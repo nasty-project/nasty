@@ -64,7 +64,7 @@ impl HasId for SmbShare {
 pub struct CreateSmbShareRequest {
     /// Samba share name (1–80 characters, no special characters).
     pub name: String,
-    /// Absolute path to share (must exist and be under `/storage/`).
+    /// Absolute path to share (must exist and be under `/fs/`).
     pub path: String,
     /// Optional description.
     pub comment: Option<String>,

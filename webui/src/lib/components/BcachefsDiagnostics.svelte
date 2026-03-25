@@ -90,7 +90,7 @@
 	// ── Terminal tab (fs top / fs timestats) ──────────────────
 
 	function mountPath() {
-		return filesystems.find(p => p.name === selectedFs)?.mount_point ?? `/storage/${selectedFs}`;
+		return filesystems.find(p => p.name === selectedFs)?.mount_point ?? `/fs/${selectedFs}`;
 	}
 
 	async function startTerm() {
