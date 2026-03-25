@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use axum::{
     extract::{
-        Multipart,
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
@@ -138,7 +137,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws/vm/{vm_id}/vnc", get(vm_console::vnc_handler))
         .route("/ws/vm/{vm_id}/serial", get(vm_console::serial_handler))
         .route("/api/login", post(login_handler))
-        .route("/api/upload/vm-image", post(upload_vm_image_handler))
         .route("/health", get(health))
         .with_state(state);
 
@@ -167,110 +165,6 @@ fn sd_notify_ready() {
 
 async fn health() -> &'static str {
     "ok"
-}
-
-// ── VM Image Upload ────────────────────────────────────────────────
-
-async fn upload_vm_image_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<Arc<AppState>>,
-    mut multipart: Multipart,
-) -> impl IntoResponse {
-    // Authenticate
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
-
-    let token = match token {
-        Some(t) => t,
-        None => {
-            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Missing authorization token" }))).into_response();
-        }
-    };
-
-    let client_ip = headers.get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
-
-    let session = match state.auth.validate(&token, client_ip).await {
-        Ok(s) => s,
-        Err(e) => {
-            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": format!("Invalid token: {}", e) }))).into_response();
-        }
-    };
-
-    // Get or create the images subvolume
-    let filesystems = state.filesystems.list().await.unwrap_or_default();
-    let fs_name = filesystems.first().map(|f| f.name.clone()).unwrap_or_default();
-    
-    if fs_name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No filesystems available" }))).into_response();
-    }
-
-    let subvolume = match state.subvolumes.get(&fs_name, "images", None).await {
-        Ok(sv) => sv,
-        Err(_) => {
-            // Create the images subvolume if it doesn't exist
-            let req = nasty_storage::subvolume::CreateSubvolumeRequest {
-                filesystem: fs_name.clone(),
-                name: "images".to_string(),
-                subvolume_type: nasty_storage::subvolume::SubvolumeType::Filesystem,
-                volsize_bytes: None,
-                compression: Some("zstd".to_string()),
-                comments: Some("VM images (ISO, qcow2, img, raw)".to_string()),
-            };
-            match state.subvolumes.create(req, None::<String>).await {
-                Ok(sv) => sv,
-                Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to create images subvolume: {}", e) }))).into_response();
-                }
-            }
-        }
-    };
-
-    // Process the uploaded file
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let file_name = field.file_name().unwrap_or("").to_string();
-        
-        if file_name.is_empty() {
-            continue;
-        }
-
-        let extensions = ["iso", "qcow2", "img", "raw"];
-        let ext = std::path::Path::new(&file_name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
-            .unwrap_or_default();
-
-        if !extensions.contains(&ext.as_str()) {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("Invalid file type. Supported: {:?}", extensions) }))).into_response();
-        }
-
-        let dest_path = std::path::Path::new(&subvolume.path).join(&file_name);
-        
-        // Read file content and write to disk
-        match field.bytes().await {
-            Ok(data) => {
-                if let Err(e) = tokio::fs::write(&dest_path, data).await {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to save file: {}", e) }))).into_response();
-                }
-                info!("User '{}' uploaded VM image: {}", session.username, file_name);
-                return (StatusCode::OK, Json(serde_json::json!({ 
-                    "name": file_name,
-                    "path": dest_path.to_string_lossy(),
-                    "filesystem": fs_name,
-                }))).into_response();
-            }
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to save file: {}", e) }))).into_response();
-            }
-        }
-    }
-
-    (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No file provided" }))).into_response()
 }
 
 // ── Login endpoint ──────────────────────────────────────────────

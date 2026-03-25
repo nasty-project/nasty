@@ -33,8 +33,6 @@
 	let newIso = $state('');
 	let imageFiles: { name: string; path: string; filesystem: string; size_bytes: number }[] = $state([]);
 	let noImagesSubvolume = $state(false);
-	let uploading = $state(false);
-	let uploadProgress = $state(0);
 	let newDescription = $state('');
 	let newBootOrder = $state('disk');
 	let newAutostart = $state(false);
@@ -94,55 +92,6 @@
 		);
 		await loadImages();
 		noImagesSubvolume = false;
-	}
-
-	async function uploadImage(event: Event) {
-		const input = event.target as HTMLInputElement;
-		if (!input.files || input.files.length === 0) return;
-
-		const file = input.files[0];
-		uploading = true;
-		uploadProgress = 0;
-
-		try {
-			const formData = new FormData();
-			formData.append('file', file);
-
-			const xhr = new XMLHttpRequest();
-			xhr.open('POST', '/api/upload/vm-image');
-
-			const token = localStorage.getItem('token');
-			if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-
-			xhr.upload.onprogress = (e) => {
-				if (e.lengthComputable) {
-					uploadProgress = Math.round((e.loaded / e.total) * 100);
-				}
-			};
-
-			await new Promise<void>((resolve, reject) => {
-				xhr.onload = () => {
-					if (xhr.status >= 200 && xhr.status < 300) {
-						resolve();
-					} else {
-						reject(new Error(xhr.responseText || 'Upload failed'));
-					}
-				};
-				xhr.onerror = () => reject(new Error('Upload failed'));
-				xhr.send(formData);
-			});
-
-			await withToast(
-				async () => { await loadImages(); },
-				`Uploaded ${file.name}`
-			);
-		} catch (e) {
-			alert(`Upload failed: ${e}`);
-		} finally {
-			uploading = false;
-			uploadProgress = 0;
-			input.value = '';
-		}
 	}
 
 	function formatSize(bytes: number): string {
@@ -562,28 +511,7 @@
 							<option value={iso.path}>{iso.name} ({iso.filesystem}, {formatSize(iso.size_bytes)})</option>
 						{/each}
 					</select>
-					<div class="mt-2 flex items-center gap-2">
-						<Label for="file-upload" class="cursor-pointer text-xs text-primary hover:underline">
-							{uploading ? 'Uploading...' : 'Upload new image'}
-						</Label>
-						<input
-							id="file-upload"
-							type="file"
-							accept=".iso,.qcow2,.img,.raw"
-							class="hidden"
-							onchange={uploadImage}
-							disabled={uploading}
-						/>
-						{#if uploading}
-							<div class="flex items-center gap-2">
-								<div class="h-2 w-24 rounded-full bg-muted overflow-hidden">
-									<div class="h-full bg-primary transition-all" style="width: {uploadProgress}%"></div>
-								</div>
-								<span class="text-xs text-muted-foreground">{uploadProgress}%</span>
-							</div>
-						{/if}
-					</div>
-					<span class="mt-1 block text-xs text-muted-foreground">Supports ISO, qcow2, img, raw.</span>
+					<span class="mt-1 block text-xs text-muted-foreground">Upload images to the "images" subvolume via SMB/NFS or terminal. Supports ISO, qcow2, img, raw.</span>
 				{:else if noImagesSubvolume && filesystems.length > 0}
 					<div class="mt-1 rounded border border-dashed border-muted-foreground/30 p-3 text-sm text-muted-foreground">
 						<p class="mb-2">No image storage found. Create an "images" subvolume to store VM images.</p>
