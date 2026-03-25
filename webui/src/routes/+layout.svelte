@@ -20,9 +20,7 @@
 		LayoutDashboard,
 		Database,
 		Layers,
-		FolderOpen,
 		Share2,
-		Server,
 		HardDrive,
 		Bell,
 		Settings,
@@ -30,7 +28,6 @@
 		Terminal,
 		ShieldCheck,
 		Network,
-		Zap,
 		Power,
 		RotateCcw,
 		PowerOff,
@@ -222,10 +219,7 @@
 			{ href: '/',              label: 'Dashboard',      icon: LayoutDashboard },
 			{ href: '/filesystems',   label: 'Filesystems',    icon: Database },
 			{ href: '/subvolumes',    label: 'Subvolumes',     icon: Layers },
-			{ href: '/shares/nfs',    label: 'NFS',            icon: FolderOpen },
-			{ href: '/shares/smb',    label: 'SMB',            icon: Share2 },
-			{ href: '/shares/iscsi',  label: 'iSCSI',          icon: Server },
-			{ href: '/shares/nvmeof', label: 'NVMe-oF',        icon: Zap },
+			{ href: '/sharing',       label: 'Sharing',         icon: Share2 },
 		];
 		if (sysInfo?.kvm_available) {
 			items.push({ href: '/vms', label: 'Virtual Machines', icon: Monitor });
