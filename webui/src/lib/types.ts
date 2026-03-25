@@ -495,3 +495,16 @@ export interface App {
 	status: string;
 	updated: string;
 }
+
+export interface HelmRepo {
+	name: string;
+	url: string;
+}
+
+export interface HelmChart {
+	name: string;
+	repo: string;
+	version: string;
+	app_version: string;
+	description: string;
+}

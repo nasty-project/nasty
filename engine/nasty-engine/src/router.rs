@@ -30,6 +30,7 @@ fn is_operator_allowed(method: &str) -> bool {
             | "apps.enable" | "apps.disable"
             | "apps.install" | "apps.remove"
             | "apps.install_chart"
+            | "apps.repo.add" | "apps.repo.remove" | "apps.repo.update"
         )
 }
 
@@ -1257,6 +1258,35 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(e) => err(req, e),
             },
             Err(e) => invalid(req, e),
+        },
+        "apps.repo.list" => match state.apps.repo_list().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
+        "apps.repo.add" => match parse_params(req) {
+            Ok(p) => match state.apps.repo_add(p).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
+        "apps.repo.remove" => match require_str(req, "name") {
+            Ok(name) => match state.apps.repo_remove(name).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "apps.repo.update" => match state.apps.repo_update().await {
+            Ok(()) => ok(req, "ok"),
+            Err(e) => err(req, e),
+        },
+        "apps.search" => match require_str(req, "query") {
+            Ok(q) => match state.apps.search(q).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
         },
 
         // ── Unknown ─────────────────────────────────────────────

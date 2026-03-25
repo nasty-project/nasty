@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { AppsStatus, App } from '$lib/types';
+	import type { AppsStatus, App, HelmRepo, HelmChart } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -19,6 +19,21 @@
 	let expanded: Record<string, boolean> = $state({});
 	let logsApp: string | null = $state(null);
 	let logsContent = $state('');
+	let mode: 'easy' | 'expert' = $state('easy');
+
+	// Expert mode state
+	let repos: HelmRepo[] = $state([]);
+	let searchResults: HelmChart[] = $state([]);
+	let searchQuery = $state('');
+	let searching = $state(false);
+	let newRepoName = $state('');
+	let newRepoUrl = $state('');
+	let showAddRepo = $state(false);
+
+	// Expert install
+	let expertInstall: HelmChart | null = $state(null);
+	let expertReleaseName = $state('');
+	let expertValues = $state('');
 
 	// Install form
 	let newName = $state('');
@@ -142,6 +157,73 @@
 		}
 	}
 
+	// Expert mode functions
+	async function loadRepos() {
+		try {
+			repos = await client.call<HelmRepo[]>('apps.repo.list');
+		} catch { repos = []; }
+	}
+
+	async function addRepo() {
+		if (!newRepoName || !newRepoUrl) return;
+		await withToast(
+			() => client.call('apps.repo.add', { name: newRepoName, url: newRepoUrl }),
+			'Repo added'
+		);
+		showAddRepo = false;
+		newRepoName = ''; newRepoUrl = '';
+		await loadRepos();
+	}
+
+	async function removeRepo(name: string) {
+		if (!await confirm(`Remove Helm repo "${name}"?`)) return;
+		await withToast(() => client.call('apps.repo.remove', { name }), 'Repo removed');
+		await loadRepos();
+	}
+
+	async function updateRepos() {
+		await withToast(() => client.call('apps.repo.update'), 'Repos updated');
+	}
+
+	async function searchCharts() {
+		if (!searchQuery.trim()) { searchResults = []; return; }
+		searching = true;
+		try {
+			searchResults = await client.call<HelmChart[]>('apps.search', { query: searchQuery });
+		} catch { searchResults = []; }
+		searching = false;
+	}
+
+	async function installChart() {
+		if (!expertInstall || !expertReleaseName) return;
+		const params: Record<string, unknown> = {
+			name: expertReleaseName,
+			chart: `${expertInstall.repo}/${expertInstall.name}`,
+			version: expertInstall.version,
+		};
+		if (expertValues.trim()) {
+			try {
+				params.values = JSON.parse(expertValues);
+			} catch {
+				await withToast(async () => { throw new Error('Invalid JSON values'); }, '');
+				return;
+			}
+		}
+		const ok = await withToast(
+			() => client.call('apps.install_chart', params),
+			'Chart installed'
+		);
+		if (ok !== undefined) {
+			expertInstall = null;
+			expertReleaseName = ''; expertValues = '';
+			await refresh();
+		}
+	}
+
+	$effect(() => {
+		if (mode === 'expert' && status?.running) loadRepos();
+	});
+
 	function formatMemory(bytes: number): string {
 		if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 		if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(0)} MiB`;
@@ -215,14 +297,27 @@
 {:else if !status?.running}
 	<p class="text-muted-foreground">Waiting for app runtime to start...</p>
 {:else}
-	<!-- App management -->
-	<div class="mb-4 flex items-center gap-3">
-		<Button size="sm" onclick={() => showInstall = !showInstall}>
-			{showInstall ? 'Cancel' : 'Install App'}
-		</Button>
-		<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
+	<!-- Mode tabs -->
+	<div class="mb-4 flex items-center gap-4">
+		<div class="flex rounded-md overflow-hidden border border-border">
+			<button
+				class="px-3 py-1.5 text-sm transition-colors {mode === 'easy' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}"
+				onclick={() => mode = 'easy'}
+			>Easy</button>
+			<button
+				class="px-3 py-1.5 text-sm transition-colors {mode === 'expert' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}"
+				onclick={() => mode = 'expert'}
+			>Helm Charts</button>
+		</div>
+		{#if mode === 'easy'}
+			<Button size="sm" onclick={() => showInstall = !showInstall}>
+				{showInstall ? 'Cancel' : 'Install App'}
+			</Button>
+		{/if}
+		<Input bind:value={search} placeholder="Search installed..." class="h-9 w-48" />
 	</div>
 
+	{#if mode === 'easy'}
 	{#if showInstall}
 		<Card class="mb-6 max-w-xl">
 			<CardContent class="pt-6">
@@ -336,6 +431,154 @@
 				{/each}
 			</tbody>
 		</table>
+	{/if}
+	{:else}
+	<!-- Expert mode: Helm repos + chart search -->
+	<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+		<!-- Repos -->
+		<Card>
+			<CardContent class="pt-6">
+				<div class="flex items-center justify-between mb-4">
+					<h3 class="text-lg font-semibold">Helm Repositories</h3>
+					<div class="flex gap-2">
+						<Button size="xs" variant="outline" onclick={updateRepos}>Refresh</Button>
+						<Button size="xs" onclick={() => showAddRepo = !showAddRepo}>
+							{showAddRepo ? 'Cancel' : 'Add Repo'}
+						</Button>
+					</div>
+				</div>
+
+				{#if showAddRepo}
+					<div class="mb-4 rounded border p-3">
+						<div class="grid grid-cols-2 gap-2 mb-2">
+							<div>
+								<Label class="text-xs">Name</Label>
+								<Input bind:value={newRepoName} placeholder="bitnami" class="mt-1 h-8 text-xs" />
+							</div>
+							<div>
+								<Label class="text-xs">URL</Label>
+								<Input bind:value={newRepoUrl} placeholder="https://charts.bitnami.com/bitnami" class="mt-1 h-8 text-xs" />
+							</div>
+						</div>
+						<Button size="xs" onclick={addRepo} disabled={!newRepoName || !newRepoUrl}>Add</Button>
+					</div>
+				{/if}
+
+				{#if repos.length === 0}
+					<p class="text-sm text-muted-foreground">No repositories configured.</p>
+				{:else}
+					<div class="space-y-1">
+						{#each repos as repo}
+							<div class="flex items-center justify-between rounded bg-secondary/50 px-3 py-2">
+								<div>
+									<span class="font-semibold text-sm">{repo.name}</span>
+									<span class="ml-2 text-xs text-muted-foreground truncate">{repo.url}</span>
+								</div>
+								<Button variant="destructive" size="xs" onclick={() => removeRepo(repo.name)}>Remove</Button>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</CardContent>
+		</Card>
+
+		<!-- Chart Search -->
+		<Card>
+			<CardContent class="pt-6">
+				<h3 class="text-lg font-semibold mb-4">Search Charts</h3>
+				<div class="flex gap-2 mb-4">
+					<Input bind:value={searchQuery} placeholder="postgresql, redis, grafana..." class="h-9"
+						onkeydown={(e: KeyboardEvent) => e.key === 'Enter' && searchCharts()} />
+					<Button size="sm" onclick={searchCharts} disabled={searching}>
+						{searching ? 'Searching...' : 'Search'}
+					</Button>
+				</div>
+
+				{#if searchResults.length > 0}
+					<div class="max-h-80 overflow-y-auto space-y-1">
+						{#each searchResults as chart}
+							<div class="rounded border px-3 py-2 hover:bg-muted/30 transition-colors">
+								<div class="flex items-center justify-between">
+									<div>
+										<span class="font-semibold text-sm">{chart.repo}/{chart.name}</span>
+										<Badge variant="secondary" class="ml-2 text-[0.6rem]">v{chart.version}</Badge>
+										{#if chart.app_version}
+											<span class="ml-1 text-xs text-muted-foreground">app: {chart.app_version}</span>
+										{/if}
+									</div>
+									<Button size="xs" variant="outline" onclick={() => { expertInstall = chart; expertReleaseName = chart.name; expertValues = ''; }}>
+										Install
+									</Button>
+								</div>
+								{#if chart.description}
+									<p class="text-xs text-muted-foreground mt-1">{chart.description}</p>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{:else if searchQuery && !searching}
+					<p class="text-sm text-muted-foreground">No charts found.</p>
+				{/if}
+			</CardContent>
+		</Card>
+	</div>
+
+	<!-- Expert install dialog -->
+	{#if expertInstall}
+		<Card class="mt-6 max-w-xl">
+			<CardContent class="pt-6">
+				<h3 class="mb-4 text-lg font-semibold">Install {expertInstall.repo}/{expertInstall.name}</h3>
+				<div class="mb-4">
+					<Label for="expert-name">Release Name</Label>
+					<Input id="expert-name" bind:value={expertReleaseName} class="mt-1" />
+				</div>
+				<div class="mb-4">
+					<Label for="expert-values">Values (JSON, optional)</Label>
+					<textarea
+						id="expert-values"
+						bind:value={expertValues}
+						placeholder={'{"key": "value"}'}
+						class="mt-1 w-full h-32 rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono"
+					></textarea>
+					<span class="mt-1 block text-xs text-muted-foreground">Override default chart values. Must be valid JSON.</span>
+				</div>
+				<div class="flex gap-2">
+					<Button onclick={installChart} disabled={!expertReleaseName}>Install</Button>
+					<Button variant="ghost" onclick={() => expertInstall = null}>Cancel</Button>
+				</div>
+			</CardContent>
+		</Card>
+	{/if}
+
+	<!-- Installed apps table (visible in both modes) -->
+	{#if apps.length > 0}
+		<h3 class="text-lg font-semibold mt-6 mb-3">Installed Apps</h3>
+		<table class="w-full text-sm">
+			<thead>
+				<tr>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Name</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Chart</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each apps as app}
+					<tr class="border-b border-border hover:bg-muted/30">
+						<td class="p-3 font-semibold">{app.name}</td>
+						<td class="p-3 text-xs text-muted-foreground font-mono">{app.chart}</td>
+						<td class="p-3"><Badge variant={app.status === 'deployed' ? 'default' : 'secondary'}>{app.status}</Badge></td>
+						<td class="p-3">
+							<div class="flex gap-2">
+								<Button variant="outline" size="xs" onclick={() => showLogs(app.name)}>Logs</Button>
+								<Button variant="destructive" size="xs" onclick={() => removeApp(app.name)}>Remove</Button>
+							</div>
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/if}
 	{/if}
 {/if}
 

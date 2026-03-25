@@ -156,6 +156,38 @@ pub struct InstallHelmChartRequest {
     pub values: Option<serde_json::Value>,
 }
 
+// ── Helm repo types ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddRepoRequest {
+    /// Repository name (e.g. "bitnami").
+    pub name: String,
+    /// Repository URL (e.g. "https://charts.bitnami.com/bitnami").
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HelmRepo {
+    /// Repository name.
+    pub name: String,
+    /// Repository URL.
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HelmChart {
+    /// Chart name (e.g. "postgresql").
+    pub name: String,
+    /// Repository name (e.g. "bitnami").
+    pub repo: String,
+    /// Latest version.
+    pub version: String,
+    /// App version (e.g. "16.2.0").
+    pub app_version: String,
+    /// Short description.
+    pub description: String,
+}
+
 // ── Service ─────────────────────────────────────────────────────
 
 pub struct AppsService;
@@ -419,6 +451,115 @@ impl AppsService {
 
         info!("Installed Helm chart '{}' as '{}'", req.chart, req.name);
         self.get(&req.name).await
+    }
+
+    // ── Helm repo management ───────────────────────────────
+
+    pub async fn repo_list(&self) -> Result<Vec<HelmRepo>, AppsError> {
+        let output = Command::new("helm")
+            .args(["repo", "list", "--kubeconfig", KUBECONFIG, "-o", "json"])
+            .output()
+            .await
+            .map_err(|e| AppsError::HelmFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            // No repos configured yet — return empty
+            return Ok(vec![]);
+        }
+
+        let repos: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+            .unwrap_or_default();
+
+        Ok(repos.iter().map(|r| HelmRepo {
+            name: r["name"].as_str().unwrap_or("").to_string(),
+            url: r["url"].as_str().unwrap_or("").to_string(),
+        }).collect())
+    }
+
+    pub async fn repo_add(&self, req: AddRepoRequest) -> Result<HelmRepo, AppsError> {
+        let output = Command::new("helm")
+            .args(["repo", "add", &req.name, &req.url, "--kubeconfig", KUBECONFIG])
+            .output()
+            .await
+            .map_err(|e| AppsError::HelmFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AppsError::HelmFailed(stderr.to_string()));
+        }
+
+        // Update repo index
+        let _ = Command::new("helm")
+            .args(["repo", "update", "--kubeconfig", KUBECONFIG])
+            .output()
+            .await;
+
+        info!("Added Helm repo '{}' ({})", req.name, req.url);
+        Ok(HelmRepo { name: req.name, url: req.url })
+    }
+
+    pub async fn repo_remove(&self, name: &str) -> Result<(), AppsError> {
+        let output = Command::new("helm")
+            .args(["repo", "remove", name, "--kubeconfig", KUBECONFIG])
+            .output()
+            .await
+            .map_err(|e| AppsError::HelmFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AppsError::HelmFailed(stderr.to_string()));
+        }
+
+        info!("Removed Helm repo '{name}'");
+        Ok(())
+    }
+
+    pub async fn repo_update(&self) -> Result<(), AppsError> {
+        self.require_ready().await?;
+
+        let output = Command::new("helm")
+            .args(["repo", "update", "--kubeconfig", KUBECONFIG])
+            .output()
+            .await
+            .map_err(|e| AppsError::HelmFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AppsError::HelmFailed(stderr.to_string()));
+        }
+
+        info!("Helm repos updated");
+        Ok(())
+    }
+
+    /// Search for charts across all configured repos.
+    pub async fn search(&self, query: &str) -> Result<Vec<HelmChart>, AppsError> {
+        self.require_ready().await?;
+
+        let output = Command::new("helm")
+            .args(["search", "repo", query, "--kubeconfig", KUBECONFIG, "-o", "json"])
+            .output()
+            .await
+            .map_err(|e| AppsError::HelmFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            return Ok(vec![]);
+        }
+
+        let results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+            .unwrap_or_default();
+
+        Ok(results.iter().map(|r| {
+            let full_name = r["name"].as_str().unwrap_or("");
+            let (repo, chart_name) = full_name.split_once('/').unwrap_or(("", full_name));
+            HelmChart {
+                name: chart_name.to_string(),
+                repo: repo.to_string(),
+                version: r["version"].as_str().unwrap_or("").to_string(),
+                app_version: r["app_version"].as_str().unwrap_or("").to_string(),
+                description: r["description"].as_str().unwrap_or("").to_string(),
+            }
+        }).collect())
     }
 
     // ── Restore on boot ─────────────────────────────────────
