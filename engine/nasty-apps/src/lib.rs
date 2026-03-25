@@ -732,7 +732,36 @@ impl AppsService {
         if !self.is_k3s_ready().await {
             return Err(AppsError::NotReady("k3s not responding".to_string()));
         }
+        // Ensure bjw-s repo exists — re-add if bootstrap failed previously
+        self.ensure_helm_repo().await;
         Ok(())
+    }
+
+    /// Ensure the bjw-s helm repo is configured. Idempotent.
+    async fn ensure_helm_repo(&self) {
+        let output = Command::new("helm")
+            .args(["repo", "list", "-o", "json"])
+            .output()
+            .await;
+
+        let has_bjws = match output {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).contains("bjw-s")
+            }
+            _ => false,
+        };
+
+        if !has_bjws {
+            info!("bjw-s helm repo missing — adding...");
+            let _ = Command::new("helm")
+                .args(["repo", "add", "bjw-s", APP_TEMPLATE_REPO])
+                .output()
+                .await;
+            let _ = Command::new("helm")
+                .args(["repo", "update"])
+                .output()
+                .await;
+        }
     }
 
 }
