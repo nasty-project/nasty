@@ -368,9 +368,9 @@ pub fn read_space(mount_point: &str) -> SpaceUsage {
         let mut stat: libc::statvfs = std::mem::zeroed();
         if libc::statvfs(path.as_ptr(), &mut stat) == 0 {
             let block_size = stat.f_frsize as u64;
-            let total = stat.f_blocks * block_size;
-            let available = stat.f_bavail * block_size;
-            let used = total.saturating_sub(stat.f_bfree * block_size);
+            let total = stat.f_blocks as u64 * block_size;
+            let available = stat.f_bavail as u64 * block_size;
+            let used = total.saturating_sub(stat.f_bfree as u64 * block_size);
             SpaceUsage {
                 total_bytes: total,
                 used_bytes: used,
@@ -409,8 +409,8 @@ pub fn read_fs_options(sysfs: &Path) -> HashMap<String, String> {
 pub fn read_background_ops(sysfs: &Path) -> BackgroundOps {
     let internal = sysfs.join("internal");
 
-    let btree_cache_size_bytes = read_sysfs_str(&sysfs.join("btree_cache_size"))
-        .and_then(|s| parse_human_bytes(&s));
+    let btree_cache_size_bytes =
+        read_sysfs_str(&sysfs.join("btree_cache_size")).and_then(|s| parse_human_bytes(&s));
 
     BackgroundOps {
         copy_gc_wait: read_sysfs_str(&internal.join("copy_gc_wait")),
