@@ -316,10 +316,13 @@ export interface SmartAttribute {
 	failing: boolean;
 }
 
+export type ReleaseChannel = 'stable' | 'beta' | 'edge';
+
 export interface UpdateInfo {
 	current_version: string;
 	latest_version: string | null;
 	update_available: boolean | null;
+	channel: ReleaseChannel;
 }
 
 export interface BcachefsToolsInfo {

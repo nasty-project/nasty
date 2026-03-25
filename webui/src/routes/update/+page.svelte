@@ -207,6 +207,26 @@
 		}
 	}
 
+	async function changeChannel(channel: string) {
+		if (channel === info?.channel) return;
+		const descriptions: Record<string, string> = {
+			stable: 'Tagged releases only. Most reliable.',
+			beta: 'Pre-release branch. Tested but may have rough edges.',
+			edge: 'Latest development branch. Bleeding edge — may break.',
+		};
+		if (!await confirm(
+			`Switch to ${channel} channel?`,
+			`${descriptions[channel] ?? ''} You should check for updates after switching.`
+		)) return;
+		const result = await withToast(
+			() => client.call('system.update.channel.set', { channel }),
+			`Switched to ${channel} channel`
+		);
+		if (result !== undefined && info) {
+			info = { ...info, channel: channel as any };
+		}
+	}
+
 	function startPolling() {
 		stopPolling();
 		pollInterval = setInterval(async () => {
@@ -436,6 +456,31 @@
 						{/if}
 					</div>
 				</div>
+
+				<!-- Release channel selector -->
+				{#if info}
+					<div class="mb-5 flex items-center gap-3">
+						<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Channel</span>
+						<div class="flex rounded-md overflow-hidden border border-border">
+							{#each ['stable', 'beta', 'edge'] as ch}
+								<button
+									class="px-3 py-1 text-xs transition-colors {info.channel === ch ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
+									onclick={() => changeChannel(ch)}
+									disabled={status?.state === 'running'}
+								>{ch.charAt(0).toUpperCase() + ch.slice(1)}</button>
+							{/each}
+						</div>
+						<span class="text-xs text-muted-foreground">
+							{#if info.channel === 'stable'}
+								Tagged releases. Most reliable.
+							{:else if info.channel === 'beta'}
+								Pre-release branch. May have rough edges.
+							{:else}
+								Latest development. May break.
+							{/if}
+						</span>
+					</div>
+				{/if}
 
 				<div class="flex gap-2">
 					<Button size="sm" onclick={checkForUpdates} disabled={checking || status?.state === 'running'}>

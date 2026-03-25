@@ -306,6 +306,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => err(req, e),
         },
         "system.update.status" => ok(req, state.updates.status().await),
+        "system.update.channel.get" => ok(req, state.updates.get_channel().await),
+        "system.update.channel.set" => match require_str(req, "channel") {
+            Ok(ch) => match ch.parse::<nasty_system::update::ReleaseChannel>() {
+                Ok(channel) => match state.updates.set_channel(channel).await {
+                    Ok(c) => ok(req, c),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            },
+            Err(r) => r,
+        },
         "system.reboot_required" => ok(req, state.updates.reboot_required().await),
 
         // ── Logging ───────────────────────────────────────────────

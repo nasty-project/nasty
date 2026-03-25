@@ -22,13 +22,88 @@ const BCACHEFS_REF_STATE: &str = "/var/lib/nasty/bcachefs-tools-ref";
 const BCACHEFS_DEBUG_CHECKS_STATE: &str = "/var/lib/nasty/bcachefs-debug-checks";
 const BCACHEFS_SWITCH_RESULT: &str = "/var/lib/nasty/bcachefs-switch-result";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
+const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
+
+// ── Release channels ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChannel {
+    /// Tagged releases only (e.g. v0.1.0). Most stable.
+    Stable,
+    /// Pre-release branch. Tested but may have rough edges.
+    Beta,
+    /// Latest main branch. Bleeding edge.
+    Edge,
+}
+
+impl ReleaseChannel {
+    /// Git ref to track for this channel.
+    pub fn git_ref(&self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Beta => "beta",
+            Self::Edge => "main",
+        }
+    }
+
+    /// GitHub API endpoint for checking latest commit.
+    pub fn github_api_url(&self) -> String {
+        match self {
+            Self::Stable => "https://api.github.com/repos/nasty-project/nasty/releases/latest".to_string(),
+            _ => format!("https://api.github.com/repos/nasty-project/nasty/commits/{}", self.git_ref()),
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Stable => "Stable",
+            Self::Beta => "Beta",
+            Self::Edge => "Edge",
+        }
+    }
+}
+
+impl std::fmt::Display for ReleaseChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stable => write!(f, "stable"),
+            Self::Beta => write!(f, "beta"),
+            Self::Edge => write!(f, "edge"),
+        }
+    }
+}
+
+impl std::str::FromStr for ReleaseChannel {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "stable" => Ok(Self::Stable),
+            "beta" => Ok(Self::Beta),
+            "edge" => Ok(Self::Edge),
+            other => Err(format!("unknown channel: {other}")),
+        }
+    }
+}
+
+pub async fn read_channel() -> ReleaseChannel {
+    tokio::fs::read_to_string(RELEASE_CHANNEL_PATH)
+        .await
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(ReleaseChannel::Stable)
+}
+
+async fn write_channel(channel: ReleaseChannel) -> Result<(), std::io::Error> {
+    tokio::fs::write(RELEASE_CHANNEL_PATH, channel.to_string()).await
+}
 
 // TODO: Remove token-based auth once the repo is public.
 // The token file is only needed for private repo access.
 // When removing, delete check_via_github_api(), GITHUB_TOKEN_PATH,
 // and revert check() to use git ls-remote directly.
 const GITHUB_TOKEN_PATH: &str = "/var/lib/nasty/github-token";
-const GITHUB_API_REPO: &str = "https://api.github.com/repos/nasty-project/nasty/commits/main";
+
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BcachefsToolsInfo {
@@ -81,6 +156,8 @@ pub struct UpdateInfo {
     pub latest_version: Option<String>,
     /// Whether a newer version is available. None if the check has not been run yet.
     pub update_available: Option<bool>,
+    /// Active release channel.
+    pub channel: ReleaseChannel,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -151,19 +228,48 @@ impl UpdateService {
             current_version: read_current_version().await,
             latest_version: None,
             update_available: None,
+            channel: read_channel().await,
         }
+    }
+
+    /// Get or set the release channel.
+    pub async fn get_channel(&self) -> ReleaseChannel {
+        read_channel().await
+    }
+
+    pub async fn set_channel(&self, channel: ReleaseChannel) -> Result<ReleaseChannel, UpdateError> {
+        write_channel(channel).await
+            .map_err(|e| UpdateError::CommandFailed(format!("write channel: {e}")))?;
+        info!("Release channel set to {}", channel.display_name());
+        Ok(channel)
     }
 
     /// Check if an update is available by comparing local rev to GitHub
     pub async fn check(&self) -> Result<UpdateInfo, UpdateError> {
         let current = read_current_version().await;
+        let channel = read_channel().await;
 
-        // Try GitHub API with token first (for private repo), fall back to git ls-remote
-        let latest = match check_via_github_api().await {
-            Ok(sha) => sha,
-            Err(_) => {
-                let token = read_github_token().await;
-                check_via_git_ls_remote(token.as_deref()).await?
+        // For stable channel, check latest GitHub release tag.
+        // For beta/edge, check the branch commit.
+        let latest = match channel {
+            ReleaseChannel::Stable => {
+                match check_latest_release().await {
+                    Ok(tag) => tag,
+                    Err(_) => {
+                        let token = read_github_token().await;
+                        check_via_git_ls_remote(token.as_deref(), "refs/heads/stable").await?
+                    }
+                }
+            }
+            _ => {
+                let git_ref = format!("refs/heads/{}", channel.git_ref());
+                match check_via_github_api_branch(channel.git_ref()).await {
+                    Ok(sha) => sha,
+                    Err(_) => {
+                        let token = read_github_token().await;
+                        check_via_git_ls_remote(token.as_deref(), &git_ref).await?
+                    }
+                }
             }
         };
 
@@ -182,6 +288,7 @@ impl UpdateService {
             current_version: current,
             latest_version: Some(latest),
             update_available: available,
+            channel,
         })
     }
 
@@ -210,6 +317,8 @@ impl UpdateService {
         // Build the update script:
         // 1. Pull latest source into /etc/nixos
         // 2. Rebuild from local flake (which has hardware-configuration.nix)
+        let channel = read_channel().await;
+        let branch = channel.git_ref();
         let token = read_github_token().await;
 
         // TODO: Remove token env var once repo is public.
@@ -247,13 +356,28 @@ HW_CFG="nixos/hardware-configuration.nix"
 [ -f "$HW_CFG" ] && cp "$HW_CFG" /tmp/nasty-hw-config.nix
 
 git remote set-url origin "{REPO_URL}" 2>/dev/null || git remote add origin "{REPO_URL}"
+CHANNEL={branch}
+echo "==> Channel: $CHANNEL"
 GIT_TERMINAL_PROMPT=0 git -c credential.helper= {git_insteadof} fetch origin
 
 # Disable sparse checkout — Nix treats missing tracked files as dirty,
 # which causes every build to get a "-dirty" version suffix.
 git sparse-checkout disable 2>/dev/null || true
 
-git reset --hard origin/main
+# For stable channel, checkout the latest tag on the stable branch.
+# For beta/edge, track the branch head.
+if [ "$CHANNEL" = "stable" ]; then
+    LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+    if [ -n "$LATEST_TAG" ]; then
+        echo "==> Checking out release $LATEST_TAG"
+        git checkout "$LATEST_TAG" --detach
+    else
+        echo "==> No release tags found, falling back to origin/stable"
+        git reset --hard origin/stable
+    fi
+else
+    git reset --hard origin/$CHANNEL
+fi
 
 # Remove files not needed on the appliance. The build only needs
 # engine/, webui/, nixos/. Delete and stage the removals so the
@@ -304,7 +428,11 @@ fi
 # The flake bakes the local hw-config commit SHA into /etc/nasty-version, which
 # never matches origin/main. Writing the real upstream SHA to /var/lib/nasty/version
 # lets the engine report the correct version and stop showing false update prompts.
-git rev-parse --short origin/main > {VERSION_PATH}
+if [ "$CHANNEL" = "stable" ] && [ -n "$LATEST_TAG" ]; then
+    echo "$LATEST_TAG" > {VERSION_PATH}
+else
+    git rev-parse --short origin/$CHANNEL > {VERSION_PATH}
+fi
 
 echo "==> Update complete!"
 "#
@@ -1020,7 +1148,34 @@ fn strip_pool_mounts(content: &str) -> String {
 }
 
 /// TODO: Remove once repo is public — only needed for private repo access.
-async fn check_via_github_api() -> Result<String, UpdateError> {
+/// Check latest release tag via GitHub API (for stable channel).
+async fn check_latest_release() -> Result<String, UpdateError> {
+    let token = read_github_token().await;
+    let mut req = reqwest::Client::new()
+        .get("https://api.github.com/repos/nasty-project/nasty/releases/latest")
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "nasty-engine");
+
+    if let Some(ref t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+
+    let body: serde_json::Value = req
+        .send()
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("GitHub API: {e}")))?
+        .json()
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("parse: {e}")))?;
+
+    body["tag_name"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| UpdateError::CommandFailed("no tag_name in release response".into()))
+}
+
+/// Check latest commit on a branch via GitHub API.
+async fn check_via_github_api_branch(branch: &str) -> Result<String, UpdateError> {
     let token = tokio::fs::read_to_string(GITHUB_TOKEN_PATH)
         .await
         .map(|s| s.trim().to_string())
@@ -1030,8 +1185,9 @@ async fn check_via_github_api() -> Result<String, UpdateError> {
         return Err(UpdateError::CommandFailed("empty github token".into()));
     }
 
+    let url = format!("https://api.github.com/repos/nasty-project/nasty/commits/{branch}");
     let body: serde_json::Value = reqwest::Client::new()
-        .get(GITHUB_API_REPO)
+        .get(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "nasty-engine")
@@ -1052,7 +1208,7 @@ async fn check_via_github_api() -> Result<String, UpdateError> {
 
 /// Direct git ls-remote — works for public repos without auth.
 /// If a token is provided, uses url.insteadOf for non-interactive x-access-token auth.
-async fn check_via_git_ls_remote(token: Option<&str>) -> Result<String, UpdateError> {
+async fn check_via_git_ls_remote(token: Option<&str>, git_ref: &str) -> Result<String, UpdateError> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.args(["-c", "credential.helper="]);
@@ -1061,7 +1217,7 @@ async fn check_via_git_ls_remote(token: Option<&str>) -> Result<String, UpdateEr
             "url.https://x-access-token:{t}@github.com/.insteadOf=https://github.com/"
         ));
     }
-    cmd.args(["ls-remote", REPO_URL, "refs/heads/main"]);
+    cmd.args(["ls-remote", REPO_URL, git_ref]);
 
     let output = cmd
         .output()
