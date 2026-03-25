@@ -708,6 +708,8 @@ in {
         git              # for update check (git ls-remote)
         curl             # for update check (GitHub API, TODO: remove when repo is public)
         qemu             # QEMU/KVM for virtual machines
+        config.services.k3s.package  # k3s for apps runtime
+        kubernetes-helm              # Helm for app deployment
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
