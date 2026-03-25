@@ -308,20 +308,23 @@ impl AppsService {
 
     pub async fn status(&self) -> AppsStatus {
         let enabled = self.is_enabled();
-        let running = if enabled { self.is_k3s_ready().await } else { false };
-        let app_count = if running {
-            self.list().await.map(|apps| apps.len()).unwrap_or(0)
-        } else {
-            0
-        };
-        let memory_bytes = if running { k3s_memory().await } else { None };
-
-        AppsStatus {
-            enabled,
-            running,
-            app_count,
-            memory_bytes,
+        if !enabled {
+            return AppsStatus { enabled, running: false, app_count: 0, memory_bytes: None };
         }
+
+        let running = self.is_k3s_ready().await;
+        if !running {
+            return AppsStatus { enabled, running: false, app_count: 0, memory_bytes: None };
+        }
+
+        // Run helm list and memory check in parallel (skip require_ready — already checked)
+        let (apps_result, memory_bytes) = tokio::join!(
+            self.list_internal(),
+            k3s_memory()
+        );
+        let app_count = apps_result.map(|apps| apps.len()).unwrap_or(0);
+
+        AppsStatus { enabled, running, app_count, memory_bytes }
     }
 
     // ── App management (app-template) ───────────────────────
@@ -397,7 +400,11 @@ impl AppsService {
 
     pub async fn list(&self) -> Result<Vec<App>, AppsError> {
         self.require_ready().await?;
+        self.list_internal().await
+    }
 
+    /// List apps without the require_ready check (used by status() which already checked).
+    async fn list_internal(&self) -> Result<Vec<App>, AppsError> {
         let output = Command::new("helm")
             .args([
                 "list", "--namespace", NAMESPACE,
