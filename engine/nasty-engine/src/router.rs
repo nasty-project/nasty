@@ -1440,21 +1440,13 @@ async fn check_block_device_conflict(
 
 const VM_IMAGE_EXTENSIONS: &[&str] = &["iso", "qcow2", "img", "raw"];
 
-#[derive(serde::Serialize)]
-struct VmImageListResult {
-    subvolume_exists: bool,
-    images: Vec<serde_json::Value>,
-}
-
 /// List all VM images from "images" subvolumes across all filesystems.
-async fn list_vm_images(state: &AppState) -> VmImageListResult {
+async fn list_vm_images(state: &AppState) -> Vec<serde_json::Value> {
     let subvols = state.subvolumes.list_all(None, None).await.unwrap_or_default();
     let mut images = Vec::new();
-    let mut subvolume_exists = false;
 
     for sv in &subvols {
         if sv.name == "images" {
-            subvolume_exists = true;
             let dir = &sv.path;
             if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
@@ -1483,7 +1475,7 @@ async fn list_vm_images(state: &AppState) -> VmImageListResult {
         }
     }
 
-    VmImageListResult { subvolume_exists, images }
+    images
 }
 
 /// Ensure an "images" subvolume exists on a filesystem. Creates it if missing.

@@ -79,9 +79,8 @@
 
 	async function loadImages() {
 		try {
-			const result = await client.call<{ subvolume_exists: boolean; images: typeof imageFiles }>('vm.images.list');
-			imageFiles = result.images;
-			noImagesSubvolume = !result.subvolume_exists;
+			imageFiles = await client.call<typeof imageFiles>('vm.images.list');
+			noImagesSubvolume = imageFiles.length === 0;
 		} catch { imageFiles = []; noImagesSubvolume = true; }
 	}
 
