@@ -111,7 +111,7 @@
 			const xhr = new XMLHttpRequest();
 			xhr.open('POST', '/api/upload/vm-image');
 
-			const token = localStorage.getItem('token');
+			const token = getToken();
 			if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
 			xhr.upload.onprogress = (e) => {
