@@ -31,8 +31,8 @@
 	let newDiskFs = $state('');
 	let newDiskSize = $state(10); // GiB
 	let newIso = $state('');
-	let isoFiles: { name: string; path: string; filesystem: string; size_bytes: number }[] = $state([]);
-	let noIsoSubvolume = $state(false);
+	let imageFiles: { name: string; path: string; filesystem: string; size_bytes: number }[] = $state([]);
+	let noImagesSubvolume = $state(false);
 	let newDescription = $state('');
 	let newBootOrder = $state('disk');
 	let newAutostart = $state(false);
@@ -66,7 +66,7 @@
 		if (showCreate) {
 			loadSubvolumes();
 			loadFilesystems();
-			loadIsos();
+			loadImages();
 		}
 	});
 
@@ -77,20 +77,20 @@
 		} catch { /* ignore */ }
 	}
 
-	async function loadIsos() {
+	async function loadImages() {
 		try {
-			isoFiles = await client.call<typeof isoFiles>('vm.iso.list');
-			noIsoSubvolume = isoFiles.length === 0;
-		} catch { isoFiles = []; noIsoSubvolume = true; }
+			imageFiles = await client.call<typeof imageFiles>('vm.images.list');
+			noImagesSubvolume = imageFiles.length === 0;
+		} catch { imageFiles = []; noImagesSubvolume = true; }
 	}
 
-	async function createIsosSubvolume(filesystem: string) {
+	async function createImagesSubvolume(filesystem: string) {
 		await withToast(
-			() => client.call('vm.iso.ensure', { filesystem }),
-			'ISO storage created'
+			() => client.call('vm.images.ensure', { filesystem }),
+			'Image storage created'
 		);
-		await loadIsos();
-		noIsoSubvolume = false;
+		await loadImages();
+		noImagesSubvolume = false;
 	}
 
 	function formatSize(bytes: number): string {
@@ -502,28 +502,28 @@
 				{/if}
 			</div>
 			<div class="mb-4">
-				<Label>Boot ISO (optional)</Label>
-				{#if isoFiles.length > 0}
+				<Label>Boot Image (optional)</Label>
+				{#if imageFiles.length > 0}
 					<select bind:value={newIso} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 						<option value="">None</option>
-						{#each isoFiles as iso}
+						{#each imageFiles as iso}
 							<option value={iso.path}>{iso.name} ({iso.filesystem}, {formatSize(iso.size_bytes)})</option>
 						{/each}
 					</select>
-					<span class="mt-1 block text-xs text-muted-foreground">Upload ISOs to the "isos" subvolume via SMB/NFS or the terminal.</span>
-				{:else if noIsoSubvolume && filesystems.length > 0}
+					<span class="mt-1 block text-xs text-muted-foreground">Upload images to the "images" subvolume via SMB/NFS or terminal. Supports ISO, qcow2, img, raw.</span>
+				{:else if noImagesSubvolume && filesystems.length > 0}
 					<div class="mt-1 rounded border border-dashed border-muted-foreground/30 p-3 text-sm text-muted-foreground">
-						<p class="mb-2">No ISO storage found. Create an "isos" subvolume to store installation images.</p>
+						<p class="mb-2">No image storage found. Create an "images" subvolume to store VM images.</p>
 						<div class="flex gap-2 items-center">
 							{#each filesystems as fs}
-								<Button size="xs" variant="outline" onclick={() => createIsosSubvolume(fs.name)}>
+								<Button size="xs" variant="outline" onclick={() => createImagesSubvolume(fs.name)}>
 									Create on {fs.name}
 								</Button>
 							{/each}
 						</div>
 					</div>
 				{:else}
-					<Input bind:value={newIso} placeholder="No ISOs available" class="mt-1" disabled />
+					<Input bind:value={newIso} placeholder="No images available" class="mt-1" disabled />
 				{/if}
 			</div>
 			<div class="mb-4">
