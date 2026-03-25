@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { AppsStatus, App, HelmRepo, HelmChart } from '$lib/types';
+	import type { AppsStatus, App, AppIngress, HelmRepo, HelmChart } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -41,6 +41,11 @@
 	let newPorts = $state<{ name: string; container_port: number; node_port: string; protocol: string }[]>([]);
 	let newEnvs = $state<{ name: string; value: string }[]>([]);
 	let newVolumes = $state<{ name: string; mount_path: string; size: string }[]>([]);
+	let newCpuLimit = $state('');
+	let newMemoryLimit = $state('');
+
+	// Ingress state
+	let ingresses: AppIngress[] = $state([]);
 
 	const client = getClient();
 
@@ -54,8 +59,10 @@
 			status = await client.call<AppsStatus>('apps.status');
 			if (status.enabled && status.running) {
 				apps = await client.call<App[]>('apps.list');
+				ingresses = await client.call<AppIngress[]>('apps.ingress.list');
 			} else {
 				apps = [];
+				ingresses = [];
 			}
 		} catch { /* ignore */ }
 	}
@@ -126,6 +133,8 @@
 		if (newVolumes.length > 0) {
 			params.volumes = newVolumes.filter(v => v.name && v.mount_path);
 		}
+		if (newCpuLimit) params.cpu_limit = newCpuLimit;
+		if (newMemoryLimit) params.memory_limit = newMemoryLimit;
 
 		const ok = await withToast(
 			() => client.call('apps.install', params),
@@ -134,6 +143,7 @@
 		if (ok !== undefined) {
 			showInstall = false;
 			newName = ''; newImage = ''; newPorts = []; newEnvs = []; newVolumes = [];
+			newCpuLimit = ''; newMemoryLimit = '';
 			await refresh();
 		}
 	}
@@ -155,6 +165,27 @@
 		} catch (e) {
 			logsContent = `Failed to load logs: ${e}`;
 		}
+	}
+
+	// Ingress functions
+	async function enableIngress(appName: string, nodePort: number) {
+		await withToast(
+			() => client.call('apps.ingress.set', { name: appName, node_port: nodePort }),
+			'Ingress enabled'
+		);
+		await refresh();
+	}
+
+	async function disableIngress(appName: string) {
+		await withToast(
+			() => client.call('apps.ingress.remove', { name: appName }),
+			'Ingress disabled'
+		);
+		await refresh();
+	}
+
+	function getIngress(appName: string): AppIngress | undefined {
+		return ingresses.find(i => i.name === appName);
 	}
 
 	// Expert mode functions
@@ -386,6 +417,21 @@
 					{/if}
 				</div>
 
+				<!-- Resource Limits -->
+				<div class="mb-4">
+					<Label>Resource Limits (optional)</Label>
+					<div class="grid grid-cols-2 gap-3 mt-1">
+						<div>
+							<Label class="text-xs">CPU</Label>
+							<Input bind:value={newCpuLimit} placeholder="e.g. 500m or 2" class="mt-1 h-8 text-xs" />
+						</div>
+						<div>
+							<Label class="text-xs">Memory</Label>
+							<Input bind:value={newMemoryLimit} placeholder="e.g. 256Mi or 1Gi" class="mt-1 h-8 text-xs" />
+						</div>
+					</div>
+				</div>
+
 				<Button onclick={install} disabled={!newName || !newImage}>Install</Button>
 			</CardContent>
 		</Card>
@@ -419,6 +465,15 @@
 						</td>
 						<td class="p-3">
 							<div class="flex gap-2">
+								{#if getIngress(app.name)}
+									<a href={getIngress(app.name)?.path} target="_blank" class="text-xs text-blue-500 hover:underline self-center">{getIngress(app.name)?.path}</a>
+									<Button variant="secondary" size="xs" onclick={() => disableIngress(app.name)}>Unproxy</Button>
+								{:else}
+									<Button variant="outline" size="xs" onclick={() => {
+										const port = prompt('NodePort to proxy (check app service):');
+										if (port) enableIngress(app.name, parseInt(port));
+									}}>Proxy</Button>
+								{/if}
 								<Button variant="outline" size="xs" onclick={() => showLogs(app.name)}>
 									Logs
 								</Button>
@@ -570,6 +625,15 @@
 						<td class="p-3"><Badge variant={app.status === 'deployed' ? 'default' : 'secondary'}>{app.status}</Badge></td>
 						<td class="p-3">
 							<div class="flex gap-2">
+								{#if getIngress(app.name)}
+									<a href={getIngress(app.name)?.path} target="_blank" class="text-xs text-blue-500 hover:underline self-center">{getIngress(app.name)?.path}</a>
+									<Button variant="secondary" size="xs" onclick={() => disableIngress(app.name)}>Unproxy</Button>
+								{:else}
+									<Button variant="outline" size="xs" onclick={() => {
+										const port = prompt('NodePort to proxy:');
+										if (port) enableIngress(app.name, parseInt(port));
+									}}>Proxy</Button>
+								{/if}
 								<Button variant="outline" size="xs" onclick={() => showLogs(app.name)}>Logs</Button>
 								<Button variant="destructive" size="xs" onclick={() => removeApp(app.name)}>Remove</Button>
 							</div>

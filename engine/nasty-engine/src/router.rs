@@ -31,6 +31,7 @@ fn is_operator_allowed(method: &str) -> bool {
             | "apps.install" | "apps.remove"
             | "apps.install_chart"
             | "apps.repo.add" | "apps.repo.remove" | "apps.repo.update"
+            | "apps.ingress.set" | "apps.ingress.remove"
         )
 }
 
@@ -1280,6 +1281,24 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "apps.repo.update" => match state.apps.repo_update().await {
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),
+        },
+        "apps.ingress.list" => match state.apps.ingress_list().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
+        "apps.ingress.set" => match parse_params(req) {
+            Ok(p) => match state.apps.ingress_set(p).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
+        "apps.ingress.remove" => match require_str(req, "name") {
+            Ok(name) => match state.apps.ingress_remove(name).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
         },
         "apps.search" => match require_str(req, "query") {
             Ok(q) => match state.apps.search(q).await {

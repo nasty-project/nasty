@@ -501,6 +501,12 @@ export interface HelmRepo {
 	url: string;
 }
 
+export interface AppIngress {
+	name: string;
+	node_port: number;
+	path: string;
+}
+
 export interface HelmChart {
 	name: string;
 	repo: string;

@@ -611,6 +611,8 @@ in {
       "d /var/lib/nasty/shares/smb 0750 root root -"
       "d /var/lib/nasty/shares/iscsi 0750 root root -"
       "d /var/lib/nasty/shares/nvmeof 0750 root root -"
+      "d /var/lib/nasty/vms 0750 root root -"
+      "f /var/lib/nasty/apps-proxy.conf 0644 root root - # empty = no app proxies"
       "d ${cfg.storage.mountBase} 0755 root root -"
       "d /etc/exports.d 0755 root root -"
       "d /etc/target 0750 root root -"
@@ -812,6 +814,7 @@ in {
         extraConfig = ''
           add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
           proxy_set_header X-Real-IP $remote_addr;
+          include /var/lib/nasty/apps-proxy.conf;
         '';
 
         locations."/" = {
