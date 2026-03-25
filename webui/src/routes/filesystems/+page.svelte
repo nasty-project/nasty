@@ -3,6 +3,10 @@
 	import { getClient } from '$lib/client';
 	import { formatBytes, formatPercent } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
+
+	let pageTab = $state<'manage' | 'diagnostics'>(
+		typeof window !== 'undefined' && window.location.hash === '#diagnostics' ? 'diagnostics' : 'manage'
+	);
 	import { confirm } from '$lib/confirm.svelte';
 	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, FsUsage, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
@@ -461,6 +465,26 @@
 	}
 </script>
 
+
+<!-- Page-level tabs -->
+<div class="mb-4 flex items-center gap-4 border-b border-border">
+	<button
+		onclick={() => { pageTab = 'manage'; history.replaceState(null, '', '#manage'); }}
+		class="px-3 py-2 text-sm font-medium transition-colors border-b-2 -mb-px
+			{pageTab === 'manage' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+	>Manage</button>
+	<button
+		onclick={() => { pageTab = 'diagnostics'; history.replaceState(null, '', '#diagnostics'); }}
+		class="px-3 py-2 text-sm font-medium transition-colors border-b-2 -mb-px
+			{pageTab === 'diagnostics' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+	>Diagnostics</button>
+</div>
+
+{#if pageTab === 'diagnostics'}
+	{#await import('$lib/components/BcachefsDiagnostics.svelte') then module}
+		<module.default />
+	{/await}
+{:else}
 
 <div class="mb-4">
 	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}>
@@ -1073,3 +1097,6 @@
 		</Card>
 	{/each}
 {/if}
+
+{/if}
+<!-- end pageTab === 'manage' -->
