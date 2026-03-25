@@ -75,7 +75,28 @@ pub struct Acl {
     /// CHAP username for this initiator (optional).
     pub userid: Option<String>,
     /// CHAP password for this initiator (optional).
+    /// Stored on disk for configfs restore but redacted in API responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+}
+
+impl Acl {
+    /// Return a copy with the password redacted for API responses.
+    pub fn redacted(&self) -> Self {
+        Self {
+            initiator_iqn: self.initiator_iqn.clone(),
+            userid: self.userid.clone(),
+            password: self.password.as_ref().map(|_| "***".to_string()),
+        }
+    }
+}
+
+impl IscsiTarget {
+    /// Return a copy with CHAP passwords redacted for API responses.
+    pub fn redacted(mut self) -> Self {
+        self.acls = self.acls.into_iter().map(|a| a.redacted()).collect();
+        self
+    }
 }
 
 impl HasId for IscsiTarget {
@@ -199,13 +220,15 @@ impl IscsiService {
     }
 
     pub async fn list(&self) -> Result<Vec<IscsiTarget>, IscsiError> {
-        Ok(state_dir().load_all().await)
+        let targets: Vec<IscsiTarget> = state_dir().load_all().await;
+        Ok(targets.into_iter().map(|t| t.redacted()).collect())
     }
 
     pub async fn get(&self, id: &str) -> Result<IscsiTarget, IscsiError> {
         state_dir()
             .load::<IscsiTarget>(id)
             .await
+            .map(|t| t.redacted())
             .ok_or_else(|| IscsiError::NotFound(id.to_string()))
     }
 
@@ -289,7 +312,7 @@ impl IscsiService {
         }
 
         info!("Created iSCSI target {iqn}");
-        Ok(target)
+        Ok(target.redacted())
     }
 
     pub async fn delete(&self, req: DeleteTargetRequest) -> Result<(), IscsiError> {
@@ -451,7 +474,7 @@ impl IscsiService {
         save_lio_config().await;
 
         info!("Added LUN {} to target '{}'", target.luns.len() - 1, target.iqn);
-        Ok(target)
+        Ok(target.redacted())
     }
 
     pub async fn remove_lun(&self, req: RemoveLunRequest) -> Result<IscsiTarget, IscsiError> {
@@ -496,7 +519,7 @@ impl IscsiService {
         save_lio_config().await;
 
         info!("Removed LUN {} from target '{}'", req.lun_id, target.iqn);
-        Ok(target)
+        Ok(target.redacted())
     }
 
     pub async fn add_acl(&self, req: AddAclRequest) -> Result<IscsiTarget, IscsiError> {
@@ -528,7 +551,7 @@ impl IscsiService {
         save_lio_config().await;
 
         info!("Added ACL to target '{}'", target.iqn);
-        Ok(target)
+        Ok(target.redacted())
     }
 
     pub async fn remove_acl(&self, req: RemoveAclRequest) -> Result<IscsiTarget, IscsiError> {
@@ -552,7 +575,7 @@ impl IscsiService {
         save_lio_config().await;
 
         info!("Removed ACL from target '{}'", target.iqn);
-        Ok(target)
+        Ok(target.redacted())
     }
 }
 
