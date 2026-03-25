@@ -29,37 +29,37 @@ const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ReleaseChannel {
-    /// Tagged releases only (e.g. v0.1.0). Most stable.
-    Stable,
-    /// Pre-release branch. Tested but may have rough edges.
-    Beta,
-    /// Latest main branch. Bleeding edge.
-    Edge,
+    /// Tagged releases only. Safe, tested, boring.
+    Mild,
+    /// Pre-release branch. New features, occasional heartburn.
+    Spicy,
+    /// Latest main branch. Bleeding edge — you asked for it.
+    Nasty,
 }
 
 impl ReleaseChannel {
     /// Git ref to track for this channel.
     pub fn git_ref(&self) -> &'static str {
         match self {
-            Self::Stable => "stable",
-            Self::Beta => "beta",
-            Self::Edge => "main",
+            Self::Mild => "stable",
+            Self::Spicy => "beta",
+            Self::Nasty => "main",
         }
     }
 
     /// GitHub API endpoint for checking latest commit.
     pub fn github_api_url(&self) -> String {
         match self {
-            Self::Stable => "https://api.github.com/repos/nasty-project/nasty/releases/latest".to_string(),
+            Self::Mild => "https://api.github.com/repos/nasty-project/nasty/releases/latest".to_string(),
             _ => format!("https://api.github.com/repos/nasty-project/nasty/commits/{}", self.git_ref()),
         }
     }
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            Self::Stable => "Stable",
-            Self::Beta => "Beta",
-            Self::Edge => "Edge",
+            Self::Mild => "Mild",
+            Self::Spicy => "Spicy",
+            Self::Nasty => "Nasty",
         }
     }
 }
@@ -67,9 +67,9 @@ impl ReleaseChannel {
 impl std::fmt::Display for ReleaseChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Stable => write!(f, "stable"),
-            Self::Beta => write!(f, "beta"),
-            Self::Edge => write!(f, "edge"),
+            Self::Mild => write!(f, "mild"),
+            Self::Spicy => write!(f, "spicy"),
+            Self::Nasty => write!(f, "nasty"),
         }
     }
 }
@@ -78,9 +78,9 @@ impl std::str::FromStr for ReleaseChannel {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_lowercase().as_str() {
-            "stable" => Ok(Self::Stable),
-            "beta" => Ok(Self::Beta),
-            "edge" => Ok(Self::Edge),
+            "mild" | "stable" => Ok(Self::Mild),
+            "spicy" | "beta" => Ok(Self::Spicy),
+            "nasty" | "edge" => Ok(Self::Nasty),
             other => Err(format!("unknown channel: {other}")),
         }
     }
@@ -91,7 +91,7 @@ pub async fn read_channel() -> ReleaseChannel {
         .await
         .ok()
         .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(ReleaseChannel::Edge)
+        .unwrap_or(ReleaseChannel::Nasty)
 }
 
 async fn write_channel(channel: ReleaseChannel) -> Result<(), std::io::Error> {
@@ -252,7 +252,7 @@ impl UpdateService {
         // For stable channel, check latest GitHub release tag.
         // For beta/edge, check the branch commit.
         let latest = match channel {
-            ReleaseChannel::Stable => {
+            ReleaseChannel::Mild => {
                 match check_latest_release().await {
                     Ok(tag) => tag,
                     Err(_) => {

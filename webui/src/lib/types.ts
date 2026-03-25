@@ -333,7 +333,7 @@ export interface FirmwareUpdateResult {
 	reboot_required: boolean;
 }
 
-export type ReleaseChannel = 'stable' | 'beta' | 'edge';
+export type ReleaseChannel = 'mild' | 'spicy' | 'nasty';
 
 export interface UpdateInfo {
 	current_version: string;

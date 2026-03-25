@@ -218,9 +218,9 @@
 	async function changeChannel(channel: string) {
 		if (channel === info?.channel) return;
 		const descriptions: Record<string, string> = {
-			stable: 'Tagged releases only. Most reliable.',
-			beta: 'Pre-release branch. Tested but may have rough edges.',
-			edge: 'Latest development branch. Bleeding edge — may break.',
+			mild: 'Tagged releases only. Safe, tested, boring.',
+			spicy: 'Pre-release branch. New features, occasional heartburn.',
+			nasty: 'Latest development branch. Bleeding edge — you asked for it.',
 		};
 		if (!await confirm(
 			`Switch to ${channel} channel?`,
