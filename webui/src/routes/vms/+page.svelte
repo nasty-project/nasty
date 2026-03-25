@@ -555,7 +555,7 @@
 			</div>
 			<div class="mb-4">
 				<Label>Boot Image (optional)</Label>
-				{#if imageFiles.length > 0}
+				{#if !noImagesSubvolume}
 					<select bind:value={newIso} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 						<option value="">None</option>
 						{#each imageFiles as iso}
@@ -584,7 +584,7 @@
 						{/if}
 					</div>
 					<span class="mt-1 block text-xs text-muted-foreground">Supports ISO, qcow2, img, raw.</span>
-				{:else if noImagesSubvolume && filesystems.length > 0}
+				{:else if filesystems.length > 0}
 					<div class="mt-1 rounded border border-dashed border-muted-foreground/30 p-3 text-sm text-muted-foreground">
 						<p class="mb-2">No image storage found. Create an "images" subvolume to store VM images.</p>
 						<div class="flex gap-2 items-center">
