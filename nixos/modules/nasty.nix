@@ -856,6 +856,11 @@ in {
         # Proxy API calls to engine
         locations."/api/" = {
           proxyPass = "http://127.0.0.1:${toString cfg.engine.port}";
+          extraConfig = ''
+            client_max_body_size 10G;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+          '';
         };
 
         locations."/health" = {

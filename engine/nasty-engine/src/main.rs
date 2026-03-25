@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{
+        DefaultBodyLimit,
         Multipart,
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -138,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws/vm/{vm_id}/vnc", get(vm_console::vnc_handler))
         .route("/ws/vm/{vm_id}/serial", get(vm_console::serial_handler))
         .route("/api/login", post(login_handler))
-        .route("/api/upload/vm-image", post(upload_vm_image_handler))
+        .route("/api/upload/vm-image", post(upload_vm_image_handler).layer(DefaultBodyLimit::max(10_737_418_240)))
         .route("/health", get(health))
         .with_state(state);
 
@@ -231,7 +232,7 @@ async fn upload_vm_image_handler(
     };
 
     // Process the uploaded file
-    while let Ok(Some(field)) = multipart.next_field().await {
+    while let Ok(Some(mut field)) = multipart.next_field().await {
         let file_name = field.file_name().unwrap_or("").to_string();
         
         if file_name.is_empty() {
@@ -251,23 +252,36 @@ async fn upload_vm_image_handler(
 
         let dest_path = std::path::Path::new(&subvolume.path).join(&file_name);
         
-        // Read file content and write to disk
-        match field.bytes().await {
-            Ok(data) => {
-                if let Err(e) = tokio::fs::write(&dest_path, data).await {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to save file: {}", e) }))).into_response();
-                }
-                info!("User '{}' uploaded VM image: {}", session.username, file_name);
-                return (StatusCode::OK, Json(serde_json::json!({ 
-                    "name": file_name,
-                    "path": dest_path.to_string_lossy(),
-                    "filesystem": fs_name,
-                }))).into_response();
-            }
+        // Stream file content to disk
+        let mut file = match tokio::fs::File::create(&dest_path).await {
+            Ok(f) => f,
             Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to save file: {}", e) }))).into_response();
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to create file: {}", e) }))).into_response();
+            }
+        };
+        use tokio::io::AsyncWriteExt;
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    if let Err(e) = file.write_all(&chunk).await {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to write chunk: {}", e) }))).into_response();
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to read chunk: {}", e) }))).into_response();
+                }
             }
         }
+        if let Err(e) = file.sync_all().await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to sync file: {}", e) }))).into_response();
+        }
+        info!("User '{}' uploaded VM image: {}", session.username, file_name);
+        return (StatusCode::OK, Json(serde_json::json!({ 
+            "name": file_name,
+            "path": dest_path.to_string_lossy(),
+            "filesystem": fs_name,
+        }))).into_response();
     }
 
     (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No file provided" }))).into_response()
