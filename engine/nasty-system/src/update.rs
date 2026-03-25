@@ -91,7 +91,7 @@ pub async fn read_channel() -> ReleaseChannel {
         .await
         .ok()
         .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(ReleaseChannel::Stable)
+        .unwrap_or(ReleaseChannel::Edge)
 }
 
 async fn write_channel(channel: ReleaseChannel) -> Result<(), std::io::Error> {
