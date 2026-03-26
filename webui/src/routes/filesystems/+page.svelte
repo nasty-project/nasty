@@ -213,6 +213,53 @@
 		return buildProfiles().find(p => p.id === wizardProfile) ?? buildProfiles()[0];
 	}
 
+	function buildFormatCommand(): string[] {
+		const profile = activeProfile();
+		const args = ['bcachefs', 'format'];
+
+		if (replicas > 1) args.push(`--replicas=${replicas}`);
+		if (compression) args.push(`--compression=${compression}`);
+		if (profile.foreground_target) args.push(`--foreground_target=${profile.foreground_target}`);
+		if (profile.metadata_target) args.push(`--metadata_target=${profile.metadata_target}`);
+		if (profile.background_target) args.push(`--background_target=${profile.background_target}`);
+		if (profile.promote_target) args.push(`--promote_target=${profile.promote_target}`);
+		if (erasureCode) args.push('--erasure_code');
+
+		const defaultLabel = profile.id === 'none' ? null : newName;
+		for (const path of selectedPaths) {
+			const label = profile.device_labels[path] ?? defaultLabel;
+			if (label) args.push(`--label=${label}`);
+			args.push(path);
+		}
+
+		return args;
+	}
+
+	function buildMountCommand(): string[] {
+		const deviceArg = selectedPaths.join(':');
+		return ['bcachefs', 'mount', '-o', 'prjquota', deviceArg, `/fs/${newName}`];
+	}
+
+	function formatCommandLines(args: string[]): string {
+		if (args.length <= 4) return args.join(' ');
+		const parts: string[] = [args[0] + ' ' + args[1]]; // "bcachefs format"
+		for (let i = 2; i < args.length; i++) {
+			const arg = args[i];
+			if (arg.startsWith('--label=')) {
+				// Per-device group: label + device path on one line
+				const next = args[i + 1] && !args[i + 1].startsWith('--') ? ' ' + args[++i] : '';
+				parts.push('  ' + arg + next);
+			} else if (arg.startsWith('--')) {
+				// Global option
+				parts.push('  ' + arg);
+			} else {
+				// Bare device path (no label)
+				parts.push('  ' + arg);
+			}
+		}
+		return parts.join(' \\\n');
+	}
+
 	async function createFs() {
 		if (!newName || selectedPaths.length === 0) return;
 		const profile = activeProfile();
@@ -773,6 +820,13 @@
 							<p class="mt-1 text-xs text-muted-foreground">Requires multiple devices.</p>
 						{/if}
 					</div>
+				</div>
+
+				<div class="mb-5">
+					<Label>Commands</Label>
+					<pre class="mt-1 rounded-md border border-border bg-black/40 p-3 text-xs font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap">{formatCommandLines(buildFormatCommand())}
+
+{buildMountCommand().join(' ')}</pre>
 				</div>
 
 				<div class="flex gap-2">
