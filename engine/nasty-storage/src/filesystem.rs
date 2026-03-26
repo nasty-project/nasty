@@ -587,12 +587,12 @@ impl FilesystemService {
         if is_encrypted {
             let key_path = format!("{KEYS_DIR}/{}.key", req.name);
             if Path::new(&key_path).exists() {
-                cmd::run_ok("bcachefs", &["unlock", "-f", &key_path, &req.devices[0].path])
+                cmd::run_ok("bcachefs", &["unlock", "-k", "session", "-f", &key_path, &req.devices[0].path])
                     .await
                     .map_err(FilesystemError::CommandFailed)?;
             } else if let Some(ref passphrase) = req.passphrase {
                 let stdin = format!("{passphrase}\n");
-                cmd::run_ok_stdin("bcachefs", &["unlock", &req.devices[0].path], stdin.as_bytes())
+                cmd::run_ok_stdin("bcachefs", &["unlock", "-k", "session", &req.devices[0].path], stdin.as_bytes())
                     .await
                     .map_err(FilesystemError::CommandFailed)?;
             }
@@ -699,7 +699,7 @@ impl FilesystemService {
         if opts.encrypted == Some(true) {
             let key_path = format!("{KEYS_DIR}/{name}.key");
             if Path::new(&key_path).exists() {
-                cmd::run_ok("bcachefs", &["unlock", "-f", &key_path, first_device])
+                cmd::run_ok("bcachefs", &["unlock", "-k", "session", "-f", &key_path, first_device])
                     .await
                     .map_err(FilesystemError::CommandFailed)?;
             } else {
@@ -735,7 +735,7 @@ impl FilesystemService {
             .ok_or_else(|| FilesystemError::CommandFailed("no devices".to_string()))?;
 
         let stdin = format!("{passphrase}\n");
-        cmd::run_ok_stdin("bcachefs", &["unlock", &first_device], stdin.as_bytes())
+        cmd::run_ok_stdin("bcachefs", &["unlock", "-k", "session", &first_device], stdin.as_bytes())
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
