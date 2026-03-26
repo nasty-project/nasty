@@ -1571,15 +1571,7 @@ async fn load_fs_state() -> FsState {
         Ok(c) => c,
         Err(_) => return FsState::new(),
     };
-    // Try new format (HashMap<String, FsMountOptions>) first
-    if let Ok(state) = serde_json::from_str::<FsState>(&content) {
-        return state;
-    }
-    // Fall back to old format (Vec<String>) for backward compat
-    if let Ok(names) = serde_json::from_str::<Vec<String>>(&content) {
-        return names.into_iter().map(|n| (n, FsMountOptions::default())).collect();
-    }
-    FsState::new()
+    serde_json::from_str(&content).unwrap_or_default()
 }
 
 async fn save_fs_state(state: &FsState) -> Result<(), FilesystemError> {
