@@ -1,9 +1,9 @@
 //! App runtime management — optional k3s + Helm integration.
 //!
 //! Disabled by default. When enabled, starts a single-node k3s cluster
-//! and deploys nasty-csi for storage. Apps are deployed as Helm releases
-//! using the bjw-s app-template chart for simple containers, or raw
-//! Helm charts for advanced use cases.
+//! with local-path-provisioner for storage (backed by a bcachefs subvolume).
+//! Apps are deployed as Helm releases using the bjw-s app-template chart
+//! for simple containers, or raw Helm charts for advanced use cases.
 
 use std::path::Path;
 
@@ -145,7 +145,7 @@ pub struct AppVolume {
     pub storage_class: String,
 }
 
-fn default_storage_class() -> String { "nasty-nfs".to_string() }
+fn default_storage_class() -> String { "local-path".to_string() }
 
 /// Request to install a custom Helm chart.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -263,6 +263,35 @@ impl AppsService {
             if !ready {
                 error!("k3s did not become ready within 90s");
                 return;
+            }
+
+            // Create apps-data subvolume on first available filesystem
+            let apps_data_path = setup_apps_storage().await;
+
+            // Configure local-path-provisioner to use bcachefs subvolume
+            if let Some(ref path) = apps_data_path {
+                let config_json = format!(
+                    r#"{{"nodePathMap":[{{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["{}"]}}]}}"#,
+                    path
+                );
+                let patch = format!(
+                    r#"{{"data":{{"config.json":"{}"}}}}"#,
+                    config_json.replace('"', r#"\""#)
+                );
+                let _ = tokio::process::Command::new("k3s")
+                    .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", "kube-system",
+                           "patch", "configmap", "local-path-config", "-p", &patch])
+                    .output()
+                    .await;
+
+                // Restart local-path-provisioner to pick up new config
+                let _ = tokio::process::Command::new("k3s")
+                    .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", "kube-system",
+                           "rollout", "restart", "deployment/local-path-provisioner"])
+                    .output()
+                    .await;
+
+                info!("local-path-provisioner configured to use {path}");
             }
 
             // Create namespace
@@ -888,4 +917,63 @@ async fn reload_nginx() {
         .args(["reload", "nginx"])
         .output()
         .await;
+}
+
+/// Create an "apps-data" subvolume on the first available bcachefs filesystem.
+/// Returns the subvolume path if successful.
+async fn setup_apps_storage() -> Option<String> {
+    // Find first mounted bcachefs filesystem
+    let fs_base = std::path::Path::new("/fs");
+    let mut entries = match tokio::fs::read_dir(fs_base).await {
+        Ok(e) => e,
+        Err(_) => {
+            error!("No /fs directory — cannot set up apps storage");
+            return None;
+        }
+    };
+
+    let mut fs_name = None;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            fs_name = Some(entry.file_name().to_string_lossy().to_string());
+            break;
+        }
+    }
+
+    let fs_name = match fs_name {
+        Some(n) => n,
+        None => {
+            error!("No filesystems found under /fs — cannot set up apps storage");
+            return None;
+        }
+    };
+
+    let subvol_path = format!("/fs/{fs_name}/apps-data");
+
+    // Check if subvolume already exists
+    if std::path::Path::new(&subvol_path).exists() {
+        info!("Apps storage subvolume already exists at {subvol_path}");
+        return Some(subvol_path);
+    }
+
+    // Create bcachefs subvolume
+    let output = Command::new("bcachefs")
+        .args(["subvolume", "create", &subvol_path])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            info!("Created apps storage subvolume at {subvol_path}");
+            Some(subvol_path)
+        }
+        Ok(o) => {
+            error!("Failed to create apps subvolume: {}", String::from_utf8_lossy(&o.stderr));
+            None
+        }
+        Err(e) => {
+            error!("Failed to run bcachefs subvolume create: {e}");
+            None
+        }
+    }
 }
