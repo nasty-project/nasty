@@ -1389,6 +1389,25 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+        "apps.forward.start" => match parse_params::<serde_json::Value>(req) {
+            Ok(p) => {
+                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let local_port = p.get("local_port").and_then(|v| v.as_u64()).map(|v| v as u16);
+                match state.apps.port_forward_start(name, local_port).await {
+                    Ok(info) => ok(req, info),
+                    Err(e) => err(req, e),
+                }
+            }
+            Err(e) => invalid(req, e),
+        },
+        "apps.forward.stop" => match require_str(req, "name") {
+            Ok(name) => match state.apps.port_forward_stop(name).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "apps.forward.list" => ok(req, state.apps.port_forward_list()),
         "apps.search" => match require_str(req, "query") {
             Ok(q) => match state.apps.search(q).await {
                 Ok(v) => ok(req, v),

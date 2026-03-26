@@ -238,13 +238,30 @@ pub struct SetIngressRequest {
     pub node_port: u16,
 }
 
+/// Active port-forward state.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PortForwardInfo {
+    /// App name.
+    pub name: String,
+    /// Local port on the NASty host.
+    pub local_port: u16,
+    /// Container port being forwarded.
+    pub container_port: u16,
+    /// Pod name.
+    pub pod: String,
+}
+
 // ── Service ─────────────────────────────────────────────────────
 
-pub struct AppsService;
+pub struct AppsService {
+    port_forwards: std::sync::Mutex<std::collections::HashMap<String, (PortForwardInfo, tokio::process::Child)>>,
+}
 
 impl AppsService {
     pub fn new() -> Self {
-        Self
+        Self {
+            port_forwards: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
     // ── Enable/Disable ──────────────────────────────────────
@@ -791,6 +808,96 @@ impl AppsService {
 
         info!("Ingress removed for '{name}'");
         Ok(())
+    }
+
+    // ── Port Forwarding ──────────────────────────────────────
+
+    /// Start a port-forward to an app's pod.
+    pub async fn port_forward_start(&self, name: &str, local_port: Option<u16>) -> Result<PortForwardInfo, AppsError> {
+        self.require_ready().await?;
+
+        // Find the pod for this app
+        let output = Command::new("k3s")
+            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", NAMESPACE,
+                   "get", "pods", "-l", &format!("app.kubernetes.io/name={name}"),
+                   "-o", "jsonpath={.items[0].metadata.name}"])
+            .output()
+            .await
+            .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+
+        let pod = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if pod.is_empty() {
+            return Err(AppsError::AppNotFound(name.to_string()));
+        }
+
+        // Find the container port from the pod spec
+        let port_output = Command::new("k3s")
+            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", NAMESPACE,
+                   "get", "pod", &pod,
+                   "-o", "jsonpath={.spec.containers[0].ports[0].containerPort}"])
+            .output()
+            .await
+            .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+
+        let container_port: u16 = String::from_utf8_lossy(&port_output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(8080);
+
+        let local = local_port.unwrap_or(container_port);
+
+        // Kill existing forward for this app
+        self.port_forward_stop(name).await.ok();
+
+        // Start port-forward process
+        let child = Command::new("k3s")
+            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", NAMESPACE,
+                   "port-forward", &format!("pod/{pod}"), &format!("{local}:{container_port}"),
+                   "--address", "0.0.0.0"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+
+        let info = PortForwardInfo {
+            name: name.to_string(),
+            local_port: local,
+            container_port,
+            pod: pod.clone(),
+        };
+
+        info!("Port-forward started: {}:{} → pod/{} ({})", local, container_port, pod, name);
+
+        let mut forwards = self.port_forwards.lock().unwrap();
+        forwards.insert(name.to_string(), (PortForwardInfo {
+            name: name.to_string(),
+            local_port: local,
+            container_port,
+            pod,
+        }, child));
+
+        Ok(info)
+    }
+
+    /// Stop a port-forward for an app.
+    pub async fn port_forward_stop(&self, name: &str) -> Result<(), AppsError> {
+        let mut forwards = self.port_forwards.lock().unwrap();
+        if let Some((_, mut child)) = forwards.remove(name) {
+            let _ = child.kill().await;
+            info!("Port-forward stopped for '{name}'");
+        }
+        Ok(())
+    }
+
+    /// List active port-forwards.
+    pub fn port_forward_list(&self) -> Vec<PortForwardInfo> {
+        let forwards = self.port_forwards.lock().unwrap();
+        forwards.values().map(|(info, _)| PortForwardInfo {
+            name: info.name.clone(),
+            local_port: info.local_port,
+            container_port: info.container_port,
+            pod: info.pod.clone(),
+        }).collect()
     }
 
     /// Write the nginx proxy config file.

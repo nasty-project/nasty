@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { AppsStatus, App, AppIngress, HelmRepo, HelmChart } from '$lib/types';
+	import type { AppsStatus, App, HelmRepo, HelmChart } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -51,8 +51,6 @@
 	let newCpuLimit = $state('');
 	let newMemoryLimit = $state('');
 
-	// Ingress state
-	let ingresses: AppIngress[] = $state([]);
 
 	const client = getClient();
 
@@ -76,10 +74,10 @@
 			status = await client.call<AppsStatus>('apps.status');
 			if (status.enabled && status.running) {
 				apps = await client.call<App[]>('apps.list');
-				ingresses = await client.call<AppIngress[]>('apps.ingress.list');
+				await loadForwards();
 			} else {
 				apps = [];
-				ingresses = [];
+				forwards = [];
 			}
 		} catch { /* ignore */ }
 	}
@@ -185,25 +183,31 @@
 		}
 	}
 
-	// Ingress functions
-	async function enableIngress(appName: string, nodePort: number) {
-		await withToast(
-			() => client.call('apps.ingress.set', { name: appName, node_port: nodePort }),
-			'Ingress enabled'
-		);
-		await refresh();
+	// Port-forward functions
+	let forwards: { name: string; local_port: number; container_port: number; pod: string }[] = $state([]);
+
+	async function loadForwards() {
+		try { forwards = await client.call('apps.forward.list'); } catch { forwards = []; }
 	}
 
-	async function disableIngress(appName: string) {
+	async function startForward(appName: string) {
 		await withToast(
-			() => client.call('apps.ingress.remove', { name: appName }),
-			'Ingress disabled'
+			() => client.call('apps.forward.start', { name: appName }),
+			'Port-forward started'
 		);
-		await refresh();
+		await loadForwards();
 	}
 
-	function getIngress(appName: string): AppIngress | undefined {
-		return ingresses.find(i => i.name === appName);
+	async function stopForward(appName: string) {
+		await withToast(
+			() => client.call('apps.forward.stop', { name: appName }),
+			'Port-forward stopped'
+		);
+		await loadForwards();
+	}
+
+	function getForward(appName: string) {
+		return forwards.find(f => f.name === appName);
 	}
 
 	// Expert mode functions
@@ -549,14 +553,12 @@
 						</td>
 						<td class="p-3">
 							<div class="flex gap-2">
-								{#if getIngress(app.name)}
-									<a href={getIngress(app.name)?.path} target="_blank" class="text-xs text-blue-500 hover:underline self-center">{getIngress(app.name)?.path}</a>
-									<Button variant="secondary" size="xs" onclick={() => disableIngress(app.name)}>Unproxy</Button>
+								{@const fwd = getForward(app.name)}
+								{#if fwd}
+									<a href="http://{window.location.hostname}:{fwd.local_port}" target="_blank" class="text-xs text-blue-500 hover:underline self-center">:{fwd.local_port}</a>
+									<Button variant="secondary" size="xs" onclick={() => stopForward(app.name)}>Stop</Button>
 								{:else}
-									<Button variant="outline" size="xs" onclick={() => {
-										const port = prompt('NodePort to proxy (check app service):');
-										if (port) enableIngress(app.name, parseInt(port));
-									}}>Proxy</Button>
+									<Button variant="outline" size="xs" onclick={() => startForward(app.name)}>Access</Button>
 								{/if}
 								<Button variant="outline" size="xs" onclick={() => showLogs(app.name)}>
 									Logs
@@ -709,14 +711,12 @@
 						<td class="p-3"><Badge variant={app.status === 'deployed' ? 'default' : 'secondary'}>{app.status}</Badge></td>
 						<td class="p-3">
 							<div class="flex gap-2">
-								{#if getIngress(app.name)}
-									<a href={getIngress(app.name)?.path} target="_blank" class="text-xs text-blue-500 hover:underline self-center">{getIngress(app.name)?.path}</a>
-									<Button variant="secondary" size="xs" onclick={() => disableIngress(app.name)}>Unproxy</Button>
+								{@const fwd2 = getForward(app.name)}
+								{#if fwd2}
+									<a href="http://{window.location.hostname}:{fwd2.local_port}" target="_blank" class="text-xs text-blue-500 hover:underline self-center">:{fwd2.local_port}</a>
+									<Button variant="secondary" size="xs" onclick={() => stopForward(app.name)}>Stop</Button>
 								{:else}
-									<Button variant="outline" size="xs" onclick={() => {
-										const port = prompt('NodePort to proxy:');
-										if (port) enableIngress(app.name, parseInt(port));
-									}}>Proxy</Button>
+									<Button variant="outline" size="xs" onclick={() => startForward(app.name)}>Access</Button>
 								{/if}
 								<Button variant="outline" size="xs" onclick={() => showLogs(app.name)}>Logs</Button>
 								<Button variant="destructive" size="xs" onclick={() => removeApp(app.name)}>Remove</Button>
