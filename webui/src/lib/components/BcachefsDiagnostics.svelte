@@ -1,12 +1,9 @@
 <script lang="ts">
-	import { onMount, onDestroy, tick } from 'svelte';
-	import { Terminal } from '@xterm/xterm';
-	import { FitAddon } from '@xterm/addon-fit';
+	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
-	import { getToken } from '$lib/auth';
 	import { error as showError } from '$lib/toast.svelte';
 	import type { Filesystem } from '$lib/types';
-	import { RefreshCw, SquareX } from '@lucide/svelte';
+	import { RefreshCw } from '@lucide/svelte';
 
 	type Tab = 'usage' | 'top' | 'timestats' | 'scrub' | 'reconcile';
 
@@ -49,19 +46,18 @@
 	let timestatsAutoRefresh = $state(false);
 	let timestatsIntervalId: ReturnType<typeof setInterval> | null = null;
 
+	// top tab state
+	let topOutput = $state('');
+	let topLoading = $state(false);
+	let topAutoRefresh = $state(false);
+	let topIntervalId: ReturnType<typeof setInterval> | null = null;
+
 	// scrub/reconcile tab state
 	let scrubOutput = $state('');
 	let scrubRunning = $state(false);
 	let scrubLoading = $state(false);
 	let reconcileOutput = $state('');
 	let reconcileLoading = $state(false);
-
-	// terminal tab state (fs top)
-	let termEl: HTMLDivElement | undefined = $state();
-	let term: Terminal | null = null;
-	let fitAddon: FitAddon | null = null;
-	let termWs: WebSocket | null = null;
-	let termStatus = $state<'idle' | 'running' | 'done'>('idle');
 
 	onMount(async () => {
 		try {
@@ -79,8 +75,8 @@
 
 	onDestroy(() => {
 		stopAutoRefresh();
+		stopTopAutoRefresh();
 		stopTimestatsAutoRefresh();
-		killTerm();
 	});
 
 	// ── Usage tab ──────────────────────────────────────────────
@@ -185,86 +181,34 @@
 		}
 	}
 
-	// ── Terminal tab (fs top) ────────────────────────────────
+	// ── Top tab ──────────────────────────────────────────────
 
-	function mountPath() {
-		return filesystems.find(p => p.name === selectedFs)?.mount_point ?? `/fs/${selectedFs}`;
-	}
-
-	async function startTerm() {
+	async function refreshTop() {
 		if (!selectedFs) return;
-		killTerm();
-		termStatus = 'running';
-		await tick();
-		if (!termEl) return;
-
-		term = new Terminal({
-			cursorBlink: false,
-			cursorStyle: 'bar',
-			cursorInactiveStyle: 'none',
-			scrollback: 0,
-			fontSize: 13,
-			fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-			theme: {
-				background: '#0f1117', foreground: '#e0e0e0', cursor: '#e0e0e0',
-				black: '#0f1117', red: '#dc2626', green: '#4ade80', yellow: '#f59e0b',
-				blue: '#2563eb', magenta: '#a855f7', cyan: '#22d3ee', white: '#e0e0e0',
-				brightBlack: '#4b5563', brightRed: '#f87171', brightGreen: '#86efac',
-				brightYellow: '#fcd34d', brightBlue: '#60a5fa', brightMagenta: '#c084fc',
-				brightCyan: '#67e8f9', brightWhite: '#ffffff',
-			},
-		});
-		fitAddon = new FitAddon();
-		term.loadAddon(fitAddon);
-		term.open(termEl);
-		fitAddon.fit();
-		term.focus();
-
-		const { cols, rows } = term;
-		const mp = mountPath();
-		const argv = ['bcachefs', 'fs', 'top', '-h', mp];
-
-		const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/terminal`;
-		termWs = new WebSocket(wsUrl);
-
-		termWs.onopen = () => {
-			termWs!.send(JSON.stringify({ token: getToken(), cols, rows, cmd: argv }));
-		};
-
-		termWs.onmessage = (e) => {
-			try {
-				const msg = JSON.parse(e.data);
-				if (msg.authenticated) return;
-				if (msg.error) { term?.write(`\r\nError: ${msg.error}\r\n`); return; }
-			} catch { /* raw PTY output */ }
-			term?.write(e.data);
-		};
-
-		termWs.onclose = () => { termStatus = 'done'; };
-		termWs.onerror = () => { termStatus = 'done'; };
-
-		term.onData((data) => {
-			if (termWs?.readyState === WebSocket.OPEN) {
-				termWs.send(data);
-			}
-		});
-
-		const resizeObserver = new ResizeObserver(() => {
-			fitAddon?.fit();
-			const s = fitAddon ? { cols: term!.cols, rows: term!.rows } : null;
-			if (s && termWs?.readyState === WebSocket.OPEN) {
-				termWs.send(JSON.stringify({ type: 'resize', ...s }));
-			}
-		});
-		if (termEl) resizeObserver.observe(termEl);
+		topLoading = true;
+		try {
+			const result = await getClient().call('bcachefs.top', { name: selectedFs });
+			topOutput = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+		} catch (e) {
+			topOutput = e instanceof Error ? e.message : String(e);
+		} finally {
+			topLoading = false;
+		}
 	}
 
-	function killTerm() {
-		termWs?.close();
-		termWs = null;
-		term?.dispose();
-		term = null;
-		termStatus = 'idle';
+	function startTopAutoRefresh() {
+		stopTopAutoRefresh();
+		refreshTop();
+		topIntervalId = setInterval(refreshTop, 3000);
+	}
+
+	function stopTopAutoRefresh() {
+		if (topIntervalId !== null) { clearInterval(topIntervalId); topIntervalId = null; }
+	}
+
+	function toggleTopAutoRefresh() {
+		topAutoRefresh = !topAutoRefresh;
+		if (topAutoRefresh) startTopAutoRefresh(); else stopTopAutoRefresh();
 	}
 
 	// Reset state on filesystem or tab change — auto-load data
@@ -272,17 +216,18 @@
 		const _fs = selectedFs;
 		const _tab = activeTab;
 		usageOutput = '';
+		topOutput = '';
 		timestatsData = null;
 		scrubOutput = '';
 		reconcileOutput = '';
 		stopAutoRefresh();
+		stopTopAutoRefresh();
 		stopTimestatsAutoRefresh();
-		killTerm();
 
 		if (_fs) {
 			if (_tab === 'usage') refreshUsage();
+			else if (_tab === 'top') refreshTop();
 			else if (_tab === 'timestats') refreshTimestats();
-			else if (_tab === 'top') startTerm();
 			else if (_tab === 'scrub') refreshScrub();
 			else if (_tab === 'reconcile') refreshReconcile();
 		}
@@ -436,23 +381,22 @@
 		<!-- top tab controls -->
 		{:else if activeTab === 'top'}
 			<div class="ml-auto flex items-center gap-2 pb-1">
-				{#if termStatus === 'idle' || termStatus === 'done'}
-					<button
-						onclick={startTerm}
-						disabled={!selectedFs}
-						class="rounded px-3 py-1 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-					>
-						{termStatus === 'done' ? 'Restart' : 'Start'}
-					</button>
-				{:else}
-					<button
-						onclick={killTerm}
-						class="flex items-center gap-1 rounded px-3 py-1 text-xs bg-destructive text-destructive-foreground hover:bg-destructive/90"
-					>
-						<SquareX size={12} />
-						Stop
-					</button>
-				{/if}
+				<button
+					onclick={refreshTop}
+					disabled={!selectedFs || topLoading}
+					class="flex items-center gap-1.5 rounded px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 disabled:opacity-50"
+				>
+					<RefreshCw size={12} class={topLoading ? 'animate-spin' : ''} />
+					Refresh
+				</button>
+				<button
+					onclick={toggleTopAutoRefresh}
+					disabled={!selectedFs}
+					class="rounded px-3 py-1 text-xs disabled:opacity-50
+						{topAutoRefresh ? 'bg-primary text-primary-foreground' : 'bg-secondary hover:bg-secondary/80'}"
+				>
+					{topAutoRefresh ? 'Live (3s)' : 'Live'}
+				</button>
 			</div>
 		{/if}
 	</div>
@@ -568,18 +512,17 @@
 			{/if}
 		</div>
 
-	<!-- ═══ Terminal output (fs top) ═══ -->
-	{:else}
-		<div class="rounded-lg border border-border bg-[#0f1117] overflow-hidden" style="min-height: 400px;">
+	<!-- ═══ Top output ═══ -->
+	{:else if activeTab === 'top'}
+		<div class="rounded-lg border border-border bg-card overflow-hidden">
 			{#if !selectedFs}
 				<p class="p-6 text-sm text-muted-foreground">Select a mounted filesystem.</p>
-			{:else if termStatus === 'idle'}
-				<p class="p-6 text-sm text-muted-foreground">Starting...</p>
+			{:else if topOutput === '' && topLoading}
+				<p class="p-6 text-sm text-muted-foreground">Loading...</p>
+			{:else if topOutput === ''}
+				<p class="p-6 text-sm text-muted-foreground">No data available.</p>
 			{:else}
-				<div bind:this={termEl} class="w-full" style="min-height: 400px;"></div>
-				{#if termStatus === 'done'}
-					<p class="px-4 py-2 text-xs text-muted-foreground border-t border-border">Process exited. Press Restart to run again.</p>
-				{/if}
+				<pre class="p-4 text-xs font-mono overflow-x-auto whitespace-pre leading-relaxed">{topOutput}</pre>
 			{/if}
 		</div>
 	{/if}

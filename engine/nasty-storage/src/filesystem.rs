@@ -1315,6 +1315,40 @@ impl FilesystemService {
         Ok(raw)
     }
 
+    pub async fn bcachefs_top(&self, name: &str) -> Result<String, FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted".to_string(),
+            ));
+        }
+        let mount_point = fs.mount_point.as_ref().unwrap();
+        // Use `script` to provide a PTY so fs top doesn't fail with "No such device"
+        // Capture 2 seconds of output to get at least one full frame
+        let raw = cmd::run_ok(
+            "script",
+            &["-qc", &format!("timeout 2 bcachefs fs top -h {mount_point}"), "/dev/null"],
+        )
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
+
+        // Strip ANSI escapes and extract the last complete frame
+        let clean = strip_ansi(&raw);
+        // Split on clear-screen artifacts and take the last substantial frame
+        let frames: Vec<&str> = clean.split("\x1b[?1049h").collect();
+        let frame = frames.last().unwrap_or(&clean.as_str());
+        // Clean up: remove carriage returns, control chars, and the header/help lines
+        let lines: Vec<&str> = frame
+            .lines()
+            .map(|l| l.trim_end_matches('\r'))
+            .filter(|l| !l.is_empty())
+            .filter(|l| !l.starts_with("All counters"))
+            .filter(|l| !l.starts_with("  perf trace"))
+            .filter(|l| !l.starts_with("  q:quit"))
+            .collect();
+        Ok(lines.join("\n"))
+    }
+
     pub async fn bcachefs_timestats(&self, name: &str) -> Result<serde_json::Value, FilesystemError> {
         let fs = self.get(name).await?;
         if !fs.mounted {
