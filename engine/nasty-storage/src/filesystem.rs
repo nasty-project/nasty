@@ -704,7 +704,7 @@ impl FilesystemService {
                     .map_err(FilesystemError::CommandFailed)?;
             } else {
                 return Err(FilesystemError::CommandFailed(
-                    format!("encrypted filesystem '{name}' requires unlock — no stored key found. Unlock via WebUI.")
+                    format!("encrypted filesystem '{name}' is locked — unlock it first, then mount.")
                 ));
             }
         }
@@ -726,42 +726,21 @@ impl FilesystemService {
         self.get(name).await
     }
 
-    /// Unlock an encrypted filesystem with a passphrase and mount it.
+    /// Unlock an encrypted filesystem with a passphrase (does not mount).
     pub async fn unlock(&self, name: &str, passphrase: &str) -> Result<Filesystem, FilesystemError> {
         let fs = self.get(name).await?;
-        if fs.mounted {
-            return Ok(fs);
-        }
 
         let first_device = fs.devices.first()
             .map(|d| d.path.clone())
             .ok_or_else(|| FilesystemError::CommandFailed("no devices".to_string()))?;
 
-        // Unlock with passphrase via stdin
         let stdin = format!("{passphrase}\n");
         cmd::run_ok_stdin("bcachefs", &["unlock", &first_device], stdin.as_bytes())
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
-        // Now mount normally
-        let state = load_fs_state().await;
-        let opts = get_fs_mount_options(&state, name);
-        let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
-        tokio::fs::create_dir_all(&mount_point).await?;
-
-        let device_arg = fs.devices.iter().map(|d| d.path.as_str()).collect::<Vec<_>>().join(":");
-        let mount_opt_str = build_mount_opts(&opts);
-        cmd::run_ok("bcachefs", &["mount", "-o", &mount_opt_str, &device_arg, &mount_point])
-            .await
-            .map_err(FilesystemError::CommandFailed)?;
-
-        save_fs_mounted_with_opts(name, opts).await;
+        info!("Filesystem '{name}' unlocked");
         self.get(name).await
-    }
-
-    /// Lock an encrypted filesystem (unmount it).
-    pub async fn lock(&self, name: &str) -> Result<(), FilesystemError> {
-        self.unmount(name).await
     }
 
     /// Export the stored encryption key for a filesystem.

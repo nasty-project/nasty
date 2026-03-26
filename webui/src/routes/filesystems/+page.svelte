@@ -1085,18 +1085,11 @@
 							<Button variant="default" size="xs" onclick={() => { unlockFs = fs.name; unlockPassphrase = ''; }}>
 								Unlock
 							</Button>
-						{:else if fs.options.encrypted && !fs.options.locked}
-							<Button variant="secondary" size="xs" onclick={async () => {
-								await withToast(() => client.call('fs.lock', { name: fs.name }), 'Filesystem locked');
-								await refresh();
-							}}>
-								Lock
-							</Button>
-						{:else}
-							<Button variant="secondary" size="xs" onclick={() => toggleMount(fs)}>
-								{fs.mounted ? 'Unmount' : 'Mount'}
-							</Button>
 						{/if}
+						<Button variant="secondary" size="xs" onclick={() => toggleMount(fs)}
+							disabled={fs.options.encrypted && fs.options.locked && !fs.mounted}>
+							{fs.mounted ? 'Unmount' : 'Mount'}
+						</Button>
 						{#if fs.options.encrypted && fs.options.key_stored}
 							<Button variant="secondary" size="xs" onclick={async () => {
 								const key = await client.call<string>('fs.key.export', { name: fs.name });

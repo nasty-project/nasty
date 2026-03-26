@@ -549,7 +549,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "fs.mount" => match require_str(req, "name") {
             Ok(name) => match state.filesystems.mount(name).await {
-                Ok(v) => ok(req, v),
+                Ok(v) => {
+                    // Cascade: restore block devices on this filesystem
+                    let _ = state.subvolumes.restore_block_devices().await;
+                    ok(req, v)
+                }
                 Err(e) => err(req, e),
             },
             Err(r) => r,
@@ -566,22 +570,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let passphrase = p.get("passphrase").and_then(|v| v.as_str()).unwrap_or("");
                 match state.filesystems.unlock(name, passphrase).await {
-                    Ok(fs) => {
-                        // Cascade: restore block devices, shares, VMs, apps
-                        let _ = state.subvolumes.restore_block_devices().await;
-                        ok(req, fs)
-                    }
+                    Ok(fs) => ok(req, fs),
                     Err(e) => err(req, e),
                 }
             }
             Err(e) => invalid(req, e),
-        },
-        "fs.lock" => match require_str(req, "name") {
-            Ok(name) => match state.filesystems.lock(name).await {
-                Ok(()) => ok(req, "ok"),
-                Err(e) => err(req, e),
-            },
-            Err(r) => r,
         },
         "fs.key.export" => match require_str(req, "name") {
             Ok(name) => match state.filesystems.export_key(name).await {
