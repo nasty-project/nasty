@@ -506,6 +506,9 @@ export interface AppsStatus {
 	running: boolean;
 	app_count: number;
 	memory_bytes?: number;
+	storage_path?: string;
+	k3s_version?: string;
+	node_status?: string;
 }
 
 export interface App {

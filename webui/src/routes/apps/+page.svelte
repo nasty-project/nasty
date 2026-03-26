@@ -10,6 +10,8 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import { CircleCheck, Circle } from '@lucide/svelte';
+	import type { Filesystem } from '$lib/types';
 
 	let status: AppsStatus | null = $state(null);
 	let apps: App[] = $state([]);
@@ -19,7 +21,11 @@
 	let expanded: Record<string, boolean> = $state({});
 	let logsApp: string | null = $state(null);
 	let logsContent = $state('');
-	let mode: 'easy' | 'expert' = $state('easy');
+	let mode: 'easy' | 'expert' | 'settings' = $state('easy');
+
+	// Setup wizard state
+	let filesystems: Filesystem[] = $state([]);
+	let selectedFs = $state('');
 
 	// Expert mode state
 	let repos: HelmRepo[] = $state([]);
@@ -50,9 +56,19 @@
 	const client = getClient();
 
 	onMount(async () => {
-		await refresh();
+		await Promise.all([refresh(), loadFilesystems()]);
 		loading = false;
 	});
+
+	async function loadFilesystems() {
+		try {
+			const all = await client.call<Filesystem[]>('fs.list');
+			filesystems = all.filter(f => f.mounted);
+			if (filesystems.length > 0 && !selectedFs) {
+				selectedFs = filesystems[0].name;
+			}
+		} catch { /* ignore */ }
+	}
 
 	async function refresh() {
 		try {
@@ -70,7 +86,7 @@
 	async function enableApps() {
 		enabling = true;
 		await withToast(
-			() => client.call('apps.enable'),
+			() => client.call('apps.enable', { filesystem: selectedFs || undefined }),
 			'Apps runtime enabled'
 		);
 		enabling = false;
@@ -283,28 +299,21 @@
 </script>
 
 <!-- Status Card -->
-{#if status}
+{#if status?.enabled}
 	<Card class="mb-4">
 		<CardContent class="flex items-center gap-4 py-3">
-			{#if status.enabled}
-				<Badge variant={status.running ? 'default' : 'destructive'}>
-					{status.running ? 'Running' : 'Starting...'}
-				</Badge>
-				<span class="text-sm text-muted-foreground">
-					{status.app_count} app{status.app_count !== 1 ? 's' : ''}
-					{#if status.memory_bytes}
-						&middot; k3s using {formatMemory(status.memory_bytes)}
-					{/if}
-				</span>
-				<Button size="xs" variant="destructive" onclick={disableApps}>
-					Disable Apps
-				</Button>
-			{:else}
-				<Badge variant="secondary">Disabled</Badge>
-				<span class="text-sm text-muted-foreground">
-					App runtime is not running. Enable to deploy containerized applications.
-				</span>
-			{/if}
+			<Badge variant={status.running ? 'default' : 'destructive'}>
+				{status.running ? 'Running' : 'Starting...'}
+			</Badge>
+			<span class="text-sm text-muted-foreground">
+				{status.app_count} app{status.app_count !== 1 ? 's' : ''}
+				{#if status.memory_bytes}
+					&middot; k3s using {formatMemory(status.memory_bytes)}
+				{/if}
+				{#if status.node_status}
+					&middot; Node: {status.node_status}
+				{/if}
+			</span>
 		</CardContent>
 	</Card>
 {/if}
@@ -312,17 +321,66 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else if !status?.enabled}
-	<!-- Enable prompt -->
-	<Card class="max-w-lg">
-		<CardContent class="pt-6 text-center">
-			<h3 class="text-lg font-semibold mb-2">App Runtime</h3>
-			<p class="text-sm text-muted-foreground mb-4">
-				NASty can run containerized applications using a lightweight Kubernetes runtime (k3s).
-				This uses approximately 500 MiB–1 GiB of RAM.
+	<!-- Setup Wizard -->
+	<Card class="mb-4 max-w-2xl">
+		<CardContent class="pt-6 pb-4">
+			<h3 class="mb-1 text-lg font-semibold">Apps Setup</h3>
+			<p class="mb-4 text-sm text-muted-foreground">
+				NASty runs containerized applications using a lightweight Kubernetes runtime (k3s).
+				Uses approximately 500 MiB–1 GiB of RAM.
 			</p>
-			<Button onclick={enableApps} disabled={enabling}>
-				{enabling ? 'Enabling...' : 'Enable Apps'}
-			</Button>
+
+			<div class="space-y-2">
+				<div class="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5">
+					{#if filesystems.length > 0}
+						<CircleCheck size={18} class="mt-0.5 shrink-0 text-green-500" />
+					{:else}
+						<Circle size={18} class="mt-0.5 shrink-0 text-muted-foreground" />
+					{/if}
+					<div class="flex-1 min-w-0">
+						<div class="text-sm font-medium">Storage Filesystem</div>
+						<div class="text-xs text-muted-foreground">
+							{filesystems.length > 0
+								? `${filesystems.length} filesystem${filesystems.length !== 1 ? 's' : ''} available`
+								: 'No filesystem found — create one in Storage first'}
+						</div>
+					</div>
+					{#if filesystems.length === 0}
+						<Button size="xs" variant="outline" onclick={() => window.location.href = '/filesystems'}>
+							Go to Storage
+						</Button>
+					{/if}
+				</div>
+
+				<div class="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5">
+					{#if filesystems.length > 0}
+						<CircleCheck size={18} class="mt-0.5 shrink-0 text-green-500" />
+					{:else}
+						<Circle size={18} class="mt-0.5 shrink-0 text-muted-foreground" />
+					{/if}
+					<div class="flex-1 min-w-0">
+						<div class="text-sm font-medium">App Storage Location</div>
+						{#if filesystems.length > 0}
+							<div class="mt-1">
+								<select bind:value={selectedFs} class="h-7 rounded-md border border-input bg-transparent px-2 text-xs">
+									{#each filesystems as fs}
+										<option value={fs.name}>{fs.name}</option>
+									{/each}
+								</select>
+								<span class="ml-2 text-xs text-muted-foreground">Subvolume "apps-data" will be created on this filesystem</span>
+							</div>
+						{:else}
+							<div class="text-xs text-muted-foreground">Requires a filesystem first</div>
+						{/if}
+					</div>
+				</div>
+			</div>
+
+			<div class="mt-4">
+				<Button onclick={enableApps} disabled={enabling || filesystems.length === 0}>
+					{enabling ? 'Enabling...' : 'Enable Apps'}
+				</Button>
+			</div>
 		</CardContent>
 	</Card>
 {:else if !status?.running}
@@ -339,6 +397,10 @@
 				class="px-3 py-1.5 text-sm transition-colors {mode === 'expert' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}"
 				onclick={() => mode = 'expert'}
 			>Helm Charts</button>
+			<button
+				class="px-3 py-1.5 text-sm transition-colors {mode === 'settings' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}"
+				onclick={() => mode = 'settings'}
+			>Settings</button>
 		</div>
 		{#if mode === 'easy'}
 			<Button size="sm" onclick={() => showInstall = !showInstall}>
@@ -643,6 +705,55 @@
 			</tbody>
 		</table>
 	{/if}
+	{:else if mode === 'settings'}
+	<!-- Settings tab -->
+	<div class="max-w-2xl space-y-4">
+		<Card>
+			<CardContent class="pt-6">
+				<h4 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cluster</h4>
+				<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+					<span class="text-muted-foreground">k3s Version</span>
+					<span class="font-mono text-xs">{status?.k3s_version ?? 'Unknown'}</span>
+					<span class="text-muted-foreground">Node Status</span>
+					<span>
+						<Badge variant={status?.node_status === 'Ready' ? 'default' : 'destructive'}>
+							{status?.node_status ?? 'Unknown'}
+						</Badge>
+					</span>
+					<span class="text-muted-foreground">Apps</span>
+					<span>{status?.app_count ?? 0} deployed</span>
+					{#if status?.memory_bytes}
+						<span class="text-muted-foreground">Memory</span>
+						<span>{formatMemory(status.memory_bytes)}</span>
+					{/if}
+				</div>
+			</CardContent>
+		</Card>
+
+		<Card>
+			<CardContent class="pt-6">
+				<h4 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Storage</h4>
+				<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+					<span class="text-muted-foreground">Path</span>
+					<code class="text-xs">{status?.storage_path ?? 'Not configured'}</code>
+					<span class="text-muted-foreground">Provisioner</span>
+					<span>local-path-provisioner</span>
+				</div>
+			</CardContent>
+		</Card>
+
+		<Card>
+			<CardContent class="pt-6">
+				<h4 class="mb-3 text-xs font-semibold uppercase tracking-wide text-destructive">Danger Zone</h4>
+				<p class="mb-3 text-sm text-muted-foreground">
+					Disabling apps stops the k3s runtime and all running containers. App data on the filesystem is preserved.
+				</p>
+				<Button variant="destructive" size="sm" onclick={disableApps}>
+					Disable Apps
+				</Button>
+			</CardContent>
+		</Card>
+	</div>
 	{/if}
 {/if}
 

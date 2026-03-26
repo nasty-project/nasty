@@ -1239,9 +1239,12 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "apps.status" => match state.apps.status().await {
             s => ok(req, s),
         },
-        "apps.enable" => match state.apps.enable().await {
-            Ok(()) => ok(req, "ok"),
-            Err(e) => err(req, e),
+        "apps.enable" => {
+            let p: nasty_apps::EnableAppsRequest = parse_params(req).unwrap_or_default();
+            match state.apps.enable(p).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            }
         },
         "apps.disable" => match state.apps.disable().await {
             Ok(()) => ok(req, "ok"),

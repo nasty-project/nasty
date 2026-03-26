@@ -69,6 +69,28 @@ pub struct AppsStatus {
     pub app_count: usize,
     /// k3s memory usage in bytes (approximate).
     pub memory_bytes: Option<u64>,
+    /// Path to the apps storage subvolume.
+    pub storage_path: Option<String>,
+    /// k3s version string.
+    pub k3s_version: Option<String>,
+    /// Node readiness status (e.g. "Ready", "NotReady").
+    pub node_status: Option<String>,
+}
+
+/// Request to enable the apps runtime.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct EnableAppsRequest {
+    /// Filesystem to create apps-data subvolume on.
+    pub filesystem: Option<String>,
+}
+
+/// Persisted apps configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AppsConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -229,21 +251,50 @@ impl AppsService {
         Path::new(STATE_PATH).exists()
     }
 
-    pub async fn enable(&self) -> Result<(), AppsError> {
+    fn load_config() -> AppsConfig {
+        let content = match std::fs::read_to_string(STATE_PATH) {
+            Ok(c) => c,
+            Err(_) => return AppsConfig::default(),
+        };
+        // Try JSON format first, fall back to old "1" marker
+        if let Ok(config) = serde_json::from_str::<AppsConfig>(&content) {
+            return config;
+        }
+        // Old format: bare "1" means enabled with no config
+        if content.trim() == "1" {
+            return AppsConfig { enabled: true, storage_path: None };
+        }
+        AppsConfig::default()
+    }
+
+    async fn save_config(config: &AppsConfig) -> Result<(), AppsError> {
+        let json = serde_json::to_string_pretty(config)
+            .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+        tokio::fs::write(STATE_PATH, json).await?;
+        Ok(())
+    }
+
+    pub async fn enable(&self, req: EnableAppsRequest) -> Result<(), AppsError> {
         if self.is_enabled() {
             return Err(AppsError::AlreadyEnabled);
         }
 
-        // Write state file
-        tokio::fs::write(STATE_PATH, "1").await?;
+        // Save config with chosen filesystem
+        let config = AppsConfig {
+            enabled: true,
+            storage_path: None, // Will be set during bootstrap
+        };
+        Self::save_config(&config).await?;
 
         // Start k3s via systemd (non-blocking — k3s takes 30-60s to initialize)
         run_cmd("systemctl", &["start", K3S_SERVICE]).await?;
 
         info!("Apps runtime enabled — k3s starting (bootstrap will run in background)");
 
+        let filesystem = req.filesystem.clone();
+
         // Bootstrap in background — don't block the RPC response
-        tokio::spawn(async {
+        tokio::spawn(async move {
             // Wait for k3s to be ready (up to 90s)
             let mut ready = false;
             for _ in 0..45 {
@@ -265,8 +316,8 @@ impl AppsService {
                 return;
             }
 
-            // Create apps-data subvolume on first available filesystem
-            let apps_data_path = setup_apps_storage().await;
+            // Create apps-data subvolume
+            let apps_data_path = setup_apps_storage(filesystem.as_deref()).await;
 
             // Configure local-path-provisioner to use bcachefs subvolume
             if let Some(ref path) = apps_data_path {
@@ -312,6 +363,15 @@ impl AppsService {
                 .output()
                 .await;
 
+            // Persist storage path in config
+            if let Some(ref path) = apps_data_path {
+                let config = AppsConfig {
+                    enabled: true,
+                    storage_path: Some(path.clone()),
+                };
+                let _ = AppsService::save_config(&config).await;
+            }
+
             info!("Apps bootstrap complete (namespace: {NAMESPACE}, repo: bjw-s)");
         });
 
@@ -336,24 +396,38 @@ impl AppsService {
     // ── Status ──────────────────────────────────────────────
 
     pub async fn status(&self) -> AppsStatus {
+        let config = Self::load_config();
         let enabled = self.is_enabled();
+        let storage_path = config.storage_path.clone();
+
         if !enabled {
-            return AppsStatus { enabled, running: false, app_count: 0, memory_bytes: None };
+            return AppsStatus {
+                enabled, running: false, app_count: 0, memory_bytes: None,
+                storage_path, k3s_version: None, node_status: None,
+            };
         }
 
         let running = self.is_k3s_ready().await;
         if !running {
-            return AppsStatus { enabled, running: false, app_count: 0, memory_bytes: None };
+            return AppsStatus {
+                enabled, running: false, app_count: 0, memory_bytes: None,
+                storage_path, k3s_version: None, node_status: None,
+            };
         }
 
-        // Run helm list and memory check in parallel (skip require_ready — already checked)
-        let (apps_result, memory_bytes) = tokio::join!(
+        // Run checks in parallel
+        let (apps_result, memory_bytes, k3s_version, node_status) = tokio::join!(
             self.list_internal(),
-            k3s_memory()
+            k3s_memory(),
+            k3s_version(),
+            k3s_node_status(),
         );
         let app_count = apps_result.map(|apps| apps.len()).unwrap_or(0);
 
-        AppsStatus { enabled, running, app_count, memory_bytes }
+        AppsStatus {
+            enabled, running, app_count, memory_bytes,
+            storage_path, k3s_version, node_status,
+        }
     }
 
     // ── App management (app-template) ───────────────────────
@@ -833,6 +907,34 @@ async fn k3s_memory() -> Option<u64> {
         .ok()
 }
 
+async fn k3s_version() -> Option<String> {
+    let output = Command::new("k3s")
+        .args(["--version"])
+        .output()
+        .await
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Format: "k3s version v1.xx.x+k3s1 (hash)"
+    stdout.split_whitespace().nth(2).map(|s| s.to_string())
+}
+
+async fn k3s_node_status() -> Option<String> {
+    let output = Command::new("k3s")
+        .args(["kubectl", "--kubeconfig", KUBECONFIG, "get", "nodes",
+               "-o", "jsonpath={.items[0].status.conditions[?(@.type==\"Ready\")].status}"])
+        .output()
+        .await
+        .ok()?;
+    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if status == "True" {
+        Some("Ready".to_string())
+    } else if status == "False" {
+        Some("NotReady".to_string())
+    } else {
+        Some(status)
+    }
+}
+
 /// Generate values.yaml for the bjw-s app-template chart.
 fn generate_app_template_values(req: &InstallAppRequest) -> serde_json::Value {
     let mut env_list = serde_json::Map::new();
@@ -919,32 +1021,42 @@ async fn reload_nginx() {
         .await;
 }
 
-/// Create an "apps-data" subvolume on the first available bcachefs filesystem.
+/// Create an "apps-data" subvolume on the specified or first available bcachefs filesystem.
 /// Returns the subvolume path if successful.
-async fn setup_apps_storage() -> Option<String> {
-    // Find first mounted bcachefs filesystem
-    let fs_base = std::path::Path::new("/fs");
-    let mut entries = match tokio::fs::read_dir(fs_base).await {
-        Ok(e) => e,
-        Err(_) => {
-            error!("No /fs directory — cannot set up apps storage");
+async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
+    let fs_name = if let Some(name) = filesystem {
+        // Verify the specified filesystem exists
+        let path = format!("/fs/{name}");
+        if !std::path::Path::new(&path).is_dir() {
+            error!("Specified filesystem '{name}' not found at {path}");
             return None;
         }
-    };
+        name.to_string()
+    } else {
+        // Find first mounted bcachefs filesystem
+        let fs_base = std::path::Path::new("/fs");
+        let mut entries = match tokio::fs::read_dir(fs_base).await {
+            Ok(e) => e,
+            Err(_) => {
+                error!("No /fs directory — cannot set up apps storage");
+                return None;
+            }
+        };
 
-    let mut fs_name = None;
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
-            fs_name = Some(entry.file_name().to_string_lossy().to_string());
-            break;
+        let mut found = None;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                found = Some(entry.file_name().to_string_lossy().to_string());
+                break;
+            }
         }
-    }
 
-    let fs_name = match fs_name {
-        Some(n) => n,
-        None => {
-            error!("No filesystems found under /fs — cannot set up apps storage");
-            return None;
+        match found {
+            Some(n) => n,
+            None => {
+                error!("No filesystems found under /fs — cannot set up apps storage");
+                return None;
+            }
         }
     };
 
