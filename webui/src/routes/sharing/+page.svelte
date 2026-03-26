@@ -537,6 +537,14 @@
 		await nvmeRefresh();
 	}
 
+	async function toggleProtocol(name: string, currentlyEnabled: boolean) {
+		const action = currentlyEnabled ? 'disable' : 'enable';
+		await withToast(
+			() => client.call(`service.protocol.${action}`, { name }),
+			`${name} ${action}d`
+		);
+	}
+
 	// ── Events & lifecycle ───────────────────────────────
 	function handleEvent(_: string, params: unknown) {
 		const p = params as { collection?: string };
@@ -594,12 +602,13 @@
 			<span class="text-sm text-muted-foreground">
 				{nfsShares.length} share{nfsShares.length !== 1 ? 's' : ''}
 				{#if nfsShares.length > 0}
-					&middot; Mount with: <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">mount -t nfs {window.location.hostname}:&lt;path&gt; /mnt</code>
+					&middot; <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">mount -t nfs {window.location.hostname}:&lt;path&gt; /mnt</code>
 				{/if}
 			</span>
-			{#if !nfsProtocol.enabled}
-				<Badge variant="secondary">Disabled</Badge>
-			{/if}
+			<Button size="xs" variant={nfsProtocol.enabled ? 'secondary' : 'default'} class="ml-auto"
+				onclick={() => toggleProtocol('nfs', nfsProtocol!.enabled)}>
+				{nfsProtocol.enabled ? 'Disable' : 'Enable'} NFS
+			</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -612,7 +621,7 @@
 </div>
 
 {#if nfsShowCreate}
-	<Card class="mb-6 max-w-lg">
+	<Card class="mb-6 max-w-2xl">
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
 			<div class="mb-4">
@@ -620,7 +629,7 @@
 				<select id="nfs-path" bind:value={nfsNewSubvolume} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 					<option value="">Select a subvolume...</option>
 					{#each nfsSubvolumes as sv}
-						<option value={sv.path}>{sv.filesystem}/{sv.name}</option>
+						<option value={sv.path}>{sv.filesystem}/{sv.name} ({sv.path})</option>
 					{/each}
 				</select>
 				{#if nfsSubvolumes.length === 0}
@@ -753,12 +762,13 @@
 			<span class="text-sm text-muted-foreground">
 				{smbShares.length} share{smbShares.length !== 1 ? 's' : ''}
 				{#if smbShares.length > 0}
-					&middot; Connect with: <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">\\{window.location.hostname}\&lt;name&gt;</code>
+					&middot; <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">\\{window.location.hostname}\&lt;name&gt;</code>
 				{/if}
 			</span>
-			{#if !smbProtocol.enabled}
-				<Badge variant="secondary">Disabled</Badge>
-			{/if}
+			<Button size="xs" variant={smbProtocol.enabled ? 'secondary' : 'default'} class="ml-auto"
+				onclick={() => toggleProtocol('smb', smbProtocol!.enabled)}>
+				{smbProtocol.enabled ? 'Disable' : 'Enable'} SMB
+			</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -771,7 +781,7 @@
 </div>
 
 {#if smbShowCreate}
-	<Card class="mb-6 max-w-lg">
+	<Card class="mb-6 max-w-2xl">
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
 			<div class="mb-4">
@@ -779,7 +789,7 @@
 				<select id="smb-subvol" bind:value={smbNewSubvolume} onchange={smbOnSubvolumeSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 					<option value="">Select a subvolume...</option>
 					{#each smbSubvolumes as sv}
-						<option value={sv.path}>{sv.filesystem}/{sv.name}</option>
+						<option value={sv.path}>{sv.filesystem}/{sv.name} ({sv.path})</option>
 					{/each}
 				</select>
 				{#if smbSubvolumes.length === 0}
@@ -929,11 +939,12 @@
 			</Badge>
 			<span class="text-sm text-muted-foreground">
 				{iscsiTargets.length} target{iscsiTargets.length !== 1 ? 's' : ''}
-				&middot; Portal: <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">{window.location.hostname}:3260</code>
+				&middot; <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">{window.location.hostname}:3260</code>
 			</span>
-			{#if !iscsiProtocol.enabled}
-				<Badge variant="secondary">Disabled</Badge>
-			{/if}
+			<Button size="xs" variant={iscsiProtocol.enabled ? 'secondary' : 'default'} class="ml-auto"
+				onclick={() => toggleProtocol('iscsi', iscsiProtocol!.enabled)}>
+				{iscsiProtocol.enabled ? 'Disable' : 'Enable'} iSCSI
+			</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -946,7 +957,7 @@
 </div>
 
 {#if iscsiShowCreate}
-	<Card class="mb-6 max-w-lg">
+	<Card class="mb-6 max-w-2xl">
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Target</h3>
 			<div class="mb-4">
@@ -1135,11 +1146,14 @@
 			</Badge>
 			<span class="text-sm text-muted-foreground">
 				{nvmeSubsystems.length} subsystem{nvmeSubsystems.length !== 1 ? 's' : ''}
-				&middot; Connect with: <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">nvme connect -t tcp -a {window.location.hostname} -s 4420 -n &lt;nqn&gt;</code>
+				{#if nvmeSubsystems.length > 0}
+					&middot; <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">nvme connect -t tcp -a {window.location.hostname} -s 4420 -n &lt;nqn&gt;</code>
+				{/if}
 			</span>
-			{#if !nvmeProtocol.enabled}
-				<Badge variant="secondary">Disabled</Badge>
-			{/if}
+			<Button size="xs" variant={nvmeProtocol.enabled ? 'secondary' : 'default'} class="ml-auto"
+				onclick={() => toggleProtocol('nvmeof', nvmeProtocol!.enabled)}>
+				{nvmeProtocol.enabled ? 'Disable' : 'Enable'} NVMe-oF
+			</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -1152,7 +1166,7 @@
 </div>
 
 {#if nvmeShowCreate}
-	<Card class="mb-6 max-w-lg">
+	<Card class="mb-6 max-w-2xl">
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
 			<div class="mb-4">
