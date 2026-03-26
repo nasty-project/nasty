@@ -1525,47 +1525,100 @@ async fn ensure_images_subvolume(state: &AppState, filesystem: &str) -> Result<S
 /// Check if a subvolume is in use by a VM, iSCSI target, or NVMe-oF subsystem.
 /// Returns an error message if in use, None if safe to delete.
 async fn check_subvolume_in_use(state: &AppState, filesystem: &str, name: &str) -> Option<String> {
-    // Resolve the block device path for this subvolume
-    let sv = state.subvolumes.get(filesystem, name, None).await.ok()?;
-    let block_device = sv.block_device.as_deref()?;
+    let sv = match state.subvolumes.get(filesystem, name, None).await.ok() {
+        Some(sv) => sv,
+        None => return None,
+    };
+    let block_device = sv.block_device.as_deref();
+    let subvol_path = &sv.path;
 
-    // Check VMs
-    if let Ok(vms) = state.vms.list().await {
-        for vm in &vms {
-            for disk in &vm.config.disks {
-                if disk.path == block_device {
-                    return Some(format!(
-                        "subvolume is in use as a disk by VM '{}'. Stop and remove the VM first.",
-                        vm.config.name
-                    ));
+    // ── Block device checks (VMs, iSCSI, NVMe-oF) ──
+
+    if let Some(bd) = block_device {
+        // Check VMs
+        if let Ok(vms) = state.vms.list().await {
+            for vm in &vms {
+                for disk in &vm.config.disks {
+                    if disk.path == bd {
+                        return Some(format!(
+                            "subvolume is in use as a disk by VM '{}'. Detach the disk first.",
+                            vm.config.name
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Check iSCSI targets
+        if let Ok(targets) = state.iscsi.list().await {
+            for target in &targets {
+                for lun in &target.luns {
+                    if lun.backstore_path == bd {
+                        return Some(format!(
+                            "subvolume is in use by iSCSI target '{}'. Delete the target first.",
+                            target.iqn
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Check NVMe-oF subsystems
+        if let Ok(subsystems) = state.nvmeof.list().await {
+            for subsys in &subsystems {
+                for ns in &subsys.namespaces {
+                    if ns.device_path == bd {
+                        return Some(format!(
+                            "subvolume is in use by NVMe-oF subsystem '{}'. Delete the subsystem first.",
+                            subsys.nqn
+                        ));
+                    }
                 }
             }
         }
     }
 
-    // Check iSCSI targets
-    if let Ok(targets) = state.iscsi.list().await {
-        for target in &targets {
-            for lun in &target.luns {
-                if lun.backstore_path == block_device {
-                    return Some(format!(
-                        "subvolume is in use by iSCSI target '{}'. Delete the target first.",
-                        target.iqn
-                    ));
-                }
+    // ── Path-based checks (NFS, SMB shares) ──
+
+    if let Ok(nfs_shares) = state.nfs.list().await {
+        for share in &nfs_shares {
+            if share.path == *subvol_path || share.path.starts_with(&format!("{subvol_path}/")) {
+                return Some(format!(
+                    "subvolume is shared via NFS (path: {}). Delete the NFS share first.",
+                    share.path
+                ));
             }
         }
     }
 
-    // Check NVMe-oF subsystems
-    if let Ok(subsystems) = state.nvmeof.list().await {
-        for subsys in &subsystems {
-            for ns in &subsys.namespaces {
-                if ns.device_path == block_device {
-                    return Some(format!(
-                        "subvolume is in use by NVMe-oF subsystem '{}'. Delete the subsystem first.",
-                        subsys.nqn
-                    ));
+    if let Ok(smb_shares) = state.smb.list().await {
+        for share in &smb_shares {
+            if share.path == *subvol_path || share.path.starts_with(&format!("{subvol_path}/")) {
+                return Some(format!(
+                    "subvolume is shared via SMB as '{}'. Delete the SMB share first.",
+                    share.name
+                ));
+            }
+        }
+    }
+
+    // ── System subvolume checks (apps-data, images) ──
+
+    if name == "apps-data" && state.apps.is_enabled() {
+        return Some("subvolume is used by the Apps runtime for storage. Disable Apps first.".to_string());
+    }
+
+    if name == "images" {
+        // Check if any VM references an ISO from this subvolume
+        if let Ok(vms) = state.vms.list().await {
+            for vm in &vms {
+                if let Some(ref iso) = vm.config.boot_iso {
+                    if iso.starts_with(subvol_path) {
+                        return Some(format!(
+                            "subvolume contains VM boot image used by '{}'. Remove the ISO reference first.",
+                            vm.config.name
+                        ));
+                    }
                 }
             }
         }
