@@ -549,7 +549,7 @@
 </div>
 
 {#if wizardStep !== 0}
-	<Card class="mb-6 max-w-2xl">
+	<Card class="mb-6 max-w-4xl">
 		<CardContent class="pt-6">
 			<!-- Step indicator -->
 			<div class="mb-6 flex items-center gap-0">
@@ -771,7 +771,9 @@
 							<span class="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-xs">
 								<span class="rounded px-1 py-0.5 text-[10px] font-semibold uppercase {classColor(dev.device_class)}">{dev.device_class}</span>
 								<span class="font-mono">{dev.path}</span>
-								<span class="text-muted-foreground">→ {profile.device_labels[dev.path] ?? (profile.id === 'none' ? '—' : newName)}</span>
+								{#if profile.device_labels[dev.path]}
+									<span class="text-muted-foreground">→ {profile.device_labels[dev.path]}</span>
+								{/if}
 							</span>
 						{/each}
 					</div>
