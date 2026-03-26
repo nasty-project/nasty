@@ -140,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws/vm/{vm_id}/serial", get(vm_console::serial_handler))
         .route("/api/login", post(login_handler))
         .route("/api/upload/vm-image", post(upload_vm_image_handler).layer(DefaultBodyLimit::max(10_737_418_240)))
+        .route("/api/files/browse", get(files_browse_handler))
         .route("/health", get(health))
         .with_state(state);
 
@@ -325,6 +326,97 @@ async fn upload_vm_image_handler(
         "name": file_name,
         "path": dest_path.to_string_lossy(),
         "filesystem": fs_name,
+    }))).into_response()
+}
+
+// ── File Browser endpoints ──────────────────────────────────────
+
+const FILES_ROOT: &str = "/fs";
+
+/// Validate that a path is under /fs and doesn't escape via traversal.
+fn safe_path(requested: &str) -> Result<std::path::PathBuf, StatusCode> {
+    let clean = requested.replace("\\", "/");
+    let joined = std::path::Path::new(FILES_ROOT).join(clean.trim_start_matches('/'));
+    let canonical = joined.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
+    if !canonical.starts_with(FILES_ROOT) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(canonical)
+}
+
+/// List directory contents. GET /api/files/browse?path=/first
+async fn files_browse_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Auth check
+    let token = headers.get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+    let token = match token {
+        Some(t) => t,
+        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing token"}))).into_response(),
+    };
+    let client_ip = headers.get("x-real-ip").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+    if state.auth.validate(&token, client_ip).await.is_err() {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid token"}))).into_response();
+    }
+
+    let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let dir = match safe_path(req_path) {
+        Ok(p) => p,
+        Err(status) => return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response(),
+    };
+
+    let meta = match tokio::fs::metadata(&dir).await {
+        Ok(m) => m,
+        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response(),
+    };
+
+    if !meta.is_dir() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Not a directory"}))).into_response();
+    }
+
+    let mut entries = Vec::new();
+    let mut read_dir = match tokio::fs::read_dir(&dir).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    };
+
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let meta = entry.metadata().await.ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = meta.as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        entries.push(serde_json::json!({
+            "name": name,
+            "is_dir": is_dir,
+            "size": if is_dir { 0 } else { size },
+            "modified": modified,
+        }));
+    }
+
+    // Sort: directories first, then by name
+    entries.sort_by(|a, b| {
+        let a_dir = a["is_dir"].as_bool().unwrap_or(false);
+        let b_dir = b["is_dir"].as_bool().unwrap_or(false);
+        b_dir.cmp(&a_dir).then_with(|| {
+            a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+        })
+    });
+
+    let display_path = dir.strip_prefix(FILES_ROOT).unwrap_or(&dir).to_string_lossy().to_string();
+    (StatusCode::OK, Json(serde_json::json!({
+        "path": display_path,
+        "entries": entries,
     }))).into_response()
 }
 
