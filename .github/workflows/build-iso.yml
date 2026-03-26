@@ -1,0 +1,64 @@
+name: Build NASty ISO
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # TODO: Remove once repo is public — only needed for private repo updates
+      # Stored as a secret (not a variable) so GitHub secret scanning cannot see
+      # the PAT value and auto-revoke it.
+      - name: Inject GitHub token for updates
+        run: |
+          echo "${{ secrets.NASTY_GITHUB_TOKEN }}" > nixos/github-token
+          git add nixos/github-token
+
+      - name: Compute npm deps hash
+        run: |
+          HASH=$(nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json 2>/dev/null)
+          echo "Computed npmDepsHash: $HASH"
+          sed -i "s|npmDepsHash = \".*\"|npmDepsHash = \"$HASH\"|" nixos/flake.nix
+          git add nixos/flake.nix
+          echo "Updated flake.nix with hash: $HASH"
+
+      - name: Build x86_64 ISO
+        run: |
+          set -o pipefail
+          cd nixos
+          nix build .#nixosConfigurations.nasty-iso.config.system.build.isoImage \
+            --no-link --print-out-paths -L 2>&1 | tee /tmp/build.log
+          grep '^/nix/store' /tmp/build.log | tail -1 > /tmp/iso-path.txt
+          cat /tmp/iso-path.txt
+
+      - name: Prepare ISO
+        run: |
+          ISO_DIR=$(cat /tmp/iso-path.txt)
+          ISO_FILE=$(find "$ISO_DIR" -name "*.iso" -type f | head -1)
+          echo "ISO: $ISO_FILE"
+          ls -lh "$ISO_FILE"
+
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DEST="nasty-x86_64-${SHORT_SHA}.iso"
+          cp "$ISO_FILE" "$DEST"
+          echo "iso_dest=$DEST" >> "$GITHUB_ENV"
+
+      - name: Upload as release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="iso-$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
+          gh release create "$TAG" "${{ env.iso_dest }}" \
+            --title "NASty ISO $TAG" \
+            --notes "Automated ISO build from commit $(git rev-parse --short HEAD)"

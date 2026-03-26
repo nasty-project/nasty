@@ -379,10 +379,9 @@ else
     git reset --hard origin/$CHANNEL
 fi
 
-# Remove dev-only files not needed on the appliance (tests, docs, etc.
-# are in separate repos now). Keep this as a safety net for any stray
-# files that shouldn't affect the Nix build (-dirty version suffix).
-for f in .claude CLAUDE.md; do
+# Remove dev-only files not needed on the appliance.
+# These stay in the repo for CI/dev but shouldn't ship to users.
+for f in .github .claude CLAUDE.md; do
     [ -e "$f" ] && git rm -rf --quiet "$f" 2>/dev/null || true
 done
 
