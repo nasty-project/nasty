@@ -939,10 +939,19 @@ fn generate_app_template_values(req: &InstallAppRequest) -> serde_json::Value {
         env_list.insert(e.name.clone(), serde_json::json!(e.value));
     }
 
+    // Ensure port names are valid k8s identifiers (must contain at least one letter)
+    let sanitize_port_name = |name: &str, port: u16| -> String {
+        if name.chars().any(|c| c.is_ascii_alphabetic()) {
+            name.to_string()
+        } else {
+            format!("port-{port}")
+        }
+    };
+
     let ports: Vec<serde_json::Value> = req.ports.iter().map(|p| {
         serde_json::json!({
             "containerPort": p.container_port,
-            "name": p.name,
+            "name": sanitize_port_name(&p.name, p.container_port),
             "protocol": p.protocol,
         })
     }).collect();
@@ -961,6 +970,7 @@ fn generate_app_template_values(req: &InstallAppRequest) -> serde_json::Value {
 
     let mut service_ports = serde_json::Map::new();
     for p in &req.ports {
+        let svc_name = sanitize_port_name(&p.name, p.container_port);
         let mut port_def = serde_json::json!({
             "port": p.container_port,
             "protocol": p.protocol,
@@ -968,36 +978,46 @@ fn generate_app_template_values(req: &InstallAppRequest) -> serde_json::Value {
         if let Some(np) = p.node_port {
             port_def["nodePort"] = serde_json::json!(np);
         }
-        service_ports.insert(p.name.clone(), port_def);
+        service_ports.insert(svc_name, port_def);
     }
 
-    serde_json::json!({
+    let mut container = serde_json::json!({
+        "image": {
+            "repository": req.image.rsplit_once(':').map(|(r, _)| r).unwrap_or(&req.image),
+            "tag": req.image.rsplit_once(':').map(|(_, t)| t).unwrap_or("latest"),
+        },
+        "env": env_list,
+        "resources": {
+            "limits": build_resource_limits(&req.cpu_limit, &req.memory_limit),
+        },
+    });
+
+    if !ports.is_empty() {
+        container["ports"] = serde_json::json!(ports);
+    }
+
+    let mut values = serde_json::json!({
         "controllers": {
             "main": {
                 "containers": {
-                    "main": {
-                        "image": {
-                            "repository": req.image.rsplit_once(':').map(|(r, _)| r).unwrap_or(&req.image),
-                            "tag": req.image.rsplit_once(':').map(|(_, t)| t).unwrap_or("latest"),
-                        },
-                        "env": env_list,
-                        "ports": ports,
-                        "resources": {
-                            "limits": build_resource_limits(&req.cpu_limit, &req.memory_limit),
-                        },
-                    }
+                    "main": container,
                 }
             }
         },
-        "service": {
+        "persistence": persistence,
+    });
+
+    if !service_ports.is_empty() {
+        values["service"] = serde_json::json!({
             "main": {
                 "type": if req.ports.iter().any(|p| p.node_port.is_some()) { "NodePort" } else { "ClusterIP" },
                 "controller": "main",
                 "ports": service_ports,
             }
-        },
-        "persistence": persistence,
-    })
+        });
+    }
+
+    values
 }
 
 fn build_resource_limits(cpu: &Option<String>, memory: &Option<String>) -> serde_json::Value {

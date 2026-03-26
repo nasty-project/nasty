@@ -107,7 +107,7 @@
 	}
 
 	function addPort() {
-		newPorts = [...newPorts, { name: `port${newPorts.length}`, container_port: 8080, node_port: '', protocol: 'TCP' }];
+		newPorts = [...newPorts, { name: newPorts.length === 0 ? 'http' : `port-${newPorts.length}`, container_port: 8080, node_port: '', protocol: 'TCP' }];
 	}
 
 	function removePort(i: number) {
@@ -161,8 +161,9 @@
 			showInstall = false;
 			newName = ''; newImage = ''; newPorts = []; newEnvs = []; newVolumes = [];
 			newCpuLimit = ''; newMemoryLimit = '';
-			await refresh();
 		}
+		// Always refresh — app may have been partially created even on failure
+		await refresh();
 	}
 
 	async function removeApp(name: string) {
@@ -454,7 +455,7 @@
 					</div>
 					{#each newPorts as port, i}
 						<div class="grid grid-cols-[1fr_80px_90px_60px_auto] gap-2 mt-1 items-center">
-							<Input bind:value={port.name} placeholder="Name" class="h-8 text-xs" />
+							<Input bind:value={port.name} placeholder="e.g. http" class="h-8 text-xs" />
 							<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" />
 							<Input bind:value={port.node_port} placeholder="NodePort" class="h-8 text-xs" />
 							<select bind:value={port.protocol} class="h-8 rounded-md border border-input bg-transparent px-1 text-xs">
