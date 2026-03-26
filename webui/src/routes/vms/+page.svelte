@@ -51,7 +51,7 @@
 
 	// Console state
 	let consoleVm: VmStatus | null = $state(null);
-	let consoleMode: 'serial' | 'vnc' = $state('serial');
+	let consoleMode: 'serial' | 'vnc' = $state('vnc');
 	let consoleEl: HTMLDivElement | undefined = $state(undefined);
 	let consoleTerm: Terminal | null = $state(null);
 	let consoleWs: WebSocket | null = $state(null);
@@ -390,7 +390,7 @@
 		await refresh();
 	}
 
-	function openConsole(vm: VmStatus, mode: 'serial' | 'vnc' = 'serial') {
+	function openConsole(vm: VmStatus, mode: 'serial' | 'vnc' = 'vnc') {
 		closeConsole();
 		consoleMode = mode;
 		consoleVm = vm;
@@ -698,8 +698,11 @@
 					<td class="p-3" onclick={(e) => e.stopPropagation()}>
 						<div class="flex gap-2">
 							{#if vm.running}
-								<Button variant="outline" size="xs" onclick={() => openConsole(vm)}>
-									Console
+								<Button variant="outline" size="xs" onclick={() => openConsole(vm, 'vnc')}>
+									Display
+								</Button>
+								<Button variant="outline" size="xs" onclick={() => openConsole(vm, 'serial')}>
+									Serial
 								</Button>
 								<Button variant="secondary" size="xs" onclick={() => stopVm(vm.id)} disabled={actionInProgress[vm.id]}>
 									Stop
@@ -882,13 +885,13 @@
 					<span class="text-sm font-semibold text-white">{consoleVm.name}</span>
 					<div class="flex rounded-md overflow-hidden border border-white/20">
 						<button
+							class="px-2 py-0.5 text-xs transition-colors {consoleMode === 'vnc' ? 'bg-white/20 text-white' : 'text-white/50 hover:text-white/80'}"
+							onclick={() => switchConsoleMode('vnc')}
+						>Display</button>
+						<button
 							class="px-2 py-0.5 text-xs transition-colors {consoleMode === 'serial' ? 'bg-white/20 text-white' : 'text-white/50 hover:text-white/80'}"
 							onclick={() => switchConsoleMode('serial')}
 						>Serial</button>
-						<button
-							class="px-2 py-0.5 text-xs transition-colors {consoleMode === 'vnc' ? 'bg-white/20 text-white' : 'text-white/50 hover:text-white/80'}"
-							onclick={() => switchConsoleMode('vnc')}
-						>VNC</button>
 					</div>
 				</div>
 				<Button variant="ghost" size="xs" onclick={closeConsole} class="text-white hover:text-white/80">
@@ -896,7 +899,11 @@
 				</Button>
 			</div>
 			{#if consoleMode === 'serial'}
-				<div class="flex-1 p-2 overflow-hidden" bind:this={consoleEl}></div>
+				<div class="flex-1 p-2 overflow-hidden relative" bind:this={consoleEl}>
+					<div class="absolute bottom-3 right-4 text-xs text-white/30 pointer-events-none">
+						Guest OS must enable serial console (e.g. console=ttyS0,115200)
+					</div>
+				</div>
 			{:else}
 				<div class="flex-1 overflow-hidden" bind:this={vncEl}></div>
 			{/if}
