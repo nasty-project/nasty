@@ -264,6 +264,10 @@
 		return parts.join(' \\\n');
 	}
 
+	$effect(() => {
+		if (replicas < 2 && erasureCode) erasureCode = false;
+	});
+
 	async function createFs() {
 		if (!newName || selectedPaths.length === 0) return;
 		if (erasureCode && selectedPaths.length < replicas + 1) return;
@@ -796,8 +800,8 @@
 						<select id="replicas" bind:value={replicas} disabled={selectedPaths.length <= 1}
 							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 							<option value={1}>1 (no redundancy)</option>
-							<option value={2}>2 (mirrored)</option>
-							<option value={3}>3</option>
+							<option value={2}>2{erasureCode ? ' (RAID-5)' : ' (mirrored)'}</option>
+							<option value={3}>3{erasureCode ? ' (RAID-6)' : ''}</option>
 						</select>
 						{#if selectedPaths.length <= 1}
 							<span class="text-xs text-muted-foreground">Requires multiple devices</span>
@@ -816,15 +820,17 @@
 					<div>
 						<Label>Erasure Coding</Label>
 						<label class="mt-2 flex cursor-pointer items-center gap-2 text-sm">
-							<input type="checkbox" bind:checked={erasureCode} disabled={selectedPaths.length < replicas + 1} class="h-4 w-4" />
+							<input type="checkbox" bind:checked={erasureCode} disabled={replicas < 2 || selectedPaths.length < replicas + 1} class="h-4 w-4" />
 							Enable
 						</label>
-						{#if erasureCode && selectedPaths.length < replicas + 1}
+						{#if replicas < 2}
+							<p class="mt-1 text-xs text-muted-foreground">Requires replicas >= 2. Replicas=1 disables erasure coding.</p>
+						{:else if erasureCode && selectedPaths.length < replicas + 1}
 							<p class="mt-1 text-xs text-destructive">Needs at least {replicas + 1} devices for replicas={replicas} (currently {selectedPaths.length}).</p>
 						{:else if erasureCode}
-							<p class="mt-1 text-xs text-amber-400">Replicas controls parity: {replicas} = {replicas === 2 ? 'RAID-5' : replicas === 3 ? 'RAID-6' : `${replicas - 1} parity`}. Min {replicas + 1} devices. Metadata is not erasure coded.</p>
+							<p class="mt-1 text-xs text-amber-400">{replicas === 2 ? 'RAID-5 (1 parity block)' : 'RAID-6 (2 parity blocks)'}. Min {replicas + 1} devices. Metadata is not erasure coded.</p>
 						{:else}
-							<p class="mt-1 text-xs text-muted-foreground">Requires at least {replicas + 1} devices for replicas={replicas}.</p>
+							<p class="mt-1 text-xs text-muted-foreground">Reed-Solomon: replicas=2 for RAID-5, replicas=3 for RAID-6. Min {replicas + 1} devices.</p>
 						{/if}
 					</div>
 				</div>
