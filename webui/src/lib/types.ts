@@ -71,6 +71,7 @@ export interface FilesystemOptions {
 	erasure_code: boolean | null;
 	encrypted: boolean | null;
 	error_action: string | null;
+	version_upgrade: string | null;
 }
 
 export interface FsUsage {

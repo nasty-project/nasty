@@ -28,6 +28,7 @@
 	let compression = $state('');
 	let showPartitions = $state(false);
 	let erasureCode = $state(false);
+	let versionUpgrade = $state('');
 
 	// Manual tiering state
 	let manualLabels: Record<string, string> = $state({});
@@ -45,6 +46,7 @@
 	let addDeviceLabel = $state('');
 	let showAddPartitions = $state(false);
 	let editErasureCode = $state(false);
+	let editVersionUpgrade = $state('');
 
 	// Inline label editing: key is "fsName|devicePath"
 	let editingLabel: string | null = $state(null);
@@ -241,7 +243,9 @@
 
 	function buildMountCommand(): string[] {
 		const deviceArg = selectedPaths.join(':');
-		return ['bcachefs', 'mount', '-o', 'prjquota', deviceArg, `/fs/${newName}`];
+		const opts = ['prjquota'];
+		if (versionUpgrade) opts.push(`version_upgrade=${versionUpgrade}`);
+		return ['bcachefs', 'mount', '-o', opts.join(','), deviceArg, `/fs/${newName}`];
 	}
 
 	function formatCommandLines(args: string[]): string {
@@ -286,6 +290,7 @@
 				background_target: profile.background_target || undefined,
 				promote_target: profile.promote_target || undefined,
 				erasure_code: erasureCode || undefined,
+				version_upgrade: versionUpgrade || undefined,
 			}),
 			`Filesystem "${newName}" created`
 		);
@@ -427,6 +432,7 @@
 		editCompression = fs.options.compression ?? '';
 		editBgCompression = fs.options.background_compression ?? '';
 	editErasureCode = fs.options.erasure_code ?? false;
+		editVersionUpgrade = fs.options.version_upgrade ?? '';
 	}
 
 	async function saveOptions(fsName: string) {
@@ -436,6 +442,7 @@
 				compression: editCompression || 'none',
 				background_compression: editBgCompression || 'none',
 				erasure_code: editErasureCode,
+				version_upgrade: editVersionUpgrade || undefined,
 			}),
 			`Options updated for "${fsName}"`
 		);
@@ -835,6 +842,16 @@
 							<p class="mt-1 text-xs text-muted-foreground">Reed-Solomon: replicas=2 for RAID-5, replicas=3 for RAID-6. Min {replicas + 1} devices.</p>
 						{/if}
 					</div>
+					<div>
+						<Label for="version-upgrade">Version Upgrade</Label>
+						<select id="version-upgrade" bind:value={versionUpgrade}
+							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+							<option value="">None (don't upgrade)</option>
+							<option value="compatible">Compatible (allow new features)</option>
+							<option value="incompatible">Incompatible (upgrade to latest)</option>
+						</select>
+						<p class="mt-1 text-xs text-muted-foreground">Controls metadata version upgrade behavior at mount time.</p>
+					</div>
 				</div>
 
 				<div class="mb-5">
@@ -933,6 +950,15 @@
 								<input id="edit-erasure-{fs.name}" type="checkbox" bind:checked={editErasureCode} class="h-4 w-4" />
 								Enabled
 							</label>
+						</div>
+						<div>
+							<label for="edit-vu-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Version Upgrade</label>
+							<select id="edit-vu-{fs.name}" bind:value={editVersionUpgrade} class="h-9 rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="">None</option>
+								<option value="compatible">Compatible</option>
+								<option value="incompatible">Incompatible</option>
+							</select>
+							<p class="mt-0.5 text-[0.65rem] text-muted-foreground">Requires remount</p>
 						</div>
 					</div>
 					<div class="mt-3 flex gap-2">

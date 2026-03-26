@@ -80,6 +80,8 @@ pub struct FilesystemOptions {
     pub encrypted: Option<bool>,
     /// Action on unrecoverable read errors (`continue`, `ro`, `panic`).
     pub error_action: Option<String>,
+    /// Version upgrade behavior at mount: `compatible`, `incompatible`, or `none`.
+    pub version_upgrade: Option<String>,
 }
 
 /// A device within a filesystem, with its per-device bcachefs configuration.
@@ -138,6 +140,8 @@ pub struct CreateFilesystemRequest {
     pub promote_target: Option<String>,
     /// Whether to enable erasure coding.
     pub erasure_code: Option<bool>,
+    /// Version upgrade behavior at mount time: `compatible`, `incompatible`, or `none`.
+    pub version_upgrade: Option<String>,
 }
 
 fn default_replicas() -> u32 {
@@ -174,6 +178,9 @@ pub struct UpdateFilesystemOptionsRequest {
     pub error_action: Option<String>,
     /// Whether to enable erasure coding.
     pub erasure_code: Option<bool>,
+    /// Version upgrade behavior at mount time: `compatible`, `incompatible`, or `none`.
+    /// Changing this requires a remount.
+    pub version_upgrade: Option<String>,
 }
 
 /// Add a device to an existing filesystem.
@@ -270,13 +277,13 @@ impl FilesystemService {
     /// Mount filesystems that were previously tracked as mounted.
     /// Called at startup to restore filesystem state across reboots.
     pub async fn restore_mounts(&self) {
-        let fs_names = load_fs_state().await;
-        if fs_names.is_empty() {
+        let state = load_fs_state().await;
+        if state.is_empty() {
             info!("No filesystems to restore");
             return;
         }
 
-        for name in &fs_names {
+        for (name, opts) in &state {
             let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
 
             // Skip if already mounted
@@ -286,7 +293,7 @@ impl FilesystemService {
             }
 
             info!("Restoring filesystem '{name}'...");
-            match self.mount(name).await {
+            match self.mount_with_opts(name, opts).await {
                 Ok(_) => info!("Filesystem '{name}' mounted at {mount_point}"),
                 Err(e) => tracing::warn!("Failed to mount filesystem '{name}': {e}"),
             }
@@ -373,6 +380,16 @@ impl FilesystemService {
                 available_bytes: 0,
                 options,
             });
+        }
+
+        // Overlay persisted mount options (version_upgrade) onto sysfs options
+        let state = load_fs_state().await;
+        for fs in &mut filesystems {
+            if let Some(opts) = state.get(&fs.name) {
+                if fs.options.version_upgrade.is_none() {
+                    fs.options.version_upgrade = opts.version_upgrade.clone();
+                }
+            }
         }
 
         Ok(filesystems)
@@ -487,13 +504,17 @@ impl FilesystemService {
             .map(|d| d.path.as_str())
             .collect::<Vec<_>>()
             .join(":");
-        info!("Mounting filesystem '{}' at {}", req.name, mount_point);
-        cmd::run_ok("bcachefs", &["mount", "-o", "prjquota", &device_arg, &mount_point])
+        let mount_opts = FsMountOptions {
+            version_upgrade: req.version_upgrade.clone(),
+        };
+        let mount_opt_str = build_mount_opts(&mount_opts);
+        info!("Mounting filesystem '{}' at {} with options: {}", req.name, mount_point, mount_opt_str);
+        cmd::run_ok("bcachefs", &["mount", "-o", &mount_opt_str, &device_arg, &mount_point])
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
         // Track mount state for boot reconciliation
-        save_fs_mounted(&req.name).await;
+        save_fs_mounted_with_opts(&req.name, mount_opts).await;
 
         // Read back the filesystem info
         let uuid = get_fs_uuid(&req.devices[0].path).await.unwrap_or_default();
@@ -560,6 +581,13 @@ impl FilesystemService {
 
     /// Mount an existing unmounted filesystem
     pub async fn mount(&self, name: &str) -> Result<Filesystem, FilesystemError> {
+        let state = load_fs_state().await;
+        let opts = get_fs_mount_options(&state, name);
+        self.mount_with_opts(name, &opts).await
+    }
+
+    /// Mount with explicit mount options
+    async fn mount_with_opts(&self, name: &str, opts: &FsMountOptions) -> Result<Filesystem, FilesystemError> {
         let fs = self.get(name).await?;
         if fs.mounted {
             return Ok(fs);
@@ -574,12 +602,13 @@ impl FilesystemService {
             .map(|d| d.path.as_str())
             .collect::<Vec<_>>()
             .join(":");
-        cmd::run_ok("bcachefs", &["mount", "-o", "prjquota", &device_arg, &mount_point])
+        let mount_opt_str = build_mount_opts(opts);
+        cmd::run_ok("bcachefs", &["mount", "-o", &mount_opt_str, &device_arg, &mount_point])
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
         // Track mount state for boot reconciliation
-        save_fs_mounted(name).await;
+        save_fs_mounted_with_opts(name, opts.clone()).await;
 
         self.get(name).await
     }
@@ -626,6 +655,19 @@ impl FilesystemService {
         }
         if let Some(ec) = req.erasure_code {
             write_opt(&base, "erasure_code", if ec { "1" } else { "0" }).await?;
+        }
+
+        // version_upgrade is a mount option — requires remount
+        if let Some(ref vu) = req.version_upgrade {
+            let mut state = load_fs_state().await;
+            let opts = state.entry(req.name.clone()).or_default();
+            opts.version_upgrade = Some(vu.clone());
+            let _ = save_fs_state(&state).await;
+
+            // Remount with new options
+            self.unmount(&req.name).await?;
+            self.mount(&req.name).await?;
+            return self.get(&req.name).await;
         }
 
         self.get(&req.name).await
@@ -1345,6 +1387,7 @@ async fn read_fs_options_sysfs(uuid: &str) -> FilesystemOptions {
         erasure_code: read_opt_bool(&base, "erasure_code").await,
         encrypted: read_opt_bool(&base, "encrypted").await,
         error_action: read_opt(&base, "errors").await,
+        version_upgrade: read_opt(&base, "version_upgrade").await,
     }
 }
 
@@ -1497,33 +1540,67 @@ async fn discover_unmounted_bcachefs(
 // ── Filesystem mount state persistence ────────────────────────────────
 
 /// Track which filesystems should be mounted across reboots
+/// Per-filesystem mount state, persisted across reboots.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct FsMountOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version_upgrade: Option<String>,
+}
+
+/// Filesystem state: maps fs name → mount options.
+type FsState = HashMap<String, FsMountOptions>;
+
 async fn save_fs_mounted(fs_name: &str) {
+    save_fs_mounted_with_opts(fs_name, FsMountOptions::default()).await;
+}
+
+async fn save_fs_mounted_with_opts(fs_name: &str, opts: FsMountOptions) {
     let mut state = load_fs_state().await;
-    let name = fs_name.to_string();
-    if !state.contains(&name) {
-        state.push(name);
-    }
+    state.insert(fs_name.to_string(), opts);
     let _ = save_fs_state(&state).await;
 }
 
 async fn save_fs_unmounted(fs_name: &str) {
     let mut state = load_fs_state().await;
-    state.retain(|n| n != fs_name);
+    state.remove(fs_name);
     let _ = save_fs_state(&state).await;
 }
 
-async fn load_fs_state() -> Vec<String> {
-    match tokio::fs::read_to_string(FS_STATE_PATH).await {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Vec::new(),
+async fn load_fs_state() -> FsState {
+    let content = match tokio::fs::read_to_string(FS_STATE_PATH).await {
+        Ok(c) => c,
+        Err(_) => return FsState::new(),
+    };
+    // Try new format (HashMap<String, FsMountOptions>) first
+    if let Ok(state) = serde_json::from_str::<FsState>(&content) {
+        return state;
     }
+    // Fall back to old format (Vec<String>) for backward compat
+    if let Ok(names) = serde_json::from_str::<Vec<String>>(&content) {
+        return names.into_iter().map(|n| (n, FsMountOptions::default())).collect();
+    }
+    FsState::new()
 }
 
-async fn save_fs_state(state: &[String]) -> Result<(), FilesystemError> {
+async fn save_fs_state(state: &FsState) -> Result<(), FilesystemError> {
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| FilesystemError::CommandFailed(e.to_string()))?;
     tokio::fs::write(FS_STATE_PATH, json).await?;
     Ok(())
+}
+
+fn get_fs_mount_options(state: &FsState, name: &str) -> FsMountOptions {
+    state.get(name).cloned().unwrap_or_default()
+}
+
+fn build_mount_opts(opts: &FsMountOptions) -> String {
+    let mut parts = vec!["prjquota".to_string()];
+    if let Some(ref vu) = opts.version_upgrade {
+        if vu != "none" {
+            parts.push(format!("version_upgrade={vu}"));
+        }
+    }
+    parts.join(",")
 }
 
 async fn is_mountpoint(path: &str) -> bool {
