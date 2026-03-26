@@ -504,7 +504,7 @@ impl FilesystemService {
             .iter()
             .map(|d| FilesystemDevice {
                 path: d.path.clone(),
-                label: d.label.clone().or_else(|| Some(default_label.to_string())),
+                label: d.label.clone(),
                 durability: d.durability,
                 state: Some("rw".to_string()),
                 data_allowed: None,
