@@ -82,6 +82,14 @@ pub struct FilesystemOptions {
     pub error_action: Option<String>,
     /// Version upgrade behavior at mount: `compatible`, `incompatible`, or `none`.
     pub version_upgrade: Option<String>,
+    /// Whether mounted in degraded mode (missing devices).
+    pub degraded: Option<bool>,
+    /// Whether verbose mount logging is enabled.
+    pub verbose: Option<bool>,
+    /// Whether fsck runs at mount time.
+    pub fsck: Option<bool>,
+    /// Whether journal flushing is disabled.
+    pub journal_flush_disabled: Option<bool>,
 }
 
 /// A device within a filesystem, with its per-device bcachefs configuration.
@@ -140,6 +148,14 @@ pub struct CreateFilesystemRequest {
     pub promote_target: Option<String>,
     /// Whether to enable erasure coding.
     pub erasure_code: Option<bool>,
+    /// Data checksum algorithm (e.g. `crc32c`, `crc64`, `xxhash`, `none`).
+    pub data_checksum: Option<String>,
+    /// Metadata checksum algorithm.
+    pub metadata_checksum: Option<String>,
+    /// Bucket size in bytes (e.g. `"512k"`, `"1M"`). Affects allocation granularity.
+    pub bucket_size: Option<String>,
+    /// Maximum encoded extent size (e.g. `"64k"`, `"128k"`).
+    pub encoded_extent_max: Option<String>,
     /// Version upgrade behavior at mount time: `compatible`, `incompatible`, or `none`.
     pub version_upgrade: Option<String>,
 }
@@ -179,8 +195,16 @@ pub struct UpdateFilesystemOptionsRequest {
     /// Whether to enable erasure coding.
     pub erasure_code: Option<bool>,
     /// Version upgrade behavior at mount time: `compatible`, `incompatible`, or `none`.
-    /// Changing this requires a remount.
+    /// Changing mount options requires a remount.
     pub version_upgrade: Option<String>,
+    /// Mount in degraded mode (allow mounting with missing devices).
+    pub degraded: Option<bool>,
+    /// Enable verbose mount logging.
+    pub verbose: Option<bool>,
+    /// Run fsck at mount time.
+    pub fsck: Option<bool>,
+    /// Disable journal flushing (unsafe, for benchmarking).
+    pub journal_flush_disabled: Option<bool>,
 }
 
 /// Add a device to an existing filesystem.
@@ -382,13 +406,15 @@ impl FilesystemService {
             });
         }
 
-        // Overlay persisted mount options (version_upgrade) onto sysfs options
+        // Overlay persisted mount options onto sysfs options
         let state = load_fs_state().await;
         for fs in &mut filesystems {
             if let Some(opts) = state.get(&fs.name) {
-                if fs.options.version_upgrade.is_none() {
-                    fs.options.version_upgrade = opts.version_upgrade.clone();
-                }
+                if fs.options.version_upgrade.is_none() { fs.options.version_upgrade = opts.version_upgrade.clone(); }
+                if fs.options.degraded.is_none() { fs.options.degraded = opts.degraded; }
+                if fs.options.verbose.is_none() { fs.options.verbose = opts.verbose; }
+                if fs.options.fsck.is_none() { fs.options.fsck = opts.fsck; }
+                if fs.options.journal_flush_disabled.is_none() { fs.options.journal_flush_disabled = opts.journal_flush_disabled; }
             }
         }
 
@@ -463,6 +489,19 @@ impl FilesystemService {
             args.push("--erasure_code".to_string());
         }
 
+        if let Some(ref v) = req.data_checksum {
+            args.push(format!("--data_checksum={v}"));
+        }
+        if let Some(ref v) = req.metadata_checksum {
+            args.push(format!("--metadata_checksum={v}"));
+        }
+        if let Some(ref v) = req.bucket_size {
+            args.push(format!("--bucket={v}"));
+        }
+        if let Some(ref v) = req.encoded_extent_max {
+            args.push(format!("--encoded_extent_max={v}"));
+        }
+
         // Per-device options go immediately before each device path
         let has_targets = req.foreground_target.is_some()
             || req.metadata_target.is_some()
@@ -506,6 +545,7 @@ impl FilesystemService {
             .join(":");
         let mount_opts = FsMountOptions {
             version_upgrade: req.version_upgrade.clone(),
+            ..FsMountOptions::default()
         };
         let mount_opt_str = build_mount_opts(&mount_opts);
         info!("Mounting filesystem '{}' at {} with options: {}", req.name, mount_point, mount_opt_str);
@@ -657,11 +697,21 @@ impl FilesystemService {
             write_opt(&base, "erasure_code", if ec { "1" } else { "0" }).await?;
         }
 
-        // version_upgrade is a mount option — requires remount
-        if let Some(ref vu) = req.version_upgrade {
+        // Mount options require a remount to take effect
+        let has_mount_changes = req.version_upgrade.is_some()
+            || req.degraded.is_some()
+            || req.verbose.is_some()
+            || req.fsck.is_some()
+            || req.journal_flush_disabled.is_some();
+
+        if has_mount_changes {
             let mut state = load_fs_state().await;
             let opts = state.entry(req.name.clone()).or_default();
-            opts.version_upgrade = Some(vu.clone());
+            if let Some(ref v) = req.version_upgrade { opts.version_upgrade = Some(v.clone()); }
+            if let Some(v) = req.degraded { opts.degraded = Some(v); }
+            if let Some(v) = req.verbose { opts.verbose = Some(v); }
+            if let Some(v) = req.fsck { opts.fsck = Some(v); }
+            if let Some(v) = req.journal_flush_disabled { opts.journal_flush_disabled = Some(v); }
             let _ = save_fs_state(&state).await;
 
             // Remount with new options
@@ -1545,6 +1595,14 @@ async fn discover_unmounted_bcachefs(
 struct FsMountOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version_upgrade: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    degraded: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verbose: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fsck: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    journal_flush_disabled: Option<bool>,
 }
 
 /// Filesystem state: maps fs name → mount options.
@@ -1588,10 +1646,14 @@ fn get_fs_mount_options(state: &FsState, name: &str) -> FsMountOptions {
 fn build_mount_opts(opts: &FsMountOptions) -> String {
     let mut parts = vec!["prjquota".to_string()];
     if let Some(ref vu) = opts.version_upgrade {
-        if vu != "none" {
+        if !vu.is_empty() && vu != "none" {
             parts.push(format!("version_upgrade={vu}"));
         }
     }
+    if opts.degraded == Some(true) { parts.push("degraded".to_string()); }
+    if opts.verbose == Some(true) { parts.push("verbose".to_string()); }
+    if opts.fsck == Some(true) { parts.push("fsck".to_string()); }
+    if opts.journal_flush_disabled == Some(true) { parts.push("journal_flush_disabled".to_string()); }
     parts.join(",")
 }
 

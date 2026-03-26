@@ -72,6 +72,10 @@ export interface FilesystemOptions {
 	encrypted: boolean | null;
 	error_action: string | null;
 	version_upgrade: string | null;
+	degraded: boolean | null;
+	verbose: boolean | null;
+	fsck: boolean | null;
+	journal_flush_disabled: boolean | null;
 }
 
 export interface FsUsage {

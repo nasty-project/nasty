@@ -29,6 +29,14 @@
 	let showPartitions = $state(false);
 	let erasureCode = $state(false);
 	let versionUpgrade = $state('');
+	let dataChecksum = $state('');
+	let metadataChecksum = $state('');
+	let bucketSize = $state('');
+	let encodedExtentMax = $state('');
+	let degraded = $state(false);
+	let verbose = $state(false);
+	let mountFsck = $state(false);
+	let journalFlushDisabled = $state(false);
 
 	// Manual tiering state
 	let manualLabels: Record<string, string> = $state({});
@@ -47,6 +55,10 @@
 	let showAddPartitions = $state(false);
 	let editErasureCode = $state(false);
 	let editVersionUpgrade = $state('');
+	let editDegraded = $state(false);
+	let editVerbose = $state(false);
+	let editFsck = $state(false);
+	let editJournalFlushDisabled = $state(false);
 
 	// Inline label editing: key is "fsName|devicePath"
 	let editingLabel: string | null = $state(null);
@@ -226,6 +238,10 @@
 		if (profile.background_target) args.push(`--background_target=${profile.background_target}`);
 		if (profile.promote_target) args.push(`--promote_target=${profile.promote_target}`);
 		if (erasureCode) args.push('--erasure_code');
+		if (dataChecksum) args.push(`--data_checksum=${dataChecksum}`);
+		if (metadataChecksum) args.push(`--metadata_checksum=${metadataChecksum}`);
+		if (bucketSize) args.push(`--bucket=${bucketSize}`);
+		if (encodedExtentMax) args.push(`--encoded_extent_max=${encodedExtentMax}`);
 
 		const hasTargets = !!(profile.foreground_target || profile.metadata_target || profile.background_target || profile.promote_target);
 		for (const path of selectedPaths) {
@@ -245,6 +261,10 @@
 		const deviceArg = selectedPaths.join(':');
 		const opts = ['prjquota'];
 		if (versionUpgrade) opts.push(`version_upgrade=${versionUpgrade}`);
+		if (degraded) opts.push('degraded');
+		if (verbose) opts.push('verbose');
+		if (mountFsck) opts.push('fsck');
+		if (journalFlushDisabled) opts.push('journal_flush_disabled');
 		return ['bcachefs', 'mount', '-o', opts.join(','), deviceArg, `/fs/${newName}`];
 	}
 
@@ -290,6 +310,10 @@
 				background_target: profile.background_target || undefined,
 				promote_target: profile.promote_target || undefined,
 				erasure_code: erasureCode || undefined,
+				data_checksum: dataChecksum || undefined,
+				metadata_checksum: metadataChecksum || undefined,
+				bucket_size: bucketSize || undefined,
+				encoded_extent_max: encodedExtentMax || undefined,
 				version_upgrade: versionUpgrade || undefined,
 			}),
 			`Filesystem "${newName}" created`
@@ -305,6 +329,15 @@
 			manualBgTarget = '';
 			manualPromoteTarget = '';
 			erasureCode = false;
+			versionUpgrade = '';
+			dataChecksum = '';
+			metadataChecksum = '';
+			bucketSize = '';
+			encodedExtentMax = '';
+			degraded = false;
+			verbose = false;
+			mountFsck = false;
+			journalFlushDisabled = false;
 			await refresh();
 		}
 	}
@@ -433,6 +466,10 @@
 		editBgCompression = fs.options.background_compression ?? '';
 	editErasureCode = fs.options.erasure_code ?? false;
 		editVersionUpgrade = fs.options.version_upgrade ?? '';
+		editDegraded = fs.options.degraded ?? false;
+		editVerbose = fs.options.verbose ?? false;
+		editFsck = fs.options.fsck ?? false;
+		editJournalFlushDisabled = fs.options.journal_flush_disabled ?? false;
 	}
 
 	async function saveOptions(fsName: string) {
@@ -443,6 +480,10 @@
 				background_compression: editBgCompression || 'none',
 				erasure_code: editErasureCode,
 				version_upgrade: editVersionUpgrade || undefined,
+				degraded: editDegraded || undefined,
+				verbose: editVerbose || undefined,
+				fsck: editFsck || undefined,
+				journal_flush_disabled: editJournalFlushDisabled || undefined,
 			}),
 			`Options updated for "${fsName}"`
 		);
@@ -854,6 +895,76 @@
 					</div>
 				</div>
 
+				<!-- Advanced format options -->
+				<details class="mb-5">
+					<summary class="cursor-pointer text-sm text-muted-foreground hover:text-foreground">Advanced options</summary>
+					<div class="mt-3 flex flex-wrap gap-4">
+						<div class="flex-1 min-w-[140px]">
+							<Label for="data-checksum">Data Checksum</Label>
+							<select id="data-checksum" bind:value={dataChecksum}
+								class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="">Default (crc32c)</option>
+								<option value="crc32c">CRC32C</option>
+								<option value="crc64">CRC64</option>
+								<option value="xxhash">xxHash</option>
+								<option value="none">None</option>
+							</select>
+						</div>
+						<div class="flex-1 min-w-[140px]">
+							<Label for="meta-checksum">Metadata Checksum</Label>
+							<select id="meta-checksum" bind:value={metadataChecksum}
+								class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="">Default (crc32c)</option>
+								<option value="crc32c">CRC32C</option>
+								<option value="crc64">CRC64</option>
+								<option value="xxhash">xxHash</option>
+								<option value="none">None</option>
+							</select>
+						</div>
+						<div class="flex-1 min-w-[140px]">
+							<Label for="bucket-size">Bucket Size</Label>
+							<select id="bucket-size" bind:value={bucketSize}
+								class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="">Default</option>
+								<option value="256k">256 KiB</option>
+								<option value="512k">512 KiB</option>
+								<option value="1M">1 MiB</option>
+								<option value="2M">2 MiB</option>
+							</select>
+						</div>
+						<div class="flex-1 min-w-[140px]">
+							<Label for="extent-max">Max Encoded Extent</Label>
+							<select id="extent-max" bind:value={encodedExtentMax}
+								class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="">Default</option>
+								<option value="64k">64 KiB</option>
+								<option value="128k">128 KiB</option>
+								<option value="256k">256 KiB</option>
+								<option value="512k">512 KiB</option>
+							</select>
+						</div>
+					</div>
+					<div class="mt-3 flex flex-wrap gap-4">
+						<label class="flex cursor-pointer items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={degraded} class="h-4 w-4" />
+							Degraded mode
+						</label>
+						<label class="flex cursor-pointer items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={mountFsck} class="h-4 w-4" />
+							Fsck on mount
+						</label>
+						<label class="flex cursor-pointer items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={verbose} class="h-4 w-4" />
+							Verbose
+						</label>
+						<label class="flex cursor-pointer items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={journalFlushDisabled} class="h-4 w-4" />
+							Disable journal flush
+						</label>
+					</div>
+					<p class="mt-2 text-xs text-muted-foreground">Checksum and bucket size are set at format time. Mount options can be changed later via Edit Options.</p>
+				</details>
+
 				<div class="mb-5">
 					<Label>Commands</Label>
 					<pre class="mt-1 rounded-md border border-border bg-black/40 p-3 text-xs font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap">{formatCommandLines(buildFormatCommand())}
@@ -961,6 +1072,25 @@
 							<p class="mt-0.5 text-[0.65rem] text-muted-foreground">Requires remount</p>
 						</div>
 					</div>
+					<div class="mt-3 flex flex-wrap gap-4">
+						<label class="flex cursor-pointer items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={editDegraded} class="h-4 w-4" />
+							<span class="text-xs">Degraded mode</span>
+						</label>
+						<label class="flex cursor-pointer items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={editFsck} class="h-4 w-4" />
+							<span class="text-xs">Fsck on mount</span>
+						</label>
+						<label class="flex cursor-pointer items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={editVerbose} class="h-4 w-4" />
+							<span class="text-xs">Verbose</span>
+						</label>
+						<label class="flex cursor-pointer items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={editJournalFlushDisabled} class="h-4 w-4" />
+							<span class="text-xs">Disable journal flush</span>
+						</label>
+					</div>
+					<p class="mt-1 text-[0.65rem] text-muted-foreground">Mount options require a remount to take effect.</p>
 					<div class="mt-3 flex gap-2">
 						<Button size="xs" onclick={() => saveOptions(fs.name)}>Save</Button>
 						<Button variant="secondary" size="xs" onclick={() => editOptionsFs = null}>Cancel</Button>
