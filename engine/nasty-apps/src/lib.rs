@@ -254,7 +254,7 @@ pub struct PortForwardInfo {
 // ── Service ─────────────────────────────────────────────────────
 
 pub struct AppsService {
-    port_forwards: std::sync::Mutex<std::collections::HashMap<String, (PortForwardInfo, tokio::process::Child)>>,
+    port_forwards: std::sync::Mutex<std::collections::HashMap<String, (PortForwardInfo, u32)>>,
 }
 
 impl AppsService {
@@ -859,6 +859,8 @@ impl AppsService {
             .spawn()
             .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
 
+        let pid = child.id().unwrap_or(0);
+
         let info = PortForwardInfo {
             name: name.to_string(),
             local_port: local,
@@ -866,7 +868,7 @@ impl AppsService {
             pod: pod.clone(),
         };
 
-        info!("Port-forward started: {}:{} → pod/{} ({})", local, container_port, pod, name);
+        info!("Port-forward started: {}:{} → pod/{} ({}) [pid={}]", local, container_port, pod, name, pid);
 
         let mut forwards = self.port_forwards.lock().unwrap();
         forwards.insert(name.to_string(), (PortForwardInfo {
@@ -874,16 +876,21 @@ impl AppsService {
             local_port: local,
             container_port,
             pod,
-        }, child));
+        }, pid));
 
         Ok(info)
     }
 
     /// Stop a port-forward for an app.
     pub async fn port_forward_stop(&self, name: &str) -> Result<(), AppsError> {
-        let mut forwards = self.port_forwards.lock().unwrap();
-        if let Some((_, mut child)) = forwards.remove(name) {
-            let _ = child.kill().await;
+        let pid = {
+            let mut forwards = self.port_forwards.lock().unwrap();
+            forwards.remove(name).map(|(_, pid)| pid)
+        };
+        if let Some(pid) = pid {
+            if pid > 0 {
+                let _ = Command::new("kill").arg(pid.to_string()).output().await;
+            }
             info!("Port-forward stopped for '{name}'");
         }
         Ok(())
