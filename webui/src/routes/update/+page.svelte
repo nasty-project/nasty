@@ -482,77 +482,79 @@
 	<!-- System tab -->
 	{#if activeTab === 'system'}
 		<Card class="mb-6">
-			<CardContent class="py-5">
-				<div class="mb-5 flex items-center gap-8">
+			<CardContent class="py-4">
+				<div class="flex flex-wrap items-start justify-between gap-6">
+					<!-- Left: version info + buttons -->
 					<div>
-						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed</div>
-						<div class="font-mono text-xl font-semibold">{info?.current_version ?? 'unknown'}</div>
-					</div>
-					{#if info?.latest_version}
-						<div class="text-lg text-muted-foreground/30">→</div>
-						<div>
-							<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Available</div>
-							<div class="font-mono text-xl font-semibold {info.update_available ? 'text-blue-400' : ''}">{info.latest_version}</div>
-						</div>
-					{/if}
-					<div class="flex items-end pb-0.5">
-						{#if info?.update_available === true}
-							<span class="rounded-md border border-amber-600 bg-amber-950 px-2.5 py-0.5 text-xs font-medium text-amber-400">Update available</span>
-						{:else if info?.update_available === false}
-							<span class="rounded-md border border-green-700 bg-green-950 px-2.5 py-0.5 text-xs font-medium text-green-400">Up to date</span>
-						{/if}
-					</div>
-				</div>
-
-				<!-- Release channel selector -->
-				{#if info}
-					<div class="mb-5 flex items-center gap-3">
-						<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Channel</span>
-						<div class="flex rounded-md overflow-hidden border border-border">
-							<button
-								title="Tagged releases only. Safe, tested, boring."
-								class="px-3 py-1 text-xs transition-colors {info.channel === 'mild' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
-								onclick={() => changeChannel('mild')}
-								disabled={status?.state === 'running'}
-							>Mild</button>
-							<button
-								title="Pre-release branch. New features, occasional heartburn."
-								class="px-3 py-1 text-xs transition-colors {info.channel === 'spicy' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
-								onclick={() => changeChannel('spicy')}
-								disabled={status?.state === 'running'}
-							>Spicy</button>
-							<button
-								title="Latest development branch. Bleeding edge — you asked for it."
-								class="px-3 py-1 text-xs transition-colors {info.channel === 'nasty' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
-								onclick={() => changeChannel('nasty')}
-								disabled={status?.state === 'running'}
-							>Nasty</button>
-						</div>
-						<span class="text-xs text-muted-foreground">
-							{#if info.channel === 'mild'}
-								Safe, tested, boring.
-							{:else if info.channel === 'spicy'}
-								New features, occasional heartburn.
-							{:else}
-								Bleeding edge — you asked for it.
+						<div class="mb-3 flex items-center gap-8">
+							<div>
+								<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed</div>
+								<div class="font-mono text-xl font-semibold">{info?.current_version ?? 'unknown'}</div>
+							</div>
+							{#if info?.latest_version}
+								<div class="text-lg text-muted-foreground/30">→</div>
+								<div>
+									<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Available</div>
+									<div class="font-mono text-xl font-semibold {info.update_available ? 'text-blue-400' : ''}">{info.latest_version}</div>
+								</div>
 							{/if}
-						</span>
+							{#if info?.update_available === true}
+								<span class="rounded-md border border-amber-600 bg-amber-950 px-2.5 py-0.5 text-xs font-medium text-amber-400">Update available</span>
+							{:else if info?.update_available === false}
+								<span class="rounded-md border border-green-700 bg-green-950 px-2.5 py-0.5 text-xs font-medium text-green-400">Up to date</span>
+							{/if}
+						</div>
+						<div class="flex gap-2">
+							<Button size="sm" onclick={checkForUpdates} disabled={checking || status?.state === 'running'}>
+								{checking ? 'Checking...' : 'Check for Updates'}
+							</Button>
+							{#if info?.update_available}
+								<Button
+									variant="default"
+									size="sm"
+									onclick={applyUpdate}
+									disabled={status?.state === 'running'}
+								>
+									Update Now
+								</Button>
+							{/if}
+						</div>
 					</div>
-				{/if}
 
-				<div class="flex gap-2">
-					<Button size="sm" onclick={checkForUpdates} disabled={checking || status?.state === 'running'}>
-						{checking ? 'Checking...' : 'Check for Updates'}
-					</Button>
-					{#if info?.update_available}
-						<Button
-							variant="default"
-							size="sm"
-							onclick={applyUpdate}
-							disabled={status?.state === 'running'}
-						>
-							Update Now
-						</Button>
+					<!-- Right: flavor selector -->
+					{#if info}
+						<div>
+							<div class="mb-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Flavor</div>
+							<div class="flex rounded-md overflow-hidden border border-border">
+								<button
+									title="Tagged releases only. Safe, tested, boring."
+									class="px-3 py-1 text-xs transition-colors {info.channel === 'mild' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
+									onclick={() => changeChannel('mild')}
+									disabled={status?.state === 'running'}
+								>Mild</button>
+								<button
+									title="Pre-release branch. New features, occasional heartburn."
+									class="px-3 py-1 text-xs transition-colors {info.channel === 'spicy' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
+									onclick={() => changeChannel('spicy')}
+									disabled={status?.state === 'running'}
+								>Spicy</button>
+								<button
+									title="Latest development branch. Bleeding edge — you asked for it."
+									class="px-3 py-1 text-xs transition-colors {info.channel === 'nasty' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
+									onclick={() => changeChannel('nasty')}
+									disabled={status?.state === 'running'}
+								>Nasty</button>
+							</div>
+							<p class="mt-1 text-xs text-muted-foreground max-w-[220px]">
+								{#if info.channel === 'mild'}
+									Safe, tested, boring.
+								{:else if info.channel === 'spicy'}
+									New features, occasional heartburn.
+								{:else}
+									Bleeding edge — you asked for it.
+								{/if}
+							</p>
+						</div>
 					{/if}
 				</div>
 			</CardContent>
