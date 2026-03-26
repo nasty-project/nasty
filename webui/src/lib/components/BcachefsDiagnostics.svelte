@@ -13,7 +13,7 @@
 	const TAB_META: Record<Tab, { label: string; description: string }> = {
 		usage: {
 			label: 'fs usage',
-			description: 'Space breakdown by data type (superblock, journal, btree, data, cached, parity) and per-device fragmentation.',
+			description: 'Space breakdown by data type (superblock, journal, btree, data, cached, parity) and per-device usage.',
 		},
 		top: {
 			label: 'fs top',
@@ -21,7 +21,7 @@
 		},
 		timestats: {
 			label: 'fs timestats',
-			description: 'Operation latency: min/max/mean/stddev/EWMA for data reads, writes, btree ops, journal flushes, copygc, and more. Updates live in a real PTY.',
+			description: 'Operation latency: min/max/mean/stddev for data reads, writes, btree ops, journal flushes, and more.',
 		},
 	};
 
@@ -35,7 +35,13 @@
 	let autoRefresh = $state(false);
 	let intervalId: ReturnType<typeof setInterval> | null = null;
 
-	// terminal tab state
+	// timestats tab state
+	let timestatsData: any = $state(null);
+	let timestatsLoading = $state(false);
+	let timestatsAutoRefresh = $state(false);
+	let timestatsIntervalId: ReturnType<typeof setInterval> | null = null;
+
+	// terminal tab state (fs top)
 	let termEl: HTMLDivElement | undefined = $state();
 	let term: Terminal | null = null;
 	let fitAddon: FitAddon | null = null;
@@ -46,7 +52,11 @@
 		try {
 			filesystems = await getClient().call('fs.list');
 			const mounted = filesystems.filter(p => p.mounted);
-			if (mounted.length > 0) selectedFs = mounted[0].name;
+			if (mounted.length > 0) {
+				selectedFs = mounted[0].name;
+				// Auto-load first tab
+				await refreshUsage();
+			}
 		} catch (e) {
 			showError(e instanceof Error ? e.message : 'Failed to load filesystems');
 		}
@@ -54,6 +64,7 @@
 
 	onDestroy(() => {
 		stopAutoRefresh();
+		stopTimestatsAutoRefresh();
 		killTerm();
 	});
 
@@ -87,7 +98,37 @@
 		if (autoRefresh) startAutoRefresh(); else stopAutoRefresh();
 	}
 
-	// ── Terminal tab (fs top / fs timestats) ──────────────────
+	// ── Timestats tab ──────────────────────────────────────────
+
+	async function refreshTimestats() {
+		if (!selectedFs) return;
+		timestatsLoading = true;
+		try {
+			timestatsData = await getClient().call('bcachefs.timestats', { name: selectedFs });
+		} catch (e) {
+			timestatsData = null;
+			showError(e instanceof Error ? e.message : String(e));
+		} finally {
+			timestatsLoading = false;
+		}
+	}
+
+	function startTimestatsAutoRefresh() {
+		stopTimestatsAutoRefresh();
+		refreshTimestats();
+		timestatsIntervalId = setInterval(refreshTimestats, 3000);
+	}
+
+	function stopTimestatsAutoRefresh() {
+		if (timestatsIntervalId !== null) { clearInterval(timestatsIntervalId); timestatsIntervalId = null; }
+	}
+
+	function toggleTimestatsAutoRefresh() {
+		timestatsAutoRefresh = !timestatsAutoRefresh;
+		if (timestatsAutoRefresh) startTimestatsAutoRefresh(); else stopTimestatsAutoRefresh();
+	}
+
+	// ── Terminal tab (fs top) ────────────────────────────────
 
 	function mountPath() {
 		return filesystems.find(p => p.name === selectedFs)?.mount_point ?? `/fs/${selectedFs}`;
@@ -97,7 +138,7 @@
 		if (!selectedFs) return;
 		killTerm();
 		termStatus = 'running';
-		await tick(); // wait for termEl div to appear in the DOM
+		await tick();
 		if (!termEl) return;
 
 		term = new Terminal({
@@ -121,11 +162,10 @@
 
 		const { cols, rows } = term;
 		const mp = mountPath();
-		const argv = ['bcachefs', 'fs', activeTab === 'top' ? 'top' : 'timestats', mp];
+		const argv = ['bcachefs', 'fs', 'top', '-h', mp];
 
 		const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/terminal`;
 		termWs = new WebSocket(wsUrl);
-		termStatus = 'running';
 
 		termWs.onopen = () => {
 			termWs!.send(JSON.stringify({ token: getToken(), cols, rows, cmd: argv }));
@@ -143,7 +183,6 @@
 		termWs.onclose = () => { termStatus = 'done'; };
 		termWs.onerror = () => { termStatus = 'done'; };
 
-		// Forward keystrokes to PTY
 		term.onData((data) => {
 			if (termWs?.readyState === WebSocket.OPEN) {
 				termWs.send(data);
@@ -168,14 +207,38 @@
 		termStatus = 'idle';
 	}
 
-	// Reset terminal state when filesystem or tab changes
+	// Reset state on filesystem or tab change — auto-load data
 	$effect(() => {
-		selectedFs; activeTab;
+		const _fs = selectedFs;
+		const _tab = activeTab;
 		usageOutput = '';
-		if (autoRefresh && activeTab === 'usage') startAutoRefresh();
-		else stopAutoRefresh();
+		timestatsData = null;
+		stopAutoRefresh();
+		stopTimestatsAutoRefresh();
 		killTerm();
+
+		if (_fs) {
+			if (_tab === 'usage') refreshUsage();
+			else if (_tab === 'timestats') refreshTimestats();
+			else if (_tab === 'top') startTerm();
+		}
 	});
+
+	// Helper to render timestats sections as tables
+	function timestatsEntries(section: any): { name: string; count: number; dur_min: string; dur_max: string; dur_total: string; mean: string; mean_recent: string; stddev: string; stddev_recent: string }[] {
+		if (!section || typeof section !== 'object') return [];
+		return Object.entries(section).map(([name, v]: [string, any]) => ({
+			name,
+			count: v?.count ?? 0,
+			dur_min: v?.duration_min ?? '—',
+			dur_max: v?.duration_max ?? '—',
+			dur_total: v?.duration_total ?? '—',
+			mean: v?.mean ?? v?.mean_since ?? '—',
+			mean_recent: v?.mean_recent ?? '—',
+			stddev: v?.stddev ?? v?.stddev_since ?? '—',
+			stddev_recent: v?.stddev_recent ?? '—',
+		})).filter(e => e.count > 0);
+	}
 </script>
 
 <div class="space-y-4">
@@ -240,7 +303,28 @@
 				</button>
 			</div>
 
-		<!-- top/timestats tab controls -->
+		<!-- timestats tab controls -->
+		{:else if activeTab === 'timestats'}
+			<div class="ml-auto flex items-center gap-2 pb-1">
+				<button
+					onclick={refreshTimestats}
+					disabled={!selectedFs || timestatsLoading}
+					class="flex items-center gap-1.5 rounded px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 disabled:opacity-50"
+				>
+					<RefreshCw size={12} class={timestatsLoading ? 'animate-spin' : ''} />
+					Refresh
+				</button>
+				<button
+					onclick={toggleTimestatsAutoRefresh}
+					disabled={!selectedFs}
+					class="rounded px-3 py-1 text-xs disabled:opacity-50
+						{timestatsAutoRefresh ? 'bg-primary text-primary-foreground' : 'bg-secondary hover:bg-secondary/80'}"
+				>
+					{timestatsAutoRefresh ? 'Live (3s)' : 'Live'}
+				</button>
+			</div>
+
+		<!-- top tab controls -->
 		{:else}
 			<div class="ml-auto flex items-center gap-2 pb-1">
 				{#if termStatus === 'idle' || termStatus === 'done'}
@@ -266,27 +350,86 @@
 
 	<p class="text-xs text-muted-foreground">{TAB_META[activeTab].description}</p>
 
-	<!-- usage output -->
+	<!-- ═══ Usage output ═══ -->
 	{#if activeTab === 'usage'}
 		<div class="rounded-lg border border-border bg-card overflow-hidden">
 			{#if !selectedFs}
 				<p class="p-6 text-sm text-muted-foreground">Select a mounted filesystem to view diagnostics.</p>
+			{:else if usageOutput === '' && usageLoading}
+				<p class="p-6 text-sm text-muted-foreground">Loading...</p>
 			{:else if usageOutput === ''}
-				<p class="p-6 text-sm text-muted-foreground">
-					{usageLoading ? 'Running…' : 'Press Refresh or enable Live to fetch data.'}
-				</p>
+				<p class="p-6 text-sm text-muted-foreground">No data available.</p>
 			{:else}
 				<pre class="p-4 text-xs font-mono overflow-x-auto whitespace-pre leading-relaxed">{usageOutput}</pre>
 			{/if}
 		</div>
 
-	<!-- terminal output (top / timestats) -->
+	<!-- ═══ Timestats output ═══ -->
+	{:else if activeTab === 'timestats'}
+		<div class="space-y-4">
+			{#if !selectedFs}
+				<div class="rounded-lg border border-border bg-card p-6">
+					<p class="text-sm text-muted-foreground">Select a mounted filesystem.</p>
+				</div>
+			{:else if !timestatsData && timestatsLoading}
+				<div class="rounded-lg border border-border bg-card p-6">
+					<p class="text-sm text-muted-foreground">Loading...</p>
+				</div>
+			{:else if !timestatsData}
+				<div class="rounded-lg border border-border bg-card p-6">
+					<p class="text-sm text-muted-foreground">No data available.</p>
+				</div>
+			{:else}
+				{#each Object.entries(timestatsData) as [sectionName, sectionData]}
+					{@const entries = timestatsEntries(sectionData)}
+					{#if entries.length > 0}
+						<div class="rounded-lg border border-border bg-card overflow-hidden">
+							<div class="px-4 py-2 border-b border-border bg-secondary/30">
+								<h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{sectionName.replace(/_/g, ' ')}</h3>
+							</div>
+							<div class="overflow-x-auto">
+								<table class="w-full text-xs font-mono">
+									<thead>
+										<tr class="border-b border-border text-muted-foreground">
+											<th class="px-3 py-2 text-left">Name</th>
+											<th class="px-3 py-2 text-right">Count</th>
+											<th class="px-3 py-2 text-right">Min</th>
+											<th class="px-3 py-2 text-right">Max</th>
+											<th class="px-3 py-2 text-right">Total</th>
+											<th class="px-3 py-2 text-right">Mean</th>
+											<th class="px-3 py-2 text-right">Recent</th>
+											<th class="px-3 py-2 text-right">Stddev</th>
+										</tr>
+									</thead>
+									<tbody>
+										{#each entries as row}
+											<tr class="border-b border-border/50 hover:bg-muted/20">
+												<td class="px-3 py-1.5 text-foreground">{row.name}</td>
+												<td class="px-3 py-1.5 text-right">{row.count}</td>
+												<td class="px-3 py-1.5 text-right">{row.dur_min}</td>
+												<td class="px-3 py-1.5 text-right">{row.dur_max}</td>
+												<td class="px-3 py-1.5 text-right">{row.dur_total}</td>
+												<td class="px-3 py-1.5 text-right">{row.mean}</td>
+												<td class="px-3 py-1.5 text-right">{row.mean_recent}</td>
+												<td class="px-3 py-1.5 text-right">{row.stddev}</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+						</div>
+					{/if}
+				{/each}
+			{/if}
+		</div>
+
+	<!-- ═══ Terminal output (fs top) ═══ -->
 	{:else}
 		<div class="rounded-lg border border-border bg-[#0f1117] overflow-hidden" style="min-height: 400px;">
 			{#if !selectedFs}
 				<p class="p-6 text-sm text-muted-foreground">Select a mounted filesystem.</p>
 			{:else if termStatus === 'idle'}
-				<p class="p-6 text-sm text-muted-foreground">Press Start to launch <code class="font-mono">bcachefs fs {activeTab === 'top' ? 'top' : 'timestats'}</code> in a live terminal.</p>
+				<p class="p-6 text-sm text-muted-foreground">Starting...</p>
 			{:else}
 				<div bind:this={termEl} class="w-full" style="min-height: 400px;"></div>
 				{#if termStatus === 'done'}

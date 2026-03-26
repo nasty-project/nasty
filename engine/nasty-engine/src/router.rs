@@ -723,6 +723,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+        "bcachefs.timestats" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.bcachefs_timestats(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
 
         // ── Subvolumes ──────────────────────────────────────────
         "subvolume.list_all" => {

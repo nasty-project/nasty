@@ -1309,10 +1309,24 @@ impl FilesystemService {
             ));
         }
         let mount_point = fs.mount_point.as_ref().unwrap();
-        let raw = cmd::run_ok("bcachefs", &["fs", "usage", "-h", mount_point])
+        let raw = cmd::run_ok("bcachefs", &["fs", "usage", "-a", "-h", mount_point])
             .await
             .map_err(FilesystemError::CommandFailed)?;
         Ok(raw)
+    }
+
+    pub async fn bcachefs_timestats(&self, name: &str) -> Result<serde_json::Value, FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted".to_string(),
+            ));
+        }
+        let mount_point = fs.mount_point.as_ref().unwrap();
+        let raw = cmd::run_ok("bcachefs", &["fs", "timestats", "--json", "--once", mount_point])
+            .await
+            .map_err(FilesystemError::CommandFailed)?;
+        serde_json::from_str(&raw).map_err(|e| FilesystemError::CommandFailed(format!("failed to parse timestats JSON: {e}")))
     }
 
 }
