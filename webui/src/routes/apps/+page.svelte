@@ -553,9 +553,8 @@
 						</td>
 						<td class="p-3">
 							<div class="flex gap-2">
-								{@const fwd = getForward(app.name)}
-								{#if fwd}
-									<a href="http://{window.location.hostname}:{fwd.local_port}" target="_blank" class="text-xs text-blue-500 hover:underline self-center">:{fwd.local_port}</a>
+								{#if getForward(app.name)}
+									<a href="http://{window.location.hostname}:{getForward(app.name)?.local_port}" target="_blank" class="text-xs text-blue-500 hover:underline self-center">:{getForward(app.name)?.local_port}</a>
 									<Button variant="secondary" size="xs" onclick={() => stopForward(app.name)}>Stop</Button>
 								{:else}
 									<Button variant="outline" size="xs" onclick={() => startForward(app.name)}>Access</Button>
@@ -711,9 +710,8 @@
 						<td class="p-3"><Badge variant={app.status === 'deployed' ? 'default' : 'secondary'}>{app.status}</Badge></td>
 						<td class="p-3">
 							<div class="flex gap-2">
-								{@const fwd2 = getForward(app.name)}
-								{#if fwd2}
-									<a href="http://{window.location.hostname}:{fwd2.local_port}" target="_blank" class="text-xs text-blue-500 hover:underline self-center">:{fwd2.local_port}</a>
+								{#if getForward(app.name)}
+									<a href="http://{window.location.hostname}:{getForward(app.name)?.local_port}" target="_blank" class="text-xs text-blue-500 hover:underline self-center">:{getForward(app.name)?.local_port}</a>
 									<Button variant="secondary" size="xs" onclick={() => stopForward(app.name)}>Stop</Button>
 								{:else}
 									<Button variant="outline" size="xs" onclick={() => startForward(app.name)}>Access</Button>
