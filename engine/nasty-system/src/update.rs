@@ -379,10 +379,10 @@ else
     git reset --hard origin/$CHANNEL
 fi
 
-# Remove files not needed on the appliance. The build only needs
-# engine/, webui/, nixos/. Delete and stage the removals so the
-# tree stays clean for Nix (avoids -dirty version suffix).
-for f in tests docs .github .claude build-iso.sh README.md CLAUDE.md; do
+# Remove dev-only files not needed on the appliance (tests, docs, etc.
+# are in separate repos now). Keep this as a safety net for any stray
+# files that shouldn't affect the Nix build (-dirty version suffix).
+for f in .claude CLAUDE.md; do
     [ -e "$f" ] && git rm -rf --quiet "$f" 2>/dev/null || true
 done
 
