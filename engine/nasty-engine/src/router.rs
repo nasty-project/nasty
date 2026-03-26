@@ -422,6 +422,16 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => err(req, e),
         },
 
+        // ── GC config ───────────────────────────────────────────
+        "system.gc.get" => ok(req, nasty_system::update::GcConfig::load()),
+        "system.gc.set" => match parse_params::<nasty_system::update::GcConfig>(req) {
+            Ok(config) => match config.save().await {
+                Ok(()) => ok(req, config),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
+
         // ── Protocols ────────────────────────────────────────────
         "service.protocol.list" => ok(req, state.protocols.list().await),
         "service.protocol.enable" => match require_str(req, "name") {

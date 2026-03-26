@@ -45,6 +45,11 @@
 	let savingTls = $state(false);
 	let tlsChanged = $state(false);
 
+	// GC config
+	let gcKeep = $state(5);
+	let gcMaxAge = $state(0);
+	let savingGc = $state(false);
+
 	const popularDnsProviders = [
 		{ code: 'cloudflare', name: 'Cloudflare' },
 		{ code: 'route53', name: 'Amazon Route 53' },
@@ -140,6 +145,13 @@
 			tlsDnsProvider = settings?.tls_dns_provider ?? '';
 			tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
 			syncNetworkForm();
+
+			// Load GC config
+			try {
+				const gc = await client.call<{ keep_generations: number; max_age_days: number }>('system.gc.get');
+				gcKeep = gc.keep_generations;
+				gcMaxAge = gc.max_age_days;
+			} catch { /* ignore */ }
 		});
 	});
 
@@ -151,6 +163,15 @@
 		netGateway = network.gateway ?? '';
 		netNameservers = network.nameservers.join(', ');
 		netChanged = false;
+	}
+
+	async function saveGc() {
+		savingGc = true;
+		await withToast(
+			() => client.call('system.gc.set', { keep_generations: gcKeep, max_age_days: gcMaxAge }),
+			'Cleanup settings saved'
+		);
+		savingGc = false;
 	}
 
 	async function saveHostname() {
@@ -395,6 +416,37 @@
 
 					<Button size="sm" onclick={applyLogLevel} disabled={savingLog || !logFilter.trim()}>
 						{savingLog ? 'Applying…' : 'Apply'}
+					</Button>
+				</section>
+
+				<!-- System Cleanup -->
+				<section class="rounded-lg border border-border p-5">
+					<h2 class="mb-4 text-base font-semibold">System Cleanup</h2>
+					<p class="mb-3 text-xs text-muted-foreground">
+						Old NixOS generations are cleaned up before each update to free disk space.
+						You can roll back to any kept generation via the bootloader.
+					</p>
+					<div class="flex flex-wrap gap-4 mb-3">
+						<div>
+							<label for="gc-keep" class="mb-1 block text-xs text-muted-foreground">Keep last N generations</label>
+							<input id="gc-keep" type="number" min="1" max="50" bind:value={gcKeep}
+								class="h-9 w-24 rounded-md border border-input bg-transparent px-3 text-sm" />
+						</div>
+						<div>
+							<label for="gc-age" class="mb-1 block text-xs text-muted-foreground">Max age (days, 0 = no limit)</label>
+							<input id="gc-age" type="number" min="0" max="365" bind:value={gcMaxAge}
+								class="h-9 w-24 rounded-md border border-input bg-transparent px-3 text-sm" />
+						</div>
+					</div>
+					<p class="mb-3 text-xs text-muted-foreground">
+						{#if gcMaxAge > 0}
+							Generations older than {gcMaxAge} days will be deleted, but at least {gcKeep} will always be kept.
+						{:else}
+							The {gcKeep} most recent generations will be kept. Older ones are deleted before each update.
+						{/if}
+					</p>
+					<Button size="sm" onclick={saveGc} disabled={savingGc || gcKeep < 1}>
+						{savingGc ? 'Saving…' : 'Save'}
 					</Button>
 				</section>
 

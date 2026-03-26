@@ -23,6 +23,45 @@ const BCACHEFS_DEBUG_CHECKS_STATE: &str = "/var/lib/nasty/bcachefs-debug-checks"
 const BCACHEFS_SWITCH_RESULT: &str = "/var/lib/nasty/bcachefs-switch-result";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
 const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
+const GC_CONFIG_PATH: &str = "/var/lib/nasty/gc-config.json";
+
+// ── Garbage collection config ────────────────────────────────────
+
+/// Configuration for NixOS generation garbage collection.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GcConfig {
+    /// Minimum number of generations to keep (default 5).
+    #[serde(default = "default_keep_generations")]
+    pub keep_generations: u32,
+    /// Delete generations older than this many days (0 = disabled).
+    /// `keep_generations` is always respected as a minimum.
+    #[serde(default)]
+    pub max_age_days: u32,
+}
+
+fn default_keep_generations() -> u32 { 5 }
+
+impl Default for GcConfig {
+    fn default() -> Self {
+        Self { keep_generations: 5, max_age_days: 0 }
+    }
+}
+
+impl GcConfig {
+    pub fn load() -> Self {
+        std::fs::read_to_string(GC_CONFIG_PATH)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default()
+    }
+
+    pub async fn save(&self) -> Result<(), UpdateError> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| UpdateError::Failed(e.to_string()))?;
+        tokio::fs::write(GC_CONFIG_PATH, json).await
+            .map_err(|e| UpdateError::Failed(e.to_string()))
+    }
+}
 
 // ── Release channels ────────────────────────────────────────────
 
@@ -333,6 +372,9 @@ impl UpdateService {
             .unwrap_or_default();
 
         let local_flake = local_flake().await;
+        let gc = GcConfig::load();
+        let gc_keep = gc.keep_generations;
+        let gc_max_age = gc.max_age_days;
         let script = format!(
             r#"#!/bin/bash
 set -euo pipefail
@@ -410,12 +452,18 @@ git add -A
 git -c user.email="nasty@localhost" -c user.name="NASty" \
   commit -m "local: appliance adjustments" || true
 
-# Garbage-collect old generations, keeping the last 5 for rollback.
-KEEP=5
+# Garbage-collect old generations.
+KEEP={gc_keep}
+MAX_AGE={gc_max_age}
 GENS=$(ls -1 /nix/var/nix/profiles/system-*-link 2>/dev/null | wc -l)
 if [ "$GENS" -gt "$KEEP" ]; then
-    echo "==> Cleaning up old generations ($GENS found, keeping $KEEP)..."
-    nix-env --profile /nix/var/nix/profiles/system --delete-generations "+$KEEP" 2>/dev/null || true
+    if [ "$MAX_AGE" -gt 0 ]; then
+        echo "==> Cleaning generations older than ${{MAX_AGE}}d (keeping at least $KEEP)..."
+        nix-env --profile /nix/var/nix/profiles/system --delete-generations "+$KEEP" --delete-older-than "${{MAX_AGE}}d" 2>/dev/null || true
+    else
+        echo "==> Cleaning up old generations ($GENS found, keeping $KEEP)..."
+        nix-env --profile /nix/var/nix/profiles/system --delete-generations "+$KEEP" 2>/dev/null || true
+    fi
     nix-collect-garbage 2>/dev/null || true
 fi
 
