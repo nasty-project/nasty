@@ -256,15 +256,7 @@ impl AppsService {
             Ok(c) => c,
             Err(_) => return AppsConfig::default(),
         };
-        // Try JSON format first, fall back to old "1" marker
-        if let Ok(config) = serde_json::from_str::<AppsConfig>(&content) {
-            return config;
-        }
-        // Old format: bare "1" means enabled with no config
-        if content.trim() == "1" {
-            return AppsConfig { enabled: true, storage_path: None };
-        }
-        AppsConfig::default()
+        serde_json::from_str(&content).unwrap_or_default()
     }
 
     async fn save_config(config: &AppsConfig) -> Result<(), AppsError> {
