@@ -813,19 +813,18 @@
 							<option value="gzip">Gzip</option>
 						</select>
 					</div>
-					{@const ecMinDevices = replicas + 1}
 					<div>
 						<Label>Erasure Coding</Label>
 						<label class="mt-2 flex cursor-pointer items-center gap-2 text-sm">
-							<input type="checkbox" bind:checked={erasureCode} disabled={selectedPaths.length < ecMinDevices} class="h-4 w-4" />
+							<input type="checkbox" bind:checked={erasureCode} disabled={selectedPaths.length < replicas + 1} class="h-4 w-4" />
 							Enable
 						</label>
-						{#if erasureCode && selectedPaths.length < ecMinDevices}
-							<p class="mt-1 text-xs text-destructive">Needs at least {ecMinDevices} devices for replicas={replicas} (currently {selectedPaths.length}).</p>
+						{#if erasureCode && selectedPaths.length < replicas + 1}
+							<p class="mt-1 text-xs text-destructive">Needs at least {replicas + 1} devices for replicas={replicas} (currently {selectedPaths.length}).</p>
 						{:else if erasureCode}
-							<p class="mt-1 text-xs text-amber-400">Replicas controls parity: {replicas} = {replicas === 2 ? 'RAID-5' : replicas === 3 ? 'RAID-6' : `${replicas - 1} parity`}. Min {ecMinDevices} devices. Metadata is not erasure coded.</p>
+							<p class="mt-1 text-xs text-amber-400">Replicas controls parity: {replicas} = {replicas === 2 ? 'RAID-5' : replicas === 3 ? 'RAID-6' : `${replicas - 1} parity`}. Min {replicas + 1} devices. Metadata is not erasure coded.</p>
 						{:else}
-							<p class="mt-1 text-xs text-muted-foreground">Requires at least {ecMinDevices} devices for replicas={replicas}.</p>
+							<p class="mt-1 text-xs text-muted-foreground">Requires at least {replicas + 1} devices for replicas={replicas}.</p>
 						{/if}
 					</div>
 				</div>
