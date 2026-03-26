@@ -8,7 +8,7 @@
 	import type { Filesystem } from '$lib/types';
 	import { RefreshCw, SquareX } from '@lucide/svelte';
 
-	type Tab = 'usage' | 'top' | 'timestats';
+	type Tab = 'usage' | 'top' | 'timestats' | 'scrub' | 'reconcile';
 
 	const TAB_META: Record<Tab, { label: string; description: string }> = {
 		usage: {
@@ -22,6 +22,14 @@
 		timestats: {
 			label: 'fs timestats',
 			description: 'Operation latency: min/max/mean/stddev for data reads, writes, btree ops, journal flushes, and more.',
+		},
+		scrub: {
+			label: 'scrub',
+			description: 'Verify checksums and correct errors. Run periodically to detect silent data corruption.',
+		},
+		reconcile: {
+			label: 'reconcile',
+			description: 'Background data rebalancing status — moves data between tiers and restripes after device changes.',
 		},
 	};
 
@@ -40,6 +48,13 @@
 	let timestatsLoading = $state(false);
 	let timestatsAutoRefresh = $state(false);
 	let timestatsIntervalId: ReturnType<typeof setInterval> | null = null;
+
+	// scrub/reconcile tab state
+	let scrubOutput = $state('');
+	let scrubRunning = $state(false);
+	let scrubLoading = $state(false);
+	let reconcileOutput = $state('');
+	let reconcileLoading = $state(false);
 
 	// terminal tab state (fs top)
 	let termEl: HTMLDivElement | undefined = $state();
@@ -128,6 +143,48 @@
 		if (timestatsAutoRefresh) startTimestatsAutoRefresh(); else stopTimestatsAutoRefresh();
 	}
 
+	// ── Scrub tab ──────────────────────────────────────────────
+
+	async function refreshScrub() {
+		if (!selectedFs) return;
+		scrubLoading = true;
+		try {
+			const result = await getClient().call('fs.scrub.status', { name: selectedFs });
+			scrubOutput = result.raw || 'No scrub data available.';
+			scrubRunning = result.running ?? false;
+		} catch (e) {
+			scrubOutput = e instanceof Error ? e.message : String(e);
+		} finally {
+			scrubLoading = false;
+		}
+	}
+
+	async function startScrub() {
+		if (!selectedFs) return;
+		try {
+			await getClient().call('fs.scrub.start', { name: selectedFs });
+			scrubRunning = true;
+			await refreshScrub();
+		} catch (e) {
+			showError(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	// ── Reconcile tab ──────────────────────────────────────────
+
+	async function refreshReconcile() {
+		if (!selectedFs) return;
+		reconcileLoading = true;
+		try {
+			const result = await getClient().call('fs.reconcile.status', { name: selectedFs });
+			reconcileOutput = result.raw || 'No reconcile data available.';
+		} catch (e) {
+			reconcileOutput = e instanceof Error ? e.message : String(e);
+		} finally {
+			reconcileLoading = false;
+		}
+	}
+
 	// ── Terminal tab (fs top) ────────────────────────────────
 
 	function mountPath() {
@@ -213,6 +270,8 @@
 		const _tab = activeTab;
 		usageOutput = '';
 		timestatsData = null;
+		scrubOutput = '';
+		reconcileOutput = '';
 		stopAutoRefresh();
 		stopTimestatsAutoRefresh();
 		killTerm();
@@ -221,6 +280,8 @@
 			if (_tab === 'usage') refreshUsage();
 			else if (_tab === 'timestats') refreshTimestats();
 			else if (_tab === 'top') startTerm();
+			else if (_tab === 'scrub') refreshScrub();
+			else if (_tab === 'reconcile') refreshReconcile();
 		}
 	});
 
@@ -324,8 +385,41 @@
 				</button>
 			</div>
 
+		<!-- scrub tab controls -->
+		{:else if activeTab === 'scrub'}
+			<div class="ml-auto flex items-center gap-2 pb-1">
+				<button
+					onclick={refreshScrub}
+					disabled={!selectedFs || scrubLoading}
+					class="flex items-center gap-1.5 rounded px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 disabled:opacity-50"
+				>
+					<RefreshCw size={12} class={scrubLoading ? 'animate-spin' : ''} />
+					Refresh
+				</button>
+				<button
+					onclick={startScrub}
+					disabled={!selectedFs || scrubRunning}
+					class="rounded px-3 py-1 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+				>
+					{scrubRunning ? 'Running...' : 'Start Scrub'}
+				</button>
+			</div>
+
+		<!-- reconcile tab controls -->
+		{:else if activeTab === 'reconcile'}
+			<div class="ml-auto flex items-center gap-2 pb-1">
+				<button
+					onclick={refreshReconcile}
+					disabled={!selectedFs || reconcileLoading}
+					class="flex items-center gap-1.5 rounded px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 disabled:opacity-50"
+				>
+					<RefreshCw size={12} class={reconcileLoading ? 'animate-spin' : ''} />
+					Refresh
+				</button>
+			</div>
+
 		<!-- top tab controls -->
-		{:else}
+		{:else if activeTab === 'top'}
 			<div class="ml-auto flex items-center gap-2 pb-1">
 				{#if termStatus === 'idle' || termStatus === 'done'}
 					<button
@@ -420,6 +514,42 @@
 						</div>
 					{/if}
 				{/each}
+			{/if}
+		</div>
+
+	<!-- ═══ Scrub output ═══ -->
+	{:else if activeTab === 'scrub'}
+		<div class="rounded-lg border border-border bg-card overflow-hidden">
+			{#if !selectedFs}
+				<p class="p-6 text-sm text-muted-foreground">Select a mounted filesystem.</p>
+			{:else if scrubOutput === '' && scrubLoading}
+				<p class="p-6 text-sm text-muted-foreground">Loading...</p>
+			{:else if scrubOutput === ''}
+				<p class="p-6 text-sm text-muted-foreground">No scrub data available. Start a scrub to verify checksums.</p>
+			{:else}
+				<div class="p-4">
+					{#if scrubRunning}
+						<div class="mb-3 flex items-center gap-2">
+							<span class="inline-block h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span>
+							<span class="text-sm font-medium text-yellow-500">Scrub in progress</span>
+						</div>
+					{/if}
+					<pre class="text-xs font-mono overflow-x-auto whitespace-pre leading-relaxed">{scrubOutput}</pre>
+				</div>
+			{/if}
+		</div>
+
+	<!-- ═══ Reconcile output ═══ -->
+	{:else if activeTab === 'reconcile'}
+		<div class="rounded-lg border border-border bg-card overflow-hidden">
+			{#if !selectedFs}
+				<p class="p-6 text-sm text-muted-foreground">Select a mounted filesystem.</p>
+			{:else if reconcileOutput === '' && reconcileLoading}
+				<p class="p-6 text-sm text-muted-foreground">Loading...</p>
+			{:else if reconcileOutput === ''}
+				<p class="p-6 text-sm text-muted-foreground">No reconcile data available.</p>
+			{:else}
+				<pre class="p-4 text-xs font-mono overflow-x-auto whitespace-pre leading-relaxed">{reconcileOutput}</pre>
 			{/if}
 		</div>
 

@@ -14,6 +14,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import { RefreshCw } from '@lucide/svelte';
 
 	let filesystems: Filesystem[] = $state([]);
 	let devices: BlockDevice[] = $state([]);
@@ -1186,69 +1187,27 @@
 
 			{#if healthFs === fs.name}
 					<div class="mt-4 border-t border-border pt-4">
-						{#if healthLoading}
-							<p class="text-sm text-muted-foreground">Loading health data...</p>
+						{#if healthLoading && !fsUsage}
+							<p class="text-sm text-muted-foreground">Loading...</p>
 						{:else}
-							{#if fsUsage}
-								<div class="mb-4">
-									<h4 class="mb-2 text-xs uppercase tracking-wide text-muted-foreground">Filesystem Usage</h4>
-									{#if fsUsage.devices.length > 0}
-										<table class="w-full text-sm">
-											<thead>
-												<tr>
-													<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Device</th>
-													<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Used</th>
-													<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Free</th>
-													<th class="p-1.5 text-left text-xs uppercase text-muted-foreground">Total</th>
-												</tr>
-											</thead>
-											<tbody>
-												{#each fsUsage.devices as dev}
-													<tr>
-														<td class="p-1.5 font-mono text-xs">{dev.path}</td>
-														<td class="p-1.5 text-xs">{formatBytes(dev.used_bytes)}</td>
-														<td class="p-1.5 text-xs">{formatBytes(dev.free_bytes)}</td>
-														<td class="p-1.5 text-xs">{formatBytes(dev.total_bytes)}</td>
-													</tr>
-												{/each}
-											</tbody>
-										</table>
-									{/if}
-									<div class="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs">
-										<span class="text-muted-foreground">Data</span>
-										<span>{formatBytes(fsUsage.data_bytes)}</span>
-										<span class="text-muted-foreground">Metadata</span>
-										<span>{formatBytes(fsUsage.metadata_bytes)}</span>
-										<span class="text-muted-foreground">Reserved</span>
-										<span>{formatBytes(fsUsage.reserved_bytes)}</span>
-									</div>
-								</div>
-							{/if}
-							<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-								<div class="rounded-lg border border-border p-4">
-									<div class="mb-2 flex items-center justify-between">
-										<h4 class="text-xs uppercase tracking-wide text-muted-foreground">Scrub</h4>
-										{#if scrubStatus}
-											<Badge variant={scrubStatus.running ? 'destructive' : 'default'}>
-												{scrubStatus.running ? 'Running' : 'Idle'}
-											</Badge>
-										{/if}
-									</div>
-									{#if scrubStatus?.raw}
-										<pre class="mb-3 max-h-[200px] overflow-auto whitespace-pre-wrap rounded bg-secondary p-2 font-mono text-xs text-muted-foreground">{scrubStatus.raw}</pre>
-									{/if}
-									<Button size="xs" onclick={() => startScrub(fs.name)}>Start Scrub</Button>
-								</div>
-								<div class="rounded-lg border border-border p-4">
-									<h4 class="mb-2 text-xs uppercase tracking-wide text-muted-foreground">Reconcile</h4>
-									{#if reconcileStatus?.raw}
-										<pre class="max-h-[200px] overflow-auto whitespace-pre-wrap rounded bg-secondary p-2 font-mono text-xs text-muted-foreground">{reconcileStatus.raw}</pre>
-									{:else}
-										<p class="text-xs text-muted-foreground">No reconcile data available</p>
-									{/if}
-								</div>
+							<div class="flex flex-wrap items-center gap-3 text-xs">
+								{#if fsUsage}
+									<span class="text-muted-foreground">Data: <strong class="text-foreground">{formatBytes(fsUsage.data_bytes)}</strong></span>
+									<span class="text-muted-foreground">Metadata: <strong class="text-foreground">{formatBytes(fsUsage.metadata_bytes)}</strong></span>
+									<span class="text-muted-foreground">Reserved: <strong class="text-foreground">{formatBytes(fsUsage.reserved_bytes)}</strong></span>
+								{/if}
+								{#if scrubStatus}
+									<Badge variant={scrubStatus.running ? 'destructive' : 'secondary'} class="text-[0.6rem]">
+										Scrub: {scrubStatus.running ? 'Running' : 'Idle'}
+									</Badge>
+								{/if}
+								{#if reconcileStatus?.raw && reconcileStatus.raw !== 'No reconcile data available'}
+									<Badge variant="secondary" class="text-[0.6rem]">Reconcile: active</Badge>
+								{/if}
+								<Button variant="secondary" size="xs" onclick={() => refreshHealth(fs.name)}>
+									<RefreshCw size={10} class={healthLoading ? 'animate-spin' : ''} />
+								</Button>
 							</div>
-							<Button variant="secondary" size="xs" class="mt-4" onclick={() => refreshHealth(fs.name)}>Refresh</Button>
 						{/if}
 					</div>
 				{/if}
