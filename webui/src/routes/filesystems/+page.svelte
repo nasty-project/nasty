@@ -519,17 +519,19 @@
 		await refresh();
 	}
 
-	async function toggleHealth(fsName: string) {
-		if (healthFs === fsName) {
+	// Auto-load health data when filesystem details are expanded
+	$effect(() => {
+		const fs = expandedFs;
+		if (fs) {
+			healthFs = fs;
+			refreshHealth(fs);
+		} else {
 			healthFs = null;
 			fsUsage = null;
 			scrubStatus = null;
 			reconcileStatus = null;
-			return;
 		}
-		healthFs = fsName;
-		await refreshHealth(fsName);
-	}
+	});
 
 	async function refreshHealth(fsName: string) {
 		healthLoading = true;
@@ -1078,9 +1080,6 @@
 							<Button variant="secondary" size="xs" onclick={() => openEditOptions(fs)}>
 								{editOptionsFs === fs.name ? 'Hide Options' : 'Options'}
 							</Button>
-							<Button variant="secondary" size="xs" onclick={() => toggleHealth(fs.name)}>
-								{healthFs === fs.name ? 'Hide Health' : 'Health'}
-							</Button>
 						{/if}
 						{#if fs.options.encrypted && fs.options.locked}
 							<Button variant="default" size="xs" onclick={() => { unlockFs = fs.name; unlockPassphrase = ''; }}>
@@ -1185,12 +1184,11 @@
 				</div>
 			{/if}
 
-			{#if healthFs === fs.name}
+				{#if expandedFs === fs.name}
 					<div class="mt-4 border-t border-border pt-4">
-						{#if healthLoading && !fsUsage}
-							<p class="text-sm text-muted-foreground">Loading...</p>
-						{:else}
-							<div class="flex flex-wrap items-center gap-3 text-xs">
+						<!-- Health summary -->
+						{#if fsUsage || scrubStatus}
+							<div class="mb-4 flex flex-wrap items-center gap-3 text-xs">
 								{#if fsUsage}
 									<span class="text-muted-foreground">Data: <strong class="text-foreground">{formatBytes(fsUsage.data_bytes)}</strong></span>
 									<span class="text-muted-foreground">Metadata: <strong class="text-foreground">{formatBytes(fsUsage.metadata_bytes)}</strong></span>
@@ -1209,11 +1207,6 @@
 								</Button>
 							</div>
 						{/if}
-					</div>
-				{/if}
-
-				{#if expandedFs === fs.name}
-					<div class="mt-4 border-t border-border pt-4">
 						<div class="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs">
 							<span class="text-muted-foreground">Replicas</span>
 							<span>{fs.options.data_replicas ?? 1}</span>
