@@ -86,7 +86,7 @@
 	}
 
 	// Version info (loaded once after connect)
-	let sysInfo: { version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_is_custom: boolean; bcachefs_debug_checks: boolean; kvm_available: boolean } | null = $state(null);
+	let sysInfo: { hostname: string; version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_is_custom: boolean; bcachefs_debug_checks: boolean; kvm_available: boolean } | null = $state(null);
 	let clock24h = $state(true);
 
 	$effect(() => {
@@ -250,7 +250,7 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<title>NASty</title>
+	<title>{sysInfo?.hostname ? `${sysInfo.hostname} — NASty` : 'NASty'}</title>
 </svelte:head>
 
 <Toasts />
