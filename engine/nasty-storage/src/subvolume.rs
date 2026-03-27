@@ -478,7 +478,7 @@ impl SubvolumeService {
                 owner: meta.owner,
                 properties,
                 parent,
-                encrypted: get(XATTR_NASTY_ENCRYPTED),
+                encrypted: xattr::get(&path_str, XATTR_NASTY_ENCRYPTED).ok().flatten().and_then(|b| String::from_utf8(b).ok()),
                 luks_open: {
                     let mapper_name = format!("{ENC_MAPPER_PREFIX}{fs_name}-{name}");
                     std::path::Path::new(&format!("/dev/mapper/{mapper_name}")).exists()
@@ -1438,7 +1438,7 @@ impl SubvolumeService {
 
         let mapper_device = format!("/dev/mapper/{mapper_name}");
 
-        if let Some(ref fs_type) = inner_fs {
+        if inner_fs.is_some() {
             // Check if already formatted by trying to mount
             let mount_point = format!("{ENC_MOUNT_BASE}/{filesystem}/.enc/{name}");
             tokio::fs::create_dir_all(&mount_point).await?;
