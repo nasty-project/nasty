@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import type { Settings, SystemInfo, NetworkConfig } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Copy, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
@@ -181,6 +182,7 @@
 			'Hostname updated'
 		);
 		info = await client.call<SystemInfo>('system.info');
+		sysInfoRefresh.trigger();
 		savingHostname = false;
 	}
 
