@@ -777,7 +777,7 @@
 					</div>
 					<span class="mt-1 block text-xs text-muted-foreground">Devices are bound to vfio-pci when the VM starts.</span>
 				{:else}
-					<p class="mt-1 text-xs text-muted-foreground">No PCI devices available for passthrough. Requires bare-metal host with IOMMU enabled.</p>
+					<p class="mt-1 text-xs text-muted-foreground">No PCI devices available. Enable VT-d (Intel) or AMD-Vi in BIOS/UEFI settings. Not available on virtual machines.</p>
 				{/if}
 			</div>
 			<div class="mb-4 flex items-center gap-2">
