@@ -501,7 +501,9 @@ impl VmService {
             if let Some(disks) = req.disks { config.disks = disks; }
             if let Some(nets) = req.networks { config.networks = nets; }
             if let Some(pt) = req.passthrough_devices { config.passthrough_devices = pt; }
-            if let Some(iso) = req.boot_iso { config.boot_iso = Some(iso); }
+            if let Some(ref iso) = req.boot_iso {
+                config.boot_iso = if iso.is_empty() { None } else { Some(iso.clone()) };
+            }
             if let Some(bo) = req.boot_order { config.boot_order = bo; }
             if let Some(uefi) = req.uefi { config.uefi = uefi; }
             if req.cpu_model.is_some() { config.cpu_model = req.cpu_model; }

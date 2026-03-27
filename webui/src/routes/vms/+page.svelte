@@ -909,6 +909,22 @@
 												</select>
 											</div>
 											<div>
+												<label class="text-xs text-muted-foreground">Boot ISO</label>
+												<div class="mt-0.5 flex gap-1">
+													<select value={vm.boot_iso ?? ''}
+														class="h-8 flex-1 rounded-md border border-input bg-transparent px-2 text-xs"
+														onchange={(e) => updateVmField(vm.id, 'boot_iso', (e.target as HTMLSelectElement).value)}>
+														<option value="">None (no ISO)</option>
+														{#each imageFiles as iso}
+															<option value={iso.path}>{iso.name}</option>
+														{/each}
+													</select>
+												</div>
+												{#if vm.boot_iso}
+													<span class="text-[0.65rem] text-muted-foreground">{vm.boot_iso}</span>
+												{/if}
+											</div>
+											<div>
 												<label class="text-xs text-muted-foreground">Description</label>
 												<input type="text" value={vm.description ?? ''} placeholder="Optional"
 													class="mt-0.5 h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
