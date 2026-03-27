@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{info, warn};
 
 const STATE_PATH: &str = "/var/lib/nasty/settings.json";
 const STATE_DIR: &str = "/var/lib/nasty";
@@ -177,6 +177,23 @@ impl SettingsService {
             if settings.tls_challenge_type == "dns" {
                 write_dns_credentials(&settings).await;
             }
+            // Apply TLS changes by rebuilding the NixOS config in the background.
+            // This activates the ACME service and nginx certificate changes.
+            info!("TLS settings changed — triggering nixos-rebuild switch...");
+            tokio::spawn(async {
+                match tokio::process::Command::new("nixos-rebuild")
+                    .args(["switch", "--flake", "/etc/nixos/nixos"])
+                    .output()
+                    .await
+                {
+                    Ok(o) if o.status.success() => info!("TLS rebuild completed successfully"),
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        tracing::warn!("TLS rebuild failed: {stderr}");
+                    }
+                    Err(e) => tracing::warn!("TLS rebuild failed to start: {e}"),
+                }
+            });
         }
         Ok(settings.clone())
     }
