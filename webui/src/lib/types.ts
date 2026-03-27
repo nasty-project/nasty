@@ -149,6 +149,9 @@ export interface Subvolume {
 	owner: string | null;
 	properties: Record<string, string>;
 	parent: string | null;
+	encrypted?: string;
+	luks_open: boolean;
+	enc_mount_point?: string;
 }
 
 export interface Snapshot {

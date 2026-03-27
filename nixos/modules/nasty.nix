@@ -164,7 +164,7 @@ in {
     boot.kernelParams = [ "quiet" "intel_iommu=on" "amd_iommu=on" "iommu=pt" ];
 
     # VFIO modules for PCI passthrough (loaded on demand, not at boot).
-    boot.kernelModules = [ "vfio-pci" "vfio" "vfio_iommu_type1" ];
+    boot.kernelModules = [ "vfio-pci" "vfio" "vfio_iommu_type1" "dm-crypt" ];
     boot.initrd.verbose = false;
     # Systemd in initrd: required for Plymouth to start early enough to
     # intercept boot messages. Without this Plymouth starts after systemd
@@ -411,6 +411,8 @@ in {
       k3s               # lightweight Kubernetes for app runtime (optional)
       kubernetes-helm   # Helm chart manager for app deployment
       kubectl           # Kubernetes CLI (also available via k3s kubectl)
+      cryptsetup        # LUKS encryption for per-volume encryption at rest
+      e2fsprogs         # mkfs.ext4 for inner filesystem of encrypted file shares
 
       (writeShellScriptBin "nasty-report" ''
         set -euo pipefail
