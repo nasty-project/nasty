@@ -110,6 +110,21 @@ pub struct VmDisk {
     /// Whether this is a read-only disk.
     #[serde(default)]
     pub readonly: bool,
+    /// Cache mode: "writeback" (default), "writethrough", "none", "unsafe".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<String>,
+    /// I/O mode: "threads" (default), "native" (requires cache=none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aio: Option<String>,
+    /// Discard/TRIM support: "unmap" or "ignore" (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discard: Option<String>,
+    /// I/O throttling: max read IOPS (0 = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_rd: Option<u64>,
+    /// I/O throttling: max write IOPS (0 = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops_wr: Option<u64>,
 }
 
 fn default_disk_interface() -> String { "virtio".to_string() }
@@ -704,9 +719,15 @@ fn build_qemu_args(config: &VmConfig) -> Vec<String> {
             _ => "none", // virtio uses -device virtio-blk-pci
         };
         let ro = if disk.readonly { ",readonly=on" } else { "" };
+        let cache = disk.cache.as_deref().map(|c| format!(",cache={c}")).unwrap_or_default();
+        let aio = disk.aio.as_deref().map(|a| format!(",aio={a}")).unwrap_or_default();
+        let discard = disk.discard.as_deref().map(|d| format!(",discard={d}")).unwrap_or_default();
+        let mut throttle = String::new();
+        if let Some(v) = disk.iops_rd { if v > 0 { throttle.push_str(&format!(",throttling.iops-read={v}")); } }
+        if let Some(v) = disk.iops_wr { if v > 0 { throttle.push_str(&format!(",throttling.iops-write={v}")); } }
         args.extend_from_slice(&[
             "-drive".to_string(),
-            format!("file={},format=raw,if={iface},id=drive{i}{ro}", disk.path),
+            format!("file={},format=raw,if={iface},id=drive{i}{ro}{cache}{aio}{discard}{throttle}", disk.path),
         ]);
         // Add virtio-blk-pci device for virtio disks
         if disk.interface == "virtio" || disk.interface.is_empty() {

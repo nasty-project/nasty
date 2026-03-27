@@ -893,6 +893,12 @@
 													{#if disk.readonly}
 														<Badge variant="secondary" class="text-[0.6rem]">readonly</Badge>
 													{/if}
+													{#if disk.cache}
+														<Badge variant="secondary" class="text-[0.6rem]">cache={disk.cache}</Badge>
+													{/if}
+													{#if disk.discard}
+														<Badge variant="secondary" class="text-[0.6rem]">discard={disk.discard}</Badge>
+													{/if}
 													{#if !vm.running}
 														<Button variant="ghost" size="xs" class="ml-auto text-destructive hover:text-destructive" onclick={() => detachDisk(vm, i)}>
 															Detach

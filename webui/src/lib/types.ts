@@ -456,6 +456,11 @@ export interface VmDisk {
 	path: string;
 	interface: string;
 	readonly: boolean;
+	cache?: string;
+	aio?: string;
+	discard?: string;
+	iops_rd?: number;
+	iops_wr?: number;
 }
 
 export interface VmNetwork {
