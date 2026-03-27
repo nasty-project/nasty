@@ -468,7 +468,7 @@ impl SubvolumeService {
                 name: name.to_string(),
                 filesystem: fs_name.to_string(),
                 subvolume_type: meta.subvolume_type,
-                path: path_str,
+                path: path_str.clone(),
                 used_bytes: size,
                 compression: meta.compression,
                 comments: meta.comments,
