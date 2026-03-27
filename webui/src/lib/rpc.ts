@@ -52,10 +52,6 @@ export class NastyClient {
 				this.ws!.send(JSON.stringify({ token }));
 			};
 
-			this.ws.onerror = () => {
-				if (!authResolved) reject(new Error('WebSocket connection failed'));
-			};
-
 			this.ws.onmessage = (event) => {
 				const msg = JSON.parse(event.data);
 
@@ -108,9 +104,16 @@ export class NastyClient {
 				// Keep retrying as long as we haven't been explicitly disconnected.
 				if (this._shouldReconnect) {
 					for (const h of this.disconnectHandlers) h();
-					// Prepare a new ready-promise so calls made while reconnecting will wait.
-					this._readyPromise = new Promise((res) => { this._readyResolve = res; });
-					this.reconnectTimer = setTimeout(() => this.connect(token).catch(() => {}), 3000);
+					this._scheduleReconnect(token);
+				}
+			};
+
+			this.ws.onerror = () => {
+				if (!authResolved) reject(new Error('WebSocket connection failed'));
+				// If this was a reconnect attempt that failed to even open,
+				// onclose may not fire, so schedule retry here too.
+				if (this._shouldReconnect && !this._authenticated) {
+					this._scheduleReconnect(token);
 				}
 			};
 		});
@@ -153,6 +156,21 @@ export class NastyClient {
 			});
 			this.ws!.send(JSON.stringify(request));
 		});
+	}
+
+	/** Schedule a reconnection attempt. Deduplicates to avoid multiple timers. */
+	private _scheduleReconnect(token: string) {
+		if (this.reconnectTimer) return; // already scheduled
+		this._readyPromise = new Promise((res) => { this._readyResolve = res; });
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = null;
+			this.connect(token).catch(() => {
+				// Connection failed — schedule another attempt
+				if (this._shouldReconnect) {
+					this._scheduleReconnect(token);
+				}
+			});
+		}, 3000);
 	}
 
 	/** Enable with localStorage.setItem('nasty-debug', '1') then reload */
