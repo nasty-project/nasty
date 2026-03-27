@@ -18,8 +18,18 @@
 	let vms: VmStatus[] = $state([]);
 	let capabilities: VmCapabilities | null = $state(null);
 	let blockSubvolumes: Subvolume[] = $state([]);
-	let showCreate = $state(false);
+	let wizardStep: 0 | 1 | 2 | 3 | 4 | 5 | 6 = $state(0); // 0=hidden
 	let loading = $state(true);
+	let editTab: 'general' | 'system' | 'storage' | 'network' | 'passthrough' = $state('general');
+
+	const WIZARD_STEPS: [string, string][] = [
+		['1', 'General'],
+		['2', 'System'],
+		['3', 'Storage'],
+		['4', 'Network'],
+		['5', 'Passthrough'],
+		['6', 'Review'],
+	];
 	let expanded: Record<string, boolean> = $state({});
 	let actionInProgress: Record<string, boolean> = $state({});
 
@@ -66,12 +76,24 @@
 	let filesystems: { name: string; mounted: boolean }[] = $state([]);
 
 	$effect(() => {
-		if (showCreate) {
+		if (wizardStep > 0) {
 			loadSubvolumes();
 			loadFilesystems();
 			loadImages();
 		}
 	});
+
+	function openWizard() {
+		wizardStep = 1;
+		newName = ''; newCpus = 1; newMemory = 1024; newDisk = ''; newDiskCreate = false;
+		newDiskFs = ''; newDiskSize = 10; newIso = ''; newDescription = '';
+		newBootOrder = 'disk'; newAutostart = false; newPassthrough = [];
+	}
+
+	// Network state for create wizard
+	let newNetMode = $state('user');
+	let newNetBridge = $state('');
+	let newNetMac = $state('');
 
 	async function loadFilesystems() {
 		try {
@@ -300,6 +322,12 @@
 			if (!newDisk) params.boot_order = 'cdrom';
 		}
 		if (newDescription) params.description = newDescription;
+		// Network
+		const net: Record<string, unknown> = { mode: newNetMode };
+		if (newNetMode === 'bridge' && newNetBridge) net.bridge = newNetBridge;
+		if (newNetMac) net.mac = newNetMac;
+		params.networks = [net];
+		// Passthrough
 		if (newPassthrough.length > 0) {
 			params.passthrough_devices = newPassthrough.map(addr => {
 				const dev = capabilities?.passthrough_devices.find(d => d.address === addr);
@@ -312,11 +340,12 @@
 			'Virtual machine created'
 		);
 		if (ok !== undefined) {
-			showCreate = false;
+			wizardStep = 0;
 			newName = ''; newCpus = 1; newMemory = 1024; newDisk = '';
 			newDiskCreate = false; newDiskFs = ''; newDiskSize = 10;
 			newIso = ''; newDescription = ''; newBootOrder = 'disk';
 			newAutostart = false; newPassthrough = [];
+			newNetMode = 'user'; newNetBridge = ''; newNetMac = '';
 			await refresh();
 		}
 	}
@@ -634,22 +663,57 @@
 {/if}
 
 <div class="mb-4 flex items-center gap-3">
-	<Button size="sm" onclick={() => showCreate = !showCreate}
+	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}
 		disabled={!canCreateVm}
 		title={!canCreateVm ? 'Complete VM environment setup first' : ''}>
-		{showCreate ? 'Cancel' : 'Create VM'}
+		{wizardStep !== 0 ? 'Cancel' : 'Create VM'}
 	</Button>
 	<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
 </div>
 
-{#if showCreate}
+{#if wizardStep !== 0}
 	<Card class="mb-6 max-w-2xl">
 		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New VM</h3>
+			<!-- Step indicator -->
+			<div class="mb-6 flex items-center gap-0">
+				{#each WIZARD_STEPS as [num, label], i}
+					<div class="flex items-center">
+						<div class="flex items-center gap-2">
+							<div class="flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold
+								{wizardStep > i + 1 ? 'bg-primary text-primary-foreground' :
+								 wizardStep === i + 1 ? 'bg-primary text-primary-foreground' :
+								 'bg-secondary text-muted-foreground'}">
+								{num}
+							</div>
+							<span class="text-xs {wizardStep === i + 1 ? 'text-foreground font-medium' : 'text-muted-foreground'}">{label}</span>
+						</div>
+						{#if i < WIZARD_STEPS.length - 1}
+							<div class="mx-3 h-px w-8 bg-border"></div>
+						{/if}
+					</div>
+				{/each}
+			</div>
+
+			<!-- Step 1: General -->
+			{#if wizardStep === 1}
 			<div class="mb-4">
 				<Label for="vm-name">Name</Label>
 				<Input id="vm-name" bind:value={newName} placeholder="my-vm" class="mt-1" />
 			</div>
+			<div class="mb-4">
+				<Label for="vm-desc">Description</Label>
+				<Input id="vm-desc" bind:value={newDescription} placeholder="Optional description" class="mt-1" />
+			</div>
+			<div class="mb-4 flex items-center gap-2">
+				<input id="vm-autostart" type="checkbox" bind:checked={newAutostart} class="rounded border-input" />
+				<Label for="vm-autostart">Auto-start on NASty boot</Label>
+			</div>
+			<div class="flex gap-2">
+				<Button size="sm" onclick={() => wizardStep = 2} disabled={!newName}>Next: System →</Button>
+			</div>
+
+			<!-- Step 2: System -->
+			{:else if wizardStep === 2}
 			<div class="grid grid-cols-2 gap-4 mb-4">
 				<div>
 					<Label for="vm-cpus">CPU Cores</Label>
@@ -660,6 +724,45 @@
 					<Input id="vm-memory" type="number" bind:value={newMemory} min={128} step={128} class="mt-1" />
 				</div>
 			</div>
+			<details class="mb-4">
+				<summary class="cursor-pointer text-xs text-muted-foreground hover:text-foreground">Advanced system options</summary>
+				<div class="mt-2 grid grid-cols-2 gap-4">
+					<div>
+						<Label class="text-xs">CPU Model</Label>
+						<select class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+							<option value="host">host (passthrough)</option>
+							<option value="max">max (all features)</option>
+							<option value="qemu64">qemu64 (generic)</option>
+						</select>
+					</div>
+					<div>
+						<Label class="text-xs">Machine Type</Label>
+						<select class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+							<option value="q35">Q35 (modern, PCIe)</option>
+							<option value="i440fx">i440FX (legacy PCI)</option>
+						</select>
+					</div>
+					<div>
+						<Label class="text-xs">VGA Type</Label>
+						<select class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+							<option value="virtio">Virtio GPU</option>
+							<option value="qxl">QXL (SPICE)</option>
+							<option value="std">Standard VGA</option>
+							<option value="none">None</option>
+						</select>
+					</div>
+				</div>
+			</details>
+			<div class="flex gap-2">
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 1}>← Back</Button>
+				<Button size="sm" onclick={() => wizardStep = 3}>Next: Storage →</Button>
+			</div>
+
+			<!-- Step 3: Storage -->
+			{:else if wizardStep === 3}
+			<h3 class="mb-4 text-lg font-semibold">New VM</h3>
+			<!-- Step 3: Storage (disk, ISO, boot order) -->
+			{:else if wizardStep === 3}
 			<div class="mb-4">
 				<div class="flex items-center justify-between">
 					<Label>Boot Disk</Label>
@@ -753,10 +856,40 @@
 					<option value="network">Network (PXE)</option>
 				</select>
 			</div>
-			<div class="mb-4">
-				<Label for="vm-desc">Description</Label>
-				<Input id="vm-desc" bind:value={newDescription} placeholder="Optional description" class="mt-1" />
+			<div class="flex gap-2">
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 2}>← Back</Button>
+				<Button size="sm" onclick={() => wizardStep = 4}>Next: Network →</Button>
 			</div>
+
+			<!-- Step 4: Network -->
+			{:else if wizardStep === 4}
+			<div class="mb-4">
+				<Label>Network Mode</Label>
+				<select bind:value={newNetMode} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+					<option value="user">NAT (User mode — simple, no host config needed)</option>
+					<option value="bridge">Bridge (VM on host network, requires bridge interface)</option>
+				</select>
+			</div>
+			{#if newNetMode === 'bridge'}
+				<div class="mb-4">
+					<Label>Bridge Interface</Label>
+					<Input bind:value={newNetBridge} placeholder="br0" class="mt-1" />
+				</div>
+			{/if}
+			<details class="mb-4">
+				<summary class="cursor-pointer text-xs text-muted-foreground hover:text-foreground">Advanced network options</summary>
+				<div class="mt-2">
+					<Label class="text-xs">MAC Address</Label>
+					<Input bind:value={newNetMac} placeholder="Auto-generated if empty" class="mt-1 font-mono text-xs" />
+				</div>
+			</details>
+			<div class="flex gap-2">
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 3}>← Back</Button>
+				<Button size="sm" onclick={() => wizardStep = 5}>Next: Passthrough →</Button>
+			</div>
+
+			<!-- Step 5: Passthrough -->
+			{:else if wizardStep === 5}
 			<div class="mb-4">
 				<Label>PCI Passthrough</Label>
 				{#if availablePciDevices.length > 0}
@@ -788,11 +921,50 @@
 					<p class="mt-1 text-xs text-muted-foreground">No PCI devices available. Enable VT-d (Intel) or AMD-Vi in BIOS/UEFI settings. Not available on virtual machines.</p>
 				{/if}
 			</div>
-			<div class="mb-4 flex items-center gap-2">
-				<input id="vm-autostart" type="checkbox" bind:checked={newAutostart} class="rounded border-input" />
-				<Label for="vm-autostart">Auto-start on NASty boot</Label>
+			<div class="flex gap-2">
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 4}>← Back</Button>
+				<Button size="sm" onclick={() => wizardStep = 6}>Next: Review →</Button>
 			</div>
-			<Button onclick={create} disabled={!newName}>Create</Button>
+
+			<!-- Step 6: Review -->
+			{:else if wizardStep === 6}
+			<div class="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+				<span class="text-muted-foreground">Name</span>
+				<span class="font-mono">{newName}</span>
+				<span class="text-muted-foreground">CPU</span>
+				<span>{newCpus} core{newCpus !== 1 ? 's' : ''}</span>
+				<span class="text-muted-foreground">Memory</span>
+				<span>{newMemory} MiB</span>
+				<span class="text-muted-foreground">Boot Order</span>
+				<span>{newBootOrder}</span>
+				{#if newDisk || newDiskCreate}
+					<span class="text-muted-foreground">Disk</span>
+					<span class="font-mono text-xs">{newDiskCreate ? `vm-${newName} (${newDiskSize} GiB, new)` : newDisk}</span>
+				{/if}
+				{#if newIso}
+					<span class="text-muted-foreground">Boot ISO</span>
+					<span class="font-mono text-xs">{newIso}</span>
+				{/if}
+				<span class="text-muted-foreground">Network</span>
+				<span>{newNetMode === 'bridge' ? `Bridge (${newNetBridge || 'br0'})` : 'NAT'}</span>
+				{#if newPassthrough.length > 0}
+					<span class="text-muted-foreground">Passthrough</span>
+					<span>{newPassthrough.length} device{newPassthrough.length !== 1 ? 's' : ''}</span>
+				{/if}
+				{#if newDescription}
+					<span class="text-muted-foreground">Description</span>
+					<span>{newDescription}</span>
+				{/if}
+				{#if newAutostart}
+					<span class="text-muted-foreground">Autostart</span>
+					<span>Yes</span>
+				{/if}
+			</div>
+			<div class="flex gap-2">
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 5}>← Back</Button>
+				<Button size="sm" onclick={create} disabled={!newName}>Create VM</Button>
+			</div>
+			{/if}
 		</CardContent>
 	</Card>
 {/if}
@@ -865,10 +1037,24 @@
 				{#if expanded[vm.id]}
 					<tr class="border-b border-border bg-secondary/20">
 						<td colspan="4" class="px-4 py-4">
-							<div class="space-y-4">
-								<!-- Configuration -->
+							<!-- Detail view tabs -->
+							<div class="mb-4 flex border-b border-border">
+								{#each ['general', 'system', 'storage', 'network', 'passthrough'] as tab}
+									<button
+										onclick={() => editTab = tab as typeof editTab}
+										class="px-3 py-1.5 text-xs font-medium transition-colors capitalize border-b-2 -mb-px
+											{editTab === tab
+												? 'border-primary text-foreground'
+												: 'border-transparent text-muted-foreground hover:text-foreground'}"
+									>{tab}</button>
+								{/each}
+							</div>
+
+							<div>
+								<!-- General tab -->
+								{#if editTab === 'general'}
 								<div>
-									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Configuration</h4>
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">General</h4>
 									{#if vm.running}
 										<div class="grid grid-cols-2 gap-x-8 gap-y-1 text-sm">
 											<div><span class="text-muted-foreground">CPU:</span> {vm.cpus} core{vm.cpus !== 1 ? 's' : ''}{vm.cpu_model ? ` (${vm.cpu_model})` : ''}</div>
