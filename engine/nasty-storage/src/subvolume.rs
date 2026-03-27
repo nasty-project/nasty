@@ -1444,13 +1444,13 @@ impl SubvolumeService {
             tokio::fs::create_dir_all(&mount_point).await?;
 
             // Try mounting first (already formatted)
-            let mount_result = cmd::run_ok("mount", &[&mapper_device, &mount_point]).await;
+            let mount_result = cmd::run_ok("bcachefs", &["mount", &mapper_device, &mount_point]).await;
             if mount_result.is_err() {
-                // First time — format and then mount
-                cmd::run_ok("mkfs.ext4", &["-q", &mapper_device])
+                // First time — format as bcachefs then mount
+                cmd::run_ok("bcachefs", &["format", &mapper_device])
                     .await
                     .map_err(SubvolumeError::CommandFailed)?;
-                cmd::run_ok("mount", &[&mapper_device, &mount_point])
+                cmd::run_ok("bcachefs", &["mount", &mapper_device, &mount_point])
                     .await
                     .map_err(SubvolumeError::CommandFailed)?;
             }
@@ -1483,7 +1483,7 @@ impl SubvolumeService {
         Ok(())
     }
 
-    /// Mark a block subvolume for file-share encryption (creates inner ext4 on first unlock).
+    /// Mark a block subvolume for file-share encryption (creates inner bcachefs on first unlock).
     pub async fn luks_set_inner_fs(&self, filesystem: &str, name: &str, fs_type: &str) -> Result<(), SubvolumeError> {
         let sv = self.get(filesystem, name, None).await?;
         xattr::set(&sv.path, XATTR_NASTY_ENC_INNER, fs_type.as_bytes())

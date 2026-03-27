@@ -412,7 +412,6 @@ in {
       kubernetes-helm   # Helm chart manager for app deployment
       kubectl           # Kubernetes CLI (also available via k3s kubectl)
       cryptsetup        # LUKS encryption for per-volume encryption at rest
-      e2fsprogs         # mkfs.ext4 for inner filesystem of encrypted file shares
 
       (writeShellScriptBin "nasty-report" ''
         set -euo pipefail
