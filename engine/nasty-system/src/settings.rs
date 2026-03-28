@@ -356,31 +356,34 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             .output().await;
     }
 
-    // Build environment for DNS challenge credentials
-    let mut cmd = tokio::process::Command::new("lego");
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    cmd.args(&arg_refs);
+    // Run lego — ensure nginx is ALWAYS restarted even on failure
+    let lego_result = async {
+        let mut cmd = tokio::process::Command::new("lego");
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        cmd.args(&arg_refs);
 
-    // Load DNS credentials as environment variables if using DNS challenge
-    if settings.tls_challenge_type == "dns" {
-        if let Some(ref creds) = settings.tls_dns_credentials {
-            for line in creds.lines() {
-                if let Some((key, value)) = line.split_once('=') {
-                    cmd.env(key.trim(), value.trim());
+        if settings.tls_challenge_type == "dns" {
+            if let Some(ref creds) = settings.tls_dns_credentials {
+                for line in creds.lines() {
+                    if let Some((key, value)) = line.split_once('=') {
+                        cmd.env(key.trim(), value.trim());
+                    }
                 }
             }
         }
-    }
 
-    let output = cmd.output().await
-        .map_err(|e| format!("failed to run lego: {e}"))?;
+        cmd.output().await
+            .map_err(|e| format!("failed to run lego: {e}"))
+    }.await;
 
-    // Restart nginx if we stopped it
+    // ALWAYS restart nginx, regardless of lego success/failure
     if need_nginx_stop {
         let _ = tokio::process::Command::new("systemctl")
             .args(["start", "nginx"])
             .output().await;
     }
+
+    let output = lego_result?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
