@@ -577,41 +577,32 @@
 	onDestroy(() => client.offEvent(handleEvent));
 </script>
 
-<!-- Tab bar -->
-<div class="mb-6 flex border-b border-border">
+<!-- Tab bar with inline status -->
+{@const protocolInfo = { nfs: nfsProtocol, smb: smbProtocol, iscsi: iscsiProtocol, nvmeof: nvmeProtocol }}
+{@const shareCounts = { nfs: nfsShares.length, smb: smbShares.length, iscsi: iscsiTargets.length, nvmeof: nvmeSubsystems.length }}
+<div class="mb-6 flex items-center border-b border-border">
 	{#each TABS as tab}
+		{@const proto = protocolInfo[tab.key]}
 		<button
 			onclick={() => switchTab(tab.key)}
-			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === tab.key
+			class="flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors {activeTab === tab.key
 				? 'border-b-2 border-primary text-foreground'
 				: 'text-muted-foreground hover:text-foreground'}"
-		>{tab.label}</button>
+		>
+			{tab.label}
+			{#if proto}
+				<span class="inline-block h-1.5 w-1.5 rounded-full {proto.running ? 'bg-green-500' : 'bg-muted-foreground/40'}"></span>
+			{/if}
+			{#if shareCounts[tab.key] > 0}
+				<span class="text-[0.65rem] text-muted-foreground">{shareCounts[tab.key]}</span>
+			{/if}
+		</button>
 	{/each}
 </div>
 
 
 <!-- ════════════════════════════════════════════════════ NFS ════════════════════════════════════════════════════ -->
 {#if activeTab === 'nfs'}
-
-{#if nfsProtocol}
-	<Card class="mb-4">
-		<CardContent class="flex items-center gap-4 py-3">
-			<Badge variant={nfsProtocol.running ? 'default' : 'destructive'}>
-				{nfsProtocol.running ? 'Running' : 'Stopped'}
-			</Badge>
-			<span class="text-sm text-muted-foreground">
-				{nfsShares.length} share{nfsShares.length !== 1 ? 's' : ''}
-				{#if nfsShares.length > 0}
-					&middot; <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">mount -t nfs {window.location.hostname}:&lt;path&gt; /mnt</code>
-				{/if}
-			</span>
-			<Button size="xs" variant={nfsProtocol.enabled ? 'secondary' : 'default'} class="ml-auto"
-				onclick={() => toggleProtocol('nfs', nfsProtocol!.enabled)}>
-				{nfsProtocol.enabled ? 'Disable' : 'Enable'} NFS
-			</Button>
-		</CardContent>
-	</Card>
-{/if}
 
 <div class="mb-4 flex items-center gap-3">
 	<Button size="sm" onclick={() => nfsShowCreate = !nfsShowCreate}>
@@ -753,25 +744,6 @@
 <!-- ════════════════════════════════════════════════════ SMB ════════════════════════════════════════════════════ -->
 {:else if activeTab === 'smb'}
 
-{#if smbProtocol}
-	<Card class="mb-4">
-		<CardContent class="flex items-center gap-4 py-3">
-			<Badge variant={smbProtocol.running ? 'default' : 'destructive'}>
-				{smbProtocol.running ? 'Running' : 'Stopped'}
-			</Badge>
-			<span class="text-sm text-muted-foreground">
-				{smbShares.length} share{smbShares.length !== 1 ? 's' : ''}
-				{#if smbShares.length > 0}
-					&middot; <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">\\{window.location.hostname}\&lt;name&gt;</code>
-				{/if}
-			</span>
-			<Button size="xs" variant={smbProtocol.enabled ? 'secondary' : 'default'} class="ml-auto"
-				onclick={() => toggleProtocol('smb', smbProtocol!.enabled)}>
-				{smbProtocol.enabled ? 'Disable' : 'Enable'} SMB
-			</Button>
-		</CardContent>
-	</Card>
-{/if}
 
 <div class="mb-4 flex items-center gap-3">
 	<Button size="sm" onclick={() => smbShowCreate = !smbShowCreate}>
@@ -930,24 +902,6 @@
 
 <!-- ════════════════════════════════════════════════════ iSCSI ════════════════════════════════════════════════════ -->
 {:else if activeTab === 'iscsi'}
-
-{#if iscsiProtocol}
-	<Card class="mb-4">
-		<CardContent class="flex items-center gap-4 py-3">
-			<Badge variant={iscsiProtocol.running ? 'default' : 'destructive'}>
-				{iscsiProtocol.running ? 'Running' : 'Stopped'}
-			</Badge>
-			<span class="text-sm text-muted-foreground">
-				{iscsiTargets.length} target{iscsiTargets.length !== 1 ? 's' : ''}
-				&middot; <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">{window.location.hostname}:3260</code>
-			</span>
-			<Button size="xs" variant={iscsiProtocol.enabled ? 'secondary' : 'default'} class="ml-auto"
-				onclick={() => toggleProtocol('iscsi', iscsiProtocol!.enabled)}>
-				{iscsiProtocol.enabled ? 'Disable' : 'Enable'} iSCSI
-			</Button>
-		</CardContent>
-	</Card>
-{/if}
 
 <div class="mb-4 flex items-center gap-3">
 	<Button size="sm" onclick={() => iscsiShowCreate = !iscsiShowCreate}>
@@ -1137,26 +1091,6 @@
 
 <!-- ════════════════════════════════════════════════════ NVMe-oF ════════════════════════════════════════════════════ -->
 {:else if activeTab === 'nvmeof'}
-
-{#if nvmeProtocol}
-	<Card class="mb-4">
-		<CardContent class="flex items-center gap-4 py-3">
-			<Badge variant={nvmeProtocol.running ? 'default' : 'destructive'}>
-				{nvmeProtocol.running ? 'Running' : 'Stopped'}
-			</Badge>
-			<span class="text-sm text-muted-foreground">
-				{nvmeSubsystems.length} subsystem{nvmeSubsystems.length !== 1 ? 's' : ''}
-				{#if nvmeSubsystems.length > 0}
-					&middot; <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">nvme connect -t tcp -a {window.location.hostname} -s 4420 -n &lt;nqn&gt;</code>
-				{/if}
-			</span>
-			<Button size="xs" variant={nvmeProtocol.enabled ? 'secondary' : 'default'} class="ml-auto"
-				onclick={() => toggleProtocol('nvmeof', nvmeProtocol!.enabled)}>
-				{nvmeProtocol.enabled ? 'Disable' : 'Enable'} NVMe-oF
-			</Button>
-		</CardContent>
-	</Card>
-{/if}
 
 <div class="mb-4 flex items-center gap-3">
 	<Button size="sm" onclick={() => nvmeShowCreate = !nvmeShowCreate}>
