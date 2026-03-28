@@ -70,12 +70,28 @@
 	let subvolumes: Subvolume[] = $state([]);
 	let loading = $state(true);
 
-	let showCreate = $state(false);
+	let wizardStep: 0 | 1 | 2 | 3 | 4 = $state(0); // 0=hidden
 	let newName = $state('');
 	let newType: SubvolumeType = $state('filesystem');
 	let newVolsize = $state('');
 	let newCompression = $state('');
 	let newComments = $state('');
+	let newEncrypt = $state(false);
+	let newPassphrase = $state('');
+	let newPassphraseConfirm = $state('');
+
+	const WIZARD_STEPS: [string, string][] = [
+		['1', 'Basic'],
+		['2', 'Storage'],
+		['3', 'Security'],
+		['4', 'Review'],
+	];
+
+	function openWizard() {
+		wizardStep = 1;
+		newName = ''; newType = 'filesystem'; newVolsize = ''; newCompression = '';
+		newComments = ''; newEncrypt = false; newPassphrase = ''; newPassphraseConfirm = '';
+	}
 
 	let showSnap = $state<string | null>(null);
 	let snapName = $state('');
@@ -255,6 +271,7 @@
 	async function createSubvolume() {
 		if (!newName || !selectedFs) return;
 		if (newType === 'block' && !newVolsize) return;
+		if (newEncrypt && (!newPassphrase || newPassphrase !== newPassphraseConfirm)) return;
 
 		const params: Record<string, unknown> = {
 			filesystem: selectedFs,
@@ -272,12 +289,16 @@
 			`Subvolume "${newName}" created`
 		);
 		if (ok !== undefined) {
-			newName = '';
-			newType = 'filesystem';
-			newVolsize = '';
-			newCompression = '';
-			newComments = '';
-			showCreate = false;
+			// Encrypt if requested (block subvolumes only)
+			if (newEncrypt && newType === 'block' && newPassphrase) {
+				await withToast(
+					() => client.call('subvolume.encrypt', { filesystem: selectedFs, name: newName, passphrase: newPassphrase }),
+					`Subvolume "${newName}" encrypted`
+				);
+			}
+			wizardStep = 0;
+			newName = ''; newType = 'filesystem'; newVolsize = ''; newCompression = '';
+			newComments = ''; newEncrypt = false; newPassphrase = ''; newPassphraseConfirm = '';
 			await refresh();
 		}
 	}
@@ -488,8 +509,8 @@
 
 {#if mountedFilesystems.length > 0}
 	<div class="mb-4 flex items-center gap-4">
-		<Button size="sm" onclick={() => showCreate = !showCreate}>
-			{showCreate ? 'Cancel' : 'Create Subvolume'}
+		<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}>
+			{wizardStep !== 0 ? 'Cancel' : 'Create Subvolume'}
 		</Button>
 		<select value={selectedFs} onchange={(e) => selectFs((e.target as HTMLSelectElement).value)} class="h-9 w-auto rounded-md border border-input bg-transparent px-3 text-sm">
 			{#each mountedFilesystems as p}
@@ -500,10 +521,31 @@
 	</div>
 {/if}
 
-{#if showCreate}
-	<Card class="mb-6 max-w-lg">
+{#if wizardStep !== 0}
+	<Card class="mb-6 max-w-2xl">
 		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">Create Subvolume in "{selectedFs}"</h3>
+			<!-- Step indicator -->
+			<div class="mb-6 flex items-center gap-0">
+				{#each WIZARD_STEPS as [num, label], i}
+					<div class="flex items-center">
+						<div class="flex items-center gap-2">
+							<div class="flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold
+								{wizardStep > i + 1 ? 'bg-primary text-primary-foreground' :
+								 wizardStep === i + 1 ? 'bg-primary text-primary-foreground' :
+								 'bg-secondary text-muted-foreground'}">
+								{num}
+							</div>
+							<span class="text-xs {wizardStep === i + 1 ? 'text-foreground font-medium' : 'text-muted-foreground'}">{label}</span>
+						</div>
+						{#if i < WIZARD_STEPS.length - 1}
+							<div class="mx-3 h-px w-8 bg-border"></div>
+						{/if}
+					</div>
+				{/each}
+			</div>
+
+			<!-- Step 1: Basic -->
+			{#if wizardStep === 1}
 			<div class="mb-4">
 				<Label for="sv-name">Name</Label>
 				<Input id="sv-name" bind:value={newName} placeholder="documents" class="mt-1" />
@@ -515,6 +557,16 @@
 					<option value="block">Block Device (iSCSI, NVMe-oF)</option>
 				</select>
 			</div>
+			<div class="mb-4">
+				<Label for="sv-comments">Comments</Label>
+				<Input id="sv-comments" bind:value={newComments} placeholder="Optional description" class="mt-1" />
+			</div>
+			<div class="flex gap-2">
+				<Button size="sm" onclick={() => wizardStep = 2} disabled={!newName}>Next: Storage →</Button>
+			</div>
+
+			<!-- Step 2: Storage -->
+			{:else if wizardStep === 2}
 			{#if newType === 'block'}
 				<div class="mb-4">
 					<Label for="sv-volsize">Volume Size (GiB)</Label>
@@ -530,11 +582,82 @@
 					<option value="gzip">Gzip</option>
 				</select>
 			</div>
-			<div class="mb-4">
-				<Label for="sv-comments">Comments</Label>
-				<Input id="sv-comments" bind:value={newComments} placeholder="Optional description" class="mt-1" />
+			<div class="flex gap-2">
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 1}>← Back</Button>
+				<Button size="sm" onclick={() => wizardStep = 3} disabled={newType === 'block' && !newVolsize}>Next: Security →</Button>
 			</div>
-			<Button onclick={createSubvolume} disabled={!newName || (newType === 'block' && !newVolsize)}>Create</Button>
+
+			<!-- Step 3: Security -->
+			{:else if wizardStep === 3}
+			{#if newType === 'block'}
+				<div class="mb-4 rounded-lg border border-border p-4">
+					<label class="flex cursor-pointer items-center gap-2 text-sm font-medium">
+						<input type="checkbox" bind:checked={newEncrypt} class="h-4 w-4" />
+						Encrypt subvolume (LUKS)
+					</label>
+					{#if newEncrypt}
+						<div class="mt-3 grid grid-cols-2 gap-4">
+							<div>
+								<Label>Passphrase</Label>
+								<input type="password" bind:value={newPassphrase}
+									class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+									placeholder="Enter passphrase" />
+							</div>
+							<div>
+								<Label>Confirm</Label>
+								<input type="password" bind:value={newPassphraseConfirm}
+									class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+									placeholder="Confirm passphrase" />
+							</div>
+						</div>
+						{#if newPassphrase && newPassphraseConfirm && newPassphrase !== newPassphraseConfirm}
+							<p class="mt-1 text-xs text-destructive">Passphrases do not match.</p>
+						{/if}
+						<p class="mt-2 text-xs text-amber-400">Warning: losing the passphrase means permanent data loss.</p>
+					{:else}
+						<p class="mt-1 text-xs text-muted-foreground">Data at rest will not be encrypted.</p>
+					{/if}
+				</div>
+			{:else}
+				<p class="text-sm text-muted-foreground">Encryption is only available for block subvolumes. File share subvolumes use filesystem-level encryption instead.</p>
+			{/if}
+			<div class="mt-4 flex gap-2">
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 2}>← Back</Button>
+				<Button size="sm" onclick={() => wizardStep = 4}
+					disabled={newEncrypt && (!newPassphrase || newPassphrase !== newPassphraseConfirm)}>Next: Review →</Button>
+			</div>
+
+			<!-- Step 4: Review -->
+			{:else if wizardStep === 4}
+			<div class="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+				<span class="text-muted-foreground">Filesystem</span>
+				<span class="font-mono">{selectedFs}</span>
+				<span class="text-muted-foreground">Name</span>
+				<span class="font-mono">{newName}</span>
+				<span class="text-muted-foreground">Type</span>
+				<span>{newType === 'filesystem' ? 'File Share' : 'Block Device'}</span>
+				{#if newType === 'block' && newVolsize}
+					<span class="text-muted-foreground">Size</span>
+					<span>{newVolsize} GiB</span>
+				{/if}
+				{#if newCompression}
+					<span class="text-muted-foreground">Compression</span>
+					<span>{newCompression}</span>
+				{/if}
+				{#if newEncrypt}
+					<span class="text-muted-foreground">Encryption</span>
+					<span>LUKS (encrypted at rest)</span>
+				{/if}
+				{#if newComments}
+					<span class="text-muted-foreground">Comments</span>
+					<span>{newComments}</span>
+				{/if}
+			</div>
+			<div class="flex gap-2">
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 3}>← Back</Button>
+				<Button size="sm" onclick={createSubvolume}>Create Subvolume</Button>
+			</div>
+			{/if}
 		</CardContent>
 	</Card>
 {/if}
