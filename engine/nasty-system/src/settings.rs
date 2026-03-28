@@ -5,6 +5,49 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+// ── ACME cert status (global, in-memory) ─────────────────────
+
+static ACME_STATUS: std::sync::OnceLock<std::sync::Mutex<AcmeStatus>> = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AcmeStatus {
+    /// "idle", "running", "success", "error"
+    pub state: String,
+    /// Human-readable message (error details, progress info)
+    pub message: String,
+    /// Domain the cert is for
+    pub domain: Option<String>,
+    /// When the cert expires (ISO 8601), if known
+    pub expires: Option<String>,
+    /// When the last attempt was made
+    pub last_attempt: Option<String>,
+}
+
+impl Default for AcmeStatus {
+    fn default() -> Self {
+        Self { state: "idle".into(), message: String::new(), domain: None, expires: None, last_attempt: None }
+    }
+}
+
+fn set_acme_status(state: &str, message: &str, domain: Option<&str>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+    let status = ACME_STATUS.get_or_init(|| std::sync::Mutex::new(AcmeStatus::default()));
+    if let Ok(mut s) = status.lock() {
+        s.state = state.to_string();
+        s.message = message.to_string();
+        if let Some(d) = domain { s.domain = Some(d.to_string()); }
+        s.last_attempt = Some(now);
+    }
+}
+
+pub fn get_acme_status() -> AcmeStatus {
+    let status = ACME_STATUS.get_or_init(|| std::sync::Mutex::new(AcmeStatus::default()));
+    status.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
 const STATE_PATH: &str = "/var/lib/nasty/settings.json";
 const STATE_DIR: &str = "/var/lib/nasty";
 const TLS_CERT_PATH: &str = "/var/lib/nasty/tls/cert.pem";
@@ -249,6 +292,8 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     let email = settings.tls_acme_email.as_deref()
         .ok_or("ACME email not set")?;
 
+    set_acme_status("running", &format!("Requesting certificate for {domain}..."), Some(domain));
+
     // Create lego data directory
     let _ = tokio::fs::create_dir_all(LEGO_DATA_DIR).await;
 
@@ -323,17 +368,21 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("lego {action} failed: {stderr}"));
+        let msg = format!("lego {action} failed: {stderr}");
+        set_acme_status("error", &msg, Some(domain));
+        return Err(msg);
     }
+
+    set_acme_status("running", "Installing certificate...", Some(domain));
 
     // Copy lego certs to NASty's TLS paths
     let lego_cert = format!("{LEGO_DATA_DIR}/certificates/{domain}.crt");
     let lego_key = format!("{LEGO_DATA_DIR}/certificates/{domain}.key");
 
     tokio::fs::copy(&lego_cert, TLS_CERT_PATH).await
-        .map_err(|e| format!("failed to copy cert: {e}"))?;
+        .map_err(|e| { let m = format!("failed to copy cert: {e}"); set_acme_status("error", &m, Some(domain)); m })?;
     tokio::fs::copy(&lego_key, TLS_KEY_PATH).await
-        .map_err(|e| format!("failed to copy key: {e}"))?;
+        .map_err(|e| { let m = format!("failed to copy key: {e}"); set_acme_status("error", &m, Some(domain)); m })?;
 
     // Set restrictive permissions on key
     let _ = tokio::fs::set_permissions(TLS_KEY_PATH, std::fs::Permissions::from_mode(0o640)).await;
@@ -343,6 +392,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         .args(["reload", "nginx"])
         .output().await;
 
+    set_acme_status("success", &format!("Certificate installed for {domain}"), Some(domain));
     info!("ACME certificate installed for {domain}");
     Ok(())
 }

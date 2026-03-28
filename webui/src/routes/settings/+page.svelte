@@ -40,6 +40,7 @@
 	let tlsDomain = $state('');
 	let tlsAcmeEmail = $state('');
 	let tlsAcmeEnabled = $state(false);
+	let acmeStatus: { state: string; message: string; domain?: string; last_attempt?: string } | null = $state(null);
 	let tlsChallengeType = $state<'tls-alpn' | 'dns'>('tls-alpn');
 	let tlsDnsProvider = $state('');
 	let tlsDnsCredentials = $state('');
@@ -147,6 +148,9 @@
 			tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
 			syncNetworkForm();
 
+			// Load ACME status
+			try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
+
 			// Load GC config
 			try {
 				const gc = await client.call<{ keep_generations: number; max_age_days: number }>('system.gc.get');
@@ -227,11 +231,21 @@
 				tls_dns_provider: tlsDnsProvider || null,
 				tls_dns_credentials: tlsDnsCredentials || null,
 			}),
-			tlsAcmeEnabled ? 'Let\'s Encrypt enabled — rebuild required to apply' : 'TLS settings saved'
+			tlsAcmeEnabled ? 'Let\'s Encrypt certificate requested — check status below' : 'TLS settings saved'
 		);
 		if (result !== undefined) {
 			settings = result;
 			tlsChanged = false;
+			// Poll ACME status for a few seconds to show progress
+			if (tlsAcmeEnabled) {
+				const poll = setInterval(async () => {
+					try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
+					if (acmeStatus && (acmeStatus.state === 'success' || acmeStatus.state === 'error')) {
+						clearInterval(poll);
+					}
+				}, 3000);
+				setTimeout(() => clearInterval(poll), 120000); // stop after 2 min
+			}
 		}
 		savingTls = false;
 	}
@@ -579,6 +593,29 @@
 					<span class="font-medium">Enable Let's Encrypt</span>
 				</label>
 			</div>
+
+			{#if acmeStatus && acmeStatus.state !== 'idle'}
+				<div class="mb-4 rounded border border-border p-3 text-xs">
+					<div class="flex items-center gap-2">
+						{#if acmeStatus.state === 'running'}
+							<span class="inline-block h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span>
+							<span class="text-yellow-500 font-medium">Provisioning...</span>
+						{:else if acmeStatus.state === 'success'}
+							<span class="inline-block h-2 w-2 rounded-full bg-green-500"></span>
+							<span class="text-green-500 font-medium">Certificate active</span>
+						{:else if acmeStatus.state === 'error'}
+							<span class="inline-block h-2 w-2 rounded-full bg-red-500"></span>
+							<span class="text-red-500 font-medium">Error</span>
+						{/if}
+						{#if acmeStatus.domain}
+							<span class="text-muted-foreground">({acmeStatus.domain})</span>
+						{/if}
+					</div>
+					{#if acmeStatus.message}
+						<p class="mt-1 text-muted-foreground">{acmeStatus.message}</p>
+					{/if}
+				</div>
+			{/if}
 
 			{#if tlsAcmeEnabled}
 				<div class="mb-4">

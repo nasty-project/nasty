@@ -62,7 +62,7 @@ fn is_read_only(method: &str) -> bool {
         || matches!(
             method,
             "system.info" | "system.health" | "system.stats" | "system.disks" | "system.network.get"
-            | "system.alerts" | "system.settings.get" | "system.metrics.history" | "system.metrics.prometheus" | "alert.rules.list"
+            | "system.alerts" | "system.settings.get" | "system.acme.status" | "system.metrics.history" | "system.metrics.prometheus" | "alert.rules.list"
             | "device.list" | "auth.me" | "auth.list_users" | "auth.token.list"
             | "fs.usage" | "fs.scrub.status" | "fs.reconcile.status"
             | "bcachefs.usage"
@@ -292,6 +292,8 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
+
+        "system.acme.status" => ok(req, nasty_system::settings::get_acme_status()),
 
         // ── System Update ─────────────────────────────────────────
         "system.update.version" => ok(req, state.updates.version().await),
