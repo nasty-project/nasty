@@ -82,6 +82,9 @@ pub struct Settings {
     /// DNS provider API credentials as KEY=VALUE lines.
     #[serde(default)]
     pub tls_dns_credentials: Option<String>,
+    /// Use Let's Encrypt staging environment (for testing, avoids rate limits).
+    #[serde(default)]
+    pub tls_acme_staging: bool,
 }
 
 fn default_challenge_type() -> String {
@@ -132,6 +135,8 @@ pub struct SettingsUpdate {
     pub tls_dns_provider: Option<String>,
     /// DNS API credentials (KEY=VALUE per line).
     pub tls_dns_credentials: Option<String>,
+    /// Use staging environment.
+    pub tls_acme_staging: Option<bool>,
 }
 
 pub struct SettingsService {
@@ -213,6 +218,12 @@ impl SettingsService {
             let creds = if creds.trim().is_empty() { None } else { Some(creds.trim().to_string()) };
             if settings.tls_dns_credentials != creds {
                 settings.tls_dns_credentials = creds;
+                tls_changed = true;
+            }
+        }
+        if let Some(staging) = update.tls_acme_staging {
+            if settings.tls_acme_staging != staging {
+                settings.tls_acme_staging = staging;
                 tls_changed = true;
             }
         }
@@ -311,6 +322,11 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         "--domains".to_string(), domain.to_string(),
         "--path".to_string(), LEGO_DATA_DIR.to_string(),
     ];
+
+    if settings.tls_acme_staging {
+        args.push("--server".to_string());
+        args.push("https://acme-staging-v02.api.letsencrypt.org/directory".to_string());
+    }
 
     // Challenge type
     if settings.tls_challenge_type == "dns" {

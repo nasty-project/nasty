@@ -41,6 +41,7 @@
 	let tlsAcmeEmail = $state('');
 	let tlsAcmeEnabled = $state(false);
 	let acmeStatus: { state: string; message: string; domain?: string; last_attempt?: string } | null = $state(null);
+	let tlsAcmeStaging = $state(false);
 	let tlsChallengeType = $state<'tls-alpn' | 'dns'>('tls-alpn');
 	let tlsDnsProvider = $state('');
 	let tlsDnsCredentials = $state('');
@@ -146,6 +147,7 @@
 			tlsChallengeType = settings?.tls_challenge_type ?? 'tls-alpn';
 			tlsDnsProvider = settings?.tls_dns_provider ?? '';
 			tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
+			tlsAcmeStaging = (settings as any)?.tls_acme_staging ?? false;
 			syncNetworkForm();
 
 			// Load ACME status
@@ -230,6 +232,7 @@
 				tls_challenge_type: tlsChallengeType,
 				tls_dns_provider: tlsDnsProvider || null,
 				tls_dns_credentials: tlsDnsCredentials || null,
+				tls_acme_staging: tlsAcmeStaging,
 			}),
 			tlsAcmeEnabled ? 'Let\'s Encrypt certificate requested — check status below' : 'TLS settings saved'
 		);
@@ -592,6 +595,12 @@
 					/>
 					<span class="font-medium">Enable Let's Encrypt</span>
 				</label>
+				{#if tlsAcmeEnabled}
+					<label class="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer mt-2 ml-6">
+						<input type="checkbox" bind:checked={tlsAcmeStaging} onchange={() => tlsChanged = true} class="rounded border-input" />
+						Use staging environment (for testing, certs not trusted by browsers)
+					</label>
+				{/if}
 			</div>
 
 			{#if acmeStatus && acmeStatus.state !== 'idle'}
