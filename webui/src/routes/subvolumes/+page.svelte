@@ -300,6 +300,44 @@
 		await refresh();
 	}
 
+	// Encryption state
+	let encryptTarget: string | null = $state(null);
+	let encryptPassphrase = $state('');
+	let encryptConfirm = $state('');
+	let unlockTarget: string | null = $state(null);
+	let unlockPassphrase = $state('');
+
+	async function encryptSubvolume() {
+		if (!encryptTarget || !encryptPassphrase || encryptPassphrase !== encryptConfirm) return;
+		await withToast(
+			() => client.call('subvolume.encrypt', { filesystem: selectedFs, name: encryptTarget, passphrase: encryptPassphrase }),
+			`Subvolume "${encryptTarget}" encrypted`
+		);
+		encryptTarget = null;
+		encryptPassphrase = '';
+		encryptConfirm = '';
+		await refresh();
+	}
+
+	async function unlockSubvolume() {
+		if (!unlockTarget || !unlockPassphrase) return;
+		await withToast(
+			() => client.call('subvolume.unlock', { filesystem: selectedFs, name: unlockTarget, passphrase: unlockPassphrase }),
+			`Subvolume "${unlockTarget}" unlocked`
+		);
+		unlockTarget = null;
+		unlockPassphrase = '';
+		await refresh();
+	}
+
+	async function lockSubvolume(name: string) {
+		await withToast(
+			() => client.call('subvolume.lock', { filesystem: selectedFs, name }),
+			`Subvolume "${name}" locked`
+		);
+		await refresh();
+	}
+
 	async function attachSubvolume(name: string) {
 		await withToast(
 			() => client.call('subvolume.attach', { filesystem: selectedFs, name }),
@@ -538,6 +576,11 @@
 							class={sv.subvolume_type === 'filesystem' ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}>
 							{sv.subvolume_type === 'filesystem' ? 'File Share' : 'Block'}
 						</Badge>
+						{#if sv.encrypted}
+							<Badge variant={sv.luks_open ? 'default' : 'destructive'} class="text-[0.6rem] ml-1">
+								{sv.luks_open ? 'Unlocked' : 'Locked'}
+							</Badge>
+						{/if}
 					</td>
 					<td class="p-3 text-sm">
 						{#if sv.subvolume_type === 'block' && sv.volsize_bytes}
@@ -585,6 +628,15 @@
 							<Button variant="secondary" size="xs" onclick={() => openDetail(sv)}>
 								{expandedName === sv.name ? 'Hide' : 'Details'}
 							</Button>
+							{#if sv.subvolume_type === 'block' && !sv.encrypted}
+								<Button variant="outline" size="xs" onclick={() => { encryptTarget = sv.name; encryptPassphrase = ''; encryptConfirm = ''; }}>Encrypt</Button>
+							{/if}
+							{#if sv.encrypted && !sv.luks_open}
+								<Button variant="default" size="xs" onclick={() => { unlockTarget = sv.name; unlockPassphrase = ''; }}>Unlock</Button>
+							{/if}
+							{#if sv.encrypted && sv.luks_open}
+								<Button variant="secondary" size="xs" onclick={() => lockSubvolume(sv.name)}>Lock</Button>
+							{/if}
 							<Button variant="destructive" size="xs" onclick={() => deleteSubvolume(sv.name)}>Delete</Button>
 						</div>
 					</td>
@@ -918,3 +970,49 @@
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
+
+<!-- Encrypt Modal -->
+{#if encryptTarget}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<Card class="w-full max-w-sm">
+			<CardContent class="pt-6">
+				<h3 class="mb-2 text-lg font-semibold">Encrypt "{encryptTarget}"</h3>
+				<p class="mb-4 text-sm text-muted-foreground">LUKS encrypt this block subvolume. Data at rest will be protected.</p>
+				<input type="password" bind:value={encryptPassphrase}
+					class="mb-2 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+					placeholder="Passphrase" />
+				<input type="password" bind:value={encryptConfirm}
+					class="mb-2 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+					placeholder="Confirm passphrase" />
+				{#if encryptPassphrase && encryptConfirm && encryptPassphrase !== encryptConfirm}
+					<p class="mb-2 text-xs text-destructive">Passphrases do not match.</p>
+				{/if}
+				<p class="mb-4 text-xs text-amber-400">Warning: losing the passphrase means permanent data loss.</p>
+				<div class="flex gap-2">
+					<Button onclick={encryptSubvolume} disabled={!encryptPassphrase || encryptPassphrase !== encryptConfirm}>Encrypt</Button>
+					<Button variant="secondary" onclick={() => encryptTarget = null}>Cancel</Button>
+				</div>
+			</CardContent>
+		</Card>
+	</div>
+{/if}
+
+<!-- Unlock Modal -->
+{#if unlockTarget}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<Card class="w-full max-w-sm">
+			<CardContent class="pt-6">
+				<h3 class="mb-2 text-lg font-semibold">Unlock "{unlockTarget}"</h3>
+				<p class="mb-4 text-sm text-muted-foreground">Enter the passphrase to unlock this encrypted subvolume.</p>
+				<input type="password" bind:value={unlockPassphrase}
+					class="mb-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+					placeholder="Passphrase"
+					onkeydown={(e) => { if (e.key === 'Enter' && unlockPassphrase) unlockSubvolume(); }} />
+				<div class="flex gap-2">
+					<Button onclick={unlockSubvolume} disabled={!unlockPassphrase}>Unlock</Button>
+					<Button variant="secondary" onclick={() => unlockTarget = null}>Cancel</Button>
+				</div>
+			</CardContent>
+		</Card>
+	</div>
+{/if}
