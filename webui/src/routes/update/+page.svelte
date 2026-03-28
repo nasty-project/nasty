@@ -44,7 +44,7 @@
 	let checking = $state(false);
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
 	let logEl: HTMLPreElement | undefined = $state();
-	let logCollapsed = $state(false);
+	let logCollapsed = $state(true);
 
 	// bcachefs-tools switching state
 	let bcachefsInfo: BcachefsToolsInfo | null = $state(null);
@@ -573,7 +573,7 @@
 			</CardContent>
 		</Card>
 
-		{#if status && status.state !== 'idle'}
+		{#if status && (status.state === 'running' || status.state === 'failed')}
 			<Card class="mb-6">
 				<CardContent class="py-5">
 					<div class="mb-5 flex items-center">
