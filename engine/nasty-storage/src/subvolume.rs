@@ -30,11 +30,7 @@ const XATTR_NASTY_VOLSIZE:     &str = "user.nasty.volsize";
 const XATTR_NASTY_COMPRESSION: &str = "user.nasty.compression";
 const XATTR_NASTY_COMMENT:     &str = "user.nasty.comment";
 const XATTR_NASTY_OWNER:       &str = "user.nasty.owner";
-const XATTR_NASTY_ENCRYPTED:   &str = "user.nasty.encrypted";
-const XATTR_NASTY_ENC_INNER:   &str = "user.nasty.enc_inner_fs";
-
-const ENC_MAPPER_PREFIX: &str = "nasty-enc-";
-const ENC_MOUNT_BASE: &str = "/fs";
+const XATTR_NASTY_DIRECT_IO:   &str = "user.nasty.direct_io";
 
 /// Logical key prefix that maps to the reserved nasty.* xattrs.
 /// Excluded from the user-visible `properties` map.
@@ -99,15 +95,9 @@ pub struct Subvolume {
     /// Parent subvolume name if this is a clone (from bcachefs snapshot_parent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    /// Encryption type: "luks2" (server-managed), "client" (client-managed), or None.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encrypted: Option<String>,
-    /// Whether the LUKS container is currently open (/dev/mapper/ exists).
+    /// Whether O_DIRECT is enabled on the loop device (block subvolumes only).
     #[serde(default)]
-    pub luks_open: bool,
-    /// Mount point of the inner filesystem (NFS/SMB encrypted shares).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enc_mount_point: Option<String>,
+    pub direct_io: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -137,6 +127,7 @@ struct SubvolumeMeta {
     compression: Option<String>,
     comments: Option<String>,
     owner: Option<String>,
+    direct_io: bool,
 }
 
 /// Read NASty-internal metadata from the reserved `user.nasty.*` xattrs.
@@ -168,6 +159,7 @@ fn read_meta_xattrs(path: &Path) -> SubvolumeMeta {
         compression: get(XATTR_NASTY_COMPRESSION),
         comments: get(XATTR_NASTY_COMMENT),
         owner: get(XATTR_NASTY_OWNER),
+        direct_io: get(XATTR_NASTY_DIRECT_IO).as_deref() == Some("true"),
     }
 }
 
@@ -179,6 +171,7 @@ fn write_meta_xattrs(
     compression: Option<&str>,
     comments: Option<&str>,
     owner: Option<&str>,
+    direct_io: bool,
 ) -> Result<(), SubvolumeError> {
     let type_str = match subvolume_type {
         SubvolumeType::Filesystem => "filesystem",
@@ -203,6 +196,10 @@ fn write_meta_xattrs(
         xattr::set(path, XATTR_NASTY_OWNER, o.as_bytes())
             .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr owner: {e}")))?;
     }
+    if direct_io {
+        xattr::set(path, XATTR_NASTY_DIRECT_IO, b"true")
+            .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr direct_io: {e}")))?;
+    }
     Ok(())
 }
 
@@ -221,6 +218,9 @@ pub struct CreateSubvolumeRequest {
     pub compression: Option<String>,
     /// Optional description for the subvolume.
     pub comments: Option<String>,
+    /// Enable O_DIRECT on the loop device (bypasses host page cache for the backing file).
+    #[serde(default)]
+    pub direct_io: Option<bool>,
 }
 
 fn default_type() -> SubvolumeType {
@@ -376,7 +376,12 @@ impl SubvolumeService {
                 info!("Loop device already attached for {}/{}", subvol.filesystem, subvol.name);
                 existing
             } else {
-                match cmd::run_ok("losetup", &["--find", "--show", &img_path]).await {
+                let mut args = vec!["--find", "--show"];
+                if subvol.direct_io {
+                    args.push("--direct-io=on");
+                }
+                args.push(&img_path);
+                match cmd::run_ok("losetup", &args).await {
                     Ok(dev) => {
                         let dev = dev.trim().to_string();
                         info!("Attached {} for block subvolume {}/{}", dev, subvol.filesystem, subvol.name);
@@ -478,19 +483,7 @@ impl SubvolumeService {
                 owner: meta.owner,
                 properties,
                 parent,
-                encrypted: xattr::get(&path_str, XATTR_NASTY_ENCRYPTED).ok().flatten().and_then(|b| String::from_utf8(b).ok()),
-                luks_open: {
-                    let mapper_name = format!("{ENC_MAPPER_PREFIX}{fs_name}-{name}");
-                    std::path::Path::new(&format!("/dev/mapper/{mapper_name}")).exists()
-                },
-                enc_mount_point: {
-                    let enc_mp = format!("{ENC_MOUNT_BASE}/{fs_name}/.enc/{name}");
-                    if std::path::Path::new(&enc_mp).is_dir() && is_mountpoint_sync(&enc_mp) {
-                        Some(enc_mp)
-                    } else {
-                        None
-                    }
-                },
+                direct_io: meta.direct_io,
             });
         }
 
@@ -612,7 +605,12 @@ impl SubvolumeService {
             }
 
             info!("Attaching loop device for '{}'", req.name);
-            cmd::run_ok("losetup", &["--find", "--show", &img_path])
+            let mut losetup_args = vec!["--find", "--show"];
+            if req.direct_io.unwrap_or(false) {
+                losetup_args.push("--direct-io=on");
+            }
+            losetup_args.push(&img_path);
+            cmd::run_ok("losetup", &losetup_args)
                 .await
                 .map_err(SubvolumeError::CommandFailed)?;
         }
@@ -625,6 +623,7 @@ impl SubvolumeService {
             req.compression.as_deref(),
             req.comments.as_deref(),
             owner.as_deref(),
+            req.direct_io.unwrap_or(false),
         )?;
 
         self.get(&req.filesystem, &req.name, None).await
@@ -688,7 +687,12 @@ impl SubvolumeService {
 
         let img_path = format!("{}/{}", subvol.path, BLOCK_FILE_NAME);
         info!("Attaching loop device for '{}'", name);
-        cmd::run_ok("losetup", &["--find", "--show", &img_path])
+        let mut args = vec!["--find", "--show"];
+        if subvol.direct_io {
+            args.push("--direct-io=on");
+        }
+        args.push(&img_path);
+        cmd::run_ok("losetup", &args)
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
@@ -1036,7 +1040,12 @@ impl SubvolumeService {
             let img_path = format!("{new_subvol_path}/{BLOCK_FILE_NAME}");
             if Path::new(&img_path).exists() {
                 info!("Attaching loop device for restored block subvolume '{}'", req.new_name);
-                cmd::run_ok("losetup", &["--find", "--show", &img_path])
+                let mut args = vec!["--find", "--show"];
+                if snap_meta.direct_io {
+                    args.push("--direct-io=on");
+                }
+                args.push(&img_path);
+                cmd::run_ok("losetup", &args)
                     .await
                     .map_err(SubvolumeError::CommandFailed)?;
             }
@@ -1099,6 +1108,7 @@ impl SubvolumeService {
             parent.compression.as_deref(),
             None,
             owner_filter,
+            parent.direct_io,
         )?;
 
         // For block subvolumes, attach a loop device to the clone's sparse image
@@ -1107,7 +1117,12 @@ impl SubvolumeService {
             let img_path = format!("{new_subvol_path}/{BLOCK_FILE_NAME}");
             if Path::new(&img_path).exists() {
                 info!("Attaching loop device for cloned block subvolume '{}'", req.new_name);
-                cmd::run_ok("losetup", &["--find", "--show", &img_path])
+                let mut args = vec!["--find", "--show"];
+                if parent.direct_io {
+                    args.push("--direct-io=on");
+                }
+                args.push(&img_path);
+                cmd::run_ok("losetup", &args)
                     .await
                     .map_err(SubvolumeError::CommandFailed)?;
             }
@@ -1373,122 +1388,4 @@ async fn find_loop_device(file_path: &str) -> Option<String> {
     None
 }
 
-fn is_mountpoint_sync(path: &str) -> bool {
-    std::fs::read_to_string("/proc/mounts")
-        .map(|content| content.lines().any(|l| l.split_whitespace().nth(1) == Some(path)))
-        .unwrap_or(false)
-}
-
-// ── LUKS encryption operations ────────────────────────────────
-
-impl SubvolumeService {
-    /// LUKS-format a block subvolume's loop device.
-    pub async fn luks_format(&self, filesystem: &str, name: &str, passphrase: &str) -> Result<Subvolume, SubvolumeError> {
-        let sv = self.get(filesystem, name, None).await?;
-        if sv.subvolume_type != SubvolumeType::Block {
-            return Err(SubvolumeError::CommandFailed("only block subvolumes can be encrypted".to_string()));
-        }
-        let block_device = sv.block_device.as_deref()
-            .ok_or_else(|| SubvolumeError::CommandFailed("block device not attached".to_string()))?;
-
-        if sv.encrypted.is_some() {
-            return Err(SubvolumeError::CommandFailed("subvolume is already encrypted".to_string()));
-        }
-
-        // LUKS format with passphrase via stdin
-        let stdin = format!("{passphrase}\n");
-        cmd::run_ok_stdin("cryptsetup", &["luksFormat", "--type", "luks2", "--batch-mode", block_device], stdin.as_bytes())
-            .await
-            .map_err(SubvolumeError::CommandFailed)?;
-
-        // Mark as encrypted in xattrs
-        let _ = xattr::set(&sv.path, XATTR_NASTY_ENCRYPTED, b"luks2");
-
-        info!("LUKS formatted block subvolume '{filesystem}/{name}' on {block_device}");
-        self.get(filesystem, name, None).await
-    }
-
-    /// Open (unlock) a LUKS-encrypted block subvolume.
-    pub async fn luks_open(&self, filesystem: &str, name: &str, passphrase: &str) -> Result<Subvolume, SubvolumeError> {
-        let sv = self.get(filesystem, name, None).await?;
-        if sv.encrypted.as_deref() != Some("luks2") {
-            return Err(SubvolumeError::CommandFailed("subvolume is not LUKS-encrypted".to_string()));
-        }
-        let block_device = sv.block_device.as_deref()
-            .ok_or_else(|| SubvolumeError::CommandFailed("block device not attached".to_string()))?;
-
-        let mapper_name = format!("{ENC_MAPPER_PREFIX}{filesystem}-{name}");
-        if std::path::Path::new(&format!("/dev/mapper/{mapper_name}")).exists() {
-            return self.get(filesystem, name, None).await; // already open
-        }
-
-        // Open LUKS with passphrase via stdin
-        let stdin = format!("{passphrase}\n");
-        cmd::run_ok_stdin("cryptsetup", &["luksOpen", block_device, &mapper_name], stdin.as_bytes())
-            .await
-            .map_err(SubvolumeError::CommandFailed)?;
-
-        info!("LUKS opened '{filesystem}/{name}' as /dev/mapper/{mapper_name}");
-
-        // If inner filesystem xattr exists, format + mount for file shares
-        let inner_fs = xattr::get(&sv.path, XATTR_NASTY_ENC_INNER)
-            .ok()
-            .flatten()
-            .and_then(|v| String::from_utf8(v).ok());
-
-        let mapper_device = format!("/dev/mapper/{mapper_name}");
-
-        if inner_fs.is_some() {
-            // Check if already formatted by trying to mount
-            let mount_point = format!("{ENC_MOUNT_BASE}/{filesystem}/.enc/{name}");
-            tokio::fs::create_dir_all(&mount_point).await?;
-
-            // Try mounting first (already formatted)
-            let mount_result = cmd::run_ok("bcachefs", &["mount", &mapper_device, &mount_point]).await;
-            if mount_result.is_err() {
-                // First time — format as bcachefs then mount
-                cmd::run_ok("bcachefs", &["format", &mapper_device])
-                    .await
-                    .map_err(SubvolumeError::CommandFailed)?;
-                cmd::run_ok("bcachefs", &["mount", &mapper_device, &mount_point])
-                    .await
-                    .map_err(SubvolumeError::CommandFailed)?;
-            }
-            info!("Mounted encrypted inner filesystem at {mount_point}");
-        }
-
-        self.get(filesystem, name, None).await
-    }
-
-    /// Close (lock) a LUKS-encrypted block subvolume.
-    pub async fn luks_close(&self, filesystem: &str, name: &str) -> Result<(), SubvolumeError> {
-        let mapper_name = format!("{ENC_MAPPER_PREFIX}{filesystem}-{name}");
-
-        // Unmount inner filesystem if mounted
-        let mount_point = format!("{ENC_MOUNT_BASE}/{filesystem}/.enc/{name}");
-        if is_mountpoint_sync(&mount_point) {
-            cmd::run_ok("umount", &[&mount_point])
-                .await
-                .map_err(SubvolumeError::CommandFailed)?;
-        }
-
-        // Close LUKS
-        if std::path::Path::new(&format!("/dev/mapper/{mapper_name}")).exists() {
-            cmd::run_ok("cryptsetup", &["luksClose", &mapper_name])
-                .await
-                .map_err(SubvolumeError::CommandFailed)?;
-        }
-
-        info!("LUKS closed '{filesystem}/{name}'");
-        Ok(())
-    }
-
-    /// Mark a block subvolume for file-share encryption (creates inner bcachefs on first unlock).
-    pub async fn luks_set_inner_fs(&self, filesystem: &str, name: &str, fs_type: &str) -> Result<(), SubvolumeError> {
-        let sv = self.get(filesystem, name, None).await?;
-        xattr::set(&sv.path, XATTR_NASTY_ENC_INNER, fs_type.as_bytes())
-            .map_err(|e| SubvolumeError::CommandFailed(format!("failed to set inner fs xattr: {e}")))?;
-        Ok(())
-    }
-}
 

@@ -70,27 +70,24 @@
 	let subvolumes: Subvolume[] = $state([]);
 	let loading = $state(true);
 
-	let wizardStep: 0 | 1 | 2 | 3 | 4 = $state(0); // 0=hidden
+	let wizardStep: 0 | 1 | 2 | 3 = $state(0); // 0=hidden
 	let newName = $state('');
 	let newType: SubvolumeType = $state('filesystem');
 	let newVolsize = $state('');
 	let newCompression = $state('');
 	let newComments = $state('');
-	let newEncrypt = $state(false);
-	let newPassphrase = $state('');
-	let newPassphraseConfirm = $state('');
+	let newDirectIo = $state(false);
 
 	const WIZARD_STEPS: [string, string][] = [
 		['1', 'Basic'],
 		['2', 'Storage'],
-		['3', 'Security'],
-		['4', 'Review'],
+		['3', 'Review'],
 	];
 
 	function openWizard() {
 		wizardStep = 1;
 		newName = ''; newType = 'filesystem'; newVolsize = ''; newCompression = '';
-		newComments = ''; newEncrypt = false; newPassphrase = ''; newPassphraseConfirm = '';
+		newComments = ''; newDirectIo = false;
 	}
 
 	let showSnap = $state<string | null>(null);
@@ -271,7 +268,6 @@
 	async function createSubvolume() {
 		if (!newName || !selectedFs) return;
 		if (newType === 'block' && !newVolsize) return;
-		if (newEncrypt && (!newPassphrase || newPassphrase !== newPassphraseConfirm)) return;
 
 		const params: Record<string, unknown> = {
 			filesystem: selectedFs,
@@ -283,22 +279,16 @@
 		}
 		if (newCompression) params.compression = newCompression;
 		if (newComments) params.comments = newComments;
+		if (newDirectIo) params.direct_io = true;
 
 		const ok = await withToast(
 			() => client.call('subvolume.create', params),
 			`Subvolume "${newName}" created`
 		);
 		if (ok !== undefined) {
-			// Encrypt if requested (block subvolumes only)
-			if (newEncrypt && newType === 'block' && newPassphrase) {
-				await withToast(
-					() => client.call('subvolume.encrypt', { filesystem: selectedFs, name: newName, passphrase: newPassphrase }),
-					`Subvolume "${newName}" encrypted`
-				);
-			}
 			wizardStep = 0;
 			newName = ''; newType = 'filesystem'; newVolsize = ''; newCompression = '';
-			newComments = ''; newEncrypt = false; newPassphrase = ''; newPassphraseConfirm = '';
+			newComments = ''; newDirectIo = false;
 			await refresh();
 		}
 	}
@@ -317,44 +307,6 @@
 		await withToast(
 			() => client.call('subvolume.delete', { filesystem: selectedFs, name }),
 			`Subvolume "${name}" deleted`
-		);
-		await refresh();
-	}
-
-	// Encryption state
-	let encryptTarget: string | null = $state(null);
-	let encryptPassphrase = $state('');
-	let encryptConfirm = $state('');
-	let unlockTarget: string | null = $state(null);
-	let unlockPassphrase = $state('');
-
-	async function encryptSubvolume() {
-		if (!encryptTarget || !encryptPassphrase || encryptPassphrase !== encryptConfirm) return;
-		await withToast(
-			() => client.call('subvolume.encrypt', { filesystem: selectedFs, name: encryptTarget, passphrase: encryptPassphrase }),
-			`Subvolume "${encryptTarget}" encrypted`
-		);
-		encryptTarget = null;
-		encryptPassphrase = '';
-		encryptConfirm = '';
-		await refresh();
-	}
-
-	async function unlockSubvolume() {
-		if (!unlockTarget || !unlockPassphrase) return;
-		await withToast(
-			() => client.call('subvolume.unlock', { filesystem: selectedFs, name: unlockTarget, passphrase: unlockPassphrase }),
-			`Subvolume "${unlockTarget}" unlocked`
-		);
-		unlockTarget = null;
-		unlockPassphrase = '';
-		await refresh();
-	}
-
-	async function lockSubvolume(name: string) {
-		await withToast(
-			() => client.call('subvolume.lock', { filesystem: selectedFs, name }),
-			`Subvolume "${name}" locked`
 		);
 		await refresh();
 	}
@@ -582,53 +534,22 @@
 					<option value="gzip">Gzip</option>
 				</select>
 			</div>
+			{#if newType === 'block'}
+				<div class="mb-4">
+					<label class="flex cursor-pointer items-center gap-2 text-sm font-medium">
+						<input type="checkbox" bind:checked={newDirectIo} class="h-4 w-4" />
+						Direct I/O (O_DIRECT)
+					</label>
+					<p class="mt-1 text-xs text-muted-foreground">Bypass host page cache for the backing file. Reduces double-caching when the client (iSCSI/NVMe-oF) manages its own cache.</p>
+				</div>
+			{/if}
 			<div class="flex gap-2">
 				<Button variant="secondary" size="sm" onclick={() => wizardStep = 1}>← Back</Button>
-				<Button size="sm" onclick={() => wizardStep = 3} disabled={newType === 'block' && !newVolsize}>Next: Security →</Button>
+				<Button size="sm" onclick={() => wizardStep = 3} disabled={newType === 'block' && !newVolsize}>Next: Review →</Button>
 			</div>
 
-			<!-- Step 3: Security -->
+			<!-- Step 3: Review -->
 			{:else if wizardStep === 3}
-			{#if newType === 'block'}
-				<div class="mb-4 rounded-lg border border-border p-4">
-					<label class="flex cursor-pointer items-center gap-2 text-sm font-medium">
-						<input type="checkbox" bind:checked={newEncrypt} class="h-4 w-4" />
-						Encrypt subvolume (LUKS)
-					</label>
-					{#if newEncrypt}
-						<div class="mt-3 grid grid-cols-2 gap-4">
-							<div>
-								<Label>Passphrase</Label>
-								<input type="password" bind:value={newPassphrase}
-									class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-									placeholder="Enter passphrase" />
-							</div>
-							<div>
-								<Label>Confirm</Label>
-								<input type="password" bind:value={newPassphraseConfirm}
-									class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-									placeholder="Confirm passphrase" />
-							</div>
-						</div>
-						{#if newPassphrase && newPassphraseConfirm && newPassphrase !== newPassphraseConfirm}
-							<p class="mt-1 text-xs text-destructive">Passphrases do not match.</p>
-						{/if}
-						<p class="mt-2 text-xs text-amber-400">Warning: losing the passphrase means permanent data loss.</p>
-					{:else}
-						<p class="mt-1 text-xs text-muted-foreground">Data at rest will not be encrypted.</p>
-					{/if}
-				</div>
-			{:else}
-				<p class="text-sm text-muted-foreground">Encryption is only available for block subvolumes. File share subvolumes use filesystem-level encryption instead.</p>
-			{/if}
-			<div class="mt-4 flex gap-2">
-				<Button variant="secondary" size="sm" onclick={() => wizardStep = 2}>← Back</Button>
-				<Button size="sm" onclick={() => wizardStep = 4}
-					disabled={newEncrypt && (!newPassphrase || newPassphrase !== newPassphraseConfirm)}>Next: Review →</Button>
-			</div>
-
-			<!-- Step 4: Review -->
-			{:else if wizardStep === 4}
 			<div class="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
 				<span class="text-muted-foreground">Filesystem</span>
 				<span class="font-mono">{selectedFs}</span>
@@ -644,9 +565,9 @@
 					<span class="text-muted-foreground">Compression</span>
 					<span>{newCompression}</span>
 				{/if}
-				{#if newEncrypt}
-					<span class="text-muted-foreground">Encryption</span>
-					<span>LUKS (encrypted at rest)</span>
+				{#if newDirectIo}
+					<span class="text-muted-foreground">Direct I/O</span>
+					<span>Enabled</span>
 				{/if}
 				{#if newComments}
 					<span class="text-muted-foreground">Comments</span>
@@ -654,7 +575,7 @@
 				{/if}
 			</div>
 			<div class="flex gap-2">
-				<Button variant="secondary" size="sm" onclick={() => wizardStep = 3}>← Back</Button>
+				<Button variant="secondary" size="sm" onclick={() => wizardStep = 2}>← Back</Button>
 				<Button size="sm" onclick={createSubvolume}>Create Subvolume</Button>
 			</div>
 			{/if}
@@ -699,11 +620,6 @@
 							class={sv.subvolume_type === 'filesystem' ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}>
 							{sv.subvolume_type === 'filesystem' ? 'File Share' : 'Block'}
 						</Badge>
-						{#if sv.encrypted}
-							<Badge variant={sv.luks_open ? 'default' : 'destructive'} class="text-[0.6rem] ml-1">
-								{sv.luks_open ? 'Unlocked' : 'Locked'}
-							</Badge>
-						{/if}
 					</td>
 					<td class="p-3 text-sm">
 						{#if sv.subvolume_type === 'block' && sv.volsize_bytes}
@@ -751,15 +667,6 @@
 							<Button variant="secondary" size="xs" onclick={() => openDetail(sv)}>
 								{expandedName === sv.name ? 'Hide' : 'Details'}
 							</Button>
-							{#if sv.subvolume_type === 'block' && !sv.encrypted}
-								<Button variant="outline" size="xs" onclick={() => { encryptTarget = sv.name; encryptPassphrase = ''; encryptConfirm = ''; }}>Encrypt</Button>
-							{/if}
-							{#if sv.encrypted && !sv.luks_open}
-								<Button variant="default" size="xs" onclick={() => { unlockTarget = sv.name; unlockPassphrase = ''; }}>Unlock</Button>
-							{/if}
-							{#if sv.encrypted && sv.luks_open}
-								<Button variant="secondary" size="xs" onclick={() => lockSubvolume(sv.name)}>Lock</Button>
-							{/if}
 							<Button variant="destructive" size="xs" onclick={() => deleteSubvolume(sv.name)}>Delete</Button>
 						</div>
 					</td>
@@ -823,6 +730,10 @@
 										{#if detailSv.block_device}
 											<span class="text-muted-foreground">Block Device</span>
 											<span class="font-mono text-xs">{detailSv.block_device}</span>
+										{/if}
+										{#if detailSv.subvolume_type === 'block'}
+											<span class="text-muted-foreground">Direct I/O</span>
+											<span>{detailSv.direct_io ? 'Enabled' : 'Disabled'}</span>
 										{/if}
 										{#if detailSv.owner}
 											<span class="text-muted-foreground">Owner</span>
@@ -1094,48 +1005,3 @@
 	</Dialog.Content>
 </Dialog.Root>
 
-<!-- Encrypt Modal -->
-{#if encryptTarget}
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-		<Card class="w-full max-w-sm">
-			<CardContent class="pt-6">
-				<h3 class="mb-2 text-lg font-semibold">Encrypt "{encryptTarget}"</h3>
-				<p class="mb-4 text-sm text-muted-foreground">LUKS encrypt this block subvolume. Data at rest will be protected.</p>
-				<input type="password" bind:value={encryptPassphrase}
-					class="mb-2 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-					placeholder="Passphrase" />
-				<input type="password" bind:value={encryptConfirm}
-					class="mb-2 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-					placeholder="Confirm passphrase" />
-				{#if encryptPassphrase && encryptConfirm && encryptPassphrase !== encryptConfirm}
-					<p class="mb-2 text-xs text-destructive">Passphrases do not match.</p>
-				{/if}
-				<p class="mb-4 text-xs text-amber-400">Warning: losing the passphrase means permanent data loss.</p>
-				<div class="flex gap-2">
-					<Button onclick={encryptSubvolume} disabled={!encryptPassphrase || encryptPassphrase !== encryptConfirm}>Encrypt</Button>
-					<Button variant="secondary" onclick={() => encryptTarget = null}>Cancel</Button>
-				</div>
-			</CardContent>
-		</Card>
-	</div>
-{/if}
-
-<!-- Unlock Modal -->
-{#if unlockTarget}
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-		<Card class="w-full max-w-sm">
-			<CardContent class="pt-6">
-				<h3 class="mb-2 text-lg font-semibold">Unlock "{unlockTarget}"</h3>
-				<p class="mb-4 text-sm text-muted-foreground">Enter the passphrase to unlock this encrypted subvolume.</p>
-				<input type="password" bind:value={unlockPassphrase}
-					class="mb-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-					placeholder="Passphrase"
-					onkeydown={(e) => { if (e.key === 'Enter' && unlockPassphrase) unlockSubvolume(); }} />
-				<div class="flex gap-2">
-					<Button onclick={unlockSubvolume} disabled={!unlockPassphrase}>Unlock</Button>
-					<Button variant="secondary" onclick={() => unlockTarget = null}>Cancel</Button>
-				</div>
-			</CardContent>
-		</Card>
-	</div>
-{/if}

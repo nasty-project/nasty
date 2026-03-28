@@ -240,6 +240,7 @@ async fn upload_vm_image_handler(
                 volsize_bytes: None,
                 compression: Some("zstd".to_string()),
                 comments: Some("VM images (ISO, qcow2, img, raw)".to_string()),
+                direct_io: None,
             };
             match state.subvolumes.create(req, None::<String>).await {
                 Ok(sv) => sv,

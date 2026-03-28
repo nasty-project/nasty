@@ -13,7 +13,6 @@ fn is_operator_allowed(method: &str) -> bool {
             "subvolume.create" | "subvolume.delete" | "subvolume.attach" | "subvolume.detach"
             | "subvolume.resize" | "subvolume.update" | "subvolume.clone"
             | "subvolume.set_properties" | "subvolume.remove_properties"
-            | "subvolume.encrypt" | "subvolume.unlock" | "subvolume.lock"
             | "snapshot.create" | "snapshot.delete" | "snapshot.clone"
             | "share.nfs.create" | "share.nfs.update" | "share.nfs.delete"
             | "share.smb.create" | "share.smb.update" | "share.smb.delete"
@@ -929,43 +928,6 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => invalid(req, e),
         },
 
-        // ── Subvolume encryption (LUKS) ─────────────────────────
-        "subvolume.encrypt" => match parse_params::<serde_json::Value>(req) {
-            Ok(p) => {
-                let fs = p.get("filesystem").and_then(|v| v.as_str()).unwrap_or("");
-                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let passphrase = p.get("passphrase").and_then(|v| v.as_str()).unwrap_or("");
-                match state.subvolumes.luks_format(fs, name, passphrase).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                }
-            }
-            Err(e) => invalid(req, e),
-        },
-        "subvolume.unlock" => match parse_params::<serde_json::Value>(req) {
-            Ok(p) => {
-                let fs = p.get("filesystem").and_then(|v| v.as_str()).unwrap_or("");
-                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let passphrase = p.get("passphrase").and_then(|v| v.as_str()).unwrap_or("");
-                match state.subvolumes.luks_open(fs, name, passphrase).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                }
-            }
-            Err(e) => invalid(req, e),
-        },
-        "subvolume.lock" => match parse_params::<serde_json::Value>(req) {
-            Ok(p) => {
-                let fs = p.get("filesystem").and_then(|v| v.as_str()).unwrap_or("");
-                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                match state.subvolumes.luks_close(fs, name).await {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
-                }
-            }
-            Err(e) => invalid(req, e),
-        },
-
         // ── Snapshots ───────────────────────────────────────────
         "snapshot.list" => match require_str(req, "filesystem") {
             Ok(fs_name) => {
@@ -1620,6 +1582,7 @@ async fn ensure_images_subvolume(state: &AppState, filesystem: &str) -> Result<S
         volsize_bytes: None,
         compression: Some("zstd".to_string()),
         comments: Some("VM images (ISO, qcow2, img, raw)".to_string()),
+        direct_io: None,
     };
 
     let sv = state.subvolumes.create(req, None::<String>).await
