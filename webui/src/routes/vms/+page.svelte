@@ -556,27 +556,14 @@
 	);
 </script>
 
-{#if capabilities}
-	<Card class="mb-4">
-		<CardContent class="flex items-center gap-4 py-3">
-			<Badge variant={capabilities.kvm_available ? 'default' : 'destructive'}>
-				{capabilities.kvm_available ? 'KVM Available' : 'No KVM'}
-			</Badge>
-			<span class="text-sm text-muted-foreground">
-				{vms.length} VM{vms.length !== 1 ? 's' : ''}
-				&middot; {vms.filter(v => v.running).length} running
-				&middot; Arch: <code class="rounded bg-secondary px-1.5 py-0.5 text-xs">{capabilities.arch}</code>
-			</span>
-			{#if capabilities.uefi_available}
-				<Badge variant="secondary">UEFI</Badge>
-			{/if}
-			{#if capabilities.passthrough_devices.length > 0}
-				<Badge variant="secondary">{capabilities.passthrough_devices.length} PCI devices</Badge>
-			{/if}
-		</CardContent>
-	</Card>
-{/if}
-
+<div class="mb-4 flex items-center gap-3">
+	{#if capabilities}
+		<span class="text-xs text-muted-foreground flex items-center gap-2">
+			<span class="inline-block h-1.5 w-1.5 rounded-full {capabilities.kvm_available ? 'bg-green-500' : 'bg-destructive'}"></span>
+			{vms.length} VM{vms.length !== 1 ? 's' : ''} &middot; {vms.filter(v => v.running).length} running
+		</span>
+	{/if}
+</div>
 <div class="mb-4 flex items-center gap-3">
 	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}
 >

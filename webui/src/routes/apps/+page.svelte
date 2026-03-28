@@ -304,37 +304,6 @@
 	});
 </script>
 
-<!-- Status Card -->
-{#if status?.enabled}
-	<Card class="mb-4">
-		<CardContent class="flex items-center gap-4 py-3">
-			<Badge variant={status.running ? 'default' : 'destructive'}>
-				{status.running ? 'Running' : 'Starting...'}
-			</Badge>
-			<span class="text-sm text-muted-foreground">
-				{status.app_count} app{status.app_count !== 1 ? 's' : ''}
-				{#if status.memory_bytes}
-					&middot; k3s using {formatMemory(status.memory_bytes)}
-				{/if}
-				{#if status.node_status}
-					&middot; Node: {status.node_status}
-				{/if}
-			</span>
-		</CardContent>
-	</Card>
-	{#if !status.storage_ok && status.storage_path}
-		<Card class="mb-4 border-destructive">
-			<CardContent class="flex items-center gap-4 py-3">
-				<Badge variant="destructive">Storage Missing</Badge>
-				<span class="text-sm text-muted-foreground">
-					Apps storage subvolume <code class="text-xs">{status.storage_path}</code> no longer exists.
-					App data may be lost. Recreate the subvolume or disable and re-enable apps.
-				</span>
-			</CardContent>
-		</Card>
-	{/if}
-{/if}
-
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else if !status?.enabled}
@@ -403,28 +372,47 @@
 {:else if !status?.running}
 	<p class="text-muted-foreground">Waiting for app runtime to start...</p>
 {:else}
-	<!-- Top-level tabs: Apps / Runtime -->
-	<div class="mb-4 flex rounded-md overflow-hidden border border-border w-fit">
+	<!-- Top-level tabs with inline status -->
+	<div class="mb-6 flex items-center border-b border-border">
 		<button
-			class="px-3 py-1.5 text-sm transition-colors {page === 'apps' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}"
 			onclick={() => page = 'apps'}
-		>Apps</button>
+			class="flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors {page === 'apps'
+				? 'border-b-2 border-primary text-foreground'
+				: 'text-muted-foreground hover:text-foreground'}"
+		>
+			Apps
+			{#if status}
+				<span class="inline-block h-1.5 w-1.5 rounded-full {status.running ? 'bg-green-500' : 'bg-muted-foreground/40'}"></span>
+				{#if status.app_count > 0}
+					<span class="text-[0.65rem] text-muted-foreground">{status.app_count}</span>
+				{/if}
+			{/if}
+		</button>
 		<button
-			class="px-3 py-1.5 text-sm transition-colors {page === 'runtime' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}"
 			onclick={() => page = 'runtime'}
+			class="px-4 py-2 text-sm font-medium transition-colors {page === 'runtime'
+				? 'border-b-2 border-primary text-foreground'
+				: 'text-muted-foreground hover:text-foreground'}"
 		>Runtime</button>
+		{#if !status?.storage_ok && status?.storage_path}
+			<span class="ml-auto text-xs text-destructive">Storage missing</span>
+		{/if}
 	</div>
 
 	{#if page === 'apps'}
-	<!-- Sub-tabs: Easy / Helm Charts -->
+	<!-- Sub-tabs -->
 	<div class="mb-4 flex items-center gap-4">
-		<div class="flex rounded-md overflow-hidden border border-border">
+		<div class="flex border-b border-border">
 			<button
-				class="px-3 py-1.5 text-sm transition-colors {mode === 'easy' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}"
+				class="px-3 py-1.5 text-sm font-medium transition-colors {mode === 'easy'
+					? 'border-b-2 border-primary text-foreground'
+					: 'text-muted-foreground hover:text-foreground'}"
 				onclick={() => mode = 'easy'}
 			>Easy</button>
 			<button
-				class="px-3 py-1.5 text-sm transition-colors {mode === 'expert' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}"
+				class="px-3 py-1.5 text-sm font-medium transition-colors {mode === 'expert'
+					? 'border-b-2 border-primary text-foreground'
+					: 'text-muted-foreground hover:text-foreground'}"
 				onclick={() => mode = 'expert'}
 			>Helm Charts</button>
 		</div>

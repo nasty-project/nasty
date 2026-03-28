@@ -458,35 +458,31 @@
 	<p class="text-muted-foreground">Loading...</p>
 {:else}
 	<!-- Tab bar -->
-	<div class="mb-6 flex w-fit rounded-md border border-border text-sm">
+	<div class="mb-6 flex border-b border-border">
 		<button
 			onclick={() => activeTab = 'system'}
-			class="rounded-l-md px-5 py-1.5 font-medium transition-colors
-				{activeTab === 'system' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
-		>
-			System
-		</button>
+			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'system'
+				? 'border-b-2 border-primary text-foreground'
+				: 'text-muted-foreground hover:text-foreground'}"
+		>System</button>
 		<button
 			onclick={() => { activeTab = 'generations'; loadGenerations(); }}
-			class="px-5 py-1.5 font-medium transition-colors
-				{activeTab === 'generations' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
-		>
-			Generations
-		</button>
+			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'generations'
+				? 'border-b-2 border-primary text-foreground'
+				: 'text-muted-foreground hover:text-foreground'}"
+		>Generations</button>
 		<button
 			onclick={() => activeTab = 'bcachefs'}
-			class="flex items-center gap-2 px-5 py-1.5 font-medium transition-colors
-				{activeTab === 'bcachefs' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
-		>
-			bcachefs
-		</button>
+			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'bcachefs'
+				? 'border-b-2 border-primary text-foreground'
+				: 'text-muted-foreground hover:text-foreground'}"
+		>bcachefs</button>
 		<button
 			onclick={() => activeTab = 'firmware'}
-			class="flex items-center gap-2 rounded-r-md px-5 py-1.5 font-medium transition-colors
-				{activeTab === 'firmware' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
-		>
-			Firmware
-		</button>
+			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'firmware'
+				? 'border-b-2 border-primary text-foreground'
+				: 'text-muted-foreground hover:text-foreground'}"
+		>Firmware</button>
 	</div>
 
 	<!-- System tab -->
