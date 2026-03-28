@@ -309,6 +309,18 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     // Create lego data directory
     let _ = tokio::fs::create_dir_all(LEGO_DATA_DIR).await;
 
+    // Track which ACME server was used last — if it changed (staging ↔ production),
+    // wipe lego data and start fresh (accounts/certs aren't transferable between servers)
+    let server_marker = format!("{LEGO_DATA_DIR}/.server");
+    let current_server = if settings.tls_acme_staging { "staging" } else { "production" };
+    let last_server = tokio::fs::read_to_string(&server_marker).await.unwrap_or_default();
+    if !last_server.is_empty() && last_server.trim() != current_server {
+        info!("ACME server changed from {} to {} — clearing lego data", last_server.trim(), current_server);
+        let _ = tokio::fs::remove_dir_all(LEGO_DATA_DIR).await;
+        let _ = tokio::fs::create_dir_all(LEGO_DATA_DIR).await;
+    }
+    let _ = tokio::fs::write(&server_marker, current_server).await;
+
     // Determine if this is a new cert or renewal
     let lego_cert_path = format!("{LEGO_DATA_DIR}/certificates/{domain}.crt");
     let action = if std::path::Path::new(&lego_cert_path).exists() {
