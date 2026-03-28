@@ -307,22 +307,16 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     set_acme_status("running", &format!("Requesting certificate for {domain}..."), Some(domain));
 
     // Create lego data directory
-    let _ = tokio::fs::create_dir_all(LEGO_DATA_DIR).await;
-
-    // Track which ACME server was used last — if it changed (staging ↔ production),
-    // wipe lego data and start fresh (accounts/certs aren't transferable between servers)
-    let server_marker = format!("{LEGO_DATA_DIR}/.server");
-    let current_server = if settings.tls_acme_staging { "staging" } else { "production" };
-    let last_server = tokio::fs::read_to_string(&server_marker).await.unwrap_or_default();
-    if !last_server.is_empty() && last_server.trim() != current_server {
-        info!("ACME server changed from {} to {} — clearing lego data", last_server.trim(), current_server);
-        let _ = tokio::fs::remove_dir_all(LEGO_DATA_DIR).await;
-        let _ = tokio::fs::create_dir_all(LEGO_DATA_DIR).await;
-    }
-    let _ = tokio::fs::write(&server_marker, current_server).await;
+    // Use separate lego directories per ACME server so staging/production data coexist
+    let lego_dir = if settings.tls_acme_staging {
+        format!("{LEGO_DATA_DIR}/staging")
+    } else {
+        format!("{LEGO_DATA_DIR}/production")
+    };
+    let _ = tokio::fs::create_dir_all(&lego_dir).await;
 
     // Determine if this is a new cert or renewal
-    let lego_cert_path = format!("{LEGO_DATA_DIR}/certificates/{domain}.crt");
+    let lego_cert_path = format!("{lego_dir}/certificates/{domain}.crt");
     let action = if std::path::Path::new(&lego_cert_path).exists() {
         "renew"
     } else {
@@ -333,7 +327,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         "--accept-tos".to_string(),
         "--email".to_string(), email.to_string(),
         "--domains".to_string(), domain.to_string(),
-        "--path".to_string(), LEGO_DATA_DIR.to_string(),
+        "--path".to_string(), lego_dir.clone(),
     ];
 
     if settings.tls_acme_staging {
@@ -408,8 +402,8 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     set_acme_status("running", "Installing certificate...", Some(domain));
 
     // Copy lego certs to NASty's TLS paths
-    let lego_cert = format!("{LEGO_DATA_DIR}/certificates/{domain}.crt");
-    let lego_key = format!("{LEGO_DATA_DIR}/certificates/{domain}.key");
+    let lego_cert = format!("{lego_dir}/certificates/{domain}.crt");
+    let lego_key = format!("{lego_dir}/certificates/{domain}.key");
 
     tokio::fs::copy(&lego_cert, TLS_CERT_PATH).await
         .map_err(|e| { let m = format!("failed to copy cert: {e}"); set_acme_status("error", &m, Some(domain)); m })?;
@@ -473,7 +467,8 @@ pub async fn check_acme_renewal() {
     }
 
     // Check if cert exists and is near expiry (within 30 days)
-    let cert_path = format!("{LEGO_DATA_DIR}/certificates/{}.crt",
+    let lego_subdir = if settings.tls_acme_staging { "staging" } else { "production" };
+    let cert_path = format!("{LEGO_DATA_DIR}/{lego_subdir}/certificates/{}.crt",
         settings.tls_domain.as_deref().unwrap_or(""));
     if !std::path::Path::new(&cert_path).exists() {
         info!("No ACME cert found, running initial provisioning...");
