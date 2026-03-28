@@ -412,6 +412,7 @@ in {
       kubernetes-helm   # Helm chart manager for app deployment
       kubectl           # Kubernetes CLI (also available via k3s kubectl)
       cryptsetup        # LUKS encryption for per-volume encryption at rest
+      lego              # ACME client for Let's Encrypt certificates
 
       (writeShellScriptBin "nasty-report" ''
         set -euo pipefail

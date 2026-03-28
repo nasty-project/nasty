@@ -7,7 +7,9 @@ use tracing::{info, warn};
 
 const STATE_PATH: &str = "/var/lib/nasty/settings.json";
 const STATE_DIR: &str = "/var/lib/nasty";
-const TLS_NIX_PATH: &str = "/etc/nixos/nixos/tls.nix";
+const TLS_CERT_PATH: &str = "/var/lib/nasty/tls/cert.pem";
+const TLS_KEY_PATH: &str = "/var/lib/nasty/tls/key.pem";
+const LEGO_DATA_DIR: &str = "/var/lib/nasty/lego";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Settings {
@@ -173,27 +175,19 @@ impl SettingsService {
         }
         save(&settings).await.map_err(|e| e.to_string())?;
         if tls_changed {
-            write_tls_nix(&settings).await;
-            if settings.tls_challenge_type == "dns" {
-                write_dns_credentials(&settings).await;
-            }
-            // Apply TLS changes by rebuilding the NixOS config in the background.
-            // This activates the ACME service and nginx certificate changes.
-            info!("TLS settings changed — triggering nixos-rebuild switch...");
-            tokio::spawn(async {
-                match tokio::process::Command::new("nixos-rebuild")
-                    .args(["switch", "--flake", "/etc/nixos/nixos"])
-                    .output()
-                    .await
-                {
-                    Ok(o) if o.status.success() => info!("TLS rebuild completed successfully"),
-                    Ok(o) => {
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        tracing::warn!("TLS rebuild failed: {stderr}");
-                    }
-                    Err(e) => tracing::warn!("TLS rebuild failed to start: {e}"),
+            if settings.tls_acme_enabled {
+                if settings.tls_challenge_type == "dns" {
+                    write_dns_credentials(&settings).await;
                 }
-            });
+                // Run ACME cert provisioning in the background
+                let s = settings.clone();
+                tokio::spawn(async move {
+                    match run_lego(&s).await {
+                        Ok(()) => info!("ACME certificate provisioned successfully"),
+                        Err(e) => warn!("ACME certificate provisioning failed: {e}"),
+                    }
+                });
+            }
         }
         Ok(settings.clone())
     }
@@ -245,60 +239,152 @@ async fn save(settings: &Settings) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Write /etc/nixos/nixos/tls.nix based on current TLS settings.
-/// When ACME is enabled with a domain and email, generates the Let's Encrypt config.
-/// Otherwise generates a no-op module (self-signed cert is the default in nasty.nix).
-async fn write_tls_nix(settings: &Settings) {
-    let nix = generate_tls_nix(settings);
-    if let Err(e) = tokio::fs::write(TLS_NIX_PATH, &nix).await {
-        warn!("Failed to write {TLS_NIX_PATH}: {e}");
-    }
-}
-
 const DNS_CREDS_PATH: &str = "/var/lib/nasty/acme-dns-credentials";
 
-fn generate_tls_nix(settings: &Settings) -> String {
-    let mut out = String::from(
-        "# Managed by NASty — edit via WebUI Settings > TLS\n{ ... }:\n{\n",
-    );
+/// Run lego ACME client to obtain or renew a certificate.
+/// Writes cert and key to /var/lib/nasty/tls/ and reloads nginx.
+async fn run_lego(settings: &Settings) -> Result<(), String> {
+    let domain = settings.tls_domain.as_deref()
+        .ok_or("TLS domain not set")?;
+    let email = settings.tls_acme_email.as_deref()
+        .ok_or("ACME email not set")?;
 
-    if settings.tls_acme_enabled {
-        if let (Some(domain), Some(email)) = (&settings.tls_domain, &settings.tls_acme_email) {
-            out.push_str("  security.acme.acceptTerms = true;\n");
-            out.push_str(&format!("  security.acme.defaults.email = \"{email}\";\n"));
-            out.push_str(&format!("  security.acme.certs.\"{domain}\" = {{\n"));
+    // Create lego data directory
+    let _ = tokio::fs::create_dir_all(LEGO_DATA_DIR).await;
 
-            if settings.tls_challenge_type == "dns" {
-                if let Some(provider) = &settings.tls_dns_provider {
-                    out.push_str(&format!("    dnsProvider = \"{provider}\";\n"));
-                    out.push_str(&format!("    credentialsFile = \"{DNS_CREDS_PATH}\";\n"));
+    // Determine if this is a new cert or renewal
+    let lego_cert_path = format!("{LEGO_DATA_DIR}/certificates/{domain}.crt");
+    let action = if std::path::Path::new(&lego_cert_path).exists() {
+        "renew"
+    } else {
+        "run"
+    };
+
+    let mut args = vec![
+        "--accept-tos".to_string(),
+        "--email".to_string(), email.to_string(),
+        "--domains".to_string(), domain.to_string(),
+        "--path".to_string(), LEGO_DATA_DIR.to_string(),
+    ];
+
+    // Challenge type
+    if settings.tls_challenge_type == "dns" {
+        if let Some(ref provider) = settings.tls_dns_provider {
+            args.push("--dns".to_string());
+            args.push(provider.clone());
+        } else {
+            return Err("DNS challenge selected but no provider configured".to_string());
+        }
+    } else {
+        // TLS-ALPN-01: lego listens on :443 temporarily
+        // nginx must be stopped briefly for this to work
+        args.push("--tls".to_string());
+        args.push("--tls.port".to_string());
+        args.push(":443".to_string());
+    }
+
+    args.push(action.to_string());
+
+    info!("Running lego {action} for {domain} (challenge: {})", settings.tls_challenge_type);
+
+    // For TLS-ALPN challenge, stop nginx briefly so lego can bind to :443
+    let need_nginx_stop = settings.tls_challenge_type != "dns";
+    if need_nginx_stop {
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["stop", "nginx"])
+            .output().await;
+    }
+
+    // Build environment for DNS challenge credentials
+    let mut cmd = tokio::process::Command::new("lego");
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    cmd.args(&arg_refs);
+
+    // Load DNS credentials as environment variables if using DNS challenge
+    if settings.tls_challenge_type == "dns" {
+        if let Some(ref creds) = settings.tls_dns_credentials {
+            for line in creds.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    cmd.env(key.trim(), value.trim());
                 }
-            } else {
-                out.push_str("    tlsChallenge = true;\n");
             }
-
-            out.push_str("  };\n");
-            out.push_str(&format!("  services.nasty.tls.certFile = \"/var/lib/acme/{domain}/fullchain.pem\";\n"));
-            out.push_str(&format!("  services.nasty.tls.keyFile = \"/var/lib/acme/{domain}/key.pem\";\n"));
-            out.push_str("  services.nasty.tls.selfSigned = false;\n");
         }
     }
 
-    out.push_str("}\n");
-    out
+    let output = cmd.output().await
+        .map_err(|e| format!("failed to run lego: {e}"))?;
+
+    // Restart nginx if we stopped it
+    if need_nginx_stop {
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["start", "nginx"])
+            .output().await;
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("lego {action} failed: {stderr}"));
+    }
+
+    // Copy lego certs to NASty's TLS paths
+    let lego_cert = format!("{LEGO_DATA_DIR}/certificates/{domain}.crt");
+    let lego_key = format!("{LEGO_DATA_DIR}/certificates/{domain}.key");
+
+    tokio::fs::copy(&lego_cert, TLS_CERT_PATH).await
+        .map_err(|e| format!("failed to copy cert: {e}"))?;
+    tokio::fs::copy(&lego_key, TLS_KEY_PATH).await
+        .map_err(|e| format!("failed to copy key: {e}"))?;
+
+    // Set restrictive permissions on key
+    let _ = tokio::fs::set_permissions(TLS_KEY_PATH, std::fs::Permissions::from_mode(0o640)).await;
+
+    // Reload nginx to pick up new cert
+    let _ = tokio::process::Command::new("systemctl")
+        .args(["reload", "nginx"])
+        .output().await;
+
+    info!("ACME certificate installed for {domain}");
+    Ok(())
 }
 
-/// Write DNS credentials to a file readable by the ACME service.
+/// Write DNS credentials to a file readable by the ACME client.
 async fn write_dns_credentials(settings: &Settings) {
     if let Some(creds) = &settings.tls_dns_credentials {
         if let Err(e) = tokio::fs::write(DNS_CREDS_PATH, creds).await {
             warn!("Failed to write DNS credentials: {e}");
             return;
         }
-        // Restrict permissions — contains API keys
         let _ = tokio::fs::set_permissions(
             DNS_CREDS_PATH,
             std::fs::Permissions::from_mode(0o600),
         ).await;
+    }
+}
+
+/// Check if ACME cert needs renewal (runs on engine startup).
+pub async fn check_acme_renewal() {
+    let settings = load().await;
+    if !settings.tls_acme_enabled {
+        return;
+    }
+    if settings.tls_domain.is_none() || settings.tls_acme_email.is_none() {
+        return;
+    }
+
+    // Check if cert exists and is near expiry (within 30 days)
+    let cert_path = format!("{LEGO_DATA_DIR}/certificates/{}.crt",
+        settings.tls_domain.as_deref().unwrap_or(""));
+    if !std::path::Path::new(&cert_path).exists() {
+        info!("No ACME cert found, running initial provisioning...");
+        if let Err(e) = run_lego(&settings).await {
+            warn!("ACME provisioning on startup failed: {e}");
+        }
+        return;
+    }
+
+    // Try renewal (lego handles expiry check internally)
+    info!("Checking ACME certificate renewal...");
+    if let Err(e) = run_lego(&settings).await {
+        warn!("ACME renewal check failed: {e}");
     }
 }

@@ -133,6 +133,11 @@ async fn main() -> anyhow::Result<()> {
     );
     info!("Caches warm in {}ms", t0.elapsed().as_millis());
 
+    // Check ACME cert renewal in background (non-blocking)
+    tokio::spawn(async {
+        nasty_system::settings::check_acme_renewal().await;
+    });
+
     // Signal systemd that startup is complete
     sd_notify_ready();
 
