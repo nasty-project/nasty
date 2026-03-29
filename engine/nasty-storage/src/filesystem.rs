@@ -1557,6 +1557,22 @@ async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<Filesystem
 
 /// Read filesystem options from sysfs for a mounted bcachefs filesystem.
 /// Options live at /sys/fs/bcachefs/<uuid>/options/<option_name>
+/// Extract the selected value from bcachefs option strings.
+/// bcachefs sysfs/show-super use `[selected] opt1 opt2` for enum options.
+/// For plain values (e.g. `zstd`), returns the value as-is.
+fn parse_bcachefs_opt(val: &str) -> String {
+    if val.contains('[') {
+        val.split('[')
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .unwrap_or(val)
+            .trim()
+            .to_string()
+    } else {
+        val.to_string()
+    }
+}
+
 async fn read_fs_options_sysfs(uuid: &str) -> FilesystemOptions {
     if uuid.is_empty() {
         return FilesystemOptions::default();
@@ -1568,7 +1584,7 @@ async fn read_fs_options_sysfs(uuid: &str) -> FilesystemOptions {
         let path = format!("{base}/{name}");
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => {
-                let v = s.trim().to_string();
+                let v = parse_bcachefs_opt(s.trim());
                 if v.is_empty() || v == "none" || v == "(none)" {
                     None
                 } else {
@@ -1630,24 +1646,25 @@ async fn read_fs_options_show_super(device: Option<&str>) -> FilesystemOptions {
         // show-super outputs lines like "Option:  value" or "Option          value"
         if let Some((key, val)) = line.split_once(':') {
             let key = key.trim().to_lowercase();
-            let val = val.trim();
+            let val = parse_bcachefs_opt(val.trim());
             if val.is_empty() || val == "none" || val == "(none)" {
                 continue;
             }
             match key.as_str() {
-                "compression" => opts.compression = Some(val.to_string()),
-                "background_compression" => opts.background_compression = Some(val.to_string()),
+                "compression" => opts.compression = Some(val),
+                "background_compression" => opts.background_compression = Some(val),
                 "data_replicas" => opts.data_replicas = val.parse().ok(),
                 "metadata_replicas" => opts.metadata_replicas = val.parse().ok(),
-                "data_checksum" => opts.data_checksum = Some(val.to_string()),
-                "metadata_checksum" => opts.metadata_checksum = Some(val.to_string()),
-                "foreground_target" => opts.foreground_target = Some(val.to_string()),
-                "background_target" => opts.background_target = Some(val.to_string()),
-                "promote_target" => opts.promote_target = Some(val.to_string()),
-                "metadata_target" => opts.metadata_target = Some(val.to_string()),
+                "data_checksum" => opts.data_checksum = Some(val),
+                "metadata_checksum" => opts.metadata_checksum = Some(val),
+                "foreground_target" => opts.foreground_target = Some(val),
+                "background_target" => opts.background_target = Some(val),
+                "promote_target" => opts.promote_target = Some(val),
+                "metadata_target" => opts.metadata_target = Some(val),
                 "erasure_code" => opts.erasure_code = Some(val == "1" || val == "true"),
                 "encrypted" => opts.encrypted = Some(val == "1" || val == "true" || val == "yes"),
-                "errors" => opts.error_action = Some(val.to_string()),
+                "errors" => opts.error_action = Some(val),
+                "version_upgrade" => opts.version_upgrade = Some(val),
                 _ => {}
             }
         }
