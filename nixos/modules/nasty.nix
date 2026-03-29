@@ -895,6 +895,12 @@ in {
       };
     };
 
+    # ── Journald ───────────────────────────────────────────────
+    services.journald.extraConfig = ''
+      SystemMaxUse=200M
+      MaxRetentionSec=7day
+    '';
+
     # ── Log rotation ──────────────────────────────────────────
     services.logrotate.settings.nasty = {
       files = "/var/lib/nasty/audit.log";
