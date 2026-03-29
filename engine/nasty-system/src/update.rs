@@ -456,40 +456,15 @@ git -c user.email="nasty@localhost" -c user.name="NASty" \
 # The booted generation is always protected — even if it's older than KEEP.
 KEEP={gc_keep}
 MAX_AGE={gc_max_age}
-GENS=$(ls -1 /nix/var/nix/profiles/system-*-link 2>/dev/null | grep -c 'system-[0-9]*-link')
-# Find which generation we actually booted from (may differ from current profile)
-BOOTED_GEN=$(readlink /run/booted-system 2>/dev/null || true)
-BOOTED_NUM=""
-if [ -n "$BOOTED_GEN" ]; then
-    for link in /nix/var/nix/profiles/system-*-link; do
-        if [ "$(readlink -f "$link")" = "$(readlink -f "$BOOTED_GEN")" ]; then
-            BOOTED_NUM=$(echo "$link" | grep -o '[0-9]*' | tail -1)
-            break
-        fi
-    done
-fi
-# If booted generation is outside the keep range, increase KEEP to include it
-if [ -n "$BOOTED_NUM" ]; then
-    LATEST_NUM=$(ls -1 /nix/var/nix/profiles/system-*-link 2>/dev/null | grep -o '[0-9]*' | sort -n | tail -1)
-    DISTANCE=$(( LATEST_NUM - BOOTED_NUM + 1 ))
-    if [ "$DISTANCE" -gt "$KEEP" ]; then
-        echo "==> Booted generation $BOOTED_NUM is $DISTANCE generations back, expanding KEEP from $KEEP to $DISTANCE"
-        KEEP=$DISTANCE
-    fi
-fi
+# Garbage-collect old NixOS generations.
+# nix-env --list-generations is the reliable way to enumerate them.
+GEN_LIST=$(nix-env --profile /nix/var/nix/profiles/system --list-generations 2>/dev/null | awk '{{print $1}}' || true)
+GENS=$(echo "$GEN_LIST" | grep -c '[0-9]' || echo 0)
 if [ "$GENS" -gt "$KEEP" ]; then
-    echo "==> Cleaning up old generations ($GENS found, keeping $KEEP)..."
-    # Collect all generation numbers, sorted numerically
-    ALL_NUMS=$(ls -1 /nix/var/nix/profiles/system-*-link 2>/dev/null \
-        | grep -o 'system-[0-9]*-link' | grep -o '[0-9]*' | sort -n)
-    # Keep the last $KEEP generations
-    TO_DELETE=$(echo "$ALL_NUMS" | head -n -"$KEEP")
-    # Remove booted generation from the delete list
-    if [ -n "$BOOTED_NUM" ]; then
-        TO_DELETE=$(echo "$TO_DELETE" | grep -v "^${{BOOTED_NUM}}$")
-    fi
+    DELETE_COUNT=$(( GENS - KEEP ))
+    TO_DELETE=$(echo "$GEN_LIST" | head -n "$DELETE_COUNT" | tr '\n' ' ')
     if [ -n "$TO_DELETE" ]; then
-        # nix-env --delete-generations accepts space-separated generation numbers
+        echo "==> Cleaning up old generations ($GENS found, keeping $KEEP, deleting $DELETE_COUNT)..."
         # shellcheck disable=SC2086
         nix-env --profile /nix/var/nix/profiles/system --delete-generations $TO_DELETE 2>&1 || true
         nix-collect-garbage 2>&1 || true
