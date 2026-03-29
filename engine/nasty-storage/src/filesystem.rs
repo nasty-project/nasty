@@ -1201,38 +1201,64 @@ impl FilesystemService {
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
+        // Also get -a output for per-device btree/user breakdown
+        let raw_all = cmd::run_ok("bcachefs", &["fs", "usage", "-a", mount_point])
+            .await
+            .unwrap_or_default();
+
         let mut dev_usages = Vec::new();
         let mut data_bytes: u64 = 0;
         let mut metadata_bytes: u64 = 0;
         let mut reserved_bytes: u64 = 0;
 
-        // Parse per-device lines: "  /dev/sdX:  123456 used  789012 free  912468 total"
-        // and summary lines for data/metadata/reserved
+        // Parse default output for summary: "Used:", "Online reserved:"
+        // and device table: "label (device N):  devname  state  size  used  use%"
         for line in raw.lines() {
             let trimmed = line.trim();
-
-            // Per-device usage
-            if trimmed.starts_with("/dev/") {
-                if let Some(dev_usage) = parse_device_usage_line(trimmed) {
-                    dev_usages.push(dev_usage);
-                }
-            }
-
-            // Summary data/metadata/reserved
             let lower = trimmed.to_lowercase();
-            if lower.starts_with("data:") || lower.starts_with("user data:") {
+
+            if lower.starts_with("used:") {
                 if let Some(bytes) = extract_first_bytes(trimmed) {
-                    data_bytes = bytes;
+                    data_bytes = bytes; // "Used" is total used (data + metadata)
                 }
-            } else if lower.starts_with("metadata:") || lower.starts_with("btree:") {
-                if let Some(bytes) = extract_first_bytes(trimmed) {
-                    metadata_bytes = bytes;
-                }
-            } else if lower.starts_with("reserved:") {
+            } else if lower.starts_with("online reserved:") {
                 if let Some(bytes) = extract_first_bytes(trimmed) {
                     reserved_bytes = bytes;
                 }
             }
+
+            // Device table row: "label (device N):  sdb  rw  53264510976  8912896  0%"
+            if trimmed.contains("(device") && trimmed.contains("):") {
+                if let Some(du) = parse_device_table_line(trimmed) {
+                    dev_usages.push(du);
+                }
+            }
+        }
+
+        // Parse -a output to sum btree (metadata) vs user (data) across devices.
+        // Per-device sections start with "label (device N):" and contain indented rows:
+        //   btree:  8912896  ...
+        //   user:   0        ...
+        let mut total_btree: u64 = 0;
+        let mut total_user: u64 = 0;
+        for line in raw_all.lines() {
+            let trimmed = line.trim();
+            // Indented rows inside per-device sections
+            if trimmed.starts_with("btree:") {
+                if let Some(bytes) = extract_first_bytes(trimmed) {
+                    total_btree += bytes;
+                }
+            } else if trimmed.starts_with("user:") {
+                if let Some(bytes) = extract_first_bytes(trimmed) {
+                    total_user += bytes;
+                }
+            }
+        }
+
+        // Use the per-type breakdown if available
+        if total_btree > 0 || total_user > 0 {
+            metadata_bytes = total_btree;
+            data_bytes = total_user;
         }
 
         Ok(FsUsage {
@@ -1396,27 +1422,25 @@ fn strip_ansi(s: &str) -> String {
 }
 
 /// Parse a device usage line like "/dev/sda: 123 used  456 free  789 total"
-fn parse_device_usage_line(line: &str) -> Option<DeviceUsage> {
-    let (path, rest) = line.split_once(':')?;
-    let path = path.trim().to_string();
-
-    let mut used = 0u64;
-    let mut free = 0u64;
-    let mut total = 0u64;
-
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    for chunk in parts.chunks(2) {
-        if chunk.len() == 2 {
-            if let Ok(n) = chunk[0].parse::<u64>() {
-                match chunk[1].to_lowercase().as_str() {
-                    "used" => used = n,
-                    "free" => free = n,
-                    "total" => total = n,
-                    _ => {}
-                }
-            }
-        }
+/// Parse device table row from `bcachefs fs usage` default output.
+/// Format: "label (device N):  sdb     rw     53264510976   8912896    0%"
+///    or:  "label (device N):  sdb     rw     49.6G         8.50M      0%"  (with -h)
+fn parse_device_table_line(line: &str) -> Option<DeviceUsage> {
+    let after = line.split("):").nth(1)?.trim();
+    let parts: Vec<&str> = after.split_whitespace().collect();
+    // parts: [devname, state, size, used, use%]
+    if parts.len() < 4 {
+        return None;
     }
+    let dev_name = parts[0];
+    let path = if dev_name.starts_with('/') {
+        dev_name.to_string()
+    } else {
+        format!("/dev/{dev_name}")
+    };
+    let total = parse_human_bytes(parts[2]).unwrap_or(0);
+    let used = parse_human_bytes(parts[3]).unwrap_or(0);
+    let free = total.saturating_sub(used);
 
     Some(DeviceUsage {
         path,
