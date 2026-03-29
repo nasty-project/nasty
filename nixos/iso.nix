@@ -218,8 +218,8 @@ in
           mklabel gpt \
           mkpart ESP fat32 1MiB 512MiB \
           set 1 esp on \
-          mkpart root ext4 512MiB 15GiB \
-          mkpart data 15GiB 100%
+          mkpart root ext4 512MiB 20GiB \
+          mkpart data 20GiB 100%
       fi
 
       PART1="''${DISK}''${PSEP}1"
