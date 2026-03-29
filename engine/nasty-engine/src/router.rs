@@ -452,6 +452,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
 
         // ── Alerts ───────────────────────────────────────────────
+        "telemetry.send" => {
+            let sent = crate::telemetry::send_report(&state).await;
+            ok(req, serde_json::json!({ "sent": sent }))
+        }
+
         "system.alerts" => {
             // Evaluate current alert rules against live system state
             let stats = match fetch_metrics_json::<nasty_system::SystemStats>(

@@ -19,6 +19,7 @@ use tracing_subscriber::{reload, prelude::*};
 
 mod auth;
 mod router;
+mod telemetry;
 mod terminal;
 mod vm_console;
 
@@ -137,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async {
         nasty_system::settings::check_acme_renewal().await;
     });
+
+    // Start daily anonymous telemetry (if not opted out)
+    telemetry::spawn_daily(state.clone());
 
     // Signal systemd that startup is complete
     sd_notify_ready();
