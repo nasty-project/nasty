@@ -177,6 +177,15 @@ in {
     # Enable flakes for nixos-rebuild --flake
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
+    # ── Nix garbage collection ─────────────────────────────────
+    # Automatic weekly cleanup of old generations and unreferenced store paths.
+    # configurationLimit in boot.loader caps boot menu entries separately.
+    nix.gc = {
+      automatic = true;
+      dates = "weekly";
+      options = "--delete-older-than 30d";
+    };
+
     # ── NTP ────────────────────────────────────────────────────
     services.timesyncd.enable = true;
 

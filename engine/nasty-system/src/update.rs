@@ -372,9 +372,6 @@ impl UpdateService {
             .unwrap_or_default();
 
         let local_flake = local_flake().await;
-        let gc = GcConfig::load();
-        let gc_keep = gc.keep_generations;
-        let gc_max_age = gc.max_age_days;
         let script = format!(
             r#"#!/bin/bash
 set -euo pipefail
@@ -452,24 +449,8 @@ git add -A
 git -c user.email="nasty@localhost" -c user.name="NASty" \
   commit -m "local: appliance adjustments" || true
 
-# Garbage-collect old generations.
-# The booted generation is always protected — even if it's older than KEEP.
-KEEP={gc_keep}
-MAX_AGE={gc_max_age}
-# Garbage-collect old NixOS generations.
-# nix-env --list-generations is the reliable way to enumerate them.
-GEN_LIST=$(nix-env --profile /nix/var/nix/profiles/system --list-generations 2>/dev/null | awk '{{print $1}}' || true)
-GENS=$(echo "$GEN_LIST" | grep -c '[0-9]' || echo 0)
-if [ "$GENS" -gt "$KEEP" ]; then
-    DELETE_COUNT=$(( GENS - KEEP ))
-    TO_DELETE=$(echo "$GEN_LIST" | head -n "$DELETE_COUNT" | tr '\n' ' ')
-    if [ -n "$TO_DELETE" ]; then
-        echo "==> Cleaning up old generations ($GENS found, keeping $KEEP, deleting $DELETE_COUNT)..."
-        # shellcheck disable=SC2086
-        nix-env --profile /nix/var/nix/profiles/system --delete-generations $TO_DELETE 2>&1 || true
-        nix-collect-garbage 2>&1 || true
-    fi
-fi
+# Generation cleanup is handled by nix.gc (systemd timer) in the NixOS config.
+# No custom GC logic needed here — just rebuild.
 
 echo "==> Rebuilding system..."
 NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}
