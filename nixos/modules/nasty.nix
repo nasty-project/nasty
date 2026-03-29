@@ -417,6 +417,12 @@ in {
       rsync             # file transfer and sync
       jq                # JSON parsing (used by engine scripts)
       htop
+      python3           # scripting and quick data processing
+      file              # file type identification
+      tree              # directory structure visualization
+      strace            # system call tracing for debugging
+      dig               # DNS debugging
+      nano              # quick file editing
       qemu              # QEMU/KVM for virtual machines
       OVMF              # UEFI firmware for VMs
       pciutils          # lspci for passthrough device discovery
