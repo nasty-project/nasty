@@ -30,6 +30,12 @@
 		disk_temperature: 'Disk Temperature (°C)',
 		smart_health: 'SMART Health Failure',
 		swap_usage_percent: 'Swap Usage (%)',
+		bcachefs_degraded: 'bcachefs Degraded Mode',
+		bcachefs_device_error: 'bcachefs Device Errors',
+		bcachefs_device_state: 'bcachefs Device State',
+		bcachefs_io_errors: 'bcachefs IO Errors',
+		bcachefs_scrub_errors: 'bcachefs Scrub Corruption',
+		bcachefs_reconcile_stalled: 'bcachefs Reconcile Stalled',
 	};
 
 	const conditionLabels: Record<AlertCondition, string> = {

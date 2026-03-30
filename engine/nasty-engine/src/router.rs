@@ -472,11 +472,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Vec::new()
             };
 
-            let fs_usage_list: Vec<nasty_system::alerts::FsUsage> = fs_list
-                .unwrap_or_default()
-                .into_iter()
+            let filesystems = fs_list.unwrap_or_default();
+            let fs_usage_list: Vec<nasty_system::alerts::FsUsage> = filesystems.iter()
                 .map(|p| nasty_system::alerts::FsUsage {
-                    name: p.name,
+                    name: p.name.clone(),
                     used_bytes: p.used_bytes,
                     total_bytes: p.total_bytes,
                 })
@@ -491,7 +490,48 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 })
                 .collect();
 
-            let alerts = state.alerts.evaluate(&stats, &fs_usage_list, &disk_summary).await;
+            // Collect bcachefs health from mounted filesystems
+            let mut bcachefs_health = Vec::new();
+            for fs in &filesystems {
+                if !fs.mounted { continue; }
+                let degraded = fs.options.degraded.unwrap_or(false);
+                let devices: Vec<nasty_system::alerts::BcachefsDeviceHealth> = fs.devices.iter().map(|d| {
+                    nasty_system::alerts::BcachefsDeviceHealth {
+                        path: d.path.clone(),
+                        state: d.state.clone().unwrap_or_else(|| "rw".into()),
+                        has_errors: d.has_data.as_deref().map_or(false, |s| s.contains("error")),
+                    }
+                }).collect();
+
+                // Read IO error counters from sysfs
+                let io_error_count = read_bcachefs_error_count(&fs.uuid).await;
+
+                // Check scrub status for errors
+                let scrub_errors = match state.filesystems.scrub_status(&fs.name).await {
+                    Ok(s) => s.raw.to_lowercase().contains("error"),
+                    Err(_) => false,
+                };
+
+                // Check reconcile status for stalled work
+                let reconcile_stalled = match state.filesystems.reconcile_status(&fs.name).await {
+                    Ok(s) => {
+                        let raw = s.raw.to_lowercase();
+                        raw.contains("pending") && !raw.contains("running")
+                    }
+                    Err(_) => false,
+                };
+
+                bcachefs_health.push(nasty_system::alerts::BcachefsHealth {
+                    fs_name: fs.name.clone(),
+                    degraded,
+                    devices,
+                    io_error_count,
+                    scrub_errors,
+                    reconcile_stalled,
+                });
+            }
+
+            let alerts = state.alerts.evaluate(&stats, &fs_usage_list, &disk_summary, &bcachefs_health).await;
             ok(req, alerts)
         }
         "alert.rules.list" => ok(req, state.alerts.list_rules().await),
@@ -1867,4 +1907,19 @@ async fn vm_clone(
     };
 
     state.vms.create(create_req).await.map_err(|e| e.to_string())
+}
+
+/// Read bcachefs error counters from sysfs. Returns total read+write error count.
+async fn read_bcachefs_error_count(uuid: &str) -> u64 {
+    let counters_dir = format!("/sys/fs/bcachefs/{uuid}/counters");
+    let mut total = 0u64;
+    for name in ["io_read_errors", "io_write_errors", "io_checksum_errors"] {
+        let path = format!("{counters_dir}/{name}");
+        if let Ok(val) = tokio::fs::read_to_string(&path).await {
+            if let Ok(n) = val.trim().parse::<u64>() {
+                total += n;
+            }
+        }
+    }
+    total
 }

@@ -33,6 +33,13 @@ pub enum AlertMetric {
     DiskTemperature,
     SmartHealth,
     SwapUsagePercent,
+    // bcachefs health (always-on, threshold ignored)
+    BcachefsDegraded,
+    BcachefsDeviceError,
+    BcachefsDeviceState,
+    BcachefsIOErrors,
+    BcachefsScrubErrors,
+    BcachefsReconcileStalled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -159,6 +166,7 @@ impl AlertService {
         stats: &super::SystemStats,
         filesystems: &[FsUsage],
         disk_health: &[DiskHealthSummary],
+        bcachefs_health: &[BcachefsHealth],
     ) -> Vec<ActiveAlert> {
         let state = self.state.read().await;
         let mut alerts = Vec::new();
@@ -296,6 +304,125 @@ impl AlertService {
                         }
                     }
                 }
+                // ── bcachefs health checks (always-on, threshold ignored) ──
+                AlertMetric::BcachefsDegraded => {
+                    for fs in bcachefs_health {
+                        if fs.degraded {
+                            alerts.push(ActiveAlert {
+                                rule_id: rule.id.clone(),
+                                rule_name: rule.name.clone(),
+                                severity: rule.severity.clone(),
+                                metric: rule.metric.clone(),
+                                message: format!(
+                                    "Filesystem \"{}\" is running in DEGRADED mode (missing device)",
+                                    fs.fs_name
+                                ),
+                                current_value: 1.0,
+                                threshold: 0.0,
+                                source: fs.fs_name.clone(),
+                            });
+                        }
+                    }
+                }
+                AlertMetric::BcachefsDeviceState => {
+                    for fs in bcachefs_health {
+                        for dev in &fs.devices {
+                            if dev.state != "rw" && dev.state != "spare" {
+                                alerts.push(ActiveAlert {
+                                    rule_id: rule.id.clone(),
+                                    rule_name: rule.name.clone(),
+                                    severity: rule.severity.clone(),
+                                    metric: rule.metric.clone(),
+                                    message: format!(
+                                        "Device {} in filesystem \"{}\" is in '{}' state (expected 'rw')",
+                                        dev.path, fs.fs_name, dev.state
+                                    ),
+                                    current_value: 0.0,
+                                    threshold: 0.0,
+                                    source: dev.path.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                AlertMetric::BcachefsDeviceError => {
+                    for fs in bcachefs_health {
+                        for dev in &fs.devices {
+                            if dev.has_errors {
+                                alerts.push(ActiveAlert {
+                                    rule_id: rule.id.clone(),
+                                    rule_name: rule.name.clone(),
+                                    severity: rule.severity.clone(),
+                                    metric: rule.metric.clone(),
+                                    message: format!(
+                                        "Device {} in filesystem \"{}\" has IO errors",
+                                        dev.path, fs.fs_name
+                                    ),
+                                    current_value: 1.0,
+                                    threshold: 0.0,
+                                    source: dev.path.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                AlertMetric::BcachefsIOErrors => {
+                    for fs in bcachefs_health {
+                        if fs.io_error_count > 0 {
+                            alerts.push(ActiveAlert {
+                                rule_id: rule.id.clone(),
+                                rule_name: rule.name.clone(),
+                                severity: rule.severity.clone(),
+                                metric: rule.metric.clone(),
+                                message: format!(
+                                    "Filesystem \"{}\" has {} IO errors",
+                                    fs.fs_name, fs.io_error_count
+                                ),
+                                current_value: fs.io_error_count as f64,
+                                threshold: 0.0,
+                                source: fs.fs_name.clone(),
+                            });
+                        }
+                    }
+                }
+                AlertMetric::BcachefsScrubErrors => {
+                    for fs in bcachefs_health {
+                        if fs.scrub_errors {
+                            alerts.push(ActiveAlert {
+                                rule_id: rule.id.clone(),
+                                rule_name: rule.name.clone(),
+                                severity: rule.severity.clone(),
+                                metric: rule.metric.clone(),
+                                message: format!(
+                                    "Filesystem \"{}\" scrub found data corruption",
+                                    fs.fs_name
+                                ),
+                                current_value: 1.0,
+                                threshold: 0.0,
+                                source: fs.fs_name.clone(),
+                            });
+                        }
+                    }
+                }
+                AlertMetric::BcachefsReconcileStalled => {
+                    for fs in bcachefs_health {
+                        if fs.reconcile_stalled {
+                            alerts.push(ActiveAlert {
+                                rule_id: rule.id.clone(),
+                                rule_name: rule.name.clone(),
+                                severity: rule.severity.clone(),
+                                metric: rule.metric.clone(),
+                                message: format!(
+                                    "Filesystem \"{}\" reconcile is stalled — background work not progressing",
+                                    fs.fs_name
+                                ),
+                                current_value: 1.0,
+                                threshold: 0.0,
+                                source: fs.fs_name.clone(),
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -317,6 +444,31 @@ pub struct DiskHealthSummary {
     pub device: String,
     pub temperature_c: Option<i32>,
     pub health_passed: bool,
+}
+
+/// bcachefs filesystem health for alert evaluation
+#[derive(Debug)]
+pub struct BcachefsHealth {
+    pub fs_name: String,
+    /// Mounted in degraded mode (missing devices)
+    pub degraded: bool,
+    /// Per-device state and error info
+    pub devices: Vec<BcachefsDeviceHealth>,
+    /// IO error counts from sysfs counters (read_errors + write_errors)
+    pub io_error_count: u64,
+    /// Whether a scrub found errors (from last scrub status)
+    pub scrub_errors: bool,
+    /// Whether reconcile has pending work but isn't making progress
+    pub reconcile_stalled: bool,
+}
+
+#[derive(Debug)]
+pub struct BcachefsDeviceHealth {
+    pub path: String,
+    /// Device state: "rw", "ro", "evacuating", "spare"
+    pub state: String,
+    /// Whether the device has IO errors reported in sysfs
+    pub has_errors: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -408,6 +560,61 @@ fn default_rules() -> Vec<AlertRule> {
             metric: AlertMetric::CpuLoadPercent,
             condition: AlertCondition::Above,
             threshold: 90.0,
+            severity: AlertSeverity::Warning,
+        },
+        // bcachefs health (always-on, threshold not used)
+        AlertRule {
+            id: "bcachefs-degraded".into(),
+            name: "bcachefs degraded (missing device)".into(),
+            enabled: true,
+            metric: AlertMetric::BcachefsDegraded,
+            condition: AlertCondition::Equals,
+            threshold: 1.0,
+            severity: AlertSeverity::Critical,
+        },
+        AlertRule {
+            id: "bcachefs-device-state".into(),
+            name: "bcachefs device not read-write".into(),
+            enabled: true,
+            metric: AlertMetric::BcachefsDeviceState,
+            condition: AlertCondition::Equals,
+            threshold: 1.0,
+            severity: AlertSeverity::Warning,
+        },
+        AlertRule {
+            id: "bcachefs-device-errors".into(),
+            name: "bcachefs device IO errors".into(),
+            enabled: true,
+            metric: AlertMetric::BcachefsDeviceError,
+            condition: AlertCondition::Equals,
+            threshold: 1.0,
+            severity: AlertSeverity::Critical,
+        },
+        AlertRule {
+            id: "bcachefs-io-errors".into(),
+            name: "bcachefs filesystem IO errors".into(),
+            enabled: true,
+            metric: AlertMetric::BcachefsIOErrors,
+            condition: AlertCondition::Above,
+            threshold: 0.0,
+            severity: AlertSeverity::Critical,
+        },
+        AlertRule {
+            id: "bcachefs-scrub-errors".into(),
+            name: "bcachefs scrub found corruption".into(),
+            enabled: true,
+            metric: AlertMetric::BcachefsScrubErrors,
+            condition: AlertCondition::Equals,
+            threshold: 1.0,
+            severity: AlertSeverity::Critical,
+        },
+        AlertRule {
+            id: "bcachefs-reconcile-stalled".into(),
+            name: "bcachefs reconcile stalled".into(),
+            enabled: true,
+            metric: AlertMetric::BcachefsReconcileStalled,
+            condition: AlertCondition::Equals,
+            threshold: 1.0,
             severity: AlertSeverity::Warning,
         },
     ]

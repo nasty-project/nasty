@@ -437,7 +437,7 @@ export interface AlertRule {
 	severity: AlertSeverity;
 }
 
-export type AlertMetric = 'fs_usage_percent' | 'cpu_load_percent' | 'memory_usage_percent' | 'disk_temperature' | 'smart_health' | 'swap_usage_percent';
+export type AlertMetric = 'fs_usage_percent' | 'cpu_load_percent' | 'memory_usage_percent' | 'disk_temperature' | 'smart_health' | 'swap_usage_percent' | 'bcachefs_degraded' | 'bcachefs_device_error' | 'bcachefs_device_state' | 'bcachefs_io_errors' | 'bcachefs_scrub_errors' | 'bcachefs_reconcile_stalled';
 export type AlertCondition = 'above' | 'below' | 'equals';
 export type AlertSeverity = 'warning' | 'critical';
 
