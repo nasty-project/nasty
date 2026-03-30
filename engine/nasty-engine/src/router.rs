@@ -1615,14 +1615,8 @@ async fn list_vm_images(state: &AppState) -> VmImageListResult {
 }
 
 /// Ensure the `.nasty/images` subvolume exists on a filesystem. Creates it if missing.
-/// Also checks legacy "images" name for backward compatibility.
 async fn ensure_images_subvolume(state: &AppState, filesystem: &str) -> Result<String, String> {
-    // Check new location first
     if let Ok(sv) = state.subvolumes.get(filesystem, ".nasty/images", None).await {
-        return Ok(sv.path);
-    }
-    // Fall back to legacy name
-    if let Ok(sv) = state.subvolumes.get(filesystem, "images", None).await {
         return Ok(sv.path);
     }
 
@@ -1736,11 +1730,11 @@ async fn check_subvolume_in_use(state: &AppState, filesystem: &str, name: &str) 
 
     // ── System subvolume checks (apps-data, images) ──
 
-    if (name == "apps-data" || name == ".nasty/apps-data") && state.apps.is_enabled() {
+    if name == ".nasty/apps-data" && state.apps.is_enabled() {
         return Some("subvolume is used by the Apps runtime for storage. Disable Apps first.".to_string());
     }
 
-    if name == "images" || name == ".nasty/images" {
+    if name == ".nasty/images" {
         // Check if any VM references an ISO from this subvolume
         if let Ok(vms) = state.vms.list().await {
             for vm in &vms {

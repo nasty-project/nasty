@@ -301,8 +301,6 @@
 	}
 
 	const SYSTEM_SUBVOLUMES: Record<string, string> = {
-		'images': 'VM boot images',
-		'apps-data': 'Apps runtime storage (k3s)',
 		'.nasty/images': 'VM boot images',
 		'.nasty/apps-data': 'Apps runtime storage (k3s)',
 	};

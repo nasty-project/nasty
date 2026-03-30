@@ -236,9 +236,7 @@ async fn upload_vm_image_handler(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No filesystems available" }))).into_response();
     }
 
-    // Check .nasty/images first, then legacy "images"
-    let subvolume = match state.subvolumes.get(&fs_name, ".nasty/images", None).await
-        .or(state.subvolumes.get(&fs_name, "images", None).await) {
+    let subvolume = match state.subvolumes.get(&fs_name, ".nasty/images", None).await {
         Ok(sv) => sv,
         Err(_) => {
             // Ensure .nasty parent directory exists
