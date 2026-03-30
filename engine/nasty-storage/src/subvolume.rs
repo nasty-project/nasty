@@ -678,6 +678,17 @@ impl SubvolumeService {
         // parent deletion. We intentionally do NOT delete snapshots here so that
         // snapshot-based restore/DR scenarios work correctly.
 
+        // Delete child subvolumes first (depth-first) — bcachefs rejects
+        // deleting a subvolume that contains nested subvolumes.
+        let children = find_child_subvolumes(&mount_point, &req.name).await;
+        for child in children.iter().rev() {
+            let child_path = format!("{mount_point}/{child}");
+            info!("Deleting child subvolume '{child}' before parent '{}'", req.name);
+            if let Err(e) = cmd::run_ok("bcachefs", &["subvolume", "delete", &child_path]).await {
+                warn!("Failed to delete child subvolume '{child}': {e}");
+            }
+        }
+
         info!("Deleting subvolume '{}' from filesystem '{}'", req.name, req.filesystem);
         cmd::run_ok("bcachefs", &["subvolume", "delete", &subvol_path])
             .await
@@ -1432,4 +1443,27 @@ async fn find_loop_device(file_path: &str) -> Option<String> {
     None
 }
 
+/// Find all child subvolumes under a given parent path using `bcachefs subvolume list -R`.
+/// Returns paths relative to the mount point, sorted so deepest children come last
+/// (caller should reverse for depth-first deletion).
+async fn find_child_subvolumes(mount_point: &str, parent_name: &str) -> Vec<String> {
+    let output = match cmd::run_ok("bcachefs", &["subvolume", "list", "-R", mount_point]).await {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    let prefix = format!("{parent_name}/");
+    let mut children = Vec::new();
+    for line in output.lines() {
+        // Format: "Path                     ID       Created          Flags        Size"
+        // Each line starts with the relative path, then whitespace-separated fields.
+        let path = line.split_whitespace().next().unwrap_or("");
+        if path.starts_with(&prefix) && path != parent_name {
+            children.push(path.to_string());
+        }
+    }
+    // Sort so deeper paths come later — reverse for depth-first deletion
+    children.sort();
+    children
+}
 
