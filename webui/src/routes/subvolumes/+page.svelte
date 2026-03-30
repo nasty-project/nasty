@@ -726,6 +726,9 @@
 					</td>
 					<td class="p-3">
 						<div class="flex gap-2">
+							<Button variant="outline" size="xs" onclick={() => { showSnap = sv.name; snapName = ''; }}>
+								<Camera class="mr-1 h-3 w-3" />Snap
+							</Button>
 							<Button variant="secondary" size="xs" onclick={() => openDetail(sv)}>
 								{expandedName === sv.name ? 'Hide' : 'Details'}
 							</Button>
