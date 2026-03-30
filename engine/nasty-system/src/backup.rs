@@ -7,12 +7,11 @@
 use std::path::Path;
 use tracing::{info, warn};
 
-const SOURCE_DIRS: &[&str] = &[
-    "/var/lib/nasty",
-    "/var/lib/samba",
+/// Source → destination name mapping under .nasty/
+const BACKUP_DIRS: &[(&str, &str)] = &[
+    ("/var/lib/nasty", "engine"),
+    ("/var/lib/samba", "samba"),
 ];
-
-const BACKUP_SUBDIR: &str = ".nasty/config-backup";
 const INTERVAL_SECS: u64 = 3600; // 1 hour
 
 /// Find the first mounted filesystem under /fs.
@@ -36,19 +35,17 @@ async fn run_backup() {
         None => return, // No filesystem mounted yet
     };
 
-    let backup_dir = format!("/fs/{fs_name}/{BACKUP_SUBDIR}");
-    if let Err(e) = tokio::fs::create_dir_all(&backup_dir).await {
-        warn!("Failed to create backup dir {backup_dir}: {e}");
+    let nasty_dir = format!("/fs/{fs_name}/.nasty");
+    if let Err(e) = tokio::fs::create_dir_all(&nasty_dir).await {
+        warn!("Failed to create .nasty dir: {e}");
         return;
     }
 
-    for src in SOURCE_DIRS {
+    for (src, dest_name) in BACKUP_DIRS {
         if !Path::new(src).is_dir() {
             continue;
         }
-        // Use the last component as the target subdir name
-        let name = Path::new(src).file_name().unwrap().to_string_lossy();
-        let dest = format!("{backup_dir}/{name}");
+        let dest = format!("{nasty_dir}/{dest_name}");
         let _ = tokio::fs::create_dir_all(&dest).await;
 
         let output = tokio::process::Command::new("rsync")
@@ -67,7 +64,7 @@ async fn run_backup() {
         }
     }
 
-    info!("Config backup complete → /fs/{fs_name}/{BACKUP_SUBDIR}");
+    info!("Config backup complete → /fs/{fs_name}/.nasty/");
 }
 
 /// Spawn the periodic backup task. Runs immediately then every hour.
