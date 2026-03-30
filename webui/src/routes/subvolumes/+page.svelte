@@ -75,6 +75,9 @@
 	let newType: SubvolumeType = $state('filesystem');
 	let newVolsize = $state('');
 	let newCompression = $state('');
+	let newForegroundTarget = $state('');
+	let newBackgroundTarget = $state('');
+	let newPromoteTarget = $state('');
 	let newComments = $state('');
 	let newDirectIo = $state(false);
 
@@ -278,6 +281,9 @@
 			params.volsize_bytes = parseFloat(newVolsize) * 1073741824;
 		}
 		if (newCompression) params.compression = newCompression;
+		if (newForegroundTarget) params.foreground_target = newForegroundTarget;
+		if (newBackgroundTarget) params.background_target = newBackgroundTarget;
+		if (newPromoteTarget) params.promote_target = newPromoteTarget;
 		if (newComments) params.comments = newComments;
 		if (newDirectIo) params.direct_io = true;
 
@@ -288,6 +294,7 @@
 		if (ok !== undefined) {
 			wizardStep = 0;
 			newName = ''; newType = 'filesystem'; newVolsize = ''; newCompression = '';
+			newForegroundTarget = ''; newBackgroundTarget = ''; newPromoteTarget = '';
 			newComments = ''; newDirectIo = false;
 			await refresh();
 		}
@@ -402,6 +409,14 @@
 	}
 
 	const mountedFilesystems = $derived(filesystems.filter(p => p.mounted));
+
+	// Unique device labels from the selected filesystem (for tiering dropdowns)
+	const deviceLabels = $derived(() => {
+		const fs = filesystems.find(f => f.name === selectedFs);
+		if (!fs) return [];
+		const labels = fs.devices.map(d => d.label).filter((l): l is string => !!l);
+		return [...new Set(labels)].sort();
+	});
 
 	let search = $state('');
 
@@ -534,6 +549,41 @@
 					<option value="gzip">Gzip</option>
 				</select>
 			</div>
+			{#if deviceLabels().length > 0}
+				<div class="mb-4">
+					<Label>Tiering Targets</Label>
+					<p class="mb-2 text-xs text-muted-foreground">Override filesystem defaults. Leave empty to inherit.</p>
+					<div class="grid grid-cols-3 gap-2">
+						<div>
+							<label for="sv-fg-target" class="mb-1 block text-xs text-muted-foreground">Foreground</label>
+							<select id="sv-fg-target" bind:value={newForegroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+								<option value="">Inherit</option>
+								{#each deviceLabels() as label}
+									<option value={label}>{label}</option>
+								{/each}
+							</select>
+						</div>
+						<div>
+							<label for="sv-bg-target" class="mb-1 block text-xs text-muted-foreground">Background</label>
+							<select id="sv-bg-target" bind:value={newBackgroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+								<option value="">Inherit</option>
+								{#each deviceLabels() as label}
+									<option value={label}>{label}</option>
+								{/each}
+							</select>
+						</div>
+						<div>
+							<label for="sv-promote-target" class="mb-1 block text-xs text-muted-foreground">Promote (cache)</label>
+							<select id="sv-promote-target" bind:value={newPromoteTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+								<option value="">Inherit</option>
+								{#each deviceLabels() as label}
+									<option value={label}>{label}</option>
+								{/each}
+							</select>
+						</div>
+					</div>
+				</div>
+			{/if}
 			{#if newType === 'block'}
 				<div class="mb-4">
 					<label class="flex cursor-pointer items-center gap-2 text-sm font-medium">
@@ -564,6 +614,18 @@
 				{#if newCompression}
 					<span class="text-muted-foreground">Compression</span>
 					<span>{newCompression}</span>
+				{/if}
+				{#if newForegroundTarget}
+					<span class="text-muted-foreground">Foreground Target</span>
+					<span>{newForegroundTarget}</span>
+				{/if}
+				{#if newBackgroundTarget}
+					<span class="text-muted-foreground">Background Target</span>
+					<span>{newBackgroundTarget}</span>
+				{/if}
+				{#if newPromoteTarget}
+					<span class="text-muted-foreground">Promote Target</span>
+					<span>{newPromoteTarget}</span>
 				{/if}
 				{#if newDirectIo}
 					<span class="text-muted-foreground">Direct I/O</span>
