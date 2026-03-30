@@ -728,6 +728,8 @@ in {
       path = with pkgs; [
         bashInteractive  # bash for terminal
         util-linux       # lsblk, blkid, wipefs, mount, umount
+        gptfdisk         # sgdisk (free space detection, partition creation)
+        parted           # partprobe (re-read partition table)
         nasty-bcachefs-tools  # bcachefs
         iproute2         # ip (for network config detection)
         kmod             # modprobe (for iSCSI/NVMe-oF kernel modules)
