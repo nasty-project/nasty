@@ -297,6 +297,11 @@ impl AppsService {
         };
         Self::save_config(&config).await?;
 
+        // Move k3s data to bcachefs so container images and etcd don't fill the root partition.
+        if let Some(ref fs_name) = req.filesystem {
+            ensure_k3s_symlink(fs_name).await;
+        }
+
         // Start k3s via systemd (non-blocking — k3s takes 30-60s to initialize)
         run_cmd("systemctl", &["start", K3S_SERVICE]).await?;
 
@@ -926,6 +931,14 @@ impl AppsService {
         if !self.is_enabled() {
             return;
         }
+        // Ensure k3s data symlink is in place before starting
+        let config = Self::load_config();
+        if let Some(ref path) = config.storage_path {
+            // storage_path is like /fs/first/.nasty/apps-data — derive filesystem name
+            if let Some(fs_name) = path.strip_prefix("/fs/").and_then(|s| s.split('/').next()) {
+                ensure_k3s_symlink(fs_name).await;
+            }
+        }
         info!("Apps runtime enabled — ensuring k3s is running");
         if let Err(e) = run_cmd("systemctl", &["start", K3S_SERVICE]).await {
             error!("Failed to start k3s: {e}");
@@ -1221,5 +1234,42 @@ async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
             error!("Failed to run bcachefs subvolume create: {e}");
             None
         }
+    }
+}
+
+/// Ensure /var/lib/rancher/k3s is symlinked to /fs/{fs}/.nasty/k3s.
+/// Migrates existing data on first run. No-op if already set up.
+async fn ensure_k3s_symlink(fs_name: &str) {
+    let k3s_data = format!("/fs/{fs_name}/.nasty/k3s");
+    let default_path = "/var/lib/rancher/k3s";
+
+    // Already correct?
+    if let Ok(target) = tokio::fs::read_link(default_path).await {
+        if target.to_string_lossy() == k3s_data {
+            return;
+        }
+    }
+
+    let nasty_dir = format!("/fs/{fs_name}/.nasty");
+    let _ = tokio::fs::create_dir_all(&nasty_dir).await;
+    if !std::path::Path::new(&k3s_data).exists() {
+        let _ = tokio::fs::create_dir_all(&k3s_data).await;
+    }
+
+    // Migrate existing data (first-time only)
+    if std::path::Path::new(default_path).is_dir()
+        && !std::path::Path::new(default_path).is_symlink()
+    {
+        info!("Migrating k3s data from {default_path} to {k3s_data}");
+        let _ = run_cmd("cp", &["-a", &format!("{default_path}/."), &k3s_data]).await;
+        let _ = tokio::fs::remove_dir_all(default_path).await;
+    }
+
+    let _ = tokio::fs::remove_dir_all(default_path).await;
+    let _ = tokio::fs::remove_file(default_path).await;
+    let _ = tokio::fs::create_dir_all("/var/lib/rancher").await;
+    match tokio::fs::symlink(&k3s_data, default_path).await {
+        Ok(()) => info!("Symlinked {default_path} → {k3s_data}"),
+        Err(e) => error!("Failed to symlink k3s data: {e}"),
     }
 }
