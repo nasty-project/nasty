@@ -1628,6 +1628,10 @@ pub async fn create_partition_on_free_space(disk_path: &str) -> Result<String, F
         return Err(FilesystemError::CommandFailed("failed to find new partition after creation".to_string()));
     }
 
+    // Wipe any stale filesystem signatures inherited from the disk's
+    // previously unpartitioned space (e.g. old ZFS/LVM metadata).
+    let _ = cmd::run_ok("wipefs", &["-a", &last_part]).await;
+
     info!("Created partition {last_part} on {disk_path}");
     Ok(last_part)
 }
