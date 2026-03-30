@@ -323,6 +323,12 @@ impl IscsiService {
 
         let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
 
+        // Disable TPG first — signals initiators to disconnect
+        let _ = configfs_write(&format!("{tpg_path}/enable"), "0").await;
+
+        // Brief settle for initiators to process disconnect
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
         // Remove ACL dirs first (must be empty before TPG removal)
         for acl in &target.acls {
             let acl_path = format!("{tpg_path}/acls/{}", acl.initiator_iqn);
