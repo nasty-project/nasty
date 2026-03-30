@@ -221,6 +221,12 @@ pub struct CreateSubvolumeRequest {
     /// Enable O_DIRECT on the loop device (bypasses host page cache for the backing file).
     #[serde(default)]
     pub direct_io: Option<bool>,
+    /// Device or label for foreground writes (overrides filesystem default).
+    pub foreground_target: Option<String>,
+    /// Device or label for background moves/recompression (overrides filesystem default).
+    pub background_target: Option<String>,
+    /// Device or label to promote data to on read (cache tier, overrides filesystem default).
+    pub promote_target: Option<String>,
 }
 
 fn default_type() -> SubvolumeType {
@@ -299,6 +305,12 @@ pub struct UpdateSubvolumeRequest {
     pub compression: Option<String>,
     /// New description for the subvolume. Empty string clears the comment.
     pub comments: Option<String>,
+    /// Device or label for foreground writes. Use `-` to remove.
+    pub foreground_target: Option<String>,
+    /// Device or label for background moves/recompression. Use `-` to remove.
+    pub background_target: Option<String>,
+    /// Device or label to promote data to on read. Use `-` to remove.
+    pub promote_target: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -575,6 +587,22 @@ impl SubvolumeService {
             .await;
         }
 
+        // Set tiering targets if specified
+        for (flag, value) in [
+            ("--foreground_target", &req.foreground_target),
+            ("--background_target", &req.background_target),
+            ("--promote_target", &req.promote_target),
+        ] {
+            if let Some(t) = value {
+                info!("Setting {}={} on subvolume '{}'", flag, t, req.name);
+                let _ = cmd::run_ok(
+                    "bcachefs",
+                    &["set-file-option", &format!("{flag}={t}"), &subvol_path],
+                )
+                .await;
+            }
+        }
+
         // For filesystem subvolumes: enforce size via bcachefs project quota
         if req.subvolume_type == SubvolumeType::Filesystem {
             if let Some(size) = req.volsize_bytes {
@@ -810,6 +838,23 @@ impl SubvolumeService {
             } else {
                 xattr::set(path, XATTR_NASTY_COMMENT, comments.as_bytes())
                     .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr comment: {e}")))?;
+            }
+        }
+
+        // Update tiering targets if specified (use "-" to remove)
+        for (flag, value) in [
+            ("--foreground_target", &req.foreground_target),
+            ("--background_target", &req.background_target),
+            ("--promote_target", &req.promote_target),
+        ] {
+            if let Some(t) = value {
+                info!("Setting {}={} on subvolume '{}'", flag, t, req.name);
+                cmd::run_ok(
+                    "bcachefs",
+                    &["set-file-option", &format!("{flag}={t}"), path],
+                )
+                .await
+                .map_err(SubvolumeError::CommandFailed)?;
             }
         }
 
