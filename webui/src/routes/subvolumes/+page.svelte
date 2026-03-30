@@ -703,13 +703,10 @@
 		<tbody>
 			{#each sorted as sv}
 				<tr class="border-b border-border">
-					<td class="p-3" style="padding-left: {(sv.name.split('/').length - 1) * 1.5 + 0.75}rem">
+					<td class="p-3">
 						<button class="text-left hover:text-blue-400 transition-colors" onclick={() => openDetail(sv)}>
-							<strong>{sv.name.includes('/') ? sv.name.split('/').pop() : sv.name}</strong>
+							<strong>{sv.name}</strong>
 						</button>
-						{#if sv.name.includes('/')}
-							<span class="block font-mono text-xs text-muted-foreground/40">{sv.name}</span>
-						{/if}
 						<span class="block font-mono text-xs text-muted-foreground">{sv.path}</span>
 						{#if sv.comments}
 							<span class="mt-0.5 block text-xs italic text-muted-foreground">{sv.comments}</span>
