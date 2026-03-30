@@ -97,6 +97,24 @@
 	let snapName = $state('');
 	let showClone = $state<string | null>(null);
 	let cloneName = $state('');
+	let showResize = $state(false);
+	let resizeValue = $state('');
+
+	async function resizeSubvolume() {
+		if (!detailSv || !resizeValue) return;
+		const bytes = parseFloat(resizeValue) * 1073741824;
+		await withToast(
+			() => client.call('subvolume.resize', { filesystem: selectedFs, name: detailSv!.name, volsize_bytes: bytes }),
+			`${detailSv.subvolume_type === 'block' ? 'Volume' : 'Quota'} updated to ${resizeValue} GiB`
+		);
+		showResize = false;
+		resizeValue = '';
+		await refresh();
+		if (detailSv) {
+			const updated = subvolumes.find(sv => sv.name === detailSv!.name);
+			if (updated) detailSv = updated;
+		}
+	}
 
 	// Inline expanded detail
 	let expandedName = $state<string | null>(null);
@@ -534,12 +552,13 @@
 
 			<!-- Step 2: Storage -->
 			{:else if wizardStep === 2}
-			{#if newType === 'block'}
-				<div class="mb-4">
-					<Label for="sv-volsize">Volume Size (GiB)</Label>
-					<Input id="sv-volsize" type="number" bind:value={newVolsize} placeholder="100" min="1" class="mt-1" />
-				</div>
-			{/if}
+			<div class="mb-4">
+				<Label for="sv-volsize">{newType === 'block' ? 'Volume Size (GiB)' : 'Quota (GiB)'}</Label>
+				<Input id="sv-volsize" type="number" bind:value={newVolsize} placeholder={newType === 'block' ? '100' : 'No limit'} min="1" class="mt-1" />
+				{#if newType === 'filesystem'}
+					<p class="mt-1 text-xs text-muted-foreground">Maximum space this share can use. Leave empty for no limit.</p>
+				{/if}
+			</div>
 			<div class="mb-4">
 				<Label for="sv-compression">Compression</Label>
 				<select id="sv-compression" bind:value={newCompression} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
@@ -607,8 +626,8 @@
 				<span class="font-mono">{newName}</span>
 				<span class="text-muted-foreground">Type</span>
 				<span>{newType === 'filesystem' ? 'File Share' : 'Block Device'}</span>
-				{#if newType === 'block' && newVolsize}
-					<span class="text-muted-foreground">Size</span>
+				{#if newVolsize}
+					<span class="text-muted-foreground">{newType === 'block' ? 'Size' : 'Quota'}</span>
 					<span>{newVolsize} GiB</span>
 				{/if}
 				{#if newCompression}
@@ -684,10 +703,10 @@
 						</Badge>
 					</td>
 					<td class="p-3 text-sm">
-						{#if sv.subvolume_type === 'block' && sv.volsize_bytes}
+						{#if sv.volsize_bytes}
 							{formatBytes(sv.volsize_bytes)}
 							{#if sv.used_bytes !== null}
-								<span class="text-xs text-muted-foreground">({formatBytes(sv.used_bytes)} on disk)</span>
+								<span class="text-xs text-muted-foreground">({formatBytes(sv.used_bytes)} used)</span>
 							{/if}
 						{:else if sv.used_bytes !== null}
 							{formatBytes(sv.used_bytes)}
@@ -781,10 +800,22 @@
 												</button>
 											{/if}
 										</span>
-										{#if detailSv.subvolume_type === 'block' && detailSv.volsize_bytes}
-											<span class="text-muted-foreground">Volume Size</span>
-											<span>{formatBytes(detailSv.volsize_bytes)}</span>
-										{/if}
+										<span class="text-muted-foreground">{detailSv.subvolume_type === 'block' ? 'Size' : 'Quota'}</span>
+										<span>
+											{#if showResize}
+												<span class="flex items-center gap-1">
+													<Input type="number" bind:value={resizeValue} class="h-7 w-24 text-xs" placeholder="GiB" min="1"
+														onkeydown={(e) => { if (e.key === 'Enter') resizeSubvolume(); if (e.key === 'Escape') showResize = false; }} />
+													<button onclick={resizeSubvolume} class="p-0.5 text-green-400 hover:text-green-300"><Check class="h-3.5 w-3.5" /></button>
+													<button onclick={() => showResize = false} class="p-0.5 text-muted-foreground hover:text-foreground"><X class="h-3.5 w-3.5" /></button>
+												</span>
+											{:else}
+												<button class="group flex items-center gap-1 hover:text-blue-400 transition-colors" onclick={() => { showResize = true; resizeValue = detailSv?.volsize_bytes ? String(Math.round(detailSv.volsize_bytes / 1073741824)) : ''; }}>
+													{detailSv.volsize_bytes ? formatBytes(detailSv.volsize_bytes) : 'No limit'}
+													<Pencil class="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+												</button>
+											{/if}
+										</span>
 										{#if detailSv.used_bytes !== null}
 											<span class="text-muted-foreground">Used</span>
 											<span>{formatBytes(detailSv.used_bytes)}</span>
