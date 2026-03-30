@@ -53,4 +53,12 @@ let
 
 in {
   environment.systemPackages = [ linuxquota ];
+
+  # Expose the package so other modules (nasty.nix) can add it to service PATHs.
+  options.nasty.linuxquota = pkgs.lib.mkOption {
+    type = pkgs.lib.types.package;
+    default = linuxquota;
+    readOnly = true;
+    description = "linuxquota package with bcachefs support";
+  };
 }

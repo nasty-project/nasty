@@ -732,6 +732,7 @@ in {
         gptfdisk         # sgdisk (free space detection, partition creation)
         parted           # partprobe (re-read partition table)
         nasty-bcachefs-tools  # bcachefs
+        config.nasty.linuxquota  # setproject, setquota, repquota (bcachefs project quotas)
         iproute2         # ip (for network config detection)
         kmod             # modprobe (for iSCSI/NVMe-oF kernel modules)
         systemd          # systemctl, journalctl (for update status)
