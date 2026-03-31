@@ -93,6 +93,7 @@ async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>, client_ip:
         c
     };
     cmd.env("TERM", "xterm-256color");
+    cmd.env("HOME", "/root");
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
