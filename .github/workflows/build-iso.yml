@@ -57,15 +57,14 @@ jobs:
           echo "ISO: $ISO_FILE"
           ls -lh "$ISO_FILE"
 
-          # Use version tag if present (v0.0.1), otherwise commit-based
-          VERSION=$(git describe --tags --exact-match 2>/dev/null | grep '^v' || echo "")
-          if [ -n "$VERSION" ]; then
-            DEST="nasty-${VERSION}-x86_64.iso"
+          # Use the input ref if it looks like a version tag, otherwise commit-based
+          INPUT_REF="${{ inputs.ref }}"
+          if [[ "$INPUT_REF" == v* ]]; then
+            VERSION="$INPUT_REF"
           else
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            VERSION="dev-${SHORT_SHA}"
-            DEST="nasty-${VERSION}-x86_64.iso"
+            VERSION="dev-$(git rev-parse --short HEAD)"
           fi
+          DEST="nasty-${VERSION}-x86_64.iso"
           cp "$ISO_FILE" "$DEST"
           echo "iso_dest=$DEST" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_ENV"
