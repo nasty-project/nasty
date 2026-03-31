@@ -58,6 +58,9 @@
 	let loginPass = $state('');
 	let loginError = $state('');
 
+	// Engine version tracking — used to detect updates during reconnect
+	let initialCommit: string | null = null;
+
 	// Power menu
 	let powerOpen = $state(false);
 	let powering = $state(false);
@@ -120,7 +123,21 @@
 
 	onMount(() => {
 		tryConnect();
-		const onReconnect = () => { powering = false; reconnecting = false; };
+		const onReconnect = async () => {
+			powering = false;
+			reconnecting = false;
+			// Check if engine was updated while we were disconnected.
+			// If the commit changed, the WebUI bundle likely changed too — force reload.
+			try {
+				const res = await fetch('/health');
+				const health = await res.json();
+				if (initialCommit && health.commit && health.commit !== initialCommit) {
+					console.log(`Engine commit changed: ${initialCommit} → ${health.commit} — reloading`);
+					location.reload();
+					return;
+				}
+			} catch { /* health check failed, continue with stale UI */ }
+		};
 		const onDisconnect = () => { reconnecting = true; };
 		getClient().onReconnect(onReconnect);
 		getClient().onDisconnect(onDisconnect);
@@ -143,6 +160,13 @@
 			authInfo = await client.connect(token);
 			connected = true;
 			showLogin = false;
+			// Capture engine commit on first connect for reconnect version check
+			if (!initialCommit) {
+				try {
+					const health = await fetch('/health').then(r => r.json());
+					initialCommit = health.commit ?? null;
+				} catch { /* ignore */ }
+			}
 			showPasswordChange = !!authInfo?.must_change_password;
 		} catch (e) {
 			clearToken();
