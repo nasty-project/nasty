@@ -41,6 +41,10 @@
 		Monitor,
 		Box,
 		FolderOpen,
+		CircleHelp,
+		ExternalLink,
+		MessageCircle,
+		Github,
 	} from '@lucide/svelte';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
@@ -67,6 +71,7 @@
 
 	// Profile menu
 	let profileOpen = $state(false);
+	let helpOpen = $state(false);
 
 	// Forced password change
 	let showPasswordChange = $state(false);
@@ -336,7 +341,9 @@
 				</div>
 			{:else}
 				<div class="shrink-0 border-b border-border px-4 py-4 relative">
+					<a href="https://github.com/nasty-project" target="_blank" rel="noopener noreferrer">
 					<img src={theme.isDark ? logoDark : logoLight} alt="NASty" class="h-40" />
+				</a>
 					<button onclick={toggleSidebar} class="absolute top-2 right-2 text-muted-foreground/50 hover:text-foreground transition-colors" title="Collapse sidebar">
 						<PanelLeftClose size={15} />
 					</button>
@@ -450,6 +457,40 @@
 					{#if powering}
 						<span class="text-sm text-amber-500">Shutting down…</span>
 					{/if}
+
+					<!-- Help menu -->
+					<div class="relative">
+						<button
+							onclick={() => { helpOpen = !helpOpen; profileOpen = false; powerOpen = false; }}
+							class="flex items-center rounded-md border-2 border-blue-500/50 p-1.5 text-muted-foreground transition-all hover:bg-accent hover:text-accent-foreground hover:border-blue-400/80 hover:shadow-[0_0_12px_rgba(96,165,250,0.4)] active:shadow-none"
+							title="Help & Community"
+						>
+							<CircleHelp size={15} />
+						</button>
+						{#if helpOpen}
+							<div class="absolute right-0 top-full mt-2 z-50 w-64 rounded-md border border-border bg-popover p-2 shadow-lg"
+								onmouseleave={() => helpOpen = false}>
+								<a href="https://github.com/nasty-project" target="_blank" rel="noopener noreferrer"
+									class="flex items-center gap-2 rounded px-3 py-2 text-sm text-popover-foreground no-underline hover:bg-accent transition-colors">
+									<Github size={15} />
+									GitHub
+									<ExternalLink size={12} class="ml-auto text-muted-foreground" />
+								</a>
+								<a href="https://webchat.oftc.net/?channels=#bcachefs" target="_blank" rel="noopener noreferrer"
+									class="flex items-center gap-2 rounded px-3 py-2 text-sm text-popover-foreground no-underline hover:bg-accent transition-colors">
+									<MessageCircle size={15} />
+									bcachefs IRC (OFTC)
+									<ExternalLink size={12} class="ml-auto text-muted-foreground" />
+								</a>
+								<a href="https://matrix.to/#/#_oftc_%23bcache:matrix.org" target="_blank" rel="noopener noreferrer"
+									class="flex items-center gap-2 rounded px-3 py-2 text-sm text-popover-foreground no-underline hover:bg-accent transition-colors">
+									<MessageCircle size={15} />
+									bcachefs Matrix
+									<ExternalLink size={12} class="ml-auto text-muted-foreground" />
+								</a>
+							</div>
+						{/if}
+					</div>
 
 					<!-- Theme toggle -->
 					<button
