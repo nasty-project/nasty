@@ -150,24 +150,26 @@
 	}
 </script>
 
-<div class="{fullscreen ? 'fixed inset-0 z-50 flex flex-col bg-[#0f1117] p-4' : 'flex h-full flex-col'}">
-	<div class="mb-1 flex shrink-0 items-center gap-3">
-		{#if status === 'disconnected'}
-			<Button size="sm" onclick={reconnect}>Reconnect</Button>
-		{/if}
-		<button
-			onclick={() => { fullscreen = !fullscreen; setTimeout(() => fitAddon?.fit(), 0); }}
-			class="ml-auto flex items-center rounded-md border border-border p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-			title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-		>
-			{#if fullscreen}
-				<Minimize2 size={14} />
-			{:else}
-				<Maximize2 size={14} />
+<div class="{fullscreen ? 'fixed inset-0 z-50 flex flex-col bg-[#0f1117]' : 'flex h-full flex-col'}">
+	<div class="relative flex-1 min-h-0 overflow-hidden {fullscreen ? '' : 'rounded-lg border border-border'} p-1" style="background: #0f1117">
+		<div bind:this={terminalEl} class="h-full w-full"></div>
+		<div class="absolute top-2 right-2 flex items-center gap-2 z-10">
+			{#if status === 'disconnected'}
+				<Button size="sm" onclick={reconnect}>Reconnect</Button>
 			{/if}
-		</button>
+			<button
+				onclick={() => { fullscreen = !fullscreen; setTimeout(() => fitAddon?.fit(), 0); }}
+				class="flex items-center rounded-md bg-black/50 p-1.5 text-muted-foreground/60 transition-colors hover:bg-black/80 hover:text-foreground"
+				title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+			>
+				{#if fullscreen}
+					<Minimize2 size={14} />
+				{:else}
+					<Maximize2 size={14} />
+				{/if}
+			</button>
+		</div>
 	</div>
-	<div class="flex-1 min-h-0 overflow-hidden rounded-lg border border-border p-1" style="background: #0f1117" bind:this={terminalEl}></div>
 </div>
 
 <style>
