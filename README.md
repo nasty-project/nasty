@@ -30,9 +30,22 @@ NASty is a self-contained NAS operating system that turns commodity hardware int
 
 ## Getting Started
 
-Download the latest ISO from [Releases](../../releases) and boot it on your hardware. The installer walks you through disk selection and initial setup.
+1. Download the latest ISO from [Releases](../../releases)
+2. Boot it on your hardware — the installer walks you through disk selection and initial setup
+3. Open the WebUI at `https://<nasty-ip>`
+4. Default credentials: **admin** / **admin**
 
-Default credentials: **admin** / **admin**
+## Update Flavors
+
+NASty has three update flavors — choose your adventure:
+
+| Flavor | What you get | How to get it |
+|--------|-------------|---------------|
+| **Mild** | Tagged stable releases (`v0.0.1`) | Default. Safe, tested, boring. |
+| **Spicy** | Pre-release builds (`s0.0.1`) | New features, occasional heartburn. |
+| **Nasty** | Latest commit on main | Bleeding edge — you asked for it. |
+
+Switch flavors from **Settings → Update → Flavor** in the WebUI.
 
 ## Architecture
 
@@ -43,6 +56,14 @@ Default credentials: **admin** / **admin**
 | OS | NixOS |
 | Filesystem | bcachefs |
 
+## Project Structure
+
+```
+engine/         Rust workspace (nasty-engine, nasty-storage, nasty-sharing, nasty-system, nasty-vm, nasty-apps)
+webui/          SvelteKit application
+nixos/          NixOS modules and ISO configuration
+```
+
 ## Related Projects
 
 | Repository | Description |
@@ -51,10 +72,16 @@ Default credentials: **admin** / **admin**
 | [nasty-chart](https://github.com/nasty-project/nasty-chart) | Helm chart for the CSI driver |
 | [nasty-go](https://github.com/nasty-project/nasty-go) | Go client library for the NASty API |
 | [nasty-plugin](https://github.com/nasty-project/nasty-plugin) | kubectl plugin (`kubectl nasty`) |
+| [nasty-tests](https://github.com/nasty-project/nasty-tests) | Integration test suite |
+| [nasty-telemetry](https://github.com/nasty-project/nasty-telemetry) | Anonymous usage telemetry |
 
 ## FAQ
 
 See [FAQ.md](FAQ.md) — covers why NASty exists, why bcachefs over ZFS, why NixOS, production readiness, and more.
+
+## Telemetry
+
+NASty collects anonymous usage stats (drive count, total/used storage) to help us understand how it's used. Enabled by default, disable anytime from **Settings → Telemetry**. See [nasty-telemetry](https://github.com/nasty-project/nasty-telemetry) for details on exactly what's collected.
 
 ## License
 

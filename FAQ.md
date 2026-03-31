@@ -37,8 +37,9 @@ No. NASty is experimental and under active development. bcachefs itself is still
 That said, NASty is probably the most thoroughly tested one-person NAS project you'll find:
 
 - **132 end-to-end integration tests** across all 4 protocols (NFS, SMB, iSCSI, NVMe-oF) — snapshots, clones, volume expansion, crash simulation, concurrent operations, StatefulSets, access modes, adoption, and more
+- **370 integration tests** across all protocols (NFS, SMB, iSCSI, NVMe-oF) including snapshots, clones, and data integrity
 - **76 CSI sanity tests** verifying spec compliance
-- Tests run against a real NASty instance on Oracle Cloud ARM (not mocks) with a real k3s cluster provisioning real volumes over real network protocols
+- **24-25 E2E tests per block protocol** (iSCSI, NVMe-oF) run against a real NASty instance with a real k3s cluster
 - CI/CD pipeline builds, lints, tests, and publishes container images automatically
 - Tested by an elite team consisting of me, myself, I, my alter ego, my evil twin, my inner child, my future self, my past self, my impostor syndrome, my caffeine-fueled persona, and a rubber duck named QA
 
