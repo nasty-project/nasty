@@ -512,11 +512,24 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     Err(_) => false,
                 };
 
-                // Check reconcile status for stalled work
+                // Check reconcile status for stalled work.
+                // The raw output has a "pending:" row with per-column counts.
+                // Only flag as stalled if scan_pending > 0 or any pending count is non-zero.
                 let reconcile_stalled = match state.filesystems.reconcile_status(&fs.name).await {
                     Ok(s) => {
                         let raw = s.raw.to_lowercase();
-                        raw.contains("pending") && !raw.contains("running")
+                        // Check "scan pending: N" where N > 0
+                        let scan_pending = raw.lines()
+                            .find(|l| l.contains("scan pending"))
+                            .and_then(|l| l.split_whitespace().last())
+                            .and_then(|n| n.parse::<u64>().ok())
+                            .unwrap_or(0) > 0;
+                        // Check "pending:" row for any non-zero value
+                        let work_pending = raw.lines()
+                            .find(|l| l.trim().starts_with("pending:"))
+                            .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
+                            .unwrap_or(false);
+                        (scan_pending || work_pending) && !raw.contains("running")
                     }
                     Err(_) => false,
                 };
