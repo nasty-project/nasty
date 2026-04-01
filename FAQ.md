@@ -6,7 +6,7 @@ Because bcachefs deserves a proper NAS appliance, and nobody was building one.
 
 Honestly? Curiosity, caffeine, and AI.
 
-bcachefs is arguably the most interesting Linux filesystem since I'm on this planet. And I'm 46. But using it for NAS meant CLI-only. NASty wraps it in an appliance with a WebUI, NFS/SMB/iSCSI/NVMe-oF, a Kubernetes CSI driver, and NixOS for atomic updates. One human, one AI, zero business plan.
+bcachefs is arguably the most interesting Linux filesystem since I'm on this planet. But using it for NAS meant CLI-only. NASty wraps it in an appliance with a WebUI, NFS/SMB/iSCSI/NVMe-oF, a Kubernetes CSI driver, and NixOS for atomic updates. One human, one AI, zero business plan.
 
 ## Why bcachefs instead of ZFS?
 
