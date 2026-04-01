@@ -19,11 +19,6 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Inject GitHub token for updates
-        run: |
-          echo "${{ secrets.NASTY_GITHUB_TOKEN }}" > nixos/github-token
-          git add nixos/github-token
-
       - name: Compute npm deps hash
         run: |
           HASH=$(nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json 2>/dev/null)
