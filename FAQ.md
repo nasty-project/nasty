@@ -69,6 +69,20 @@ In bcachefs, a snapshot IS a subvolume. It's a first-class citizen, not a depend
 
 A clone is just a writable snapshot. One command: `bcachefs subvolume snapshot` (without `-r`). Instant, COW, fully independent. No clone modes, no send/receive for independence.
 
+## How can I help?
+
+Try it. Break it. Tell me what sucks. Open issues. Send patches. Or just use it and let the telemetry tell me you exist — that alone is motivating.
+
+NASty is a one-person project and I'd love it to grow beyond that. Whether you're into Rust, SvelteKit, NixOS, Kubernetes, bcachefs, or just want a NAS that doesn't feel like it was designed in 2005 — there's something here for you.
+
+The best way to start:
+- **Use it** — install on spare hardware, play with it, find the rough edges
+- **File issues** — even "this confused me" is valuable feedback
+- **Join the conversation** — bcachefs IRC on OFTC (`#bcachefs`) or [Matrix](https://matrix.to/#/#_oftc_%23bcache:matrix.org)
+- **Contribute code** — pick an issue, send a PR, or just improve something that bothers you
+
+No contribution is too small. Documentation fixes, typo corrections, better error messages — it all counts.
+
 ## Where does the name come from?
 
 NAS + ty. It's the only English word with "NAS" in it that I could think of. Maybe there are others. I don't care. Just a NAS that's a bit nasty.
