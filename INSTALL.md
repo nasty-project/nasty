@@ -95,18 +95,18 @@ echo "experimental-features = nix-command flakes" > ~/.config/nix/nix.conf
 # 9. Install tools
 nix profile install nixpkgs#nixos-install-tools nixpkgs#git
 
-# 10. Clone NASty
-git clone https://github.com/nasty-project/nasty.git /tmp/nasty
+# 10. Clone NASty directly into the target's /etc/nixos
+git clone https://github.com/nasty-project/nasty.git /mnt/etc/nixos
 
 # 11. Generate hardware configuration for your machine
-nixos-generate-config --root /mnt
+nixos-generate-config --root /mnt --dir /tmp/hw-config
 
 # 12. Copy it into the NASty flake
-cp /mnt/etc/nixos/hardware-configuration.nix /tmp/nasty/nixos/
+cp /tmp/hw-config/hardware-configuration.nix /mnt/etc/nixos/nixos/
 
 # 13. Install NASty (this takes 10-30 minutes)
 nixos-install --root /mnt \
-  --flake /tmp/nasty/nixos#nasty \
+  --flake /mnt/etc/nixos/nixos#nasty \
   --no-root-passwd
 
 # 14. Set root password
