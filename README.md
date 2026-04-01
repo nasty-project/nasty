@@ -68,6 +68,8 @@ NASty is a self-contained NAS operating system built entirely through vibecoding
 3. Open the WebUI at `https://<nasty-ip>`
 4. Default credentials: **admin** / **admin**
 
+ISO won't boot? Some UEFI firmware doesn't like NixOS ISOs. See [INSTALL.md](INSTALL.md) for an alternative installation method from any Linux live environment.
+
 ## Update Flavors
 
 NASty has three update flavors. All of them will eventually break something. The only question is how fast.
