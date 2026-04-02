@@ -84,7 +84,7 @@ in
 {
   # Pre-built packages in the ISO's Nix store so nixos-install
   # can reuse them instead of recompiling from source.
-  system.extraDependencies = [ nixpkgs nasty-engine ]
+  system.extraDependencies = [ nixpkgs nasty-engine pkgs.OVMF pkgs.OVMF.fd ]
     ++ lib.optional (nasty-rootfs-toplevel != null) nasty-rootfs-toplevel
     ++ lib.optional (nasty-webui != null) nasty-webui;
 
