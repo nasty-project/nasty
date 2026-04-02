@@ -429,7 +429,7 @@ async fn read_proc_stats(pid: u32) -> (u64, f64, u64) {
 
 /// Read the pinned bcachefs-tools commit SHA from flake.lock (12-char short form).
 async fn read_bcachefs_commit() -> Option<String> {
-    let content = tokio::fs::read_to_string("/etc/nixos/nixos/flake.lock").await.ok()?;
+    let content = tokio::fs::read_to_string("/etc/nixos/flake.lock").await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let rev = v["nodes"]["bcachefs-tools"]["locked"]["rev"].as_str()?;
     Some(rev[..rev.len().min(12)].to_string())
