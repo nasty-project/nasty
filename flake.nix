@@ -17,27 +17,7 @@
     # Helper to build packages for a given system
     mkPkgs = system: nixpkgs.legacyPackages.${system};
 
-    installerSrc = builtins.path {
-      path = self.outPath;
-      name = "nasty-installer-src";
-      filter = path: type:
-        let
-          pathStr = toString path;
-          root = toString self.outPath;
-          rel =
-            if pathStr == root then ""
-            else builtins.replaceStrings [ "${root}/" ] [ "" ] pathStr;
-        in
-          rel == ""
-          || rel == "flake.nix"
-          || rel == "flake.lock"
-          || rel == "engine"
-          || rel == "webui"
-          || rel == "nixos"
-          || nixpkgs.lib.hasPrefix "engine/" rel
-          || nixpkgs.lib.hasPrefix "webui/" rel
-          || nixpkgs.lib.hasPrefix "nixos/" rel;
-    };
+    installerSrc = self.outPath;
 
     mkEngine = system: let pkgs = mkPkgs system; in pkgs.rustPlatform.buildRustPackage {
       pname = "nasty-engine";
@@ -130,7 +110,10 @@
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
           ./nixos/modules/nasty.nix
-          ./nixos/rootfs.nix
+          ./nixos/configuration.nix
+          ({ ... }: {
+            boot.isContainer = true;
+          })
         ];
       };
 
