@@ -1,4 +1,4 @@
-{ config, pkgs, lib, nasty-engine, nasty-webui, installerSrc, nixpkgs, ... }:
+{ config, pkgs, lib, nasty-engine, nasty-webui, installerSrc, nixpkgs, nasty-rootfs-toplevel ? null, ... }:
 
 let
   nasty-grub-theme = pkgs.runCommand "nasty-grub-theme" {
@@ -85,6 +85,7 @@ in
   # Pre-built packages in the ISO's Nix store so nixos-install
   # can reuse them instead of recompiling from source.
   system.extraDependencies = [ nixpkgs nasty-engine ]
+    ++ lib.optional (nasty-rootfs-toplevel != null) nasty-rootfs-toplevel
     ++ lib.optional (nasty-webui != null) nasty-webui;
 
   # Bundle NASty source on the ISO for flake-based installation

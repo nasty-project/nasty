@@ -109,7 +109,7 @@
             });
         };
       });
-    in {
+    in rec {
       # Full NASty appliance configuration
       nasty = nixpkgs.lib.nixosSystem {
         inherit system;
@@ -123,10 +123,24 @@
         ];
       };
 
+      nasty-rootfs = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
+        modules = [
+          ./nixos/modules/bcachefs.nix
+          ./nixos/modules/linuxquota.nix
+          ./nixos/modules/nasty.nix
+          ./nixos/rootfs.nix
+        ];
+      };
+
       # ISO image for installation
       nasty-iso = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools installerSrc nixpkgs; };
+        specialArgs = {
+          inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools installerSrc nixpkgs;
+          nasty-rootfs-toplevel = nasty-rootfs.config.system.build.toplevel;
+        };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -140,7 +154,10 @@
       # Build: nix build .#nixosConfigurations.nasty-iso-sd.config.system.build.isoImage
       nasty-iso-sd = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools installerSrc nixpkgs; };
+        specialArgs = {
+          inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools installerSrc nixpkgs;
+          nasty-rootfs-toplevel = nasty-rootfs.config.system.build.toplevel;
+        };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -188,6 +205,7 @@
     packages.x86_64-linux = {
       engine = mkEngine "x86_64-linux";
       webui = mkWebui "x86_64-linux";
+      nasty-rootfs = (mkNixosConfigs "x86_64-linux").nasty-rootfs.config.system.build.toplevel;
       nasty-cloud-image = (mkNixosConfigs "x86_64-linux").nasty-cloud.config.system.build.OCIImage;
       default = mkEngine "x86_64-linux";
     };
@@ -195,6 +213,7 @@
     packages.aarch64-linux = {
       engine = mkEngine "aarch64-linux";
       webui = mkWebui "aarch64-linux";
+      nasty-rootfs = (mkNixosConfigs "aarch64-linux").nasty-rootfs.config.system.build.toplevel;
       nasty-cloud-image = (mkNixosConfigs "aarch64-linux").nasty-cloud.config.system.build.OCIImage;
       default = mkEngine "aarch64-linux";
     };
@@ -206,6 +225,7 @@
     nixosConfigurations = (mkNixosConfigs "x86_64-linux") // (
       let configs = mkNixosConfigs "aarch64-linux"; in {
         "nasty-aarch64" = configs.nasty;
+        "nasty-rootfs-aarch64" = configs.nasty-rootfs;
         "nasty-iso-aarch64" = configs.nasty-iso;
         "nasty-vm-aarch64" = configs.nasty-vm;
         "nasty-cloud-aarch64" = configs.nasty-cloud;
