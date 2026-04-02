@@ -1,8 +1,6 @@
-{ config, pkgs, lib, nasty-engine, nasty-webui, ... }:
+{ config, pkgs, lib, nasty-engine, nasty-webui, installerSrc, ... }:
 
 let
-  nastySrc = lib.cleanSource ./..;
-
   nasty-grub-theme = pkgs.runCommand "nasty-grub-theme" {
     nativeBuildInputs = [ pkgs.librsvg pkgs.imagemagick ];
   } ''
@@ -90,7 +88,7 @@ in
     ++ lib.optional (nasty-webui != null) nasty-webui;
 
   # Bundle NASty source on the ISO for flake-based installation
-  environment.etc."nasty-src".source = nastySrc;
+  environment.etc."nasty-src".source = installerSrc;
 
   # ── Branding ──────────────────────────────────────────────
   image.baseName = lib.mkForce "nasty";
@@ -116,7 +114,6 @@ in
     e2fsprogs
     dosfstools
     nixos-install-tools
-    git  # required for Nix flakes
 
     (writeShellScriptBin "nasty-install" ''
       set -euo pipefail
@@ -306,19 +303,15 @@ in
           > /mnt/etc/nixos/nixos/networking.nix
       fi
 
-      # Flakes require a git repo to resolve paths.
-      # Sparse checkout ensures future updates don't materialize dev-only files
-      # (tests/, CLAUDE.md, build-iso.sh) that have no place on an appliance.
-      cd /mnt/etc/nixos
-      git init -q
-      git remote add origin https://github.com/nasty-project/nasty.git
-      git sparse-checkout init --cone
-      git sparse-checkout set flake.nix flake.lock engine webui nixos
-      git add .
-
       echo "==> Installing NASty..."
-      echo "    (this may take a while on first install)"
-      nixos-install --flake /mnt/etc/nixos#nasty --no-root-passwd
+      echo "    validating embedded flake.lock..."
+      SYSTEM=$(${pkgs.nix}/bin/nix --extra-experimental-features 'nix-command flakes' \
+        build /mnt/etc/nixos#nixosConfigurations.nasty.config.system.build.toplevel \
+        --no-update-lock-file \
+        --no-write-lock-file \
+        --print-out-paths)
+      echo "    installing validated system closure..."
+      nixos-install --system "$SYSTEM" --no-root-passwd
 
       # Detect IP address to show in post-install message
       NASTY_IP=$(${pkgs.iproute2}/bin/ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[^ ]+' || echo "<ip>")

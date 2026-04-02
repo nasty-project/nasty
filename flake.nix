@@ -17,6 +17,28 @@
     # Helper to build packages for a given system
     mkPkgs = system: nixpkgs.legacyPackages.${system};
 
+    installerSrc = builtins.path {
+      path = self.outPath;
+      name = "nasty-installer-src";
+      filter = path: type:
+        let
+          pathStr = toString path;
+          root = toString self.outPath;
+          rel =
+            if pathStr == root then ""
+            else builtins.replaceStrings [ "${root}/" ] [ "" ] pathStr;
+        in
+          rel == ""
+          || rel == "flake.nix"
+          || rel == "flake.lock"
+          || rel == "engine"
+          || rel == "webui"
+          || rel == "nixos"
+          || nixpkgs.lib.hasPrefix "engine/" rel
+          || nixpkgs.lib.hasPrefix "webui/" rel
+          || nixpkgs.lib.hasPrefix "nixos/" rel;
+    };
+
     mkEngine = system: let pkgs = mkPkgs system; in pkgs.rustPlatform.buildRustPackage {
       pname = "nasty-engine";
       version = "0.1.0";
@@ -104,7 +126,7 @@
       # ISO image for installation
       nasty-iso = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools installerSrc; };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -118,7 +140,7 @@
       # Build: nix build .#nixosConfigurations.nasty-iso-sd.config.system.build.isoImage
       nasty-iso-sd = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools installerSrc; };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
