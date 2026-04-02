@@ -19,12 +19,13 @@
 
     installerSrc = self.outPath;
 
+    nasty-version = (builtins.fromTOML (builtins.readFile ./engine/Cargo.toml)).workspace.package.version;
+
     mkEngine = system: let pkgs = mkPkgs system; in pkgs.rustPlatform.buildRustPackage {
       pname = "nasty-engine";
-      version = "0.1.0";
+      version = nasty-version;
       src = ./engine;
       cargoLock.lockFile = ./engine/Cargo.lock;
-      NASTY_GIT_COMMIT = self.shortRev or self.dirtyShortRev or "unknown";
       meta = {
         description = "NASty NAS engine";
         license = pkgs.lib.licenses.gpl3Only;
@@ -33,7 +34,7 @@
 
     mkWebui = system: let pkgs = mkPkgs system; in pkgs.buildNpmPackage {
       pname = "nasty-webui";
-      version = "0.1.0";
+      version = nasty-version;
       src = ./webui;
       npmDepsHash = "sha256-B5xrBA4kwJk9Mwuz21/Lrl9dyo1PKKX55pVl+BDfaCc=";
       npmFlags = [ "--legacy-peer-deps" ];
@@ -46,8 +47,6 @@
         cp -r build/* $out/share/nasty-webui/
       '';
     };
-
-    nasty-version = self.shortRev or self.dirtyShortRev or "dev";
 
     mkNixosConfigs = system: let
       pkgs = mkPkgs system;
