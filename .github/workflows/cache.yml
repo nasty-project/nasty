@@ -1,0 +1,32 @@
+name: Push to Cachix
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  cachix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v16
+        with:
+          name: nasty
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Compute npm deps hash
+        run: |
+          HASH=$(nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json 2>/dev/null)
+          sed -i "s|npmDepsHash = \".*\"|npmDepsHash = \"$HASH\"|" flake.nix
+
+      - name: Build and push system closure
+        run: |
+          nix build .#nixosConfigurations.nasty.config.system.build.toplevel \
+            --no-link -L
