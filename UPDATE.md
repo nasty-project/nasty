@@ -11,13 +11,13 @@ The NixOS flake was moved from `nixos/flake.nix` to the repository root (`flake.
 The update fails with errors like:
 
 ```
-error: path '/etc/nixos/nixos/flake.nix' does not exist
+error: path '/etc/nixos/flake.nix' does not exist
 ```
 
 or:
 
 ```
-error: getting status of '/etc/nixos/nixos/flake.lock': No such file or directory
+error: getting status of '/etc/nixos/flake.lock': No such file or directory
 ```
 
 ### Fix

@@ -1,7 +1,7 @@
 //! Network configuration management.
 //!
 //! Persists user-configured settings to `/var/lib/nasty/networking.json`
-//! and generates `/etc/nixos/nixos/networking.nix` for NixOS persistence.
+//! and generates `/etc/nixos/networking.nix` for NixOS persistence.
 //! Changes are applied immediately via `ip` commands without a full nixos-rebuild.
 
 use schemars::JsonSchema;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 const JSON_PATH: &str = "/var/lib/nasty/networking.json";
-const NIX_PATH: &str = "/etc/nixos/nixos/networking.nix";
+const NIX_PATH: &str = "/etc/nixos/networking.nix";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NetworkConfig {

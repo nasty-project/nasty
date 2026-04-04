@@ -1,4 +1,4 @@
-{ config, pkgs, lib, nasty-engine, nasty-webui, installerSrc, nixpkgs, nasty-rootfs-toplevel ? null, ... }:
+{ config, pkgs, lib, nasty-engine, nasty-webui, nixpkgs, nasty-rootfs-toplevel ? null, ... }:
 
 let
   nasty-grub-theme = pkgs.runCommand "nasty-grub-theme" {
@@ -88,8 +88,9 @@ in
     ++ lib.optional (nasty-rootfs-toplevel != null) nasty-rootfs-toplevel
     ++ lib.optional (nasty-webui != null) nasty-webui;
 
-  # Bundle NASty source on the ISO for flake-based installation
-  environment.etc."nasty-src".source = installerSrc;
+  # Bundle the slim local system flake on the ISO. The installed appliance keeps
+  # only a wrapper flake plus machine-local modules under /etc/nixos.
+  environment.etc."nasty-system-flake".source = ./system-flake;
 
   # ── Branding ──────────────────────────────────────────────
   image.baseName = lib.mkForce "nasty";
@@ -237,13 +238,9 @@ in
       mkdir -p /mnt/boot
       mount "$PART1" /mnt/boot
 
-      echo "==> Copying NASty source..."
+      echo "==> Copying local system flake..."
       mkdir -p /mnt/etc/nixos
-      cp -L --no-preserve=mode /etc/nasty-src/flake.nix /mnt/etc/nixos/
-      cp -L --no-preserve=mode /etc/nasty-src/flake.lock /mnt/etc/nixos/
-      for dir in engine webui nixos; do
-        cp -rL --no-preserve=mode /etc/nasty-src/$dir /mnt/etc/nixos/
-      done
+      cp -rL --no-preserve=mode /etc/nasty-system-flake/. /mnt/etc/nixos/
 
       echo "==> Generating hardware configuration..."
       nixos-generate-config --root /mnt --dir /tmp/hw-config
@@ -265,9 +262,10 @@ in
       ' /tmp/hw-config/hardware-configuration.nix > /tmp/hw-clean.nix \
         && mv /tmp/hw-clean.nix /tmp/hw-config/hardware-configuration.nix
 
-      cp /tmp/hw-config/hardware-configuration.nix /mnt/etc/nixos/nixos/hardware-configuration.nix
+      cp /tmp/hw-config/hardware-configuration.nix /mnt/etc/nixos/hardware-configuration.nix
 
       echo "==> Writing network configuration..."
+      mkdir -p /mnt/var/lib/nasty
       if [ "$NET_MODE" = "2" ]; then
         NS_LIST=""
         for ns in $NET_DNS; do
@@ -282,7 +280,7 @@ in
           "  networking.defaultGateway = \"''${NET_GW}\";" \
           "  networking.nameservers = [''${NS_LIST} ];" \
           '}' \
-          > /mnt/etc/nixos/nixos/networking.nix
+          > /mnt/etc/nixos/networking.nix
         # Also write networking.json so WebUI shows the configured values
         printf '%s\n' \
           '{' \
@@ -301,8 +299,16 @@ in
           '{' \
           '  networking.useDHCP = true;' \
           '}' \
-          > /mnt/etc/nixos/nixos/networking.nix
+          > /mnt/etc/nixos/networking.nix
       fi
+
+      echo "==> Recording installed NASty version..."
+      NASTY_REF=$(jq -r '.nodes["nasty"].original.ref // empty' /mnt/etc/nixos/flake.lock 2>/dev/null || true)
+      NASTY_REV=$(jq -r '.nodes["nasty"].locked.rev // empty' /mnt/etc/nixos/flake.lock 2>/dev/null || true)
+      case "$NASTY_REF" in
+        v*|s*) echo "$NASTY_REF" > /mnt/var/lib/nasty/version ;;
+        *) [ -n "$NASTY_REV" ] && echo "''${NASTY_REV:0:7}" > /mnt/var/lib/nasty/version || true ;;
+      esac
 
       echo "==> Installing NASty..."
       echo "    (this may take a while on first install)"

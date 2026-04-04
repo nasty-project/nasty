@@ -13,7 +13,6 @@ const UPDATE_UNIT: &str = "nasty-update";
 const LOCAL_FLAKE_DIR: &str = "/etc/nixos";
 const SYSTEM_CONFIG_PATH: &str = "/var/lib/nasty/system-config";
 const DEFAULT_CONFIG: &str = "nasty";
-const REPO_URL: &str = "https://github.com/nasty-project/nasty.git";
 const LOCAL_REPO: &str = "/etc/nixos";
 const BCACHEFS_SWITCH_UNIT: &str = "nasty-bcachefs-switch";
 const NIXOS_FLAKE_DIR: &str = "/etc/nixos";
@@ -24,6 +23,8 @@ const BCACHEFS_SWITCH_RESULT: &str = "/var/lib/nasty/bcachefs-switch-result";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
 const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
 const GC_CONFIG_PATH: &str = "/var/lib/nasty/gc-config.json";
+const DEFAULT_NASTY_OWNER: &str = "nasty-project";
+const DEFAULT_NASTY_REPO: &str = "nasty";
 
 // ── Garbage collection config ────────────────────────────────────
 
@@ -219,6 +220,23 @@ pub struct UpdateStatus {
     pub webui_changed: bool,
 }
 
+#[derive(Debug, Clone)]
+struct NastyInputSource {
+    owner: String,
+    repo: String,
+    tracked_ref: String,
+}
+
+impl NastyInputSource {
+    fn repo_url(&self) -> String {
+        format!("https://github.com/{}/{}.git", self.owner, self.repo)
+    }
+
+    fn github_input(&self, git_ref: &str) -> String {
+        format!("github:{}/{}/{}", self.owner, self.repo, git_ref)
+    }
+}
+
 // ── Generation management ──────────────────────────────────────
 
 const GENERATION_LABELS_PATH: &str = "/var/lib/nasty/generation-labels.json";
@@ -296,24 +314,38 @@ impl UpdateService {
     pub async fn check(&self) -> Result<UpdateInfo, UpdateError> {
         let current = read_current_version().await;
         let channel = read_channel().await;
+        let nasty_input = read_nasty_input_source().await;
 
-        // Mild/Spicy: find latest matching tag (v* or s*) via git ls-remote.
-        // Nasty: track HEAD of main.
+        // Mild/Spicy: find latest matching tag (v* or s*) on the configured repo.
+        // Nasty: track the wrapper flake's configured branch/ref.
         let latest = match channel {
             ReleaseChannel::Mild | ReleaseChannel::Spicy => {
                 let pattern = channel.tag_pattern().unwrap(); // "v*" or "s*"
                 let token = read_github_token().await;
-                match check_latest_tag(token.as_deref(), pattern).await {
+                match check_latest_tag(
+                    token.as_deref(),
+                    &nasty_input.owner,
+                    &nasty_input.repo,
+                    pattern,
+                ).await {
                     Ok(tag) => tag,
                     Err(_) => "unknown".to_string(),
                 }
             }
             ReleaseChannel::Nasty => {
-                match check_via_github_api_branch("main").await {
+                match check_via_github_api_branch(
+                    &nasty_input.owner,
+                    &nasty_input.repo,
+                    &nasty_input.tracked_ref,
+                ).await {
                     Ok(sha) => sha,
                     Err(_) => {
                         let token = read_github_token().await;
-                        check_via_git_ls_remote(token.as_deref(), "refs/heads/main").await?
+                        check_via_git_ls_remote(
+                            token.as_deref(),
+                            &nasty_input.repo_url(),
+                            &format!("refs/heads/{}", nasty_input.tracked_ref),
+                        ).await?
                     }
                 }
             }
@@ -361,23 +393,47 @@ impl UpdateService {
             .await;
 
         // Build the update script:
-        // 1. Pull latest source into /etc/nixos
-        // 2. Rebuild from local flake (which has hardware-configuration.nix)
+        // 1. Update the local wrapper flake input for nasty
+        // 2. Rebuild from local flake (which keeps hardware-configuration.nix)
         let channel = read_channel().await;
-        let branch = channel.git_ref();
-        let flavor = channel.to_string(); // "mild", "spicy", "nasty"
         let token = read_github_token().await;
+        let nasty_input = read_nasty_input_source().await;
 
-        // TODO: Remove token env var once repo is public.
+        // TODO: Remove token env var once the repo access model is finalized.
         let token_env = token.as_ref()
             .map(|t| format!("access-tokens = github.com={t}"))
             .unwrap_or_default();
 
-        // Build the git credential config for non-interactive auth (engine has no TTY).
-        // url.insteadOf rewrites the remote URL so x-access-token auth works without prompts.
-        let git_insteadof = token.as_ref()
-            .map(|t| format!("-c \"url.https://x-access-token:{t}@github.com/.insteadOf=https://github.com/\""))
-            .unwrap_or_default();
+        let (update_step, installed_version_expr) = match channel {
+            ReleaseChannel::Mild | ReleaseChannel::Spicy => {
+                let pattern = channel.tag_pattern().unwrap();
+                let latest_tag = check_latest_tag(
+                    token.as_deref(),
+                    &nasty_input.owner,
+                    &nasty_input.repo,
+                    pattern,
+                ).await?;
+                (
+                    format!(
+                        "echo \"==> Pinning NASty to release {latest_tag}...\"\n\
+                         nix flake lock --override-input nasty \"{}\"",
+                        nasty_input.github_input(&latest_tag)
+                    ),
+                    format!("echo \"{latest_tag}\" > {VERSION_PATH}"),
+                )
+            }
+            ReleaseChannel::Nasty => (
+                format!(
+                    "echo \"==> Updating NASty input ({})...\"\n\
+                     nix flake update nasty",
+                    nasty_input.tracked_ref
+                ),
+                format!(
+                    "NASTY_REV=$(jq -r '.nodes[\"nasty\"].locked.rev // empty' flake.lock 2>/dev/null || true)\n\
+                     [ -n \"$NASTY_REV\" ] && echo \"${{NASTY_REV:0:7}}\" > {VERSION_PATH}"
+                ),
+            ),
+        };
 
         let local_flake = local_flake().await;
         let script = format!(
@@ -395,81 +451,9 @@ _nginx_conf() {{
 }}
 _NGINX_CONF_BEFORE=$(_nginx_conf)
 WEBUI_BEFORE=$([ -n "$_NGINX_CONF_BEFORE" ] && grep 'nasty-webui' "$_NGINX_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
-echo "==> Pulling latest source..."
+echo "==> Updating local system flake..."
 cd {LOCAL_REPO}
-
-# Preserve machine-specific hardware config
-HW_CFG="nixos/hardware-configuration.nix"
-[ -f "$HW_CFG" ] && cp "$HW_CFG" /tmp/nasty-hw-config.nix
-
-git remote set-url origin "{REPO_URL}" 2>/dev/null || git remote add origin "{REPO_URL}"
-CHANNEL={branch}
-FLAVOR={flavor}
-echo "==> Flavor: $FLAVOR (branch: $CHANNEL)"
-GIT_TERMINAL_PROMPT=0 git -c credential.helper= {git_insteadof} fetch origin
-
-# Disable sparse checkout — Nix treats missing tracked files as dirty,
-# which causes every build to get a "-dirty" version suffix.
-git sparse-checkout disable 2>/dev/null || true
-
-# Mild and Spicy use tags on main. Nasty tracks HEAD of main.
-LATEST_TAG=""
-case "$FLAVOR" in
-    mild)
-        LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
-        if [ -n "$LATEST_TAG" ]; then
-            echo "==> Checking out release $LATEST_TAG"
-            git checkout "$LATEST_TAG" --detach
-        else
-            echo "==> No v* tags found, using origin/main"
-            git reset --hard origin/main
-        fi
-        ;;
-    spicy)
-        LATEST_TAG=$(git tag -l 's*' --sort=-v:refname | head -1)
-        if [ -n "$LATEST_TAG" ]; then
-            echo "==> Checking out spicy release $LATEST_TAG"
-            git checkout "$LATEST_TAG" --detach
-        else
-            echo "==> No s* tags found, using origin/main"
-            git reset --hard origin/main
-        fi
-        ;;
-    nasty)
-        git reset --hard origin/main
-        ;;
-esac
-
-# Remove dev-only files not needed on the appliance.
-# These stay in the repo for CI/dev but shouldn't ship to users.
-for f in .github .claude CLAUDE.md; do
-    [ -e "$f" ] && git rm -rf --quiet "$f" 2>/dev/null || true
-done
-
-# Restore hardware config
-[ -f /tmp/nasty-hw-config.nix ] && cp /tmp/nasty-hw-config.nix "$HW_CFG"
-
-# Re-apply custom bcachefs-tools version if the user has set one
-if [ -f "{BCACHEFS_REF_STATE}" ]; then
-    BCACHEFS_REF=$(cat "{BCACHEFS_REF_STATE}")
-    echo "==> Re-applying custom bcachefs-tools: $BCACHEFS_REF..."
-    cd {NIXOS_FLAKE_DIR}
-    nix flake lock --override-input bcachefs-tools "{BCACHEFS_TOOLS_REPO}/$BCACHEFS_REF"
-    cd {LOCAL_REPO}
-fi
-
-# Re-apply debug checks flag if the user had it enabled
-if [ -f "{BCACHEFS_DEBUG_CHECKS_STATE}" ]; then
-    echo "==> Re-applying bcachefs debug checks..."
-    cd {NIXOS_FLAKE_DIR}
-    sed -i 's|.*@NASTY_DEBUG_CHECKS_LINE@.*|                echo "\tccflags-y += -DCONFIG_BCACHEFS_DEBUG" >> src/fs/bcachefs/Makefile  # @NASTY_DEBUG_CHECKS_LINE@|' flake.nix
-    cd {LOCAL_REPO}
-fi
-
-# Commit local changes (hw-config, removed dev files) so the tree is clean for Nix
-git add -A
-git -c user.email="nasty@localhost" -c user.name="NASty" \
-  commit -m "local: appliance adjustments" || true
+{update_step}
 
 # Generation cleanup is handled by nix.gc (systemd timer) in the NixOS config.
 # No custom GC logic needed here — just rebuild.
@@ -487,15 +471,8 @@ else
     echo "false" > {UPDATE_WEBUI_CHANGED}
 fi
 
-# Write the upstream SHA to the writable version path.
-# The flake bakes the local hw-config commit SHA into /etc/nasty-version, which
-# never matches origin/main. Writing the real upstream SHA to /var/lib/nasty/version
-# lets the engine report the correct version and stop showing false update prompts.
-if [ -n "$LATEST_TAG" ]; then
-    echo "$LATEST_TAG" > {VERSION_PATH}
-else
-    git rev-parse --short origin/main > {VERSION_PATH}
-fi
+# Write the active nasty input version to the writable version path.
+{installed_version_expr}
 
 echo "==> Update complete!"
 "#
@@ -1163,7 +1140,7 @@ echo "==> bcachefs switch complete!"
 /// hardware-configuration.nix and will block boot after the filesystem is destroyed
 /// (systemd waits forever for a device UUID that no longer exists).
 async fn sanitize_hardware_config() {
-    let path = format!("{LOCAL_REPO}/nixos/hardware-configuration.nix");
+    let path = format!("{LOCAL_REPO}/hardware-configuration.nix");
     let content = match tokio::fs::read_to_string(&path).await {
         Ok(c) => c,
         Err(_) => return,
@@ -1208,15 +1185,19 @@ fn strip_pool_mounts(content: &str) -> String {
     result
 }
 
-/// TODO: Remove once repo is public — only needed for private repo access.
-/// Check latest release tag via GitHub API (for stable channel).
+/// TODO: Remove once repo access no longer requires token fallbacks.
 /// Find the latest tag matching a glob pattern (e.g. "v*", "s*") via git ls-remote.
-async fn check_latest_tag(token: Option<&str>, pattern: &str) -> Result<String, UpdateError> {
+async fn check_latest_tag(
+    token: Option<&str>,
+    owner: &str,
+    repo: &str,
+    pattern: &str,
+) -> Result<String, UpdateError> {
     let ref_pattern = format!("refs/tags/{pattern}");
     let mut args = vec!["ls-remote", "--tags", "--sort=-v:refname"];
     let url = match token {
-        Some(t) => format!("https://x-access-token:{t}@github.com/nasty-project/nasty.git"),
-        None => "https://github.com/nasty-project/nasty.git".to_string(),
+        Some(t) => format!("https://x-access-token:{t}@github.com/{owner}/{repo}.git"),
+        None => format!("https://github.com/{owner}/{repo}.git"),
     };
     args.push(&url);
     args.push(&ref_pattern);
@@ -1270,7 +1251,7 @@ async fn check_latest_release() -> Result<String, UpdateError> {
 }
 
 /// Check latest commit on a branch via GitHub API.
-async fn check_via_github_api_branch(branch: &str) -> Result<String, UpdateError> {
+async fn check_via_github_api_branch(owner: &str, repo: &str, branch: &str) -> Result<String, UpdateError> {
     let token = tokio::fs::read_to_string(GITHUB_TOKEN_PATH)
         .await
         .map(|s| s.trim().to_string())
@@ -1280,7 +1261,7 @@ async fn check_via_github_api_branch(branch: &str) -> Result<String, UpdateError
         return Err(UpdateError::CommandFailed("empty github token".into()));
     }
 
-    let url = format!("https://api.github.com/repos/nasty-project/nasty/commits/{branch}");
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{branch}");
     let body: serde_json::Value = reqwest::Client::new()
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -1303,7 +1284,11 @@ async fn check_via_github_api_branch(branch: &str) -> Result<String, UpdateError
 
 /// Direct git ls-remote — works for public repos without auth.
 /// If a token is provided, uses url.insteadOf for non-interactive x-access-token auth.
-async fn check_via_git_ls_remote(token: Option<&str>, git_ref: &str) -> Result<String, UpdateError> {
+async fn check_via_git_ls_remote(
+    token: Option<&str>,
+    repo_url: &str,
+    git_ref: &str,
+) -> Result<String, UpdateError> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.args(["-c", "credential.helper="]);
@@ -1312,7 +1297,7 @@ async fn check_via_git_ls_remote(token: Option<&str>, git_ref: &str) -> Result<S
             "url.https://x-access-token:{t}@github.com/.insteadOf=https://github.com/"
         ));
     }
-    cmd.args(["ls-remote", REPO_URL, git_ref]);
+    cmd.args(["ls-remote", repo_url, git_ref]);
 
     let output = cmd
         .output()
@@ -1336,9 +1321,18 @@ async fn check_via_git_ls_remote(token: Option<&str>, git_ref: &str) -> Result<S
 
 async fn read_current_version() -> String {
     // Prefer the writable version written by the update script (contains the real
-    // upstream SHA). Fall back to the NixOS-baked /etc/nasty-version which may
-    // contain a local hw-config commit SHA and is therefore less reliable.
-    for path in &[VERSION_PATH, VERSION_PATH_FALLBACK] {
+    // selected tag or branch commit). Fall back to the nasty input locked in the
+    // local flake, then to the NixOS-baked /etc/nasty-version as a last resort.
+    if let Ok(s) = tokio::fs::read_to_string(VERSION_PATH).await {
+        let s = s.trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    if let Some(version) = read_locked_nasty_version().await {
+        return version;
+    }
+    for path in &[VERSION_PATH_FALLBACK] {
         if let Ok(s) = tokio::fs::read_to_string(path).await {
             let s = s.trim().to_string();
             if !s.is_empty() {
@@ -1494,6 +1488,56 @@ async fn read_flake_nix_default_ref() -> String {
         }
     }
     "unknown".to_string()
+}
+
+async fn read_nasty_input_source() -> NastyInputSource {
+    let path = format!("{NIXOS_FLAKE_DIR}/flake.lock");
+    let content = match tokio::fs::read_to_string(&path).await {
+        Ok(c) => c,
+        Err(_) => {
+            return NastyInputSource {
+                owner: DEFAULT_NASTY_OWNER.to_string(),
+                repo: DEFAULT_NASTY_REPO.to_string(),
+                tracked_ref: "main".to_string(),
+            };
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => {
+            return NastyInputSource {
+                owner: DEFAULT_NASTY_OWNER.to_string(),
+                repo: DEFAULT_NASTY_REPO.to_string(),
+                tracked_ref: "main".to_string(),
+            };
+        }
+    };
+    let node = &v["nodes"]["nasty"];
+    let owner = node["original"]["owner"]
+        .as_str()
+        .or_else(|| node["locked"]["owner"].as_str())
+        .unwrap_or(DEFAULT_NASTY_OWNER)
+        .to_string();
+    let repo = node["original"]["repo"]
+        .as_str()
+        .or_else(|| node["locked"]["repo"].as_str())
+        .unwrap_or(DEFAULT_NASTY_REPO)
+        .to_string();
+    let tracked_ref = node["original"]["ref"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("main")
+        .to_string();
+    NastyInputSource { owner, repo, tracked_ref }
+}
+
+async fn read_locked_nasty_version() -> Option<String> {
+    let path = format!("{NIXOS_FLAKE_DIR}/flake.lock");
+    let content = tokio::fs::read_to_string(&path).await.ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let node = &v["nodes"]["nasty"];
+    let rev = node["locked"]["rev"].as_str()?;
+    Some(rev[..rev.len().min(7)].to_string())
 }
 
 /// Read debug checks *configured* state (what the next DKMS build will use).

@@ -102,7 +102,7 @@ git clone https://github.com/nasty-project/nasty.git /mnt/etc/nixos
 nixos-generate-config --root /mnt --dir /tmp/hw-config
 
 # 12. Copy it into the NASty flake
-cp /tmp/hw-config/hardware-configuration.nix /mnt/etc/nixos/nixos/
+cp /tmp/hw-config/hardware-configuration.nix /mnt/etc/nixos/
 
 # 13. Install NASty (this takes 10-30 minutes)
 nixos-install --root /mnt \
