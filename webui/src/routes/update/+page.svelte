@@ -64,7 +64,7 @@
 	let firmwareUpdating: Record<string, boolean> = $state({});
 
 	const phases = [
-		{ label: 'Fetch',    marker: '==> Pulling' },
+		{ label: 'Fetch',    marker: '==> Updating local system flake' },
 		{ label: 'Build',    marker: '==> Rebuilding' },
 		{ label: 'Activate', marker: 'activating the configuration' },
 		{ label: 'Done',     marker: '==> Update complete!' },
