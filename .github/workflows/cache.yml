@@ -26,7 +26,9 @@ jobs:
           HASH=$(nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json 2>/dev/null)
           sed -i "s|npmDepsHash = \".*\"|npmDepsHash = \"$HASH\"|" flake.nix
 
-      - name: Build and push system closure
+      - name: Build and push NASty packages
         run: |
-          nix build .#nixosConfigurations.nasty.config.system.build.toplevel \
+          nix build .#packages.x86_64-linux.engine \
+            --no-link -L
+          nix build .#packages.x86_64-linux.webui \
             --no-link -L
