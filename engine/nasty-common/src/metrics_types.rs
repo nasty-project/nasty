@@ -89,6 +89,9 @@ pub struct NetIfStats {
 pub struct DiskHealth {
     /// Block device path (e.g. `/dev/sda`).
     pub device: String,
+    /// ATA/SATA port identifier (e.g. `ata5`), if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ata_port: Option<String>,
     /// Drive model name reported by SMART.
     pub model: String,
     /// Drive serial number.

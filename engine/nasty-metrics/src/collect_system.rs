@@ -334,8 +334,12 @@ async fn query_smartctl(device: &str) -> Option<DiskHealth> {
         "FAILED".to_string()
     };
 
+    let dev_name = device.strip_prefix("/dev/").unwrap_or(device);
+    let ata_port = resolve_ata_port(dev_name);
+
     Some(DiskHealth {
         device: device.to_string(),
+        ata_port,
         model: json.model_name.unwrap_or_else(|| "Unknown".into()),
         serial: json.serial_number.unwrap_or_else(|| "Unknown".into()),
         firmware: json.firmware_version.unwrap_or_else(|| "Unknown".into()),
@@ -346,4 +350,22 @@ async fn query_smartctl(device: &str) -> Option<DiskHealth> {
         smart_status,
         attributes,
     })
+}
+
+/// Resolve the ATA port for a block device by following the sysfs device path.
+/// e.g. `/sys/block/sde/device` symlink contains `ataX` in its resolved path.
+fn resolve_ata_port(dev_name: &str) -> Option<String> {
+    let link = format!("/sys/block/{dev_name}/device");
+    let resolved = std::fs::read_link(&link)
+        .or_else(|_| std::fs::canonicalize(&link))
+        .ok()?;
+    let path_str = resolved.to_str()?;
+
+    // Look for "ataX" component in the resolved path
+    for component in path_str.split('/') {
+        if component.starts_with("ata") && component[3..].chars().all(|c| c.is_ascii_digit()) {
+            return Some(component.to_string());
+        }
+    }
+    None
 }
