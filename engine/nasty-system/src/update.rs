@@ -1140,7 +1140,7 @@ echo "==> bcachefs switch complete!"
 /// hardware-configuration.nix and will block boot after the filesystem is destroyed
 /// (systemd waits forever for a device UUID that no longer exists).
 async fn sanitize_hardware_config() {
-    let path = format!("{LOCAL_REPO}/nixos/hardware-configuration.nix");
+    let path = format!("{LOCAL_REPO}/hardware-configuration.nix");
     let content = match tokio::fs::read_to_string(&path).await {
         Ok(c) => c,
         Err(_) => return,
