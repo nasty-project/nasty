@@ -440,6 +440,7 @@ in {
       kubernetes-helm   # Helm chart manager for app deployment
       kubectl           # Kubernetes CLI (also available via k3s kubectl)
       lego              # ACME client for Let's Encrypt certificates
+      croc              # peer-to-peer file transfer for sending debug reports
 
       (writeShellScriptBin "nasty-report" ''
         set -euo pipefail
