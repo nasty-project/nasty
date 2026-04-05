@@ -72,7 +72,7 @@ Both features are under active development. Contributions in these areas would h
 
 Try it. Break it. Tell me what sucks. Open issues. Send patches. Or just use it and let the telemetry tell me you exist — that alone is motivating.
 
-NASty is a one-person project and I'd love it to grow beyond that. Whether you're into Rust, SvelteKit, NixOS, Kubernetes, bcachefs, or just want a NAS that doesn't feel like it was designed in 2005 — there's something here for you.
+NASty is a small project and always looking for contributors. Whether you're into Rust, SvelteKit, NixOS, Kubernetes, bcachefs, or just want a NAS that doesn't feel like it was designed in 2005 — there's something here for you.
 
 The best way to start:
 - **Use it** — install on spare hardware, play with it, find the rough edges
