@@ -4,9 +4,7 @@
 
 Because bcachefs deserves a proper NAS appliance, and nobody was building one.
 
-Honestly? Curiosity, caffeine, and AI.
-
-bcachefs is arguably the most interesting Linux filesystem since I'm on this planet. But using it for NAS meant CLI-only. NASty wraps it in an appliance with a WebUI, NFS/SMB/iSCSI/NVMe-oF, a Kubernetes CSI driver, and NixOS for atomic updates. One human, one AI, zero business plan.
+bcachefs is arguably the most interesting Linux filesystem in years. But using it for NAS meant CLI-only. NASty wraps it in an appliance with a web UI, NFS/SMB/iSCSI/NVMe-oF sharing, a Kubernetes CSI driver, and NixOS for atomic updates.
 
 ## Why bcachefs instead of ZFS?
 
@@ -40,22 +38,13 @@ That said, NASty is probably the most thoroughly tested one-person NAS project y
 - **132 Kubernetes E2E tests** — real k3s cluster provisioning real volumes over real network protocols
 - **76 CSI sanity tests** — spec compliance verification
 - CI/CD pipeline builds, lints, tests, and publishes container images automatically
-- Tested by an elite team consisting of me, myself, I, my alter ego, my evil twin, my inner child, my future self, my past self, my impostor syndrome, my caffeine-fueled persona, and a rubber duck named QA
 
 Use it for homelabs, development, and learning. Not for storing your only copy of irreplaceable data. Yet.
-
-## What's "vibecoded" mean?
-
-NASty is developed with heavy AI assistance — architecture discussions, code generation, debugging, test analysis, and documentation are all done collaboratively with an LLM. The human (Bartosz) makes the decisions; the AI does the heavy lifting.
-
-This isn't a toy or a demo. It's a serious project built faster than a single developer could manage alone. The vibecoding approach lets one person build what would normally require a team — a full NAS appliance with engine, WebUI, CSI driver, NixOS integration, and CI/CD pipeline.
-
-The same approach was used to build [tns-csi](https://github.com/fenio/tns-csi), a TrueNAS CSI driver that has an active userbase running it in production without issues. NASty's CSI driver evolved from that codebase.
 
 ## What protocols does NASty support?
 
 - **NFS** — Network File System. Standard Linux/Unix file sharing.
-- **SMB** — Server Message Block. The thing Redmond invented to make file sharing painful. But macOS and Windows users need it, so here it is.
+- **SMB** — Server Message Block. Windows/macOS file sharing over the network.
 - **iSCSI** — Internet SCSI. Block storage over TCP. Used by Kubernetes for persistent volumes.
 - **NVMe-oF** — NVMe over Fabrics. High-performance block storage over TCP. The modern alternative to iSCSI.
 
@@ -71,13 +60,13 @@ A clone is just a writable snapshot. One command: `bcachefs subvolume snapshot` 
 
 ## What about VMs and Apps?
 
-They exist. They technically work. That's where the compliments end.
+They work, but both are early-stage.
 
-VMs use QEMU/KVM with a noVNC console in the browser. You can create a VM, boot an ISO, and use it. Will it replace Proxmox? No. Will it run a Minecraft server for your kids? Probably. Will it survive a host reboot gracefully? Define "gracefully."
+VMs use QEMU/KVM with a noVNC console in the browser. You can create a VM, boot an ISO, and use it. It won't replace Proxmox, but it handles simple workloads.
 
-Apps run on an embedded k3s instance. You can deploy containers. The UI for managing them is... optimistic. Think of it as "Kubernetes for people who enjoy suffering but want it to look pretty."
+Apps run on an embedded k3s instance. You can deploy containers from the web UI. The management interface is basic.
 
-Both features are in the "it works on my machine" phase of development. If you're into QEMU internals or k3s wrangling, this is where your contributions would make the biggest impact. Please. I'm begging.
+Both features are under active development. Contributions in these areas would have outsized impact.
 
 ## How can I help?
 

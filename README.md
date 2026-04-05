@@ -7,13 +7,13 @@
 </p>
 
 <p align="center">
-  <strong>A vibecoded NAS appliance built on bcachefs.</strong><br>
+  <strong>A NAS appliance built on bcachefs.</strong><br>
   Not a joke. Probably.
 </p>
 
 ---
 
-NASty is a self-contained NAS operating system built entirely through vibecoding. One human making decisions, one AI writing code, and a mass of caffeine turning commodity hardware into something that stores your data and serves it over every protocol invented since the 90s.
+NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity hardware into a storage appliance serving NFS, SMB, iSCSI, and NVMe-oF — managed from a single web UI, updated atomically, and rolled back when things go sideways.
 
 ## Features
 
@@ -73,13 +73,13 @@ ISO won't boot? Some UEFI firmware doesn't like NixOS ISOs. See [INSTALL.md](INS
 
 ## Update Flavors
 
-NASty has three update flavors. All of them will eventually break something. The only question is how fast.
+NASty has three update flavors:
 
 | Flavor | What you get | Description |
 |--------|-------------|-------------|
-| **Mild** | Tagged stable releases (`v0.0.1`) | Tested once. Probably fine. |
-| **Spicy** | Pre-release builds (`s0.0.1`) | Moves fast, breaks things. You were warned. |
-| **Nasty** | Latest commit on main | `git pull && pray`. No refunds. |
+| **Mild** | Tagged stable releases (`v0.0.1`) | Stable releases |
+| **Spicy** | Pre-release builds (`s0.0.1`) | Pre-release builds with newer features |
+| **Nasty** | Latest commit on main | Bleeding edge, no guarantees |
 
 Switch flavors from **Settings → Update → Flavor** in the WebUI.
 
@@ -87,11 +87,11 @@ Switch flavors from **Settings → Update → Flavor** in the WebUI.
 
 | Component | Technology | Why |
 |-----------|------------|-----|
-| Engine | Rust | Fast, safe, and the compiler yells at you so users don't have to |
-| Web UI | SvelteKit + TypeScript | React was too mainstream |
-| OS | NixOS | Because normal package managers are too predictable |
-| Filesystem | bcachefs | See "yes, you read that right" above |
-| Glue | JSON-RPC 2.0 over WebSocket | REST is for people who like latency |
+| Engine | Rust | Async runtime, handles all storage and system operations |
+| Web UI | SvelteKit + TypeScript | Reactive UI with real-time WebSocket updates |
+| OS | NixOS | Atomic updates, rollback, reproducible system config |
+| Filesystem | bcachefs | Checksumming, compression, tiering, snapshots, erasure coding |
+| API | JSON-RPC 2.0 over WebSocket | Persistent connection, bidirectional, low overhead |
 
 ## Project Structure
 
@@ -105,11 +105,11 @@ The full ecosystem (CSI driver, Helm chart, kubectl plugin, and more) lives at [
 
 ## FAQ
 
-See [FAQ.md](FAQ.md) — answers to questions like "are you insane?" and "is bcachefs production ready?" (spoiler: no and no)
+See [FAQ.md](FAQ.md) for common questions about bcachefs, NixOS, and project status.
 
 ## Telemetry
 
-I spy on you. Just kidding. I count drives and storage usage. That's literally it. I just want to know if anyone actually uses this thing. Disable anytime from **Settings → Telemetry**. Full disclosure at [nasty-telemetry](https://github.com/nasty-project/nasty-telemetry).
+NASty collects anonymous usage data (drive count and storage capacity). Disable anytime from **Settings → Telemetry**. Details: [nasty-telemetry](https://github.com/nasty-project/nasty-telemetry).
 
 ## License
 
