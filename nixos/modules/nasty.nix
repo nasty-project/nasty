@@ -402,12 +402,6 @@ in {
     # Prevent k3s from starting on boot — engine manages this.
     systemd.services.k3s.wantedBy = lib.mkForce [];
 
-    # ── VM support (OVMF firmware symlinks) ────────────────────
-    # The engine expects OVMF firmware at a well-known path. NixOS stores
-    # it in the Nix store, so we create stable symlinks.
-    environment.etc."nasty/ovmf/OVMF_CODE.fd".source = "${pkgs.OVMF.fd}/FV/OVMF_CODE.fd";
-    environment.etc."nasty/ovmf/OVMF_VARS.fd".source = "${pkgs.OVMF.fd}/FV/OVMF_VARS.fd";
-
     # ── System packages ────────────────────────────────────────
 
     environment.systemPackages = with pkgs; [
@@ -434,7 +428,6 @@ in {
       dig               # DNS debugging
       nano              # quick file editing
       qemu              # QEMU/KVM for virtual machines
-      OVMF              # UEFI firmware for VMs
       pciutils          # lspci for passthrough device discovery
       k3s               # lightweight Kubernetes for app runtime (optional)
       kubernetes-helm   # Helm chart manager for app deployment
