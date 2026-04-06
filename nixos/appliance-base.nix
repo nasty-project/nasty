@@ -61,6 +61,7 @@
     smb.enable = true;
     iscsi.enable = true;
     nvmeof.enable = true;
+    tailscale.enable = true;
   };
 
   # Branding
