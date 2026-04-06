@@ -23,7 +23,6 @@ result-*
 # Environment
 .env
 .env.local
-middleware/webui/
 
 # Claude Code
 .claude/

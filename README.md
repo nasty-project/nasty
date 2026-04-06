@@ -17,7 +17,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 ## Features
 
 - **bcachefs** — compression, checksumming, erasure coding, tiering, encryption, O(1) snapshots
-- **File sharing** — NFS, SMB — managed from one UI
+- **File sharing** — NFS, SMB 
 - **Block storage** — iSCSI, NVMe-oF
 - **Web UI** — manage filesystems, subvolumes, snapshots, shares, disks, VMs, and more
 - **Web terminal** — built-in shell access from the browser
