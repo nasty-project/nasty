@@ -909,8 +909,9 @@
 			<!-- Configuration -->
 			<div class="space-y-4">
 				<div class="flex items-center gap-3">
-					<label class="text-sm font-medium">Enable Tailscale</label>
+					<span class="text-sm font-medium">Enable Tailscale</span>
 					<button
+						aria-label="Toggle Tailscale VPN"
 						onclick={() => { tsEnabled = !tsEnabled; tsChanged = true; }}
 						class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {tsEnabled ? 'bg-primary' : 'bg-muted'}"
 					>
