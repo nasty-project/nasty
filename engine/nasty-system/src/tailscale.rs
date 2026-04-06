@@ -143,15 +143,30 @@ async fn start_tailscale(auth_key: Option<&str>) -> Result<(), String> {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    // Authenticate and connect
-    let mut args = vec!["up", "--accept-routes"];
-    if let Some(key) = auth_key {
-        args.push("--authkey");
-        args.push(key);
-    }
-    run_cmd("tailscale", &args).await?;
+    // Authenticate and connect — requires an auth key.
+    // Without a key, `tailscale up` blocks waiting for browser auth which hangs the engine.
+    let Some(key) = auth_key else {
+        info!("Tailscale daemon started but no auth key configured — skipping tailscale up");
+        return Ok(());
+    };
 
-    info!("Tailscale started and connected");
+    if key.is_empty() {
+        info!("Tailscale daemon started but auth key is empty — skipping tailscale up");
+        return Ok(());
+    }
+
+    // Use a timeout to prevent hanging if auth key is invalid or network is unreachable
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_cmd("tailscale", &["up", "--accept-routes", "--authkey", key]),
+    ).await;
+
+    match result {
+        Ok(Ok(_)) => info!("Tailscale started and connected"),
+        Ok(Err(e)) => return Err(format!("tailscale up failed: {e}")),
+        Err(_) => return Err("tailscale up timed out after 30s — check your auth key".to_string()),
+    }
+
     Ok(())
 }
 
