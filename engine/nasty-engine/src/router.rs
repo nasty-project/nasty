@@ -297,12 +297,16 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
 
         // ── Tailscale VPN ────────────────────────────────────────
         "system.tailscale.get" => ok(req, state.tailscale.get().await),
-        "system.tailscale.update" => match parse_params(req) {
-            Ok(p) => match state.tailscale.update(p).await {
+        "system.tailscale.connect" => match parse_params(req) {
+            Ok(p) => match state.tailscale.connect(p).await {
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             },
             Err(e) => invalid(req, e),
+        },
+        "system.tailscale.disconnect" => match state.tailscale.disconnect().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
         },
 
         // ── System Update ─────────────────────────────────────────

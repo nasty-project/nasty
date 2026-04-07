@@ -28,11 +28,10 @@ impl Default for TailscaleConfig {
     }
 }
 
-/// Update request for Tailscale configuration.
+/// Connect request — requires an auth key.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct TailscaleUpdate {
-    pub enabled: Option<bool>,
-    pub auth_key: Option<String>,
+pub struct TailscaleConnectRequest {
+    pub auth_key: String,
 }
 
 /// Live Tailscale status returned to the WebUI.
@@ -102,26 +101,30 @@ impl TailscaleService {
         }
     }
 
-    /// Update Tailscale configuration and apply changes.
-    pub async fn update(&self, update: TailscaleUpdate) -> Result<TailscaleStatus, String> {
+    /// Connect to Tailscale with the given auth key.
+    /// Starts the daemon, authenticates, and persists the config.
+    pub async fn connect(&self, req: TailscaleConnectRequest) -> Result<TailscaleStatus, String> {
+        if req.auth_key.is_empty() {
+            return Err("Auth key is required".to_string());
+        }
+
         let mut config = self.config.write().await;
+        info!("Connecting to Tailscale");
+        start_tailscale(Some(req.auth_key.as_str())).await?;
+        config.enabled = true;
+        config.auth_key = Some(req.auth_key);
+        save_config(&config).await.map_err(|e| format!("Failed to save config: {e}"))?;
+        drop(config);
 
-        if let Some(key) = update.auth_key {
-            config.auth_key = if key.is_empty() { None } else { Some(key) };
-        }
+        Ok(self.get().await)
+    }
 
-        if let Some(enabled) = update.enabled {
-            if enabled && !config.enabled {
-                info!("Enabling Tailscale");
-                start_tailscale(config.auth_key.as_deref()).await?;
-                config.enabled = true;
-            } else if !enabled && config.enabled {
-                info!("Disabling Tailscale");
-                stop_tailscale().await?;
-                config.enabled = false;
-            }
-        }
-
+    /// Disconnect from Tailscale and stop the daemon.
+    pub async fn disconnect(&self) -> Result<TailscaleStatus, String> {
+        let mut config = self.config.write().await;
+        info!("Disconnecting from Tailscale");
+        stop_tailscale().await?;
+        config.enabled = false;
         save_config(&config).await.map_err(|e| format!("Failed to save config: {e}"))?;
         drop(config);
 

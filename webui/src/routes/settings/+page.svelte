@@ -68,9 +68,7 @@
 	}
 	let tsStatus: TailscaleStatus | null = $state(null);
 	let tsAuthKey = $state('');
-	let tsEnabled = $state(false);
-	let savingTs = $state(false);
-	let tsChanged = $state(false);
+	let tsLoading = $state(false);
 
 	const popularDnsProviders = [
 		{ code: 'cloudflare', name: 'Cloudflare' },
@@ -182,7 +180,6 @@
 			// Load Tailscale status
 			try {
 				tsStatus = await client.call<TailscaleStatus>('system.tailscale.get');
-				tsEnabled = tsStatus.enabled;
 			} catch { /* ignore — tailscale module may not be enabled */ }
 		});
 	});
@@ -876,24 +873,12 @@
 
 		{#if !tsStatus}
 			<p class="text-muted-foreground">Loading...</p>
-		{:else}
-			<!-- Status -->
-			<div class="rounded-lg border p-4 space-y-2">
+		{:else if tsStatus.connected}
+			<!-- Connected state -->
+			<div class="rounded-lg border border-green-500/30 bg-green-500/5 p-4 space-y-2">
 				<div class="flex items-center gap-2">
-					<span class="text-sm font-medium">Status:</span>
-					{#if tsStatus.connected}
-						<span class="inline-flex items-center gap-1 text-sm text-green-500">
-							<span class="w-2 h-2 rounded-full bg-green-500"></span>Connected
-						</span>
-					{:else if tsStatus.daemon_running}
-						<span class="inline-flex items-center gap-1 text-sm text-yellow-500">
-							<span class="w-2 h-2 rounded-full bg-yellow-500"></span>Daemon running, not connected
-						</span>
-					{:else}
-						<span class="inline-flex items-center gap-1 text-sm text-muted-foreground">
-							<span class="w-2 h-2 rounded-full bg-muted-foreground"></span>Disabled
-						</span>
-					{/if}
+					<span class="w-2 h-2 rounded-full bg-green-500"></span>
+					<span class="text-sm font-medium text-green-500">Connected</span>
 				</div>
 				{#if tsStatus.ip}
 					<div class="text-sm"><span class="text-muted-foreground">Tailscale IP:</span> <span class="font-mono">{tsStatus.ip}</span></div>
@@ -906,26 +891,40 @@
 				{/if}
 			</div>
 
-			<!-- Configuration -->
-			<div class="space-y-4">
-				<div class="flex items-center gap-3">
-					<span class="text-sm font-medium">Enable Tailscale</span>
-					<button
-						aria-label="Toggle Tailscale VPN"
-						onclick={() => { tsEnabled = !tsEnabled; tsChanged = true; }}
-						class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {tsEnabled ? 'bg-primary' : 'bg-muted'}"
-					>
-						<span class="inline-block h-4 w-4 transform rounded-full bg-background transition-transform {tsEnabled ? 'translate-x-6' : 'translate-x-1'}"></span>
-					</button>
+			<Button
+				disabled={tsLoading}
+				variant="destructive"
+				onclick={async () => {
+					tsLoading = true;
+					const result = await withToast(
+						() => client.call('system.tailscale.disconnect'),
+						'Tailscale disconnected'
+					);
+					if (result) {
+						tsStatus = result as TailscaleStatus;
+						tsAuthKey = '';
+					}
+					tsLoading = false;
+				}}
+			>
+				{tsLoading ? 'Disconnecting...' : 'Disconnect'}
+			</Button>
+		{:else}
+			<!-- Disconnected state -->
+			<div class="rounded-lg border p-4">
+				<div class="flex items-center gap-2">
+					<span class="w-2 h-2 rounded-full bg-muted-foreground"></span>
+					<span class="text-sm text-muted-foreground">Not connected</span>
 				</div>
+			</div>
 
+			<div class="space-y-4">
 				<div>
 					<label for="ts-authkey" class="block text-sm font-medium mb-1">Auth Key</label>
 					<input
 						id="ts-authkey"
 						type="password"
 						bind:value={tsAuthKey}
-						oninput={() => { tsChanged = true; }}
 						placeholder="tskey-auth-..."
 						class="w-full max-w-md rounded-md border bg-background px-3 py-2 text-sm"
 					/>
@@ -935,25 +934,21 @@
 				</div>
 
 				<Button
-					disabled={!tsChanged || savingTs}
+					disabled={!tsAuthKey || tsLoading}
 					onclick={async () => {
-						savingTs = true;
+						tsLoading = true;
 						const result = await withToast(
-							() => client.call('system.tailscale.update', {
-								enabled: tsEnabled,
-								auth_key: tsAuthKey || undefined,
-							}),
-							tsEnabled ? 'Tailscale enabled' : 'Tailscale disabled'
+							() => client.call('system.tailscale.connect', { auth_key: tsAuthKey }),
+							'Tailscale connected'
 						);
 						if (result) {
 							tsStatus = result as TailscaleStatus;
-							tsEnabled = tsStatus.enabled;
-							tsChanged = false;
+							tsAuthKey = '';
 						}
-						savingTs = false;
+						tsLoading = false;
 					}}
 				>
-					{savingTs ? 'Saving...' : 'Save'}
+					{tsLoading ? 'Connecting...' : 'Connect'}
 				</Button>
 			</div>
 		{/if}
