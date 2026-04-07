@@ -163,7 +163,7 @@ async fn start_tailscale(auth_key: Option<&str>) -> Result<(), String> {
         key.len(),
         &key[..key.len().min(15)]);
 
-    let authkey_arg = format!("--authkey={key}");
+    let authkey_arg = format!("--auth-key={key}");
 
     // Use a timeout to prevent hanging if auth key is invalid or network is unreachable
     let result = tokio::time::timeout(
