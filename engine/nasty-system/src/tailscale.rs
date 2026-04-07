@@ -158,10 +158,14 @@ async fn start_tailscale(auth_key: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
 
+    // Use --authkey=VALUE format to prevent double-dashes in the key from being
+    // interpreted as argument separators by the tailscale CLI.
+    let authkey_arg = format!("--authkey={key}");
+
     // Use a timeout to prevent hanging if auth key is invalid or network is unreachable
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        run_cmd("tailscale", &["up", "--accept-routes", "--authkey", key]),
+        run_cmd("tailscale", &["up", "--accept-routes", &authkey_arg]),
     ).await;
 
     match result {
