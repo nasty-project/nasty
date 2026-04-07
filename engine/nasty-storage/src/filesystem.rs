@@ -962,8 +962,12 @@ impl FilesystemService {
 
                     if dev_type == "disk" || dev_type == "part" {
                         let path = format!("/dev/{name}");
-                        let has_mount = mountpoint.is_some();
                         let in_fs = fs_devices.contains(&path);
+                        // For bcachefs devices, trust the filesystem member list rather
+                        // than lsblk's mountpoint — stale superblocks left after device
+                        // removal cause lsblk to report a phantom mount.
+                        let has_mount = mountpoint.is_some()
+                            && fstype.as_deref() != Some("bcachefs");
                         out.push(BlockDevice {
                             path,
                             size_bytes: size,
