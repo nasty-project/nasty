@@ -158,8 +158,11 @@ async fn start_tailscale(auth_key: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
 
-    // Use --authkey=VALUE format to prevent double-dashes in the key from being
-    // interpreted as argument separators by the tailscale CLI.
+    // Log key length for debugging (never log the actual key)
+    info!("Tailscale auth key: {} chars, starts with '{}'",
+        key.len(),
+        &key[..key.len().min(15)]);
+
     let authkey_arg = format!("--authkey={key}");
 
     // Use a timeout to prevent hanging if auth key is invalid or network is unreachable
