@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::cmd;
@@ -300,12 +303,25 @@ pub struct ReconcileStatus {
     pub raw: String,
 }
 
+/// How long a cached `list()` result stays valid.
+const FS_LIST_CACHE_TTL: Duration = Duration::from_secs(3);
+
 #[derive(Clone)]
-pub struct FilesystemService;
+pub struct FilesystemService {
+    list_cache: Arc<Mutex<Option<(Instant, Vec<Filesystem>)>>>,
+}
 
 impl FilesystemService {
     pub fn new() -> Self {
-        Self
+        Self {
+            list_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Invalidate the cached `list()` result.
+    /// Call this after any mutation (create, mount, unmount, destroy, etc.).
+    pub async fn invalidate_list_cache(&self) {
+        *self.list_cache.lock().await = None;
     }
 
     /// Mount filesystems that were previously tracked as mounted.
@@ -334,8 +350,30 @@ impl FilesystemService {
         }
     }
 
-    /// List all bcachefs filesystems (mounted and known via blkid)
+    /// List all bcachefs filesystems (mounted and known via blkid).
+    /// Results are cached for up to 3 seconds to avoid redundant subprocess calls.
     pub async fn list(&self) -> Result<Vec<Filesystem>, FilesystemError> {
+        {
+            let cache = self.list_cache.lock().await;
+            if let Some((ts, ref data)) = *cache {
+                if ts.elapsed() < FS_LIST_CACHE_TTL {
+                    return Ok(data.clone());
+                }
+            }
+        }
+
+        let result = self.list_uncached().await?;
+
+        {
+            let mut cache = self.list_cache.lock().await;
+            *cache = Some((Instant::now(), result.clone()));
+        }
+
+        Ok(result)
+    }
+
+    /// Uncached implementation of filesystem listing.
+    async fn list_uncached(&self) -> Result<Vec<Filesystem>, FilesystemError> {
         let mounts = read_bcachefs_mounts().await?;
         let mut filesystems = Vec::new();
         let mut seen_uuids = std::collections::HashSet::new();
@@ -640,6 +678,8 @@ impl FilesystemService {
             })
             .collect();
 
+        self.invalidate_list_cache().await;
+
         Ok(Filesystem {
             name: req.name.clone(),
             uuid: uuid.clone(),
@@ -682,6 +722,7 @@ impl FilesystemService {
             }
         }
 
+        self.invalidate_list_cache().await;
         Ok(())
     }
 
@@ -732,6 +773,7 @@ impl FilesystemService {
         // Track mount state for boot reconciliation
         save_fs_mounted_with_opts(name, opts.clone()).await;
 
+        self.invalidate_list_cache().await;
         self.get(name).await
     }
 
@@ -749,6 +791,7 @@ impl FilesystemService {
             .map_err(FilesystemError::CommandFailed)?;
 
         info!("Filesystem '{name}' unlocked");
+        self.invalidate_list_cache().await;
         self.get(name).await
     }
 
@@ -841,9 +884,11 @@ impl FilesystemService {
             cmd::run_ok("mount", &["-o", &format!("remount,{mount_opt_str}"), &mount_point])
                 .await
                 .map_err(FilesystemError::CommandFailed)?;
+            self.invalidate_list_cache().await;
             return self.get(&req.name).await;
         }
 
+        self.invalidate_list_cache().await;
         self.get(&req.name).await
     }
 
@@ -859,6 +904,7 @@ impl FilesystemService {
         // Track mount state
         save_fs_unmounted(name).await;
 
+        self.invalidate_list_cache().await;
         Ok(())
     }
 
@@ -959,7 +1005,7 @@ impl FilesystemService {
                 // /dev/sda1 -> /dev/sda, /dev/nvme0n1p1 -> /dev/nvme0n1
                 let name = d.path.trim_start_matches("/dev/");
                 // Strip trailing partition number
-                if name.contains("nvme") || name.contains("loop") {
+                if name.contains("nvme") || name.contains("loop") || name.contains("mmcblk") {
                     name.rsplit_once('p').map(|(base, _)| format!("/dev/{base}"))
                 } else {
                     let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
@@ -1016,6 +1062,7 @@ impl FilesystemService {
         cmd::run_ok("wipefs", &["-a", path])
             .await
             .map_err(FilesystemError::CommandFailed)?;
+        self.invalidate_list_cache().await;
         Ok(())
     }
 
@@ -1064,6 +1111,7 @@ impl FilesystemService {
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
+        self.invalidate_list_cache().await;
         self.get(&req.filesystem).await
     }
 
@@ -1084,6 +1132,7 @@ impl FilesystemService {
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
+        self.invalidate_list_cache().await;
         self.get(&req.filesystem).await
     }
 
@@ -1112,6 +1161,7 @@ impl FilesystemService {
         .await;
 
         info!("Device {} marked as spare after evacuation", req.device);
+        self.invalidate_list_cache().await;
         Ok(())
     }
 
@@ -1144,6 +1194,7 @@ impl FilesystemService {
         .await
         .map_err(FilesystemError::CommandFailed)?;
 
+        self.invalidate_list_cache().await;
         self.get(&req.filesystem).await
     }
 
@@ -1162,6 +1213,7 @@ impl FilesystemService {
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
+        self.invalidate_list_cache().await;
         self.get(&req.filesystem).await
     }
 
@@ -1179,6 +1231,7 @@ impl FilesystemService {
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
+        self.invalidate_list_cache().await;
         self.get(&req.filesystem).await
     }
 
@@ -1236,6 +1289,7 @@ impl FilesystemService {
             FilesystemError::CommandFailed(format!("failed to write sysfs label: {e}"))
         })?;
 
+        self.invalidate_list_cache().await;
         self.get(&req.filesystem).await
     }
 
