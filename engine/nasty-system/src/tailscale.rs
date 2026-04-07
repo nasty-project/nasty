@@ -159,11 +159,6 @@ async fn start_tailscale(auth_key: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
 
-    // Log key length for debugging (never log the actual key)
-    info!("Tailscale auth key: {} chars, starts with '{}'",
-        key.len(),
-        &key[..key.len().min(15)]);
-
     let authkey_arg = format!("--auth-key={key}");
 
     let socket_arg = format!("--socket={TAILSCALE_SOCKET}");
