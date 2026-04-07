@@ -40,7 +40,7 @@
 
 	onMount(() => {
 		loadAll();
-		refreshTimer = setInterval(refreshStats, 5000);
+		refreshTimer = setInterval(refreshStats, 15000);
 		return () => { if (refreshTimer) clearInterval(refreshTimer); };
 	});
 

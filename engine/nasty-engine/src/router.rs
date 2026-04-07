@@ -139,7 +139,9 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
     let t0 = std::time::Instant::now();
     let response = route(&request, state, session).await;
     let elapsed = t0.elapsed();
-    if elapsed.as_millis() > 50 {
+    if elapsed.as_millis() > 5000 {
+        tracing::error!("RPC very slow: {} took {}ms", request.method, elapsed.as_millis());
+    } else if elapsed.as_millis() > 1000 {
         tracing::warn!("RPC slow: {} took {}ms", request.method, elapsed.as_millis());
     } else {
         debug!("RPC done: {} in {}ms", request.method, elapsed.as_millis());
@@ -505,58 +507,65 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 })
                 .collect();
 
-            // Collect bcachefs health from mounted filesystems
-            let mut bcachefs_health = Vec::new();
-            for fs in &filesystems {
-                if !fs.mounted { continue; }
-                let degraded = fs.options.degraded.unwrap_or(false);
-                let devices: Vec<nasty_system::alerts::BcachefsDeviceHealth> = fs.devices.iter().map(|d| {
-                    nasty_system::alerts::BcachefsDeviceHealth {
-                        path: d.path.clone(),
-                        state: d.state.clone().unwrap_or_else(|| "rw".into()),
-                        has_errors: d.has_data.as_deref().map_or(false, |s| s.contains("error")),
+            // Collect bcachefs health from mounted filesystems — run all checks in parallel
+            let mut health_tasks = tokio::task::JoinSet::new();
+            for fs in filesystems.iter().filter(|fs| fs.mounted) {
+                let fs_service = state.filesystems.clone();
+                let fs = fs.clone();
+                health_tasks.spawn(async move {
+                    let degraded = fs.options.degraded.unwrap_or(false);
+                    let devices: Vec<nasty_system::alerts::BcachefsDeviceHealth> = fs.devices.iter().map(|d| {
+                        nasty_system::alerts::BcachefsDeviceHealth {
+                            path: d.path.clone(),
+                            state: d.state.clone().unwrap_or_else(|| "rw".into()),
+                            has_errors: d.has_data.as_deref().map_or(false, |s| s.contains("error")),
+                        }
+                    }).collect();
+
+                    // Run IO error count, scrub status, and reconcile status in parallel
+                    let (io_error_count, scrub_result, reconcile_result) = tokio::join!(
+                        read_bcachefs_error_count(&fs.uuid),
+                        fs_service.scrub_status(&fs.name),
+                        fs_service.reconcile_status(&fs.name),
+                    );
+
+                    let scrub_errors = match scrub_result {
+                        Ok(s) => s.raw.to_lowercase().contains("error"),
+                        Err(_) => false,
+                    };
+
+                    let reconcile_stalled = match reconcile_result {
+                        Ok(s) => {
+                            let raw = s.raw.to_lowercase();
+                            let scan_pending = raw.lines()
+                                .find(|l| l.contains("scan pending"))
+                                .and_then(|l| l.split_whitespace().last())
+                                .and_then(|n| n.parse::<u64>().ok())
+                                .unwrap_or(0) > 0;
+                            let work_pending = raw.lines()
+                                .find(|l| l.trim().starts_with("pending:"))
+                                .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
+                                .unwrap_or(false);
+                            (scan_pending || work_pending) && !raw.contains("running")
+                        }
+                        Err(_) => false,
+                    };
+
+                    nasty_system::alerts::BcachefsHealth {
+                        fs_name: fs.name.clone(),
+                        degraded,
+                        devices,
+                        io_error_count,
+                        scrub_errors,
+                        reconcile_stalled,
                     }
-                }).collect();
-
-                // Read IO error counters from sysfs
-                let io_error_count = read_bcachefs_error_count(&fs.uuid).await;
-
-                // Check scrub status for errors
-                let scrub_errors = match state.filesystems.scrub_status(&fs.name).await {
-                    Ok(s) => s.raw.to_lowercase().contains("error"),
-                    Err(_) => false,
-                };
-
-                // Check reconcile status for stalled work.
-                // The raw output has a "pending:" row with per-column counts.
-                // Only flag as stalled if scan_pending > 0 or any pending count is non-zero.
-                let reconcile_stalled = match state.filesystems.reconcile_status(&fs.name).await {
-                    Ok(s) => {
-                        let raw = s.raw.to_lowercase();
-                        // Check "scan pending: N" where N > 0
-                        let scan_pending = raw.lines()
-                            .find(|l| l.contains("scan pending"))
-                            .and_then(|l| l.split_whitespace().last())
-                            .and_then(|n| n.parse::<u64>().ok())
-                            .unwrap_or(0) > 0;
-                        // Check "pending:" row for any non-zero value
-                        let work_pending = raw.lines()
-                            .find(|l| l.trim().starts_with("pending:"))
-                            .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
-                            .unwrap_or(false);
-                        (scan_pending || work_pending) && !raw.contains("running")
-                    }
-                    Err(_) => false,
-                };
-
-                bcachefs_health.push(nasty_system::alerts::BcachefsHealth {
-                    fs_name: fs.name.clone(),
-                    degraded,
-                    devices,
-                    io_error_count,
-                    scrub_errors,
-                    reconcile_stalled,
                 });
+            }
+            let mut bcachefs_health = Vec::new();
+            while let Some(result) = health_tasks.join_next().await {
+                if let Ok(health) = result {
+                    bcachefs_health.push(health);
+                }
             }
 
             // Collect kernel errors from metrics service

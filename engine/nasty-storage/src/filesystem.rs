@@ -999,8 +999,10 @@ impl FilesystemService {
 
         // Detect unpartitioned free space on disks with existing partitions.
         // Use sgdisk to find the largest free gap; if > 1 GiB, add a virtual "free" entry.
+        // Skip boot devices (mmcblk/eMMC) — they should never be offered as storage.
         let partitioned_disks: Vec<String> = devices.iter()
             .filter(|d| d.dev_type == "part")
+            .filter(|d| !d.path.contains("mmcblk"))
             .filter_map(|d| {
                 // /dev/sda1 -> /dev/sda, /dev/nvme0n1p1 -> /dev/nvme0n1
                 let name = d.path.trim_start_matches("/dev/");

@@ -24,7 +24,7 @@
 	onMount(async () => {
 		await Promise.all([loadBlockDevices(), loadSmartProtocol()]);
 		loading = false;
-		pollInterval = setInterval(refresh, 5000);
+		pollInterval = setInterval(refresh, 30000);
 	});
 
 	onDestroy(() => {
