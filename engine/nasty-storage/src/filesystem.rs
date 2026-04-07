@@ -2037,10 +2037,6 @@ struct FsMountOptions {
 /// Filesystem state: maps fs name → mount options.
 type FsState = HashMap<String, FsMountOptions>;
 
-async fn save_fs_mounted(fs_name: &str) {
-    save_fs_mounted_with_opts(fs_name, FsMountOptions::default()).await;
-}
-
 async fn save_fs_mounted_with_opts(fs_name: &str, opts: FsMountOptions) {
     let mut state = load_fs_state().await;
     state.insert(fs_name.to_string(), opts);

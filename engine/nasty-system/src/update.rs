@@ -1223,30 +1223,6 @@ async fn check_latest_tag(
     Err(UpdateError::CommandFailed(format!("no tags matching '{pattern}' found")))
 }
 
-async fn check_latest_release() -> Result<String, UpdateError> {
-    let token = read_github_token().await;
-    let mut req = reqwest::Client::new()
-        .get("https://api.github.com/repos/nasty-project/nasty/releases/latest")
-        .header("Accept", "application/vnd.github.v3+json")
-        .header("User-Agent", "nasty-engine");
-
-    if let Some(ref t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
-    }
-
-    let body: serde_json::Value = req
-        .send()
-        .await
-        .map_err(|e| UpdateError::CommandFailed(format!("GitHub API: {e}")))?
-        .json()
-        .await
-        .map_err(|e| UpdateError::CommandFailed(format!("parse: {e}")))?;
-
-    body["tag_name"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| UpdateError::CommandFailed("no tag_name in release response".into()))
-}
 
 /// Check latest commit on a branch via GitHub API.
 async fn check_via_github_api_branch(owner: &str, repo: &str, branch: &str) -> Result<String, UpdateError> {
