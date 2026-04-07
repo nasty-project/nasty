@@ -937,9 +937,24 @@ impl FilesystemService {
                 }
             }
 
+            // Read /proc/mounts to know which devices are *actually* mounted.
+            // lsblk's mountpoint field can be stale after bcachefs device removal/wipe.
+            let mounted_devices: std::collections::HashSet<String> = tokio::fs::read_to_string("/proc/mounts")
+                .await
+                .unwrap_or_default()
+                .lines()
+                .flat_map(|line| {
+                    // Each line: "device mountpoint fstype options ..."
+                    // bcachefs uses colon-separated multi-device: "/dev/sdb:/dev/sdc /fs/first ..."
+                    let dev_field = line.split_whitespace().next().unwrap_or("");
+                    dev_field.split(':').map(String::from).collect::<Vec<_>>()
+                })
+                .collect();
+
             fn collect_devices(
                 devs: &[serde_json::Value],
                 fs_devices: &std::collections::HashSet<String>,
+                mounted_devices: &std::collections::HashSet<String>,
                 out: &mut Vec<BlockDevice>,
             ) {
                 for dev in devs {
@@ -963,29 +978,25 @@ impl FilesystemService {
                     if dev_type == "disk" || dev_type == "part" {
                         let path = format!("/dev/{name}");
                         let in_fs = fs_devices.contains(&path);
-                        // For bcachefs devices, trust the filesystem member list rather
-                        // than lsblk's mountpoint — stale superblocks left after device
-                        // removal cause lsblk to report a phantom mount.
-                        let has_mount = mountpoint.is_some()
-                            && fstype.as_deref() != Some("bcachefs");
+                        let actually_mounted = mounted_devices.contains(&path);
                         out.push(BlockDevice {
                             path,
                             size_bytes: size,
                             dev_type: dev_type.to_string(),
                             mount_point: mountpoint,
                             fs_type: fstype,
-                            in_use: has_mount || in_fs,
+                            in_use: in_fs || actually_mounted,
                             rotational,
                             device_class,
                         });
                     }
 
                     if let Some(children) = dev.get("children").and_then(|v| v.as_array()) {
-                        collect_devices(children, fs_devices, out);
+                        collect_devices(children, fs_devices, mounted_devices, out);
                     }
                 }
             }
-            collect_devices(blockdevices, &used_devices, &mut devices);
+            collect_devices(blockdevices, &used_devices, &mounted_devices, &mut devices);
         }
 
         // Mark parent disks as in_use if any of their partitions are in_use.
