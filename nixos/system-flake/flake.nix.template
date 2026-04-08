@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.4";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.5";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
     # Installer payload template. The ISO builder substitutes the tracked
