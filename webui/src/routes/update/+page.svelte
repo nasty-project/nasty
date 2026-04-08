@@ -175,6 +175,10 @@
 		}));
 	}
 
+	function isForcedVersionUpdate(row: VersionRow): boolean {
+		return row.url.trim() !== row.initialUrl;
+	}
+
 	function setTab(tab: Tab) {
 		activeTab = tab;
 		if (typeof window !== 'undefined') {
@@ -214,7 +218,7 @@
 
 		if (!await confirm(
 			'Switch upstream inputs?',
-			`This will write the selected input URLs directly into /etc/nixos/flake.nix and refresh these inputs in flake.lock: ${refreshedLabel}. Changed URLs are always refreshed even if their update toggle is off. If flake.lock changes, the system rebuild starts immediately. Changed URLs: ${changedLabel}.`
+			`This will write the selected input URLs directly into /etc/nixos/flake.nix and refresh these inputs in flake.lock: ${refreshedLabel}. URL changes are always refreshed to keep flake.lock consistent. If flake.lock changes, the system rebuild starts immediately. Changed URLs: ${changedLabel}.`
 		)) return;
 
 		await doVersionSwitch();
@@ -384,16 +388,12 @@
 		>Firmware</button>
 	</div>
 
-	{#if activeTab === 'version'}
-		<Card class="mb-6">
-			<CardHeader>
-				<CardTitle>Upstream</CardTitle>
-				<CardDescription>
-					Read directly from the installed system’s <code class="font-mono">/etc/nixos/flake.nix</code> and <code class="font-mono">/etc/nixos/flake.lock</code>.
-					Changed input URLs are refreshed automatically so the lock file stays consistent.
-				</CardDescription>
-			</CardHeader>
-			<CardContent class="space-y-4">
+		{#if activeTab === 'version'}
+			<Card class="mb-6">
+				<CardHeader>
+					<CardTitle>Upstream</CardTitle>
+				</CardHeader>
+				<CardContent class="space-y-4">
 				{#if info}
 					<div class="rounded-lg border border-border/60 bg-muted/20 px-4 py-3 text-sm">
 						<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed NASty</div>
@@ -419,24 +419,22 @@
 										class="font-mono text-sm"
 									/>
 								</div>
-								<label class="flex items-center gap-2 text-sm text-muted-foreground lg:w-28 lg:justify-end">
-									<input
-										type="checkbox"
-										bind:checked={row.update}
-										disabled={startingSwitch || status?.state === 'running'}
-										class="h-4 w-4 rounded border-input"
-									/>
-									<span>Update</span>
-								</label>
+									<label class="flex items-center gap-2 text-sm text-muted-foreground lg:w-28 lg:justify-end">
+										<input
+											type="checkbox"
+											checked={row.update || isForcedVersionUpdate(row)}
+											disabled={startingSwitch || status?.state === 'running' || isForcedVersionUpdate(row)}
+											onchange={(event) => {
+												row.update = (event.currentTarget as HTMLInputElement).checked;
+											}}
+											class="h-4 w-4 rounded border-input"
+										/>
+										<span>Update</span>
+									</label>
+								</div>
 							</div>
-							{#if row.url.trim() !== row.initialUrl}
-								<p class="mt-2 text-xs text-blue-400">
-									URL changed from <code class="font-mono">{row.initialUrl}</code>. This input will be refreshed on Switch even if its toggle is off.
-								</p>
-							{/if}
-						</div>
-					{/each}
-				</div>
+						{/each}
+					</div>
 
 				<div class="flex flex-wrap items-center justify-between gap-3">
 					<p class="text-xs text-muted-foreground">
