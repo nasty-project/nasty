@@ -1164,20 +1164,19 @@ impl FilesystemService {
             ));
         }
 
-        info!("Evacuating device {} in filesystem '{}'", req.device, req.filesystem);
-        cmd::run_ok("bcachefs", &["device", "evacuate", &req.device])
-            .await
-            .map_err(FilesystemError::CommandFailed)?;
+        let device = req.device.clone();
+        let fs_name = req.filesystem.clone();
+        info!("Starting evacuation of device {} in filesystem '{}'", device, fs_name);
 
-        // Mark as spare so bcachefs won't write new data to it and the UI
-        // shows a clear visual change (amber "spare" instead of green "rw").
-        let _ = cmd::run_ok(
-            "bcachefs",
-            &["device", "set-state", "spare", &req.device],
-        )
-        .await;
+        // Spawn evacuation in background — this can take hours for large devices.
+        // bcachefs sets the device state to "evacuating" automatically.
+        tokio::spawn(async move {
+            match cmd::run_ok("bcachefs", &["device", "evacuate", &device]).await {
+                Ok(_) => info!("Evacuation of {} in '{}' completed", device, fs_name),
+                Err(e) => warn!("Evacuation of {} in '{}' failed: {}", device, fs_name, e),
+            }
+        });
 
-        info!("Device {} marked as spare after evacuation", req.device);
         self.invalidate_list_cache().await;
         Ok(())
     }
