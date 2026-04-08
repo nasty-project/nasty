@@ -1,8 +1,11 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use rnix::ast::{self};
+use rowan::ast::AstNode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tracing::info;
 
 /// Primary version path — writable by the update script, not managed by NixOS.
@@ -21,8 +24,10 @@ const BCACHEFS_SWITCH_RESULT: &str = "/var/lib/nasty/bcachefs-switch-result";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
 const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
 const GC_CONFIG_PATH: &str = "/var/lib/nasty/gc-config.json";
+const VERSION_SWITCH_BACKUP_DIR: &str = "/var/lib/nasty/etc-nixos-backup";
 const DEFAULT_NASTY_OWNER: &str = "nasty-project";
 const DEFAULT_NASTY_REPO: &str = "nasty";
+const VERSION_INPUT_NAMES: [&str; 3] = ["nixpkgs", "bcachefs-tools", "nasty"];
 
 // ── Garbage collection config ────────────────────────────────────
 
@@ -38,11 +43,16 @@ pub struct GcConfig {
     pub max_age_days: u32,
 }
 
-fn default_keep_generations() -> u32 { 20 }
+fn default_keep_generations() -> u32 {
+    20
+}
 
 impl Default for GcConfig {
     fn default() -> Self {
-        Self { keep_generations: 20, max_age_days: 0 }
+        Self {
+            keep_generations: 20,
+            max_age_days: 0,
+        }
     }
 }
 
@@ -57,7 +67,8 @@ impl GcConfig {
     pub async fn save(&self) -> Result<(), UpdateError> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| UpdateError::CommandFailed(e.to_string()))?;
-        tokio::fs::write(GC_CONFIG_PATH, json).await
+        tokio::fs::write(GC_CONFIG_PATH, json)
+            .await
             .map_err(|e| UpdateError::CommandFailed(e.to_string()))
     }
 }
@@ -97,8 +108,13 @@ impl ReleaseChannel {
     /// GitHub API endpoint for checking latest commit.
     pub fn github_api_url(&self) -> String {
         match self {
-            Self::Mild => "https://api.github.com/repos/nasty-project/nasty/releases/latest".to_string(),
-            _ => format!("https://api.github.com/repos/nasty-project/nasty/commits/{}", self.git_ref()),
+            Self::Mild => {
+                "https://api.github.com/repos/nasty-project/nasty/releases/latest".to_string()
+            }
+            _ => format!(
+                "https://api.github.com/repos/nasty-project/nasty/commits/{}",
+                self.git_ref()
+            ),
         }
     }
 
@@ -151,7 +167,6 @@ async fn write_channel(channel: ReleaseChannel) -> Result<(), std::io::Error> {
 // and revert check() to use git ls-remote directly.
 const GITHUB_TOKEN_PATH: &str = "/var/lib/nasty/github-token";
 
-
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BcachefsToolsInfo {
     /// The ref in flake.lock original (e.g. "v1.37.0", "master", commit sha)
@@ -183,6 +198,39 @@ pub struct BcachefsToolsSwitchRequest {
     /// Build with CONFIG_BCACHEFS_DEBUG for extra runtime assertions. Has performance cost.
     #[serde(default)]
     pub debug_checks: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct VersionInputInfo {
+    /// Flake input name (e.g. `nixpkgs`).
+    pub name: String,
+    /// Exact `input.url` string from `/etc/nixos/flake.nix`.
+    pub url: String,
+    /// Locked commit SHA from `/etc/nixos/flake.lock` (shortened to 12 chars).
+    pub rev: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct VersionInfo {
+    /// Inputs shown on the Version page in fixed display order.
+    pub inputs: Vec<VersionInputInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct VersionSwitchInput {
+    /// Flake input name.
+    pub name: String,
+    /// Replacement URL to write to `/etc/nixos/flake.nix`.
+    pub url: String,
+    /// Whether this input should be refreshed in `flake.lock`.
+    #[serde(default)]
+    pub update: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VersionSwitchRequest {
+    /// Requested URLs and update flags for the Version page.
+    pub inputs: Vec<VersionSwitchInput>,
 }
 
 #[derive(Debug, Error)]
@@ -223,6 +271,13 @@ struct NastyInputSource {
     owner: String,
     repo: String,
     tracked_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedFlakeInput {
+    url: String,
+    value_start: usize,
+    value_end: usize,
 }
 
 impl NastyInputSource {
@@ -296,13 +351,49 @@ impl UpdateService {
         }
     }
 
+    /// Read the exact upstream input URLs and locked revs from the live
+    /// `/etc/nixos` flake on the installed system.
+    pub async fn version_info(&self) -> Result<VersionInfo, UpdateError> {
+        self.restore_version_backup_if_needed().await?;
+
+        let urls = read_flake_input_urls().await?;
+        let revs = read_flake_lock_revs().await;
+
+        let mut inputs = Vec::with_capacity(VERSION_INPUT_NAMES.len());
+        for name in VERSION_INPUT_NAMES {
+            let url = urls.get(name).cloned().ok_or_else(|| {
+                UpdateError::CommandFailed(format!(
+                    "missing {name}.url in {NIXOS_FLAKE_DIR}/flake.nix"
+                ))
+            })?;
+            inputs.push(VersionInputInfo {
+                name: name.to_string(),
+                url,
+                rev: revs.get(name).cloned(),
+            });
+        }
+
+        Ok(VersionInfo { inputs })
+    }
+
+    /// Best-effort page-leave cleanup for the Version tab.
+    /// If a failed/abandoned switch left a backup behind and no rebuild is
+    /// running anymore, restore it so `/etc/nixos` does not stay half-edited.
+    pub async fn version_cleanup(&self) -> Result<(), UpdateError> {
+        self.restore_version_backup_if_needed().await
+    }
+
     /// Get or set the release channel.
     pub async fn get_channel(&self) -> ReleaseChannel {
         read_channel().await
     }
 
-    pub async fn set_channel(&self, channel: ReleaseChannel) -> Result<ReleaseChannel, UpdateError> {
-        write_channel(channel).await
+    pub async fn set_channel(
+        &self,
+        channel: ReleaseChannel,
+    ) -> Result<ReleaseChannel, UpdateError> {
+        write_channel(channel)
+            .await
             .map_err(|e| UpdateError::CommandFailed(format!("write channel: {e}")))?;
         info!("Release channel set to {}", channel.display_name());
         Ok(channel)
@@ -325,7 +416,9 @@ impl UpdateService {
                     &nasty_input.owner,
                     &nasty_input.repo,
                     pattern,
-                ).await {
+                )
+                .await
+                {
                     Ok(tag) => tag,
                     Err(_) => "unknown".to_string(),
                 }
@@ -335,7 +428,9 @@ impl UpdateService {
                     &nasty_input.owner,
                     &nasty_input.repo,
                     &nasty_input.tracked_ref,
-                ).await {
+                )
+                .await
+                {
                     Ok(sha) => sha,
                     Err(_) => {
                         let token = read_github_token().await;
@@ -343,7 +438,8 @@ impl UpdateService {
                             token.as_deref(),
                             &nasty_input.repo_url(),
                             &format!("refs/heads/{}", nasty_input.tracked_ref),
-                        ).await?
+                        )
+                        .await?
                     }
                 }
             }
@@ -398,7 +494,8 @@ impl UpdateService {
         let nasty_input = read_nasty_input_source().await;
 
         // TODO: Remove token env var once the repo access model is finalized.
-        let token_env = token.as_ref()
+        let token_env = token
+            .as_ref()
             .map(|t| format!("access-tokens = github.com={t}"))
             .unwrap_or_default();
 
@@ -410,7 +507,8 @@ impl UpdateService {
                     &nasty_input.owner,
                     &nasty_input.repo,
                     pattern,
-                ).await?;
+                )
+                .await?;
                 (
                     format!(
                         "echo \"==> Pinning NASty to release {latest_tag}...\"\n\
@@ -478,22 +576,23 @@ echo "==> Update complete!"
 
         // Write script to a temp file
         let script_path = "/tmp/nasty-update.sh";
-        tokio::fs::write(script_path, &script).await
-            .map_err(|e| UpdateError::CommandFailed(format!("failed to write update script: {e}")))?;
+        tokio::fs::write(script_path, &script).await.map_err(|e| {
+            UpdateError::CommandFailed(format!("failed to write update script: {e}"))
+        })?;
 
         // Launch as a transient systemd service
         // This avoids the engine's ProtectSystem restrictions
         let mut cmd = tokio::process::Command::new("systemd-run");
         cmd.args([
-                "--unit",
-                UPDATE_UNIT,
-                "--no-block",
-                "--description",
-                "NASty system update",
-                "--property=Type=oneshot",
-                "--property=StandardOutput=journal",
-                "--property=StandardError=journal",
-            ]);
+            "--unit",
+            UPDATE_UNIT,
+            "--no-block",
+            "--description",
+            "NASty system update",
+            "--property=Type=oneshot",
+            "--property=StandardOutput=journal",
+            "--property=StandardError=journal",
+        ]);
 
         // Pass engine's PATH so the script can find git, nixos-rebuild, etc.
         let path = std::env::var("PATH").unwrap_or_default();
@@ -503,11 +602,7 @@ echo "==> Update complete!"
             cmd.args(["--setenv", &format!("NIX_CONFIG={token_env}")]);
         }
 
-        cmd.args([
-                "--",
-                "bash",
-                script_path,
-            ]);
+        cmd.args(["--", "bash", script_path]);
 
         let output = cmd
             .output()
@@ -522,6 +617,179 @@ echo "==> Update complete!"
         }
 
         info!("System update started");
+        Ok(())
+    }
+
+    /// Update selected flake inputs on the installed system and rebuild if the
+    /// lock file changed.
+    pub async fn version_switch(&self, req: VersionSwitchRequest) -> Result<(), UpdateError> {
+        let update_status = self.status().await;
+        let bcachefs_status = self.bcachefs_status().await;
+        if update_status.state == "running" || bcachefs_status.state == "running" {
+            return Err(UpdateError::AlreadyRunning);
+        }
+
+        self.restore_version_backup_if_needed().await?;
+
+        let current_urls = read_flake_input_urls().await?;
+        let mut seen = HashSet::new();
+        let mut requested = HashMap::new();
+        for input in req.inputs {
+            if !VERSION_INPUT_NAMES.contains(&input.name.as_str()) {
+                return Err(UpdateError::CommandFailed(format!(
+                    "unknown input: {}",
+                    input.name
+                )));
+            }
+            if !seen.insert(input.name.clone()) {
+                return Err(UpdateError::CommandFailed(format!(
+                    "duplicate input: {}",
+                    input.name
+                )));
+            }
+            let url = input.url.trim().to_string();
+            if url.is_empty() {
+                return Err(UpdateError::CommandFailed(format!(
+                    "{} url must not be empty",
+                    input.name
+                )));
+            }
+            requested.insert(input.name.clone(), VersionSwitchInput { url, ..input });
+        }
+
+        let mut updates = Vec::new();
+        let mut url_changes = Vec::new();
+        for name in VERSION_INPUT_NAMES {
+            let current_url = current_urls.get(name).ok_or_else(|| {
+                UpdateError::CommandFailed(format!(
+                    "missing {name}.url in {NIXOS_FLAKE_DIR}/flake.nix"
+                ))
+            })?;
+            let input = requested.get(name).ok_or_else(|| {
+                UpdateError::CommandFailed(format!("missing request entry for {name}"))
+            })?;
+            let url_changed = input.url != *current_url;
+            if input.update || url_changed {
+                updates.push(name.to_string());
+            }
+            if url_changed {
+                url_changes.push((name.to_string(), input.url.clone()));
+            }
+        }
+
+        if updates.is_empty() {
+            return Err(UpdateError::CommandFailed(
+                "nothing to switch: enable at least one update or change an input URL".into(),
+            ));
+        }
+
+        sanitize_hardware_config().await;
+
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["reset-failed", UPDATE_UNIT])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["stop", UPDATE_UNIT])
+            .output()
+            .await;
+
+        let flake_path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
+        let current_flake = tokio::fs::read_to_string(&flake_path)
+            .await
+            .map_err(|e| UpdateError::CommandFailed(format!("read {flake_path}: {e}")))?;
+        let flake_replacements = url_changes
+            .iter()
+            .map(|(name, url)| (name.clone(), url.clone()))
+            .collect::<HashMap<_, _>>();
+        let rewritten_flake = rewrite_flake_input_urls(&current_flake, &flake_replacements)?;
+        let flake_temp_path = "/tmp/nasty-version-flake.nix";
+        tokio::fs::write(flake_temp_path, &rewritten_flake)
+            .await
+            .map_err(|e| UpdateError::CommandFailed(format!("write {flake_temp_path}: {e}")))?;
+
+        let update_steps = updates
+            .iter()
+            .map(|name| format!("nix flake update {name}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let local_flake = local_flake();
+        let script = format!(
+            r#"#!/bin/bash
+set -euo pipefail
+export PATH="/run/current-system/sw/bin:$PATH"
+_nginx_conf() {{
+    grep -o "/nix/store/[^' ]*nginx\.conf" \
+        /run/current-system/etc/systemd/system/nginx.service 2>/dev/null | head -1 || true
+}}
+_NGINX_CONF_BEFORE=$(_nginx_conf)
+WEBUI_BEFORE=$([ -n "$_NGINX_CONF_BEFORE" ] && grep 'nasty-webui' "$_NGINX_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
+echo "false" > {UPDATE_WEBUI_CHANGED}
+
+echo "==> Updating local system flake..."
+rm -rf {VERSION_SWITCH_BACKUP_DIR}
+cp -a {NIXOS_FLAKE_DIR} {VERSION_SWITCH_BACKUP_DIR}
+
+cd {NIXOS_FLAKE_DIR}
+LOCK_BEFORE=$(sha256sum flake.lock 2>/dev/null | awk '{{print $1}}' || true)
+cp {flake_temp_path} flake.nix
+{update_steps}
+LOCK_AFTER=$(sha256sum flake.lock 2>/dev/null | awk '{{print $1}}' || true)
+
+if [ "$LOCK_BEFORE" != "$LOCK_AFTER" ]; then
+    echo "==> Rebuilding system..."
+    NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}
+    _NGINX_CONF_AFTER=$(_nginx_conf)
+    WEBUI_AFTER=$([ -n "$_NGINX_CONF_AFTER" ] && grep 'nasty-webui' "$_NGINX_CONF_AFTER" 2>/dev/null | head -1 || echo "")
+    if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
+        echo "true" > {UPDATE_WEBUI_CHANGED}
+    fi
+    NASTY_REV=$(jq -r '.nodes["nasty"].locked.rev // empty' flake.lock 2>/dev/null || true)
+    [ -n "$NASTY_REV" ] && echo "${{NASTY_REV:0:7}}" > {VERSION_PATH}
+else
+    echo "==> No flake.lock changes detected; skipping rebuild."
+fi
+
+rm -rf {VERSION_SWITCH_BACKUP_DIR}
+echo "==> Update complete!"
+"#
+        );
+
+        let script_path = "/tmp/nasty-version-switch.sh";
+        tokio::fs::write(script_path, &script).await.map_err(|e| {
+            UpdateError::CommandFailed(format!("failed to write version switch script: {e}"))
+        })?;
+
+        let path = std::env::var("PATH").unwrap_or_default();
+        let output = tokio::process::Command::new("systemd-run")
+            .args([
+                "--unit",
+                UPDATE_UNIT,
+                "--no-block",
+                "--description",
+                "NASty version switch",
+                "--property=Type=oneshot",
+                "--property=StandardOutput=journal",
+                "--property=StandardError=journal",
+                "--setenv",
+                &format!("PATH={path}"),
+                "--",
+                "bash",
+                script_path,
+            ])
+            .output()
+            .await
+            .map_err(|e| UpdateError::CommandFailed(format!("systemd-run: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(UpdateError::CommandFailed(format!(
+                "failed to start version switch: {stderr}"
+            )));
+        }
+
+        info!("Version switch started for inputs: {}", updates.join(", "));
         Ok(())
     }
 
@@ -623,7 +891,9 @@ echo "==> Update complete!"
             .args(["list-generations", "--json"])
             .output()
             .await
-            .map_err(|e| UpdateError::CommandFailed(format!("nixos-rebuild list-generations: {e}")))?;
+            .map_err(|e| {
+                UpdateError::CommandFailed(format!("nixos-rebuild list-generations: {e}"))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -728,14 +998,19 @@ echo "==> Switch to generation {gen_id} complete!"
 
         let output = tokio::process::Command::new("systemd-run")
             .args([
-                "--unit", UPDATE_UNIT,
+                "--unit",
+                UPDATE_UNIT,
                 "--no-block",
-                "--description", &format!("NASty switch to generation {gen_id}"),
+                "--description",
+                &format!("NASty switch to generation {gen_id}"),
                 "--property=Type=oneshot",
                 "--property=StandardOutput=journal",
                 "--property=StandardError=journal",
-                "--setenv", &format!("PATH={path}"),
-                "--", "bash", script_path,
+                "--setenv",
+                &format!("PATH={path}"),
+                "--",
+                "bash",
+                script_path,
             ])
             .output()
             .await
@@ -753,11 +1028,19 @@ echo "==> Switch to generation {gen_id} complete!"
     }
 
     /// Set or clear a label on a generation.
-    pub async fn label_generation(&self, gen_id: u64, label: Option<String>) -> Result<(), UpdateError> {
+    pub async fn label_generation(
+        &self,
+        gen_id: u64,
+        label: Option<String>,
+    ) -> Result<(), UpdateError> {
         let mut labels = load_generation_labels().await;
         match label {
-            Some(l) if !l.is_empty() => { labels.insert(gen_id, l); }
-            _ => { labels.remove(&gen_id); }
+            Some(l) if !l.is_empty() => {
+                labels.insert(gen_id, l);
+            }
+            _ => {
+                labels.remove(&gen_id);
+            }
         }
         save_generation_labels(&labels).await
     }
@@ -768,9 +1051,11 @@ echo "==> Switch to generation {gen_id} complete!"
         let profile_link = format!("/nix/var/nix/profiles/system-{gen_id}-link");
         let current_link = "/nix/var/nix/profiles/system";
 
-        let gen_target = tokio::fs::read_link(&profile_link).await
-            .map_err(|_| UpdateError::CommandFailed(format!("generation {gen_id} does not exist")))?;
-        let current_target = tokio::fs::read_link(current_link).await
+        let gen_target = tokio::fs::read_link(&profile_link).await.map_err(|_| {
+            UpdateError::CommandFailed(format!("generation {gen_id} does not exist"))
+        })?;
+        let current_target = tokio::fs::read_link(current_link)
+            .await
             .map_err(|e| UpdateError::CommandFailed(format!("cannot read current profile: {e}")))?;
 
         if gen_target == current_target {
@@ -789,8 +1074,9 @@ echo "==> Switch to generation {gen_id} complete!"
         }
 
         // Remove the profile link
-        tokio::fs::remove_file(&profile_link).await
-            .map_err(|e| UpdateError::CommandFailed(format!("failed to remove generation {gen_id}: {e}")))?;
+        tokio::fs::remove_file(&profile_link).await.map_err(|e| {
+            UpdateError::CommandFailed(format!("failed to remove generation {gen_id}: {e}"))
+        })?;
 
         // Clean up the label if any
         let mut labels = load_generation_labels().await;
@@ -816,7 +1102,14 @@ echo "==> Switch to generation {gen_id} complete!"
 
     async fn bcachefs_info_uncached(&self, system: &crate::SystemService) -> BcachefsToolsInfo {
         // Run subprocess calls and file reads concurrently.
-        let ((_, kernel_rust), running_version, (lock_ref, pinned_rev), default_ref, debug_checks, (debug_symbols, debug_checks_running)) = tokio::join!(
+        let (
+            (_, kernel_rust),
+            running_version,
+            (lock_ref, pinned_rev),
+            default_ref,
+            debug_checks,
+            (debug_symbols, debug_checks_running),
+        ) = tokio::join!(
             bcachefs_version(),
             bcachefs_loaded_module_version(),
             read_flake_lock_bcachefs(),
@@ -830,7 +1123,8 @@ echo "==> Switch to generation {gen_id} complete!"
         // Use the state file as the canonical display ref when the user has switched.
         // flake.lock's original.ref always mirrors flake.nix (not updated by --override-input),
         // so it would show the old version even after a successful switch to a new rev.
-        let state_ref = tokio::fs::read_to_string(BCACHEFS_REF_STATE).await
+        let state_ref = tokio::fs::read_to_string(BCACHEFS_REF_STATE)
+            .await
             .ok()
             .map(|s| {
                 let s = s.trim().to_string();
@@ -843,14 +1137,31 @@ echo "==> Switch to generation {gen_id} complete!"
             })
             .filter(|s| !s.is_empty());
         let pinned_ref = state_ref.clone().or(lock_ref);
-        let is_custom = state_ref.as_deref().map(|r| r != default_ref).unwrap_or(false);
+        let is_custom = state_ref
+            .as_deref()
+            .map(|r| r != default_ref)
+            .unwrap_or(false);
         // Compare loaded module version against default (strip 'v' prefix for comparison)
         let default_bare = default_ref.strip_prefix('v').unwrap_or(&default_ref);
         let is_custom_running = running_version != default_bare && running_version != "unknown";
-        BcachefsToolsInfo { pinned_ref, pinned_rev, running_version, is_custom, is_custom_running, default_ref, kernel_rust, debug_symbols, debug_checks, debug_checks_running }
+        BcachefsToolsInfo {
+            pinned_ref,
+            pinned_rev,
+            running_version,
+            is_custom,
+            is_custom_running,
+            default_ref,
+            kernel_rust,
+            debug_symbols,
+            debug_checks,
+            debug_checks_running,
+        }
     }
 
-    pub async fn bcachefs_switch(&self, req: BcachefsToolsSwitchRequest) -> Result<(), UpdateError> {
+    pub async fn bcachefs_switch(
+        &self,
+        req: BcachefsToolsSwitchRequest,
+    ) -> Result<(), UpdateError> {
         // Refuse if either update unit is running
         let update_status = self.status().await;
         let switch_status = self.bcachefs_status().await;
@@ -860,14 +1171,17 @@ echo "==> Switch to generation {gen_id} complete!"
 
         let git_ref = req.git_ref.trim().to_string();
         if git_ref.is_empty() {
-            return Err(UpdateError::CommandFailed("git_ref must not be empty".into()));
+            return Err(UpdateError::CommandFailed(
+                "git_ref must not be empty".into(),
+            ));
         }
 
         // Clean up previous unit and result file
         for action in &["reset-failed", "stop"] {
             let _ = tokio::process::Command::new("systemctl")
                 .args([action, BCACHEFS_SWITCH_UNIT])
-                .output().await;
+                .output()
+                .await;
         }
         let _ = tokio::fs::remove_file(BCACHEFS_SWITCH_RESULT).await;
 
@@ -940,27 +1254,36 @@ echo "==> bcachefs switch complete!"
         );
 
         let script_path = "/tmp/nasty-bcachefs-switch.sh";
-        tokio::fs::write(script_path, &script).await
+        tokio::fs::write(script_path, &script)
+            .await
             .map_err(|e| UpdateError::CommandFailed(format!("write script: {e}")))?;
 
         let path = std::env::var("PATH").unwrap_or_default();
         let output = tokio::process::Command::new("systemd-run")
             .args([
-                "--unit", BCACHEFS_SWITCH_UNIT,
+                "--unit",
+                BCACHEFS_SWITCH_UNIT,
                 "--no-block",
-                "--description", "NASty bcachefs version switch",
+                "--description",
+                "NASty bcachefs version switch",
                 "--property=Type=oneshot",
                 "--property=StandardOutput=journal",
                 "--property=StandardError=journal",
-                "--setenv", &format!("PATH={path}"),
-                "--", "bash", script_path,
+                "--setenv",
+                &format!("PATH={path}"),
+                "--",
+                "bash",
+                script_path,
             ])
-            .output().await
+            .output()
+            .await
             .map_err(|e| UpdateError::CommandFailed(format!("systemd-run: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(UpdateError::CommandFailed(format!("failed to start: {stderr}")));
+            return Err(UpdateError::CommandFailed(format!(
+                "failed to start: {stderr}"
+            )));
         }
         info!("bcachefs switch to {git_ref} started");
         Ok(())
@@ -968,8 +1291,13 @@ echo "==> bcachefs switch complete!"
 
     pub async fn bcachefs_status(&self) -> UpdateStatus {
         let output = tokio::process::Command::new("systemctl")
-            .args(["show", BCACHEFS_SWITCH_UNIT, "--property=ActiveState,SubState,Result"])
-            .output().await;
+            .args([
+                "show",
+                BCACHEFS_SWITCH_UNIT,
+                "--property=ActiveState,SubState,Result",
+            ])
+            .output()
+            .await;
 
         let state = match output {
             Ok(out) => {
@@ -977,8 +1305,12 @@ echo "==> bcachefs switch complete!"
                 let mut active_state = "";
                 let mut result = "";
                 for line in text.lines() {
-                    if let Some(val) = line.strip_prefix("ActiveState=") { active_state = val.trim(); }
-                    if let Some(val) = line.strip_prefix("Result=") { result = val.trim(); }
+                    if let Some(val) = line.strip_prefix("ActiveState=") {
+                        active_state = val.trim();
+                    }
+                    if let Some(val) = line.strip_prefix("Result=") {
+                        result = val.trim();
+                    }
                 }
                 match active_state {
                     "active" | "activating" | "reloading" => "running".to_string(),
@@ -996,12 +1328,13 @@ echo "==> bcachefs switch complete!"
                         } else if active_state == "failed" {
                             "failed".to_string()
                         } else {
-                            tokio::fs::read_to_string(BCACHEFS_SWITCH_RESULT).await
+                            tokio::fs::read_to_string(BCACHEFS_SWITCH_RESULT)
+                                .await
                                 .ok()
                                 .map(|s| match s.trim() {
                                     "success" => "success".to_string(),
-                                    "failed"  => "failed".to_string(),
-                                    _         => "idle".to_string(),
+                                    "failed" => "failed".to_string(),
+                                    _ => "idle".to_string(),
                                 })
                                 .unwrap_or_else(|| "idle".to_string())
                         };
@@ -1016,14 +1349,22 @@ echo "==> bcachefs switch complete!"
         };
 
         let invocation_id = tokio::process::Command::new("systemctl")
-            .args(["show", BCACHEFS_SWITCH_UNIT, "--property=InvocationID", "--value"])
-            .output().await
+            .args([
+                "show",
+                BCACHEFS_SWITCH_UNIT,
+                "--property=InvocationID",
+                "--value",
+            ])
+            .output()
+            .await
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default();
 
         let mut journal_args = vec![
-            "-u".to_string(), BCACHEFS_SWITCH_UNIT.to_string(),
-            "--no-pager".to_string(), "--output=cat".to_string(),
+            "-u".to_string(),
+            BCACHEFS_SWITCH_UNIT.to_string(),
+            "--no-pager".to_string(),
+            "--output=cat".to_string(),
         ];
         if !invocation_id.is_empty() {
             journal_args.push(format!("_SYSTEMD_INVOCATION_ID={invocation_id}"));
@@ -1032,11 +1373,18 @@ echo "==> bcachefs switch complete!"
         }
 
         let log = tokio::process::Command::new("journalctl")
-            .args(&journal_args).output().await
+            .args(&journal_args)
+            .output()
+            .await
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
 
-        UpdateStatus { state, log, reboot_required: is_reboot_required().await, webui_changed: false }
+        UpdateStatus {
+            state,
+            log,
+            reboot_required: is_reboot_required().await,
+            webui_changed: false,
+        }
     }
 
     /// Get the current status of a running/completed update
@@ -1114,7 +1462,8 @@ echo "==> bcachefs switch complete!"
         // Read hint file written by the update script.
         // Default to true when state is success and the file is missing (conservative).
         let webui_changed = if state == "success" {
-            tokio::fs::read_to_string(UPDATE_WEBUI_CHANGED).await
+            tokio::fs::read_to_string(UPDATE_WEBUI_CHANGED)
+                .await
                 .ok()
                 .map(|s| s.trim() == "true")
                 .unwrap_or(true)
@@ -1128,6 +1477,30 @@ echo "==> bcachefs switch complete!"
             reboot_required: is_reboot_required().await,
             webui_changed,
         }
+    }
+
+    async fn restore_version_backup_if_needed(&self) -> Result<(), UpdateError> {
+        if tokio::fs::metadata(VERSION_SWITCH_BACKUP_DIR)
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        if self.status().await.state == "running" {
+            return Ok(());
+        }
+
+        let restore = format!(
+            r#"set -euo pipefail
+rm -rf {NIXOS_FLAKE_DIR}
+cp -a {VERSION_SWITCH_BACKUP_DIR} {NIXOS_FLAKE_DIR}
+rm -rf {VERSION_SWITCH_BACKUP_DIR}
+"#
+        );
+        run_bash_script(&restore).await?;
+        info!("Restored {NIXOS_FLAKE_DIR} from backup after an incomplete version switch");
+        Ok(())
     }
 }
 
@@ -1145,7 +1518,9 @@ async fn sanitize_hardware_config() {
     };
     let sanitized = strip_pool_mounts(&content);
     if sanitized != content {
-        info!("Removed filesystem mount entries from hardware-configuration.nix to prevent boot failure");
+        info!(
+            "Removed filesystem mount entries from hardware-configuration.nix to prevent boot failure"
+        );
         if let Err(e) = tokio::fs::write(&path, sanitized).await {
             tracing::warn!("Failed to write sanitized hardware-configuration.nix: {e}");
         }
@@ -1220,12 +1595,17 @@ async fn check_latest_tag(
         }
     }
 
-    Err(UpdateError::CommandFailed(format!("no tags matching '{pattern}' found")))
+    Err(UpdateError::CommandFailed(format!(
+        "no tags matching '{pattern}' found"
+    )))
 }
 
-
 /// Check latest commit on a branch via GitHub API.
-async fn check_via_github_api_branch(owner: &str, repo: &str, branch: &str) -> Result<String, UpdateError> {
+async fn check_via_github_api_branch(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<String, UpdateError> {
     let token = tokio::fs::read_to_string(GITHUB_TOKEN_PATH)
         .await
         .map(|s| s.trim().to_string())
@@ -1325,7 +1705,10 @@ async fn read_current_version() -> String {
 async fn is_reboot_required() -> bool {
     let paths = [
         ("/run/booted-system/kernel", "/run/current-system/kernel"),
-        ("/run/booted-system/kernel-modules", "/run/current-system/kernel-modules"),
+        (
+            "/run/booted-system/kernel-modules",
+            "/run/current-system/kernel-modules",
+        ),
     ];
     for (booted_path, current_path) in paths {
         let booted = tokio::fs::read_link(booted_path).await;
@@ -1390,10 +1773,15 @@ async fn bcachefs_version() -> (String, Option<bool>) {
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    let version = raw.split_whitespace().next().unwrap_or("unknown").to_string();
+    let version = raw
+        .split_whitespace()
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
 
     // Parse optional "kernel: CONFIG_RUST=y" / "kernel: CONFIG_RUST=n" line
-    let kernel_rust = raw.lines()
+    let kernel_rust = raw
+        .lines()
         .find(|l| l.contains("CONFIG_RUST"))
         .map(|l| l.contains("CONFIG_RUST=y"));
 
@@ -1435,22 +1823,158 @@ async fn save_generation_labels(
     Ok(())
 }
 
-/// Parse flake.nix to extract the default bcachefs-tools ref from the input URL.
-async fn read_flake_nix_default_ref() -> String {
-    let path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
-    let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("bcachefs-tools.url") {
-            // e.g. bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.0";
-            if let Some(slash_pos) = line.rfind('/') {
-                let rest = &line[slash_pos + 1..];
-                let end = rest.find('"').unwrap_or(rest.len());
-                return rest[..end].to_string();
-            }
+async fn run_bash_script(script: &str) -> Result<(), UpdateError> {
+    let output = tokio::process::Command::new("bash")
+        .args(["-lc", script])
+        .output()
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("bash: {e}")))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(UpdateError::CommandFailed(if stderr.is_empty() {
+            "bash command failed".into()
+        } else {
+            stderr
+        }))
+    }
+}
+
+fn parse_flake_input_urls(content: &str) -> Result<HashMap<String, ParsedFlakeInput>, UpdateError> {
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        let first = parsed.errors()[0].to_string();
+        return Err(UpdateError::CommandFailed(format!(
+            "failed to parse {NIXOS_FLAKE_DIR}/flake.nix: {first}"
+        )));
+    }
+
+    let mut urls = HashMap::new();
+    let root = parsed.tree();
+    for node in root
+        .syntax()
+        .descendants()
+        .filter_map(ast::AttrpathValue::cast)
+    {
+        let Some(attrpath) = node.attrpath() else {
+            continue;
+        };
+        let normalized_path = attrpath
+            .syntax()
+            .text()
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        let Some(name) = VERSION_INPUT_NAMES
+            .iter()
+            .find(|candidate| normalized_path == format!("{candidate}.url"))
+        else {
+            continue;
+        };
+        let Some(value) = node.value() else { continue };
+        let raw_value = value.syntax().text().to_string();
+        let Some(url) = unquote_nix_string(&raw_value) else {
+            continue;
+        };
+        let range = value.syntax().text_range();
+        urls.insert(
+            (*name).to_string(),
+            ParsedFlakeInput {
+                url,
+                value_start: u32::from(range.start()) as usize,
+                value_end: u32::from(range.end()) as usize,
+            },
+        );
+    }
+
+    for name in VERSION_INPUT_NAMES {
+        if !urls.contains_key(name) {
+            return Err(UpdateError::CommandFailed(format!(
+                "missing {name}.url in {NIXOS_FLAKE_DIR}/flake.nix"
+            )));
         }
     }
-    "unknown".to_string()
+
+    Ok(urls)
+}
+
+fn rewrite_flake_input_urls(
+    content: &str,
+    replacements: &HashMap<String, String>,
+) -> Result<String, UpdateError> {
+    if replacements.is_empty() {
+        return Ok(content.to_string());
+    }
+
+    let parsed = parse_flake_input_urls(content)?;
+    let mut edits = Vec::new();
+    for (name, replacement) in replacements {
+        let current = parsed.get(name).ok_or_else(|| {
+            UpdateError::CommandFailed(format!("missing {name}.url in {NIXOS_FLAKE_DIR}/flake.nix"))
+        })?;
+        edits.push((
+            current.value_start,
+            current.value_end,
+            serde_json::to_string(replacement).map_err(|e| {
+                UpdateError::CommandFailed(format!("serialize replacement URL for {name}: {e}"))
+            })?,
+        ));
+    }
+
+    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut rewritten = content.to_string();
+    for (start, end, replacement) in edits {
+        rewritten.replace_range(start..end, &replacement);
+    }
+    Ok(rewritten)
+}
+
+fn unquote_nix_string(raw: &str) -> Option<String> {
+    serde_json::from_str::<String>(raw).ok()
+}
+
+async fn read_flake_input_urls() -> Result<HashMap<String, String>, UpdateError> {
+    let path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("read {path}: {e}")))?;
+    Ok(parse_flake_input_urls(&content)?
+        .into_iter()
+        .map(|(name, parsed)| (name, parsed.url))
+        .collect())
+}
+
+async fn read_flake_lock_revs() -> HashMap<String, String> {
+    let path = format!("{NIXOS_FLAKE_DIR}/flake.lock");
+    let content = match tokio::fs::read_to_string(&path).await {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut revs = HashMap::new();
+    for name in VERSION_INPUT_NAMES {
+        if let Some(rev) = v["nodes"][name]["locked"]["rev"].as_str() {
+            revs.insert(name.to_string(), rev[..rev.len().min(12)].to_string());
+        }
+    }
+    revs
+}
+
+/// Parse flake.nix to extract the default bcachefs-tools ref from the input URL.
+async fn read_flake_nix_default_ref() -> String {
+    read_flake_input_urls()
+        .await
+        .ok()
+        .and_then(|urls| urls.get("bcachefs-tools").cloned())
+        .and_then(|url| url.rsplit('/').next().map(|s| s.to_string()))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 async fn read_nasty_input_source() -> NastyInputSource {
@@ -1491,7 +2015,11 @@ async fn read_nasty_input_source() -> NastyInputSource {
         .filter(|s| !s.is_empty())
         .unwrap_or("main")
         .to_string();
-    NastyInputSource { owner, repo, tracked_ref }
+    NastyInputSource {
+        owner,
+        repo,
+        tracked_ref,
+    }
 }
 
 async fn read_locked_nasty_version() -> Option<String> {
@@ -1507,7 +2035,9 @@ async fn read_locked_nasty_version() -> Option<String> {
 /// State file is the sole source of truth — survives git reset --hard.
 /// Note: the *running* module state is detected separately via modinfo in lib.rs.
 async fn read_debug_checks_enabled() -> bool {
-    tokio::fs::metadata(BCACHEFS_DEBUG_CHECKS_STATE).await.is_ok()
+    tokio::fs::metadata(BCACHEFS_DEBUG_CHECKS_STATE)
+        .await
+        .is_ok()
 }
 
 /// Parse flake.lock to extract the bcachefs-tools pinned ref and rev.
@@ -1523,7 +2053,8 @@ async fn read_flake_lock_bcachefs() -> (Option<String>, Option<String>) {
     };
     let node = &v["nodes"]["bcachefs-tools"];
     let pinned_ref = node["original"]["ref"].as_str().map(|s| s.to_string());
-    let pinned_rev = node["locked"]["rev"].as_str()
+    let pinned_rev = node["locked"]["rev"]
+        .as_str()
         .map(|s| s[..s.len().min(12)].to_string()); // short rev, 12 chars
     (pinned_ref, pinned_rev)
 }

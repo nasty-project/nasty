@@ -368,6 +368,16 @@ export interface BcachefsToolsInfo {
 	debug_checks_running: boolean;
 }
 
+export interface VersionInputInfo {
+	name: string;
+	url: string;
+	rev: string | null;
+}
+
+export interface VersionInfo {
+	inputs: VersionInputInfo[];
+}
+
 export interface Generation {
 	generation: number;
 	date: string;

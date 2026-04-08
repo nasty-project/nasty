@@ -14,3 +14,5 @@ tracing.workspace = true
 reqwest.workspace = true
 schemars.workspace = true
 libc.workspace = true
+rnix = "0.12"
+rowan = "0.15"
