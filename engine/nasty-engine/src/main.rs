@@ -136,10 +136,7 @@ async fn main() -> anyhow::Result<()> {
     // Runs before sd_notify_ready() — nginx won't serve until this completes.
     info!("Warming caches...");
     let t0 = std::time::Instant::now();
-    tokio::join!(
-        state.system.info(),
-        state.updates.bcachefs_info(&state.system),
-    );
+    state.system.info().await;
     info!("Caches warm in {}ms", t0.elapsed().as_millis());
 
     // Check ACME cert renewal in background (non-blocking)
@@ -828,4 +825,3 @@ async fn wait_for_auth(socket: &mut WebSocket, state: &AppState, client_ip: &str
         }
     }
 }
-

@@ -128,11 +128,6 @@
 	});
 
 	onMount(() => {
-		const onPageHide = () => {
-			void client.call('system.version.cleanup').catch(() => {});
-		};
-
-		window.addEventListener('pagehide', onPageHide);
 		const onReconnect = () => {
 			Promise.all([
 				loadVersionPage(),
@@ -151,14 +146,12 @@
 		client.onReconnect(onReconnect);
 
 		return () => {
-			window.removeEventListener('pagehide', onPageHide);
 			client.offReconnect(onReconnect);
 		};
 	});
 
 	onDestroy(() => {
 		stopPolling();
-		void client.call('system.version.cleanup').catch(() => {});
 	});
 
 	function versionLabel(name: string): string {
@@ -192,7 +185,6 @@
 	}
 
 	async function loadVersionPage() {
-		await client.call('system.version.cleanup').catch(() => {});
 		await withToast(async () => {
 			const [nextInfo, nextVersion] = await Promise.all([
 				client.call<VersionInfo>('system.version.get'),
@@ -222,7 +214,7 @@
 
 		if (!await confirm(
 			'Switch upstream inputs?',
-			`This will back up /etc/nixos, write the selected input URLs into flake.nix, refresh these inputs in flake.lock: ${refreshedLabel}. Changed URLs are always refreshed even if their update toggle is off. If flake.lock changes, the system rebuild starts immediately. Changed URLs: ${changedLabel}.`
+			`This will write the selected input URLs directly into /etc/nixos/flake.nix and refresh these inputs in flake.lock: ${refreshedLabel}. Changed URLs are always refreshed even if their update toggle is off. If flake.lock changes, the system rebuild starts immediately. Changed URLs: ${changedLabel}.`
 		)) return;
 
 		await doVersionSwitch();

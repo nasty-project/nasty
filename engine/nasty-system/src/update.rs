@@ -3,9 +3,7 @@ use rowan::ast::AstNode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tracing::info;
 
 /// Primary version path — writable by the update script, not managed by NixOS.
@@ -15,12 +13,7 @@ const VERSION_PATH_FALLBACK: &str = "/etc/nasty-version";
 const UPDATE_UNIT: &str = "nasty-update";
 const LOCAL_FLAKE_TARGET: &str = "/etc/nixos#nasty";
 const LOCAL_REPO: &str = "/etc/nixos";
-const BCACHEFS_SWITCH_UNIT: &str = "nasty-bcachefs-switch";
 const NIXOS_FLAKE_DIR: &str = "/etc/nixos";
-const BCACHEFS_TOOLS_REPO: &str = "github:koverstreet/bcachefs-tools";
-const BCACHEFS_REF_STATE: &str = "/var/lib/nasty/bcachefs-tools-ref";
-const BCACHEFS_DEBUG_CHECKS_STATE: &str = "/var/lib/nasty/bcachefs-debug-checks";
-const BCACHEFS_SWITCH_RESULT: &str = "/var/lib/nasty/bcachefs-switch-result";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
 const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
 const GC_CONFIG_PATH: &str = "/var/lib/nasty/gc-config.json";
@@ -168,39 +161,6 @@ async fn write_channel(channel: ReleaseChannel) -> Result<(), std::io::Error> {
 const GITHUB_TOKEN_PATH: &str = "/var/lib/nasty/github-token";
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct BcachefsToolsInfo {
-    /// The ref in flake.lock original (e.g. "v1.37.0", "master", commit sha)
-    pub pinned_ref: Option<String>,
-    /// The resolved full commit sha from flake.lock locked
-    pub pinned_rev: Option<String>,
-    /// Version of the bcachefs kernel module currently loaded (from modinfo)
-    pub running_version: String,
-    /// True when the user has configured a non-default bcachefs-tools version
-    pub is_custom: bool,
-    /// True when the actually loaded module differs from the default version
-    pub is_custom_running: bool,
-    /// The default ref from flake.nix (e.g. "v1.37.0")
-    pub default_ref: String,
-    /// Whether the running kernel was built with Rust support (CONFIG_RUST=y)
-    pub kernel_rust: Option<bool>,
-    /// Whether the loaded module has debug symbols (-g)
-    pub debug_symbols: bool,
-    /// Whether debug checks are configured for the next build
-    pub debug_checks: bool,
-    /// Whether the loaded module has CONFIG_BCACHEFS_DEBUG
-    pub debug_checks_running: bool,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct BcachefsToolsSwitchRequest {
-    /// A git ref: tag (v1.37.0), branch (master), or commit hash
-    pub git_ref: String,
-    /// Build with CONFIG_BCACHEFS_DEBUG for extra runtime assertions. Has performance cost.
-    #[serde(default)]
-    pub debug_checks: bool,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct VersionInputInfo {
     /// Flake input name (e.g. `nixpkgs`).
     pub name: String,
@@ -325,20 +285,11 @@ struct NixosGeneration {
     current: bool,
 }
 
-pub struct UpdateService {
-    cached_info: Arc<RwLock<Option<BcachefsToolsInfo>>>,
-}
+pub struct UpdateService;
 
 impl UpdateService {
     pub fn new() -> Self {
-        Self {
-            cached_info: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    /// Invalidate cached bcachefs info — call after switch or rebuild.
-    pub async fn invalidate_bcachefs_cache(&self) {
-        *self.cached_info.write().await = None;
+        Self
     }
 
     /// Get current installed version
@@ -354,8 +305,6 @@ impl UpdateService {
     /// Read the exact upstream input URLs and locked revs from the live
     /// `/etc/nixos` flake on the installed system.
     pub async fn version_info(&self) -> Result<VersionInfo, UpdateError> {
-        self.restore_version_backup_if_needed().await?;
-
         let urls = read_flake_input_urls().await?;
         let revs = read_flake_lock_revs().await;
 
@@ -376,11 +325,11 @@ impl UpdateService {
         Ok(VersionInfo { inputs })
     }
 
-    /// Best-effort page-leave cleanup for the Version tab.
-    /// If a failed/abandoned switch left a backup behind and no rebuild is
-    /// running anymore, restore it so `/etc/nixos` does not stay half-edited.
+    /// Legacy endpoint kept for compatibility with older web UIs.
+    /// Newer builds do not restore from a backup; they only purge any stale
+    /// backup directory left behind by an older implementation.
     pub async fn version_cleanup(&self) -> Result<(), UpdateError> {
-        self.restore_version_backup_if_needed().await
+        self.purge_stale_version_backup().await
     }
 
     /// Get or set the release channel.
@@ -470,11 +419,6 @@ impl UpdateService {
         if status.state == "running" {
             return Err(UpdateError::AlreadyRunning);
         }
-
-        // Sanitize hardware-configuration.nix before updating.
-        // If the user ever ran nixos-generate-config while pools were mounted,
-        // those fileSystems entries would block boot after filesystem destruction.
-        sanitize_hardware_config().await;
 
         // Clean up any previous update unit
         let _ = tokio::process::Command::new("systemctl")
@@ -624,12 +568,11 @@ echo "==> Update complete!"
     /// lock file changed.
     pub async fn version_switch(&self, req: VersionSwitchRequest) -> Result<(), UpdateError> {
         let update_status = self.status().await;
-        let bcachefs_status = self.bcachefs_status().await;
-        if update_status.state == "running" || bcachefs_status.state == "running" {
+        if update_status.state == "running" {
             return Err(UpdateError::AlreadyRunning);
         }
 
-        self.restore_version_backup_if_needed().await?;
+        self.purge_stale_version_backup().await?;
 
         let current_urls = read_flake_input_urls().await?;
         let mut seen = HashSet::new();
@@ -683,8 +626,6 @@ echo "==> Update complete!"
             ));
         }
 
-        sanitize_hardware_config().await;
-
         let _ = tokio::process::Command::new("systemctl")
             .args(["reset-failed", UPDATE_UNIT])
             .output()
@@ -728,9 +669,6 @@ WEBUI_BEFORE=$([ -n "$_NGINX_CONF_BEFORE" ] && grep 'nasty-webui' "$_NGINX_CONF_
 echo "false" > {UPDATE_WEBUI_CHANGED}
 
 echo "==> Updating local system flake..."
-rm -rf {VERSION_SWITCH_BACKUP_DIR}
-cp -a {NIXOS_FLAKE_DIR} {VERSION_SWITCH_BACKUP_DIR}
-
 cd {NIXOS_FLAKE_DIR}
 LOCK_BEFORE=$(sha256sum flake.lock 2>/dev/null | awk '{{print $1}}' || true)
 cp {flake_temp_path} flake.nix
@@ -750,8 +688,6 @@ if [ "$LOCK_BEFORE" != "$LOCK_AFTER" ]; then
 else
     echo "==> No flake.lock changes detected; skipping rebuild."
 fi
-
-rm -rf {VERSION_SWITCH_BACKUP_DIR}
 echo "==> Update complete!"
 "#
         );
@@ -1088,305 +1024,6 @@ echo "==> Switch to generation {gen_id} complete!"
         Ok(())
     }
 
-    pub async fn bcachefs_info(&self, system: &crate::SystemService) -> BcachefsToolsInfo {
-        {
-            let guard = self.cached_info.read().await;
-            if let Some(ref cached) = *guard {
-                return cached.clone();
-            }
-        }
-        let info = self.bcachefs_info_uncached(system).await;
-        *self.cached_info.write().await = Some(info.clone());
-        info
-    }
-
-    async fn bcachefs_info_uncached(&self, system: &crate::SystemService) -> BcachefsToolsInfo {
-        // Run subprocess calls and file reads concurrently.
-        let (
-            (_, kernel_rust),
-            running_version,
-            (lock_ref, pinned_rev),
-            default_ref,
-            debug_checks,
-            (debug_symbols, debug_checks_running),
-        ) = tokio::join!(
-            bcachefs_version(),
-            bcachefs_loaded_module_version(),
-            read_flake_lock_bcachefs(),
-            read_flake_nix_default_ref(),
-            // debug_checks from state file: reflects what will be built next (controls toggle)
-            read_debug_checks_enabled(),
-            // debug_symbols + debug_checks from cached module inspection (avoids
-            // expensive xz decompression on every page load)
-            system.cached_debug_flags(),
-        );
-        // Use the state file as the canonical display ref when the user has switched.
-        // flake.lock's original.ref always mirrors flake.nix (not updated by --override-input),
-        // so it would show the old version even after a successful switch to a new rev.
-        let state_ref = tokio::fs::read_to_string(BCACHEFS_REF_STATE)
-            .await
-            .ok()
-            .map(|s| {
-                let s = s.trim().to_string();
-                // Full 40-char SHA saved by the switch script — truncate for display
-                if s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                    s[..12].to_string()
-                } else {
-                    s
-                }
-            })
-            .filter(|s| !s.is_empty());
-        let pinned_ref = state_ref.clone().or(lock_ref);
-        let is_custom = state_ref
-            .as_deref()
-            .map(|r| r != default_ref)
-            .unwrap_or(false);
-        // Compare loaded module version against default (strip 'v' prefix for comparison)
-        let default_bare = default_ref.strip_prefix('v').unwrap_or(&default_ref);
-        let is_custom_running = running_version != default_bare && running_version != "unknown";
-        BcachefsToolsInfo {
-            pinned_ref,
-            pinned_rev,
-            running_version,
-            is_custom,
-            is_custom_running,
-            default_ref,
-            kernel_rust,
-            debug_symbols,
-            debug_checks,
-            debug_checks_running,
-        }
-    }
-
-    pub async fn bcachefs_switch(
-        &self,
-        req: BcachefsToolsSwitchRequest,
-    ) -> Result<(), UpdateError> {
-        // Refuse if either update unit is running
-        let update_status = self.status().await;
-        let switch_status = self.bcachefs_status().await;
-        if update_status.state == "running" || switch_status.state == "running" {
-            return Err(UpdateError::AlreadyRunning);
-        }
-
-        let git_ref = req.git_ref.trim().to_string();
-        if git_ref.is_empty() {
-            return Err(UpdateError::CommandFailed(
-                "git_ref must not be empty".into(),
-            ));
-        }
-
-        // Clean up previous unit and result file
-        for action in &["reset-failed", "stop"] {
-            let _ = tokio::process::Command::new("systemctl")
-                .args([action, BCACHEFS_SWITCH_UNIT])
-                .output()
-                .await;
-        }
-        let _ = tokio::fs::remove_file(BCACHEFS_SWITCH_RESULT).await;
-
-        let default_ref = read_flake_nix_default_ref().await;
-        let is_default = git_ref == default_ref;
-
-        // Persist the chosen ref so regular updates can re-apply it.
-        // State file is written by the script after resolving the ref to a commit SHA.
-        // For the default ref we clear it here; for custom refs the script overwrites it
-        // with the pinned SHA so branch names like "master" don't drift on future updates.
-        if is_default {
-            let _ = tokio::fs::remove_file(BCACHEFS_REF_STATE).await;
-        }
-
-        let input_url = format!("{BCACHEFS_TOOLS_REPO}/{git_ref}");
-
-        // Toggle debug checks in flake.nix by replacing the marker line.
-        // When enabled: marker becomes an echo that appends the flag to the DKMS Makefile.
-        // When disabled: marker is restored to a plain comment.
-        let debug_checks_sed = if req.debug_checks {
-            r#"sed -i 's|.*@NASTY_DEBUG_CHECKS_LINE@.*|                echo "\tccflags-y += -DCONFIG_BCACHEFS_DEBUG" >> src/fs/bcachefs/Makefile  # @NASTY_DEBUG_CHECKS_LINE@|' flake.nix"#
-        } else {
-            r#"sed -i 's|.*@NASTY_DEBUG_CHECKS_LINE@.*|                # @NASTY_DEBUG_CHECKS_LINE@|' flake.nix"#
-        };
-        let debug_checks_state = if req.debug_checks {
-            format!(r#"echo "1" > {BCACHEFS_DEBUG_CHECKS_STATE}"#)
-        } else {
-            format!(r#"rm -f {BCACHEFS_DEBUG_CHECKS_STATE}"#)
-        };
-
-        let local_flake = local_flake();
-        let script = format!(
-            r#"#!/bin/bash
-set -euo pipefail
-export PATH="/run/current-system/sw/bin:$PATH"
-# Write 'failed' up front; overwritten with 'success' at the end.
-# Survives engine restarts so polling can read the outcome even after
-# the transient systemd unit has been garbage-collected.
-echo "failed" > {BCACHEFS_SWITCH_RESULT}
-SWITCH_LOG=/var/lib/nasty/bcachefs-switch.log
-PREV_REF=$(cat {BCACHEFS_REF_STATE} 2>/dev/null || echo "{default_ref}")
-printf '%s  started  %s  (was: %s)\n' "$(date -u '+%Y-%m-%d %H:%M:%S')" "{git_ref}" "$PREV_REF" >> "$SWITCH_LOG"
-echo "==> Switching bcachefs to {git_ref}..."
-cd {NIXOS_FLAKE_DIR}
-nix flake lock --override-input bcachefs-tools "{input_url}"
-# Resolve the symbolic ref (e.g. "master") to the exact commit SHA that was
-# just pinned in flake.lock. Store the SHA so future system updates re-use
-# the same commit rather than advancing with the branch tip.
-RESOLVED_SHA=$(jq -r '.nodes["bcachefs-tools"].locked.rev' flake.lock 2>/dev/null || true)
-if [ "{git_ref}" != "{default_ref}" ]; then
-    if echo "{git_ref}" | grep -qE '^v[0-9]'; then
-        echo "{git_ref}" > {BCACHEFS_REF_STATE}
-        echo "==> Pinned to tag {git_ref}"
-    elif [ -n "$RESOLVED_SHA" ]; then
-        echo "$RESOLVED_SHA" > {BCACHEFS_REF_STATE}
-        echo "==> Pinned to commit $RESOLVED_SHA"
-    fi
-fi
-# Update debug checks flag in flake.nix and persist state
-{debug_checks_sed}
-{debug_checks_state}
-# /etc/nixos is the active flake payload, not necessarily a Git checkout.
-# Persist the selected ref and flake changes directly, then rebuild from them.
-echo "==> Rebuilding system..."
-NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}
-echo "success" > {BCACHEFS_SWITCH_RESULT}
-printf '%s  success  %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S')" "{git_ref}" >> "$SWITCH_LOG"
-echo "==> bcachefs switch complete!"
-"#
-        );
-
-        let script_path = "/tmp/nasty-bcachefs-switch.sh";
-        tokio::fs::write(script_path, &script)
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("write script: {e}")))?;
-
-        let path = std::env::var("PATH").unwrap_or_default();
-        let output = tokio::process::Command::new("systemd-run")
-            .args([
-                "--unit",
-                BCACHEFS_SWITCH_UNIT,
-                "--no-block",
-                "--description",
-                "NASty bcachefs version switch",
-                "--property=Type=oneshot",
-                "--property=StandardOutput=journal",
-                "--property=StandardError=journal",
-                "--setenv",
-                &format!("PATH={path}"),
-                "--",
-                "bash",
-                script_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("systemd-run: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(UpdateError::CommandFailed(format!(
-                "failed to start: {stderr}"
-            )));
-        }
-        info!("bcachefs switch to {git_ref} started");
-        Ok(())
-    }
-
-    pub async fn bcachefs_status(&self) -> UpdateStatus {
-        let output = tokio::process::Command::new("systemctl")
-            .args([
-                "show",
-                BCACHEFS_SWITCH_UNIT,
-                "--property=ActiveState,SubState,Result",
-            ])
-            .output()
-            .await;
-
-        let state = match output {
-            Ok(out) => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                let mut active_state = "";
-                let mut result = "";
-                for line in text.lines() {
-                    if let Some(val) = line.strip_prefix("ActiveState=") {
-                        active_state = val.trim();
-                    }
-                    if let Some(val) = line.strip_prefix("Result=") {
-                        result = val.trim();
-                    }
-                }
-                match active_state {
-                    "active" | "activating" | "reloading" => "running".to_string(),
-                    _ => {
-                        // Unit finished, missing, or never ran.
-                        // systemd Result=success is reliable when the unit still exists;
-                        // for cleaned-up or missing units it may be empty.
-                        // The result file is the authoritative fallback: the script writes
-                        // "failed" at the top and overwrites with "success" at the bottom,
-                        // so it always reflects the true outcome.
-                        // We remove it after reading a terminal state so stale results
-                        // don't surface on the next page load.
-                        let state = if result == "success" {
-                            "success".to_string()
-                        } else if active_state == "failed" {
-                            "failed".to_string()
-                        } else {
-                            tokio::fs::read_to_string(BCACHEFS_SWITCH_RESULT)
-                                .await
-                                .ok()
-                                .map(|s| match s.trim() {
-                                    "success" => "success".to_string(),
-                                    "failed" => "failed".to_string(),
-                                    _ => "idle".to_string(),
-                                })
-                                .unwrap_or_else(|| "idle".to_string())
-                        };
-                        if state == "success" || state == "failed" {
-                            let _ = tokio::fs::remove_file(BCACHEFS_SWITCH_RESULT).await;
-                        }
-                        state
-                    }
-                }
-            }
-            Err(_) => "idle".to_string(),
-        };
-
-        let invocation_id = tokio::process::Command::new("systemctl")
-            .args([
-                "show",
-                BCACHEFS_SWITCH_UNIT,
-                "--property=InvocationID",
-                "--value",
-            ])
-            .output()
-            .await
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-        let mut journal_args = vec![
-            "-u".to_string(),
-            BCACHEFS_SWITCH_UNIT.to_string(),
-            "--no-pager".to_string(),
-            "--output=cat".to_string(),
-        ];
-        if !invocation_id.is_empty() {
-            journal_args.push(format!("_SYSTEMD_INVOCATION_ID={invocation_id}"));
-        } else {
-            journal_args.extend(["-n".to_string(), "200".to_string()]);
-        }
-
-        let log = tokio::process::Command::new("journalctl")
-            .args(&journal_args)
-            .output()
-            .await
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-
-        UpdateStatus {
-            state,
-            log,
-            reboot_required: is_reboot_required().await,
-            webui_changed: false,
-        }
-    }
-
     /// Get the current status of a running/completed update
     pub async fn status(&self) -> UpdateStatus {
         // Use systemctl show to get detailed state
@@ -1479,7 +1116,7 @@ echo "==> bcachefs switch complete!"
         }
     }
 
-    async fn restore_version_backup_if_needed(&self) -> Result<(), UpdateError> {
+    async fn purge_stale_version_backup(&self) -> Result<(), UpdateError> {
         if tokio::fs::metadata(VERSION_SWITCH_BACKUP_DIR)
             .await
             .is_err()
@@ -1487,75 +1124,13 @@ echo "==> bcachefs switch complete!"
             return Ok(());
         }
 
-        if self.status().await.state == "running" {
-            return Ok(());
-        }
-
-        let restore = format!(
-            r#"set -euo pipefail
-rm -rf {NIXOS_FLAKE_DIR}
-cp -a {VERSION_SWITCH_BACKUP_DIR} {NIXOS_FLAKE_DIR}
-rm -rf {VERSION_SWITCH_BACKUP_DIR}
-"#
-        );
-        run_bash_script(&restore).await?;
-        info!("Restored {NIXOS_FLAKE_DIR} from backup after an incomplete version switch");
+        tokio::fs::remove_dir_all(VERSION_SWITCH_BACKUP_DIR)
+            .await
+            .map_err(|e| {
+                UpdateError::CommandFailed(format!("remove stale {VERSION_SWITCH_BACKUP_DIR}: {e}"))
+            })?;
         Ok(())
     }
-}
-
-/// Remove any `fileSystems."/fs/..."` blocks from hardware-configuration.nix.
-///
-/// Filesystem mounts are managed at runtime by the engine. If a user ran
-/// `nixos-generate-config` while pools were mounted, those entries end up in
-/// hardware-configuration.nix and will block boot after the filesystem is destroyed
-/// (systemd waits forever for a device UUID that no longer exists).
-async fn sanitize_hardware_config() {
-    let path = format!("{LOCAL_REPO}/hardware-configuration.nix");
-    let content = match tokio::fs::read_to_string(&path).await {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let sanitized = strip_pool_mounts(&content);
-    if sanitized != content {
-        info!(
-            "Removed filesystem mount entries from hardware-configuration.nix to prevent boot failure"
-        );
-        if let Err(e) = tokio::fs::write(&path, sanitized).await {
-            tracing::warn!("Failed to write sanitized hardware-configuration.nix: {e}");
-        }
-    }
-}
-
-fn strip_pool_mounts(content: &str) -> String {
-    let mut result = String::with_capacity(content.len());
-    let mut skip = false;
-    let mut depth = 0i32;
-    for line in content.lines() {
-        if !skip && line.trim_start().starts_with("fileSystems.\"/storage/") {
-            skip = true;
-            depth = 0;
-        }
-        if skip {
-            for c in line.chars() {
-                match c {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth <= 0 {
-                            skip = false;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            continue;
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-    result
 }
 
 /// TODO: Remove once repo access no longer requires token fallbacks.
@@ -1731,63 +1306,6 @@ async fn read_github_token() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Run `bcachefs version` and return the version string, or "unknown" on failure.
-/// Strips trailing noise like "kernel: unable to read kernel config".
-/// Returns (version_string, kernel_rust).
-/// `bcachefs version` may emit extra lines, e.g.:
-///   "1.37.1\nkernel: CONFIG_RUST=y"
-///   "1.37.0\nkernel: unable to read kernel config"
-/// Returns the version of the bcachefs kernel module that is currently loaded,
-/// by reading the version field from modinfo. This is the authoritative running
-/// version — it reflects what is actually mounted and active, not what is
-/// installed in current-system (which may differ when a reboot is pending).
-async fn bcachefs_loaded_module_version() -> String {
-    tokio::process::Command::new("modinfo")
-        .args(["bcachefs", "--field", "version"])
-        .output()
-        .await
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if v.is_empty() { None } else { Some(v) }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-async fn bcachefs_version() -> (String, Option<bool>) {
-    let raw = tokio::process::Command::new("bcachefs")
-        .arg("version")
-        .output()
-        .await
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let version = raw
-        .split_whitespace()
-        .next()
-        .unwrap_or("unknown")
-        .to_string();
-
-    // Parse optional "kernel: CONFIG_RUST=y" / "kernel: CONFIG_RUST=n" line
-    let kernel_rust = raw
-        .lines()
-        .find(|l| l.contains("CONFIG_RUST"))
-        .map(|l| l.contains("CONFIG_RUST=y"));
-
-    (version, kernel_rust)
-}
-
 /// Build the full flake reference for nixos-rebuild.
 fn local_flake() -> &'static str {
     LOCAL_FLAKE_TARGET
@@ -1795,6 +1313,10 @@ fn local_flake() -> &'static str {
 
 pub async fn read_flake_nix_default_ref_pub() -> String {
     read_flake_nix_default_ref().await
+}
+
+pub async fn read_flake_lock_bcachefs_pub() -> (Option<String>, Option<String>) {
+    read_flake_lock_bcachefs().await
 }
 
 /// Public wrapper for use by lib.rs cached info.
@@ -1821,25 +1343,6 @@ async fn save_generation_labels(
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("write labels: {e}")))?;
     Ok(())
-}
-
-async fn run_bash_script(script: &str) -> Result<(), UpdateError> {
-    let output = tokio::process::Command::new("bash")
-        .args(["-lc", script])
-        .output()
-        .await
-        .map_err(|e| UpdateError::CommandFailed(format!("bash: {e}")))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(UpdateError::CommandFailed(if stderr.is_empty() {
-            "bash command failed".into()
-        } else {
-            stderr
-        }))
-    }
 }
 
 fn parse_flake_input_urls(content: &str) -> Result<HashMap<String, ParsedFlakeInput>, UpdateError> {
@@ -2029,15 +1532,6 @@ async fn read_locked_nasty_version() -> Option<String> {
     let node = &v["nodes"]["nasty"];
     let rev = node["locked"]["rev"].as_str()?;
     Some(rev[..rev.len().min(7)].to_string())
-}
-
-/// Read debug checks *configured* state (what the next DKMS build will use).
-/// State file is the sole source of truth — survives git reset --hard.
-/// Note: the *running* module state is detected separately via modinfo in lib.rs.
-async fn read_debug_checks_enabled() -> bool {
-    tokio::fs::metadata(BCACHEFS_DEBUG_CHECKS_STATE)
-        .await
-        .is_ok()
 }
 
 /// Parse flake.lock to extract the bcachefs-tools pinned ref and rev.

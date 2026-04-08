@@ -113,8 +113,7 @@ use nasty_system::network::NetworkConfig;
 use nasty_system::protocol::ProtocolStatus;
 use nasty_system::settings::{Settings, SettingsUpdate};
 use nasty_system::update::{
-    BcachefsToolsInfo, BcachefsToolsSwitchRequest, UpdateInfo, UpdateStatus, VersionInfo,
-    VersionSwitchRequest,
+    UpdateInfo, UpdateStatus, VersionInfo, VersionSwitchRequest,
 };
 use nasty_system::{DiskHealth, SystemHealth, SystemInfo, SystemStats};
 
@@ -321,38 +320,10 @@ fn methods(generator: &mut SchemaGenerator) -> Vec<(&'static str, Vec<Method>)> 
                 },
                 Method {
                     name: "system.version.cleanup",
-                    desc: "Restore `/etc/nixos` from the last backup if a Version-page switch was abandoned or failed.",
+                    desc: "Purge any stale legacy backup directory left by older Version-page builds.",
                     role: "admin",
                     params: MethodParams::None,
                     result: None,
-                },
-            ],
-        ),
-        (
-            "bcachefs-tools",
-            vec![
-                Method {
-                    name: "bcachefs.tools.info",
-                    desc: "Return bcachefs-tools version info (pinned ref, running version, custom/default flag).",
-                    role: "any",
-                    params: MethodParams::None,
-                    result: Some(gen_schema::<BcachefsToolsInfo>(generator)),
-                },
-                Method {
-                    name: "bcachefs.tools.switch",
-                    desc: "Switch bcachefs-tools to a specific git ref (tag, branch, or commit SHA). Runs `nixos-rebuild switch` in background.",
-                    role: "admin",
-                    params: MethodParams::Schema(gen_schema::<BcachefsToolsSwitchRequest>(
-                        generator,
-                    )),
-                    result: None,
-                },
-                Method {
-                    name: "bcachefs.tools.status",
-                    desc: "Return the current bcachefs-tools switch operation status.",
-                    role: "any",
-                    params: MethodParams::None,
-                    result: Some(gen_schema::<UpdateStatus>(generator)),
                 },
             ],
         ),

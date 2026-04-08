@@ -123,8 +123,6 @@ fn is_read_only(method: &str) -> bool {
                 | "system.version.get"
                 | "system.log.level"
                 | "system.settings.timezones"
-                | "bcachefs.tools.info"
-                | "bcachefs.tools.status"
         )
 }
 
@@ -438,7 +436,6 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "system.update.apply" => match state.updates.apply().await {
             Ok(()) => {
                 state.system.invalidate_bcachefs_cache().await;
-                state.updates.invalidate_bcachefs_cache().await;
                 ok(req, "ok")
             }
             Err(e) => err(req, e),
@@ -446,7 +443,6 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "system.update.rollback" => match state.updates.rollback().await {
             Ok(()) => {
                 state.system.invalidate_bcachefs_cache().await;
-                state.updates.invalidate_bcachefs_cache().await;
                 ok(req, "ok")
             }
             Err(e) => err(req, e),
@@ -465,7 +461,6 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Ok(p) => match state.updates.version_switch(p).await {
                     Ok(()) => {
                         state.system.invalidate_bcachefs_cache().await;
-                        state.updates.invalidate_bcachefs_cache().await;
                         ok(req, serde_json::json!({"status": "started"}))
                     }
                     Err(e) => err(req, e),
@@ -533,7 +528,6 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Ok(p) => match state.updates.switch_generation(p.generation).await {
                     Ok(()) => {
                         state.system.invalidate_bcachefs_cache().await;
-                        state.updates.invalidate_bcachefs_cache().await;
                         ok(req, serde_json::json!({"status": "started"}))
                     }
                     Err(e) => err(req, e),
@@ -568,23 +562,6 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(e) => invalid(req, e),
             }
         }
-
-        // ── bcachefs-tools version switching ──────────────────────
-        "bcachefs.tools.info" => ok(req, state.updates.bcachefs_info(&state.system).await),
-        "bcachefs.tools.switch" => {
-            match parse_params::<nasty_system::update::BcachefsToolsSwitchRequest>(req) {
-                Ok(p) => match state.updates.bcachefs_switch(p).await {
-                    Ok(()) => {
-                        state.system.invalidate_bcachefs_cache().await;
-                        state.updates.invalidate_bcachefs_cache().await;
-                        ok(req, serde_json::json!({"status": "started"}))
-                    }
-                    Err(e) => err(req, e),
-                },
-                Err(e) => invalid(req, e),
-            }
-        }
-        "bcachefs.tools.status" => ok(req, state.updates.bcachefs_status().await),
 
         "system.reboot" => match state.updates.reboot().await {
             Ok(()) => ok(req, "ok"),
