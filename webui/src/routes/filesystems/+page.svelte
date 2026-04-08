@@ -60,6 +60,8 @@
 	let addDeviceLabel = $state('');
 	let showAddPartitions = $state(false);
 	let editErasureCode = $state(false);
+	let editDataChecksum = $state('');
+	let editMetadataChecksum = $state('');
 	let editVersionUpgrade = $state('');
 	let editDataReplicas = $state(1);
 	let editMetadataReplicas = $state(1);
@@ -489,6 +491,8 @@
 		editCompression = fs.options.compression ?? '';
 		editBgCompression = fs.options.background_compression ?? '';
 	editErasureCode = fs.options.erasure_code ?? false;
+		editDataChecksum = fs.options.data_checksum ?? 'none';
+		editMetadataChecksum = fs.options.metadata_checksum ?? 'none';
 		editVersionUpgrade = fs.options.version_upgrade ?? '';
 		editDataReplicas = fs.options.data_replicas ?? 1;
 		editMetadataReplicas = fs.options.metadata_replicas ?? 1;
@@ -519,6 +523,8 @@
 				compression: editCompression || 'none',
 				background_compression: editBgCompression || 'none',
 				erasure_code: editErasureCode,
+				data_checksum: editDataChecksum || 'none',
+				metadata_checksum: editMetadataChecksum || 'none',
 				data_replicas: editDataReplicas,
 				metadata_replicas: editMetadataReplicas,
 				move_ios_in_flight: editMoveIos,
@@ -1185,6 +1191,26 @@
 								<input id="edit-erasure-{fs.name}" type="checkbox" bind:checked={editErasureCode} class="h-4 w-4" />
 								<span class="text-xs">Erasure coding</span>
 							</label>
+							<div class="mt-3 grid grid-cols-2 gap-3">
+								<div>
+									<label for="edit-data-checksum-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Data Checksum</label>
+									<select id="edit-data-checksum-{fs.name}" bind:value={editDataChecksum} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+										<option value="none">None</option>
+										<option value="crc32c">CRC32C</option>
+										<option value="crc64">CRC64</option>
+										<option value="xxhash">xxHash</option>
+									</select>
+								</div>
+								<div>
+									<label for="edit-meta-checksum-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Metadata Checksum</label>
+									<select id="edit-meta-checksum-{fs.name}" bind:value={editMetadataChecksum} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+										<option value="none">None</option>
+										<option value="crc32c">CRC32C</option>
+										<option value="crc64">CRC64</option>
+										<option value="xxhash">xxHash</option>
+									</select>
+								</div>
+							</div>
 						</fieldset>
 						<!-- Compression -->
 						<fieldset class="rounded-md border border-border p-3">
@@ -1272,6 +1298,8 @@
 							<span>{fs.options.data_checksum ?? '—'}</span>
 							<span class="text-muted-foreground">Compression</span>
 							<span>{fs.options.compression ?? 'none'}{#if fs.options.background_compression} / bg: {fs.options.background_compression}{/if}</span>
+							<span class="text-muted-foreground">Erasure Code</span>
+							<span>{fs.options.erasure_code ? 'Enabled' : 'No'}</span>
 							<span class="text-muted-foreground">Encrypted</span>
 							<span>
 								{#if fs.options.encrypted}
@@ -1303,10 +1331,6 @@
 							{#if fs.options.metadata_target}
 								<span class="text-muted-foreground">Meta Target</span>
 								<span>{fs.options.metadata_target}</span>
-							{/if}
-							{#if fs.options.erasure_code}
-								<span class="text-muted-foreground">Erasure Code</span>
-								<span>Enabled</span>
 							{/if}
 							{#if fs.options.error_action}
 								<span class="text-muted-foreground">Error Action</span>

@@ -224,6 +224,10 @@ pub struct UpdateFilesystemOptionsRequest {
     pub fsck: Option<bool>,
     /// Disable journal flushing (unsafe, for benchmarking).
     pub journal_flush_disabled: Option<bool>,
+    /// Data checksum algorithm (`none`, `crc32c`, `crc64`, `xxhash`).
+    pub data_checksum: Option<String>,
+    /// Metadata checksum algorithm (`none`, `crc32c`, `crc64`, `xxhash`).
+    pub metadata_checksum: Option<String>,
     /// Number of data replicas.
     pub data_replicas: Option<u32>,
     /// Number of metadata replicas.
@@ -896,6 +900,12 @@ impl FilesystemService {
         }
         if let Some(ec) = req.erasure_code {
             write_opt(&base, "erasure_code", if ec { "1" } else { "0" }).await?;
+        }
+        if let Some(ref v) = req.data_checksum {
+            write_opt(&base, "data_checksum", v).await?;
+        }
+        if let Some(ref v) = req.metadata_checksum {
+            write_opt(&base, "metadata_checksum", v).await?;
         }
         if let Some(v) = req.data_replicas {
             write_opt(&base, "data_replicas", &v.to_string()).await?;
