@@ -58,6 +58,8 @@
 	let scrubLoading = $state(false);
 	let reconcileOutput = $state('');
 	let reconcileLoading = $state(false);
+	let reconcileEnabled = $state(true);
+	let reconcileToggling = $state(false);
 
 	onMount(async () => {
 		try {
@@ -172,12 +174,28 @@
 		if (!selectedFs) return;
 		reconcileLoading = true;
 		try {
-			const result = await getClient().call<{ raw: string }>('fs.reconcile.status', { name: selectedFs });
+			const result = await getClient().call<{ raw: string; enabled: boolean }>('fs.reconcile.status', { name: selectedFs });
 			reconcileOutput = result.raw || 'No reconcile data available.';
+			reconcileEnabled = result.enabled;
 		} catch (e) {
 			reconcileOutput = e instanceof Error ? e.message : String(e);
 		} finally {
 			reconcileLoading = false;
+		}
+	}
+
+	async function toggleReconcile() {
+		if (!selectedFs) return;
+		reconcileToggling = true;
+		try {
+			const method = reconcileEnabled ? 'fs.reconcile.disable' : 'fs.reconcile.enable';
+			await getClient().call(method, { name: selectedFs });
+			reconcileEnabled = !reconcileEnabled;
+			await refreshReconcile();
+		} catch (e) {
+			reconcileOutput = e instanceof Error ? e.message : String(e);
+		} finally {
+			reconcileToggling = false;
 		}
 	}
 
@@ -368,6 +386,13 @@
 		<!-- reconcile tab controls -->
 		{:else if activeTab === 'reconcile'}
 			<div class="ml-auto flex items-center gap-2 pb-1">
+				<button
+					onclick={toggleReconcile}
+					disabled={!selectedFs || reconcileToggling}
+					class="rounded px-3 py-1 text-xs {reconcileEnabled ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'bg-destructive text-destructive-foreground hover:bg-destructive/90'} disabled:opacity-50"
+				>
+					{reconcileToggling ? '...' : reconcileEnabled ? 'Enabled' : 'Disabled'}
+				</button>
 				<button
 					onclick={refreshReconcile}
 					disabled={!selectedFs || reconcileLoading}

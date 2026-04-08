@@ -315,6 +315,8 @@ pub struct ScrubStatus {
 pub struct ReconcileStatus {
     /// Raw text output from the bcachefs reconcile status command.
     pub raw: String,
+    /// Whether reconcile is currently enabled on this filesystem.
+    pub enabled: bool,
 }
 
 /// How long a cached `list()` result stays valid.
@@ -1509,7 +1511,34 @@ impl FilesystemService {
             .await
             .unwrap_or_else(|_| "No reconcile data available".to_string());
 
-        Ok(ReconcileStatus { raw })
+        let enabled = self.reconcile_enabled(&fs.uuid).await;
+
+        Ok(ReconcileStatus { raw, enabled })
+    }
+
+    /// Read reconcile_enabled from sysfs for a mounted filesystem.
+    async fn reconcile_enabled(&self, uuid: &str) -> bool {
+        let path = format!("/sys/fs/bcachefs/{uuid}/options/reconcile_enabled");
+        tokio::fs::read_to_string(&path)
+            .await
+            .map(|s| s.trim() != "0")
+            .unwrap_or(true)
+    }
+
+    /// Enable or disable reconcile on a mounted filesystem via sysfs.
+    pub async fn set_reconcile_enabled(&self, name: &str, enabled: bool) -> Result<(), FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to toggle reconcile".to_string(),
+            ));
+        }
+        let path = format!("/sys/fs/bcachefs/{}/options/reconcile_enabled", fs.uuid);
+        let val = if enabled { "1" } else { "0" };
+        info!("Setting reconcile_enabled={val} on filesystem '{name}'");
+        tokio::fs::write(&path, val).await.map_err(|e| {
+            FilesystemError::CommandFailed(format!("failed to write {path}: {e}"))
+        })
     }
 
     /// Raw output of `bcachefs fs usage <mount>` — space breakdown by data type and device.

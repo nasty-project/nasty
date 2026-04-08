@@ -104,6 +104,7 @@ export interface ScrubStatus {
 
 export interface ReconcileStatus {
 	raw: string;
+	enabled: boolean;
 }
 
 export interface BlockDevice {

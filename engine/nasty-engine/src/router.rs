@@ -814,6 +814,20 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+        "fs.reconcile.enable" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.set_reconcile_enabled(name, true).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.reconcile.disable" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.set_reconcile_enabled(name, false).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
 
         // ── bcachefs diagnostics ────────────────────────────────
         "bcachefs.usage" => match require_str(req, "name") {
