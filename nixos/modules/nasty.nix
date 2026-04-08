@@ -284,9 +284,10 @@ in {
          bcachefs subvolume snapshot <src> <dst>
 
        I/O monitoring
-         iotop -o
+         iotop-c -o
          iostat -x 1
          dool -dny 1
+         btop                                       interactive CPU/mem/disk/net dashboard
          # → type 'debug' for perf profiling and kernel oops symbolization
          # → type 'benchmark' for fio storage tests
 
