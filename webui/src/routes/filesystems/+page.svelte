@@ -1338,16 +1338,20 @@
 											<div class="flex gap-1.5 items-center">
 											{#if fs.mounted}
 												{@const ds = devDisplayState(dev)}
-												{#if ds === 'rw'}
-													<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'ro')}>Set RO</Button>
-													<Button variant="secondary" size="xs" onclick={() => offlineDevice(fs.name, dev.path)}>Offline</Button>
-												{:else if ds === 'ro'}
-													<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'rw')}>Set RW</Button>
+												{#if ds === 'evacuating'}
+													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
+												{:else}
+													{#if ds === 'rw'}
+														<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'ro')}>Set RO</Button>
+														<Button variant="secondary" size="xs" onclick={() => offlineDevice(fs.name, dev.path)}>Offline</Button>
+													{:else if ds === 'ro'}
+														<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'rw')}>Set RW</Button>
+													{/if}
+													{#if ds !== 'spare'}
+														<Button variant="secondary" size="xs" onclick={() => evacuateDevice(fs.name, dev.path)}>Evacuate</Button>
+													{/if}
+													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 												{/if}
-												{#if ds !== 'spare' && ds !== 'evacuated'}
-													<Button variant="secondary" size="xs" onclick={() => evacuateDevice(fs.name, dev.path)}>Evacuate</Button>
-												{/if}
-												<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 											{/if}
 											</div>
 										</td>
