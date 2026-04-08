@@ -8,7 +8,7 @@
     # Pinned to v1.37 release tag.
     # To revert to pure nixpkgs: comment out these two lines.
     # No other changes needed — bcachefs.nix defaults to pkgs.bcachefs-tools.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.4";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.5";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
   };
