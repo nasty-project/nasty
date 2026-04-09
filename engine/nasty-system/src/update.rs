@@ -395,7 +395,7 @@ impl UpdateService {
         )
         .await?;
         let bootstrapped_flake =
-            render_system_flake_template(&template, &release_status.latest_url, &local_system)?;
+            render_system_flake_template(&template, &release_status.latest_tag, &local_system)?;
 
         let _ = tokio::process::Command::new("systemctl")
             .args(["reset-failed", UPDATE_UNIT])
