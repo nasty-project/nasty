@@ -572,6 +572,21 @@ impl FilesystemService {
         }
 
         if req.erasure_code == Some(true) {
+            if req.replicas < 2 {
+                return Err(FilesystemError::InvalidInput(
+                    "Erasure coding requires replicas >= 2 (data is written as replicas first, then converted to parity stripes)".to_string(),
+                ));
+            }
+            if req.devices.len() < (req.replicas as usize) + 1 {
+                return Err(FilesystemError::InvalidInput(
+                    format!(
+                        "Erasure coding with {} replicas requires at least {} devices (got {})",
+                        req.replicas,
+                        req.replicas + 1,
+                        req.devices.len(),
+                    ),
+                ));
+            }
             args.push("--erasure_code".to_string());
         }
 

@@ -303,7 +303,8 @@
 	}
 
 	$effect(() => {
-		if (replicas < 2 && erasureCode) erasureCode = false;
+		if (erasureCode && replicas < 2) replicas = 2;
+		if (erasureCode && selectedPaths.length < 3) erasureCode = false;
 	});
 
 	async function createFs() {
@@ -581,7 +582,8 @@
 		} else {
 			selectedPaths = [...selectedPaths, path];
 		}
-		if (selectedPaths.length <= 1) replicas = 1;
+		if (selectedPaths.length <= 1) { replicas = 1; erasureCode = false; }
+		else if (erasureCode && selectedPaths.length < replicas + 1) erasureCode = false;
 	}
 
 	function availableDevices(): BlockDevice[] {
@@ -927,14 +929,20 @@
 				<div class="mb-5 grid grid-cols-2 gap-4">
 					<div>
 						<Label for="replicas">Replicas</Label>
-						<select id="replicas" bind:value={replicas} disabled={selectedPaths.length <= 1}
+						<select id="replicas" bind:value={replicas} disabled={selectedPaths.length <= 1 || erasureCode}
 							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-							<option value={1}>1 (no redundancy)</option>
+							{#if !erasureCode}
+								<option value={1}>1 (no redundancy)</option>
+							{/if}
 							<option value={2}>2{erasureCode ? ' (RAID-5)' : ' (mirrored)'}</option>
-							<option value={3}>3{erasureCode ? ' (RAID-6)' : ''}</option>
+							{#if selectedPaths.length >= 4 || !erasureCode}
+								<option value={3}>3{erasureCode ? ' (RAID-6)' : ''}</option>
+							{/if}
 						</select>
 						{#if selectedPaths.length <= 1}
 							<span class="text-xs text-muted-foreground">Requires multiple devices</span>
+						{:else if erasureCode}
+							<span class="text-xs text-muted-foreground">Set by erasure coding</span>
 						{/if}
 					</div>
 					<div>
@@ -949,19 +957,22 @@
 					</div>
 				</div>
 
-				{#if selectedPaths.length >= 3 && replicas >= 2}
+				{#if selectedPaths.length >= 3}
 				<div class="mb-5">
 					<label class="flex cursor-pointer items-center gap-2 text-sm">
-						<input type="checkbox" bind:checked={erasureCode} disabled={selectedPaths.length < replicas + 1} class="h-4 w-4" />
+						<input type="checkbox" bind:checked={erasureCode} disabled={selectedPaths.length < 3} class="h-4 w-4" />
 						<span class="font-medium">Erasure Coding</span>
 						{#if erasureCode}
-							<span class="text-xs text-amber-400">({replicas === 2 ? 'RAID-5' : 'RAID-6'}, min {replicas + 1} devices)</span>
+							<span class="text-xs text-amber-400">({replicas === 2 ? 'RAID-5' : 'RAID-6'}, {replicas}+1 across {selectedPaths.length} devices)</span>
 						{:else}
-							<span class="text-xs text-muted-foreground">(Reed-Solomon parity, min {replicas + 1} devices)</span>
+							<span class="text-xs text-muted-foreground">(Reed-Solomon parity, requires 3+ devices)</span>
 						{/if}
 					</label>
-					{#if erasureCode && selectedPaths.length < replicas + 1}
-						<p class="mt-1 ml-6 text-xs text-destructive">Needs at least {replicas + 1} devices (currently {selectedPaths.length}).</p>
+					{#if erasureCode}
+						<p class="mt-1 ml-6 text-xs text-muted-foreground">Data is written as {replicas} replicas, then converted to parity stripes in the background. Needs {replicas + 1}+ devices.</p>
+						{#if selectedPaths.length < replicas + 1}
+							<p class="mt-1 ml-6 text-xs text-destructive">Not enough devices: need at least {replicas + 1} for {replicas === 2 ? 'RAID-5' : 'RAID-6'} (have {selectedPaths.length}).</p>
+						{/if}
 					{/if}
 				</div>
 				{/if}
