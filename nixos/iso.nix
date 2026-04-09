@@ -257,7 +257,6 @@ in
       ${nasty-engine}/bin/nasty-engine bootstrap-system-flake \
         --dest-dir /mnt/etc/nixos \
         --template-file /etc/nasty-source/nixos/system-flake/flake.nix.template \
-        --nasty-url github:nasty-project/nasty/v0.0.2 \
         --system "$LOCAL_SYSTEM" >/dev/null
 
       echo "==> Generating hardware configuration..."

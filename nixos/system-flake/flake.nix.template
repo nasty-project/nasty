@@ -7,9 +7,9 @@
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.5";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
-    # Installer payload template. The ISO builder substitutes the tracked
-    # upstream URL here and ships a generated flake.lock alongside it.
-    nasty.url = "@NASTY_URL@";
+    # Installer payload template. Bootstrap substitutes the tagged release
+    # and local system placeholders when writing /etc/nixos/flake.nix.
+    nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
     nasty.inputs.nixpkgs.follows = "nixpkgs";
     nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
@@ -51,7 +51,7 @@
         };
     in {
       nixosConfigurations = {
-        nasty = mkSystem "local-system";
+        nasty = mkSystem "@LOCAL_SYSTEM@";
       };
     };
 }

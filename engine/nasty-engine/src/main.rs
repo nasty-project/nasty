@@ -198,20 +198,20 @@ async fn main() -> anyhow::Result<()> {
 async fn run_bootstrap_system_flake_cli(args: &[String]) -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Usage: nasty-engine bootstrap-system-flake --dest-dir <dir> --template-file <path> --nasty-url <url> --system <system>"
+            "Usage: nasty-engine bootstrap-system-flake --dest-dir <dir> --template-file <path> --system <system>"
         );
         return Ok(());
     }
 
     let dest_dir = required_flag_value(args, "--dest-dir")?;
     let template_file = required_flag_value(args, "--template-file")?;
-    let nasty_url = required_flag_value(args, "--nasty-url")?;
     let local_system = required_flag_value(args, "--system")?;
+    let nasty_version = env!("CARGO_PKG_VERSION");
 
     let result = nasty_system::update::bootstrap_system_flake_from_template_path(
         &template_file,
         &dest_dir,
-        &nasty_url,
+        nasty_version,
         &local_system,
     )
     .await

@@ -1367,22 +1367,22 @@ async fn latest_official_nasty_release_tag() -> Result<String, UpdateError> {
 pub async fn bootstrap_system_flake_from_template_path(
     template_path: &str,
     dest_dir: &str,
-    nasty_url: &str,
+    nasty_version: &str,
     local_system: &str,
 ) -> Result<BootstrapSystemFlakeResult, UpdateError> {
     let template = tokio::fs::read_to_string(template_path)
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("read {template_path}: {e}")))?;
-    bootstrap_system_flake_from_template(&template, dest_dir, nasty_url, local_system).await
+    bootstrap_system_flake_from_template(&template, dest_dir, nasty_version, local_system).await
 }
 
 pub async fn bootstrap_system_flake_from_template(
     template: &str,
     dest_dir: &str,
-    nasty_url: &str,
+    nasty_version: &str,
     local_system: &str,
 ) -> Result<BootstrapSystemFlakeResult, UpdateError> {
-    let rendered = render_system_flake_template(template, nasty_url, local_system)?;
+    let rendered = render_system_flake_template(template, nasty_version, local_system)?;
     tokio::fs::create_dir_all(dest_dir)
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("mkdir {dest_dir}: {e}")))?;
@@ -1395,23 +1395,41 @@ pub async fn bootstrap_system_flake_from_template(
 
 fn render_system_flake_template(
     template: &str,
-    nasty_url: &str,
+    nasty_version: &str,
     local_system: &str,
 ) -> Result<String, UpdateError> {
-    if !template.contains("@NASTY_URL@") {
+    if !template.contains("@NASTY_VERSION@") {
         return Err(UpdateError::CommandFailed(
-            "system flake template is missing @NASTY_URL@ placeholder".into(),
+            "system flake template is missing @NASTY_VERSION@ placeholder".into(),
         ));
     }
-    if !template.contains("\"local-system\"") {
+    if !template.contains("@LOCAL_SYSTEM@") {
         return Err(UpdateError::CommandFailed(
-            "system flake template is missing \"local-system\" placeholder".into(),
+            "system flake template is missing @LOCAL_SYSTEM@ placeholder".into(),
         ));
     }
+    let nasty_tag = normalize_release_tag(nasty_version)?;
 
     Ok(template
-        .replace("@NASTY_URL@", nasty_url)
-        .replace("\"local-system\"", &format!("\"{local_system}\"")))
+        .replace("@NASTY_VERSION@", &nasty_tag)
+        .replace("@LOCAL_SYSTEM@", local_system))
+}
+
+fn normalize_release_tag(version_or_tag: &str) -> Result<String, UpdateError> {
+    let trimmed = version_or_tag.trim();
+    let tag = if trimmed.starts_with('v') {
+        trimmed.to_string()
+    } else {
+        format!("v{trimmed}")
+    };
+
+    if parse_release_tag_version(&tag).is_none() {
+        return Err(UpdateError::CommandFailed(format!(
+            "invalid tagged release version: {version_or_tag}"
+        )));
+    }
+
+    Ok(tag)
 }
 
 async fn detect_local_system() -> Result<String, UpdateError> {
@@ -1945,17 +1963,17 @@ mod tests {
     #[test]
     fn renders_system_flake_template() {
         let template = r#"
-inputs = { nasty.url = "@NASTY_URL@"; };
+inputs = { nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@"; };
 "#
         .to_string()
             + r#"
 outputs = { nixpkgs, nasty, ... }: {
-  nixosConfigurations.nasty = nixpkgs.lib.nixosSystem { system = "local-system"; };
+  nixosConfigurations.nasty = nixpkgs.lib.nixosSystem { system = "@LOCAL_SYSTEM@"; };
 };
 "#;
         let rendered = super::render_system_flake_template(
             &template,
-            "github:nasty-project/nasty/v0.0.3",
+            "0.0.3",
             "x86_64-linux",
         )
         .expect("rendered");
