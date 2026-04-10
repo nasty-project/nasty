@@ -1,8 +1,9 @@
-{ config, lib, pkgs, nasty-engine ? null, nasty-webui ? null, nasty-version ? "dev", nasty-bcachefs-tools ? pkgs.bcachefs-tools, ... }:
+args@{ config, lib, pkgs, nasty-engine ? null, nasty-webui ? null, nasty-version ? "dev", nasty-bcachefs-tools ? pkgs.bcachefs-tools, ... }:
 
 let
   cfg = config.services.nasty;
   inherit (lib) mkEnableOption mkOption mkIf types;
+  nastySystemFlakeSnapshot = args.nastySystemFlakeSnapshot or null;
 
   useSelfSigned = cfg.tls.selfSigned && cfg.tls.certFile == null && cfg.tls.keyFile == null;
   tlsCertFile = if cfg.tls.certFile != null then cfg.tls.certFile else "/var/lib/nasty/tls/cert.pem";
@@ -215,6 +216,57 @@ in {
 
     # Version file for update system
     environment.etc."nasty-version".text = nasty-version;
+
+    # Keep a generation-owned copy of the managed wrapper flake in /etc so the
+    # exact flake used to build the active generation is readable from
+    # /run/current-system/etc/nasty-system-flake and can be restored on boot.
+    environment.etc."nasty-system-flake".source = lib.mkIf (nastySystemFlakeSnapshot != null) nastySystemFlakeSnapshot;
+
+    systemd.services.recover-generation-flake = mkIf (nastySystemFlakeSnapshot != null) {
+      description = "Recover /etc/nixos flake files from the active system generation";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "nasty-engine.service" ];
+      after = [ "local-fs.target" ];
+      aliases = [ "nasty-restore-system-flake.service" ];
+      restartTriggers = [ nastySystemFlakeSnapshot ];
+      unitConfig.ConditionPathExists = "/etc/nasty-system-flake/flake.nix";
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = pkgs.writeShellScript "recover-generation-flake" ''
+          set -euo pipefail
+
+          ${pkgs.coreutils}/bin/install -d -m 0755 /etc/nixos
+
+          sync_file() {
+            local name="$1"
+            local src="/etc/nasty-system-flake/$name"
+            local dst="/etc/nixos/$name"
+
+            if [ ! -e "$src" ]; then
+              return 0
+            fi
+
+            if [ -e "$dst" ] && ${pkgs.diffutils}/bin/cmp -s "$src" "$dst"; then
+              return 0
+            fi
+
+            ${pkgs.coreutils}/bin/install -m 0644 -T "$src" "$dst"
+          }
+
+          sync_file flake.nix
+          sync_file flake.lock
+        '';
+      };
+    };
+
+    # systemd starts the recovery unit on boot; activation starts it again so a
+    # freshly switched generation re-applies its own flake snapshot immediately.
+    system.activationScripts.recover-generation-flake = mkIf (nastySystemFlakeSnapshot != null) ''
+      if [ -d /run/systemd/system ]; then
+        ${pkgs.systemd}/bin/systemctl start recover-generation-flake.service >/dev/null 2>&1 || true
+      fi
+    '';
 
     # Apply hostname saved in settings.json on every boot.
     systemd.services.nasty-apply-hostname = {

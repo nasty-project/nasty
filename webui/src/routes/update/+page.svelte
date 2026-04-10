@@ -3,23 +3,62 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { UpdateInfo, UpdateStatus, BcachefsToolsInfo, Generation, FirmwareDevice, FirmwareUpdateResult } from '$lib/types';
-	import { Tag, Trash2, ArrowRightLeft, Pencil, X, Check } from '@lucide/svelte';
+	import type {
+		UpdateInfo,
+		UpdateStatus,
+		Generation,
+		FirmwareDevice,
+		FirmwareUpdateResult,
+		VersionInfo,
+		VersionTaggedReleaseStatus
+	} from '$lib/types';
+	import { Tag, Trash2, ArrowRightLeft, X, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
+	import { Input } from '$lib/components/ui/input';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
-	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 
-	let activeTab: 'system' | 'generations' | 'bcachefs' | 'firmware' = $state(
-		typeof window !== 'undefined' && window.location.hash === '#bcachefs' ? 'bcachefs'
-		: typeof window !== 'undefined' && window.location.hash === '#generations' ? 'generations'
+	type Tab = 'version' | 'generations' | 'firmware';
+	type VersionRow = {
+		name: string;
+		label: string;
+		url: string;
+		rev: string | null;
+		update: boolean;
+		initialUrl: string;
+		initialRev: string | null;
+	};
+
+	type TaggedReleaseBannerState =
+		| { kind: 'loading' }
+		| { kind: 'switching' }
+		| { kind: 'failure' }
+		| ({ kind: 'ready' } & VersionTaggedReleaseStatus);
+
+	const client = getClient();
+	const VERSION_PAGE_ACTION_KEY = 'nasty.version-page.action';
+
+	let activeTab: Tab = $state(
+		typeof window !== 'undefined' && window.location.hash === '#generations' ? 'generations'
 		: typeof window !== 'undefined' && window.location.hash === '#firmware' ? 'firmware'
-		: 'system'
+		: 'version'
 	);
 
-	// ── Generations tab state ───────────────────────────────
+	let info: UpdateInfo | null = $state(null);
+	let taggedReleaseBanner: TaggedReleaseBannerState = $state({ kind: 'loading' });
+	let versionRows: VersionRow[] = $state([]);
+	let status: UpdateStatus | null = $state(null);
+	let loading = $state(true);
+	let startingSwitch = $state(false);
+	let startingUpgrade = $state(false);
+	let upstreamExpanded = $state(false);
+	let pollInterval: ReturnType<typeof setInterval> | null = null;
+	let logEl: HTMLPreElement | undefined = $state();
+	let logCollapsed = $state(true);
+	let taggedReleaseBannerRequestId = 0;
+
 	let generations: Generation[] = $state([]);
 	let generationsLoading = $state(false);
 	let generationsLoaded = $state(false);
@@ -27,36 +66,6 @@
 	let editLabelValue = $state('');
 	let labelFilter = $state('');
 
-	const filteredGenerations = $derived(
-		labelFilter
-			? generations.filter(g => g.label?.toLowerCase().includes(labelFilter.toLowerCase()))
-			: generations
-	);
-
-	const availableLabels = $derived(
-		[...new Set(generations.map(g => g.label).filter((l): l is string => !!l))].sort()
-	);
-
-	let info: UpdateInfo | null = $state(null);
-	let status: UpdateStatus | null = $state(null);
-	let engineCommit: string | null = $state(null);
-	let loading = $state(true);
-	let checking = $state(false);
-	let pollInterval: ReturnType<typeof setInterval> | null = null;
-	let logEl: HTMLPreElement | undefined = $state();
-	let logCollapsed = $state(true);
-
-	// bcachefs-tools switching state
-	let bcachefsInfo: BcachefsToolsInfo | null = $state(null);
-	let bcachefsStatus: UpdateStatus | null = $state(null);
-	let bcachefsRef = $state('');
-	let bcachefsDebugChecks = $state(false);
-	let bcachefsSwitching = $state(false);
-	let bcachefsLogEl: HTMLPreElement | undefined = $state();
-	let bcachefsPollInterval: ReturnType<typeof setInterval> | null = null;
-	let bcachefsLogCollapsed = $state(false);
-
-	// ── Firmware tab state ─────────────────────────────────
 	let firmwareAvailable = $state(false);
 	let firmwareDevices: FirmwareDevice[] = $state([]);
 	let firmwareLoading = $state(false);
@@ -64,10 +73,16 @@
 	let firmwareUpdating: Record<string, boolean> = $state({});
 
 	const phases = [
-		{ label: 'Fetch',    marker: '==> Updating local system flake' },
-		{ label: 'Build',    marker: '==> Rebuilding' },
+		{ label: 'Fetch', marker: '==> Updating local system flake' },
+		{ label: 'Build', marker: '==> Rebuilding' },
 		{ label: 'Activate', marker: 'activating the configuration' },
-		{ label: 'Done',     marker: '==> Update complete!' },
+		{ label: 'Done', marker: '==> Update complete!' }
+	];
+
+	const genPhases = [
+		{ label: 'Switch', marker: '==> Switching to generation' },
+		{ label: 'Activate', marker: '==> Activating generation' },
+		{ label: 'Done', marker: '==> Switch to generation' }
 	];
 
 	const currentPhase = $derived.by(() => {
@@ -79,12 +94,6 @@
 		return reached;
 	});
 
-	const genPhases = [
-		{ label: 'Switch',   marker: '==> Switching to generation' },
-		{ label: 'Activate', marker: '==> Activating generation' },
-		{ label: 'Done',     marker: '==> Switch to generation' },
-	];
-
 	const genCurrentPhase = $derived.by(() => {
 		const log = status?.log ?? '';
 		let reached = -1;
@@ -94,44 +103,38 @@
 		return reached;
 	});
 
-	const bcachefsPhases = [
-		{ label: 'Fetch',    marker: '==> Switching' },
-		{ label: 'Build',    marker: '==> Rebuilding' },
-		{ label: 'Activate', marker: 'activating the configuration' },
-		{ label: 'Done',     marker: '==> bcachefs switch complete!' },
-	];
+	const versionDirty = $derived.by(() =>
+		versionRows.some((row) => row.url.trim() !== row.initialUrl || row.update)
+	);
 
-	const bcachefsCurrentPhase = $derived.by(() => {
-		const log = bcachefsStatus?.log ?? '';
-		let reached = -1;
-		for (let i = 0; i < bcachefsPhases.length; i++) {
-			if (log.includes(bcachefsPhases[i].marker)) reached = i;
-		}
-		return reached;
+	const upstreamBusy = $derived.by(() =>
+		startingSwitch || startingUpgrade || status?.state === 'running'
+	);
+
+	const versionSelectionCount = $derived.by(() =>
+		versionRows.filter((row) => row.update || row.url.trim() !== row.initialUrl).length
+	);
+
+	const filteredGenerations = $derived(
+		labelFilter
+			? generations.filter((g) => g.label?.toLowerCase().includes(labelFilter.toLowerCase()))
+			: generations
+	);
+
+	const availableLabels = $derived(
+		[...new Set(generations.map((g) => g.label).filter((l): l is string => !!l))].sort()
+	);
+
+	const versionStatusVisible = $derived.by(() => {
+		if (!status || status.state === 'idle') return false;
+		const log = status.log ?? '';
+		return currentPhase >= 0 || log.includes('No flake.lock changes detected');
 	});
 
-	const bcachefsDebugChanged = $derived(
-		bcachefsInfo != null && bcachefsDebugChecks !== (bcachefsInfo as BcachefsToolsInfo).debug_checks
-	);
-
-	const bcachefsCanSwitch = $derived(
-		bcachefsRef.trim() !== '' || bcachefsDebugChanged
-	);
-
-	const bcachefsWarnVisible = $derived(
-		bcachefsRef.trim() !== '' && bcachefsRef.trim() !== ((bcachefsInfo as BcachefsToolsInfo | null)?.default_ref ?? '')
-	);
-
-	// True when the entered ref looks like a branch name rather than a tag (v*) or commit SHA ([0-9a-f]{7,40})
-	const bcachefsRefIsBranch = $derived.by(() => {
-		const r = bcachefsRef.trim();
-		if (!r) return false;
-		if (/^v\d/.test(r)) return false;           // tag: v1.37.0
-		if (/^[0-9a-f]{7,40}$/.test(r)) return false; // commit SHA
-		return true;
+	const generationStatusVisible = $derived.by(() => {
+		if (!status || status.state === 'idle') return false;
+		return genCurrentPhase >= 0;
 	});
-
-	const client = getClient();
 
 	$effect(() => {
 		if (status?.log && logEl) {
@@ -139,165 +142,215 @@
 		}
 	});
 
-	$effect(() => {
-		if (bcachefsStatus?.log && bcachefsLogEl) {
-			bcachefsLogEl.scrollTop = bcachefsLogEl.scrollHeight;
-		}
-	});
-
-	$effect(() => {
-		if (bcachefsStatus?.state === 'running') {
-			startBcachefsPolling();
-		}
-	});
-
-	const onReconnect = () => {
-		Promise.all([loadVersion(), loadBcachefsInfo()]);
-	};
-
 	onMount(() => {
-		const t0 = performance.now();
-		Promise.all([loadVersion(), loadStatus(), loadBcachefsInfo(), loadBcachefsStatus(),
-			client.call('system.info').then((si: any) => { engineCommit = si.engine_commit ?? null; }).catch(() => {}),
-		]).then(() => {
-			if (localStorage.getItem('nasty-debug') === '1') {
-				console.debug(`[page] update: ${(performance.now() - t0).toFixed(0)}ms total`);
-			}
+		const onReconnect = () => {
+			Promise.all([
+				loadVersionPage(),
+				loadStatus(),
+				activeTab === 'firmware' && firmwareLoaded ? loadFirmware() : Promise.resolve()
+			]);
+		};
+
+		Promise.all([
+			loadVersionPage(),
+			loadStatus()
+		]).finally(() => {
 			loading = false;
 		});
+
 		client.onReconnect(onReconnect);
-		return () => client.offReconnect(onReconnect);
+
+		return () => {
+			client.offReconnect(onReconnect);
+		};
 	});
 
 	onDestroy(() => {
 		stopPolling();
-		stopBcachefsPolling();
 	});
 
-	async function loadVersion() {
+	function versionLabel(name: string): string {
+		switch (name) {
+			case 'nixpkgs': return 'nixpkgs';
+			case 'bcachefs-tools': return 'bcachefs-tools';
+			case 'nasty': return 'nasty';
+			default: return name;
+		}
+	}
+
+	function syncVersionRows(next: VersionInfo) {
+		versionRows = next.inputs.map((input) => ({
+			name: input.name,
+			label: versionLabel(input.name),
+			url: input.url,
+			rev: input.rev,
+			update: false,
+			initialUrl: input.url,
+			initialRev: input.rev
+		}));
+	}
+
+	function isForcedVersionUpdate(row: VersionRow): boolean {
+		return row.url.trim() !== row.initialUrl;
+	}
+
+	function isOfficialTaggedReleaseUrl(url: string): boolean {
+		return /^github:nasty-project\/nasty\/v\d+\.\d+\.\d+$/.test(url.trim());
+	}
+
+	function setTab(tab: Tab) {
+		activeTab = tab;
+		if (typeof window !== 'undefined') {
+			window.location.hash = tab === 'version' ? '#version' : `#${tab}`;
+		}
+		if (tab === 'generations' && !generationsLoaded) void loadGenerations();
+		if (tab === 'firmware' && !firmwareLoaded) void loadFirmware();
+	}
+
+	function readVersionPageAction(): string | null {
+		if (typeof window === 'undefined') return null;
+		return window.sessionStorage.getItem(VERSION_PAGE_ACTION_KEY);
+	}
+
+	function writeVersionPageAction(action: string | null) {
+		if (typeof window === 'undefined') return;
+		if (action) {
+			window.sessionStorage.setItem(VERSION_PAGE_ACTION_KEY, action);
+		} else {
+			window.sessionStorage.removeItem(VERSION_PAGE_ACTION_KEY);
+		}
+	}
+
+	async function loadVersionPage() {
 		await withToast(async () => {
-			info = await client.call<UpdateInfo>('system.update.version');
+			const [nextInfo, nextVersion] = await Promise.all([
+				client.call<VersionInfo>('system.version.get'),
+				client.call<UpdateInfo>('system.update.version')
+			]);
+			info = nextVersion;
+			syncVersionRows(nextInfo);
+			if (readVersionPageAction() === 'version-switch') {
+				taggedReleaseBanner = { kind: 'switching' };
+			} else {
+				void loadTaggedReleaseBanner();
+			}
 		});
+	}
+
+	async function loadTaggedReleaseBanner() {
+		if (readVersionPageAction() === 'version-switch') {
+			taggedReleaseBanner = { kind: 'switching' };
+			return;
+		}
+		const requestId = ++taggedReleaseBannerRequestId;
+		taggedReleaseBanner = { kind: 'loading' };
+		try {
+			const releaseStatus = await client.call<VersionTaggedReleaseStatus>(
+				'system.version.tagged_release_notice'
+			);
+			if (requestId === taggedReleaseBannerRequestId) {
+				taggedReleaseBanner = { kind: 'ready', ...releaseStatus };
+			}
+		} catch {
+			if (requestId === taggedReleaseBannerRequestId) {
+				taggedReleaseBanner = { kind: 'failure' };
+			}
+		}
 	}
 
 	async function loadStatus() {
 		await withToast(async () => {
 			status = await client.call<UpdateStatus>('system.update.status');
-			if (status?.state === 'running') {
-				startPolling();
+			if (readVersionPageAction() === 'version-switch') {
+				if (status?.state === 'running') {
+					taggedReleaseBanner = { kind: 'switching' };
+				} else {
+					writeVersionPageAction(null);
+					void loadTaggedReleaseBanner();
+				}
 			}
+			if (status?.state === 'running') startPolling();
 		});
 	}
 
-	async function checkForUpdates() {
-		checking = true;
-		const result = await withToast(
-			() => client.call<UpdateInfo>('system.update.check'),
-			'Update check complete'
-		);
-		if (result !== undefined) {
-			info = result;
-		}
-		checking = false;
+	async function requestVersionSwitch() {
+		if (!versionDirty) return;
+		const changedUrls = versionRows.filter((row) => row.url.trim() !== row.initialUrl);
+		const refreshed = versionRows.filter((row) => row.update || row.url.trim() !== row.initialUrl);
+		const changedLabel = changedUrls.length > 0
+			? changedUrls.map((row) => row.name).join(', ')
+			: 'none';
+		const refreshedLabel = refreshed.map((row) => row.name).join(', ');
+
+		if (!await confirm(
+			'Switch upstream inputs?',
+			`This will write the selected input URLs directly into /etc/nixos/flake.nix and refresh these inputs in flake.lock: ${refreshedLabel}. URL changes are always refreshed to keep flake.lock consistent. If flake.lock changes, the system rebuild starts immediately. Changed URLs: ${changedLabel}.`
+		)) return;
+
+		await doVersionSwitch();
 	}
 
-	async function applyUpdate() {
-		if (!await confirm('Apply System Update?', 'NASty will fetch and apply the latest version. Services will restart. If the update includes UI changes, you will be prompted to reload the page. This can take several minutes.')) return;
-		doApplyUpdate();
-	}
-
-	async function doApplyUpdate() {
+	async function doVersionSwitch() {
+		startingSwitch = true;
+		writeVersionPageAction('version-switch');
+		taggedReleaseBanner = { kind: 'switching' };
 		logCollapsed = false;
 		status = { state: 'running', log: '', reboot_required: false, webui_changed: false };
-		const ok = await withToast(
-			() => client.call('system.update.apply'),
-			'Update started'
+		const result = await withToast(
+			() => client.call('system.version.switch', {
+				inputs: versionRows.map((row) => ({
+					name: row.name,
+					url: row.url.trim(),
+					update: row.update
+				}))
+			}),
+			'Version switch started'
 		);
-		if (ok !== undefined) {
+		if (result !== undefined) {
 			startPolling();
+		} else {
+			writeVersionPageAction(null);
+			void loadTaggedReleaseBanner();
 		}
+		startingSwitch = false;
 	}
 
-	async function changeChannel(channel: string) {
-		if (channel === info?.channel) return;
-		const descriptions: Record<string, string> = {
-			mild: 'Tagged releases only. Safe, tested, boring.',
-			spicy: 'Pre-release builds. New features, occasional heartburn.',
-			nasty: 'Latest commit on main. Bleeding edge — you asked for it.',
-		};
-		const flavorOrder: Record<string, number> = { mild: 0, spicy: 1, nasty: 2 };
-		const isDowngrade = (flavorOrder[channel] ?? 0) < (flavorOrder[info?.channel ?? 'nasty'] ?? 0);
-		const warning = isDowngrade
-			? ' This may downgrade your system to an older version.'
-			: '';
-		if (!await confirm(
-			`Switch to ${channel} flavor?`,
-			`${descriptions[channel] ?? ''}${warning} You should check for updates after switching.`
-		)) return;
+	async function upgradeTaggedRelease() {
+		if (taggedReleaseBanner.kind !== 'ready' || taggedReleaseBanner.current_is_latest_standard_url) return;
+		startingUpgrade = true;
+		logCollapsed = false;
+		status = { state: 'running', log: '', reboot_required: false, webui_changed: false };
 		const result = await withToast(
-			() => client.call('system.update.channel.set', { channel }),
-			`Switched to ${channel} flavor`
+			() => client.call('system.version.upgrade_tagged_release'),
+			'Tagged release upgrade started'
 		);
-		if (result !== undefined && info) {
-			info = { ...info, channel: channel as any };
+		if (result !== undefined) {
+			startPolling();
+		} else {
+			await loadVersionPage();
 		}
+		startingUpgrade = false;
 	}
-
-	// ── Firmware functions ──────────────────────────────────
-
-	async function loadFirmware() {
-		firmwareLoading = true;
-		try {
-			firmwareAvailable = await client.call<boolean>('firmware.available');
-			if (firmwareAvailable) {
-				firmwareDevices = await client.call<FirmwareDevice[]>('firmware.check');
-			}
-		} catch { /* ignore */ }
-		firmwareLoading = false;
-		firmwareLoaded = true;
-	}
-
-	async function updateFirmware(deviceId: string) {
-		if (!await confirm('Apply firmware update?', 'This will flash new firmware to the device. Do not power off during the update. A reboot may be required.')) return;
-		firmwareUpdating[deviceId] = true;
-		const result = await withToast(
-			() => client.call<FirmwareUpdateResult>('firmware.update', { device_id: deviceId }),
-			'Firmware update applied'
-		);
-		firmwareUpdating[deviceId] = false;
-		if (result?.reboot_required) {
-			rebootState.set();
-		}
-		await loadFirmware();
-	}
-
-	$effect(() => {
-		if (activeTab === 'firmware' && !firmwareLoaded) loadFirmware();
-	});
 
 	function startPolling() {
 		stopPolling();
 		pollInterval = setInterval(async () => {
 			try {
-				status = await client.call<UpdateStatus>('system.update.status');
-				if (status && (status.state === 'success' || status.state === 'failed')) {
-					stopPolling();
-					await loadVersion();
-					// Refresh engine commit display
-					try { engineCommit = (await client.call<any>('system.info')).engine_commit ?? null; } catch {}
-					if (status.state === 'success') {
-						// Mark as up-to-date since we just applied the update
-						if (info) {
-							info.current_version = info.latest_version ?? info.current_version;
-							info.update_available = false;
+					status = await client.call<UpdateStatus>('system.update.status');
+					if (status && (status.state === 'success' || status.state === 'failed')) {
+						if (readVersionPageAction() === 'version-switch') {
+							writeVersionPageAction(null);
 						}
+						stopPolling();
+						await loadVersionPage();
+						if (status.state === 'success') {
 						if (status.webui_changed) refreshState.set();
 						if (status.reboot_required) rebootState.set();
 						setTimeout(() => { logCollapsed = true; }, 3000);
 					}
 				}
 			} catch {
-				// Connection may drop during update, keep polling
+				// Rebuild can restart services and briefly drop the socket.
 			}
 		}, 3000);
 	}
@@ -309,93 +362,12 @@
 		}
 	}
 
-	async function loadBcachefsInfo() {
-		await withToast(async () => {
-			bcachefsInfo = await client.call<BcachefsToolsInfo>('bcachefs.tools.info');
-			if (bcachefsInfo) {
-				bcachefsDebugChecks = bcachefsInfo.debug_checks;
-			}
-		});
-		sysInfoRefresh.trigger(); // keep sidebar bcachefs version in sync
-	}
-
-	async function loadBcachefsStatus() {
-		await withToast(async () => {
-			bcachefsStatus = await client.call<UpdateStatus>('bcachefs.tools.status');
-			if (bcachefsStatus?.state === 'running') {
-				startBcachefsPolling();
-			}
-		});
-	}
-
-	async function requestBcachefsSwitch() {
-		const ref = bcachefsRef.trim() || bcachefsInfo?.pinned_ref || bcachefsInfo?.default_ref || '';
-		if (!ref) return;
-		const desc = bcachefsRef.trim()
-			? `Switch bcachefs-tools to ${ref}?`
-			: `Rebuild bcachefs-tools ${ref} with updated build flags?`;
-		if (!await confirm(
-			desc,
-			'The system will rebuild with the new version. The first build may take 5–20 minutes. If the new version introduced an incompatible on-disk format, downgrading may leave filesystems unmountable.'
-		)) return;
-		doBcachefsSwitch();
-	}
-
-	async function doBcachefsSwitch() {
-		const ref = bcachefsRef.trim() || bcachefsInfo?.pinned_ref || bcachefsInfo?.default_ref || '';
-		if (!ref) return;
-		bcachefsSwitching = true;
-		bcachefsLogCollapsed = false;
-		bcachefsStatus = { state: 'running', log: '', reboot_required: false, webui_changed: false };
-		const result = await withToast(
-			() => client.call('bcachefs.tools.switch', { git_ref: ref, debug_checks: bcachefsDebugChecks }),
-			'bcachefs switch started'
-		);
-		if (result !== undefined) {
-			startBcachefsPolling();
-		}
-		bcachefsSwitching = false;
-	}
-
-	function startBcachefsPolling() {
-		stopBcachefsPolling();
-		bcachefsPollInterval = setInterval(async () => {
-			try {
-				bcachefsStatus = await client.call<UpdateStatus>('bcachefs.tools.status');
-				// Only stop on terminal states. 'idle' can occur transiently when systemd
-				// restarts during switch-to-configuration and the unit state is briefly lost.
-				if (bcachefsStatus && (bcachefsStatus.state === 'success' || bcachefsStatus.state === 'failed')) {
-					stopBcachefsPolling();
-					await loadBcachefsInfo();
-					if (bcachefsStatus.state === 'success') {
-						// No page reload needed — only bcachefs-tools changed, not the webui JS.
-						if (bcachefsStatus.reboot_required) rebootState.set();
-						bcachefsRef = '';
-						setTimeout(() => { bcachefsLogCollapsed = true; }, 5000);
-					}
-				}
-			} catch {
-				// Connection may drop during rebuild, keep polling
-			}
-		}, 3000);
-	}
-
-	function stopBcachefsPolling() {
-		if (bcachefsPollInterval) {
-			clearInterval(bcachefsPollInterval);
-			bcachefsPollInterval = null;
-		}
-	}
-
-	/** Break systemd's single-line "Consumed …" summary into one stat per line. */
 	function formatLog(log: string): string {
 		return log.replace(
 			/(^.+: Consumed .+)$/m,
 			(line) => line.replace(/, /g, ',\n  ')
 		);
 	}
-
-	// ── Generations ─────────────────────────────────────────
 
 	async function loadGenerations() {
 		generationsLoading = true;
@@ -414,21 +386,20 @@
 			'The system will activate this generation. Services will restart. A reboot may be required if the kernel changed.'
 		)) return;
 
+		logCollapsed = false;
 		status = { state: 'running', log: '', reboot_required: false, webui_changed: false };
 		const ok = await withToast(
 			() => client.call('system.generations.switch', { generation: gen }),
 			`Switching to generation ${gen}`
 		);
-		if (ok !== undefined) {
-			startPolling();
-		}
+		if (ok !== undefined) startPolling();
 	}
 
 	async function saveLabel(gen: number) {
 		await withToast(
 			() => client.call('system.generations.label', {
 				generation: gen,
-				label: editLabelValue.trim() || null,
+				label: editLabelValue.trim() || null
 			}),
 			editLabelValue.trim() ? 'Label saved' : 'Label removed'
 		);
@@ -453,135 +424,200 @@
 		editingLabel = gen.generation;
 		editLabelValue = gen.label ?? '';
 	}
+
+	async function loadFirmware() {
+		firmwareLoading = true;
+		try {
+			firmwareAvailable = await client.call<boolean>('firmware.available');
+			if (firmwareAvailable) {
+				firmwareDevices = await client.call<FirmwareDevice[]>('firmware.check');
+			}
+		} catch {
+			// Ignore fwupd errors in the page shell.
+		}
+		firmwareLoading = false;
+		firmwareLoaded = true;
+	}
+
+	async function updateFirmware(deviceId: string) {
+		if (!await confirm(
+			'Apply firmware update?',
+			'This will flash new firmware to the device. Do not power off during the update. A reboot may be required.'
+		)) return;
+		firmwareUpdating[deviceId] = true;
+		const result = await withToast(
+			() => client.call<FirmwareUpdateResult>('firmware.update', { device_id: deviceId }),
+			'Firmware update applied'
+		);
+		firmwareUpdating[deviceId] = false;
+		if (result?.reboot_required) rebootState.set();
+		await loadFirmware();
+	}
 </script>
-
-
-<!-- Global banners — shown regardless of active tab -->
-
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else}
-	<!-- Tab bar -->
 	<div class="mb-6 flex border-b border-border">
 		<button
-			onclick={() => activeTab = 'system'}
-			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'system'
+			onclick={() => setTab('version')}
+			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'version'
 				? 'border-b-2 border-primary text-foreground'
 				: 'text-muted-foreground hover:text-foreground'}"
-		>System</button>
+		>Version</button>
 		<button
-			onclick={() => { activeTab = 'generations'; loadGenerations(); }}
+			onclick={() => setTab('generations')}
 			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'generations'
 				? 'border-b-2 border-primary text-foreground'
 				: 'text-muted-foreground hover:text-foreground'}"
 		>Generations</button>
 		<button
-			onclick={() => activeTab = 'bcachefs'}
-			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'bcachefs'
-				? 'border-b-2 border-primary text-foreground'
-				: 'text-muted-foreground hover:text-foreground'}"
-		>bcachefs</button>
-		<button
-			onclick={() => activeTab = 'firmware'}
+			onclick={() => setTab('firmware')}
 			class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'firmware'
 				? 'border-b-2 border-primary text-foreground'
 				: 'text-muted-foreground hover:text-foreground'}"
 		>Firmware</button>
 	</div>
 
-	<!-- System tab -->
-	{#if activeTab === 'system'}
+	{#if activeTab === 'version'}
 		<Card class="mb-6">
-			<CardContent class="py-4">
-				<div class="flex flex-wrap items-start justify-between gap-6">
-					<!-- Left: version info + buttons -->
-					<div>
-						<div class="mb-3 flex items-center gap-8">
-							<div>
-								<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed</div>
-								<div class="font-mono text-xl font-semibold">{info?.current_version ?? 'unknown'}</div>
-								{#if engineCommit && engineCommit !== info?.current_version}
-									<div class="text-xs text-muted-foreground">engine: <span class="font-mono">{engineCommit}</span></div>
-								{/if}
-							</div>
-							{#if info?.latest_version}
-								<div class="text-lg text-muted-foreground/30">→</div>
-								<div>
-									<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Available</div>
-									<div class="font-mono text-xl font-semibold {info.update_available ? 'text-blue-400' : ''}">{info.latest_version}</div>
+			<CardContent class="space-y-4 pt-6">
+				<div
+					class="rounded-lg border px-4 py-4 text-sm {taggedReleaseBanner.kind === 'failure'
+						? 'border-amber-500/40 bg-amber-500/10'
+						: taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url
+							? 'border-emerald-500/40 bg-emerald-500/10'
+							: 'border-border/60 bg-muted/20'}"
+				>
+					<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+						<div class="min-w-0 flex-1">
+							<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tagged Release</div>
+							{#if taggedReleaseBanner.kind === 'loading'}
+								<div class="mt-1 font-medium">Fetching newest version...</div>
+							{:else if taggedReleaseBanner.kind === 'switching'}
+								<div class="mt-1 font-medium">Switching to another Version...</div>
+							{:else if taggedReleaseBanner.kind === 'failure'}
+								<div class="mt-1 font-medium">Network failure, unable to fetch newest tagged release</div>
+							{:else if taggedReleaseBanner.current_is_latest_standard_url}
+								<div class="mt-1 font-medium">Already at newest tagged release</div>
+								<div class="mt-1 text-xs text-muted-foreground">
+									<code class="font-mono">{taggedReleaseBanner.latest_tag}</code>
+								</div>
+							{:else if !isOfficialTaggedReleaseUrl(taggedReleaseBanner.current_url)}
+								<div class="mt-1 font-medium">
+									You are using a custom build of nasty. Click to switch back to upstream release.
+								</div>
+								<div class="mt-1 text-xs text-muted-foreground">
+									<code class="font-mono">{taggedReleaseBanner.latest_url}</code>
+								</div>
+							{:else}
+								<div class="mt-1 font-medium">
+									The newest tagged release is {taggedReleaseBanner.latest_tag}, click to switch
+								</div>
+								<div class="mt-1 text-xs text-muted-foreground">
+									<code class="font-mono">{taggedReleaseBanner.latest_url}</code>
 								</div>
 							{/if}
-							{#if info?.update_available === true}
-								<span class="rounded-md border border-amber-600 bg-amber-950 px-2.5 py-0.5 text-xs font-medium text-amber-400">Update available</span>
-							{:else if info?.update_available === false}
-								<span class="rounded-md border border-green-700 bg-green-950 px-2.5 py-0.5 text-xs font-medium text-green-400">Up to date</span>
-							{/if}
 						</div>
-						<div class="flex gap-2">
-							<Button size="sm" onclick={checkForUpdates} disabled={checking || status?.state === 'running'}>
-								{checking ? 'Checking...' : 'Check for Updates'}
-							</Button>
-							{#if info?.update_available}
-								<Button
-									variant="default"
-									size="sm"
-									onclick={applyUpdate}
-									disabled={status?.state === 'running'}
-								>
-									Update Now
+						<div class="flex flex-wrap items-start justify-end gap-3">
+							{#if info}
+								<div class="min-w-[11rem] rounded-lg border border-border/60 bg-background/60 px-4 py-3 text-sm">
+									<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed NASty</div>
+									<div class="mt-1 font-mono text-lg font-semibold">{info.current_version}</div>
+								</div>
+							{/if}
+							{#if taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url}
+								<Button size="sm" onclick={upgradeTaggedRelease} disabled={startingUpgrade || status?.state === 'running'}>
+									{startingUpgrade ? 'Starting...' : 'Upgrade'}
 								</Button>
 							{/if}
 						</div>
 					</div>
+				</div>
 
-					<!-- Right: flavor selector -->
-					{#if info}
-						<div>
-							<div class="mb-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Flavor</div>
-							<div class="flex rounded-md overflow-hidden border border-border">
-								<button
-									title="Tagged releases only. Safe, tested, boring."
-									class="px-3 py-1 text-xs transition-colors {info.channel === 'mild' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
-									onclick={() => changeChannel('mild')}
-									disabled={status?.state === 'running'}
-								>Mild</button>
-								<button
-									title="Pre-release branch. New features, occasional heartburn."
-									class="px-3 py-1 text-xs transition-colors {info.channel === 'spicy' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
-									onclick={() => changeChannel('spicy')}
-									disabled={status?.state === 'running'}
-								>Spicy</button>
-								<button
-									title="Latest development branch. Bleeding edge — you asked for it."
-									class="px-3 py-1 text-xs transition-colors {info.channel === 'nasty' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}"
-									onclick={() => changeChannel('nasty')}
-									disabled={status?.state === 'running'}
-								>Nasty</button>
+				<div class="rounded-lg border border-border/60">
+					<button
+						onclick={() => { upstreamExpanded = !upstreamExpanded; }}
+						class="flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-muted/20"
+					>
+						{#if upstreamExpanded}
+							<ChevronDown class="h-4 w-4 shrink-0 text-muted-foreground" />
+						{:else}
+							<ChevronRight class="h-4 w-4 shrink-0 text-muted-foreground" />
+						{/if}
+						<div class="flex-1">
+							<div class="font-medium">Upstream</div>
+							<div class="text-xs text-muted-foreground">Edit live flake input URLs and rebuild from /etc/nixos.</div>
+						</div>
+					</button>
+
+					{#if upstreamExpanded}
+						<div class="space-y-4 border-t border-border/60 p-4 {upstreamBusy ? 'pointer-events-none opacity-50' : ''}">
+							<div class="space-y-3">
+								{#each versionRows as row}
+									<div class="rounded-lg border border-border/60 p-4">
+										<div class="mb-2 flex items-center justify-between gap-3">
+											<div class="font-medium">{row.label}</div>
+											<div class="flex items-center gap-2 text-xs">
+												<span class="text-muted-foreground">locked</span>
+												<Badge variant="secondary" class="font-mono">{row.rev ?? 'unknown'}</Badge>
+											</div>
+										</div>
+										<div class="flex flex-col gap-3 lg:flex-row lg:items-center">
+											<div class="flex-1">
+												<Input
+													bind:value={row.url}
+													disabled={startingSwitch || status?.state === 'running'}
+													class="font-mono text-sm"
+												/>
+											</div>
+											<label class="flex items-center gap-2 text-sm text-muted-foreground lg:w-28 lg:justify-end">
+												<input
+													type="checkbox"
+													checked={row.update || isForcedVersionUpdate(row)}
+													disabled={startingSwitch || status?.state === 'running' || isForcedVersionUpdate(row)}
+													onchange={(event) => {
+														row.update = (event.currentTarget as HTMLInputElement).checked;
+													}}
+													class="h-4 w-4 rounded border-input"
+												/>
+												<span>Update</span>
+											</label>
+										</div>
+									</div>
+								{/each}
 							</div>
-							<p class="mt-1 text-xs text-muted-foreground max-w-[220px]">
-								{#if info.channel === 'mild'}
-									Safe, tested, boring.
-								{:else if info.channel === 'spicy'}
-									New features, occasional heartburn.
-								{:else}
-									Bleeding edge — you asked for it.
-								{/if}
-							</p>
+
+							<div class="flex flex-wrap items-center justify-between gap-3">
+								<p class="text-xs text-muted-foreground">
+									{#if versionSelectionCount > 0}
+										{versionSelectionCount} input{versionSelectionCount === 1 ? '' : 's'} selected for refresh.
+									{:else}
+										No refresh selected yet.
+									{/if}
+								</p>
+								<Button
+									size="sm"
+									onclick={requestVersionSwitch}
+									disabled={!versionDirty || startingSwitch || status?.state === 'running'}
+								>
+									{startingSwitch ? 'Starting...' : 'Switch'}
+								</Button>
+							</div>
 						</div>
 					{/if}
 				</div>
 			</CardContent>
 		</Card>
 
-		{#if status && (status.state === 'running' || status.state === 'failed')}
+		{#if versionStatusVisible}
 			<Card class="mb-6">
 				<CardContent class="py-5">
 					<div class="mb-5 flex items-center">
 						{#each phases as phase, i}
 							{@const done = currentPhase >= i}
-							{@const active = status.state === 'running' && currentPhase === i - 1}
-							{@const failed = status.state === 'failed' && !done}
+							{@const active = status?.state === 'running' && currentPhase === i - 1}
+							{@const failed = status?.state === 'failed' && !done}
 							<div class="flex items-center gap-0">
 								<div class="flex flex-col items-center gap-1">
 									<div class="flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all {
@@ -595,22 +631,22 @@
 									<span class="text-[0.65rem] font-medium {done ? 'text-blue-400' : active ? 'text-blue-400/70' : failed ? 'text-red-500/70' : 'text-muted-foreground/40'}">{phase.label}</span>
 								</div>
 								{#if i < phases.length - 1}
-									<div class="mb-3.5 h-px w-12 {currentPhase > i ? 'bg-blue-500' : 'bg-border'} mx-1"></div>
+									<div class="mx-1 mb-3.5 h-px w-12 {currentPhase > i ? 'bg-blue-500' : 'bg-border'}"></div>
 								{/if}
 							</div>
 						{/each}
-						{#if status.state === 'failed'}
+						{#if status?.state === 'failed'}
 							<span class="ml-4 text-sm text-destructive">Failed</span>
 						{/if}
 					</div>
 
-					{#if status.log}
+					{#if status?.log}
 						{#if status.state !== 'running'}
 							<button
 								onclick={() => logCollapsed = !logCollapsed}
-								class="mt-3 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+								class="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
 							>
-								<span class="transition-transform {logCollapsed ? '' : 'rotate-180'} inline-block">▾</span>
+								<span class="inline-block transition-transform {logCollapsed ? '' : 'rotate-180'}">▾</span>
 								{logCollapsed ? 'Show output' : 'Hide output'}
 							</button>
 						{/if}
@@ -618,29 +654,23 @@
 							<pre bind:this={logEl} class="mt-3 max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{formatLog(status.log)}</pre>
 						{/if}
 					{/if}
-					{#if status.state === 'failed'}
+
+					{#if status?.state === 'failed'}
 						<div class="mt-4 flex gap-2">
-							<Button size="sm" onclick={doApplyUpdate}>Retry</Button>
+							<Button size="sm" onclick={doVersionSwitch}>Retry</Button>
 							<Button variant="secondary" size="sm" onclick={() => status = { state: 'idle', log: '', reboot_required: false, webui_changed: false }}>Dismiss</Button>
 						</div>
 					{/if}
 				</CardContent>
 			</Card>
 		{/if}
-
-		<p class="text-xs text-muted-foreground">
-			Updates are fetched and applied atomically. If the build fails, the running system is not affected.
-			Use the Generations tab to switch to any previous system version.
-		</p>
-
-	<!-- Generations tab -->
 	{:else if activeTab === 'generations'}
 		<Card>
 			<CardContent class="py-5">
 				<div class="mb-4 flex items-center justify-between">
 					<div>
 						<h2 class="text-base font-semibold">System Generations</h2>
-						<p class="text-xs text-muted-foreground">Each update creates a new generation. Switch to any previous version or label known-good configurations.</p>
+						<p class="text-xs text-muted-foreground">Each successful rebuild creates a new generation. Switch back to any previous version or label known-good configurations.</p>
 					</div>
 					<div class="flex items-center gap-2">
 						{#if availableLabels.length > 0}
@@ -702,7 +732,10 @@
 														bind:value={editLabelValue}
 														class="w-28 rounded-md border border-input bg-background px-2 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
 														placeholder="e.g. stable"
-														onkeydown={(e) => { if (e.key === 'Enter') saveLabel(gen.generation); if (e.key === 'Escape') editingLabel = null; }}
+														onkeydown={(e) => {
+															if (e.key === 'Enter') saveLabel(gen.generation);
+															if (e.key === 'Escape') editingLabel = null;
+														}}
 													/>
 													<button onclick={() => saveLabel(gen.generation)} class="text-green-400 hover:text-green-300" title="Save">
 														<Check class="h-3.5 w-3.5" />
@@ -714,14 +747,15 @@
 											{:else if gen.label}
 												<button
 													onclick={() => startEditLabel(gen)}
-													class="flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs text-foreground hover:bg-accent transition-colors"
+													class="flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs text-foreground transition-colors hover:bg-accent"
 												>
 													<Tag class="h-3 w-3" />{gen.label}
 												</button>
 											{:else}
 												<button
 													onclick={() => startEditLabel(gen)}
-													class="text-muted-foreground/50 hover:text-muted-foreground transition-colors" title="Add label"
+													class="text-muted-foreground/50 transition-colors hover:text-muted-foreground"
+													title="Add label"
 												>
 													<Tag class="h-3.5 w-3.5" />
 												</button>
@@ -732,7 +766,7 @@
 												{#if !gen.current}
 													<button
 														onclick={() => switchGeneration(gen.generation)}
-														class="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+														class="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 														title="Switch to this generation"
 														disabled={status?.state === 'running'}
 													>
@@ -740,7 +774,7 @@
 													</button>
 													<button
 														onclick={() => deleteGeneration(gen.generation)}
-														class="rounded-md p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+														class="rounded-md p-1 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
 														title="Delete this generation"
 														disabled={gen.booted || status?.state === 'running'}
 													>
@@ -758,14 +792,14 @@
 			</CardContent>
 		</Card>
 
-		{#if status && status.state !== 'idle'}
+		{#if generationStatusVisible}
 			<Card class="mt-6">
 				<CardContent class="py-5">
 					<div class="mb-5 flex items-center">
 						{#each genPhases as phase, i}
 							{@const done = genCurrentPhase >= i}
-							{@const active = status.state === 'running' && genCurrentPhase === i - 1}
-							{@const failed = status.state === 'failed' && !done}
+							{@const active = status?.state === 'running' && genCurrentPhase === i - 1}
+							{@const failed = status?.state === 'failed' && !done}
 							<div class="flex items-center gap-0">
 								<div class="flex flex-col items-center gap-1">
 									<div class="flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all {
@@ -779,22 +813,22 @@
 									<span class="text-[0.65rem] font-medium {done ? 'text-blue-400' : active ? 'text-blue-400/70' : failed ? 'text-red-500/70' : 'text-muted-foreground/40'}">{phase.label}</span>
 								</div>
 								{#if i < genPhases.length - 1}
-									<div class="mb-3.5 h-px w-12 {genCurrentPhase > i ? 'bg-blue-500' : 'bg-border'} mx-1"></div>
+									<div class="mx-1 mb-3.5 h-px w-12 {genCurrentPhase > i ? 'bg-blue-500' : 'bg-border'}"></div>
 								{/if}
 							</div>
 						{/each}
-						{#if status.state === 'failed'}
+						{#if status?.state === 'failed'}
 							<span class="ml-4 text-sm text-destructive">Failed</span>
 						{/if}
 					</div>
 
-					{#if status.log}
+					{#if status?.log}
 						{#if status.state !== 'running'}
 							<button
 								onclick={() => logCollapsed = !logCollapsed}
-								class="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+								class="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
 							>
-								<span class="transition-transform {logCollapsed ? '' : 'rotate-180'} inline-block">▾</span>
+								<span class="inline-block transition-transform {logCollapsed ? '' : 'rotate-180'}">▾</span>
 								{logCollapsed ? 'Show output' : 'Hide output'}
 							</button>
 						{/if}
@@ -805,185 +839,6 @@
 				</CardContent>
 			</Card>
 		{/if}
-
-	<!-- bcachefs tab -->
-	{:else if activeTab === 'bcachefs'}
-		{#if bcachefsInfo?.is_custom_running}
-			<div class="mb-4 flex items-center gap-3 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200">
-				<span class="flex-1"><strong>Non-standard version in use.</strong> You are running a custom bcachefs version ({bcachefsInfo.running_version}) instead of the default ({bcachefsInfo.default_ref}). Switch back when stability is more important than bleeding-edge fixes.</span>
-				<Button variant="secondary" size="xs" onclick={() => { bcachefsRef = bcachefsInfo!.default_ref; }} disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}>
-					Restore default
-				</Button>
-			</div>
-		{/if}
-		{#if bcachefsInfo?.debug_checks_running}
-			<div class="mb-4 rounded-lg border border-blue-800 bg-blue-950 px-4 py-3 text-sm text-blue-200">
-				<strong>Debug checks enabled.</strong> The bcachefs kernel module is running with extra runtime assertions (CONFIG_BCACHEFS_DEBUG). This adds overhead to every filesystem operation. Disable when no longer needed for development or debugging.
-			</div>
-		{/if}
-
-		<Card class="mb-6">
-			<CardContent class="py-5">
-				<div class="mb-5 flex flex-wrap items-start gap-6">
-					<div>
-						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Pinned</div>
-						<div class="font-mono text-sm font-semibold">
-							{#if bcachefsInfo?.pinned_ref}
-								{bcachefsInfo.pinned_ref}{#if bcachefsInfo.pinned_rev && !/^[0-9a-f]+$/i.test(bcachefsInfo.pinned_ref)} <span class="text-muted-foreground">({bcachefsInfo.pinned_rev})</span>{/if}
-							{:else}
-								<span class="text-muted-foreground">unknown</span>
-							{/if}
-						</div>
-					</div>
-					<div>
-						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Running</div>
-						<div class="font-mono text-sm font-semibold">{bcachefsInfo?.running_version ?? 'unknown'}{bcachefsInfo?.is_custom && bcachefsInfo?.pinned_rev && !/^v\d/.test(bcachefsInfo.pinned_ref ?? '') ? ' @ ' + bcachefsInfo.pinned_rev : ''}</div>
-					{#if bcachefsInfo?.kernel_rust != null}
-						<div class="mt-0.5 text-xs text-muted-foreground">
-							kernel Rust: <span class="{bcachefsInfo.kernel_rust ? 'text-green-400' : 'text-yellow-400'}">{bcachefsInfo.kernel_rust ? 'yes' : 'no'}</span>
-						</div>
-					{/if}
-					</div>
-					<div>
-						<div class="mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Default</div>
-						<div class="font-mono text-sm font-semibold text-muted-foreground">{bcachefsInfo?.default_ref ?? 'unknown'}</div>
-					</div>
-				</div>
-
-				<div class="mb-3 flex flex-wrap gap-2">
-					<input
-						type="text"
-						class="h-9 w-96 rounded-md border border-input bg-background px-3 py-1 font-mono text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-						placeholder="e.g. v1.38.0, master, 098dad22ef7725620930587a047813469fceedce"
-						bind:value={bcachefsRef}
-						disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
-					/>
-					{#if bcachefsInfo?.default_ref}
-						<Button
-							variant="secondary"
-							size="sm"
-							onclick={() => { bcachefsRef = bcachefsInfo!.default_ref; }}
-							disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
-						>
-							{bcachefsInfo.default_ref}
-						</Button>
-					{/if}
-					<Button
-						variant="secondary"
-						size="sm"
-						onclick={() => { bcachefsRef = 'master'; }}
-						disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
-					>
-						master
-					</Button>
-				</div>
-
-				{#if bcachefsWarnVisible}
-					<div class="mb-3 rounded-lg border border-amber-700 bg-amber-950 px-4 py-3 text-sm text-amber-200 space-y-1.5">
-						<div><strong>Build time:</strong> bcachefs-tools is compiled from source — the first build can take 5–20 minutes depending on your hardware.</div>
-						<div><strong>Compatibility risk:</strong> If a newer on-disk format was already written to your filesystems, downgrading may leave them unmountable. Reach out to the bcachefs devs if you run into problems.</div>
-					</div>
-				{/if}
-				{#if bcachefsRefIsBranch}
-					<div class="mb-3 rounded-lg border border-blue-800 bg-blue-950 px-4 py-3 text-sm text-blue-200">
-						<strong>Branch detected:</strong> <code class="font-mono">{bcachefsRef.trim()}</code> will be resolved
-						to the exact commit it points to right now and pinned there. Future system updates won't follow the
-						branch tip. Use a specific tag or commit SHA for full control.
-					</div>
-				{/if}
-
-				<div class="mb-3 flex items-start gap-6">
-					<label class="flex items-start gap-2 text-sm text-muted-foreground" title="Debug symbols are inherited from the NixOS kernel config (CONFIG_DEBUG_INFO=y)">
-						<input
-							type="checkbox"
-							checked={bcachefsInfo?.debug_symbols ?? false}
-							disabled
-							class="mt-0.5 rounded border-input opacity-50"
-						/>
-						<span>
-							<span class="text-muted-foreground font-medium">Debug symbols</span>
-							<span class="block text-xs text-muted-foreground/50 mt-0.5">Inherited from NixOS kernel config (CONFIG_DEBUG_INFO=y).<br/>Adds source-level debug info for readable stack traces.<br/>No runtime cost.</span>
-						</span>
-					</label>
-					<label class="flex items-start gap-2 text-sm text-muted-foreground cursor-pointer">
-						<input
-							type="checkbox"
-							bind:checked={bcachefsDebugChecks}
-							disabled={bcachefsSwitching || bcachefsStatus?.state === 'running'}
-							class="mt-0.5 rounded border-input"
-						/>
-						<span>
-							<span class="text-foreground font-medium">Debug checks</span>
-							<span class="block text-xs text-muted-foreground/70 mt-0.5">Enables extra runtime assertions inside bcachefs<br/>(btree locking, iterator validation, bkey verification).<br/><strong>Has performance cost</strong> — use for development and debugging, not production.</span>
-						</span>
-					</label>
-				</div>
-
-				<Button
-					variant="default"
-					size="sm"
-					onclick={requestBcachefsSwitch}
-					disabled={!bcachefsCanSwitch || bcachefsSwitching || bcachefsStatus?.state === 'running'}
-				>
-					{bcachefsSwitching ? 'Starting...' : 'Switch'}
-				</Button>
-			</CardContent>
-		</Card>
-
-		{#if bcachefsStatus && bcachefsStatus.state !== 'idle'}
-			<Card class="mb-6">
-				<CardContent class="py-5">
-					<div class="mb-5 flex items-center">
-						{#each bcachefsPhases as phase, i}
-							{@const done = bcachefsCurrentPhase >= i}
-							{@const active = bcachefsStatus.state === 'running' && bcachefsCurrentPhase === i - 1}
-							{@const failed = bcachefsStatus.state === 'failed' && !done}
-							<div class="flex items-center gap-0">
-								<div class="flex flex-col items-center gap-1">
-									<div class="flex h-7 w-7 items-center justify-center rounded-full border-2 text-xs font-semibold transition-all {
-										done   ? 'border-blue-500 bg-blue-500 text-white' :
-										active ? 'border-blue-400 bg-transparent text-blue-400 animate-pulse' :
-										failed ? 'border-red-700 bg-transparent text-red-500' :
-										         'border-border bg-transparent text-muted-foreground/30'
-									}">
-										{#if done}✓{:else if active}…{:else if failed}✕{:else}{i + 1}{/if}
-									</div>
-									<span class="text-[0.65rem] font-medium {done ? 'text-blue-400' : active ? 'text-blue-400/70' : failed ? 'text-red-500/70' : 'text-muted-foreground/40'}">{phase.label}</span>
-								</div>
-								{#if i < bcachefsPhases.length - 1}
-									<div class="mb-3.5 h-px w-12 {bcachefsCurrentPhase > i ? 'bg-blue-500' : 'bg-border'} mx-1"></div>
-								{/if}
-							</div>
-						{/each}
-						{#if bcachefsStatus.state === 'failed'}
-							<span class="ml-4 text-sm text-destructive">Failed</span>
-						{/if}
-					</div>
-
-					{#if bcachefsStatus.log}
-						{#if bcachefsStatus.state !== 'running'}
-							<button
-								onclick={() => bcachefsLogCollapsed = !bcachefsLogCollapsed}
-								class="mt-3 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-							>
-								<span class="transition-transform {bcachefsLogCollapsed ? '' : 'rotate-180'} inline-block">▾</span>
-								{bcachefsLogCollapsed ? 'Show output' : 'Hide output'}
-							</button>
-						{/if}
-						{#if bcachefsStatus.state === 'running' || !bcachefsLogCollapsed}
-							<pre bind:this={bcachefsLogEl} class="mt-3 max-h-64 overflow-auto rounded bg-secondary p-3 text-xs leading-relaxed">{formatLog(bcachefsStatus.log)}</pre>
-						{/if}
-					{/if}
-					{#if bcachefsStatus.state === 'failed'}
-						<div class="mt-4 flex gap-2">
-							<Button size="sm" onclick={doBcachefsSwitch} disabled={!bcachefsRef.trim()}>Retry</Button>
-							<Button variant="secondary" size="sm" onclick={() => bcachefsStatus = { state: 'idle', log: '', reboot_required: false, webui_changed: false }}>Dismiss</Button>
-						</div>
-					{/if}
-				</CardContent>
-			</Card>
-		{/if}
-	<!-- Firmware tab -->
 	{:else if activeTab === 'firmware'}
 		{#if firmwareLoading}
 			<p class="text-muted-foreground">Checking firmware...</p>
@@ -996,7 +851,7 @@
 		{:else}
 			<Card class="mb-4">
 				<CardContent class="py-5">
-					<div class="flex items-center justify-between mb-4">
+					<div class="mb-4 flex items-center justify-between">
 						<div>
 							<h3 class="text-lg font-semibold">Firmware Updates</h3>
 							<p class="text-sm text-muted-foreground">Manage device firmware via fwupd (LVFS).</p>
@@ -1012,11 +867,11 @@
 						<table class="w-full text-sm">
 							<thead>
 								<tr>
-									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Device</th>
+									<th class="w-px border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap">Device</th>
 									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Vendor</th>
 									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Version</th>
 									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Update</th>
-									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
+									<th class="w-px border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap">Actions</th>
 								</tr>
 							</thead>
 							<tbody>

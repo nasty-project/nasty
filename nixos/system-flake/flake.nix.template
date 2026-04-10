@@ -7,40 +7,52 @@
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.5";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
-    # Installer payload template. The ISO builder substitutes the tracked
-    # upstream URL here and ships a generated flake.lock alongside it.
-    nasty.url = "@NASTY_URL@";
+    # Installer payload template. Bootstrap substitutes the tagged release
+    # and local system placeholders when writing /etc/nixos/flake.nix.
+    nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
     nasty.inputs.nixpkgs.follows = "nixpkgs";
     nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
 
-  outputs = { nixpkgs, nasty, ... }:
+  outputs = { self, nixpkgs, nasty, ... }:
     let
       nasty-version =
         (builtins.fromTOML (builtins.readFile "${nasty}/engine/Cargo.toml")).workspace.package.version;
 
-      mkSystem = system: nixpkgs.lib.nixosSystem {
-        inherit system;
-        specialArgs = {
-          nasty-engine = nasty.packages.${system}.engine;
-          nasty-webui = nasty.packages.${system}.webui;
-          nasty-version = nasty-version;
-          nasty-bcachefs-tools = nasty.packages.${system}.bcachefs-tools;
+      mkSystem = system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          # Preserve the exact wrapper flake used for this build inside the
+          # system closure so it remains readable via /run/current-system/etc.
+          nastySystemFlakeSnapshot = pkgs.runCommand "nasty-system-flake-snapshot" {} ''
+            mkdir -p "$out"
+            cp ${self}/flake.nix "$out/flake.nix"
+            cp ${self}/flake.lock "$out/flake.lock"
+          '';
+        in nixpkgs.lib.nixosSystem {
+          inherit system;
+          specialArgs = {
+            nasty-engine = nasty.packages.${system}.engine;
+            nasty-webui = nasty.packages.${system}.webui;
+            nasty-version = nasty-version;
+            nasty-bcachefs-tools = nasty.packages.${system}.bcachefs-tools;
+            inherit nastySystemFlakeSnapshot;
+          };
+          modules = [
+            "${nasty}/nixos/binary-cache.nix"
+            "${nasty}/nixos/modules/bcachefs.nix"
+            "${nasty}/nixos/modules/linuxquota.nix"
+            "${nasty}/nixos/modules/nasty.nix"
+            "${nasty}/nixos/appliance-base.nix"
+            # Machine-local overlay files live directly under /etc/nixos.
+            ./hardware-configuration.nix
+            ./networking.nix
+          ];
         };
-        modules = [
-          "${nasty}/nixos/binary-cache.nix"
-          "${nasty}/nixos/modules/bcachefs.nix"
-          "${nasty}/nixos/modules/linuxquota.nix"
-          "${nasty}/nixos/modules/nasty.nix"
-          "${nasty}/nixos/appliance-base.nix"
-          # Machine-local overlay files live directly under /etc/nixos.
-          ./hardware-configuration.nix
-          ./networking.nix
-        ];
-      };
     in {
+      wrapperFlakeVersion = "v0.1";
       nixosConfigurations = {
-        nasty = mkSystem "local-system";
+        nasty = mkSystem "@LOCAL_SYSTEM@";
       };
     };
 }

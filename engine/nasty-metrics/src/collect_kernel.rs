@@ -86,8 +86,6 @@ const PATTERNS: &[Pattern] = &[
             "general protection fault",
             "RIP: 0010:",
             "Kernel panic",
-            "WARNING: CPU:",
-            "cut here",
         ],
         category: "generic",
         source_prefix: None,
@@ -198,35 +196,22 @@ impl KernelErrorCollector {
     }
 }
 
-/// Parse a raw dmesg line. Supports two formats:
-///   1. `<pri>seq,timestamp,flags;message`  (true raw /dev/kmsg format)
-///   2. `<pri>[timestamp] message`          (dmesg --raw on some kernels)
+/// Parse a raw dmesg line: `<pri>seq,timestamp,...;message`
 fn parse_raw_line(line: &str) -> Option<(u64, u64, &str)> {
+    // Format: <priority>sequence,timestamp,flags;message
+    // Example: <4>12345,6789012345,-;ata5: hard resetting link
     let after_pri = line.find('>')?.checked_add(1)?;
     let rest = line.get(after_pri..)?;
 
-    // Format 1: <pri>seq,timestamp,flags;message
-    if let Some(semi) = rest.find(';') {
-        let header = &rest[..semi];
-        let msg = rest.get(semi + 1..)?;
-        let mut parts = header.split(',');
-        let seq: u64 = parts.next()?.parse().ok()?;
-        let timestamp: u64 = parts.next()?.parse().ok()?;
-        return Some((seq, timestamp, msg));
-    }
+    let semi = rest.find(';')?;
+    let header = &rest[..semi];
+    let msg = rest.get(semi + 1..)?;
 
-    // Format 2: <pri>[timestamp] message
-    if rest.starts_with('[') {
-        let bracket_end = rest.find(']')?;
-        let ts_str = rest[1..bracket_end].trim();
-        // Timestamp is in seconds with decimals — convert to microseconds
-        let ts_usec = ts_str.parse::<f64>().ok().map(|s| (s * 1_000_000.0) as u64)?;
-        let msg = rest.get(bracket_end + 1..)?.trim_start();
-        // Use timestamp as a monotonic sequence number (always increases)
-        return Some((ts_usec, ts_usec, msg));
-    }
+    let mut parts = header.split(',');
+    let seq: u64 = parts.next()?.parse().ok()?;
+    let timestamp: u64 = parts.next()?.parse().ok()?;
 
-    None
+    Some((seq, timestamp, msg))
 }
 
 /// Classify a kernel message into a category, returning (category, source).
