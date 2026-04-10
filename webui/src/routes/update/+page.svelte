@@ -194,6 +194,10 @@
 		return row.url.trim() !== row.initialUrl;
 	}
 
+	function isOfficialTaggedReleaseUrl(url: string): boolean {
+		return /^github:nasty-project\/nasty\/v\d+\.\d+\.\d+$/.test(url.trim());
+	}
+
 	function setTab(tab: Tab) {
 		activeTab = tab;
 		if (typeof window !== 'undefined') {
@@ -498,6 +502,13 @@
 								<div class="mt-1 font-medium">Already at newest tagged release</div>
 								<div class="mt-1 text-xs text-muted-foreground">
 									<code class="font-mono">{taggedReleaseBanner.latest_tag}</code>
+								</div>
+							{:else if !isOfficialTaggedReleaseUrl(taggedReleaseBanner.current_url)}
+								<div class="mt-1 font-medium">
+									You are using a custom build of nasty. Click to switch back to upstream release.
+								</div>
+								<div class="mt-1 text-xs text-muted-foreground">
+									<code class="font-mono">{taggedReleaseBanner.latest_url}</code>
 								</div>
 							{:else}
 								<div class="mt-1 font-medium">
