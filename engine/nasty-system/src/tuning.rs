@@ -130,33 +130,44 @@ impl TuningService {
         // ── NFS ──
         if let Some(v) = update.nfs_threads {
             if v == 0 { return Err("nfs_threads must be > 0".into()); }
-            apply_nfs_threads(v).await?;
-            config.nfs_threads = v;
+            if v != config.nfs_threads {
+                apply_nfs_threads(v).await?;
+                config.nfs_threads = v;
+            }
         }
         if let Some(v) = update.nfs_lease_time {
             if v == 0 { return Err("nfs_lease_time must be > 0".into()); }
-            apply_proc_value("/proc/fs/nfsd/nfsv4leasetime", v).await?;
-            config.nfs_lease_time = v;
+            if v != config.nfs_lease_time {
+                // nfsv4leasetime returns EBUSY when clients hold active leases.
+                // This is expected — the new value takes effect after existing leases expire.
+                if let Err(e) = apply_proc_value("/proc/fs/nfsd/nfsv4leasetime", v).await {
+                    warn!("Cannot set NFS lease time while leases are active: {e}");
+                    return Err("NFS lease time cannot be changed while clients hold active leases. Disconnect all NFS clients first.".into());
+                }
+                config.nfs_lease_time = v;
+            }
         }
         if let Some(v) = update.nfs_grace_time {
             if v == 0 { return Err("nfs_grace_time must be > 0".into()); }
-            apply_proc_value("/proc/fs/nfsd/nfsv4gracetime", v).await?;
-            config.nfs_grace_time = v;
+            if v != config.nfs_grace_time {
+                if let Err(e) = apply_proc_value("/proc/fs/nfsd/nfsv4gracetime", v).await {
+                    warn!("Cannot set NFS grace time: {e}");
+                    return Err("NFS grace time cannot be changed while the server is active.".into());
+                }
+                config.nfs_grace_time = v;
+            }
         }
 
         // ── SMB ──
         let mut smb_changed = false;
         if let Some(v) = update.smb_max_connections {
-            config.smb_max_connections = v;
-            smb_changed = true;
+            if v != config.smb_max_connections { config.smb_max_connections = v; smb_changed = true; }
         }
         if let Some(v) = update.smb_deadtime {
-            config.smb_deadtime = v;
-            smb_changed = true;
+            if v != config.smb_deadtime { config.smb_deadtime = v; smb_changed = true; }
         }
         if let Some(v) = update.smb_socket_options {
-            config.smb_socket_options = v;
-            smb_changed = true;
+            if v != config.smb_socket_options { config.smb_socket_options = v; smb_changed = true; }
         }
         if smb_changed {
             apply_smb_tuning(&config).await?;
@@ -164,32 +175,44 @@ impl TuningService {
 
         // ── iSCSI ──
         if let Some(v) = update.iscsi_default_cmdsn_depth {
-            apply_iscsi_cmdsn_depth(v).await?;
-            config.iscsi_default_cmdsn_depth = v;
+            if v != config.iscsi_default_cmdsn_depth {
+                apply_iscsi_cmdsn_depth(v).await?;
+                config.iscsi_default_cmdsn_depth = v;
+            }
         }
         if let Some(v) = update.iscsi_login_timeout {
-            apply_iscsi_login_timeout(v).await?;
-            config.iscsi_login_timeout = v;
+            if v != config.iscsi_login_timeout {
+                apply_iscsi_login_timeout(v).await?;
+                config.iscsi_login_timeout = v;
+            }
         }
 
         // ── VM writeback ──
         if let Some(v) = update.vm_dirty_ratio {
             if v > 100 { return Err("vm_dirty_ratio must be 0-100".into()); }
-            apply_sysctl("vm.dirty_ratio", v).await?;
-            config.vm_dirty_ratio = v;
+            if v != config.vm_dirty_ratio {
+                apply_sysctl("vm.dirty_ratio", v).await?;
+                config.vm_dirty_ratio = v;
+            }
         }
         if let Some(v) = update.vm_dirty_background_ratio {
             if v > 100 { return Err("vm_dirty_background_ratio must be 0-100".into()); }
-            apply_sysctl("vm.dirty_background_ratio", v).await?;
-            config.vm_dirty_background_ratio = v;
+            if v != config.vm_dirty_background_ratio {
+                apply_sysctl("vm.dirty_background_ratio", v).await?;
+                config.vm_dirty_background_ratio = v;
+            }
         }
         if let Some(v) = update.vm_dirty_expire_centisecs {
-            apply_sysctl("vm.dirty_expire_centisecs", v).await?;
-            config.vm_dirty_expire_centisecs = v;
+            if v != config.vm_dirty_expire_centisecs {
+                apply_sysctl("vm.dirty_expire_centisecs", v).await?;
+                config.vm_dirty_expire_centisecs = v;
+            }
         }
         if let Some(v) = update.vm_dirty_writeback_centisecs {
-            apply_sysctl("vm.dirty_writeback_centisecs", v).await?;
-            config.vm_dirty_writeback_centisecs = v;
+            if v != config.vm_dirty_writeback_centisecs {
+                apply_sysctl("vm.dirty_writeback_centisecs", v).await?;
+                config.vm_dirty_writeback_centisecs = v;
+            }
         }
 
         save(&config).await.map_err(|e| e.to_string())?;
