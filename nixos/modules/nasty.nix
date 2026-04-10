@@ -863,8 +863,18 @@ in {
           # Must NOT be a separate [share] section — Samba merges the first
           # included share into its parent section, inheriting path/options.
           "include" = "/etc/samba/smb.nasty.conf";
+          # Include engine-managed performance tuning (thread counts, timeouts, etc).
+          # The file is written by nasty-engine's TuningService.
+          "config file" = "/etc/samba/nasty-tuning.conf";
         };
       };
+    };
+
+    # Ensure the SMB tuning config exists (empty) so Samba doesn't fail on startup
+    # before the engine has written any tuning settings.
+    environment.etc."samba/nasty-tuning.conf" = mkIf cfg.smb.enable {
+      text = "";
+      mode = "0644";
     };
 
     # Prevent Samba from auto-starting at boot. NixOS enables samba.target in

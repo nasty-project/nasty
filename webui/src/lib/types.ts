@@ -428,6 +428,21 @@ export interface Settings {
 	telemetry_enabled: boolean;
 }
 
+export interface TuningConfig {
+	nfs_threads: number;
+	nfs_lease_time: number;
+	nfs_grace_time: number;
+	smb_max_connections: number;
+	smb_deadtime: number;
+	smb_socket_options: string;
+	iscsi_default_cmdsn_depth: number;
+	iscsi_login_timeout: number;
+	vm_dirty_ratio: number;
+	vm_dirty_background_ratio: number;
+	vm_dirty_expire_centisecs: number;
+	vm_dirty_writeback_centisecs: number;
+}
+
 export interface NetworkConfig {
 	dhcp: boolean;
 	interface: string;

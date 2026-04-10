@@ -5,6 +5,7 @@ pub mod network;
 pub mod protocol;
 pub mod settings;
 pub mod tailscale;
+pub mod tuning;
 pub mod update;
 
 // Re-export metrics types from nasty-common so downstream code

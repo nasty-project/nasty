@@ -3,11 +3,11 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
-	import type { Settings, SystemInfo, NetworkConfig } from '$lib/types';
+	import type { Settings, SystemInfo, NetworkConfig, TuningConfig } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Copy, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
 
-	let activeTab: 'general' | 'tls' | 'vpn' | 'metrics' = $state('general');
+	let activeTab: 'general' | 'tls' | 'vpn' | 'metrics' | 'tuning' = $state('general');
 
 	// ── General tab state ───────────────────────────────────
 	let settings: Settings | null = $state(null);
@@ -35,6 +35,22 @@
 		{ label: 'Debug', value: 'nasty_engine=debug,nasty_storage=debug,nasty_sharing=debug,nasty_snapshot=debug,nasty_system=debug,tower_http=debug' },
 		{ label: 'Trace', value: 'nasty_engine=trace,nasty_storage=trace,nasty_sharing=trace,nasty_snapshot=trace,nasty_system=trace,tower_http=trace' },
 	];
+
+	// Tuning
+	let tuning: TuningConfig | null = $state(null);
+	let savingTuning = $state(false);
+	let tNfsThreads = $state('');
+	let tNfsLeaseTime = $state('');
+	let tNfsGraceTime = $state('');
+	let tSmbMaxConnections = $state('');
+	let tSmbDeadtime = $state('');
+	let tSmbSocketOptions = $state('');
+	let tIscsiCmdsnDepth = $state('');
+	let tIscsiLoginTimeout = $state('');
+	let tVmDirtyRatio = $state('');
+	let tVmDirtyBgRatio = $state('');
+	let tVmDirtyExpire = $state('');
+	let tVmDirtyWriteback = $state('');
 
 	// TLS
 	let tlsDomain = $state('');
@@ -334,11 +350,55 @@
 		collapsedSections[title] = !collapsedSections[title];
 	}
 
-	function switchTab(tab: 'general' | 'tls' | 'vpn' | 'metrics') {
+	function switchTab(tab: 'general' | 'tls' | 'vpn' | 'metrics' | 'tuning') {
 		activeTab = tab;
 		if (tab === 'metrics' && !metricsText) {
 			loadMetrics();
 		}
+		if (tab === 'tuning' && !tuning) {
+			loadTuning();
+		}
+	}
+
+	async function loadTuning() {
+		tuning = await client.call<TuningConfig>('system.tuning.get');
+		if (tuning) {
+			tNfsThreads = tuning.nfs_threads.toString();
+			tNfsLeaseTime = tuning.nfs_lease_time.toString();
+			tNfsGraceTime = tuning.nfs_grace_time.toString();
+			tSmbMaxConnections = tuning.smb_max_connections.toString();
+			tSmbDeadtime = tuning.smb_deadtime.toString();
+			tSmbSocketOptions = tuning.smb_socket_options;
+			tIscsiCmdsnDepth = tuning.iscsi_default_cmdsn_depth.toString();
+			tIscsiLoginTimeout = tuning.iscsi_login_timeout.toString();
+			tVmDirtyRatio = tuning.vm_dirty_ratio.toString();
+			tVmDirtyBgRatio = tuning.vm_dirty_background_ratio.toString();
+			tVmDirtyExpire = tuning.vm_dirty_expire_centisecs.toString();
+			tVmDirtyWriteback = tuning.vm_dirty_writeback_centisecs.toString();
+		}
+	}
+
+	async function saveTuning() {
+		savingTuning = true;
+		await withToast(
+			() => client.call('system.tuning.update', {
+				nfs_threads: parseInt(tNfsThreads) || undefined,
+				nfs_lease_time: parseInt(tNfsLeaseTime) || undefined,
+				nfs_grace_time: parseInt(tNfsGraceTime) || undefined,
+				smb_max_connections: parseInt(tSmbMaxConnections) ?? undefined,
+				smb_deadtime: parseInt(tSmbDeadtime) ?? undefined,
+				smb_socket_options: tSmbSocketOptions || undefined,
+				iscsi_default_cmdsn_depth: parseInt(tIscsiCmdsnDepth) || undefined,
+				iscsi_login_timeout: parseInt(tIscsiLoginTimeout) || undefined,
+				vm_dirty_ratio: parseInt(tVmDirtyRatio) ?? undefined,
+				vm_dirty_background_ratio: parseInt(tVmDirtyBgRatio) ?? undefined,
+				vm_dirty_expire_centisecs: parseInt(tVmDirtyExpire) || undefined,
+				vm_dirty_writeback_centisecs: parseInt(tVmDirtyWriteback) || undefined,
+			}),
+			'Tuning settings applied'
+		);
+		savingTuning = false;
+		await loadTuning();
 	}
 </script>
 
@@ -363,6 +423,12 @@
 			? 'border-b-2 border-primary text-foreground'
 			: 'text-muted-foreground hover:text-foreground'}"
 	>VPN</button>
+	<button
+		onclick={() => switchTab('tuning')}
+		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'tuning'
+			? 'border-b-2 border-primary text-foreground'
+			: 'text-muted-foreground hover:text-foreground'}"
+	>Tuning</button>
 	<button
 		onclick={() => switchTab('metrics')}
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'metrics'
@@ -806,6 +872,123 @@
 			</Button>
 		</section>
 	</div>
+
+{:else if activeTab === 'tuning'}
+
+	{#if !tuning}
+		<p class="text-muted-foreground">Loading...</p>
+	{:else}
+		<div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+
+			<!-- NFS -->
+			<section class="rounded-lg border border-border p-5">
+				<h3 class="mb-4 text-sm font-semibold">NFS Server</h3>
+				<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+					<div>
+						<label for="nfs-threads" class="mb-1 block text-xs text-muted-foreground">Threads</label>
+						<input id="nfs-threads" type="number" min="1" bind:value={tNfsThreads}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Kernel nfsd threads (default: 8). Increase under heavy concurrent load.</p>
+					</div>
+					<div>
+						<label for="nfs-lease" class="mb-1 block text-xs text-muted-foreground">Lease time (s)</label>
+						<input id="nfs-lease" type="number" min="1" bind:value={tNfsLeaseTime}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">NFSv4 lease window. Clients must renew state within this period.</p>
+					</div>
+					<div>
+						<label for="nfs-grace" class="mb-1 block text-xs text-muted-foreground">Grace time (s)</label>
+						<input id="nfs-grace" type="number" min="1" bind:value={tNfsGraceTime}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Grace period after restart for clients to reclaim locks.</p>
+					</div>
+				</div>
+			</section>
+
+			<!-- SMB -->
+			<section class="rounded-lg border border-border p-5">
+				<h3 class="mb-4 text-sm font-semibold">SMB Server</h3>
+				<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+					<div>
+						<label for="smb-maxconn" class="mb-1 block text-xs text-muted-foreground">Max connections</label>
+						<input id="smb-maxconn" type="number" min="0" bind:value={tSmbMaxConnections}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">0 = unlimited.</p>
+					</div>
+					<div>
+						<label for="smb-deadtime" class="mb-1 block text-xs text-muted-foreground">Dead time (min)</label>
+						<input id="smb-deadtime" type="number" min="0" bind:value={tSmbDeadtime}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Disconnect idle clients after N minutes. 0 = never.</p>
+					</div>
+					<div class="sm:col-span-3">
+						<label for="smb-sockopts" class="mb-1 block text-xs text-muted-foreground">Socket options</label>
+						<input id="smb-sockopts" type="text" bind:value={tSmbSocketOptions} placeholder="SO_RCVBUF=131072 SO_SNDBUF=131072"
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">TCP socket tuning. Leave empty for kernel defaults.</p>
+					</div>
+				</div>
+			</section>
+
+			<!-- iSCSI -->
+			<section class="rounded-lg border border-border p-5">
+				<h3 class="mb-4 text-sm font-semibold">iSCSI Target</h3>
+				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+					<div>
+						<label for="iscsi-cmdsn" class="mb-1 block text-xs text-muted-foreground">Command queue depth</label>
+						<input id="iscsi-cmdsn" type="number" min="1" bind:value={tIscsiCmdsnDepth}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Default CmdSN depth per session (default: 64).</p>
+					</div>
+					<div>
+						<label for="iscsi-timeout" class="mb-1 block text-xs text-muted-foreground">Login timeout (s)</label>
+						<input id="iscsi-timeout" type="number" min="1" bind:value={tIscsiLoginTimeout}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Seconds before login attempt times out.</p>
+					</div>
+				</div>
+			</section>
+
+			<!-- VM Writeback -->
+			<section class="rounded-lg border border-border p-5">
+				<h3 class="mb-4 text-sm font-semibold">VM Writeback (sysctl)</h3>
+				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+					<div>
+						<label for="vm-dirty" class="mb-1 block text-xs text-muted-foreground">dirty_ratio (%)</label>
+						<input id="vm-dirty" type="number" min="0" max="100" bind:value={tVmDirtyRatio}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Max dirty memory before synchronous writeback. Default: 20.</p>
+					</div>
+					<div>
+						<label for="vm-dirty-bg" class="mb-1 block text-xs text-muted-foreground">dirty_background_ratio (%)</label>
+						<input id="vm-dirty-bg" type="number" min="0" max="100" bind:value={tVmDirtyBgRatio}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Threshold for background writeback to start. Default: 10.</p>
+					</div>
+					<div>
+						<label for="vm-expire" class="mb-1 block text-xs text-muted-foreground">dirty_expire (cs)</label>
+						<input id="vm-expire" type="number" min="0" bind:value={tVmDirtyExpire}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Centiseconds before dirty pages are eligible for flush. Default: 3000.</p>
+					</div>
+					<div>
+						<label for="vm-writeback" class="mb-1 block text-xs text-muted-foreground">dirty_writeback (cs)</label>
+						<input id="vm-writeback" type="number" min="0" bind:value={tVmDirtyWriteback}
+							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Centiseconds between writeback daemon wakeups. Default: 500.</p>
+					</div>
+				</div>
+			</section>
+
+		</div>
+
+		<div class="mt-6">
+			<Button onclick={saveTuning} disabled={savingTuning}>
+				{savingTuning ? 'Applying...' : 'Apply Tuning'}
+			</Button>
+			<p class="mt-1 text-xs text-muted-foreground">All changes take effect immediately without restart.</p>
+		</div>
+	{/if}
 
 {:else if activeTab === 'metrics'}
 
