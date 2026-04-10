@@ -220,7 +220,9 @@ in {
     # Keep a generation-owned copy of the managed wrapper flake in /etc so the
     # exact flake used to build the active generation is readable from
     # /run/current-system/etc/nasty-system-flake and can be restored on boot.
-    environment.etc."nasty-system-flake".source = lib.mkIf (nastySystemFlakeSnapshot != null) nastySystemFlakeSnapshot;
+    environment.etc."nasty-system-flake" = mkIf (nastySystemFlakeSnapshot != null) {
+      source = nastySystemFlakeSnapshot;
+    };
 
     systemd.services.recover-generation-flake = mkIf (nastySystemFlakeSnapshot != null) {
       description = "Recover /etc/nixos flake files from the active system generation";
