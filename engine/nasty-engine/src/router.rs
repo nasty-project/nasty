@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use nasty_common::{ErrorCode, Request, Response};
+use serde::Deserialize;
 use tracing::debug;
 
 use crate::AppState;
@@ -10,29 +10,60 @@ fn is_operator_allowed(method: &str) -> bool {
     is_read_only(method)
         || matches!(
             method,
-            "subvolume.create" | "subvolume.delete" | "subvolume.attach" | "subvolume.detach"
-            | "subvolume.resize" | "subvolume.update" | "subvolume.clone"
-            | "subvolume.set_properties" | "subvolume.remove_properties"
-            | "snapshot.create" | "snapshot.delete" | "snapshot.clone"
-            | "share.nfs.create" | "share.nfs.update" | "share.nfs.delete"
-            | "share.smb.create" | "share.smb.update" | "share.smb.delete"
-            | "smb.user.create" | "smb.user.delete" | "smb.user.set_password"
-            | "share.iscsi.create" | "share.iscsi.delete"
-            | "share.iscsi.add_lun" | "share.iscsi.remove_lun"
-            | "share.iscsi.add_acl" | "share.iscsi.remove_acl"
-            | "share.nvmeof.create" | "share.nvmeof.delete"
-            | "share.nvmeof.add_namespace" | "share.nvmeof.remove_namespace"
-            | "share.nvmeof.add_port" | "share.nvmeof.remove_port"
-            | "share.nvmeof.add_host" | "share.nvmeof.remove_host"
-            | "vm.create" | "vm.update" | "vm.delete"
-            | "vm.start" | "vm.stop" | "vm.kill"
-            | "vm.snapshot" | "vm.clone"
-            | "apps.enable" | "apps.disable"
-            | "apps.install" | "apps.remove"
-            | "apps.install_chart"
-            | "apps.repo.add" | "apps.repo.remove" | "apps.repo.update"
-            | "apps.ingress.set" | "apps.ingress.remove"
-            | "firmware.update"
+            "subvolume.create"
+                | "subvolume.delete"
+                | "subvolume.attach"
+                | "subvolume.detach"
+                | "subvolume.resize"
+                | "subvolume.update"
+                | "subvolume.clone"
+                | "subvolume.set_properties"
+                | "subvolume.remove_properties"
+                | "snapshot.create"
+                | "snapshot.delete"
+                | "snapshot.clone"
+                | "share.nfs.create"
+                | "share.nfs.update"
+                | "share.nfs.delete"
+                | "share.smb.create"
+                | "share.smb.update"
+                | "share.smb.delete"
+                | "smb.user.create"
+                | "smb.user.delete"
+                | "smb.user.set_password"
+                | "share.iscsi.create"
+                | "share.iscsi.delete"
+                | "share.iscsi.add_lun"
+                | "share.iscsi.remove_lun"
+                | "share.iscsi.add_acl"
+                | "share.iscsi.remove_acl"
+                | "share.nvmeof.create"
+                | "share.nvmeof.delete"
+                | "share.nvmeof.add_namespace"
+                | "share.nvmeof.remove_namespace"
+                | "share.nvmeof.add_port"
+                | "share.nvmeof.remove_port"
+                | "share.nvmeof.add_host"
+                | "share.nvmeof.remove_host"
+                | "vm.create"
+                | "vm.update"
+                | "vm.delete"
+                | "vm.start"
+                | "vm.stop"
+                | "vm.kill"
+                | "vm.snapshot"
+                | "vm.clone"
+                | "apps.enable"
+                | "apps.disable"
+                | "apps.install"
+                | "apps.remove"
+                | "apps.install_chart"
+                | "apps.repo.add"
+                | "apps.repo.remove"
+                | "apps.repo.update"
+                | "apps.ingress.set"
+                | "apps.ingress.remove"
+                | "firmware.update"
         )
 }
 
@@ -60,16 +91,39 @@ fn is_read_only(method: &str) -> bool {
         || method.ends_with(".get")
         || matches!(
             method,
-            "system.info" | "system.health" | "system.stats" | "system.disks" | "system.network.get"
-            | "system.alerts" | "system.settings.get" | "system.tailscale.get" | "system.acme.status" | "system.metrics.history" | "system.metrics.prometheus" | "alert.rules.list"
-            | "device.list" | "auth.me" | "auth.list_users" | "auth.token.list"
-            | "fs.usage" | "fs.scrub.status" | "fs.reconcile.status"
-            | "bcachefs.usage"
-            | "service.protocol.list" | "subvolume.list_all" | "subvolume.find_by_property" | "subvolume.children" | "smb.user.list"
-            | "system.update.version" | "system.update.status" | "system.reboot_required" | "system.generations.list"
-            | "system.log.level"
-            | "system.settings.timezones"
-            | "bcachefs.tools.info" | "bcachefs.tools.status"
+            "system.info"
+                | "system.health"
+                | "system.stats"
+                | "system.disks"
+                | "system.network.get"
+                | "system.alerts"
+                | "system.settings.get"
+                | "system.tailscale.get"
+                | "system.acme.status"
+                | "system.metrics.history"
+                | "system.metrics.prometheus"
+                | "alert.rules.list"
+                | "device.list"
+                | "auth.me"
+                | "auth.list_users"
+                | "auth.token.list"
+                | "fs.usage"
+                | "fs.scrub.status"
+                | "fs.reconcile.status"
+                | "bcachefs.usage"
+                | "service.protocol.list"
+                | "subvolume.list_all"
+                | "subvolume.find_by_property"
+                | "subvolume.children"
+                | "smb.user.list"
+                | "system.update.version"
+                | "system.update.status"
+                | "system.reboot_required"
+                | "system.generations.list"
+                | "system.version.get"
+                | "system.version.tagged_release_notice"
+                | "system.log.level"
+                | "system.settings.timezones"
         )
 }
 
@@ -111,7 +165,10 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
 
     // Force password change — only allow auth methods until the password is changed
     if session.must_change_password
-        && !matches!(request.method.as_str(), "auth.change_password" | "auth.me" | "auth.logout")
+        && !matches!(
+            request.method.as_str(),
+            "auth.change_password" | "auth.me" | "auth.logout"
+        )
     {
         let resp = Response::error(
             request.id,
@@ -128,11 +185,7 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
         Role::Operator => !is_operator_allowed(&request.method),
     };
     if denied {
-        let resp = Response::error(
-            request.id,
-            ErrorCode::InternalError,
-            "Permission denied",
-        );
+        let resp = Response::error(request.id, ErrorCode::InternalError, "Permission denied");
         return serde_json::to_string(&resp).unwrap();
     }
 
@@ -140,9 +193,17 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
     let response = route(&request, state, session).await;
     let elapsed = t0.elapsed();
     if elapsed.as_millis() > 5000 {
-        tracing::error!("RPC very slow: {} took {}ms", request.method, elapsed.as_millis());
+        tracing::error!(
+            "RPC very slow: {} took {}ms",
+            request.method,
+            elapsed.as_millis()
+        );
     } else if elapsed.as_millis() > 1000 {
-        tracing::warn!("RPC slow: {} took {}ms", request.method, elapsed.as_millis());
+        tracing::warn!(
+            "RPC slow: {} took {}ms",
+            request.method,
+            elapsed.as_millis()
+        );
     } else {
         debug!("RPC done: {} in {}ms", request.method, elapsed.as_millis());
     }
@@ -160,19 +221,29 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
 async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
     match req.method.as_str() {
         // ── Auth ──────────────────────────────────────────────────
-        "auth.me" => ok(req, serde_json::json!({
-            "username": session.username,
-            "role": session.role,
-        })),
+        "auth.me" => ok(
+            req,
+            serde_json::json!({
+                "username": session.username,
+                "role": session.role,
+            }),
+        ),
         "auth.logout" => match state.auth.logout(&session.token).await {
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),
         },
         "auth.change_password" => {
             #[derive(Deserialize)]
-            struct P { username: String, new_password: String }
+            struct P {
+                username: String,
+                new_password: String,
+            }
             match parse_params::<P>(req) {
-                Ok(p) => match state.auth.change_password(session, &p.username, &p.new_password).await {
+                Ok(p) => match state
+                    .auth
+                    .change_password(session, &p.username, &p.new_password)
+                    .await
+                {
                     Ok(()) => ok(req, "ok"),
                     Err(e) => err(req, e),
                 },
@@ -181,24 +252,30 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "auth.create_user" => {
             #[derive(Deserialize)]
-            struct P { username: String, password: String, role: Role }
+            struct P {
+                username: String,
+                password: String,
+                role: Role,
+            }
             match parse_params::<P>(req) {
-                Ok(p) => match state.auth.create_user(session, &p.username, &p.password, p.role).await {
+                Ok(p) => match state
+                    .auth
+                    .create_user(session, &p.username, &p.password, p.role)
+                    .await
+                {
                     Ok(()) => ok(req, "ok"),
                     Err(e) => err(req, e),
                 },
                 Err(e) => invalid(req, e),
             }
         }
-        "auth.delete_user" => {
-            match require_str(req, "username") {
-                Ok(username) => match state.auth.delete_user(session, username).await {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
-                },
-                Err(r) => r,
-            }
-        }
+        "auth.delete_user" => match require_str(req, "username") {
+            Ok(username) => match state.auth.delete_user(session, username).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         "auth.list_users" => ok(req, state.auth.list_users().await),
         "auth.token.list" => match state.auth.list_api_tokens(session).await {
             Ok(v) => ok(req, v),
@@ -206,9 +283,27 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "auth.token.create" => {
             #[derive(Deserialize)]
-            struct P { name: String, role: Role, filesystem: Option<String>, expires_in_secs: Option<u64>, #[serde(default)] allowed_ips: Vec<String> }
+            struct P {
+                name: String,
+                role: Role,
+                filesystem: Option<String>,
+                expires_in_secs: Option<u64>,
+                #[serde(default)]
+                allowed_ips: Vec<String>,
+            }
             match parse_params::<P>(req) {
-                Ok(p) => match state.auth.create_api_token(session, &p.name, p.role, p.filesystem, p.expires_in_secs, p.allowed_ips).await {
+                Ok(p) => match state
+                    .auth
+                    .create_api_token(
+                        session,
+                        &p.name,
+                        p.role,
+                        p.filesystem,
+                        p.expires_in_secs,
+                        p.allowed_ips,
+                    )
+                    .await
+                {
                     Ok(t) => ok(req, t),
                     Err(e) => err(req, e),
                 },
@@ -227,19 +322,24 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "system.info" => ok(req, state.system.info().await),
         "system.health" => ok(req, state.system.health().await),
         "system.stats" => match fetch_metrics_json::<nasty_system::SystemStats>(
-            &state.metrics_client, "/api/stats"
-        ).await {
+            &state.metrics_client,
+            "/api/stats",
+        )
+        .await
+        {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
         },
         "system.network.get" => ok(req, state.network.get().await),
-        "system.network.update" => match parse_params::<nasty_system::network::NetworkConfig>(req) {
-            Ok(p) => match state.network.update(p).await {
-                Ok(()) => ok(req, "ok"),
-                Err(e) => err(req, e),
-            },
-            Err(e) => invalid(req, e),
-        },
+        "system.network.update" => {
+            match parse_params::<nasty_system::network::NetworkConfig>(req) {
+                Ok(p) => match state.network.update(p).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         "system.metrics.prometheus" => {
             let url = format!("{}/metrics", crate::METRICS_BASE);
             match state.metrics_client.get(&url).send().await {
@@ -254,14 +354,24 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             let kind = str_param(req, "kind").unwrap_or("net");
             let name = str_param(req, "name");
             let range = str_param(req, "range").unwrap_or("5m");
-            let mut url = format!("{}/api/history?kind={kind}&range={range}", crate::METRICS_BASE);
+            let mut url = format!(
+                "{}/api/history?kind={kind}&range={range}",
+                crate::METRICS_BASE
+            );
             if let Some(n) = name {
                 url.push_str(&format!("&name={n}"));
             }
-            match state.metrics_client.get(&url).send().await
+            match state
+                .metrics_client
+                .get(&url)
+                .send()
+                .await
                 .and_then(|r| Ok(r.error_for_status()?))
             {
-                Ok(resp) => match resp.json::<Vec<nasty_common::metrics_types::ResourceHistory>>().await {
+                Ok(resp) => match resp
+                    .json::<Vec<nasty_common::metrics_types::ResourceHistory>>()
+                    .await
+                {
                     Ok(v) => ok(req, v),
                     Err(e) => err(req, format!("metrics parse error: {e}")),
                 },
@@ -269,10 +379,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "system.disks" => {
-            if state.protocols.is_enabled(nasty_system::protocol::Protocol::Smart).await {
+            if state
+                .protocols
+                .is_enabled(nasty_system::protocol::Protocol::Smart)
+                .await
+            {
                 match fetch_metrics_json::<Vec<nasty_system::DiskHealth>>(
-                    &state.metrics_client, "/api/disks"
-                ).await {
+                    &state.metrics_client,
+                    "/api/disks",
+                )
+                .await
+                {
                     Ok(v) => ok(req, v),
                     Err(e) => err(req, e),
                 }
@@ -318,14 +435,55 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => err(req, e),
         },
         "system.update.apply" => match state.updates.apply().await {
-            Ok(()) => { state.system.invalidate_bcachefs_cache().await; state.updates.invalidate_bcachefs_cache().await; ok(req, "ok") }
+            Ok(()) => {
+                state.system.invalidate_bcachefs_cache().await;
+                ok(req, "ok")
+            }
             Err(e) => err(req, e),
         },
         "system.update.rollback" => match state.updates.rollback().await {
-            Ok(()) => { state.system.invalidate_bcachefs_cache().await; state.updates.invalidate_bcachefs_cache().await; ok(req, "ok") }
+            Ok(()) => {
+                state.system.invalidate_bcachefs_cache().await;
+                ok(req, "ok")
+            }
             Err(e) => err(req, e),
         },
         "system.update.status" => ok(req, state.updates.status().await),
+        "system.version.get" => match state.updates.version_info().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
+        "system.version.tagged_release_notice" => {
+            match state.updates.version_tagged_release_status().await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            }
+        }
+        "system.version.upgrade_tagged_release" => {
+            match state.updates.upgrade_tagged_release().await {
+                Ok(()) => {
+                    state.system.invalidate_bcachefs_cache().await;
+                    ok(req, serde_json::json!({"status": "started"}))
+                }
+                Err(e) => err(req, e),
+            }
+        }
+        "system.version.cleanup" => match state.updates.version_cleanup().await {
+            Ok(()) => ok(req, "ok"),
+            Err(e) => err(req, e),
+        },
+        "system.version.switch" => {
+            match parse_params::<nasty_system::update::VersionSwitchRequest>(req) {
+                Ok(p) => match state.updates.version_switch(p).await {
+                    Ok(()) => {
+                        state.system.invalidate_bcachefs_cache().await;
+                        ok(req, serde_json::json!({"status": "started"}))
+                    }
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         "system.update.channel.get" => ok(req, state.updates.get_channel().await),
         "firmware.available" => ok(req, state.firmware.is_available().await),
         "firmware.devices" => ok(req, state.firmware.list_devices().await),
@@ -354,22 +512,20 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "system.log.set_level" => {
             #[derive(Deserialize)]
-            struct P { filter: String }
+            struct P {
+                filter: String,
+            }
             match parse_params::<P>(req) {
-                Ok(p) => {
-                    match tracing_subscriber::EnvFilter::try_new(&p.filter) {
-                        Ok(new_filter) => {
-                            match state.log_reload.reload(new_filter) {
-                                Ok(()) => {
-                                    tracing::info!("Log filter changed to: {}", p.filter);
-                                    ok(req, "ok")
-                                }
-                                Err(e) => err(req, format!("failed to reload filter: {e}")),
-                            }
+                Ok(p) => match tracing_subscriber::EnvFilter::try_new(&p.filter) {
+                    Ok(new_filter) => match state.log_reload.reload(new_filter) {
+                        Ok(()) => {
+                            tracing::info!("Log filter changed to: {}", p.filter);
+                            ok(req, "ok")
                         }
-                        Err(e) => err(req, format!("invalid filter: {e}")),
-                    }
-                }
+                        Err(e) => err(req, format!("failed to reload filter: {e}")),
+                    },
+                    Err(e) => err(req, format!("invalid filter: {e}")),
+                },
                 Err(e) => invalid(req, e),
             }
         }
@@ -381,12 +537,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "system.generations.switch" => {
             #[derive(Deserialize)]
-            struct P { generation: u64 }
+            struct P {
+                generation: u64,
+            }
             match parse_params::<P>(req) {
                 Ok(p) => match state.updates.switch_generation(p.generation).await {
                     Ok(()) => {
                         state.system.invalidate_bcachefs_cache().await;
-                        state.updates.invalidate_bcachefs_cache().await;
                         ok(req, serde_json::json!({"status": "started"}))
                     }
                     Err(e) => err(req, e),
@@ -396,7 +553,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "system.generations.label" => {
             #[derive(Deserialize)]
-            struct P { generation: u64, label: Option<String> }
+            struct P {
+                generation: u64,
+                label: Option<String>,
+            }
             match parse_params::<P>(req) {
                 Ok(p) => match state.updates.label_generation(p.generation, p.label).await {
                     Ok(()) => ok(req, "ok"),
@@ -407,7 +567,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "system.generations.delete" => {
             #[derive(Deserialize)]
-            struct P { generation: u64 }
+            struct P {
+                generation: u64,
+            }
             match parse_params::<P>(req) {
                 Ok(p) => match state.updates.delete_generation(p.generation).await {
                     Ok(()) => ok(req, "ok"),
@@ -416,21 +578,6 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(e) => invalid(req, e),
             }
         }
-
-        // ── bcachefs-tools version switching ──────────────────────
-        "bcachefs.tools.info" => ok(req, state.updates.bcachefs_info(&state.system).await),
-        "bcachefs.tools.switch" => match parse_params::<nasty_system::update::BcachefsToolsSwitchRequest>(req) {
-            Ok(p) => match state.updates.bcachefs_switch(p).await {
-                Ok(()) => {
-                    state.system.invalidate_bcachefs_cache().await;
-                    state.updates.invalidate_bcachefs_cache().await;
-                    ok(req, serde_json::json!({"status": "started"}))
-                }
-                Err(e) => err(req, e),
-            },
-            Err(e) => invalid(req, e),
-        },
-        "bcachefs.tools.status" => ok(req, state.updates.bcachefs_status().await),
 
         "system.reboot" => match state.updates.reboot().await {
             Ok(()) => ok(req, "ok"),
@@ -477,20 +624,30 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "system.alerts" => {
             // Evaluate current alert rules against live system state
             let stats = match fetch_metrics_json::<nasty_system::SystemStats>(
-                &state.metrics_client, "/api/stats"
-            ).await {
+                &state.metrics_client,
+                "/api/stats",
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => return err(req, e),
             };
             let fs_list = state.filesystems.list().await;
-            let disk_health: Vec<nasty_system::DiskHealth> = if state.protocols.is_enabled(nasty_system::protocol::Protocol::Smart).await {
-                fetch_metrics_json(&state.metrics_client, "/api/disks").await.unwrap_or_default()
+            let disk_health: Vec<nasty_system::DiskHealth> = if state
+                .protocols
+                .is_enabled(nasty_system::protocol::Protocol::Smart)
+                .await
+            {
+                fetch_metrics_json(&state.metrics_client, "/api/disks")
+                    .await
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };
 
             let filesystems = fs_list.unwrap_or_default();
-            let fs_usage_list: Vec<nasty_system::alerts::FsUsage> = filesystems.iter()
+            let fs_usage_list: Vec<nasty_system::alerts::FsUsage> = filesystems
+                .iter()
                 .map(|p| nasty_system::alerts::FsUsage {
                     name: p.name.clone(),
                     used_bytes: p.used_bytes,
@@ -514,13 +671,18 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 let fs = fs.clone();
                 health_tasks.spawn(async move {
                     let degraded = fs.options.degraded.unwrap_or(false);
-                    let devices: Vec<nasty_system::alerts::BcachefsDeviceHealth> = fs.devices.iter().map(|d| {
-                        nasty_system::alerts::BcachefsDeviceHealth {
+                    let devices: Vec<nasty_system::alerts::BcachefsDeviceHealth> = fs
+                        .devices
+                        .iter()
+                        .map(|d| nasty_system::alerts::BcachefsDeviceHealth {
                             path: d.path.clone(),
                             state: d.state.clone().unwrap_or_else(|| "rw".into()),
-                            has_errors: d.has_data.as_deref().map_or(false, |s| s.contains("error")),
-                        }
-                    }).collect();
+                            has_errors: d
+                                .has_data
+                                .as_deref()
+                                .map_or(false, |s| s.contains("error")),
+                        })
+                        .collect();
 
                     // Run IO error count, scrub status, and reconcile status in parallel
                     let (io_error_count, scrub_result, reconcile_result) = tokio::join!(
@@ -537,12 +699,15 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     let reconcile_stalled = match reconcile_result {
                         Ok(s) => {
                             let raw = s.raw.to_lowercase();
-                            let scan_pending = raw.lines()
+                            let scan_pending = raw
+                                .lines()
                                 .find(|l| l.contains("scan pending"))
                                 .and_then(|l| l.split_whitespace().last())
                                 .and_then(|n| n.parse::<u64>().ok())
-                                .unwrap_or(0) > 0;
-                            let work_pending = raw.lines()
+                                .unwrap_or(0)
+                                > 0;
+                            let work_pending = raw
+                                .lines()
                                 .find(|l| l.trim().starts_with("pending:"))
                                 .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
                                 .unwrap_or(false);
@@ -575,10 +740,23 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     .unwrap_or_default();
             let kernel_alert = nasty_system::alerts::KernelErrorAlert {
                 total_count: kernel_summary.total_count,
-                categories: kernel_summary.by_category.iter().map(|c| c.category.clone()).collect(),
+                categories: kernel_summary
+                    .by_category
+                    .iter()
+                    .map(|c| c.category.clone())
+                    .collect(),
             };
 
-            let alerts = state.alerts.evaluate(&stats, &fs_usage_list, &disk_summary, &bcachefs_health, &kernel_alert).await;
+            let alerts = state
+                .alerts
+                .evaluate(
+                    &stats,
+                    &fs_usage_list,
+                    &disk_summary,
+                    &bcachefs_health,
+                    &kernel_alert,
+                )
+                .await;
             ok(req, alerts)
         }
         "alert.rules.list" => ok(req, state.alerts.list_rules().await),
@@ -634,19 +812,21 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
-        "fs.destroy" => match parse_params::<nasty_storage::filesystem::DestroyFilesystemRequest>(req) {
-            Ok(p) => {
-                if let Some(reason) = check_filesystem_in_use(state, &p.name).await {
-                    err(req, reason)
-                } else {
-                    match state.filesystems.destroy(p).await {
-                        Ok(()) => ok(req, "ok"),
-                        Err(e) => err(req, e),
+        "fs.destroy" => {
+            match parse_params::<nasty_storage::filesystem::DestroyFilesystemRequest>(req) {
+                Ok(p) => {
+                    if let Some(reason) = check_filesystem_in_use(state, &p.name).await {
+                        err(req, reason)
+                    } else {
+                        match state.filesystems.destroy(p).await {
+                            Ok(()) => ok(req, "ok"),
+                            Err(e) => err(req, e),
+                        }
                     }
                 }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
+        }
         "fs.mount" => match require_str(req, "name") {
             Ok(name) => match state.filesystems.mount(name).await {
                 Ok(v) => {
@@ -696,7 +876,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "device.wipe" => match parse_params::<serde_json::Value>(req) {
             Ok(p) => {
-                let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let path = p
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 match state.filesystems.device_wipe(&path).await {
                     Ok(()) => ok(req, "ok"),
                     Err(e) => err(req, e),
@@ -725,37 +909,42 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
-        "fs.device.evacuate" => match parse_params::<nasty_storage::filesystem::DeviceActionRequest>(req) {
-            Ok(p) => {
-                // Validate synchronously before returning
-                match state.filesystems.get(&p.filesystem).await {
-                    Err(e) => err(req, e),
-                    Ok(fs) if !fs.mounted => err(req, nasty_storage::FilesystemError::CommandFailed(
-                        "filesystem must be mounted to evacuate a device".into(),
-                    )),
-                    Ok(_) => {
-                        // Run in background — bcachefs evacuate can take many minutes.
-                        // Emit filesystem events every 3 s so UI shows live device state.
-                        let fs_svc = state.filesystems.clone();
-                        let events = state.events.clone();
-                        tokio::spawn(async move {
-                            let poll_events = events.clone();
-                            let poll = tokio::spawn(async move {
-                                loop {
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    let _ = poll_events.send("filesystem".to_string());
-                                }
+        "fs.device.evacuate" => {
+            match parse_params::<nasty_storage::filesystem::DeviceActionRequest>(req) {
+                Ok(p) => {
+                    // Validate synchronously before returning
+                    match state.filesystems.get(&p.filesystem).await {
+                        Err(e) => err(req, e),
+                        Ok(fs) if !fs.mounted => err(
+                            req,
+                            nasty_storage::FilesystemError::CommandFailed(
+                                "filesystem must be mounted to evacuate a device".into(),
+                            ),
+                        ),
+                        Ok(_) => {
+                            // Run in background — bcachefs evacuate can take many minutes.
+                            // Emit filesystem events every 3 s so UI shows live device state.
+                            let fs_svc = state.filesystems.clone();
+                            let events = state.events.clone();
+                            tokio::spawn(async move {
+                                let poll_events = events.clone();
+                                let poll = tokio::spawn(async move {
+                                    loop {
+                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                        let _ = poll_events.send("filesystem".to_string());
+                                    }
+                                });
+                                let _ = fs_svc.device_evacuate(p).await;
+                                poll.abort();
+                                let _ = events.send("filesystem".to_string());
                             });
-                            let _ = fs_svc.device_evacuate(p).await;
-                            poll.abort();
-                            let _ = events.send("filesystem".to_string());
-                        });
-                        ok(req, serde_json::json!({"status": "started"}))
+                            ok(req, serde_json::json!({"status": "started"}))
+                        }
                     }
                 }
-            },
-            Err(e) => invalid(req, e),
-        },
+                Err(e) => invalid(req, e),
+            }
+        }
         "fs.device.set_state" => match parse_params(req) {
             Ok(p) => match state.filesystems.device_set_state(p).await {
                 Ok(v) => ok(req, v),
@@ -863,10 +1052,18 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "subvolume.list" => match require_str(req, "filesystem") {
             Ok(fs_name) => {
-                if session.filesystem.as_deref().map_or(false, |p| p != fs_name) {
+                if session
+                    .filesystem
+                    .as_deref()
+                    .map_or(false, |p| p != fs_name)
+                {
                     err(req, "access denied")
                 } else {
-                    match state.subvolumes.list(fs_name, session.owner.as_deref()).await {
+                    match state
+                        .subvolumes
+                        .list(fs_name, session.owner.as_deref())
+                        .await
+                    {
                         Ok(v) => ok(req, v),
                         Err(e) => err(req, e),
                     }
@@ -876,10 +1073,18 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "subvolume.get" => match (require_str(req, "filesystem"), require_str(req, "name")) {
             (Ok(fs_name), Ok(name)) => {
-                if session.filesystem.as_deref().map_or(false, |p| p != fs_name) {
+                if session
+                    .filesystem
+                    .as_deref()
+                    .map_or(false, |p| p != fs_name)
+                {
                     err(req, "access denied")
                 } else {
-                    match state.subvolumes.get(fs_name, name, session.owner.as_deref()).await {
+                    match state
+                        .subvolumes
+                        .get(fs_name, name, session.owner.as_deref())
+                        .await
+                    {
                         Ok(v) => ok(req, v),
                         Err(e) => err(req, e),
                     }
@@ -888,49 +1093,69 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             (Err(r), _) | (_, Err(r)) => r,
         },
         "subvolume.children" => match (require_str(req, "filesystem"), require_str(req, "name")) {
-            (Ok(fs_name), Ok(name)) => {
-                match state.subvolumes.list_children(fs_name, name).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                }
-            }
+            (Ok(fs_name), Ok(name)) => match state.subvolumes.list_children(fs_name, name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
             (Err(r), _) | (_, Err(r)) => r,
         },
-        "subvolume.create" => match parse_params::<nasty_storage::subvolume::CreateSubvolumeRequest>(req) {
-            Ok(p) => {
-                if session.filesystem.as_deref().map_or(false, |f| f != p.filesystem) {
-                    err(req, "access denied")
-                } else {
-                    let owner = session.owner.clone();
-                    match state.subvolumes.create(p, owner).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
+        "subvolume.create" => {
+            match parse_params::<nasty_storage::subvolume::CreateSubvolumeRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .map_or(false, |f| f != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else {
+                        let owner = session.owner.clone();
+                        match state.subvolumes.create(p, owner).await {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
                     }
                 }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
-        "subvolume.delete" => match parse_params::<nasty_storage::subvolume::DeleteSubvolumeRequest>(req) {
-            Ok(p) => {
-                if session.filesystem.as_deref().map_or(false, |f| f != p.filesystem) {
-                    err(req, "access denied")
-                } else if let Some(conflict) = check_subvolume_in_use(state, &p.filesystem, &p.name).await {
-                    err(req, conflict)
-                } else {
-                    match state.subvolumes.delete(p, session.owner.as_deref()).await {
-                        Ok(()) => ok(req, "ok"),
-                        Err(e) => err(req, e),
+        }
+        "subvolume.delete" => {
+            match parse_params::<nasty_storage::subvolume::DeleteSubvolumeRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .map_or(false, |f| f != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else if let Some(conflict) =
+                        check_subvolume_in_use(state, &p.filesystem, &p.name).await
+                    {
+                        err(req, conflict)
+                    } else {
+                        match state.subvolumes.delete(p, session.owner.as_deref()).await {
+                            Ok(()) => ok(req, "ok"),
+                            Err(e) => err(req, e),
+                        }
                     }
                 }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
+        }
         "subvolume.attach" => match (require_str(req, "filesystem"), require_str(req, "name")) {
             (Ok(fs_name), Ok(name)) => {
-                if session.filesystem.as_deref().map_or(false, |p| p != fs_name) {
+                if session
+                    .filesystem
+                    .as_deref()
+                    .map_or(false, |p| p != fs_name)
+                {
                     err(req, "access denied")
                 } else {
-                    match state.subvolumes.attach(fs_name, name, session.owner.as_deref()).await {
+                    match state
+                        .subvolumes
+                        .attach(fs_name, name, session.owner.as_deref())
+                        .await
+                    {
                         Ok(v) => ok(req, v),
                         Err(e) => err(req, e),
                     }
@@ -940,10 +1165,18 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "subvolume.detach" => match (require_str(req, "filesystem"), require_str(req, "name")) {
             (Ok(fs_name), Ok(name)) => {
-                if session.filesystem.as_deref().map_or(false, |p| p != fs_name) {
+                if session
+                    .filesystem
+                    .as_deref()
+                    .map_or(false, |p| p != fs_name)
+                {
                     err(req, "access denied")
                 } else {
-                    match state.subvolumes.detach(fs_name, name, session.owner.as_deref()).await {
+                    match state
+                        .subvolumes
+                        .detach(fs_name, name, session.owner.as_deref())
+                        .await
+                    {
                         Ok(v) => ok(req, v),
                         Err(e) => err(req, e),
                     }
@@ -952,104 +1185,160 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             (Err(r), _) | (_, Err(r)) => r,
         },
 
-        "subvolume.resize" => match parse_params::<nasty_storage::subvolume::ResizeSubvolumeRequest>(req) {
-            Ok(p) => {
-                if session.filesystem.as_deref().map_or(false, |f| f != p.filesystem) {
-                    err(req, "access denied")
-                } else {
-                    match state.subvolumes.resize(p, session.owner.as_deref()).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
+        "subvolume.resize" => {
+            match parse_params::<nasty_storage::subvolume::ResizeSubvolumeRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .map_or(false, |f| f != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else {
+                        match state.subvolumes.resize(p, session.owner.as_deref()).await {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
                     }
                 }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
+        }
 
-        "subvolume.update" => match parse_params::<nasty_storage::subvolume::UpdateSubvolumeRequest>(req) {
-            Ok(p) => {
-                if session.filesystem.as_deref().map_or(false, |f| f != p.filesystem) {
-                    err(req, "access denied")
-                } else {
-                    match state.subvolumes.update(p, session.owner.as_deref()).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
+        "subvolume.update" => {
+            match parse_params::<nasty_storage::subvolume::UpdateSubvolumeRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .map_or(false, |f| f != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else {
+                        match state.subvolumes.update(p, session.owner.as_deref()).await {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
                     }
                 }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
+        }
 
-        "subvolume.clone" => match parse_params::<nasty_storage::subvolume::CloneSubvolumeRequest>(req) {
-            Ok(p) => {
-                if session.filesystem.as_deref().map_or(false, |f| f != p.filesystem) {
-                    err(req, "access denied")
-                } else {
-                    match state.subvolumes.clone_subvolume(p, session.owner.as_deref()).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
+        "subvolume.clone" => {
+            match parse_params::<nasty_storage::subvolume::CloneSubvolumeRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .map_or(false, |f| f != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else {
+                        match state
+                            .subvolumes
+                            .clone_subvolume(p, session.owner.as_deref())
+                            .await
+                        {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
                     }
                 }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
+        }
 
-        "subvolume.set_properties" => match parse_params::<nasty_storage::subvolume::SetPropertiesRequest>(req) {
-            Ok(p) => {
-                if session.filesystem.as_deref().map_or(false, |sp| sp != p.filesystem) {
-                    err(req, "access denied")
-                } else {
-                    match state.subvolumes.set_properties(p, session.owner.as_deref()).await {
+        "subvolume.set_properties" => {
+            match parse_params::<nasty_storage::subvolume::SetPropertiesRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .map_or(false, |sp| sp != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else {
+                        match state
+                            .subvolumes
+                            .set_properties(p, session.owner.as_deref())
+                            .await
+                        {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
+                    }
+                }
+                Err(e) => invalid(req, e),
+            }
+        }
+        "subvolume.remove_properties" => {
+            match parse_params::<nasty_storage::subvolume::RemovePropertiesRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .map_or(false, |sp| sp != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else {
+                        match state
+                            .subvolumes
+                            .remove_properties(p, session.owner.as_deref())
+                            .await
+                        {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
+                    }
+                }
+                Err(e) => invalid(req, e),
+            }
+        }
+        "subvolume.find_by_property" => {
+            match parse_params::<nasty_storage::subvolume::FindByPropertyRequest>(req) {
+                Ok(p) => {
+                    // Enforce filesystem-scoped token restriction
+                    let effective_fs = match (&session.filesystem, &p.filesystem) {
+                        (Some(sp), Some(rp)) if sp != rp => {
+                            return err(req, "access denied");
+                        }
+                        (Some(sp), None) => Some(nasty_storage::subvolume::FindByPropertyRequest {
+                            filesystem: Some(sp.clone()),
+                            key: p.key.clone(),
+                            value: p.value.clone(),
+                        }),
+                        _ => None,
+                    };
+                    let req_effective = effective_fs.unwrap_or(p);
+                    match state
+                        .subvolumes
+                        .find_by_property(req_effective, session.owner.as_deref())
+                        .await
+                    {
                         Ok(v) => ok(req, v),
                         Err(e) => err(req, e),
                     }
                 }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
-        "subvolume.remove_properties" => match parse_params::<nasty_storage::subvolume::RemovePropertiesRequest>(req) {
-            Ok(p) => {
-                if session.filesystem.as_deref().map_or(false, |sp| sp != p.filesystem) {
-                    err(req, "access denied")
-                } else {
-                    match state.subvolumes.remove_properties(p, session.owner.as_deref()).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
-                    }
-                }
-            }
-            Err(e) => invalid(req, e),
-        },
-        "subvolume.find_by_property" => match parse_params::<nasty_storage::subvolume::FindByPropertyRequest>(req) {
-            Ok(p) => {
-                // Enforce filesystem-scoped token restriction
-                let effective_fs = match (&session.filesystem, &p.filesystem) {
-                    (Some(sp), Some(rp)) if sp != rp => {
-                        return err(req, "access denied");
-                    }
-                    (Some(sp), None) => Some(nasty_storage::subvolume::FindByPropertyRequest {
-                        filesystem: Some(sp.clone()),
-                        key: p.key.clone(),
-                        value: p.value.clone(),
-                    }),
-                    _ => None,
-                };
-                let req_effective = effective_fs.unwrap_or(p);
-                match state.subvolumes.find_by_property(req_effective, session.owner.as_deref()).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                }
-            }
-            Err(e) => invalid(req, e),
-        },
+        }
 
         // ── Snapshots ───────────────────────────────────────────
         "snapshot.list" => match require_str(req, "filesystem") {
             Ok(fs_name) => {
-                if session.filesystem.as_deref().map_or(false, |p| p != fs_name) {
+                if session
+                    .filesystem
+                    .as_deref()
+                    .map_or(false, |p| p != fs_name)
+                {
                     err(req, "access denied")
                 } else {
-                    match state.snapshots.list(fs_name, session.owner.as_deref()).await {
+                    match state
+                        .snapshots
+                        .list(fs_name, session.owner.as_deref())
+                        .await
+                    {
                         Ok(v) => ok(req, v),
                         Err(e) => err(req, e),
                     }
@@ -1072,7 +1361,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => invalid(req, e),
         },
         "snapshot.clone" => match parse_params(req) {
-            Ok(p) => match state.snapshots.clone_snapshot(p, session.owner.as_deref()).await {
+            Ok(p) => match state
+                .snapshots
+                .clone_snapshot(p, session.owner.as_deref())
+                .await
+            {
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             },
@@ -1167,7 +1460,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "smb.user.set_password" => {
             #[derive(Deserialize)]
-            struct P { username: String, password: String }
+            struct P {
+                username: String,
+                password: String,
+            }
             match parse_params::<P>(req) {
                 Ok(p) => match state.smb.set_user_password(&p.username, &p.password).await {
                     Ok(()) => ok(req, "ok"),
@@ -1189,20 +1485,24 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
-        "share.iscsi.create" => match parse_params::<nasty_sharing::iscsi::CreateTargetRequest>(req) {
-            Ok(p) => {
-                if let Some(ref dp) = p.device_path {
-                    if let Some(conflict) = check_block_device_conflict(state, dp, "iscsi").await {
-                        return err(req, conflict);
+        "share.iscsi.create" => {
+            match parse_params::<nasty_sharing::iscsi::CreateTargetRequest>(req) {
+                Ok(p) => {
+                    if let Some(ref dp) = p.device_path {
+                        if let Some(conflict) =
+                            check_block_device_conflict(state, dp, "iscsi").await
+                        {
+                            return err(req, conflict);
+                        }
+                    }
+                    match state.iscsi.create(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
                     }
                 }
-                match state.iscsi.create(p).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
+        }
         "share.iscsi.delete" => match parse_params(req) {
             Ok(p) => match state.iscsi.delete(p).await {
                 Ok(()) => ok(req, "ok"),
@@ -1212,7 +1512,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "share.iscsi.add_lun" => match parse_params::<nasty_sharing::iscsi::AddLunRequest>(req) {
             Ok(p) => {
-                if let Some(conflict) = check_block_device_conflict(state, &p.backstore_path, "iscsi").await {
+                if let Some(conflict) =
+                    check_block_device_conflict(state, &p.backstore_path, "iscsi").await
+                {
                     err(req, conflict)
                 } else {
                     match state.iscsi.add_lun(p).await {
@@ -1257,20 +1559,24 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
-        "share.nvmeof.create" => match parse_params::<nasty_sharing::nvmeof::CreateSubsystemRequest>(req) {
-            Ok(p) => {
-                if let Some(ref device_path) = p.device_path {
-                    if let Some(conflict) = check_block_device_conflict(state, device_path, "nvmeof").await {
-                        return err(req, conflict);
+        "share.nvmeof.create" => {
+            match parse_params::<nasty_sharing::nvmeof::CreateSubsystemRequest>(req) {
+                Ok(p) => {
+                    if let Some(ref device_path) = p.device_path {
+                        if let Some(conflict) =
+                            check_block_device_conflict(state, device_path, "nvmeof").await
+                        {
+                            return err(req, conflict);
+                        }
+                    }
+                    match state.nvmeof.create(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
                     }
                 }
-                match state.nvmeof.create(p).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
+        }
         "share.nvmeof.delete" => match parse_params(req) {
             Ok(p) => match state.nvmeof.delete(p).await {
                 Ok(()) => ok(req, "ok"),
@@ -1278,19 +1584,23 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
-        "share.nvmeof.add_namespace" => match parse_params::<nasty_sharing::nvmeof::AddNamespaceRequest>(req) {
-            Ok(p) => {
-                if let Some(conflict) = check_block_device_conflict(state, &p.device_path, "nvmeof").await {
-                    err(req, conflict)
-                } else {
-                    match state.nvmeof.add_namespace(p).await {
-                        Ok(v) => ok(req, v),
-                        Err(e) => err(req, e),
+        "share.nvmeof.add_namespace" => {
+            match parse_params::<nasty_sharing::nvmeof::AddNamespaceRequest>(req) {
+                Ok(p) => {
+                    if let Some(conflict) =
+                        check_block_device_conflict(state, &p.device_path, "nvmeof").await
+                    {
+                        err(req, conflict)
+                    } else {
+                        match state.nvmeof.add_namespace(p).await {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
                     }
                 }
+                Err(e) => invalid(req, e),
             }
-            Err(e) => invalid(req, e),
-        },
+        }
         "share.nvmeof.remove_namespace" => match parse_params(req) {
             Ok(p) => match state.nvmeof.remove_namespace(p).await {
                 Ok(v) => ok(req, v),
@@ -1421,7 +1731,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Ok(()) => ok(req, "ok"),
                 Err(e) => err(req, e),
             }
-        },
+        }
         "apps.disable" => match state.apps.disable().await {
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),
@@ -1456,7 +1766,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Ok(n) => n,
                 Err(r) => return r,
             };
-            let tail = req.params.as_ref()
+            let tail = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("tail"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
@@ -1464,7 +1776,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             }
-        },
+        }
         "apps.install_chart" => match parse_params(req) {
             Ok(p) => match state.apps.install_chart(p).await {
                 Ok(v) => ok(req, v),
@@ -1515,7 +1827,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "apps.forward.start" => match parse_params::<serde_json::Value>(req) {
             Ok(p) => {
                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let local_port = p.get("local_port").and_then(|v| v.as_u64()).map(|v| v as u16);
+                let local_port = p
+                    .get("local_port")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u16);
                 match state.apps.port_forward_start(name, local_port).await {
                     Ok(info) => ok(req, info),
                     Err(e) => err(req, e),
@@ -1651,25 +1966,38 @@ async fn list_vm_images(state: &AppState) -> VmImageListResult {
     let mut subvolume_exists = false;
 
     for fs in &filesystems {
-        if !fs.mounted { continue; }
-        let Some(ref mp) = fs.mount_point else { continue };
+        if !fs.mounted {
+            continue;
+        }
+        let Some(ref mp) = fs.mount_point else {
+            continue;
+        };
         let dir = format!("{mp}/.nasty/images");
-        if !std::path::Path::new(&dir).is_dir() { continue; }
+        if !std::path::Path::new(&dir).is_dir() {
+            continue;
+        }
         subvolume_exists = true;
 
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                let is_image = path.extension()
+                let is_image = path
+                    .extension()
                     .and_then(|e| e.to_str())
-                    .map(|e| VM_IMAGE_EXTENSIONS.iter().any(|ext| e.eq_ignore_ascii_case(ext)))
+                    .map(|e| {
+                        VM_IMAGE_EXTENSIONS
+                            .iter()
+                            .any(|ext| e.eq_ignore_ascii_case(ext))
+                    })
                     .unwrap_or(false);
 
                 if is_image {
-                    let name = path.file_name()
+                    let name = path
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    let size = tokio::fs::metadata(&path).await
+                    let size = tokio::fs::metadata(&path)
+                        .await
                         .map(|m| m.len())
                         .unwrap_or(0);
                     images.push(serde_json::json!({
@@ -1683,17 +2011,25 @@ async fn list_vm_images(state: &AppState) -> VmImageListResult {
         }
     }
 
-    VmImageListResult { subvolume_exists, images }
+    VmImageListResult {
+        subvolume_exists,
+        images,
+    }
 }
 
 /// Ensure the `.nasty/images` directory exists on a filesystem. Creates it if missing.
 async fn ensure_images_subvolume(state: &AppState, filesystem: &str) -> Result<String, String> {
-    let mount_point = state.filesystems.get(filesystem).await
+    let mount_point = state
+        .filesystems
+        .get(filesystem)
+        .await
         .map_err(|e| e.to_string())?
-        .mount_point.ok_or_else(|| "filesystem not mounted".to_string())?;
+        .mount_point
+        .ok_or_else(|| "filesystem not mounted".to_string())?;
 
     let images_path = format!("{mount_point}/.nasty/images");
-    tokio::fs::create_dir_all(&images_path).await
+    tokio::fs::create_dir_all(&images_path)
+        .await
         .map_err(|e| format!("failed to create .nasty/images: {e}"))?;
 
     Ok(images_path)
@@ -1787,7 +2123,11 @@ async fn check_subvolume_in_use(state: &AppState, filesystem: &str, name: &str) 
 /// Check if a filesystem has any subvolumes with dependencies that would prevent destruction.
 async fn check_filesystem_in_use(state: &AppState, name: &str) -> Option<String> {
     // Get all subvolumes on this filesystem
-    let subvols = state.subvolumes.list_all(None, None).await.unwrap_or_default();
+    let subvols = state
+        .subvolumes
+        .list_all(None, None)
+        .await
+        .unwrap_or_default();
     let fs_subvols: Vec<_> = subvols.iter().filter(|sv| sv.filesystem == name).collect();
 
     if fs_subvols.is_empty() {
@@ -1828,7 +2168,11 @@ async fn resolve_vm_disks(
     state: &AppState,
     vm: &nasty_vm::VmConfig,
 ) -> Vec<nasty_vm::VmDiskSubvolume> {
-    let all_subvols = state.subvolumes.list_all(None, None).await.unwrap_or_default();
+    let all_subvols = state
+        .subvolumes
+        .list_all(None, None)
+        .await
+        .unwrap_or_default();
     let mut resolved = Vec::new();
     for disk in &vm.disks {
         for sv in &all_subvols {
@@ -1866,7 +2210,8 @@ async fn vm_snapshot(
             &format!("/run/nasty/vm/{}.qmp", req.id),
             "guest-fsfreeze-freeze",
             None,
-        ).await;
+        )
+        .await;
     }
 
     for disk in &disks {
@@ -1877,7 +2222,10 @@ async fn vm_snapshot(
             read_only: Some(true),
         };
         state.snapshots.create(snap_req, None).await.map_err(|e| {
-            format!("failed to snapshot {}/{}: {e}", disk.filesystem, disk.subvolume)
+            format!(
+                "failed to snapshot {}/{}: {e}",
+                disk.filesystem, disk.subvolume
+            )
         })?;
     }
 
@@ -1887,7 +2235,8 @@ async fn vm_snapshot(
             &format!("/run/nasty/vm/{}.qmp", req.id),
             "guest-fsfreeze-thaw",
             None,
-        ).await;
+        )
+        .await;
     }
 
     Ok(disks)
@@ -1915,9 +2264,16 @@ async fn vm_clone(
             name: disk.subvolume.clone(),
             new_name: clone_name.clone(),
         };
-        let cloned = state.subvolumes.clone_subvolume(clone_req, None).await.map_err(|e| {
-            format!("failed to clone {}/{}: {e}", disk.filesystem, disk.subvolume)
-        })?;
+        let cloned = state
+            .subvolumes
+            .clone_subvolume(clone_req, None)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to clone {}/{}: {e}",
+                    disk.filesystem, disk.subvolume
+                )
+            })?;
 
         new_disks.push(nasty_vm::VmDisk {
             path: cloned.block_device.unwrap_or_default(),
@@ -1937,7 +2293,11 @@ async fn vm_clone(
         name: req.new_name.clone(),
         cpus: Some(src.cpus),
         memory_mib: Some(src.memory_mib),
-        disks: if new_disks.is_empty() { None } else { Some(new_disks) },
+        disks: if new_disks.is_empty() {
+            None
+        } else {
+            Some(new_disks)
+        },
         networks: Some(src.networks.clone()),
         passthrough_devices: None, // Don't clone passthrough — can't share devices
         boot_iso: None,
@@ -1947,7 +2307,11 @@ async fn vm_clone(
         autostart: Some(false),
     };
 
-    state.vms.create(create_req).await.map_err(|e| e.to_string())
+    state
+        .vms
+        .create(create_req)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Read bcachefs error counters from sysfs. Returns total read+write error count.

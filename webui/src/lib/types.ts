@@ -356,17 +356,21 @@ export interface UpdateInfo {
 	channel: ReleaseChannel;
 }
 
-export interface BcachefsToolsInfo {
-	pinned_ref: string | null;
-	pinned_rev: string | null;
-	running_version: string;
-	is_custom: boolean;
-	is_custom_running: boolean;
-	default_ref: string;
-	kernel_rust: boolean | null;
-	debug_symbols: boolean;
-	debug_checks: boolean;
-	debug_checks_running: boolean;
+export interface VersionInputInfo {
+	name: string;
+	url: string;
+	rev: string | null;
+}
+
+export interface VersionInfo {
+	inputs: VersionInputInfo[];
+}
+
+export interface VersionTaggedReleaseStatus {
+	current_url: string;
+	latest_tag: string;
+	latest_url: string;
+	current_is_latest_standard_url: boolean;
 }
 
 export interface Generation {

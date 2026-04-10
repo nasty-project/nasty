@@ -16,48 +16,10 @@
   outputs = { self, nixpkgs, bcachefs-tools, ... }: let
     # Helper to build packages for a given system
     mkPkgs = system: nixpkgs.legacyPackages.${system};
+    nasty-version = (builtins.fromTOML (builtins.readFile ./engine/Cargo.toml)).workspace.package.version;
     rootLock = builtins.fromJSON (builtins.readFile ./flake.lock);
     installerNastyOwner = "nasty-project";
     installerNastyRepo = "nasty";
-    installerNastyRef = "main";
-    installerNastyUrl = "github:${installerNastyOwner}/${installerNastyRepo}/${installerNastyRef}";
-    installerSystemFlakeNix = builtins.replaceStrings
-      [ "@NASTY_URL@" ]
-      [ installerNastyUrl ]
-      (builtins.readFile ./nixos/system-flake/flake.nix.template);
-    installerSystemFlakeLock = builtins.toJSON {
-      version = rootLock.version;
-      root = "root";
-      nodes = (builtins.removeAttrs rootLock.nodes [ "root" ]) // {
-        nasty = {
-          locked = {
-            type = "path";
-            path = self.outPath;
-            narHash = self.narHash;
-            lastModified = self.lastModified;
-          };
-          original = {
-            type = "github";
-            owner = installerNastyOwner;
-            repo = installerNastyRepo;
-            ref = installerNastyRef;
-          };
-          inputs = {
-            bcachefs-tools = [ "bcachefs-tools" ];
-            nixpkgs = [ "nixpkgs" ];
-          };
-        };
-        root = {
-          inputs = {
-            bcachefs-tools = "bcachefs-tools";
-            nasty = "nasty";
-            nixpkgs = "nixpkgs";
-          };
-        };
-      };
-    };
-
-    nasty-version = (builtins.fromTOML (builtins.readFile ./engine/Cargo.toml)).workspace.package.version;
 
     mkEngine = system: let pkgs = mkPkgs system; in pkgs.rustPlatform.buildRustPackage {
       pname = "nasty-engine";
@@ -129,6 +91,47 @@
       nasty-engine = mkEngine system;
       nasty-webui = mkWebui system;
       nasty-bcachefs-tools = mkBcachefsTools system;
+      installerNastyRef = "v${nasty-version}";
+      installerSystemFlakeNix = builtins.replaceStrings
+        [ "@NASTY_VERSION@" "@LOCAL_SYSTEM@" ]
+        [ installerNastyRef system ]
+        (builtins.readFile ./nixos/system-flake/flake.nix.template);
+      installerSystemFlakeLock = builtins.toJSON {
+        version = rootLock.version;
+        root = "root";
+        nodes = (builtins.removeAttrs rootLock.nodes [ "root" ]) // {
+          nasty = {
+            locked = {
+              type = "path";
+              path = self.outPath;
+              narHash = self.narHash;
+              lastModified = self.lastModified;
+            };
+            original = {
+              type = "github";
+              owner = installerNastyOwner;
+              repo = installerNastyRepo;
+              ref = installerNastyRef;
+            };
+            inputs = {
+              bcachefs-tools = [ "bcachefs-tools" ];
+              nixpkgs = [ "nixpkgs" ];
+            };
+          };
+          root = {
+            inputs = {
+              bcachefs-tools = "bcachefs-tools";
+              nasty = "nasty";
+              nixpkgs = "nixpkgs";
+            };
+          };
+        };
+      };
+      nastySystemFlakeSnapshot = pkgs.runCommand "nasty-system-flake-snapshot" {} ''
+        mkdir -p "$out"
+        cp ${self}/flake.nix "$out/flake.nix"
+        cp ${self}/flake.lock "$out/flake.lock"
+      '';
       installerSystemFlake = pkgs.runCommand "nasty-system-flake" {} ''
         mkdir -p "$out"
         cp ${./nixos/system-flake/hardware-configuration.nix} "$out/hardware-configuration.nix"
@@ -140,7 +143,7 @@
       # Full NASty appliance configuration
       nasty = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot; };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -152,7 +155,7 @@
 
       nasty-rootfs = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot; };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -208,7 +211,7 @@
       # QEMU VM for testing
       nasty-vm = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot; };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -222,7 +225,7 @@
       # Cloud/CI disk image (Oracle Cloud compatible)
       nasty-cloud = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot; };
         modules = [
           "${nixpkgs}/nixos/modules/virtualisation/oci-image.nix"
           ./nixos/modules/bcachefs.nix

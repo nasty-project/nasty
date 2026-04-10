@@ -2,20 +2,18 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::{
-        DefaultBodyLimit,
-        Multipart,
-        State,
+        DefaultBodyLimit, Multipart, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
-    Json, Router,
 };
 use serde::Deserialize;
 use tracing::info;
-use tracing_subscriber::{reload, prelude::*};
+use tracing_subscriber::{prelude::*, reload};
 
 mod auth;
 mod router;
@@ -27,7 +25,8 @@ use auth::{AuthService, Session};
 use router::handle_rpc_request;
 
 /// Handle for dynamically reloading the tracing filter at runtime.
-pub type LogReloadHandle = reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+pub type LogReloadHandle =
+    reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
 
 /// Broadcast channel for notifying all WebSocket clients of state changes.
 /// The payload is the collection name (e.g. "filesystem", "subvolume", "share.nfs").
@@ -64,10 +63,19 @@ pub const METRICS_BASE: &str = "http://127.0.0.1:2138";
 async fn main() -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let built = env!("NASTY_BUILD_DATE");
+    let args = std::env::args().collect::<Vec<_>>();
 
     // --version flag
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
+    if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("nasty-engine {version} (built: {built})");
+        return Ok(());
+    }
+
+    if matches!(
+        args.get(1).map(String::as_str),
+        Some("bootstrap-system-flake")
+    ) {
+        run_bootstrap_system_flake_cli(&args[2..]).await?;
         return Ok(());
     }
 
@@ -82,17 +90,16 @@ async fn main() -> anyhow::Result<()> {
 
     let (event_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
-    let subvolumes = Arc::new(nasty_storage::SubvolumeService::new(nasty_storage::FilesystemService::new()));
+    let subvolumes = Arc::new(nasty_storage::SubvolumeService::new(
+        nasty_storage::FilesystemService::new(),
+    ));
     let nvmeof = Arc::new(nasty_sharing::NvmeofService::new());
 
     let state = Arc::new(AppState {
         auth: AuthService::new().await,
         events: event_tx,
         log_reload: reload_handle,
-        system: nasty_system::SystemService::new(
-            None,
-            Some(built.to_string()),
-        ),
+        system: nasty_system::SystemService::new(None, Some(built.to_string())),
         settings: nasty_system::settings::SettingsService::new().await,
         alerts: nasty_system::alerts::AlertService::new().await,
         network: nasty_system::network::NetworkService::new(),
@@ -136,10 +143,7 @@ async fn main() -> anyhow::Result<()> {
     // Runs before sd_notify_ready() — nginx won't serve until this completes.
     info!("Warming caches...");
     let t0 = std::time::Instant::now();
-    tokio::join!(
-        state.system.info(),
-        state.updates.bcachefs_info(&state.system),
-    );
+    state.system.info().await;
     info!("Caches warm in {}ms", t0.elapsed().as_millis());
 
     // Check ACME cert renewal in background (non-blocking)
@@ -162,10 +166,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws/vm/{vm_id}/vnc", get(vm_console::vnc_handler))
         .route("/ws/vm/{vm_id}/serial", get(vm_console::serial_handler))
         .route("/api/login", post(login_handler))
-        .route("/api/upload/vm-image", post(upload_vm_image_handler).layer(DefaultBodyLimit::max(10_737_418_240)))
+        .route(
+            "/api/upload/vm-image",
+            post(upload_vm_image_handler).layer(DefaultBodyLimit::max(10_737_418_240)),
+        )
         .route("/api/files/browse", get(files_browse_handler))
         .route("/api/files", delete(files_delete_handler))
-        .route("/api/files/upload", post(files_upload_handler).layer(DefaultBodyLimit::max(10_737_418_240)))
+        .route(
+            "/api/files/upload",
+            post(files_upload_handler).layer(DefaultBodyLimit::max(10_737_418_240)),
+        )
         .route("/api/files/mkdir", post(files_mkdir_handler))
         .route("/api/auth/check", get(auth_check_handler))
         .route("/health", get(health))
@@ -176,9 +186,49 @@ async fn main() -> anyhow::Result<()> {
     info!("Listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
+}
+
+async fn run_bootstrap_system_flake_cli(args: &[String]) -> anyhow::Result<()> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "Usage: nasty-engine bootstrap-system-flake --dest-dir <dir> --template-file <path> --system <system>"
+        );
+        return Ok(());
+    }
+
+    let dest_dir = required_flag_value(args, "--dest-dir")?;
+    let template_file = required_flag_value(args, "--template-file")?;
+    let local_system = required_flag_value(args, "--system")?;
+    let nasty_version = env!("CARGO_PKG_VERSION");
+
+    let result = nasty_system::update::bootstrap_system_flake_from_template_path(
+        &template_file,
+        &dest_dir,
+        nasty_version,
+        &local_system,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    println!("{}", result.flake_path);
+    Ok(())
+}
+
+fn required_flag_value(args: &[String], flag: &str) -> anyhow::Result<String> {
+    let idx = args
+        .iter()
+        .position(|arg| arg == flag)
+        .ok_or_else(|| anyhow::anyhow!("missing required flag: {flag}"))?;
+    args.get(idx + 1)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("missing value for flag: {flag}"))
 }
 
 /// Notify systemd that the service is ready (Type=notify).
@@ -209,7 +259,8 @@ async fn upload_vm_image_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let client_ip = headers.get("x-real-ip")
+    let client_ip = headers
+        .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string();
@@ -226,46 +277,89 @@ async fn upload_vm_image_handler(
     let token = match token {
         Some(t) => t,
         None => {
-            info!("VM image upload rejected: missing auth token (from {})", client_ip);
-            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Missing authorization token" }))).into_response();
+            info!(
+                "VM image upload rejected: missing auth token (from {})",
+                client_ip
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "Missing authorization token" })),
+            )
+                .into_response();
         }
     };
 
     let session = match state.auth.validate(&token, &client_ip).await {
         Ok(s) => s,
         Err(e) => {
-            info!("VM image upload rejected: invalid token (from {})", client_ip);
-            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": format!("Invalid token: {}", e) }))).into_response();
+            info!(
+                "VM image upload rejected: invalid token (from {})",
+                client_ip
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": format!("Invalid token: {}", e) })),
+            )
+                .into_response();
         }
     };
 
     // Get or create the images subvolume
     let filesystems = state.filesystems.list().await.unwrap_or_default();
-    let fs_name = filesystems.first().map(|f| f.name.clone()).unwrap_or_default();
-    
+    let fs_name = filesystems
+        .first()
+        .map(|f| f.name.clone())
+        .unwrap_or_default();
+
     if fs_name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No filesystems available" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No filesystems available" })),
+        )
+            .into_response();
     }
 
     let images_path = {
         let fs = match state.filesystems.get(&fs_name).await {
             Ok(f) => f,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
         };
         let mp = match fs.mount_point {
             Some(ref p) => p.clone(),
-            None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Filesystem not mounted" }))).into_response(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "Filesystem not mounted" })),
+                )
+                    .into_response();
+            }
         };
         let path = format!("{mp}/.nasty/images");
         if let Err(e) = tokio::fs::create_dir_all(&path).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to create .nasty/images: {e}") }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({ "error": format!("Failed to create .nasty/images: {e}") }),
+                ),
+            )
+                .into_response();
         }
         path
     };
 
     // Process the uploaded file
     let Some(mut field) = multipart.next_field().await.ok().flatten() else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No file provided" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No file provided" })),
+        )
+            .into_response();
     };
 
     let raw_name = field.file_name().unwrap_or("").to_string();
@@ -277,11 +371,21 @@ async fn upload_vm_image_handler(
         .to_string();
 
     if file_name.is_empty() {
-        info!("VM image upload rejected: empty filename (user '{}')", session.username);
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No file provided" }))).into_response();
+        info!(
+            "VM image upload rejected: empty filename (user '{}')",
+            session.username
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No file provided" })),
+        )
+            .into_response();
     }
 
-    info!("User '{}' uploading VM image: '{}' to {}", session.username, file_name, images_path);
+    info!(
+        "User '{}' uploading VM image: '{}' to {}",
+        session.username, file_name, images_path
+    );
 
     let extensions = ["iso", "qcow2", "img", "raw"];
     let ext = std::path::Path::new(&file_name)
@@ -297,19 +401,29 @@ async fn upload_vm_image_handler(
     let dest_path = std::path::Path::new(&images_path).join(&file_name);
 
     if dest_path.exists() {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": format!("Image '{}' already exists", file_name) }))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": format!("Image '{}' already exists", file_name) })),
+        )
+            .into_response();
     }
 
     // Stream file content to disk
     let mut file = match tokio::fs::File::create(&dest_path).await {
         Ok(f) => f,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to create file: {}", e) }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to create file: {}", e) })),
+            )
+                .into_response();
         }
     };
 
     use tokio::io::AsyncWriteExt;
-    let cleanup = || async { let _ = tokio::fs::remove_file(&dest_path).await; };
+    let cleanup = || async {
+        let _ = tokio::fs::remove_file(&dest_path).await;
+    };
     let start = std::time::Instant::now();
     let mut total_bytes: u64 = 0;
     loop {
@@ -319,16 +433,36 @@ async fn upload_vm_image_handler(
                 if let Err(e) = file.write_all(&chunk).await {
                     drop(file);
                     cleanup().await;
-                    tracing::error!("VM image upload write failed after {} bytes for '{}': {}", total_bytes, file_name, e);
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to write chunk: {}", e) }))).into_response();
+                    tracing::error!(
+                        "VM image upload write failed after {} bytes for '{}': {}",
+                        total_bytes,
+                        file_name,
+                        e
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            serde_json::json!({ "error": format!("Failed to write chunk: {}", e) }),
+                        ),
+                    )
+                        .into_response();
                 }
             }
             Ok(None) => break,
             Err(e) => {
                 drop(file);
                 cleanup().await;
-                tracing::error!("VM image upload stream failed after {} bytes for '{}': {}", total_bytes, file_name, e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to read chunk: {}", e) }))).into_response();
+                tracing::error!(
+                    "VM image upload stream failed after {} bytes for '{}': {}",
+                    total_bytes,
+                    file_name,
+                    e
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": format!("Failed to read chunk: {}", e) })),
+                )
+                    .into_response();
             }
         }
     }
@@ -336,18 +470,37 @@ async fn upload_vm_image_handler(
         drop(file);
         cleanup().await;
         tracing::error!("VM image upload sync failed for '{}': {}", file_name, e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": format!("Failed to sync file: {}", e) }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to sync file: {}", e) })),
+        )
+            .into_response();
     }
 
     let elapsed = start.elapsed();
     let size_mib = total_bytes as f64 / (1024.0 * 1024.0);
-    let rate_mibs = if elapsed.as_secs_f64() > 0.0 { size_mib / elapsed.as_secs_f64() } else { 0.0 };
-    info!("User '{}' uploaded VM image: '{}' ({:.1} MiB in {:.1}s, {:.1} MiB/s)", session.username, file_name, size_mib, elapsed.as_secs_f64(), rate_mibs);
-    (StatusCode::OK, Json(serde_json::json!({
-        "name": file_name,
-        "path": dest_path.to_string_lossy(),
-        "filesystem": fs_name,
-    }))).into_response()
+    let rate_mibs = if elapsed.as_secs_f64() > 0.0 {
+        size_mib / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+    info!(
+        "User '{}' uploaded VM image: '{}' ({:.1} MiB in {:.1}s, {:.1} MiB/s)",
+        session.username,
+        file_name,
+        size_mib,
+        elapsed.as_secs_f64(),
+        rate_mibs
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": file_name,
+            "path": dest_path.to_string_lossy(),
+            "filesystem": fs_name,
+        })),
+    )
+        .into_response()
 }
 
 // ── File Browser endpoints ──────────────────────────────────────
@@ -365,7 +518,9 @@ fn is_inside_block_subvolume(path: &std::path::Path) -> bool {
             return true;
         }
         match p.parent() {
-            Some(parent) if parent.starts_with(FILES_ROOT) && parent != std::path::Path::new(FILES_ROOT) => {
+            Some(parent)
+                if parent.starts_with(FILES_ROOT) && parent != std::path::Path::new(FILES_ROOT) =>
+            {
                 p = parent;
             }
             _ => break,
@@ -392,38 +547,70 @@ async fn files_browse_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Auth check
-    let token = headers.get("authorization")
+    let token = headers
+        .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string());
     let token = match token {
         Some(t) => t,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing token"}))).into_response(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Missing token"})),
+            )
+                .into_response();
+        }
     };
-    let client_ip = headers.get("x-real-ip").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
     if state.auth.validate(&token, client_ip).await.is_err() {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid token"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid token"})),
+        )
+            .into_response();
     }
 
     let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
     let dir = match safe_path(req_path) {
         Ok(p) => p,
-        Err(status) => return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response(),
+        Err(status) => {
+            return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
+        }
     };
 
     let meta = match tokio::fs::metadata(&dir).await {
         Ok(m) => m,
-        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Not found"})),
+            )
+                .into_response();
+        }
     };
 
     if !meta.is_dir() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Not a directory"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Not a directory"})),
+        )
+            .into_response();
     }
 
     let mut entries = Vec::new();
     let mut read_dir = match tokio::fs::read_dir(&dir).await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
 
     while let Ok(Some(entry)) = read_dir.next_entry().await {
@@ -431,7 +618,8 @@ async fn files_browse_handler(
         let meta = entry.metadata().await.ok();
         let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let modified = meta.as_ref()
+        let modified = meta
+            .as_ref()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
@@ -450,15 +638,27 @@ async fn files_browse_handler(
         let a_dir = a["is_dir"].as_bool().unwrap_or(false);
         let b_dir = b["is_dir"].as_bool().unwrap_or(false);
         b_dir.cmp(&a_dir).then_with(|| {
-            a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
         })
     });
 
-    let display_path = dir.strip_prefix(FILES_ROOT).unwrap_or(&dir).to_string_lossy().to_string();
-    (StatusCode::OK, Json(serde_json::json!({
-        "path": display_path,
-        "entries": entries,
-    }))).into_response()
+    let display_path = dir
+        .strip_prefix(FILES_ROOT)
+        .unwrap_or(&dir)
+        .to_string_lossy()
+        .to_string();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "path": display_path,
+            "entries": entries,
+        })),
+    )
+        .into_response()
 }
 
 /// Validate bearer token from request headers. Returns client_ip on success.
@@ -466,17 +666,30 @@ async fn validate_bearer(
     headers: &axum::http::HeaderMap,
     auth: &AuthService,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let token = headers.get("authorization")
+    let token = headers
+        .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string());
     let token = match token {
         Some(t) => t,
-        None => return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing token"})))),
+        None => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Missing token"})),
+            ));
+        }
     };
-    let client_ip = headers.get("x-real-ip").and_then(|v| v.to_str().ok()).unwrap_or("unknown").to_string();
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
     if auth.validate(&token, &client_ip).await.is_err() {
-        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid token"}))));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid token"})),
+        ));
     }
     Ok(client_ip)
 }
@@ -505,12 +718,20 @@ async fn files_delete_handler(
 
     let req_path = match params.get("path") {
         Some(p) if !p.is_empty() => p.as_str(),
-        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "path is required"}))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "path is required"})),
+            )
+                .into_response();
+        }
     };
 
     let target = match safe_path(req_path) {
         Ok(p) => p,
-        Err(status) => return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response(),
+        Err(status) => {
+            return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
+        }
     };
 
     // Refuse to delete filesystem/subvolume roots (depth 1 under /fs, e.g. /fs/mypool)
@@ -526,7 +747,13 @@ async fn files_delete_handler(
 
     let meta = match tokio::fs::metadata(&target).await {
         Ok(m) => m,
-        Err(_) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Not found"})),
+            )
+                .into_response();
+        }
     };
 
     let result = if meta.is_dir() {
@@ -540,7 +767,11 @@ async fn files_delete_handler(
             info!("Deleted {}", target.display());
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -558,11 +789,17 @@ async fn files_upload_handler(
     let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
     let dir = match safe_path(req_path) {
         Ok(p) => p,
-        Err(status) => return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response(),
+        Err(status) => {
+            return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
+        }
     };
 
     if !dir.is_dir() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Target is not a directory"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Target is not a directory"})),
+        )
+            .into_response();
     }
 
     // Protect block subvolume directories
@@ -573,7 +810,13 @@ async fn files_upload_handler(
     // Read multipart field
     let field = match multipart.next_field().await {
         Ok(Some(f)) => f,
-        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "No file in request"}))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "No file in request"})),
+            )
+                .into_response();
+        }
     };
 
     let file_name = field.file_name().unwrap_or("upload").to_string();
@@ -585,14 +828,24 @@ async fn files_upload_handler(
         .to_string();
 
     if file_name.is_empty() || file_name == "." || file_name == ".." {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid filename"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid filename"})),
+        )
+            .into_response();
     }
 
     let dest = dir.join(&file_name);
 
     let mut file = match tokio::fs::File::create(&dest).await {
         Ok(f) => f,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
 
     let mut total: u64 = 0;
@@ -604,31 +857,50 @@ async fn files_upload_handler(
                 total += chunk.len() as u64;
                 if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await {
                     let _ = tokio::fs::remove_file(&dest).await;
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": e.to_string()})),
+                    )
+                        .into_response();
                 }
             }
             Ok(None) => break,
             Err(e) => {
                 let _ = tokio::fs::remove_file(&dest).await;
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response();
             }
         }
     }
 
     if let Err(e) = file.sync_all().await {
         let _ = tokio::fs::remove_file(&dest).await;
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
     }
 
     let elapsed = t0.elapsed();
     let speed_mb = (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64();
-    info!("Uploaded {} ({} bytes, {:.1} MB/s)", file_name, total, speed_mb);
+    info!(
+        "Uploaded {} ({} bytes, {:.1} MB/s)",
+        file_name, total, speed_mb
+    );
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "name": file_name,
-        "path": dest.to_string_lossy(),
-        "size": total,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": file_name,
+            "path": dest.to_string_lossy(),
+            "size": total,
+        })),
+    )
+        .into_response()
 }
 
 /// Create a directory.  POST /api/files/mkdir?path=first/subdir/newdir
@@ -643,7 +915,13 @@ async fn files_mkdir_handler(
 
     let req_path = match params.get("path") {
         Some(p) if !p.is_empty() => p.as_str(),
-        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "path is required"}))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "path is required"})),
+            )
+                .into_response();
+        }
     };
 
     // Validate parent is under /fs
@@ -652,18 +930,31 @@ async fn files_mkdir_handler(
         None => "",
     };
     if safe_path(parent.is_empty().then_some("").unwrap_or(parent)).is_err() && !parent.is_empty() {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Invalid path"})),
+        )
+            .into_response();
     }
 
     let full = std::path::Path::new(FILES_ROOT).join(req_path.trim_start_matches('/'));
 
     // Protect block subvolume directories
-    if is_inside_block_subvolume(&full) || is_inside_block_subvolume(full.parent().unwrap_or(&full)) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot create directories inside block subvolumes"}))).into_response();
+    if is_inside_block_subvolume(&full) || is_inside_block_subvolume(full.parent().unwrap_or(&full))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot create directories inside block subvolumes"})),
+        )
+            .into_response();
     }
 
     if full.exists() {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": "Already exists"}))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Already exists"})),
+        )
+            .into_response();
     }
 
     match tokio::fs::create_dir(&full).await {
@@ -671,7 +962,11 @@ async fn files_mkdir_handler(
             info!("Created directory {}", full.display());
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -688,15 +983,29 @@ async fn login_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    let client_ip = headers.get("x-real-ip").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
-    match state.auth.login(&req.username, &req.password, client_ip).await {
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    match state
+        .auth
+        .login(&req.username, &req.password, client_ip)
+        .await
+    {
         Ok(token) => {
-            info!("Login successful: user '{}' from {}", req.username, client_ip);
+            info!(
+                "Login successful: user '{}' from {}",
+                req.username, client_ip
+            );
             (StatusCode::OK, Json(serde_json::json!({ "token": token }))).into_response()
         }
         Err(_) => {
             tracing::warn!("Login failed: user '{}' from {}", req.username, client_ip);
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid credentials" }))).into_response()
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid credentials" })),
+            )
+                .into_response()
         }
     }
 }
@@ -767,7 +1076,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
 
 /// Wait for the first message which must be: {"token": "..."}
 /// Returns the session if valid, or None if auth failed (socket is closed).
-async fn wait_for_auth(socket: &mut WebSocket, state: &AppState, client_ip: &str) -> Option<Session> {
+async fn wait_for_auth(
+    socket: &mut WebSocket,
+    state: &AppState,
+    client_ip: &str,
+) -> Option<Session> {
     let msg = tokio::time::timeout(std::time::Duration::from_secs(10), socket.recv())
         .await
         .ok()??
@@ -828,4 +1141,3 @@ async fn wait_for_auth(socket: &mut WebSocket, state: &AppState, client_ip: &str
         }
     }
 }
-
