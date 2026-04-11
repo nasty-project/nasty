@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
@@ -53,11 +53,32 @@
 
 
 	const client = getClient();
+	let startupPoll: ReturnType<typeof setInterval> | null = null;
 
 	onMount(async () => {
 		await Promise.all([refresh(), loadFilesystems()]);
 		loading = false;
+		if (status?.enabled && !status?.running) startStartupPolling();
 	});
+
+	onDestroy(() => {
+		stopStartupPolling();
+	});
+
+	function startStartupPolling() {
+		stopStartupPolling();
+		startupPoll = setInterval(async () => {
+			await refresh();
+			if (status?.running) stopStartupPolling();
+		}, 5000);
+	}
+
+	function stopStartupPolling() {
+		if (startupPoll) {
+			clearInterval(startupPoll);
+			startupPoll = null;
+		}
+	}
 
 	async function loadFilesystems() {
 		try {
@@ -86,10 +107,11 @@
 		enabling = true;
 		await withToast(
 			() => client.call('apps.enable', { filesystem: selectedFs || undefined }),
-			'Apps runtime enabled'
+			'Apps runtime enabled — starting k3s'
 		);
 		enabling = false;
 		await refresh();
+		if (status?.enabled && !status?.running) startStartupPolling();
 	}
 
 	async function disableApps() {
@@ -370,7 +392,13 @@
 		</CardContent>
 	</Card>
 {:else if !status?.running}
-	<p class="text-muted-foreground">Waiting for app runtime to start...</p>
+	<Card>
+		<CardContent class="py-8 text-center">
+			<div class="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary"></div>
+			<p class="font-medium">Starting app runtime</p>
+			<p class="mt-1 text-sm text-muted-foreground">k3s is bootstrapping. This can take up to a minute on first start.</p>
+		</CardContent>
+	</Card>
 {:else}
 	<!-- Top-level tabs with inline status -->
 	<div class="mb-6 flex items-center border-b border-border">
