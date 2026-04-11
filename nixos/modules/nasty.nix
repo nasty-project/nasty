@@ -218,6 +218,10 @@ in {
     # Version file for update system
     environment.etc."nasty-version".text = nasty-version;
 
+    # OVMF UEFI firmware for QEMU virtual machines
+    environment.etc."nasty/ovmf/OVMF_CODE.fd".source = "${pkgs.OVMF.fd}/FV/OVMF_CODE.fd";
+    environment.etc."nasty/ovmf/OVMF_VARS.fd".source = "${pkgs.OVMF.fd}/FV/OVMF_VARS.fd";
+
     # Keep a generation-owned copy of the managed wrapper flake in /etc so the
     # exact flake used to build the active generation is readable from
     # /run/current-system/etc/nasty-system-flake and can be restored on boot.
