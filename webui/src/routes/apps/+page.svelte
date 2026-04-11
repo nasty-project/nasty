@@ -462,7 +462,7 @@
 				<h3 class="mb-4 text-lg font-semibold">Install App</h3>
 				<div class="mb-4">
 					<Label for="app-name">App Name</Label>
-					<Input id="app-name" value={newName} oninput={(e) => { newName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="plex" class="mt-1" />
+					<Input id="app-name" value={newName} oninput={(e) => { newName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="whoami" class="mt-1" />
 					{#if newName && !isValidReleaseName(newName)}
 						<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, dots. Max 53 chars.</span>
 					{:else}
@@ -471,7 +471,7 @@
 				</div>
 				<div class="mb-4">
 					<Label for="app-image">Container Image</Label>
-					<Input id="app-image" bind:value={newImage} placeholder="lscr.io/linuxserver/plex:latest" class="mt-1" />
+					<Input id="app-image" bind:value={newImage} placeholder="traefik/whoami:latest" class="mt-1" />
 				</div>
 
 				<!-- Ports -->
