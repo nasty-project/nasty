@@ -5,13 +5,14 @@
 //! Apps are deployed as Helm releases using the bjw-s app-template chart
 //! for simple containers, or raw Helm charts for advanced use cases.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::process::Command;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 
 const STATE_PATH: &str = "/var/lib/nasty/apps-enabled";
 const KUBECONFIG: &str = "/etc/rancher/k3s/k3s.yaml";
@@ -451,8 +452,43 @@ impl AppsService {
 
     // ── App management (app-template) ───────────────────────
 
-    pub async fn install(&self, req: InstallAppRequest) -> Result<App, AppsError> {
+    pub async fn install(&self, mut req: InstallAppRequest) -> Result<App, AppsError> {
         self.require_ready().await?;
+
+        // Validate user-specified NodePorts and auto-assign missing ones
+        let mut used = self.used_node_ports().await;
+        for p in &req.ports {
+            if let Some(np) = p.node_port {
+                if !(30000..=32767).contains(&np) {
+                    return Err(AppsError::HelmFailed(format!(
+                        "NodePort {} is out of range (must be 30000-32767)",
+                        np
+                    )));
+                }
+                if used.contains(&np) {
+                    return Err(AppsError::HelmFailed(format!(
+                        "NodePort {} is already in use",
+                        np
+                    )));
+                }
+            }
+        }
+        let mut next_free = 30000u16;
+        for p in &mut req.ports {
+            if p.node_port.is_none() {
+                while used.contains(&next_free) {
+                    next_free += 1;
+                    if next_free > 32767 {
+                        return Err(AppsError::HelmFailed(
+                            "no free NodePort available in 30000-32767 range".into(),
+                        ));
+                    }
+                }
+                p.node_port = Some(next_free);
+                used.insert(next_free);
+                next_free += 1;
+            }
+        }
 
         // Check if release already exists
         let existing = self.list().await?;
@@ -491,6 +527,18 @@ impl AppsService {
 
         info!("Installed app '{}' (image: {})", req.name, req.image);
 
+        // Auto-create ingress using the first port's NodePort
+        if let Some(first_port) = req.ports.first() {
+            if let Some(node_port) = first_port.node_port {
+                if let Err(e) = self.ingress_set(SetIngressRequest {
+                    name: req.name.clone(),
+                    node_port,
+                }).await {
+                    warn!("Failed to auto-create ingress for '{}': {e}", req.name);
+                }
+            }
+        }
+
         // Return the installed app
         self.get(&req.name).await
     }
@@ -515,6 +563,9 @@ impl AppsService {
             }
             return Err(AppsError::HelmFailed(stderr.to_string()));
         }
+
+        // Clean up ingress rule
+        let _ = self.ingress_remove(name).await;
 
         info!("Removed app '{name}'");
         Ok(())
@@ -945,6 +996,33 @@ impl AppsService {
         }
     }
 
+    /// Collect all NodePorts currently in use by our apps.
+    async fn used_node_ports(&self) -> HashSet<u16> {
+        let mut used = HashSet::new();
+        if let Ok(rules) = self.ingress_list().await {
+            for rule in rules {
+                used.insert(rule.node_port);
+            }
+        }
+        // Also scan k8s services in case there are ports not tracked by ingress
+        if let Ok(output) = Command::new("k3s")
+            .args([
+                "kubectl", "--kubeconfig", KUBECONFIG, "-n", NAMESPACE,
+                "get", "svc", "-o",
+                "jsonpath={range .items[*].spec.ports[*]}{.nodePort}{\"\\n\"}{end}",
+            ])
+            .output()
+            .await
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Ok(port) = line.trim().parse::<u16>() {
+                    used.insert(port);
+                }
+            }
+        }
+        used
+    }
+
     // ── Internal helpers ────────────────────────────────────
 
     async fn is_k3s_ready(&self) -> bool {
@@ -1137,7 +1215,7 @@ fn generate_app_template_values(req: &InstallAppRequest) -> serde_json::Value {
     if !service_ports.is_empty() {
         values["service"] = serde_json::json!({
             "main": {
-                "type": if req.ports.iter().any(|p| p.node_port.is_some()) { "NodePort" } else { "ClusterIP" },
+                "type": "NodePort",
                 "controller": "main",
                 "ports": service_ports,
             }

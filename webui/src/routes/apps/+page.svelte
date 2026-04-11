@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { AppsStatus, App, HelmRepo, HelmChart } from '$lib/types';
+	import type { AppsStatus, App, HelmRepo, HelmChart, AppIngress } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -60,6 +60,10 @@
 		return name.length > 0 && name.length <= 53 && HELM_NAME_RE.test(name);
 	}
 
+	function hasInvalidNodePort(ports: { node_port: string }[]): boolean {
+		return ports.some(p => p.node_port && (parseInt(p.node_port) < 30000 || parseInt(p.node_port) > 32767));
+	}
+
 	onMount(async () => {
 		await Promise.all([refresh(), loadFilesystems()]);
 		loading = false;
@@ -100,10 +104,10 @@
 			status = await client.call<AppsStatus>('apps.status');
 			if (status.enabled && status.running) {
 				apps = await client.call<App[]>('apps.list');
-				await loadForwards();
+				await loadIngresses();
 			} else {
 				apps = [];
-				forwards = [];
+				ingresses = [];
 			}
 		} catch { /* ignore */ }
 	}
@@ -215,31 +219,15 @@
 		}
 	}
 
-	// Port-forward functions
-	let forwards: { name: string; local_port: number; container_port: number; pod: string }[] = $state([]);
+	// Ingress
+	let ingresses: AppIngress[] = $state([]);
 
-	async function loadForwards() {
-		try { forwards = await client.call('apps.forward.list'); } catch { forwards = []; }
+	async function loadIngresses() {
+		try { ingresses = await client.call('apps.ingress.list'); } catch { ingresses = []; }
 	}
 
-	async function startForward(appName: string) {
-		await withToast(
-			() => client.call('apps.forward.start', { name: appName }),
-			'Port-forward started'
-		);
-		await loadForwards();
-	}
-
-	async function stopForward(appName: string) {
-		await withToast(
-			() => client.call('apps.forward.stop', { name: appName }),
-			'Port-forward stopped'
-		);
-		await loadForwards();
-	}
-
-	function getForward(appName: string) {
-		return forwards.find(f => f.name === appName);
+	function getIngress(appName: string) {
+		return ingresses.find(r => r.name === appName);
 	}
 
 	// Expert mode functions
@@ -496,14 +484,18 @@
 						<div class="grid grid-cols-[1fr_80px_90px_60px_auto] gap-2 mt-1 items-center">
 							<Input bind:value={port.name} placeholder="e.g. http" class="h-8 text-xs" />
 							<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" />
-							<Input bind:value={port.node_port} placeholder="NodePort" class="h-8 text-xs" />
+							<Input bind:value={port.node_port} placeholder="auto" class="h-8 text-xs" />
 							<select bind:value={port.protocol} class="h-8 rounded-md border border-input bg-transparent px-1 text-xs">
 								<option>TCP</option>
 								<option>UDP</option>
 							</select>
 							<Button size="xs" variant="ghost" onclick={() => removePort(i)}>x</Button>
 						</div>
+						{#if port.node_port && (parseInt(port.node_port) < 30000 || parseInt(port.node_port) > 32767)}
+							<span class="text-xs text-red-500">NodePort must be between 30000 and 32767.</span>
+						{/if}
 					{/each}
+					<p class="mt-1 text-[0.6rem] text-muted-foreground">NodePort is auto-assigned if left empty. App will be accessible at /apps/{'{name}'}/ via reverse proxy.</p>
 				</div>
 
 				<!-- Environment Variables -->
@@ -555,7 +547,7 @@
 					</div>
 				</div>
 
-				<Button onclick={install} disabled={!newName || !newImage || !isValidReleaseName(newName)}>Install</Button>
+				<Button onclick={install} disabled={!newName || !newImage || !isValidReleaseName(newName) || hasInvalidNodePort(newPorts)}>Install</Button>
 			</CardContent>
 		</Card>
 	{/if}
@@ -588,11 +580,10 @@
 						</td>
 						<td class="p-3">
 							<div class="flex gap-2">
-								{#if getForward(app.name)}
-									<a href="http://{window.location.hostname}:{getForward(app.name)?.local_port}" target="_blank" class="text-xs text-blue-500 hover:underline self-center">:{getForward(app.name)?.local_port}</a>
-									<Button variant="secondary" size="xs" onclick={() => stopForward(app.name)}>Stop</Button>
-								{:else}
-									<Button variant="outline" size="xs" onclick={() => startForward(app.name)}>Access</Button>
+								{#if getIngress(app.name)}
+									<a href="/apps/{app.name}/" target="_blank" class="text-xs text-blue-500 hover:underline self-center">
+										/apps/{app.name}/
+									</a>
 								{/if}
 								<Button variant="outline" size="xs" onclick={() => showLogs(app.name)}>
 									Logs
@@ -748,11 +739,10 @@
 						<td class="p-3"><Badge variant={app.status === 'deployed' ? 'default' : 'secondary'}>{app.status}</Badge></td>
 						<td class="p-3">
 							<div class="flex gap-2">
-								{#if getForward(app.name)}
-									<a href="http://{window.location.hostname}:{getForward(app.name)?.local_port}" target="_blank" class="text-xs text-blue-500 hover:underline self-center">:{getForward(app.name)?.local_port}</a>
-									<Button variant="secondary" size="xs" onclick={() => stopForward(app.name)}>Stop</Button>
-								{:else}
-									<Button variant="outline" size="xs" onclick={() => startForward(app.name)}>Access</Button>
+								{#if getIngress(app.name)}
+									<a href="/apps/{app.name}/" target="_blank" class="text-xs text-blue-500 hover:underline self-center">
+										/apps/{app.name}/
+									</a>
 								{/if}
 								<Button variant="outline" size="xs" onclick={() => showLogs(app.name)}>Logs</Button>
 								<Button variant="destructive" size="xs" onclick={() => removeApp(app.name)}>Remove</Button>
