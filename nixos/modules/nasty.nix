@@ -759,6 +759,7 @@ in {
         iproute2              # ip -j addr show
         nasty-bcachefs-tools  # bcachefs fs usage
         util-linux            # lsblk
+        pciutils              # lspci for controller name resolution
       ];
 
       environment = {
