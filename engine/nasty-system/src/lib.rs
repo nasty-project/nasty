@@ -3,6 +3,7 @@ pub mod backup;
 pub mod firmware;
 pub mod network;
 pub mod protocol;
+pub mod nut;
 pub mod settings;
 pub mod tailscale;
 pub mod tuning;

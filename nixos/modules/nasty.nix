@@ -147,6 +147,7 @@ in {
     smb.enable = mkEnableOption "Samba server for NASty shares" // { default = true; };
     iscsi.enable = mkEnableOption "iSCSI target (LIO) for NASty" // { default = true; };
     nvmeof.enable = mkEnableOption "NVMe-oF target for NASty" // { default = true; };
+    nut.enable = mkEnableOption "NUT (Network UPS Tools) for NASty" // { default = true; };
 
     # VPN — not enabled by default (requires Tailscale auth key)
     tailscale.enable = mkEnableOption "Tailscale VPN for NASty";
@@ -684,6 +685,7 @@ in {
       ++ lib.optionals cfg.smb.enable [ samba ]
       ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
       ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ]
+      ++ lib.optionals cfg.nut.enable [ pkgs.nut ]
       ++ lib.optionals cfg.tailscale.enable [ tailscale ];
 
     # ── State directory ────────────────────────────────────────
@@ -704,6 +706,7 @@ in {
       "d /etc/target 0750 root root -"
       "f /etc/samba/smb.nasty.conf 0644 root root -"
       "d /etc/samba/nasty.d 0755 root root -"
+      "d /var/lib/nasty/nut 0750 root root -"
     ];
 
     # ── Self-signed TLS certificate ───────────────────────────
@@ -801,6 +804,7 @@ in {
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
         ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ]
+        ++ lib.optionals cfg.nut.enable [ pkgs.nut ]
         ++ lib.optionals cfg.tailscale.enable [ tailscale ];
 
       environment = {
@@ -896,6 +900,48 @@ in {
         ExecStart = "${pkgs.bash}/bin/bash -c 'test -f /etc/target/saveconfig.json && ${targetcli-fixed}/bin/targetcli restoreconfig /etc/target/saveconfig.json || true'";
         ExecStop = "${targetcli-fixed}/bin/targetcli clearconfig confirm=True";
       };
+    };
+
+    # ── NUT (Network UPS Tools) ─────────────────────────────────
+    # Custom systemd services that read config from /var/lib/nasty/nut/.
+    # Not started at boot — the engine manages lifecycle via protocol toggle.
+
+    systemd.services.nut-driver = mkIf cfg.nut.enable {
+      description = "NUT UPS driver";
+      after = [ "local-fs.target" ];
+      serviceConfig = {
+        Type = "forking";
+        ExecStart = "${pkgs.nut}/bin/upsdrvctl -u root start";
+        ExecStop = "${pkgs.nut}/bin/upsdrvctl stop";
+        Environment = "NUT_CONFPATH=/var/lib/nasty/nut";
+      };
+      wantedBy = lib.mkForce [];
+    };
+
+    systemd.services.nut-server = mkIf cfg.nut.enable {
+      description = "NUT UPS data server (upsd)";
+      after = [ "nut-driver.service" ];
+      requires = [ "nut-driver.service" ];
+      serviceConfig = {
+        Type = "forking";
+        ExecStart = "${pkgs.nut}/sbin/upsd -u root";
+        ExecStop = "${pkgs.nut}/sbin/upsd -c stop";
+        Environment = "NUT_CONFPATH=/var/lib/nasty/nut";
+      };
+      wantedBy = lib.mkForce [];
+    };
+
+    systemd.services.nut-monitor = mkIf cfg.nut.enable {
+      description = "NUT UPS monitor (upsmon)";
+      after = [ "nut-server.service" ];
+      requires = [ "nut-server.service" ];
+      serviceConfig = {
+        Type = "forking";
+        ExecStart = "${pkgs.nut}/sbin/upsmon -u root";
+        ExecStop = "${pkgs.nut}/sbin/upsmon -c stop";
+        Environment = "NUT_CONFPATH=/var/lib/nasty/nut";
+      };
+      wantedBy = lib.mkForce [];
     };
 
     # ── WebUI via nginx ────────────────────────────────────────
@@ -1014,6 +1060,7 @@ in {
       (lib.optional cfg.iscsi.enable 3260)
       (lib.optionals cfg.smb.enable [ 445 139 ])
       (lib.optional cfg.nvmeof.enable 4420)
+      (lib.optional cfg.nut.enable 3493)
     ];
 
     networking.firewall.allowedUDPPorts = lib.optionals cfg.tailscale.enable [ 41641 ];

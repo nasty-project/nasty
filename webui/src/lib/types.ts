@@ -428,6 +428,29 @@ export interface Settings {
 	telemetry_enabled: boolean;
 }
 
+export interface NutConfig {
+	driver: string;
+	port: string;
+	ups_name: string;
+	description: string;
+	shutdown_on_battery_percent: number;
+	shutdown_on_battery_seconds: number;
+	shutdown_command: string;
+}
+
+export interface UpsStatus {
+	status: string;
+	battery_charge: number | null;
+	battery_runtime: number | null;
+	input_voltage: number | null;
+	output_voltage: number | null;
+	ups_load: number | null;
+	ups_model: string | null;
+	ups_serial: string | null;
+	available: boolean;
+	raw: Record<string, string>;
+}
+
 export interface TuningConfig {
 	nfs_threads: number;
 	nfs_lease_time: number;

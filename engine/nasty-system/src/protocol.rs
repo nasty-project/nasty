@@ -17,6 +17,7 @@ pub enum Protocol {
     Smb,
     Iscsi,
     Nvmeof,
+    Nut,
     Ssh,
     Avahi,
     Smart,
@@ -28,6 +29,7 @@ impl Protocol {
         Protocol::Smb,
         Protocol::Iscsi,
         Protocol::Nvmeof,
+        Protocol::Nut,
         Protocol::Ssh,
         Protocol::Avahi,
         Protocol::Smart,
@@ -43,6 +45,7 @@ impl Protocol {
             Protocol::Smb => "smb",
             Protocol::Iscsi => "iscsi",
             Protocol::Nvmeof => "nvmeof",
+            Protocol::Nut => "nut",
             Protocol::Ssh => "ssh",
             Protocol::Avahi => "avahi",
             Protocol::Smart => "smart",
@@ -55,6 +58,7 @@ impl Protocol {
             Protocol::Smb => "SMB",
             Protocol::Iscsi => "iSCSI",
             Protocol::Nvmeof => "NVMe-oF",
+            Protocol::Nut => "UPS (NUT)",
             Protocol::Ssh => "SSH",
             Protocol::Avahi => "mDNS (Avahi)",
             Protocol::Smart => "SMART",
@@ -68,6 +72,7 @@ impl Protocol {
             Protocol::Smb => &["samba-smbd.service", "samba-nmbd.service"],
             Protocol::Iscsi => &["target.service"],
             Protocol::Nvmeof => &[], // configfs-based, no daemon
+            Protocol::Nut => &["nut-driver.service", "nut-server.service", "nut-monitor.service"],
             Protocol::Ssh => &["sshd.service"],
             Protocol::Avahi => &["avahi-daemon.service"],
             Protocol::Smart => &["smartd.service"],
@@ -80,6 +85,7 @@ impl Protocol {
             "smb" => Some(Protocol::Smb),
             "iscsi" => Some(Protocol::Iscsi),
             "nvmeof" => Some(Protocol::Nvmeof),
+            "nut" => Some(Protocol::Nut),
             "ssh" => Some(Protocol::Ssh),
             "avahi" => Some(Protocol::Avahi),
             "smart" => Some(Protocol::Smart),
@@ -112,6 +118,8 @@ struct ProtocolState {
     iscsi: bool,
     #[serde(default)]
     nvmeof: bool,
+    #[serde(default)]
+    nut: bool,
     #[serde(default = "default_true")]
     ssh: bool,
     #[serde(default = "default_true")]
@@ -129,6 +137,7 @@ impl Default for ProtocolState {
             smb: false,
             iscsi: false,
             nvmeof: false,
+            nut: false,
             ssh: true,
             avahi: true,
             smart: true,
@@ -143,6 +152,7 @@ impl ProtocolState {
             Protocol::Smb => self.smb,
             Protocol::Iscsi => self.iscsi,
             Protocol::Nvmeof => self.nvmeof,
+            Protocol::Nut => self.nut,
             Protocol::Ssh => self.ssh,
             Protocol::Avahi => self.avahi,
             Protocol::Smart => self.smart,
@@ -155,6 +165,7 @@ impl ProtocolState {
             Protocol::Smb => self.smb = enabled,
             Protocol::Iscsi => self.iscsi = enabled,
             Protocol::Nvmeof => self.nvmeof = enabled,
+            Protocol::Nut => self.nut = enabled,
             Protocol::Ssh => self.ssh = enabled,
             Protocol::Avahi => self.avahi = enabled,
             Protocol::Smart => self.smart = enabled,
@@ -315,6 +326,7 @@ async fn is_protocol_running(proto: Protocol) -> bool {
             // NVMe-oF is "running" if nvmet configfs is available
             std::path::Path::new("/sys/kernel/config/nvmet").exists()
         }
+        Protocol::Nut => systemctl_is_active("nut-server.service").await,
         Protocol::Ssh => systemctl_is_active("sshd.service").await,
         Protocol::Avahi => systemctl_is_active("avahi-daemon.service").await,
         Protocol::Smart => systemctl_is_active("smartd.service").await,
@@ -330,6 +342,13 @@ async fn prepare_protocol(proto: Protocol) {
             if let Err(e) = tokio::fs::write(SMB_NASTY_CONF, header).await {
                 warn!("Failed to create {SMB_NASTY_CONF}: {e}");
             }
+        }
+    }
+    if proto == Protocol::Nut {
+        // Write NUT config files from persisted config before starting daemons
+        let config = crate::nut::load_config().await;
+        if let Err(e) = crate::nut::write_config_files(&config).await {
+            warn!("Failed to write NUT config files: {e}");
         }
     }
 }

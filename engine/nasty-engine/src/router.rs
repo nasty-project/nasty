@@ -99,6 +99,8 @@ fn is_read_only(method: &str) -> bool {
                 | "system.alerts"
                 | "system.settings.get"
                 | "system.tuning.get"
+                | "system.nut.config.get"
+                | "system.nut.status"
                 | "system.tailscale.get"
                 | "system.acme.status"
                 | "system.metrics.history"
@@ -143,6 +145,7 @@ fn collection_for_method(method: &str) -> Option<&'static str> {
         m if m.starts_with("service.protocol.") && !is_read_only(m) => Some("protocol"),
         m if m.starts_with("system.settings.") && !is_read_only(m) => Some("settings"),
         m if m.starts_with("system.tuning.") && !is_read_only(m) => Some("tuning"),
+        m if m.starts_with("system.nut.") && !is_read_only(m) => Some("nut"),
         m if m.starts_with("system.tailscale.") && !is_read_only(m) => Some("tailscale"),
         m if m.starts_with("alert.rules.") && !is_read_only(m) => Some("alert"),
         _ => None,
@@ -425,6 +428,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(e) => invalid(req, e),
         },
+
+        // ── NUT (UPS) ─────────────────────────────────────────────
+        "system.nut.config.get" => ok(req, state.nut.get_config().await),
+        "system.nut.config.update" => match parse_params(req) {
+            Ok(p) => match state.nut.update_config(p).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
+        "system.nut.status" => ok(req, state.nut.status().await),
 
         // ── Tailscale VPN ────────────────────────────────────────
         "system.tailscale.get" => ok(req, state.tailscale.get().await),
