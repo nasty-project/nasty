@@ -706,9 +706,22 @@ impl SubvolumeService {
             // Set nocow on the sparse image — writes go in-place, reducing I/O stall
             // duration during bcachefs snapshots. Snapshots still work (COW is forced
             // for the first write after snapshot), but subsequent writes are in-place.
-            match cmd::run_ok("bcachefs", &["set-file-option", "--nocow", &img_path]).await {
-                Ok(_) => info!("Set nocow on {img_path}"),
-                Err(e) => warn!("Failed to set nocow on {img_path}: {e}"),
+            //
+            // HOWEVER: nocow implicitly disables encryption, checksums, and compression
+            // at the extent level. On encrypted filesystems this causes reconcile errors
+            // (extent_io_opts_not_set) because the checker finds unencrypted extents.
+            // See: https://github.com/koverstreet/bcachefs/issues/1112
+            let fs_encrypted = self.filesystems.get(&req.filesystem).await
+                .map(|fs| fs.options.encrypted == Some(true))
+                .unwrap_or(false);
+
+            if fs_encrypted {
+                info!("Skipping nocow on {img_path} — filesystem is encrypted (nocow disables encryption)");
+            } else {
+                match cmd::run_ok("bcachefs", &["set-file-option", "--nocow", &img_path]).await {
+                    Ok(_) => info!("Set nocow on {img_path}"),
+                    Err(e) => warn!("Failed to set nocow on {img_path}: {e}"),
+                }
             }
 
             info!("Attaching loop device for '{}'", req.name);

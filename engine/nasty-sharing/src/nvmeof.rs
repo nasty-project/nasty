@@ -489,8 +489,9 @@ impl NvmeofService {
         let ns_path = format!("{NVMET_BASE}/subsystems/{}/namespaces/{nsid}", subsys.nqn);
         configfs_mkdir(&ns_path).await?;
         configfs_write(&format!("{ns_path}/device_path"), &req.device_path).await?;
-        // Direct I/O — vol.img has nocow set, so writes are in-place (no COW overhead).
-        // This matches TrueNAS's approach for block subvolume-backed namespaces.
+        // Direct I/O — vol.img may have nocow set (on non-encrypted filesystems),
+        // so writes go in-place. On encrypted filesystems nocow is skipped to
+        // preserve encryption and checksums.
         configfs_write(&format!("{ns_path}/buffered_io"), "0").await?;
         configfs_write(&format!("{ns_path}/enable"), "1").await?;
 
