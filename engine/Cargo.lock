@@ -842,6 +842,7 @@ dependencies = [
 name = "nasty-apps"
 version = "0.0.2"
 dependencies = [
+ "reqwest",
  "schemars",
  "serde",
  "serde_json",
