@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-apidoc"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "nasty-sharing",
  "nasty-storage",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-apps"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "reqwest",
  "schemars",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-common"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "schemars",
  "serde",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-engine"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-metrics"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-sharing"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "nasty-common",
  "schemars",
@@ -925,14 +925,14 @@ dependencies = [
 
 [[package]]
 name = "nasty-snapshot"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "nasty-storage",
 ]
 
 [[package]]
 name = "nasty-storage"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "nasty-common",
  "schemars",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-system"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "base64",
  "libc",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-vm"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "nasty-common",
  "schemars",
