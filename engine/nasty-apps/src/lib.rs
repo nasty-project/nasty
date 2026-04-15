@@ -19,7 +19,12 @@ const KUBECONFIG: &str = "/etc/rancher/k3s/k3s.yaml";
 const K3S_SERVICE: &str = "k3s.service";
 const APP_TEMPLATE_REPO: &str = "https://bjw-s-labs.github.io/helm-charts";
 const APP_TEMPLATE_CHART: &str = "app-template";
-const NAMESPACE: &str = "nasty-apps";
+/// Per-app namespace prefix. Each app gets its own namespace: nasty-{name}.
+const NAMESPACE_PREFIX: &str = "nasty-";
+
+fn app_namespace(name: &str) -> String {
+    format!("{NAMESPACE_PREFIX}{name}")
+}
 
 // ── Errors ──────────────────────────────────────────────────────
 
@@ -100,7 +105,7 @@ pub struct AppsConfig {
 pub struct App {
     /// Helm release name (also used as the app identifier).
     pub name: String,
-    /// Namespace (always "nasty-apps").
+    /// Namespace (nasty-{name}).
     pub namespace: String,
     /// Container image (e.g. "lscr.io/linuxserver/plex:latest").
     pub image: String,
@@ -380,12 +385,6 @@ impl AppsService {
                 info!("local-path-provisioner configured to use {path}");
             }
 
-            // Create namespace
-            let _ = tokio::process::Command::new("k3s")
-                .args(["kubectl", "--kubeconfig", KUBECONFIG, "create", "namespace", NAMESPACE])
-                .output()
-                .await;
-
             // Add bjw-s Helm repo
             let _ = tokio::process::Command::new("helm")
                 .args(["repo", "add", "bjw-s", APP_TEMPLATE_REPO, "--kubeconfig", KUBECONFIG])
@@ -407,7 +406,7 @@ impl AppsService {
                 let _ = AppsService::save_config(&config).await;
             }
 
-            info!("Apps bootstrap complete (namespace: {NAMESPACE}, repo: bjw-s)");
+            info!("Apps bootstrap complete (repo: bjw-s)");
         });
 
         Ok(())
@@ -523,12 +522,16 @@ impl AppsService {
         let values_path = format!("/tmp/nasty-app-{}.json", req.name);
         tokio::fs::write(&values_path, &values_json).await?;
 
+        // Create per-app namespace
+        let ns = app_namespace(&req.name);
+        self.ensure_namespace(&ns).await;
+
         // helm install
         let output = Command::new("helm")
             .args([
                 "install", &req.name,
                 &format!("bjw-s/{APP_TEMPLATE_CHART}"),
-                "--namespace", NAMESPACE,
+                "--namespace", &ns,
                 "--values", &values_path,
                 "--kubeconfig", KUBECONFIG,
             ])
@@ -564,10 +567,11 @@ impl AppsService {
     pub async fn remove(&self, name: &str) -> Result<(), AppsError> {
         self.require_ready().await?;
 
+        let ns = app_namespace(name);
         let output = Command::new("helm")
             .args([
                 "uninstall", name,
-                "--namespace", NAMESPACE,
+                "--namespace", &ns,
                 "--kubeconfig", KUBECONFIG,
             ])
             .output()
@@ -585,6 +589,12 @@ impl AppsService {
         // Clean up ingress rule
         let _ = self.ingress_remove(name).await;
 
+        // Delete the per-app namespace (cleans up all remaining resources)
+        let _ = Command::new("k3s")
+            .args(["kubectl", "--kubeconfig", KUBECONFIG, "delete", "namespace", &ns])
+            .output()
+            .await;
+
         info!("Removed app '{name}'");
         Ok(())
     }
@@ -598,7 +608,7 @@ impl AppsService {
     async fn list_internal(&self) -> Result<Vec<App>, AppsError> {
         let output = Command::new("helm")
             .args([
-                "list", "--namespace", NAMESPACE,
+                "list", "--all-namespaces",
                 "--kubeconfig", KUBECONFIG,
                 "-o", "json",
             ])
@@ -614,13 +624,20 @@ impl AppsService {
         let releases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
             .unwrap_or_default();
 
-        let apps = releases.iter().map(|r| App {
-            name: r["name"].as_str().unwrap_or("").to_string(),
-            namespace: r["namespace"].as_str().unwrap_or(NAMESPACE).to_string(),
-            image: "".to_string(), // Helm doesn't expose this directly
-            chart: r["chart"].as_str().unwrap_or("").to_string(),
-            status: r["status"].as_str().unwrap_or("unknown").to_string(),
-            updated: r["updated"].as_str().unwrap_or("").to_string(),
+        let apps = releases.iter().filter_map(|r| {
+            let ns = r["namespace"].as_str().unwrap_or("");
+            // Only include releases in nasty- namespaces
+            if !ns.starts_with(NAMESPACE_PREFIX) {
+                return None;
+            }
+            Some(App {
+                name: r["name"].as_str().unwrap_or("").to_string(),
+                namespace: ns.to_string(),
+                image: "".to_string(), // Helm doesn't expose this directly
+                chart: r["chart"].as_str().unwrap_or("").to_string(),
+                status: r["status"].as_str().unwrap_or("unknown").to_string(),
+                updated: r["updated"].as_str().unwrap_or("").to_string(),
+            })
         }).collect();
 
         Ok(apps)
@@ -640,10 +657,11 @@ impl AppsService {
         // Verify app exists
         let _ = self.get(name).await?;
 
+        let ns = app_namespace(name);
         let output = Command::new("helm")
             .args([
                 "get", "values", name,
-                "--namespace", NAMESPACE,
+                "--namespace", &ns,
                 "--kubeconfig", KUBECONFIG,
                 "-o", "json",
             ])
@@ -781,11 +799,12 @@ impl AppsService {
         let values_path = format!("/tmp/nasty-app-{}.json", req.name);
         tokio::fs::write(&values_path, &values_json).await?;
 
+        let ns = app_namespace(&req.name);
         let output = Command::new("helm")
             .args([
                 "upgrade", &req.name,
                 &format!("bjw-s/{APP_TEMPLATE_CHART}"),
-                "--namespace", NAMESPACE,
+                "--namespace", &ns,
                 "--values", &values_path,
                 "--kubeconfig", KUBECONFIG,
             ])
@@ -824,11 +843,12 @@ impl AppsService {
         let tail_str = tail.unwrap_or(100).to_string();
         let label = format!("app.kubernetes.io/instance={name}");
 
+        let ns = app_namespace(name);
         let output = Command::new("k3s")
             .args([
                 "kubectl",
                 "logs",
-                "--namespace", NAMESPACE,
+                "--namespace", &ns,
                 "-l", &label,
                 "--tail", &tail_str,
                 "--kubeconfig", KUBECONFIG,
@@ -850,11 +870,14 @@ impl AppsService {
     pub async fn install_chart(&self, req: InstallHelmChartRequest) -> Result<App, AppsError> {
         self.require_ready().await?;
 
+        let ns = app_namespace(&req.name);
+        self.ensure_namespace(&ns).await;
+
         let mut args = vec![
             "install".to_string(),
             req.name.clone(),
             req.chart.clone(),
-            "--namespace".to_string(), NAMESPACE.to_string(),
+            "--namespace".to_string(), ns,
             "--kubeconfig".to_string(), KUBECONFIG.to_string(),
         ];
 
@@ -1086,8 +1109,9 @@ impl AppsService {
         self.require_ready().await?;
 
         // Find the pod for this app
+        let ns = app_namespace(name);
         let output = Command::new("k3s")
-            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", NAMESPACE,
+            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", &ns,
                    "get", "pods", "-l", &format!("app.kubernetes.io/name={name}"),
                    "-o", "jsonpath={.items[0].metadata.name}"])
             .output()
@@ -1101,7 +1125,7 @@ impl AppsService {
 
         // Find the container port from the pod spec
         let port_output = Command::new("k3s")
-            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", NAMESPACE,
+            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", &ns,
                    "get", "pod", &pod,
                    "-o", "jsonpath={.spec.containers[0].ports[0].containerPort}"])
             .output()
@@ -1120,7 +1144,7 @@ impl AppsService {
 
         // Start port-forward process
         let child = Command::new("k3s")
-            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", NAMESPACE,
+            .args(["kubectl", "--kubeconfig", KUBECONFIG, "-n", &ns,
                    "port-forward", &format!("pod/{pod}"), &format!("{local}:{container_port}"),
                    "--address", "0.0.0.0"])
             .stdout(std::process::Stdio::null())
@@ -1217,10 +1241,10 @@ impl AppsService {
                 used.insert(rule.node_port);
             }
         }
-        // Also scan k8s services in case there are ports not tracked by ingress
+        // Also scan k8s services across all nasty- namespaces
         if let Ok(output) = Command::new("k3s")
             .args([
-                "kubectl", "--kubeconfig", KUBECONFIG, "-n", NAMESPACE,
+                "kubectl", "--kubeconfig", KUBECONFIG, "--all-namespaces",
                 "get", "svc", "-o",
                 "jsonpath={range .items[*].spec.ports[*]}{.nodePort}{\"\\n\"}{end}",
             ])
@@ -1260,6 +1284,22 @@ impl AppsService {
         // Ensure bjw-s repo exists — re-add if bootstrap failed previously
         self.ensure_helm_repo().await;
         Ok(())
+    }
+
+    /// Ensure a namespace exists. Idempotent.
+    async fn ensure_namespace(&self, ns: &str) {
+        let output = Command::new("k3s")
+            .args(["kubectl", "--kubeconfig", KUBECONFIG, "get", "namespace", ns])
+            .output()
+            .await;
+        let exists = matches!(output, Ok(ref o) if o.status.success());
+        if !exists {
+            info!("Namespace {ns} missing, creating");
+            let _ = Command::new("k3s")
+                .args(["kubectl", "--kubeconfig", KUBECONFIG, "create", "namespace", ns])
+                .output()
+                .await;
+        }
     }
 
     /// Ensure the bjw-s helm repo is configured. Idempotent.
@@ -1524,10 +1564,13 @@ async fn ensure_k3s_symlink(fs_name: &str) {
     let k3s_data = format!("/fs/{fs_name}/.nasty/k3s");
     let default_path = "/var/lib/rancher/k3s";
 
-    // Already correct?
+    // Already correct? Still verify the target directory exists.
     if let Ok(target) = tokio::fs::read_link(default_path).await {
         if target.to_string_lossy() == k3s_data {
-            return;
+            if std::path::Path::new(&k3s_data).exists() {
+                return;
+            }
+            info!("k3s symlink target {k3s_data} missing, recreating");
         }
     }
 
