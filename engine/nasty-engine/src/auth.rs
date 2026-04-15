@@ -558,7 +558,7 @@ pub enum AuthError {
 }
 
 /// Append a structured event to the audit log (JSONL, append-only).
-fn audit(event: &str, user: &str, ip: &str, detail: &str) {
+pub fn audit(event: &str, user: &str, ip: &str, detail: &str) {
     use std::io::Write;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -574,6 +574,18 @@ fn audit(event: &str, user: &str, ip: &str, detail: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(AUDIT_LOG_PATH) {
         let _ = writeln!(f, "{}", line);
     }
+}
+
+/// Read audit log entries, most recent first.
+pub async fn read_audit_log(limit: usize) -> Vec<serde_json::Value> {
+    let content = tokio::fs::read_to_string(AUDIT_LOG_PATH).await.unwrap_or_default();
+    let mut entries: Vec<serde_json::Value> = content
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    entries.reverse();
+    entries.truncate(limit);
+    entries
 }
 
 fn hash_password(password: &str) -> Result<String, AuthError> {

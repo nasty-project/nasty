@@ -128,6 +128,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.version.tagged_release_notice"
                 | "system.log.level"
                 | "system.settings.timezones"
+                | "audit.list"
         )
 }
 
@@ -151,6 +152,28 @@ fn collection_for_method(method: &str) -> Option<&'static str> {
         m if m.starts_with("alert.rules.") && !is_read_only(m) => Some("alert"),
         _ => None,
     }
+}
+
+/// Extract a human-readable summary from mutation params for audit logging.
+fn audit_detail(request: &Request) -> String {
+    let params = match request.params.as_ref() {
+        Some(p) => p,
+        None => return String::new(),
+    };
+
+    // Try common identifier fields in order of specificity
+    for key in ["name", "username", "filesystem", "target", "id", "path"] {
+        if let Some(val) = params.get(key).and_then(|v| v.as_str()) {
+            return val.to_string();
+        }
+    }
+
+    // For device operations, show the device
+    if let Some(val) = params.get("device").and_then(|v| v.as_str()) {
+        return val.to_string();
+    }
+
+    String::new()
 }
 
 /// Route a JSON-RPC request to the appropriate handler
@@ -214,8 +237,18 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
         debug!("RPC done: {} in {}ms", request.method, elapsed.as_millis());
     }
 
-    // Broadcast event to all clients on successful mutations
+    // Audit log + broadcast event on successful mutations
     if response.error.is_none() {
+        // Auth mutations are already audited in auth.rs — skip them here
+        if !is_read_only(&request.method) && !request.method.starts_with("auth.") {
+            let detail = audit_detail(&request);
+            crate::auth::audit(
+                &request.method,
+                &session.username,
+                session.client_ip.as_deref().unwrap_or("unknown"),
+                &detail,
+            );
+        }
         if let Some(collection) = collection_for_method(&request.method) {
             let _ = state.events.send(collection.to_string());
         }
@@ -323,6 +356,15 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+
+        // ── Audit ──────────────────────────────────────────────
+        "audit.list" => {
+            let limit = req.params.as_ref()
+                .and_then(|p| p.get("limit"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(200) as usize;
+            ok(req, crate::auth::read_audit_log(limit).await)
+        }
 
         // ── System ──────────────────────────────────────────────
         "system.info" => ok(req, state.system.info().await),
