@@ -383,7 +383,7 @@
 		// Open the expert install dialog pre-filled with the OCI chart ref
 		expertInstall = {
 			name: chart.name,
-			repo: 'oci://tccr.io/truecharts',
+			repo: 'oci://oci.trueforge.org/truecharts',
 			version: chart.version,
 			app_version: '',
 			description: chart.description,
@@ -806,7 +806,7 @@
 			{/if}
 
 			<div class="mt-4 text-xs text-muted-foreground">
-				Powered by <a href="https://truecharts.org" target="_blank" rel="noopener" class="underline">TrueCharts</a> — charts pulled via OCI from <code>tccr.io/truecharts</code>.
+				Powered by <a href="https://truecharts.org" target="_blank" rel="noopener" class="underline">TrueCharts</a> — charts pulled via OCI from <code>oci.trueforge.org/truecharts</code>.
 			</div>
 		</CardContent>
 	</Card>

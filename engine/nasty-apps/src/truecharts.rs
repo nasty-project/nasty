@@ -13,7 +13,7 @@ use tracing::{info, warn};
 const SOURCE_URL: &str =
     "https://truecharts.org/truetech/truecharts/charts/description-list/";
 const CACHE_PATH: &str = "/var/lib/nasty/truecharts-index.json";
-pub const OCI_REGISTRY: &str = "oci://tccr.io/truecharts";
+pub const OCI_REGISTRY: &str = "oci://oci.trueforge.org/truecharts";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TrueChartEntry {
