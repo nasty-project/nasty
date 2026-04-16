@@ -459,6 +459,18 @@
 			.sort((a, b) => a.name.localeCompare(b.name));
 	});
 
+	/// Helm's list output puts the chart name + version in `chart` like "victoriametrics-5.2.1".
+	/// Return the installed version for a given chart name, or null if not installed.
+	function installedVersion(chartName: string): string | null {
+		const prefix = chartName + '-';
+		for (const a of apps) {
+			if (a.chart.startsWith(prefix)) {
+				return a.chart.slice(prefix.length);
+			}
+		}
+		return null;
+	}
+
 	const sorted = $derived.by(() => {
 		return [...filtered].sort((a, b) => {
 			const cmp = a.name.localeCompare(b.name);
@@ -790,16 +802,28 @@
 				</div>
 				<div class="max-h-[60vh] overflow-y-auto rounded border divide-y">
 					{#each trueChartsFiltered as chart (chart.name)}
+						{@const installed = installedVersion(chart.name)}
 						<div class="flex items-start gap-3 px-3 py-2 hover:bg-muted/30 transition-colors">
 							<div class="flex-1 min-w-0">
-								<div class="flex items-center gap-2">
+								<div class="flex items-center gap-2 flex-wrap">
 									<span class="font-medium">{chart.name}</span>
 									<Badge variant="outline" class="text-xs">{chart.train}</Badge>
 									<span class="text-xs text-muted-foreground">{chart.version}</span>
+									{#if installed}
+										<Badge variant="default" class="text-xs">
+											Installed{installed !== chart.version ? ` (${installed})` : ''}
+										</Badge>
+									{/if}
 								</div>
 								<div class="text-sm text-muted-foreground truncate">{chart.description}</div>
 							</div>
-							<Button size="xs" onclick={() => selectTrueChart(chart)}>Install</Button>
+							{#if installed && installed !== chart.version}
+								<Button size="xs" variant="outline" onclick={() => selectTrueChart(chart)}>Upgrade</Button>
+							{:else if installed}
+								<Button size="xs" variant="outline" disabled>Installed</Button>
+							{:else}
+								<Button size="xs" onclick={() => selectTrueChart(chart)}>Install</Button>
+							{/if}
 						</div>
 					{/each}
 				</div>
@@ -962,8 +986,9 @@
 			</CardContent>
 		</Card>
 	{/if}
+	{/if}
 
-	<!-- Installed apps table (visible in both modes) -->
+	<!-- Installed apps table (visible in all sub-tabs) -->
 	{#if apps.length > 0}
 		<h3 class="text-lg font-semibold mt-6 mb-3">Installed Apps</h3>
 		<table class="w-full text-sm">
@@ -996,7 +1021,6 @@
 				{/each}
 			</tbody>
 		</table>
-	{/if}
 	{/if}
 	{:else if page === 'runtime'}
 	<!-- Runtime tab -->
