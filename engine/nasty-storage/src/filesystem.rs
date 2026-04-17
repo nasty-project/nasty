@@ -585,6 +585,8 @@ impl FilesystemService {
         // Global options first, then per-device options + device path pairs
         let mut args: Vec<String> = vec!["format".to_string()];
 
+        args.push(format!("--label={}", req.name));
+
         if req.replicas > 1 {
             args.push(format!("--replicas={}", req.replicas));
         }
