@@ -957,12 +957,12 @@
 					{#if firmwareDevices.length === 0}
 						<p class="text-sm text-muted-foreground">No firmware-capable devices detected.</p>
 					{:else}
-						<table class="w-full text-sm table-fixed">
+						<table class="w-full text-sm">
 							<thead>
 								<tr>
-									<th class="w-[30%] border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Device</th>
-									<th class="w-[15%] border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Vendor</th>
-									<th class="w-[15%] border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Version</th>
+									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Device</th>
+									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Vendor</th>
+									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Version</th>
 									<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Update</th>
 									<th class="w-px border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap">Actions</th>
 								</tr>
@@ -970,8 +970,8 @@
 							<tbody>
 								{#each firmwareDevices as dev}
 									<tr class="border-b border-border">
-										<td class="p-3 font-semibold truncate" title={dev.name}>{dev.name}</td>
-										<td class="p-3 text-muted-foreground truncate">{dev.vendor}</td>
+										<td class="p-3 font-semibold whitespace-nowrap">{dev.name}</td>
+										<td class="p-3 text-muted-foreground whitespace-nowrap">{dev.vendor}</td>
 										<td class="p-3 font-mono text-xs">{dev.version}</td>
 										<td class="p-3">
 											{#if dev.update_available}
