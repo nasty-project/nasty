@@ -794,6 +794,7 @@ in {
         qemu             # QEMU/KVM for virtual machines
         docker                       # Docker for apps runtime
         docker-compose               # Docker Compose for multi-container apps
+        fwupd                        # fwupdmgr for firmware updates
         lego                         # ACME client for Let's Encrypt
         rsync                        # config backup to bcachefs
         procps                       # sysctl (vm.dirty_* tuning)
