@@ -808,9 +808,9 @@
 						</td>
 						<td class="p-3">
 							<div class="flex items-center gap-1.5">
-								{#if getIngress(app.name)}
-									<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20">
-										Open
+								{#if app.ports && app.ports.length > 0}
+									<a href="http://{window.location.hostname}:{app.ports[0].host_port}" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20">
+										Open :{app.ports[0].host_port}
 									</a>
 								{/if}
 								{#if app.status === 'running'}
