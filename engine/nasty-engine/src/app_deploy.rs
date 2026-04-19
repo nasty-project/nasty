@@ -335,44 +335,56 @@ async fn stream_command(
     let mut child = Command::new(cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::from(std::process::Stdio::piped()))
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to start {cmd}: {e}"))?;
 
-    // Merge stderr into the same stream by reading both and sending interleaved.
-    // Docker compose writes progress to stderr, so we need both.
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
+    // Use a channel to merge stdout and stderr into a single stream.
+    // Docker compose writes progress to stderr, so we must read both concurrently.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    let tx_out = tx.clone();
+    let stdout_task = tokio::spawn(async move {
+        if let Some(stdout) = stdout {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = tx_out.send(line).await;
+            }
+        }
+    });
+
+    let tx_err = tx.clone();
+    let stderr_task = tokio::spawn(async move {
+        if let Some(stderr) = stderr {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = tx_err.send(line).await;
+            }
+        }
+    });
+
+    // Drop our copy so rx closes when both tasks finish
+    drop(tx);
+
+    // Stream lines to WebSocket as they arrive
     let mut all_lines = Vec::new();
-
-    // Read stdout
-    if let Some(stdout) = stdout {
-        let mut reader = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let _ = socket
-                .send(Message::Text(DeployMessage::log(&line).into()))
-                .await;
-            all_lines.push(line);
-        }
+    while let Some(line) = rx.recv().await {
+        let _ = socket
+            .send(Message::Text(DeployMessage::log(&line).into()))
+            .await;
+        all_lines.push(line);
     }
 
-    // Read remaining stderr (docker compose writes here)
-    if let Some(stderr) = stderr {
-        let mut reader = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            // Skip lines already seen from stdout
-            let _ = socket
-                .send(Message::Text(DeployMessage::log(&line).into()))
-                .await;
-            all_lines.push(line);
-        }
-    }
+    // Wait for reader tasks to finish
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
 
     if !status.success() {
-        // Return only the last few lines as the error message
         let err_lines: Vec<_> = all_lines.iter()
             .filter(|l| l.contains("Error") || l.contains("error") || l.contains("failed"))
             .cloned()
