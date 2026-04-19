@@ -883,24 +883,38 @@ impl AppsService {
         );
         tokio::fs::write(format!("{}/.env", project_dir), &env_content).await?;
 
-        // Run docker compose up with labels
-        let output = Command::new("docker")
-            .args([
-                "compose",
-                "-f",
-                &format!("{}/docker-compose.yml", project_dir),
-                "--project-name",
-                &req.name,
-                "up",
-                "-d",
-            ])
-            .env("DOCKER_DEFAULT_LABELS", format!(
-                "{LABEL_MANAGED}=true,{LABEL_APP_NAME}={},{LABEL_APP_KIND}=compose",
-                req.name
-            ))
-            .output()
-            .await
-            .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+        // Run docker compose up — pull only, no building from source
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            Command::new("docker")
+                .args([
+                    "compose",
+                    "-f",
+                    &format!("{}/docker-compose.yml", project_dir),
+                    "--project-name",
+                    &req.name,
+                    "up",
+                    "-d",
+                    "--no-build",
+                    "--pull", "missing",
+                ])
+                .output(),
+        )
+        .await;
+
+        let output = match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                let _ = tokio::fs::remove_dir_all(&project_dir).await;
+                return Err(AppsError::CommandFailed(e.to_string()));
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_dir_all(&project_dir).await;
+                return Err(AppsError::DockerFailed(
+                    "docker compose timed out after 5 minutes".to_string(),
+                ));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -932,21 +946,35 @@ impl AppsService {
         )
         .await?;
 
-        // Bring up with new config
-        let output = Command::new("docker")
-            .args([
-                "compose",
-                "-f",
-                &format!("{}/docker-compose.yml", project_dir),
-                "--project-name",
-                &req.name,
-                "up",
-                "-d",
-                "--remove-orphans",
-            ])
-            .output()
-            .await
-            .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+        // Bring up with new config — pull only, no building from source
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            Command::new("docker")
+                .args([
+                    "compose",
+                    "-f",
+                    &format!("{}/docker-compose.yml", project_dir),
+                    "--project-name",
+                    &req.name,
+                    "up",
+                    "-d",
+                    "--no-build",
+                    "--pull", "missing",
+                    "--remove-orphans",
+                ])
+                .output(),
+        )
+        .await;
+
+        let output = match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(AppsError::CommandFailed(e.to_string())),
+            Err(_) => {
+                return Err(AppsError::DockerFailed(
+                    "docker compose timed out after 5 minutes".to_string(),
+                ));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
