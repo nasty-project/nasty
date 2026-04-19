@@ -444,18 +444,26 @@ impl AppsService {
         // Pull the image first
         self.pull_image(&req.image).await?;
 
-        // Build port bindings
+        // Build port bindings — default host_port to container_port if not specified
+        let used_ports = self.used_host_ports().await;
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
         let mut exposed_ports: Vec<String> = Vec::new();
 
         for p in &req.ports {
+            let host_port = p.host_port.unwrap_or(p.container_port);
+            if used_ports.contains(&host_port) {
+                return Err(AppsError::DockerFailed(format!(
+                    "host port {} is already in use by another app",
+                    host_port
+                )));
+            }
             let key = format!("{}/{}", p.container_port, p.protocol.to_lowercase());
             exposed_ports.push(key.clone());
             port_bindings.insert(
                 key,
                 Some(vec![PortBinding {
                     host_ip: Some("0.0.0.0".to_string()),
-                    host_port: p.host_port.map(|hp| hp.to_string()),
+                    host_port: Some(host_port.to_string()),
                 }]),
             );
         }
@@ -1288,6 +1296,19 @@ impl AppsService {
 
     async fn container_exists(&self, name: &str) -> bool {
         self.docker.inspect_container(name, None).await.is_ok()
+    }
+
+    /// Collect all host ports currently in use by managed containers.
+    async fn used_host_ports(&self) -> std::collections::HashSet<u16> {
+        let mut used = std::collections::HashSet::new();
+        if let Ok(apps) = self.list_internal().await {
+            for app in &apps {
+                for p in &app.ports {
+                    used.insert(p.host_port);
+                }
+            }
+        }
+        used
     }
 
     async fn pull_image(&self, image: &str) -> Result<(), AppsError> {
