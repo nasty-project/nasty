@@ -329,53 +329,53 @@ async fn stream_command(
     let mut child = Command::new(cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::from(std::process::Stdio::piped()))
         .spawn()
         .map_err(|e| format!("failed to start {cmd}: {e}"))?;
 
+    // Merge stderr into the same stream by reading both and sending interleaved.
+    // Docker compose writes progress to stderr, so we need both.
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // Stream both stdout and stderr concurrently
-    let socket_ref = &mut *socket;
+    let mut all_lines = Vec::new();
 
-    let stdout_task = async {
-        if let Some(stdout) = stdout {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let _ = socket_ref
-                    .send(Message::Text(DeployMessage::log(&line).into()))
-                    .await;
-            }
+    // Read stdout
+    if let Some(stdout) = stdout {
+        let mut reader = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = socket
+                .send(Message::Text(DeployMessage::log(&line).into()))
+                .await;
+            all_lines.push(line);
         }
-    };
+    }
 
-    // We can't borrow socket mutably twice concurrently, so collect stderr
-    // and send after stdout is done.
-    let stderr_task = async {
-        let mut lines = Vec::new();
-        if let Some(stderr) = stderr {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                lines.push(line);
-            }
+    // Read remaining stderr (docker compose writes here)
+    if let Some(stderr) = stderr {
+        let mut reader = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            // Skip lines already seen from stdout
+            let _ = socket
+                .send(Message::Text(DeployMessage::log(&line).into()))
+                .await;
+            all_lines.push(line);
         }
-        lines
-    };
-
-    let (_, stderr_lines) = tokio::join!(stdout_task, stderr_task);
-
-    // Send stderr lines
-    for line in &stderr_lines {
-        let _ = socket_ref
-            .send(Message::Text(DeployMessage::log(line).into()))
-            .await;
     }
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
 
     if !status.success() {
-        return Err(stderr_lines.join("\n"));
+        // Return only the last few lines as the error message
+        let err_lines: Vec<_> = all_lines.iter()
+            .filter(|l| l.contains("Error") || l.contains("error") || l.contains("failed"))
+            .cloned()
+            .collect();
+        return Err(if err_lines.is_empty() {
+            all_lines.last().cloned().unwrap_or_else(|| "command failed".to_string())
+        } else {
+            err_lines.join("\n")
+        });
     }
 
     Ok(())
