@@ -6,8 +6,9 @@
 //! - **Compose**: multi-container apps from a user-provided docker-compose.yml
 //!   — managed via the `docker compose` CLI.
 //!
-//! All NASty-managed containers are labeled with `nasty.managed=true` so we
-//! can distinguish them from other containers on the host.
+//! Simple apps are labeled with `nasty.managed=true` for identification.
+//! Compose apps are discovered by scanning `/var/lib/nasty/apps/` for
+//! docker-compose.yml files and using Docker's `com.docker.compose.project` label.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -100,6 +101,15 @@ pub struct AppsStatus {
     pub storage_ok: bool,
     /// Docker server version.
     pub docker_version: Option<String>,
+    /// Docker disk usage: images + containers + volumes in bytes.
+    pub disk_usage_bytes: Option<u64>,
+}
+
+/// Result of apps.prune — how much space was reclaimed.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PruneResult {
+    pub images_removed: usize,
+    pub space_reclaimed_bytes: u64,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -398,6 +408,7 @@ impl AppsService {
                 storage_path,
                 storage_ok,
                 docker_version: None,
+                disk_usage_bytes: None,
             };
         }
 
@@ -411,21 +422,27 @@ impl AppsService {
                 storage_path,
                 storage_ok,
                 docker_version: None,
+                disk_usage_bytes: None,
             };
         }
 
-        let (apps_result, docker_version) =
-            tokio::join!(self.list_internal(), self.docker_version());
+        let (apps_result, docker_version, memory_bytes, disk_usage_bytes) = tokio::join!(
+            self.list_internal(),
+            self.docker_version(),
+            self.total_memory_usage(),
+            self.docker_disk_usage(),
+        );
         let app_count = apps_result.map(|a| a.len()).unwrap_or(0);
 
         AppsStatus {
             enabled,
             running,
             app_count,
-            memory_bytes: None, // TODO: aggregate container stats if needed
+            memory_bytes,
             storage_path,
             storage_ok,
             docker_version,
+            disk_usage_bytes,
         }
     }
 
@@ -996,12 +1013,19 @@ impl AppsService {
         )
         .await?;
 
-        // Write a .env file with NASty labels so containers are tracked
+        // Write a .env file with project name
         let env_content = format!(
             "COMPOSE_PROJECT_NAME={name}\n",
             name = req.name,
         );
         tokio::fs::write(format!("{}/.env", project_dir), &env_content).await?;
+
+        // Validate compose file before deploying
+        let compose_path = format!("{}/docker-compose.yml", project_dir);
+        if let Err(e) = Self::validate_compose(&compose_path).await {
+            let _ = tokio::fs::remove_dir_all(&project_dir).await;
+            return Err(e);
+        }
 
         // Run docker compose up — pull only, no building from source
         let result = tokio::time::timeout(
@@ -1042,10 +1066,6 @@ impl AppsService {
             let _ = tokio::fs::remove_dir_all(&project_dir).await;
             return Err(AppsError::DockerFailed(stderr.to_string()));
         }
-
-        // Label the containers after creation (docker compose doesn't support
-        // DOCKER_DEFAULT_LABELS reliably across all versions)
-        self.label_compose_containers(&req.name).await;
 
         // Auto-create ingress for the first exposed port
         if let Ok(app) = self.get(&req.name).await {
@@ -1110,8 +1130,6 @@ impl AppsService {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(AppsError::DockerFailed(stderr.to_string()));
         }
-
-        self.label_compose_containers(&req.name).await;
 
         info!("Updated compose app '{}'", req.name);
         self.get(&req.name).await
@@ -1270,6 +1288,24 @@ impl AppsService {
         info!("Apps runtime enabled — ensuring Docker is running");
         if let Err(e) = run_cmd("systemctl", &["start", DOCKER_SERVICE]).await {
             error!("Failed to start Docker: {e}");
+            return;
+        }
+
+        // Bring up compose apps (their containers may not have restart:always)
+        if let Ok(mut entries) = tokio::fs::read_dir(COMPOSE_DIR).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let compose_file = entry.path().join("docker-compose.yml");
+                if !compose_file.exists() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let path = compose_file.to_string_lossy().to_string();
+                info!("Restoring compose app '{name}'");
+                let _ = Command::new("docker")
+                    .args(["compose", "-f", &path, "--project-name", &name, "up", "-d", "--no-build"])
+                    .output()
+                    .await;
+            }
         }
     }
 
@@ -1346,45 +1382,178 @@ impl AppsService {
             .ok()
     }
 
-    async fn label_compose_containers(&self, project_name: &str) {
-        // Find containers belonging to this compose project and add NASty labels
-        let mut filters = HashMap::new();
-        filters.insert(
-            "label".to_string(),
-            vec![format!("com.docker.compose.project={project_name}")],
-        );
-
-        let containers = self
-            .docker
-            .list_containers(Some(ListContainersOptions {
-                all: true,
-                filters: Some(filters),
-                ..Default::default()
-            }))
+    /// Total memory usage of all managed containers (simple + compose).
+    async fn total_memory_usage(&self) -> Option<u64> {
+        // Use cgroup memory from systemd (fast, one call).
+        let output = tokio::process::Command::new("systemctl")
+            .args(["show", DOCKER_SERVICE, "--property=MemoryCurrent"])
+            .output()
             .await
-            .unwrap_or_default();
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .trim()
+            .strip_prefix("MemoryCurrent=")?
+            .parse::<u64>()
+            .ok()
+            .filter(|&v| v < u64::MAX) // systemd returns max uint if not tracked
+    }
 
-        for c in &containers {
-            if let Some(_id) = &c.id {
-                // Docker doesn't support adding labels to running containers directly,
-                // so we need to read existing labels and check if already labeled.
-                let existing_labels = c.labels.as_ref();
-                if existing_labels
-                    .and_then(|l| l.get(LABEL_MANAGED))
-                    .is_some()
-                {
-                    continue;
-                }
+    /// Total Docker disk usage (images + containers + volumes).
+    async fn docker_disk_usage(&self) -> Option<u64> {
+        let df = self.docker.df(None::<bollard::query_parameters::DataUsageOptions>).await.ok()?;
+        let mut total: u64 = 0;
+        if let Some(ref images) = df.images_disk_usage {
+            total += images.total_size.unwrap_or(0) as u64;
+        }
+        if let Some(ref volumes) = df.volumes_disk_usage {
+            total += volumes.total_size.unwrap_or(0) as u64;
+        }
+        Some(total)
+    }
 
-                // For compose containers, we label them at image/compose level instead.
-                // The labels are added via the compose file's labels section in a
-                // wrapper .yml that we generate.
-                // Fallback: just note that compose containers are identified by the
-                // com.docker.compose.project label, which we also filter on in list_internal.
+    // ── Restart ──────────────────────────────────────────────
+
+    pub async fn restart(&self, name: &str) -> Result<(), AppsError> {
+        self.require_ready().await?;
+
+        let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
+        if Path::new(&compose_file).exists() {
+            let output = Command::new("docker")
+                .args(["compose", "-f", &compose_file, "--project-name", name, "restart"])
+                .output()
+                .await
+                .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(AppsError::DockerFailed(stderr.to_string()));
             }
+        } else {
+            let cname = container_name(name);
+            if !self.container_exists(&cname).await {
+                return Err(AppsError::AppNotFound(name.to_string()));
+            }
+            self.docker.restart_container(&cname, Some(bollard::query_parameters::RestartContainerOptions { t: Some(10), signal: None })).await?;
         }
 
-        // Simpler approach: also list by compose project label in list_internal
+        info!("Restarted app '{name}'");
+        Ok(())
+    }
+
+    // ── Pull (update image) ─────────────────────────────────
+
+    pub async fn pull(&self, name: &str) -> Result<App, AppsError> {
+        self.require_ready().await?;
+
+        let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
+        if Path::new(&compose_file).exists() {
+            // docker compose pull + up -d (recreates with new images)
+            let pull = Command::new("docker")
+                .args(["compose", "-f", &compose_file, "--project-name", name, "pull"])
+                .output()
+                .await
+                .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+            if !pull.status.success() {
+                let stderr = String::from_utf8_lossy(&pull.stderr);
+                return Err(AppsError::DockerFailed(stderr.to_string()));
+            }
+
+            let up = Command::new("docker")
+                .args(["compose", "-f", &compose_file, "--project-name", name,
+                       "up", "-d", "--no-build", "--remove-orphans"])
+                .output()
+                .await
+                .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+            if !up.status.success() {
+                let stderr = String::from_utf8_lossy(&up.stderr);
+                return Err(AppsError::DockerFailed(stderr.to_string()));
+            }
+
+            info!("Pulled latest images for compose app '{name}'");
+        } else {
+            let cname = container_name(name);
+            let info = self.docker.inspect_container(&cname, None).await
+                .map_err(|_| AppsError::AppNotFound(name.to_string()))?;
+            let image = info.config.and_then(|c| c.image).unwrap_or_default();
+            if image.is_empty() {
+                return Err(AppsError::DockerFailed("container has no image".to_string()));
+            }
+
+            // Pull latest
+            self.pull_image(&image).await?;
+
+            // Recreate container with same config but new image
+            // Stop + remove + start from the pulled image
+            let _ = self.docker.stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None })).await;
+            // We need the full config to recreate — get_config then re-install
+            let config = self.get_config(name).await?;
+            let _ = self.docker.remove_container(&cname, Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            })).await;
+
+            let req = InstallAppRequest {
+                name: name.to_string(),
+                image,
+                ports: config.ports,
+                env: config.env,
+                volumes: config.volumes,
+                cpu_limit: config.cpu_limit,
+                memory_limit: config.memory_limit,
+            };
+            return self.install(req).await;
+        }
+
+        self.get(name).await
+    }
+
+    // ── Prune ───────────────────────────────────────────────
+
+    pub async fn prune(&self) -> Result<PruneResult, AppsError> {
+        self.require_ready().await?;
+
+        let result = self.docker.prune_images(None::<bollard::query_parameters::PruneImagesOptions>).await?;
+        let images_removed = result.images_deleted.map(|v| v.len()).unwrap_or(0);
+        let space_reclaimed = result.space_reclaimed.unwrap_or(0) as u64;
+
+        // Also prune volumes
+        let _ = self.docker.prune_volumes(None::<bollard::query_parameters::PruneVolumesOptions>).await;
+
+        info!("Pruned {images_removed} images, reclaimed {} bytes", space_reclaimed);
+        Ok(PruneResult {
+            images_removed,
+            space_reclaimed_bytes: space_reclaimed,
+        })
+    }
+
+    // ── Compose validation ──────────────────────────────────
+
+    async fn validate_compose(compose_file_path: &str) -> Result<(), AppsError> {
+        let output = Command::new("docker")
+            .args(["compose", "-f", compose_file_path, "config", "--quiet"])
+            .output()
+            .await
+            .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AppsError::DockerFailed(format!("invalid compose file: {stderr}")));
+        }
+        Ok(())
+    }
+
+    // ── Container exec ──────────────────────────────────────
+
+    /// Return the docker exec command string for a given app.
+    /// The WebUI can use this to pre-fill the Terminal page.
+    pub fn exec_command(&self, name: &str) -> String {
+        let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
+        if Path::new(&compose_file).exists() {
+            format!("docker compose -f {} --project-name {} exec -it $(docker compose -f {} --project-name {} ps -q | head -1) sh",
+                    compose_file, name, compose_file, name)
+        } else {
+            format!("docker exec -it {} sh", container_name(name))
+        }
     }
 
     async fn write_proxy_conf(&self, rules: &[AppIngress]) -> Result<(), AppsError> {

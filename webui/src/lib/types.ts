@@ -576,6 +576,12 @@ export interface AppsStatus {
 	storage_path?: string;
 	storage_ok: boolean;
 	docker_version?: string;
+	disk_usage_bytes?: number;
+}
+
+export interface PruneResult {
+	images_removed: number;
+	space_reclaimed_bytes: number;
 }
 
 export interface App {

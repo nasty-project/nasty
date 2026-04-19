@@ -3,7 +3,8 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, MappedPort } from '$lib/types';
+	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, MappedPort, PruneResult } from '$lib/types';
+	import { formatBytes } from '$lib/format';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -302,6 +303,36 @@
 	async function startApp(name: string) {
 		await withToast(() => client.call('apps.start', { name }), 'App started');
 		await refresh();
+	}
+
+	async function restartApp(name: string) {
+		await withToast(() => client.call('apps.restart', { name }), 'App restarted');
+		await refresh();
+	}
+
+	async function pullApp(name: string) {
+		await withToast(() => client.call('apps.pull', { name }, 300_000), 'Image updated');
+		await refresh();
+	}
+
+	async function pruneDocker() {
+		const result = await withToast(
+			() => client.call<PruneResult>('apps.prune'),
+			'Cleanup complete'
+		);
+		if (result) {
+			await withToast(async () => {
+				const msg = `Removed ${result.images_removed} images, reclaimed ${formatBytes(result.space_reclaimed_bytes)}`;
+				return msg;
+			}, '');
+		}
+		await refresh();
+	}
+
+	async function openShell(name: string) {
+		const cmd = await client.call<string>('apps.exec_command', { name });
+		// Navigate to terminal with pre-filled command
+		window.location.href = `/terminal?cmd=${encodeURIComponent(cmd)}`;
 	}
 
 	let expanded: Record<string, boolean> = $state({});
@@ -701,7 +732,7 @@
 							</Badge>
 						</td>
 						<td class="p-3">
-							<div class="flex gap-2">
+							<div class="flex flex-wrap gap-1.5">
 								{#if getIngress(app.name)}
 									<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20">
 										Open
@@ -709,15 +740,20 @@
 								{/if}
 								{#if app.status === 'running'}
 									<Button variant="outline" size="xs" onclick={() => stopApp(app.name)}>Stop</Button>
+									<Button variant="outline" size="xs" onclick={() => restartApp(app.name)}>Restart</Button>
 								{:else}
 									<Button variant="outline" size="xs" onclick={() => startApp(app.name)}>Start</Button>
 								{/if}
+								<Button variant="outline" size="xs" onclick={() => pullApp(app.name)}>Pull</Button>
 								{#if app.kind === 'simple'}
 									<Button variant="outline" size="xs" onclick={() => editApp(app.name)}>Edit</Button>
 								{:else}
 									<Button variant="outline" size="xs" onclick={() => editCompose(app.name)}>Edit</Button>
 								{/if}
 								<Button variant="outline" size="xs" onclick={() => showLogs(app.name, app.kind)}>Logs</Button>
+								{#if app.status === 'running'}
+									<Button variant="outline" size="xs" onclick={() => openShell(app.name)}>Shell</Button>
+								{/if}
 								<Button variant="destructive" size="xs" onclick={() => removeApp(app.name)}>Remove</Button>
 							</div>
 						</td>
@@ -756,6 +792,14 @@
 					</span>
 					<span class="text-muted-foreground">Apps</span>
 					<span>{status?.app_count ?? 0} deployed</span>
+					{#if status?.memory_bytes}
+						<span class="text-muted-foreground">Memory</span>
+						<span>{formatBytes(status.memory_bytes)}</span>
+					{/if}
+					{#if status?.disk_usage_bytes != null}
+						<span class="text-muted-foreground">Disk Usage</span>
+						<span>{formatBytes(status.disk_usage_bytes)} (images + volumes)</span>
+					{/if}
 				</div>
 			</CardContent>
 		</Card>
@@ -776,6 +820,18 @@
 					<span class="text-muted-foreground">Backend</span>
 					<span>Bind mounts on bcachefs</span>
 				</div>
+			</CardContent>
+		</Card>
+
+		<Card>
+			<CardContent class="pt-6">
+				<h4 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Maintenance</h4>
+				<p class="mb-3 text-sm text-muted-foreground">
+					Remove unused Docker images, volumes, and build cache to free disk space.
+				</p>
+				<Button size="sm" onclick={pruneDocker}>
+					Cleanup Unused Images
+				</Button>
 			</CardContent>
 		</Card>
 
