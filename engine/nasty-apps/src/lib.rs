@@ -1615,13 +1615,27 @@ impl AppsService {
 
     /// Return the docker exec command string for a given app.
     /// The WebUI can use this to pre-fill the Terminal page.
-    pub fn exec_command(&self, name: &str) -> String {
+    pub async fn exec_command(&self, name: &str) -> Result<String, AppsError> {
         let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
         if Path::new(&compose_file).exists() {
-            format!("docker compose -f {} --project-name {} exec -it $(docker compose -f {} --project-name {} ps -q | head -1) sh",
-                    compose_file, name, compose_file, name)
+            // Look up the first running container in the compose project
+            let output = Command::new("docker")
+                .args(["compose", "-f", &compose_file, "--project-name", name, "ps", "-q"])
+                .output()
+                .await
+                .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+            let container_id = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if container_id.is_empty() {
+                return Err(AppsError::DockerFailed("no running containers in this app".to_string()));
+            }
+            Ok(format!("docker exec -it {} sh", container_id))
         } else {
-            format!("docker exec -it {} sh", container_name(name))
+            Ok(format!("docker exec -it {} sh", container_name(name)))
         }
     }
 

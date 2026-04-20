@@ -2051,7 +2051,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => err(req, e),
         },
         "apps.exec_command" => match require_str(req, "name") {
-            Ok(name) => ok(req, state.apps.exec_command(name)),
+            Ok(name) => match state.apps.exec_command(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
             Err(r) => r,
         },
         "apps.logs" => {

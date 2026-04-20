@@ -116,6 +116,12 @@
 							}
 						}));
 
+						// Send initial command from URL parameter (e.g. app shell)
+						const cmdParam = new URLSearchParams(window.location.search).get('cmd');
+						if (cmdParam && ws?.readyState === WebSocket.OPEN) {
+							ws.send(cmdParam + '\n');
+						}
+
 						return;
 					}
 					if (msg.error) {
