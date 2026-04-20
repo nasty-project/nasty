@@ -898,7 +898,7 @@
 									<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20">
 										Open
 									</a>
-									<a href="http://{window.location.hostname}:{app.ports[0].host_port}" target="_blank" class="text-[0.65rem] text-muted-foreground hover:text-foreground" title="Direct port access (LAN)">
+									<a href="http://{window.location.hostname}:{app.ports[0].host_port}" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted" title="Direct port access (LAN)">
 										:{app.ports[0].host_port}
 									</a>
 								{/if}
