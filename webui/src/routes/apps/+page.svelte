@@ -715,7 +715,7 @@
 						<div class="grid grid-cols-[1fr_80px_90px_60px_auto] gap-2 mt-1 items-center">
 							<Input bind:value={port.name} placeholder="e.g. http" class="h-8 text-xs" />
 							<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" disabled />
-							<Input bind:value={port.host_port} placeholder="auto" class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
+							<Input bind:value={port.host_port} placeholder={String(port.container_port)} class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
 							<select bind:value={port.protocol} class="h-8 rounded-md border border-input bg-transparent px-1 text-xs">
 								<option>TCP</option>
 								<option>UDP</option>
@@ -726,11 +726,12 @@
 					{#if portConflicts.length > 0}
 						<div class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
 							{#each portConflicts as c}
-								<div>Port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span></div>
+								{@const isAuto = newPorts.some(p => !p.host_port && p.container_port === c.port)}
+								<div>Port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span>{#if isAuto} — set an Exposed port to avoid the conflict{/if}</div>
 							{/each}
 						</div>
 					{/if}
-					<p class="mt-1 text-[0.6rem] text-muted-foreground">Internal = port inside the container (from image). Exposed = port on the host (leave empty for auto). App is also accessible at /apps/{'{name}'}/ via reverse proxy.</p>
+					<p class="mt-1 text-[0.6rem] text-muted-foreground">Internal = port inside the container. Exposed = port on the host (defaults to internal port if empty). App is also accessible at /apps/{'{name}'}/ via reverse proxy.</p>
 				</div>
 
 				<!-- Environment Variables -->
