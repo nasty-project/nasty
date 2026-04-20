@@ -596,6 +596,7 @@ export interface App {
 
 export interface AppContainer {
 	name: string;
+	container_id: string;
 	image: string;
 	status: string;
 }

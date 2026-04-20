@@ -2073,6 +2073,22 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(e) => err(req, e),
             }
         }
+        "apps.container.logs" => {
+            let container_id = match require_str(req, "container_id") {
+                Ok(n) => n,
+                Err(r) => return r,
+            };
+            let tail = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("tail"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            match state.apps.container_logs(container_id, tail).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            }
+        }
         "apps.compose.install" => match parse_params(req) {
             Ok(p) => match state.apps.compose_install(p).await {
                 Ok(v) => ok(req, v),

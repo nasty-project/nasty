@@ -148,8 +148,10 @@ pub struct App {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AppContainer {
-    /// Container name.
+    /// Service name (compose service or container name).
     pub name: String,
+    /// Docker container ID (short).
+    pub container_id: String,
     /// Container image.
     pub image: String,
     /// Container status.
@@ -772,9 +774,11 @@ impl AppsService {
                         any_running = true;
                     }
 
+                    let container_id = c.id.as_deref().unwrap_or("").chars().take(12).collect::<String>();
                     all_ports.extend(extract_ports(c));
                     containers.push(AppContainer {
                         name: svc_name,
+                        container_id,
                         image,
                         status,
                     });
@@ -947,6 +951,30 @@ impl AppsService {
             .try_collect::<Vec<_>>()
             .await
             .map_err(|_| AppsError::AppNotFound(name.to_string()))?;
+
+        let output: String = logs.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("");
+        Ok(output)
+    }
+
+    /// Get logs for a specific container by ID or name (no nasty- prefix).
+    pub async fn container_logs(&self, container_id: &str, tail: Option<u32>) -> Result<String, AppsError> {
+        self.require_ready().await?;
+
+        let tail_str = tail.unwrap_or(100).to_string();
+        let logs = self
+            .docker
+            .logs(
+                container_id,
+                Some(LogsOptions {
+                    stdout: true,
+                    stderr: true,
+                    tail: tail_str,
+                    ..Default::default()
+                }),
+            )
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|_| AppsError::AppNotFound(container_id.to_string()))?;
 
         let output: String = logs.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("");
         Ok(output)

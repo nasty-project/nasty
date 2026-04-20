@@ -476,8 +476,12 @@
 		logsApp = name;
 		logsContent = 'Loading...';
 		try {
-			const method = kind === 'compose' ? 'apps.compose.logs' : 'apps.logs';
-			logsContent = await client.call<string>(method, { name, tail: 200 });
+			if (kind === 'container') {
+				logsContent = await client.call<string>('apps.container.logs', { container_id: name, tail: 200 });
+			} else {
+				const method = kind === 'compose' ? 'apps.compose.logs' : 'apps.logs';
+				logsContent = await client.call<string>(method, { name, tail: 200 });
+			}
 		} catch (e) {
 			logsContent = `Failed to load logs: ${e}`;
 		}
@@ -946,7 +950,14 @@
 								<td class="p-1.5">
 									<Badge variant={ct.status === 'running' ? 'default' : 'secondary'} class="text-[0.6rem]">{ct.status}</Badge>
 								</td>
-								<td class="p-1.5"></td>
+								<td class="p-1.5">
+									{#if ct.status === 'running' && ct.container_id}
+										<div class="flex items-center gap-1.5">
+											<button class="rounded border border-border px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-muted hover:text-foreground" onclick={() => window.location.href = `/terminal?cmd=${encodeURIComponent(`docker exec -it ${ct.container_id} /bin/sh`)}`}>Shell</button>
+											<button class="rounded border border-border px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-muted hover:text-foreground" onclick={() => showLogs(ct.container_id, 'container')}>Logs</button>
+										</div>
+									{/if}
+								</td>
 							</tr>
 						{/each}
 					{/if}
