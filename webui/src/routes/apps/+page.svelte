@@ -105,8 +105,8 @@
 	let editingApp: string | null = $state(null);
 	let logsApp: string | null = $state(null);
 	let logsContent = $state('');
-	let page: 'apps' | 'runtime' = $state('apps');
-	let mode: 'simple' | 'compose' = $state('simple');
+	let installMode: 'simple' | 'compose' = $state('simple');
+	let showRuntimeDetails = $state(false);
 
 	// Setup wizard state
 	let filesystems: Filesystem[] = $state([]);
@@ -365,6 +365,7 @@
 		newVolumes = config.volumes.map(v => ({ name: v.name, mount_path: v.mount_path, host_path: v.host_path }));
 		newCpuLimit = config.cpu_limit ?? '';
 		newMemoryLimit = config.memory_limit ?? '';
+		installMode = 'simple';
 		showInstall = true;
 	}
 
@@ -512,6 +513,7 @@
 		editingCompose = name;
 		composeName = name;
 		composeContent = content;
+		installMode = 'compose';
 		showCompose = true;
 	}
 
@@ -628,67 +630,84 @@
 		</CardContent>
 	</Card>
 {:else}
-	<!-- Top-level tabs with inline status -->
-	<div class="mb-6 flex items-center border-b border-border">
-		<button
-			onclick={() => page = 'apps'}
-			class="flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors {page === 'apps'
-				? 'border-b-2 border-primary text-foreground'
-				: 'text-muted-foreground hover:text-foreground'}"
-		>
-			Apps
-			{#if status}
-				<span class="inline-block h-1.5 w-1.5 rounded-full {status.running ? 'bg-green-500' : 'bg-muted-foreground/40'}"></span>
-				{#if status.app_count > 0}
-					<span class="text-[0.65rem] text-muted-foreground">{status.app_count}</span>
-				{/if}
+	<!-- Docker status bar -->
+	{#if status}
+		<div class="mb-4 flex items-center gap-4 rounded-lg border border-border px-4 py-2.5 text-sm">
+			<div class="flex items-center gap-2">
+				<span class="h-2 w-2 rounded-full {status.running ? 'bg-green-400' : 'bg-red-400'}"></span>
+				<span class="text-muted-foreground">Docker {status.docker_version ?? ''}</span>
+			</div>
+			{#if status.app_count > 0}
+				<span class="text-muted-foreground">{status.app_count} app{status.app_count !== 1 ? 's' : ''}</span>
 			{/if}
-		</button>
-		<button
-			onclick={() => page = 'runtime'}
-			class="px-4 py-2 text-sm font-medium transition-colors {page === 'runtime'
-				? 'border-b-2 border-primary text-foreground'
-				: 'text-muted-foreground hover:text-foreground'}"
-		>Runtime</button>
-		{#if !status?.storage_ok && status?.storage_path}
-			<span class="ml-auto text-xs text-destructive">Storage missing</span>
-		{/if}
-	</div>
-
-	{#if page === 'apps'}
-	<!-- Sub-tabs -->
-	<div class="mb-4 flex items-center gap-4">
-		<div class="flex border-b border-border">
-			<button
-				class="px-3 py-1.5 text-sm font-medium transition-colors {mode === 'simple'
-					? 'border-b-2 border-primary text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
-				onclick={() => mode = 'simple'}
-			>Simple</button>
-			<button
-				class="px-3 py-1.5 text-sm font-medium transition-colors {mode === 'compose'
-					? 'border-b-2 border-primary text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
-				onclick={() => mode = 'compose'}
-			>Compose</button>
+			{#if status.memory_bytes}
+				<span class="text-muted-foreground">{formatBytes(status.memory_bytes)} RAM</span>
+			{/if}
+			{#if status.disk_usage_bytes != null && status.disk_usage_bytes > 0}
+				<span class="text-muted-foreground">{formatBytes(status.disk_usage_bytes)} disk</span>
+			{/if}
+			{#if !status.storage_ok && status.storage_path}
+				<span class="text-destructive">Storage missing</span>
+			{/if}
+			<button onclick={() => showRuntimeDetails = !showRuntimeDetails} class="ml-auto text-xs text-muted-foreground hover:text-foreground">
+				{showRuntimeDetails ? 'Hide details' : 'Details'}
+			</button>
 		</div>
-		{#if mode === 'simple'}
-			<Button size="sm" onclick={() => { if (showInstall) { cancelEdit(); } else { editingApp = null; newPorts = [{ name: 'http', container_port: 80, host_port: '', protocol: 'TCP' }]; showInstall = true; } }}>
-				{showInstall ? 'Cancel' : 'Install App'}
-			</Button>
-		{:else}
-			<Button size="sm" onclick={() => { if (showCompose) { cancelCompose(); } else { showCompose = true; } }}>
-				{showCompose ? 'Cancel' : 'Deploy Compose'}
-			</Button>
+
+		{#if showRuntimeDetails}
+			<div class="mb-4 grid grid-cols-1 gap-3 max-w-2xl sm:grid-cols-2">
+				<Card>
+					<CardContent class="py-4">
+						<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Storage</h4>
+						<div class="text-sm space-y-1">
+							<div class="flex justify-between"><span class="text-muted-foreground">Path</span> <code class="text-xs">{status.storage_path ?? 'Not configured'}</code></div>
+							<div class="flex justify-between"><span class="text-muted-foreground">Status</span> <span>{status.storage_ok ? 'OK' : 'Not available'}</span></div>
+						</div>
+					</CardContent>
+				</Card>
+				<Card>
+					<CardContent class="py-4">
+						<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Maintenance</h4>
+						<div class="flex flex-col gap-2">
+							<Button size="sm" variant="outline" onclick={pruneDocker}>Cleanup Unused Images</Button>
+							<Button size="sm" variant="destructive" onclick={disableApps}>Disable Apps</Button>
+						</div>
+					</CardContent>
+				</Card>
+			</div>
 		{/if}
-		<Input bind:value={search} placeholder="Search installed..." class="h-9 w-48" />
+	{/if}
+
+	<!-- Action bar -->
+	<div class="mb-4 flex items-center gap-3">
+		<Button size="sm" onclick={() => { if (showInstall || showCompose) { cancelEdit(); cancelCompose(); } else { editingApp = null; newPorts = [{ name: 'http', container_port: 80, host_port: '', protocol: 'TCP' }]; showInstall = true; installMode = 'simple'; } }}>
+			{showInstall || showCompose ? 'Cancel' : 'Install App'}
+		</Button>
+		{#if apps.length > 3}
+			<Input bind:value={search} placeholder="Filter..." class="h-9 w-40" />
+		{/if}
 	</div>
 
-	{#if mode === 'simple'}
-	{#if showInstall}
-		<Card class="mb-6 max-w-xl">
+	{#if showInstall || showCompose}
+		<Card class="mb-6 max-w-2xl">
 			<CardContent class="pt-6">
-				<h3 class="mb-4 text-lg font-semibold">{editingApp ? `Edit ${editingApp}` : 'Install App'}</h3>
+				<h3 class="mb-4 text-lg font-semibold">{editingApp ? `Edit ${editingApp}` : editingCompose ? `Edit ${editingCompose}` : 'Install App'}</h3>
+
+				<!-- Mode toggle (only for new installs, not edits) -->
+				{#if !editingApp && !editingCompose}
+					<div class="mb-4 flex rounded-md border border-border w-fit">
+						<button
+							onclick={() => { installMode = 'simple'; showCompose = false; showInstall = true; }}
+							class="px-4 py-1.5 text-xs font-medium transition-colors rounded-l-md {installMode === 'simple' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
+						>Container</button>
+						<button
+							onclick={() => { installMode = 'compose'; showInstall = false; showCompose = true; }}
+							class="px-4 py-1.5 text-xs font-medium transition-colors rounded-r-md {installMode === 'compose' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
+						>Compose</button>
+					</div>
+				{/if}
+
+				{#if installMode === 'simple' && (showInstall || editingApp)}
 				<div class="mb-4">
 					<Label for="app-name">App Name</Label>
 					<Input id="app-name" value={newName} oninput={(e) => { newName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="whoami" class="mt-1" disabled={!!editingApp} />
@@ -800,19 +819,8 @@
 					{/if}
 					<Button variant="secondary" onclick={cancelEdit}>Cancel</Button>
 				</div>
-			</CardContent>
-		</Card>
-	{/if}
-
-	{#if apps.length === 0 && !showInstall}
-		<p class="text-muted-foreground">No apps installed.</p>
-	{/if}
-	{:else}
-	<!-- Compose mode -->
-	{#if showCompose}
-		<Card class="mb-6 max-w-2xl">
-			<CardContent class="pt-6">
-				<h3 class="mb-4 text-lg font-semibold">{editingCompose ? `Edit ${editingCompose}` : 'Deploy Compose App'}</h3>
+				{:else if installMode === 'compose' && (showCompose || editingCompose)}
+				<!-- Compose form -->
 				<div class="mb-4">
 					<Label for="compose-name">App Name</Label>
 					<Input id="compose-name" value={composeName} oninput={(e) => { composeName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="my-stack" class="mt-1" disabled={!!editingCompose} />
@@ -845,13 +853,13 @@
 					</Button>
 					<Button variant="secondary" onclick={cancelCompose}>Cancel</Button>
 				</div>
+				{/if}
 			</CardContent>
 		</Card>
 	{/if}
 
-	{#if apps.length === 0 && !showCompose}
+	{#if apps.length === 0 && !showInstall && !showCompose}
 		<p class="text-muted-foreground">No apps installed.</p>
-	{/if}
 	{/if}
 
 	<!-- Installed apps table -->
@@ -945,79 +953,6 @@
 				{/each}
 			</tbody>
 		</table>
-	{/if}
-	{:else if page === 'runtime'}
-	<!-- Runtime tab -->
-	<div class="max-w-2xl space-y-4">
-		<Card>
-			<CardContent class="pt-6">
-				<h4 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Docker</h4>
-				<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-					<span class="text-muted-foreground">Docker Version</span>
-					<span class="font-mono text-xs">{status?.docker_version ?? 'Unknown'}</span>
-					<span class="text-muted-foreground">Status</span>
-					<span>
-						<Badge variant={status?.running ? 'default' : 'destructive'}>
-							{status?.running ? 'Running' : 'Stopped'}
-						</Badge>
-					</span>
-					<span class="text-muted-foreground">Apps</span>
-					<span>{status?.app_count ?? 0} deployed</span>
-					{#if status?.memory_bytes}
-						<span class="text-muted-foreground">Memory</span>
-						<span>{formatBytes(status.memory_bytes)}</span>
-					{/if}
-					{#if status?.disk_usage_bytes != null}
-						<span class="text-muted-foreground">Disk Usage</span>
-						<span>{formatBytes(status.disk_usage_bytes)} (images + volumes)</span>
-					{/if}
-				</div>
-			</CardContent>
-		</Card>
-
-		<Card>
-			<CardContent class="pt-6">
-				<h4 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Storage</h4>
-				<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-					<span class="text-muted-foreground">Path</span>
-					<div>
-						<code class="text-xs">{status?.storage_path ?? 'Not configured'}</code>
-						{#if status && !status.storage_ok && status.storage_path}
-							<Badge variant="destructive" class="ml-2 text-[0.6rem]">Missing</Badge>
-						{/if}
-					</div>
-					<span class="text-muted-foreground">Status</span>
-					<span>{status?.storage_ok ? 'OK' : 'Not available'}</span>
-					<span class="text-muted-foreground">Backend</span>
-					<span>Bind mounts on bcachefs</span>
-				</div>
-			</CardContent>
-		</Card>
-
-		<Card>
-			<CardContent class="pt-6">
-				<h4 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Maintenance</h4>
-				<p class="mb-3 text-sm text-muted-foreground">
-					Remove unused Docker images, volumes, and build cache to free disk space.
-				</p>
-				<Button size="sm" onclick={pruneDocker}>
-					Cleanup Unused Images
-				</Button>
-			</CardContent>
-		</Card>
-
-		<Card>
-			<CardContent class="pt-6">
-				<h4 class="mb-3 text-xs font-semibold uppercase tracking-wide text-destructive">Danger Zone</h4>
-				<p class="mb-3 text-sm text-muted-foreground">
-					Disabling apps stops Docker and all running containers. App data on the filesystem is preserved.
-				</p>
-				<Button variant="destructive" size="sm" onclick={disableApps}>
-					Disable Apps
-				</Button>
-			</CardContent>
-		</Card>
-	</div>
 	{/if}
 {/if}
 
