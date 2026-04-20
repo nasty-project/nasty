@@ -119,6 +119,11 @@
 	let inspecting = $state(false);
 	let lastInspectedImage = '';
 
+	// Port conflict state
+	let portConflicts = $state<{ port: number; used_by: string }[]>([]);
+	let checkingPorts = $state(false);
+	let portCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
 	const client = getClient();
 	let startupPoll: ReturnType<typeof setInterval> | null = null;
 	const APP_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
@@ -146,6 +151,49 @@
 			// Inspection failed — keep whatever ports the user has
 		}
 		inspecting = false;
+		checkPortConflicts();
+	}
+
+	function checkPortConflicts(excludeApp?: string) {
+		if (portCheckTimer) clearTimeout(portCheckTimer);
+		portCheckTimer = setTimeout(async () => {
+			const ports = newPorts
+				.map(p => p.host_port ? parseInt(p.host_port) : 0)
+				.filter(p => p > 0);
+			if (ports.length === 0) {
+				portConflicts = [];
+				return;
+			}
+			checkingPorts = true;
+			try {
+				portConflicts = await client.call<{ port: number; used_by: string }[]>(
+					'apps.check_ports',
+					{ ports, exclude_app: excludeApp ?? null }
+				);
+			} catch {
+				portConflicts = [];
+			}
+			checkingPorts = false;
+		}, 300);
+	}
+
+	function checkComposeConflicts() {
+		// Parse host ports from compose YAML (best-effort)
+		const ports: number[] = [];
+		for (const line of composeContent.split('\n')) {
+			// Match patterns like '- "8080:80"', '- 8080:80', '- "180:80/tcp"'
+			const m = line.match(/^\s*-\s*"?(\d+):\d+/);
+			if (m) ports.push(parseInt(m[1]));
+		}
+		if (ports.length === 0) {
+			portConflicts = [];
+			return;
+		}
+		checkingPorts = true;
+		client.call<{ port: number; used_by: string }[]>(
+			'apps.check_ports',
+			{ ports, exclude_app: editingCompose ?? null }
+		).then(r => { portConflicts = r; }).catch(() => { portConflicts = []; }).finally(() => { checkingPorts = false; });
 	}
 
 	onMount(async () => {
@@ -358,6 +406,7 @@
 	function cancelEdit() {
 		showInstall = false;
 		editingApp = null;
+		portConflicts = [];
 		resetForm();
 	}
 
@@ -459,6 +508,7 @@
 	function cancelCompose() {
 		showCompose = false;
 		editingCompose = null;
+		portConflicts = [];
 		composeName = ''; composeContent = '';
 	}
 
@@ -656,7 +706,7 @@
 						<div class="grid grid-cols-[1fr_80px_90px_60px_auto] gap-2 mt-1 items-center">
 							<Input bind:value={port.name} placeholder="e.g. http" class="h-8 text-xs" />
 							<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" />
-							<Input bind:value={port.host_port} placeholder="auto" class="h-8 text-xs" />
+							<Input bind:value={port.host_port} placeholder="auto" class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
 							<select bind:value={port.protocol} class="h-8 rounded-md border border-input bg-transparent px-1 text-xs">
 								<option>TCP</option>
 								<option>UDP</option>
@@ -664,6 +714,13 @@
 							<Button size="xs" variant="ghost" onclick={() => removePort(i)}>x</Button>
 						</div>
 					{/each}
+					{#if portConflicts.length > 0}
+						<div class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+							{#each portConflicts as c}
+								<div>Port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span></div>
+							{/each}
+						</div>
+					{/if}
 					<p class="mt-1 text-[0.6rem] text-muted-foreground">Host port is auto-assigned if left empty. App will be accessible at /apps/{'{name}'}/ via reverse proxy.</p>
 				</div>
 
@@ -748,9 +805,17 @@
 					<textarea
 						id="compose-file"
 						bind:value={composeContent}
+						oninput={checkComposeConflicts}
 						placeholder={"services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\""}
 						class="mt-1 w-full h-64 rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono"
 					></textarea>
+					{#if portConflicts.length > 0}
+						<div class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+							{#each portConflicts as c}
+								<div>Port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span></div>
+							{/each}
+						</div>
+					{/if}
 					<span class="mt-1 block text-xs text-muted-foreground">Paste a standard docker-compose.yml file. No modifications needed.</span>
 				</div>
 				<div class="flex gap-2">
@@ -809,8 +874,11 @@
 						<td class="p-3">
 							<div class="flex items-center gap-1.5">
 								{#if app.ports && app.ports.length > 0}
-									<a href="http://{window.location.hostname}:{app.ports[0].host_port}" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20">
-										Open :{app.ports[0].host_port}
+									<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20">
+										Open
+									</a>
+									<a href="http://{window.location.hostname}:{app.ports[0].host_port}" target="_blank" class="text-[0.65rem] text-muted-foreground hover:text-foreground" title="Direct port access (LAN)">
+										:{app.ports[0].host_port}
 									</a>
 								{/if}
 								{#if app.status === 'running'}

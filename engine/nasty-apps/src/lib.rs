@@ -267,6 +267,25 @@ pub struct SetIngressRequest {
     pub host_port: u16,
 }
 
+// ── Port check types ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckPortsRequest {
+    /// Ports to check for conflicts.
+    pub ports: Vec<u16>,
+    /// App name to exclude from conflict check (for updates).
+    #[serde(default)]
+    pub exclude_app: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PortConflict {
+    /// The port that has a conflict.
+    pub port: u16,
+    /// What is using this port (e.g. "nginx", "app:plex").
+    pub used_by: String,
+}
+
 // ── Service ─────────────────────────────────────────────────────
 
 pub struct AppsService {
@@ -1279,6 +1298,47 @@ impl AppsService {
         Ok(())
     }
 
+    // ── Port conflict checking ─────────────────────────────
+
+    pub async fn check_ports(&self, req: CheckPortsRequest) -> Vec<PortConflict> {
+        let mut conflicts = Vec::new();
+
+        // Check against other managed apps
+        if let Ok(apps) = self.list_internal().await {
+            for app in &apps {
+                // Skip the app being updated
+                if req.exclude_app.as_deref() == Some(&app.name) {
+                    continue;
+                }
+                for p in &app.ports {
+                    if req.ports.contains(&p.host_port) {
+                        conflicts.push(PortConflict {
+                            port: p.host_port,
+                            used_by: format!("app:{}", app.name),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check against system listeners via ss
+        if let Ok(listeners) = system_listeners().await {
+            for (port, process) in &listeners {
+                if req.ports.contains(port) {
+                    // Don't double-report ports already flagged as app conflicts
+                    if !conflicts.iter().any(|c| c.port == *port) {
+                        conflicts.push(PortConflict {
+                            port: *port,
+                            used_by: process.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        conflicts
+    }
+
     // ── Image inspection ────────────────────────────────────
 
     pub async fn inspect_image(&self, image: &str) -> Result<ImageInspectResult, AppsError> {
@@ -1613,6 +1673,51 @@ async fn reload_nginx() {
         .args(["reload", "nginx"])
         .output()
         .await;
+}
+
+/// Query system TCP listeners via `ss -tlnp` and return (port, process_name) pairs.
+async fn system_listeners() -> Result<Vec<(u16, String)>, AppsError> {
+    let output = Command::new("ss")
+        .args(["-tlnp"])
+        .output()
+        .await
+        .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut listeners = Vec::new();
+
+    for line in stdout.lines().skip(1) {
+        // Format: "LISTEN 0 4096 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=1753,fd=6))"
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 5 {
+            continue;
+        }
+        let local = fields[3];
+        // Extract port from "0.0.0.0:443" or "[::]:443" or "*:443"
+        let port_str = local.rsplit(':').next().unwrap_or("");
+        let port: u16 = match port_str.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Extract process name from users:(("name",...))
+        let process = if let Some(users) = fields.get(5) {
+            users
+                .split('"')
+                .nth(1)
+                .unwrap_or("unknown")
+                .to_string()
+        } else {
+            "unknown".to_string()
+        };
+
+        // Deduplicate (IPv4 + IPv6 both show up)
+        if !listeners.iter().any(|(p, _): &(u16, String)| *p == port) {
+            listeners.push((port, process));
+        }
+    }
+
+    Ok(listeners)
 }
 
 /// Parse CPU limit string to nanoseconds.
