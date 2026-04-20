@@ -825,6 +825,11 @@ impl FilesystemService {
             }
         }
 
+        // Also try unmounting by UUID — catches kernel-auto-assembled filesystems
+        // that the engine doesn't know are mounted (e.g. after a reboot).
+        let uuid_mount = format!("UUID={}", fs.uuid);
+        let _ = cmd::run_ok("umount", &[&uuid_mount]).await;
+
         // Track mount state
         save_fs_unmounted(&req.name).await;
 
@@ -835,8 +840,16 @@ impl FilesystemService {
         // Wipe bcachefs superblocks from all member devices
         for dev in &fs.devices {
             info!("Wiping bcachefs superblock on {}", dev.path);
-            let _ = cmd::run_ok("wipefs", &["-a", &dev.path]).await;
+            cmd::run_ok("wipefs", &["-a", &dev.path])
+                .await
+                .map_err(|e| FilesystemError::CommandFailed(
+                    format!("failed to wipe {}: {e}", dev.path),
+                ))?;
         }
+
+        // Flush the kernel's blkid cache so the ghost filesystem disappears
+        let _ = cmd::run_ok("udevadm", &["trigger"]).await;
+        let _ = cmd::run_ok("udevadm", &["settle"]).await;
 
         self.invalidate_list_cache().await;
         Ok(())
