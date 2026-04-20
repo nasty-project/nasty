@@ -78,6 +78,8 @@
 	let newForegroundTarget = $state('');
 	let newBackgroundTarget = $state('');
 	let newPromoteTarget = $state('');
+	let newMetadataTarget = $state('');
+	let newDataReplicas = $state('');
 	let newComments = $state('');
 	let newDirectIo = $state(false);
 
@@ -309,6 +311,8 @@
 		if (newForegroundTarget) params.foreground_target = newForegroundTarget;
 		if (newBackgroundTarget) params.background_target = newBackgroundTarget;
 		if (newPromoteTarget) params.promote_target = newPromoteTarget;
+		if (newMetadataTarget) params.metadata_target = newMetadataTarget;
+		if (newDataReplicas) params.data_replicas = parseInt(newDataReplicas, 10);
 		if (newComments) params.comments = newComments;
 		if (newDirectIo) params.direct_io = true;
 
@@ -320,6 +324,7 @@
 			wizardStep = 0;
 			newName = ''; newType = 'filesystem'; newVolsize = ''; newCompression = '';
 			newForegroundTarget = ''; newBackgroundTarget = ''; newPromoteTarget = '';
+			newMetadataTarget = ''; newDataReplicas = '';
 			newComments = ''; newDirectIo = false;
 			await refresh();
 		}
@@ -585,9 +590,9 @@
 				<div class="mb-4">
 					<Label>Tiering Targets</Label>
 					<p class="mb-2 text-xs text-muted-foreground">Override filesystem defaults. Leave empty to inherit.</p>
-					<div class="grid grid-cols-3 gap-2">
+					<div class="grid grid-cols-2 gap-2">
 						<div>
-							<label for="sv-fg-target" class="mb-1 block text-xs text-muted-foreground">Foreground</label>
+							<label for="sv-fg-target" class="mb-1 block text-xs text-muted-foreground">Foreground Target</label>
 							<select id="sv-fg-target" bind:value={newForegroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
 								<option value="">Inherit</option>
 								{#each deviceLabels() as label}
@@ -596,7 +601,16 @@
 							</select>
 						</div>
 						<div>
-							<label for="sv-bg-target" class="mb-1 block text-xs text-muted-foreground">Background</label>
+							<label for="sv-meta-target" class="mb-1 block text-xs text-muted-foreground">Metadata Target</label>
+							<select id="sv-meta-target" bind:value={newMetadataTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+								<option value="">Inherit</option>
+								{#each deviceLabels() as label}
+									<option value={label}>{label}</option>
+								{/each}
+							</select>
+						</div>
+						<div>
+							<label for="sv-bg-target" class="mb-1 block text-xs text-muted-foreground">Background Target</label>
 							<select id="sv-bg-target" bind:value={newBackgroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
 								<option value="">Inherit</option>
 								{#each deviceLabels() as label}
@@ -605,7 +619,7 @@
 							</select>
 						</div>
 						<div>
-							<label for="sv-promote-target" class="mb-1 block text-xs text-muted-foreground">Promote (cache)</label>
+							<label for="sv-promote-target" class="mb-1 block text-xs text-muted-foreground">Promote Target</label>
 							<select id="sv-promote-target" bind:value={newPromoteTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
 								<option value="">Inherit</option>
 								{#each deviceLabels() as label}
@@ -616,6 +630,11 @@
 					</div>
 				</div>
 			{/if}
+			<div class="mb-4">
+				<label for="sv-data-replicas" class="mb-1 block text-sm font-medium">Data Replicas</label>
+				<input id="sv-data-replicas" type="number" bind:value={newDataReplicas} placeholder="Inherit from filesystem" min="1" max="8" class="h-8 w-32 rounded-md border border-input bg-transparent px-2 text-sm" />
+				<p class="mt-1 text-xs text-muted-foreground">Number of data copies. Leave empty to inherit from filesystem.</p>
+			</div>
 			{#if newType === 'block'}
 				<div class="mb-4">
 					<label class="flex cursor-pointer items-center gap-2 text-sm font-medium">
@@ -658,6 +677,14 @@
 				{#if newPromoteTarget}
 					<span class="text-muted-foreground">Promote Target</span>
 					<span>{newPromoteTarget}</span>
+				{/if}
+				{#if newMetadataTarget}
+					<span class="text-muted-foreground">Metadata Target</span>
+					<span>{newMetadataTarget}</span>
+				{/if}
+				{#if newDataReplicas}
+					<span class="text-muted-foreground">Data Replicas</span>
+					<span>{newDataReplicas}</span>
 				{/if}
 				{#if newDirectIo}
 					<span class="text-muted-foreground">Direct I/O</span>

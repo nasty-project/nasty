@@ -926,13 +926,13 @@
 					<span class="text-muted-foreground">Tiering</span>
 					<span>{profile.name}</span>
 					{#if profile.foreground_target}
-						<span class="text-muted-foreground">FG Target</span><span>{profile.foreground_target}</span>
+						<span class="text-muted-foreground">Foreground Target</span><span>{profile.foreground_target}</span>
 					{/if}
 					{#if profile.metadata_target}
-						<span class="text-muted-foreground">Meta Target</span><span>{profile.metadata_target}</span>
+						<span class="text-muted-foreground">Metadata Target</span><span>{profile.metadata_target}</span>
 					{/if}
 					{#if profile.background_target}
-						<span class="text-muted-foreground">BG Target</span><span>{profile.background_target}</span>
+						<span class="text-muted-foreground">Background Target</span><span>{profile.background_target}</span>
 					{/if}
 					{#if profile.promote_target}
 						<span class="text-muted-foreground">Promote Target</span><span>{profile.promote_target}</span>
@@ -1373,11 +1373,11 @@
 								{/if}
 							</span>
 							{#if fs.options.foreground_target}
-								<span class="text-muted-foreground">FG Target</span>
+								<span class="text-muted-foreground">Foreground Target</span>
 								<span>{fs.options.foreground_target}</span>
 							{/if}
 							{#if fs.options.background_target}
-								<span class="text-muted-foreground">BG Target</span>
+								<span class="text-muted-foreground">Background Target</span>
 								<span>{fs.options.background_target}</span>
 							{/if}
 							{#if fs.options.promote_target}
@@ -1385,7 +1385,7 @@
 								<span>{fs.options.promote_target}</span>
 							{/if}
 							{#if fs.options.metadata_target}
-								<span class="text-muted-foreground">Meta Target</span>
+								<span class="text-muted-foreground">Metadata Target</span>
 								<span>{fs.options.metadata_target}</span>
 							{/if}
 							{#if fs.options.error_action}

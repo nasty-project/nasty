@@ -286,6 +286,10 @@ pub struct CreateSubvolumeRequest {
     pub background_target: Option<String>,
     /// Device or label to promote data to on read (cache tier, overrides filesystem default).
     pub promote_target: Option<String>,
+    /// Device or label for metadata/btree writes (overrides filesystem default).
+    pub metadata_target: Option<String>,
+    /// Number of data replicas for this subvolume (overrides filesystem default).
+    pub data_replicas: Option<u32>,
 }
 
 fn default_type() -> SubvolumeType {
@@ -370,6 +374,10 @@ pub struct UpdateSubvolumeRequest {
     pub background_target: Option<String>,
     /// Device or label to promote data to on read. Use `-` to remove.
     pub promote_target: Option<String>,
+    /// Device or label for metadata/btree writes. Use `-` to remove.
+    pub metadata_target: Option<String>,
+    /// Number of data replicas. Use `0` to reset to filesystem default.
+    pub data_replicas: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -671,6 +679,7 @@ impl SubvolumeService {
             ("--foreground_target", &req.foreground_target),
             ("--background_target", &req.background_target),
             ("--promote_target", &req.promote_target),
+            ("--metadata_target", &req.metadata_target),
         ] {
             if let Some(t) = value {
                 info!("Setting {}={} on subvolume '{}'", flag, t, req.name);
@@ -680,6 +689,20 @@ impl SubvolumeService {
                 )
                 .await;
             }
+        }
+
+        // Set data replicas if specified
+        if let Some(replicas) = req.data_replicas {
+            info!("Setting data_replicas={} on subvolume '{}'", replicas, req.name);
+            let _ = cmd::run_ok(
+                "bcachefs",
+                &[
+                    "set-file-option",
+                    &format!("--data_replicas={replicas}"),
+                    &subvol_path,
+                ],
+            )
+            .await;
         }
 
         // For filesystem subvolumes: enforce size via bcachefs project quota
@@ -955,6 +978,7 @@ impl SubvolumeService {
             ("--foreground_target", &req.foreground_target),
             ("--background_target", &req.background_target),
             ("--promote_target", &req.promote_target),
+            ("--metadata_target", &req.metadata_target),
         ] {
             if let Some(t) = value {
                 info!("Setting {}={} on subvolume '{}'", flag, t, req.name);
@@ -965,6 +989,19 @@ impl SubvolumeService {
                 .await
                 .map_err(SubvolumeError::CommandFailed)?;
             }
+        }
+
+        // Update data replicas if specified (use 0 to reset to filesystem default)
+        if let Some(replicas) = req.data_replicas {
+            info!("Setting data_replicas={} on subvolume '{}'", replicas, req.name);
+            let flag = if replicas == 0 {
+                "--data_replicas=-".to_string()
+            } else {
+                format!("--data_replicas={replicas}")
+            };
+            cmd::run_ok("bcachefs", &["set-file-option", &flag, path])
+                .await
+                .map_err(SubvolumeError::CommandFailed)?;
         }
 
         self.get(&req.filesystem, &req.name, owner_filter).await
