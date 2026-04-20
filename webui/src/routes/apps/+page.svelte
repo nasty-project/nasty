@@ -39,7 +39,17 @@
 				try {
 					const msg = JSON.parse(event.data);
 					if (msg.type === 'log') {
-						deployLog = [...deployLog, msg.data];
+						// Deduplicate progress lines (Extracting, Downloading, Waiting, Pulling fs layer, etc.)
+						// by replacing the previous line if it has the same hash prefix + action
+						const prev = deployLog.length > 0 ? deployLog[deployLog.length - 1] : '';
+						const progressRe = /^[0-9a-f]{12}\s+(Extracting|Downloading|Waiting|Verifying Checksum|Download complete)\b/;
+						const prevMatch = prev.match(progressRe);
+						const currMatch = msg.data.match(progressRe);
+						if (prevMatch && currMatch && prev.slice(0, 12) === msg.data.slice(0, 12) && prevMatch[1] === currMatch[1]) {
+							deployLog = [...deployLog.slice(0, -1), msg.data];
+						} else {
+							deployLog = [...deployLog, msg.data];
+						}
 					} else if (msg.type === 'error') {
 						deployError = msg.data;
 						deployLog = [...deployLog, `ERROR: ${msg.data}`];
