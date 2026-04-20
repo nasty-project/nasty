@@ -1639,8 +1639,12 @@ impl AppsService {
         };
 
         // Probe for an available shell
-        let shell = find_container_shell(&container).await;
-        Ok(format!("docker exec -it {} {}", container, shell))
+        match find_container_shell(&container).await {
+            Some(shell) => Ok(format!("docker exec -it {} {}", container, shell)),
+            None => Err(AppsError::DockerFailed(
+                "this container has no shell (scratch/distroless image)".to_string(),
+            )),
+        }
     }
 
     async fn write_proxy_conf(&self, rules: &[AppIngress]) -> Result<(), AppsError> {
@@ -1687,8 +1691,8 @@ async fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), AppsError> {
 }
 
 /// Probe a running container for an available shell.
-/// Returns the first working shell, or "sh" as a last resort.
-async fn find_container_shell(container: &str) -> &'static str {
+/// Returns None if the container has no shell (scratch/distroless images).
+async fn find_container_shell(container: &str) -> Option<&'static str> {
     for shell in ["/bin/bash", "/bin/sh", "/bin/ash"] {
         let result = Command::new("docker")
             .args(["exec", container, "test", "-x", shell])
@@ -1696,15 +1700,15 @@ async fn find_container_shell(container: &str) -> &'static str {
             .await;
         if let Ok(output) = result {
             if output.status.success() {
-                return match shell {
+                return Some(match shell {
                     "/bin/bash" => "/bin/bash",
                     "/bin/ash" => "/bin/ash",
                     _ => "/bin/sh",
-                };
+                });
             }
         }
     }
-    "sh"
+    None
 }
 
 async fn reload_nginx() {
