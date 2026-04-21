@@ -2159,13 +2159,27 @@ async fn read_bcachefs_mounts() -> Result<HashMap<String, Vec<String>>, Filesyst
     Ok(mounts)
 }
 
-/// Get the bcachefs UUID for a device using blkid
+/// Get the bcachefs UUID for a device.
+/// Tries blkid first (works when unmounted), falls back to lsblk (works when mounted).
+/// bcachefs 1.38+ can make blkid fail on mounted devices.
 async fn get_fs_uuid(device: &str) -> Option<String> {
-    let output = cmd::run_ok("blkid", &["-s", "UUID", "-o", "value", device])
-        .await
-        .ok()?;
-    let uuid = output.trim().to_string();
-    if uuid.is_empty() { None } else { Some(uuid) }
+    // Try blkid first
+    if let Ok(output) = cmd::run_ok("blkid", &["-s", "UUID", "-o", "value", device]).await {
+        let uuid = output.trim().to_string();
+        if !uuid.is_empty() {
+            return Some(uuid);
+        }
+    }
+
+    // Fallback: lsblk (works on mounted bcachefs 1.38+)
+    if let Ok(output) = cmd::run_ok("lsblk", &["-no", "UUID", device]).await {
+        let uuid = output.trim().to_string();
+        if !uuid.is_empty() {
+            return Some(uuid);
+        }
+    }
+
+    None
 }
 
 /// Get filesystem usage via statvfs-style info from `df`
