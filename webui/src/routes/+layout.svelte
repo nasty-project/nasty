@@ -3,7 +3,7 @@
 	import { page } from '$app/stores';
 	import { getClient, resetClient } from '$lib/client';
 	import { getToken, clearToken, login as doLogin } from '$lib/auth';
-	import { error as showError } from '$lib/toast.svelte';
+	import { error as showError, isBusy } from '$lib/toast.svelte';
 	import Toasts from '$lib/components/Toasts.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import ConfirmDangerousDialog from '$lib/components/ConfirmDangerousDialog.svelte';
@@ -596,6 +596,11 @@
 
 			<!-- Page content -->
 			<main class="flex-1 overflow-y-auto {currentNav.href === '/terminal' ? 'p-2' : 'p-6'}">
+				{#if isBusy()}
+					<div class="fixed top-0 left-0 right-0 z-50 h-0.5 bg-primary/20">
+						<div class="h-full w-1/3 bg-primary animate-[indeterminate_1.5s_ease-in-out_infinite]"></div>
+					</div>
+				{/if}
 				{#if !connected}
 					<p class="text-muted-foreground">Connecting to engine...</p>
 				{:else}

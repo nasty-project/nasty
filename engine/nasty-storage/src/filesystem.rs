@@ -864,8 +864,10 @@ impl FilesystemService {
 
     /// Mount with explicit mount options
     async fn mount_with_opts(&self, name: &str, opts: &FsMountOptions) -> Result<Filesystem, FilesystemError> {
+        info!("Mounting filesystem '{}'", name);
         let fs = self.get(name).await?;
         if fs.mounted {
+            info!("Filesystem '{}' is already mounted", name);
             return Ok(fs);
         }
 
@@ -1066,11 +1068,16 @@ impl FilesystemService {
 
     /// Unmount a filesystem
     pub async fn unmount(&self, name: &str) -> Result<(), FilesystemError> {
+        info!("Unmounting filesystem '{}'", name);
         let fs = self.get(name).await?;
         if let Some(ref mp) = fs.mount_point {
+            info!("Running umount on {}", mp);
             cmd::run_ok("umount", &[mp.as_str()])
                 .await
                 .map_err(FilesystemError::CommandFailed)?;
+            info!("Filesystem '{}' unmounted successfully", name);
+        } else {
+            info!("Filesystem '{}' has no mount point, skipping umount", name);
         }
 
         // Track mount state

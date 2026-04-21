@@ -119,3 +119,8 @@
     @apply bg-background text-foreground;
   }
 }
+
+@keyframes indeterminate {
+  0% { margin-left: -33%; }
+  100% { margin-left: 100%; }
+}

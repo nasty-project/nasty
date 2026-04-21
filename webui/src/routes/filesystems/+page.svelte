@@ -412,17 +412,21 @@
 		await refresh();
 	}
 
+	let mountingFs = $state<string | null>(null);
+
 	async function toggleMount(fs: Filesystem) {
 		if (fs.mounted) {
 			if (!await confirm(`Unmount Filesystem "${fs.name}"`, `Any active NFS, SMB, iSCSI, and NVMe-oF shares on this filesystem will be stopped first.`)) return;
 		}
 		const action = fs.mounted ? 'unmount' : 'mount';
+		mountingFs = fs.name;
 		await withToast(
 			() => fs.mounted
-				? client.call('fs.unmount', { name: fs.name })
-				: client.call('fs.mount', { name: fs.name }),
+				? client.call('fs.unmount', { name: fs.name }, 120000)
+				: client.call('fs.mount', { name: fs.name }, 120000),
 			`Filesystem "${fs.name}" ${action}ed`
 		);
+		mountingFs = null;
 		await refresh();
 	}
 
@@ -1178,8 +1182,8 @@
 							</Button>
 						{/if}
 						<Button variant="secondary" size="xs" onclick={() => toggleMount(fs)}
-							disabled={fs.options.encrypted && fs.options.locked && !fs.mounted}>
-							{fs.mounted ? 'Unmount' : 'Mount'}
+							disabled={mountingFs === fs.name || (fs.options.encrypted && fs.options.locked && !fs.mounted)}>
+							{mountingFs === fs.name ? (fs.mounted ? 'Unmounting...' : 'Mounting...') : (fs.mounted ? 'Unmount' : 'Mount')}
 						</Button>
 						{#if fs.options.encrypted && fs.options.key_stored}
 							<Button variant="secondary" size="xs" onclick={async () => {

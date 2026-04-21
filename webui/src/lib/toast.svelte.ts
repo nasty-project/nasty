@@ -40,11 +40,20 @@ export function info(message: string) {
 	add('info', message);
 }
 
-/** Wrap an async RPC call with automatic error toast */
+/** Number of in-flight withToast operations */
+let _busy = $state(0);
+
+/** True when any withToast operation is in progress */
+export function isBusy(): boolean {
+	return _busy > 0;
+}
+
+/** Wrap an async RPC call with automatic error toast and busy tracking */
 export async function withToast<T>(
 	fn: () => Promise<T>,
 	successMsg?: string
 ): Promise<T | undefined> {
+	_busy++;
 	try {
 		const result = await fn();
 		if (successMsg) success(successMsg);
@@ -53,5 +62,7 @@ export async function withToast<T>(
 		const msg = e instanceof Error ? e.message : typeof e === 'object' && e !== null && 'message' in e ? String((e as { message: unknown }).message) : String(e);
 		error(msg);
 		return undefined;
+	} finally {
+		_busy--;
 	}
 }
