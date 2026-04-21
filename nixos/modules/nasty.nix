@@ -4,6 +4,8 @@ let
   cfg = config.services.nasty;
   inherit (lib) mkEnableOption mkOption mkIf types;
   nastySystemFlakeSnapshot = args.nastySystemFlakeSnapshot or null;
+  nastyFlake = builtins.getFlake (toString ../..);
+  nastyTopPackage = nastyFlake.packages.${pkgs.stdenv.hostPlatform.system}.nasty-top;
 
   useSelfSigned = cfg.tls.selfSigned && cfg.tls.certFile == null && cfg.tls.keyFile == null;
   tlsCertFile = if cfg.tls.certFile != null then cfg.tls.certFile else "/var/lib/nasty/tls/cert.pem";
@@ -488,6 +490,7 @@ in {
       docker-compose    # Docker Compose for multi-container apps
       lego              # ACME client for Let's Encrypt certificates
       croc              # peer-to-peer file transfer for sending debug reports
+      nastyTopPackage   # top-like TUI for bcachefs stats and activity
 
       (writeShellScriptBin "nasty-report" ''
         set -euo pipefail
