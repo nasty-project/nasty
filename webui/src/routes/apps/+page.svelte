@@ -11,6 +11,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import CodeEditor from '$lib/components/CodeEditor.svelte';
 	import { CircleCheck, Circle } from '@lucide/svelte';
 	import { getToken } from '$lib/auth';
 	import type { Filesystem } from '$lib/types';
@@ -131,6 +132,7 @@
 
 	// Port conflict state
 	let portConflicts = $state<{ port: number; used_by: string }[]>([]);
+	let composeErrorLines = $state<number[]>([]);
 	let checkingPorts = $state(false);
 	let portCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -188,22 +190,28 @@
 	}
 
 	function checkComposeConflicts() {
-		// Parse host ports from compose YAML (best-effort)
-		const ports: number[] = [];
-		for (const line of composeContent.split('\n')) {
-			// Match patterns like '- "8080:80"', '- 8080:80', '- "180:80/tcp"'
-			const m = line.match(/^\s*-\s*"?(\d+):\d+/);
-			if (m) ports.push(parseInt(m[1]));
+		// Parse host ports from compose YAML (best-effort), tracking line numbers
+		const portLines: { port: number; line: number }[] = [];
+		const lines = composeContent.split('\n');
+		for (let i = 0; i < lines.length; i++) {
+			const m = lines[i].match(/^\s*-\s*"?(\d+):\d+/);
+			if (m) portLines.push({ port: parseInt(m[1]), line: i + 1 });
 		}
+		const ports = portLines.map(p => p.port);
 		if (ports.length === 0) {
 			portConflicts = [];
+			composeErrorLines = [];
 			return;
 		}
 		checkingPorts = true;
 		client.call<{ port: number; used_by: string }[]>(
 			'apps.check_ports',
 			{ ports, exclude_app: editingCompose ?? null }
-		).then(r => { portConflicts = r; }).catch(() => { portConflicts = []; }).finally(() => { checkingPorts = false; });
+		).then(r => {
+			portConflicts = r;
+			const conflictPorts = new Set(r.map(c => c.port));
+			composeErrorLines = portLines.filter(p => conflictPorts.has(p.port)).map(p => p.line);
+		}).catch(() => { portConflicts = []; composeErrorLines = []; }).finally(() => { checkingPorts = false; });
 	}
 
 	onMount(async () => {
@@ -525,6 +533,7 @@
 		showCompose = false;
 		editingCompose = null;
 		portConflicts = [];
+		composeErrorLines = [];
 		composeName = ''; composeContent = '';
 	}
 
@@ -834,13 +843,13 @@
 				</div>
 				<div class="mb-4">
 					<Label for="compose-file">docker-compose.yml</Label>
-					<textarea
-						id="compose-file"
+					<CodeEditor
 						bind:value={composeContent}
+						lang="yaml"
+						errorLines={composeErrorLines}
 						oninput={checkComposeConflicts}
-						placeholder={"services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\""}
-						class="mt-1 w-full h-64 rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono"
-					></textarea>
+						class="mt-1 h-64"
+					/>
 					{#if portConflicts.length > 0}
 						<div class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
 							{#each portConflicts as c}
