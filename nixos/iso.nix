@@ -348,6 +348,21 @@ in
       echo "    nixos-rebuild switch --flake /etc/nixos#nasty"
       echo ""
 
+      if [ ! -d /sys/firmware/efi ]; then
+        echo ""
+        echo "  ┌──────────────────────────────────────────────────────────┐"
+        echo "  │  WARNING: You booted the installer in Legacy BIOS mode. │"
+        echo "  │  NASty requires UEFI to boot after installation.       │"
+        echo "  │                                                         │"
+        echo "  │  Before rebooting, change your firmware/VM settings     │"
+        echo "  │  to UEFI mode:                                          │"
+        echo "  │    - Proxmox: switch BIOS from SeaBIOS to OVMF          │"
+        echo "  │    - Physical: enable UEFI boot in BIOS settings        │"
+        echo "  │    - Other VMs: select UEFI/OVMF firmware               │"
+        echo "  └──────────────────────────────────────────────────────────┘"
+        echo ""
+      fi
+
       read -p "Set root password now? (yes/no): " SET_PW
       if [ "$SET_PW" = "yes" ]; then
         nixos-enter --root /mnt -c 'passwd'
