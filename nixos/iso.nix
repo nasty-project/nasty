@@ -350,16 +350,17 @@ in
 
       if [ ! -d /sys/firmware/efi ]; then
         echo ""
-        echo "  ┌──────────────────────────────────────────────────────────┐"
-        echo "  │  WARNING: You booted the installer in Legacy BIOS mode. │"
-        echo "  │  NASty requires UEFI to boot after installation.       │"
-        echo "  │                                                         │"
-        echo "  │  Before rebooting, change your firmware/VM settings     │"
-        echo "  │  to UEFI mode:                                          │"
-        echo "  │    - Proxmox: switch BIOS from SeaBIOS to OVMF          │"
-        echo "  │    - Physical: enable UEFI boot in BIOS settings        │"
-        echo "  │    - Other VMs: select UEFI/OVMF firmware               │"
-        echo "  └──────────────────────────────────────────────────────────┘"
+        echo -e "\033[1;31m  ╔═══════════════════════════════════════════════════════╗"
+        echo -e "  ║                                                       ║"
+        echo -e "  ║  WARNING: You booted in Legacy BIOS mode.             ║"
+        echo -e "  ║  NASty requires UEFI to boot after installation.      ║"
+        echo -e "  ║                                                       ║"
+        echo -e "  ║  Before rebooting, switch to UEFI mode:               ║"
+        echo -e "  ║    - Proxmox: change BIOS from SeaBIOS to OVMF        ║"
+        echo -e "  ║    - Physical: enable UEFI boot in BIOS settings      ║"
+        echo -e "  ║    - Other VMs: select UEFI/OVMF firmware             ║"
+        echo -e "  ║                                                       ║"
+        echo -e "  ╚═══════════════════════════════════════════════════════╝\033[0m"
         echo ""
       fi
 
