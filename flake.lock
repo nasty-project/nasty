@@ -76,26 +76,6 @@
         "type": "github"
       }
     },
-    "nasty-top": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1776522196,
-        "narHash": "sha256-W56aPHsHr/0TQaZRNXCQ23MQv7/89ujSvbn0GZ72hYc=",
-        "owner": "nasty-project",
-        "repo": "nasty-top",
-        "rev": "13f55abb06f0a97580400462d0c128443e9fed87",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nasty-project",
-        "repo": "nasty-top",
-        "type": "github"
-      }
-    },
     "nix-github-actions": {
       "inputs": {
         "nixpkgs": [
@@ -151,7 +131,6 @@
     "root": {
       "inputs": {
         "bcachefs-tools": "bcachefs-tools",
-        "nasty-top": "nasty-top",
         "nixpkgs": "nixpkgs"
       }
     },

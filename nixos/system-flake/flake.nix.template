@@ -36,7 +36,6 @@
             nasty-webui = nasty.packages.${system}.webui;
             nasty-version = nasty-version;
             nasty-bcachefs-tools = nasty.packages.${system}.bcachefs-tools;
-            nasty-top = nasty.packages.${system}.nasty-top;
             inherit nastySystemFlakeSnapshot;
           };
           modules = [
