@@ -133,6 +133,7 @@
 	// Port conflict state
 	let portConflicts = $state<{ port: number; used_by: string }[]>([]);
 	let composeErrorLines = $state<number[]>([]);
+	let composePortLineMap = $state<Map<number, number>>(new Map()); // port → line number
 	let checkingPorts = $state(false);
 	let portCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -211,7 +212,8 @@
 			portConflicts = r;
 			const conflictPorts = new Set(r.map(c => c.port));
 			composeErrorLines = portLines.filter(p => conflictPorts.has(p.port)).map(p => p.line);
-		}).catch(() => { portConflicts = []; composeErrorLines = []; }).finally(() => { checkingPorts = false; });
+			composePortLineMap = new Map(portLines.map(p => [p.port, p.line]));
+		}).catch(() => { portConflicts = []; composeErrorLines = []; composePortLineMap = new Map(); }).finally(() => { checkingPorts = false; });
 	}
 
 	onMount(async () => {
@@ -854,11 +856,11 @@
 						<div class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
 							{#each portConflicts as c}
 								{@const alt = c.port < 1000 ? c.port + 8000 : c.port + 1}
-							<div>Port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span> — change the exposed (left) port, e.g. <code>"{alt}:..."</code></div>
+								{@const lineNo = composePortLineMap.get(c.port)}
+							<div><span class="font-semibold">Line {lineNo}:</span> port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span> — change to e.g. <code>{alt}</code></div>
 							{/each}
 						</div>
 					{/if}
-					<span class="mt-1 block text-xs text-muted-foreground">Port format is <code>exposed:internal</code> — change the left (exposed) port to avoid conflicts.</span>
 				</div>
 				<div class="flex gap-2">
 					<Button onclick={installCompose} disabled={!composeName || !composeContent.trim() || (!editingCompose && !isValidAppName(composeName))}>

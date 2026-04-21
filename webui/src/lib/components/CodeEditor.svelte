@@ -1,11 +1,10 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from '@codemirror/view';
-	import { EditorState } from '@codemirror/state';
+	import { EditorView, Decoration, keymap, lineNumbers, highlightActiveLine, drawSelection, type DecorationSet } from '@codemirror/view';
+	import { EditorState, StateField, StateEffect } from '@codemirror/state';
 	import { oneDark } from '@codemirror/theme-one-dark';
 	import { yaml } from '@codemirror/lang-yaml';
 	import { json } from '@codemirror/lang-json';
-	import { linter, type Diagnostic } from '@codemirror/lint';
 	import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 
 	interface Props {
@@ -37,23 +36,30 @@
 	let langExtension: ReturnType<typeof yaml> | ReturnType<typeof json>;
 	$effect(() => { langExtension = lang === 'json' ? json() : yaml(); });
 
-	// Error line linter — marks specific lines
-	function errorLineLinter() {
-		return linter((view) => {
-			const diagnostics: Diagnostic[] = [];
-			for (const lineNo of errorLines) {
-				if (lineNo < 1 || lineNo > view.state.doc.lines) continue;
-				const line = view.state.doc.line(lineNo);
-				diagnostics.push({
-					from: line.from,
-					to: line.to,
-					severity: 'error',
-					message: '',
-				});
+	// Error line highlighting via StateField + line decorations
+	const setErrorLines = StateEffect.define<number[]>();
+
+	const errorLineMark = Decoration.line({ class: 'cm-error-line' });
+
+	const errorLineField = StateField.define<DecorationSet>({
+		create() { return Decoration.none; },
+		update(decorations, tr) {
+			for (const effect of tr.effects) {
+				if (effect.is(setErrorLines)) {
+					const marks: ReturnType<typeof errorLineMark.range>[] = [];
+					for (const lineNo of effect.value) {
+						if (lineNo >= 1 && lineNo <= tr.state.doc.lines) {
+							const line = tr.state.doc.line(lineNo);
+							marks.push(errorLineMark.range(line.from));
+						}
+					}
+					return Decoration.set(marks);
+				}
 			}
-			return diagnostics;
-		});
-	}
+			return decorations.map(tr.changes);
+		},
+		provide: f => EditorView.decorations.from(f),
+	});
 
 	onMount(() => {
 		const extensions = [
@@ -64,6 +70,7 @@
 			keymap.of([...defaultKeymap, ...historyKeymap]),
 			langExtension,
 			oneDark,
+			errorLineField,
 			EditorView.theme({
 				'&': {
 					fontSize: '13px',
@@ -86,6 +93,11 @@
 				'.cm-line': {
 					padding: '0 8px',
 				},
+				'.cm-error-line': {
+					backgroundColor: 'rgba(220, 38, 38, 0.15)',
+					borderLeft: '3px solid rgb(220, 38, 38)',
+					paddingLeft: '5px',
+				},
 			}),
 			EditorView.updateListener.of((update) => {
 				if (update.docChanged && !skipUpdate) {
@@ -93,15 +105,10 @@
 					oninput?.(value);
 				}
 			}),
-			errorLineLinter(),
 		];
 
 		if (readonly) {
 			extensions.push(EditorState.readOnly.of(true));
-		}
-
-		if (placeholder) {
-			extensions.push(EditorView.contentAttributes.of({ 'aria-placeholder': placeholder }));
 		}
 
 		view = new EditorView({
@@ -111,6 +118,11 @@
 			}),
 			parent: container,
 		});
+
+		// Apply initial error lines
+		if (errorLines.length > 0) {
+			view.dispatch({ effects: setErrorLines.of(errorLines) });
+		}
 	});
 
 	onDestroy(() => {
@@ -128,11 +140,10 @@
 		}
 	});
 
-	// Re-lint when errorLines change
+	// Update error line highlights when errorLines change
 	$effect(() => {
-		if (view && errorLines) {
-			// Force re-lint by reconfiguring
-			view.dispatch({});
+		if (view) {
+			view.dispatch({ effects: setErrorLines.of(errorLines) });
 		}
 	});
 </script>
