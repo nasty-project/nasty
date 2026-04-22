@@ -92,10 +92,23 @@ impl AlertService {
     pub async fn new() -> Self {
         let mut state = load_state().await;
 
-        // Seed default rules if empty
+        // Seed default rules on first run, and backfill any new defaults
+        // added in later versions (matched by id).
+        let defaults = default_rules();
         if state.rules.is_empty() {
-            state.rules = default_rules();
+            state.rules = defaults;
             save_state(&state).await.ok();
+        } else {
+            let mut added = false;
+            for default in &defaults {
+                if !state.rules.iter().any(|r| r.id == default.id) {
+                    state.rules.push(default.clone());
+                    added = true;
+                }
+            }
+            if added {
+                save_state(&state).await.ok();
+            }
         }
 
         Self {

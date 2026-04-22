@@ -497,7 +497,6 @@ in {
           rev = "master";
           hash = "sha256-W56aPHsHr/0TQaZRNXCQ23MQv7/89ujSvbn0GZ72hYc=";
         };
-        useFetchCargoVendor = true;
         cargoHash = "sha256-1HGu29yMYskUr0IEY9Rtw5V6fGlBu+PKyKFvf+TGBu0=";
         meta.mainProgram = "nasty-top";
       })
