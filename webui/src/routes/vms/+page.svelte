@@ -556,20 +556,22 @@
 	);
 </script>
 
+{#if capabilities}
+	<div class="mb-4 flex items-center gap-4 rounded-lg border border-border px-4 py-2.5 text-sm">
+		<div class="flex items-center gap-2">
+			<span class="h-2 w-2 rounded-full {capabilities.kvm_available ? 'bg-green-400' : 'bg-red-400'}"></span>
+			<span class="text-muted-foreground">{vms.length} VM{vms.length !== 1 ? 's' : ''}</span>
+		</div>
+		<span class="text-muted-foreground">{vms.filter(v => v.running).length} running</span>
+	</div>
+{/if}
 <div class="mb-4 flex items-center gap-3">
-	{#if capabilities}
-		<span class="text-xs text-muted-foreground flex items-center gap-2">
-			<span class="inline-block h-1.5 w-1.5 rounded-full {capabilities.kvm_available ? 'bg-green-500' : 'bg-destructive'}"></span>
-			{vms.length} VM{vms.length !== 1 ? 's' : ''} &middot; {vms.filter(v => v.running).length} running
-		</span>
-	{/if}
-</div>
-<div class="mb-4 flex items-center gap-3">
-	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}
->
+	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}>
 		{wizardStep !== 0 ? 'Cancel' : 'Create VM'}
 	</Button>
-	<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
+	{#if vms.length > 3}
+		<Input bind:value={search} placeholder="Filter..." class="h-9 w-40" />
+	{/if}
 </div>
 
 {#if wizardStep !== 0}
@@ -950,7 +952,7 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else if vms.length === 0}
-	<p class="text-muted-foreground">No VMs configured.</p>
+	<p class="text-muted-foreground">No VMs installed.</p>
 {:else}
 	<table class="w-full text-sm">
 		<thead>
