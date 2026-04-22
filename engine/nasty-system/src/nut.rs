@@ -141,7 +141,9 @@ impl NutService {
             warn!("Failed to write NUT config files: {e}");
         }
         if is_nut_running().await {
-            restart_nut_services().await;
+            // Spawn restart in background — some drivers (nutdrv_qx) take 20-30s
+            // to probe USB and we don't want the API call to block/timeout.
+            tokio::spawn(async { restart_nut_services().await });
         }
 
         Ok(config.clone())
@@ -207,9 +209,19 @@ pub async fn write_config_files(config: &NutConfig) -> Result<(), String> {
 }
 
 async fn write_file(name: &str, content: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
     let path = format!("{NUT_CONF_DIR}/{name}");
     tokio::fs::write(&path, content).await
-        .map_err(|e| format!("failed to write {path}: {e}"))
+        .map_err(|e| format!("failed to write {path}: {e}"))?;
+
+    // upsd.users contains credentials — restrict to owner-only
+    if name == "upsd.users" {
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).await
+            .map_err(|e| format!("failed to set permissions on {path}: {e}"))?;
+    }
+
+    Ok(())
 }
 
 // ── Status reading ───────────────────────────────────────────

@@ -715,6 +715,7 @@ in {
       "f /etc/samba/smb.nasty.conf 0644 root root -"
       "d /etc/samba/nasty.d 0755 root root -"
       "d /var/lib/nasty/nut 0750 root root -"
+      "d /var/state/ups 0750 root root -"
     ];
 
     # ── Self-signed TLS certificate ───────────────────────────
