@@ -309,6 +309,19 @@
 	</Card>
 {/if}
 
+<!-- Onboarding — shown only when no filesystems exist -->
+{#if stats && filesystems.length === 0}
+	<Card class="mb-4 border-primary/30 bg-primary/5">
+		<CardContent class="flex items-center gap-6 py-6">
+			<div class="flex-1">
+				<h2 class="text-lg font-bold">Get started with NASty</h2>
+				<p class="mt-1 text-sm text-muted-foreground">Create your first filesystem to start storing and sharing data.</p>
+			</div>
+			<Button onclick={() => window.location.href = '/filesystems'}>Create Filesystem</Button>
+		</CardContent>
+	</Card>
+{/if}
+
 <!-- Resource gauges -->
 {#if stats}
 	<div class="mb-3 flex items-center justify-between">
