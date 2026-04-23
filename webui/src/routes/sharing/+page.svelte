@@ -35,6 +35,51 @@
 
 	let shareSubvolumes: Subvolume[] = $state([]);
 
+	// Inline subvolume creation within share wizard
+	let showInlineCreate = $state(false);
+	let inlineSvName = $state('');
+	let inlineSvQuota = $state('');
+	let inlineSvCreating = $state(false);
+	let inlineSvFilesystems: string[] = $state([]);
+	let inlineSvFs = $state('');
+
+	async function loadInlineFilesystems() {
+		try {
+			const fsList = await client.call<{ name: string; mounted: boolean }[]>('fs.list');
+			inlineSvFilesystems = fsList.filter(f => f.mounted).map(f => f.name);
+			if (inlineSvFilesystems.length > 0 && !inlineSvFs) inlineSvFs = inlineSvFilesystems[0];
+		} catch { inlineSvFilesystems = []; }
+	}
+
+	async function inlineCreateSubvolume() {
+		if (!inlineSvName || !inlineSvFs) return;
+		inlineSvCreating = true;
+		const isBlock = shareProtocol === 'iscsi' || shareProtocol === 'nvmeof';
+		const params: Record<string, unknown> = {
+			filesystem: inlineSvFs,
+			name: inlineSvName,
+			subvolume_type: isBlock ? 'block' : 'filesystem',
+		};
+		if (inlineSvQuota) params.volsize_bytes = parseFloat(inlineSvQuota) * 1073741824;
+		try {
+			await withToast(
+				() => client.call('subvolume.create', params),
+				'Subvolume created'
+			);
+			await loadShareSubvolumes();
+			// Auto-select the newly created subvolume
+			const created = shareSubvolumes.find(sv => sv.name === inlineSvName && sv.filesystem === inlineSvFs);
+			if (created) {
+				shareSubvolume = isBlock ? (created.block_device ?? '') : created.path;
+			}
+			showInlineCreate = false;
+			inlineSvName = '';
+			inlineSvQuota = '';
+		} finally {
+			inlineSvCreating = false;
+		}
+	}
+
 	function openShareWizard() {
 		shareWizardStep = 1;
 		shareProtocol = activeTab;
@@ -43,6 +88,9 @@
 		shareSmbName = ''; shareSmbGuestOk = false; shareSmbReadOnly = false;
 		shareIscsiName = ''; shareNvmeofName = '';
 		shareNvmeofAddr = '0.0.0.0'; shareNvmeofPort = '4420';
+		showInlineCreate = false;
+		inlineSvName = '';
+		inlineSvQuota = '';
 	}
 
 	async function loadShareSubvolumes() {
@@ -734,10 +782,49 @@
 						{/if}
 					{/each}
 				</select>
-				{#if filteredShareSubvolumes.length === 0}
+				{#if filteredShareSubvolumes.length === 0 && !showInlineCreate}
 					<p class="mt-1 text-xs text-muted-foreground">
-						No {shareProtocol === 'iscsi' || shareProtocol === 'nvmeof' ? 'block' : 'filesystem'} subvolumes available. Create one first.
+						No {shareProtocol === 'iscsi' || shareProtocol === 'nvmeof' ? 'block' : 'filesystem'} subvolumes available.
+						<button
+							onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}
+							class="text-primary hover:underline"
+						>Create one</button>
 					</p>
+				{:else if !showInlineCreate}
+					<button
+						onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}
+						class="mt-1 text-xs text-primary hover:underline"
+					>+ Create new subvolume</button>
+				{/if}
+				{#if showInlineCreate}
+					<div class="mt-3 rounded-lg border border-border bg-secondary/20 p-3 space-y-3">
+						<p class="text-xs font-medium">New {shareProtocol === 'iscsi' || shareProtocol === 'nvmeof' ? 'block' : 'filesystem'} subvolume</p>
+						{#if inlineSvFilesystems.length > 1}
+							<div>
+								<Label class="text-xs">Filesystem</Label>
+								<select bind:value={inlineSvFs} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+									{#each inlineSvFilesystems as fs}
+										<option value={fs}>{fs}</option>
+									{/each}
+								</select>
+							</div>
+						{/if}
+						<div>
+							<Label class="text-xs">Name</Label>
+							<Input bind:value={inlineSvName} placeholder="e.g. media" class="mt-1 h-8 text-sm" />
+						</div>
+						<div>
+							<Label class="text-xs">Quota (GiB) <span class="text-muted-foreground font-normal">{shareProtocol === 'iscsi' || shareProtocol === 'nvmeof' ? '— required for block' : '— optional'}</span></Label>
+							<Input bind:value={inlineSvQuota} type="number" placeholder="e.g. 100" class="mt-1 h-8 text-sm" />
+						</div>
+						<div class="flex gap-2">
+							<Button size="sm" onclick={inlineCreateSubvolume}
+								disabled={!inlineSvName || !inlineSvFs || inlineSvCreating || ((shareProtocol === 'iscsi' || shareProtocol === 'nvmeof') && !inlineSvQuota)}>
+								{inlineSvCreating ? 'Creating...' : 'Create'}
+							</Button>
+							<Button variant="secondary" size="sm" onclick={() => showInlineCreate = false}>Cancel</Button>
+						</div>
+					</div>
 				{/if}
 			</div>
 			<div class="flex gap-2">
