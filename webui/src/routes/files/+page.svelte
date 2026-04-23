@@ -301,11 +301,12 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else if visibleEntries.length === 0}
-	<Card>
-		<CardContent class="py-8 text-center text-muted-foreground">
-			{currentPath ? 'Empty directory' : 'No filesystems mounted'}
-		</CardContent>
-	</Card>
+	<div class="flex flex-col items-center justify-center py-12 text-center">
+		<p class="text-muted-foreground">{currentPath ? 'Empty directory' : 'No filesystems mounted.'}</p>
+		{#if !currentPath}
+			<Button size="sm" class="mt-2" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
+		{/if}
+	</div>
 {:else}
 	<table class="w-full text-sm">
 		<thead>
