@@ -490,12 +490,12 @@ in {
       croc              # peer-to-peer file transfer for sending debug reports
       (pkgs.rustPlatform.buildRustPackage {
         pname = "nasty-top";
-        version = "0.1.0";
+        version = "0.0.4";
         src = pkgs.fetchFromGitHub {
           owner = "nasty-project";
           repo = "nasty-top";
-          rev = "master";
-          hash = "sha256-W56aPHsHr/0TQaZRNXCQ23MQv7/89ujSvbn0GZ72hYc=";
+          rev = "v0.0.4";
+          hash = "sha256-unm/bc/SjxtISm9wbCMj4ySrTPQUeHtoPpcQUSWKUeE=";
         };
         cargoHash = "sha256-1HGu29yMYskUr0IEY9Rtw5V6fGlBu+PKyKFvf+TGBu0=";
         meta.mainProgram = "nasty-top";
