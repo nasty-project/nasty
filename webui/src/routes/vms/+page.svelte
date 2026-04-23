@@ -644,7 +644,7 @@
 							</div>
 						</div>
 						{#if !envReady.filesystem}
-							<Button size="xs" variant="outline" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
+							<Button size="sm" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
 						{/if}
 					</div>
 					<div class="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5">

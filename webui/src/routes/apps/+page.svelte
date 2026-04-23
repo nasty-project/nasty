@@ -599,7 +599,7 @@
 						</div>
 					</div>
 					{#if filesystems.length === 0}
-						<Button size="xs" variant="outline" onclick={() => window.location.href = '/filesystems'}>
+						<Button size="sm" onclick={() => window.location.href = '/filesystems'}>
 							Go to Filesystems
 						</Button>
 					{/if}

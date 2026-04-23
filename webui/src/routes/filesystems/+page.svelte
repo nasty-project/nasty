@@ -703,7 +703,7 @@
 					</div>
 					{#if availableDevices().length === 0}
 						<p class="text-sm text-muted-foreground">No available devices. You may need to prepare your disks first.</p>
-						<Button size="xs" variant="outline" class="mt-2" onclick={() => window.location.href = '/disks'}>Go to Disks</Button>
+						<Button size="sm" class="mt-2" onclick={() => window.location.href = '/disks'}>Go to Disks</Button>
 					{:else}
 						<div class="space-y-1.5">
 							{#each availableDevices() as dev}
@@ -1154,7 +1154,7 @@
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">No filesystems configured yet.</p>
 		<p class="mt-1 text-sm text-muted-foreground">Use the <strong>Create Filesystem</strong> button above to get started.</p>
-		<Button size="xs" variant="outline" class="mt-2" onclick={() => window.location.href = '/disks'}>Prepare Disks</Button>
+		<Button size="sm" class="mt-2" onclick={() => window.location.href = '/disks'}>Prepare Disks</Button>
 	</div>
 {:else}
 	{#each filesystems as fs}
