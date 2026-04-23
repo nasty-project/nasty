@@ -709,12 +709,12 @@
 {:else if filesystems.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">No filesystems configured.</p>
-		<a href="/filesystems" class="mt-1 text-sm text-primary hover:underline">Create a filesystem first &rarr;</a>
+		<Button size="xs" variant="outline" class="mt-2" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
 	</div>
 {:else if mountedFilesystems.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">No mounted filesystems.</p>
-		<a href="/filesystems" class="mt-1 text-sm text-primary hover:underline">Mount a filesystem first &rarr;</a>
+		<Button size="xs" variant="outline" class="mt-2" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
 	</div>
 {:else if subvolumes.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">

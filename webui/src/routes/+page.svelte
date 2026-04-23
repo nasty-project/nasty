@@ -4,6 +4,7 @@
 	import { formatBytes, formatUptime, formatPercent } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 	import type { SystemInfo, SystemHealth, SystemStats, Filesystem, DiskHealth, DiskIoStats, NetIfStats, ActiveAlert, Settings, ResourceHistory } from '$lib/types';
+	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { createIoHistory } from '$lib/history.svelte';
@@ -411,7 +412,7 @@
 					</div>
 				{:else}
 					<p class="text-sm text-muted-foreground">No filesystems configured yet.</p>
-					<a href="/filesystems" class="mt-2 inline-block text-sm font-medium text-primary hover:underline">Create a filesystem &rarr;</a>
+					<Button size="xs" variant="outline" class="mt-2" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
 				{/if}
 			</CardContent>
 		</Card>
