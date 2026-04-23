@@ -804,9 +804,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.185"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libsqlite3-sys"
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-apidoc"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "nasty-sharing",
  "nasty-storage",
@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-apps"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bollard",
  "futures-util",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-common"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "schemars",
  "serde",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-engine"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-metrics"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-sharing"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "nasty-common",
  "schemars",
@@ -1018,14 +1018,14 @@ dependencies = [
 
 [[package]]
 name = "nasty-snapshot"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "nasty-storage",
 ]
 
 [[package]]
 name = "nasty-storage"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "nasty-common",
  "schemars",
@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-system"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "base64",
  "libc",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-vm"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "nasty-common",
  "schemars",
@@ -1479,9 +1479,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.38"
+version = "0.23.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69f9466fb2c14ea04357e91413efb882e2a6d4a406e625449bc0a5d360d53a21"
+checksum = "7c2c118cb077cca2822033836dfb1b975355dfb784b5e8da48f7b6c5db74e60e"
 dependencies = [
  "once_cell",
  "ring",
