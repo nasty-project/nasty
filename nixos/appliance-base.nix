@@ -1,6 +1,8 @@
 { config, lib, pkgs, nasty-engine, nasty-webui ? null, ... }:
 
 {
+  imports = [ ./binary-cache.nix ];
+
   # Boot loader — systemd-boot (UEFI)
   boot.loader.systemd-boot.enable = true;
   boot.loader.systemd-boot.configurationLimit = 20;
