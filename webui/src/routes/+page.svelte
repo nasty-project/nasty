@@ -335,7 +335,7 @@
 			{/each}
 		</div>
 	</div>
-	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 {filesystems.length > 0 ? 'lg:grid-cols-4' : ''}">
+	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
 		<Card>
 			<CardHeader class="pb-2">
 				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">CPU</CardTitle>
@@ -393,9 +393,11 @@
 				</div>
 			</CardContent>
 		</Card>
+	</div>
 
-		{#if filesystems.length > 0}
-		<Card class="sm:col-span-2">
+	{#if filesystems.length > 0}
+	<div class="mb-4">
+		<Card>
 			<CardHeader class="pb-2">
 				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Storage</CardTitle>
 			</CardHeader>
@@ -410,7 +412,7 @@
 						<div class="h-full rounded-full transition-all duration-500 {barColor(storagePercent(filesystems))}" style="width: {storagePercent(filesystems)}%"></div>
 					</div>
 				{/if}
-				<div class="mt-3 grid grid-cols-1 gap-1 sm:grid-cols-2">
+				<div class="mt-3 grid grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-4">
 					{#each filesystems as fs}
 						<div class="flex items-center gap-2 rounded px-2 py-1 text-sm">
 							<span class="font-semibold">{fs.name}</span>
@@ -425,8 +427,8 @@
 				</div>
 			</CardContent>
 		</Card>
-		{/if}
 	</div>
+	{/if}
 {/if}
 
 <!-- Network & Disk I/O -->
