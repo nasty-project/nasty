@@ -702,7 +702,7 @@
 						</label>
 					</div>
 					{#if availableDevices().length === 0}
-						<p class="text-sm text-muted-foreground">No available devices</p>
+						<p class="text-sm text-muted-foreground">No available devices. You may need to <a href="/disks" class="text-primary hover:underline">wipe or prepare disks</a> first.</p>
 					{:else}
 						<div class="space-y-1.5">
 							{#each availableDevices() as dev}
@@ -1150,7 +1150,10 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else if filesystems.length === 0}
-	<p class="text-muted-foreground">No filesystems configured yet.</p>
+	<div class="flex flex-col items-center justify-center py-12 text-center">
+		<p class="text-muted-foreground">No filesystems configured yet.</p>
+		<p class="mt-1 text-sm text-muted-foreground">Use the <strong>Create Filesystem</strong> button above to get started. If no devices are available, <a href="/disks" class="text-primary hover:underline">prepare your disks</a> first.</p>
+	</div>
 {:else}
 	{#each filesystems as fs}
 		<Card class="mb-4">

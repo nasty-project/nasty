@@ -707,11 +707,20 @@
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else if filesystems.length === 0}
-	<p class="text-muted-foreground">No filesystems configured. Create a filesystem first.</p>
+	<div class="flex flex-col items-center justify-center py-12 text-center">
+		<p class="text-muted-foreground">No filesystems configured.</p>
+		<a href="/filesystems" class="mt-1 text-sm text-primary hover:underline">Create a filesystem first &rarr;</a>
+	</div>
 {:else if mountedFilesystems.length === 0}
-	<p class="text-muted-foreground">No mounted filesystems. Mount a filesystem first.</p>
+	<div class="flex flex-col items-center justify-center py-12 text-center">
+		<p class="text-muted-foreground">No mounted filesystems.</p>
+		<a href="/filesystems" class="mt-1 text-sm text-primary hover:underline">Mount a filesystem first &rarr;</a>
+	</div>
 {:else if subvolumes.length === 0}
-	<p class="text-muted-foreground">No subvolumes in filesystem "{selectedFs}".</p>
+	<div class="flex flex-col items-center justify-center py-12 text-center">
+		<p class="text-muted-foreground">No subvolumes in filesystem "{selectedFs}".</p>
+		<p class="mt-1 text-sm text-muted-foreground">Use the <strong>Create Subvolume</strong> button above to get started.</p>
+	</div>
 {:else}
 	<table class="w-full text-sm">
 		<thead>

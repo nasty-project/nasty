@@ -321,7 +321,7 @@
 			{/each}
 		</div>
 	</div>
-	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-{filesystems.length > 0 ? '4' : '2'}">
+	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
 		<Card>
 			<CardHeader class="pb-2">
 				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">CPU</CardTitle>
@@ -380,13 +380,13 @@
 			</CardContent>
 		</Card>
 
-		{#if filesystems.length > 0}
-			{@const storage = totalStorage(filesystems)}
-			<Card class="sm:col-span-2">
-				<CardHeader class="pb-2">
-					<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Storage</CardTitle>
-				</CardHeader>
-				<CardContent>
+		<Card class="sm:col-span-2">
+			<CardHeader class="pb-2">
+				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Storage</CardTitle>
+			</CardHeader>
+			<CardContent>
+				{#if filesystems.length > 0}
+					{@const storage = totalStorage(filesystems)}
 					{#if storage.total > 0}
 						<div class="flex items-baseline gap-2">
 							<span class="text-2xl font-bold">{formatPercent(storage.used, storage.total)}</span>
@@ -409,9 +409,12 @@
 							</div>
 						{/each}
 					</div>
-				</CardContent>
-			</Card>
-		{/if}
+				{:else}
+					<p class="text-sm text-muted-foreground">No filesystems configured yet.</p>
+					<a href="/filesystems" class="mt-2 inline-block text-sm font-medium text-primary hover:underline">Create a filesystem &rarr;</a>
+				{/if}
+			</CardContent>
+		</Card>
 	</div>
 {/if}
 
