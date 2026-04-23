@@ -3,11 +3,16 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
-	import type { Settings, SystemInfo, NetworkConfig, TuningConfig, NutConfig, UpsStatus } from '$lib/types';
+	import type { Settings, SystemInfo, NetworkConfig, TuningConfig, NutConfig, UpsStatus, NetIfStats } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
+	import { Badge } from '$lib/components/ui/badge';
 	import { Copy, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
 
-	let activeTab: 'general' | 'tls' | 'vpn' | 'metrics' | 'tuning' | 'ups' = $state('general');
+	let activeTab: 'general' | 'network' | 'tls' | 'vpn' | 'metrics' | 'tuning' | 'ups' = $state('general');
+
+	// Network tab — interface list
+	let netInterfaces: NetIfStats[] = $state([]);
+	let netIfLoaded = $state(false);
 
 	// ── General tab state ───────────────────────────────────
 	let settings: Settings | null = $state(null);
@@ -342,8 +347,19 @@
 		collapsedSections[title] = !collapsedSections[title];
 	}
 
-	function switchTab(tab: 'general' | 'tls' | 'vpn' | 'metrics' | 'tuning' | 'ups') {
+	async function loadNetInterfaces() {
+		try {
+			const stats = await client.call<{ network: NetIfStats[] }>('system.stats');
+			netInterfaces = stats.network.filter(iface => iface.name !== 'lo');
+			netIfLoaded = true;
+		} catch { /* ignore */ }
+	}
+
+	function switchTab(tab: typeof activeTab) {
 		activeTab = tab;
+		if (tab === 'network' && !netIfLoaded) {
+			loadNetInterfaces();
+		}
 		if (tab === 'metrics' && !metricsText) {
 			loadMetrics();
 		}
@@ -507,6 +523,12 @@
 			: 'text-muted-foreground hover:text-foreground'}"
 	>General</button>
 	<button
+		onclick={() => switchTab('network')}
+		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'network'
+			? 'border-b-2 border-primary text-foreground'
+			: 'text-muted-foreground hover:text-foreground'}"
+	>Network</button>
+	<button
 		onclick={() => switchTab('tls')}
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'tls'
 			? 'border-b-2 border-primary text-foreground'
@@ -656,9 +678,80 @@
 
 			<!-- Right column -->
 			<div class="flex flex-col gap-6">
-			{#if network}
+
+			<!-- Telemetry -->
 			<section class="rounded-lg border border-border p-5">
-				<h2 class="mb-4 text-base font-semibold">Network</h2>
+				<h2 class="mb-2 text-base font-semibold">Anonymous Telemetry</h2>
+				<p class="mb-4 text-sm text-muted-foreground">
+					Help improve NASty by sharing anonymous usage data: number of drives and storage capacity.
+					No personal information is collected.
+				</p>
+
+				<div class="mb-4">
+					<label class="flex items-center gap-2 text-sm cursor-pointer">
+						<input
+							type="checkbox"
+							checked={settings.telemetry_enabled}
+							onchange={(e) => saveTelemetry(e.currentTarget.checked)}
+							class="rounded border-input"
+						/>
+						<span class="font-medium">Enable telemetry</span>
+					</label>
+				</div>
+
+				<Button size="sm" onclick={sendTelemetry} disabled={sendingTelemetry || !settings.telemetry_enabled}>
+					{sendingTelemetry ? 'Sending…' : 'Send Now'}
+				</Button>
+			</section>
+
+			</div>
+		</div>
+	{/if}
+
+{:else if activeTab === 'network'}
+
+	<div class="max-w-3xl">
+		<!-- Interface list -->
+		<section class="mb-6 rounded-lg border border-border p-5">
+			<h2 class="mb-4 text-base font-semibold">Interfaces</h2>
+			{#if !netIfLoaded}
+				<p class="text-sm text-muted-foreground">Loading...</p>
+			{:else if netInterfaces.length === 0}
+				<p class="text-sm text-muted-foreground">No network interfaces detected.</p>
+			{:else}
+				<div class="space-y-2">
+					{#each netInterfaces as iface}
+						<div class="flex items-center gap-4 rounded-lg border border-border px-4 py-3 {network?.interface === iface.name ? 'border-primary/50 bg-primary/5' : ''}">
+							<div class="flex-1 min-w-0">
+								<div class="flex items-center gap-2">
+									<span class="font-mono text-sm font-medium">{iface.name}</span>
+									<Badge variant={iface.up ? 'default' : 'secondary'} class="text-[0.6rem]">
+										{iface.up ? 'Up' : 'Down'}
+									</Badge>
+									{#if network?.interface === iface.name}
+										<Badge variant="outline" class="text-[0.6rem]">Configured</Badge>
+									{/if}
+								</div>
+								{#if iface.addresses.length > 0}
+									<div class="mt-0.5 font-mono text-xs text-muted-foreground">{iface.addresses.join(', ')}</div>
+								{/if}
+							</div>
+							{#if iface.speed_mbps}
+								<span class="text-xs text-muted-foreground">{iface.speed_mbps >= 1000 ? `${iface.speed_mbps / 1000}G` : `${iface.speed_mbps}M`}</span>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</section>
+
+		<!-- Network configuration (for configured interface) -->
+		{#if network}
+			<section class="rounded-lg border border-border p-5">
+				<h2 class="mb-1 text-base font-semibold">Configuration</h2>
+				<p class="mb-4 text-xs text-muted-foreground">
+					Settings for <span class="font-mono">{network.interface || 'primary interface'}</span>
+				</p>
 
 				{#if network.live_addresses.length > 0}
 					<div class="mb-4 flex items-start justify-between gap-4">
@@ -670,7 +763,6 @@
 									<span class="ml-1 text-muted-foreground">via {network.live_gateway}</span>
 								{/if}
 							</div>
-							{#if network.interface}<div class="text-xs text-muted-foreground">{network.interface}</div>{/if}
 						</div>
 					</div>
 				{/if}
@@ -750,39 +842,11 @@
 				{/if}
 
 				<Button size="sm" onclick={saveNetwork} disabled={savingNetwork || !netChanged}>
-					{savingNetwork ? 'Applying…' : 'Apply Network'}
+					{savingNetwork ? 'Applying\u2026' : 'Apply'}
 				</Button>
 			</section>
-			{/if}
-
-			<!-- Telemetry -->
-			<section class="rounded-lg border border-border p-5">
-				<h2 class="mb-2 text-base font-semibold">Anonymous Telemetry</h2>
-				<p class="mb-4 text-sm text-muted-foreground">
-					Help improve NASty by sharing anonymous usage data: number of drives and storage capacity.
-					No personal information is collected.
-				</p>
-
-				<div class="mb-4">
-					<label class="flex items-center gap-2 text-sm cursor-pointer">
-						<input
-							type="checkbox"
-							checked={settings.telemetry_enabled}
-							onchange={(e) => saveTelemetry(e.currentTarget.checked)}
-							class="rounded border-input"
-						/>
-						<span class="font-medium">Enable telemetry</span>
-					</label>
-				</div>
-
-				<Button size="sm" onclick={sendTelemetry} disabled={sendingTelemetry || !settings.telemetry_enabled}>
-					{sendingTelemetry ? 'Sending…' : 'Send Now'}
-				</Button>
-			</section>
-
-			</div>
-		</div>
-	{/if}
+		{/if}
+	</div>
 
 {:else if activeTab === 'tls'}
 
