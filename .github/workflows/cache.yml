@@ -32,3 +32,5 @@ jobs:
             --no-link -L
           nix build .#packages.x86_64-linux.webui \
             --no-link -L
+          nix build .#packages.x86_64-linux.bcachefs-tools \
+            --no-link -L
