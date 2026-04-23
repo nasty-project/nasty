@@ -335,7 +335,7 @@
 			{/each}
 		</div>
 	</div>
-	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 {filesystems.length > 0 ? 'lg:grid-cols-4' : ''}">
 		<Card>
 			<CardHeader class="pb-2">
 				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">CPU</CardTitle>
@@ -394,41 +394,38 @@
 			</CardContent>
 		</Card>
 
+		{#if filesystems.length > 0}
 		<Card class="sm:col-span-2">
 			<CardHeader class="pb-2">
 				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Storage</CardTitle>
 			</CardHeader>
 			<CardContent>
-				{#if filesystems.length > 0}
-					{@const storage = totalStorage(filesystems)}
-					{#if storage.total > 0}
-						<div class="flex items-baseline gap-2">
-							<span class="text-2xl font-bold">{formatPercent(storage.used, storage.total)}</span>
-							<span class="text-xs text-muted-foreground">{formatBytes(storage.used)} / {formatBytes(storage.total)}</span>
-						</div>
-						<div class="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
-							<div class="h-full rounded-full transition-all duration-500 {barColor(storagePercent(filesystems))}" style="width: {storagePercent(filesystems)}%"></div>
-						</div>
-					{/if}
-					<div class="mt-3 grid grid-cols-1 gap-1 sm:grid-cols-2">
-						{#each filesystems as fs}
-							<div class="flex items-center gap-2 rounded px-2 py-1 text-sm">
-								<span class="font-semibold">{fs.name}</span>
-								<Badge variant={fs.mounted ? 'default' : 'destructive'} class="text-[0.6rem]">
-									{fs.mounted ? 'Mounted' : 'Unmounted'}
-								</Badge>
-								{#if fs.total_bytes > 0}
-									<span class="ml-auto text-xs tabular-nums text-muted-foreground">{formatBytes(fs.used_bytes)} / {formatBytes(fs.total_bytes)}</span>
-								{/if}
-							</div>
-						{/each}
+				{@const storage = totalStorage(filesystems)}
+				{#if storage.total > 0}
+					<div class="flex items-baseline gap-2">
+						<span class="text-2xl font-bold">{formatPercent(storage.used, storage.total)}</span>
+						<span class="text-xs text-muted-foreground">{formatBytes(storage.used)} / {formatBytes(storage.total)}</span>
 					</div>
-				{:else}
-					<p class="text-sm text-muted-foreground">No filesystems configured yet.</p>
-					<Button size="xs" variant="outline" class="mt-2" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
+					<div class="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
+						<div class="h-full rounded-full transition-all duration-500 {barColor(storagePercent(filesystems))}" style="width: {storagePercent(filesystems)}%"></div>
+					</div>
 				{/if}
+				<div class="mt-3 grid grid-cols-1 gap-1 sm:grid-cols-2">
+					{#each filesystems as fs}
+						<div class="flex items-center gap-2 rounded px-2 py-1 text-sm">
+							<span class="font-semibold">{fs.name}</span>
+							<Badge variant={fs.mounted ? 'default' : 'destructive'} class="text-[0.6rem]">
+								{fs.mounted ? 'Mounted' : 'Unmounted'}
+							</Badge>
+							{#if fs.total_bytes > 0}
+								<span class="ml-auto text-xs tabular-nums text-muted-foreground">{formatBytes(fs.used_bytes)} / {formatBytes(fs.total_bytes)}</span>
+							{/if}
+						</div>
+					{/each}
+				</div>
 			</CardContent>
 		</Card>
+		{/if}
 	</div>
 {/if}
 
