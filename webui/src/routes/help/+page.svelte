@@ -116,6 +116,96 @@
 			],
 		},
 		{
+			title: 'System & Updates',
+			entries: [
+				{
+					term: 'NixOS',
+					summary: 'The Linux distribution that NASty runs on.',
+					detail: 'NixOS is a declarative operating system — the entire system configuration is defined in code and rebuilt atomically. This means updates are safe and rollback is always possible. You don\'t need to know NixOS to use NASty, but it\'s why updates and rollbacks work so reliably.',
+				},
+				{
+					term: 'Generation',
+					summary: 'A snapshot of the entire system configuration.',
+					detail: 'Every time NASty updates, NixOS creates a new generation — a complete, bootable system state. If an update causes problems, you can roll back to a previous generation from the Update page or the boot menu. Old generations can be garbage-collected to free disk space.',
+				},
+				{
+					term: 'Firmware',
+					summary: 'Low-level software embedded in hardware devices.',
+					detail: 'Disk drives, network cards, and motherboards all have firmware. NASty can update firmware for supported devices through the fwupd service. Keeping firmware up to date improves stability and security.',
+				},
+			],
+		},
+		{
+			title: 'Apps & Virtualization',
+			entries: [
+				{
+					term: 'VM (Virtual Machine)',
+					summary: 'A full computer emulated in software.',
+					detail: 'VMs run a complete operating system with its own kernel, isolated from the host. Use VMs when you need a different OS (e.g., Windows), full isolation, or software that can\'t run in containers. Requires KVM support in the CPU.',
+				},
+				{
+					term: 'App',
+					summary: 'A self-contained application running in a Docker container.',
+					detail: 'NASty\'s Apps page lets you deploy and manage Docker containers — pre-packaged applications like media servers, download managers, or home automation. Each app runs isolated from the host system.',
+				},
+				{
+					term: 'Docker',
+					summary: 'A container runtime for running isolated applications.',
+					detail: 'Docker packages an application and all its dependencies into a container — a lightweight, portable unit that runs the same everywhere. Containers share the host kernel, making them much lighter than VMs.',
+				},
+				{
+					term: 'Docker Compose',
+					summary: 'A tool for defining multi-container applications.',
+					detail: 'Some apps need multiple containers working together (e.g., a web app + database). Docker Compose defines these in a single YAML file, managing networking and dependencies between containers automatically.',
+				},
+			],
+		},
+		{
+			title: 'Networking & Services',
+			entries: [
+				{
+					term: 'SSH',
+					summary: 'Secure Shell — encrypted remote terminal access.',
+					detail: 'SSH lets you connect to NASty\'s command line from another computer. Used for advanced administration, scripting, and debugging. Can be configured with password or key-based authentication.',
+				},
+				{
+					term: 'Avahi (mDNS)',
+					summary: 'Automatic network discovery — makes NASty findable by name.',
+					detail: 'Avahi broadcasts NASty\'s hostname on the local network using mDNS (multicast DNS). This is why you can reach your NAS at nasty.local instead of memorizing an IP address. Works out of the box on macOS and most Linux desktops. Windows may need Bonjour installed.',
+				},
+				{
+					term: 'SMART',
+					summary: 'Self-Monitoring, Analysis and Reporting Technology for disks.',
+					detail: 'SMART is built into every modern disk drive. It tracks health indicators like temperature, error counts, and hours of operation. NASty monitors SMART data and can alert you when a disk shows signs of failure — often before data loss occurs.',
+				},
+				{
+					term: 'Terminal',
+					summary: 'A command-line shell running directly on NASty.',
+					detail: 'The built-in terminal gives you a bash shell on the NAS, accessible from the web UI. Useful for running bcachefs commands, inspecting logs, or anything the web UI doesn\'t cover. Commands like nasty-top are available here.',
+				},
+			],
+		},
+		{
+			title: 'Security & Access',
+			entries: [
+				{
+					term: 'Access Control',
+					summary: 'Managing who can log into and administer NASty.',
+					detail: 'NASty supports local user accounts for the web UI and SMB shares. Access control settings let you manage passwords, permissions, and authentication methods.',
+				},
+				{
+					term: 'Token',
+					summary: 'A credential used for API authentication.',
+					detail: 'API tokens let external programs (scripts, CSI drivers, automation tools) authenticate with NASty without using a username and password. Tokens can be created and revoked from the Access Control page.',
+				},
+				{
+					term: 'API',
+					summary: 'Application Programming Interface — how software talks to NASty.',
+					detail: 'NASty\'s engine exposes a JSON-RPC 2.0 API over WebSocket. Everything the web UI does goes through this API, and you can use it directly for scripting and automation. Connect to ws://<nasty-ip>/ws/api with a valid token.',
+				},
+			],
+		},
+		{
 			title: 'Which Protocol Should I Use?',
 			entries: [
 				{
