@@ -636,15 +636,15 @@
 							<Circle size={18} class="mt-0.5 shrink-0 text-muted-foreground" />
 						{/if}
 						<div class="flex-1 min-w-0">
-							<div class="text-sm font-medium">Storage Filesystem</div>
+							<div class="text-sm font-medium">Filesystem</div>
 							<div class="text-xs text-muted-foreground">
 								{envReady.filesystem
 									? `${filesystems.length} filesystem${filesystems.length !== 1 ? 's' : ''} available`
-									: 'No filesystem found — create one in Storage first'}
+									: 'No filesystem found — create one in Filesystems first'}
 							</div>
 						</div>
 						{#if !envReady.filesystem}
-							<Button size="xs" variant="outline" onclick={() => window.location.href = '/filesystems'}>Go to Storage</Button>
+							<Button size="xs" variant="outline" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
 						{/if}
 					</div>
 					<div class="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5">

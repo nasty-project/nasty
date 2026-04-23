@@ -591,16 +591,16 @@
 						<Circle size={18} class="mt-0.5 shrink-0 text-muted-foreground" />
 					{/if}
 					<div class="flex-1 min-w-0">
-						<div class="text-sm font-medium">Storage Filesystem</div>
+						<div class="text-sm font-medium">Filesystem</div>
 						<div class="text-xs text-muted-foreground">
 							{filesystems.length > 0
 								? `${filesystems.length} filesystem${filesystems.length !== 1 ? 's' : ''} available`
-								: 'No filesystem found — create one in Storage first'}
+								: 'No filesystem found — create one in Filesystems first'}
 						</div>
 					</div>
 					{#if filesystems.length === 0}
 						<Button size="xs" variant="outline" onclick={() => window.location.href = '/filesystems'}>
-							Go to Storage
+							Go to Filesystems
 						</Button>
 					{/if}
 				</div>
