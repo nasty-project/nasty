@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { error as showError } from '$lib/toast.svelte';
 	import type { Filesystem } from '$lib/types';
-	import { RefreshCw } from '@lucide/svelte';
+	import { RefreshCw, SquareArrowOutUpRight } from '@lucide/svelte';
 
 	type Tab = 'usage' | 'top' | 'timestats' | 'scrub' | 'reconcile';
 
@@ -304,6 +304,18 @@
 				{/each}
 			</select>
 		{/if}
+	</div>
+
+	<!-- nasty-top suggestion -->
+	<div class="flex items-center gap-2 rounded-md border border-border bg-secondary/30 px-4 py-2 text-sm">
+		<span class="text-muted-foreground">For live IO monitoring, latency graphs, and tuning use</span>
+		<a
+			href="/terminal?cmd=nasty-top"
+			class="inline-flex items-center gap-1 font-mono font-medium text-primary hover:underline"
+		>
+			nasty-top
+			<SquareArrowOutUpRight size={12} />
+		</a>
 	</div>
 
 	<!-- Tab bar -->
