@@ -291,16 +291,22 @@ pub struct PortConflict {
 // ── Service ─────────────────────────────────────────────────────
 
 pub struct AppsService {
-    docker: Docker,
+    docker: Option<Docker>,
 }
 
 impl AppsService {
     pub fn new() -> Self {
-        // Connect to Docker socket. If Docker isn't running yet, individual
-        // operations will fail with a clear error rather than crashing at startup.
         let docker = Docker::connect_with_unix_defaults()
-            .unwrap_or_else(|_| Docker::connect_with_unix("/var/run/docker.sock", 120, &bollard::API_DEFAULT_VERSION).unwrap());
+            .or_else(|_| Docker::connect_with_unix("/var/run/docker.sock", 120, &bollard::API_DEFAULT_VERSION))
+            .ok();
+        if docker.is_none() {
+            warn!("Docker not available at startup — app management will be unavailable until engine restart");
+        }
         Self { docker }
+    }
+
+    fn docker(&self) -> Result<&Docker, AppsError> {
+        self.docker.as_ref().ok_or_else(|| AppsError::NotReady("Docker socket not available".into()))
     }
 
     // ── Enable/Disable ──────────────────────────────────────
@@ -391,10 +397,12 @@ impl AppsService {
         if let Ok(apps) = self.list().await {
             for app in &apps {
                 if app.status == "running" {
-                    let _ = self.docker.stop_container(
-                        &container_name(&app.name),
-                        Some(StopContainerOptions { t: Some(10), signal: None }),
-                    ).await;
+                    if let Ok(docker) = self.docker() {
+                        let _ = docker.stop_container(
+                            &container_name(&app.name),
+                            Some(StopContainerOptions { t: Some(10), signal: None }),
+                        ).await;
+                    }
                 }
             }
         }
@@ -567,7 +575,7 @@ impl AppsService {
             ..Default::default()
         };
 
-        self.docker
+        self.docker()?
             .create_container(
                 Some(CreateContainerOptions {
                     name: Some(cname.clone()),
@@ -577,7 +585,7 @@ impl AppsService {
             )
             .await?;
 
-        self.docker.start_container(&cname, None::<bollard::query_parameters::StartContainerOptions>).await?;
+        self.docker()?.start_container(&cname, None::<bollard::query_parameters::StartContainerOptions>).await?;
 
         info!("Installed app '{}' (image: {})", req.name, req.image);
 
@@ -617,11 +625,11 @@ impl AppsService {
 
         // Stop and remove the old container
         let _ = self
-            .docker
+            .docker()?
             .stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None }))
             .await;
         let _ = self
-            .docker
+            .docker()?
             .remove_container(
                 &cname,
                 Some(RemoveContainerOptions {
@@ -652,10 +660,10 @@ impl AppsService {
 
         // Stop and remove
         let _ = self
-            .docker
+            .docker()?
             .stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None }))
             .await;
-        self.docker
+        self.docker()?
             .remove_container(
                 &cname,
                 Some(RemoveContainerOptions {
@@ -684,7 +692,7 @@ impl AppsService {
         filters.insert("label".to_string(), vec![format!("{LABEL_MANAGED}=true")]);
 
         let labeled = self
-            .docker
+            .docker()?
             .list_containers(Some(ListContainersOptions {
                 all: true,
                 filters: Some(filters),
@@ -742,7 +750,7 @@ impl AppsService {
                     vec![format!("com.docker.compose.project={name}")],
                 );
                 let compose_containers = self
-                    .docker
+                    .docker()?
                     .list_containers(Some(ListContainersOptions {
                         all: true,
                         filters: Some(pf),
@@ -823,7 +831,7 @@ impl AppsService {
 
         let cname = container_name(name);
         let info = self
-            .docker
+            .docker()?
             .inspect_container(&cname, None)
             .await
             .map_err(|_| AppsError::AppNotFound(name.to_string()))?;
@@ -938,7 +946,7 @@ impl AppsService {
         let tail_str = tail.unwrap_or(100).to_string();
 
         let logs = self
-            .docker
+            .docker()?
             .logs(
                 &cname,
                 Some(LogsOptions {
@@ -962,7 +970,7 @@ impl AppsService {
 
         let tail_str = tail.unwrap_or(100).to_string();
         let logs = self
-            .docker
+            .docker()?
             .logs(
                 container_id,
                 Some(LogsOptions {
@@ -1002,7 +1010,7 @@ impl AppsService {
             if !self.container_exists(&cname).await {
                 return Err(AppsError::AppNotFound(name.to_string()));
             }
-            self.docker
+            self.docker()?
                 .stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None }))
                 .await?;
         }
@@ -1031,7 +1039,7 @@ impl AppsService {
             if !self.container_exists(&cname).await {
                 return Err(AppsError::AppNotFound(name.to_string()));
             }
-            self.docker
+            self.docker()?
                 .start_container(&cname, None::<bollard::query_parameters::StartContainerOptions>)
                 .await?;
         }
@@ -1409,7 +1417,10 @@ impl AppsService {
     // ── Internal helpers ────────────────────────────────────
 
     async fn is_docker_ready(&self) -> bool {
-        self.docker.ping().await.is_ok()
+        match self.docker() {
+            Ok(d) => d.ping().await.is_ok(),
+            Err(_) => false,
+        }
     }
 
     async fn require_ready(&self) -> Result<(), AppsError> {
@@ -1423,12 +1434,15 @@ impl AppsService {
     }
 
     async fn docker_version(&self) -> Option<String> {
-        let version = self.docker.version().await.ok()?;
+        let version = self.docker().ok()?.version().await.ok()?;
         version.version
     }
 
     async fn container_exists(&self, name: &str) -> bool {
-        self.docker.inspect_container(name, None).await.is_ok()
+        match self.docker() {
+            Ok(d) => d.inspect_container(name, None).await.is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// Collect all host ports currently in use by managed containers.
@@ -1457,7 +1471,7 @@ impl AppsService {
             ..Default::default()
         };
 
-        self.docker
+        self.docker()?
             .create_image(Some(options), None, None)
             .try_collect::<Vec<_>>()
             .await?;
@@ -1467,7 +1481,7 @@ impl AppsService {
 
     /// Look up the host port Docker actually assigned for a given container port.
     async fn get_mapped_port(&self, container: &str, container_port: u16) -> Option<u16> {
-        let info = self.docker.inspect_container(container, None).await.ok()?;
+        let info = self.docker().ok()?.inspect_container(container, None).await.ok()?;
         let ports = info.network_settings?.ports?;
         let key = format!("{container_port}/tcp");
         let bindings = ports.get(&key)?.as_ref()?;
@@ -1503,7 +1517,7 @@ impl AppsService {
 
     /// Total Docker disk usage (images + containers + volumes).
     async fn docker_disk_usage(&self) -> Option<u64> {
-        let df = self.docker.df(None::<bollard::query_parameters::DataUsageOptions>).await.ok()?;
+        let df = self.docker().ok()?.df(None::<bollard::query_parameters::DataUsageOptions>).await.ok()?;
         let mut total: u64 = 0;
         if let Some(ref images) = df.images_disk_usage {
             total += images.total_size.unwrap_or(0) as u64;
@@ -1535,7 +1549,7 @@ impl AppsService {
             if !self.container_exists(&cname).await {
                 return Err(AppsError::AppNotFound(name.to_string()));
             }
-            self.docker.restart_container(&cname, Some(bollard::query_parameters::RestartContainerOptions { t: Some(10), signal: None })).await?;
+            self.docker()?.restart_container(&cname, Some(bollard::query_parameters::RestartContainerOptions { t: Some(10), signal: None })).await?;
         }
 
         info!("Restarted app '{name}'");
@@ -1574,7 +1588,7 @@ impl AppsService {
             info!("Pulled latest images for compose app '{name}'");
         } else {
             let cname = container_name(name);
-            let info = self.docker.inspect_container(&cname, None).await
+            let info = self.docker()?.inspect_container(&cname, None).await
                 .map_err(|_| AppsError::AppNotFound(name.to_string()))?;
             let image = info.config.and_then(|c| c.image).unwrap_or_default();
             if image.is_empty() {
@@ -1586,10 +1600,10 @@ impl AppsService {
 
             // Recreate container with same config but new image
             // Stop + remove + start from the pulled image
-            let _ = self.docker.stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None })).await;
+            let _ = self.docker()?.stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None })).await;
             // We need the full config to recreate — get_config then re-install
             let config = self.get_config(name).await?;
-            let _ = self.docker.remove_container(&cname, Some(RemoveContainerOptions {
+            let _ = self.docker()?.remove_container(&cname, Some(RemoveContainerOptions {
                 force: true,
                 ..Default::default()
             })).await;
@@ -1614,12 +1628,12 @@ impl AppsService {
     pub async fn prune(&self) -> Result<PruneResult, AppsError> {
         self.require_ready().await?;
 
-        let result = self.docker.prune_images(None::<bollard::query_parameters::PruneImagesOptions>).await?;
+        let result = self.docker()?.prune_images(None::<bollard::query_parameters::PruneImagesOptions>).await?;
         let images_removed = result.images_deleted.map(|v| v.len()).unwrap_or(0);
         let space_reclaimed = result.space_reclaimed.unwrap_or(0) as u64;
 
         // Also prune volumes
-        let _ = self.docker.prune_volumes(None::<bollard::query_parameters::PruneVolumesOptions>).await;
+        let _ = self.docker()?.prune_volumes(None::<bollard::query_parameters::PruneVolumesOptions>).await;
 
         info!("Pruned {images_removed} images, reclaimed {} bytes", space_reclaimed);
         Ok(PruneResult {
