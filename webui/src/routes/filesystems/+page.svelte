@@ -1535,7 +1535,7 @@
 										</label>
 									</div>
 									{#if availableDevicesForAdd().length === 0}
-										<p class="text-sm text-muted-foreground">No available devices</p>
+										<p class="text-sm text-muted-foreground">No available devices. Wipe or prepare them in <Button size="xs" onclick={() => goto('/disks')}>Disks</Button></p>
 									{:else}
 										{#each availableDevicesForAdd() as dev}
 											<label class="flex cursor-pointer items-center gap-2 py-1 text-sm">
@@ -1550,9 +1550,13 @@
 											<Input id="add-dev-label" bind:value={addDeviceLabel} placeholder="e.g. ssd.fast" class="mt-1" />
 										</div>
 									{/if}
-									<div class="mt-2 flex gap-2">
+									<div class="mt-2 flex items-center gap-2">
 										<Button size="xs" onclick={() => addDevice(fs.name)} disabled={!addDevicePath}>Add</Button>
 										<Button variant="secondary" size="xs" onclick={() => { addDeviceFs = null; addDevicePath = ''; addDeviceLabel = ''; }}>Cancel</Button>
+										{#if availableDevicesForAdd().length > 0}
+											<span class="ml-auto text-xs text-muted-foreground">Need to wipe a disk first?</span>
+											<Button size="xs" variant="secondary" onclick={() => goto('/disks')}>Disks</Button>
+										{/if}
 									</div>
 								</div>
 							{:else}
