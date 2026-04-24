@@ -10,7 +10,16 @@ on:
 
 jobs:
   build-iso:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            nix_config: nasty-iso
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            nix_config: nasty-iso-aarch64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     steps:
@@ -33,10 +42,10 @@ jobs:
           git add flake.nix
           echo "Updated flake.nix with hash: $HASH"
 
-      - name: Build x86_64 ISO
+      - name: Build ${{ matrix.arch }} ISO
         run: |
           set -o pipefail
-          nix build .#nixosConfigurations.nasty-iso.config.system.build.isoImage \
+          nix build .#nixosConfigurations.${{ matrix.nix_config }}.config.system.build.isoImage \
             --no-link --print-out-paths -L 2>&1 | tee /tmp/build.log
           grep '^/nix/store' /tmp/build.log | tail -1 > /tmp/iso-path.txt
           cat /tmp/iso-path.txt
@@ -55,7 +64,7 @@ jobs:
           else
             VERSION="dev-$(git rev-parse --short HEAD)"
           fi
-          DEST="nasty-${VERSION}-x86_64.iso"
+          DEST="nasty-${VERSION}-${{ matrix.arch }}.iso"
           cp "$ISO_FILE" "$DEST"
           echo "iso_dest=$DEST" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_ENV"
