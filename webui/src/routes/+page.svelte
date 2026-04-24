@@ -385,7 +385,10 @@
 		</div>
 	</div>
 	<!-- Stats summary row -->
-	<div class="mb-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+	{@const hasTemp = stats.cpu.temp_c != null || stats.cpu.freq_mhz != null}
+	{@const hasStorage = filesystems.length > 0}
+	{@const statCols = 2 + (hasTemp ? 1 : 0) + (hasStorage ? 1 : 0)}
+	<div class="mb-4 grid grid-cols-2 gap-4 {statCols === 4 ? 'sm:grid-cols-4' : statCols === 3 ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}">
 		<Card>
 			<CardContent class="pt-4 pb-3">
 				<div class="text-xs uppercase tracking-wide text-muted-foreground">CPU Load</div>
