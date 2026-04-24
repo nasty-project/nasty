@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { getToken } from '$lib/auth';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
@@ -304,7 +305,7 @@
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">{currentPath ? 'Empty directory' : 'No filesystems mounted.'}</p>
 		{#if !currentPath}
-			<Button size="sm" class="mt-2" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
+			<Button size="sm" class="mt-2" onclick={() => goto('/filesystems')}>Go to Filesystems</Button>
 		{/if}
 	</div>
 {:else}

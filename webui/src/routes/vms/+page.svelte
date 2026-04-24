@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { getClient } from '$lib/client';
 	import { getToken } from '$lib/auth';
 	import { withToast } from '$lib/toast.svelte';
@@ -644,7 +645,7 @@
 							</div>
 						</div>
 						{#if !envReady.filesystem}
-							<Button size="sm" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
+							<Button size="sm" onclick={() => goto('/filesystems')}>Go to Filesystems</Button>
 						{/if}
 					</div>
 					<div class="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5">

@@ -9,6 +9,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { createIoHistory } from '$lib/history.svelte';
 	import IoChart from '$lib/components/io-chart.svelte';
+	import { goto } from '$app/navigation';
 	import { ChevronDown, ChevronRight } from '@lucide/svelte';
 
 	let info: SystemInfo | null = $state(null);
@@ -317,7 +318,7 @@
 				<h2 class="text-lg font-bold">Get started with NASty</h2>
 				<p class="mt-1 text-sm text-muted-foreground">Create your first filesystem to start storing and sharing data.</p>
 			</div>
-			<Button onclick={() => window.location.href = '/filesystems'}>Create Filesystem</Button>
+			<Button onclick={() => goto('/filesystems')}>Create Filesystem</Button>
 		</CardContent>
 	</Card>
 {/if}

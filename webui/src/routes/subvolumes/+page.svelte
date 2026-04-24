@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { getClient } from '$lib/client';
 	import { formatBytes } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
@@ -709,12 +710,12 @@
 {:else if filesystems.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">No filesystems configured.</p>
-		<Button size="sm" class="mt-2" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
+		<Button size="sm" class="mt-2" onclick={() => goto('/filesystems')}>Go to Filesystems</Button>
 	</div>
 {:else if mountedFilesystems.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">No mounted filesystems.</p>
-		<Button size="sm" class="mt-2" onclick={() => window.location.href = '/filesystems'}>Go to Filesystems</Button>
+		<Button size="sm" class="mt-2" onclick={() => goto('/filesystems')}>Go to Filesystems</Button>
 	</div>
 {:else if subvolumes.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">

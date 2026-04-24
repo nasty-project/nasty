@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
@@ -599,7 +600,7 @@
 						</div>
 					</div>
 					{#if filesystems.length === 0}
-						<Button size="sm" onclick={() => window.location.href = '/filesystems'}>
+						<Button size="sm" onclick={() => goto('/filesystems')}>
 							Go to Filesystems
 						</Button>
 					{/if}
