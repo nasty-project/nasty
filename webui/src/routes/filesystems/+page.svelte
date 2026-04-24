@@ -116,6 +116,9 @@
 		client.onEvent(handleEvent);
 		await refresh();
 		loading = false;
+		if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('create')) {
+			openWizard();
+		}
 	});
 
 	onDestroy(() => client.offEvent(handleEvent));
