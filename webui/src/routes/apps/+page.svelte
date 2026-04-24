@@ -601,7 +601,7 @@
 					</div>
 					{#if filesystems.length === 0}
 						<Button size="sm" onclick={() => goto('/filesystems')}>
-							Go to Filesystems
+							Filesystems
 						</Button>
 					{/if}
 				</div>

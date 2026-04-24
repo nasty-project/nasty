@@ -305,7 +305,7 @@
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">{currentPath ? 'Empty directory' : 'No filesystems mounted.'}</p>
 		{#if !currentPath}
-			<Button size="sm" class="mt-2" onclick={() => goto('/filesystems')}>Go to Filesystems</Button>
+			<Button size="sm" class="mt-2" onclick={() => goto('/filesystems')}>Filesystems</Button>
 		{/if}
 	</div>
 {:else}
