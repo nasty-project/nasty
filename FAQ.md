@@ -34,9 +34,10 @@ No. NASty is experimental and under active development. bcachefs itself is still
 
 That said, NASty is probably the most thoroughly tested one-person NAS project you'll find:
 
-- **370 API integration tests** — exercising the engine directly across all protocols, snapshots, clones, and data integrity
-- **132 Kubernetes E2E tests** — real k3s cluster provisioning real volumes over real network protocols
+- **170 Kubernetes E2E tests** — real cluster provisioning real volumes over all four network protocols, including snapshots, clones, and scale tests
+- **362 CSI driver unit tests** — covering node staging, volume lifecycle, health monitoring, and recovery
 - **76 CSI sanity tests** — spec compliance verification
+- **Integration test suite** — exercising the engine API across all protocols, snapshots, clones, and data integrity
 - CI/CD pipeline builds, lints, tests, and publishes container images automatically
 
 Use it for homelabs, development, and learning. Not for storing your only copy of irreplaceable data. Yet.
@@ -64,7 +65,7 @@ They work, but both are early-stage.
 
 VMs use QEMU/KVM with a noVNC console in the browser. You can create a VM, boot an ISO, and use it. It won't replace Proxmox, but it handles simple workloads.
 
-Apps run on an embedded k3s instance. You can deploy containers from the web UI. The management interface is basic.
+Apps run on Docker. You can deploy single containers or full Compose stacks from the web UI. The management interface is basic.
 
 Both features are under active development. Contributions in these areas would have outsized impact.
 
