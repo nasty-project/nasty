@@ -3,6 +3,9 @@
 {
   imports = [ ./binary-cache.nix ];
 
+  # Disable desktop-oriented services that are unnecessary on a headless NAS
+  services.udisks2.enable = false;
+
   # Boot loader — systemd-boot (UEFI)
   boot.loader.systemd-boot.enable = true;
   boot.loader.systemd-boot.configurationLimit = 20;
