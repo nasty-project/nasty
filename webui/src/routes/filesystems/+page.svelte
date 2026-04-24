@@ -703,7 +703,8 @@
 						</label>
 					</div>
 					{#if availableDevices().length === 0}
-						<p class="text-sm text-muted-foreground">No available devices. You may need to wipe or prepare disks in <a href="/disks" class="text-primary hover:underline" onclick={(e) => { e.preventDefault(); goto('/disks'); }}>Disks</a>.</p>
+						<p class="text-sm text-muted-foreground">No available devices. You may need to wipe or prepare disks first.</p>
+						<Button size="sm" class="mt-2" onclick={() => goto('/disks')}>Disks</Button>
 					{:else}
 						<div class="space-y-1.5">
 							{#each availableDevices() as dev}
@@ -751,7 +752,10 @@
 								{/if}
 							{/each}
 						</div>
-						<p class="mt-2 text-xs text-muted-foreground">Need more devices? Wipe or prepare them in <a href="/disks" class="text-primary hover:underline" onclick={(e) => { e.preventDefault(); goto('/disks'); }}>Disks</a>.</p>
+						<div class="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+							<span>Need more devices?</span>
+							<Button size="xs" onclick={() => goto('/disks')}>Disks</Button>
+						</div>
 					{/if}
 				</div>
 				<div class="flex gap-2">
