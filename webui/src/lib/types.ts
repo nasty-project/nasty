@@ -286,6 +286,9 @@ export interface CpuStats {
 	load_1: number;
 	load_5: number;
 	load_15: number;
+	temp_c: number | null;
+	freq_mhz: number | null;
+	governor: string | null;
 }
 
 export interface MemoryStats {

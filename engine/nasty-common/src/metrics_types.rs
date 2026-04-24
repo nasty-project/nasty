@@ -37,7 +37,7 @@ pub struct DiskIoStats {
     pub io_in_progress: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CpuStats {
     /// Number of logical CPU cores.
     pub count: u32,
@@ -47,6 +47,12 @@ pub struct CpuStats {
     pub load_5: f64,
     /// 15-minute load average.
     pub load_15: f64,
+    /// CPU package temperature in degrees Celsius (from hwmon).
+    pub temp_c: Option<i32>,
+    /// Average current CPU frequency across all cores in MHz.
+    pub freq_mhz: Option<u32>,
+    /// CPU frequency scaling governor (e.g. "powersave", "performance").
+    pub governor: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]

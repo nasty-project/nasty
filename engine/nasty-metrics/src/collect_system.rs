@@ -21,7 +21,79 @@ pub fn cpu_stats() -> CpuStats {
         })
         .unwrap_or((0.0, 0.0, 0.0));
 
-    CpuStats { count, load_1, load_5, load_15 }
+    let temp_c = read_cpu_temperature();
+    let (freq_mhz, governor) = read_cpu_frequency();
+
+    CpuStats { count, load_1, load_5, load_15, temp_c, freq_mhz, governor }
+}
+
+/// Read CPU package temperature from hwmon sysfs (coretemp / k10temp).
+fn read_cpu_temperature() -> Option<i32> {
+    let hwmon = std::fs::read_dir("/sys/class/hwmon").ok()?;
+    for entry in hwmon.flatten() {
+        let path = entry.path();
+        let name = std::fs::read_to_string(path.join("name")).unwrap_or_default();
+        let name = name.trim();
+        // coretemp (Intel), k10temp (AMD), zenpower (AMD alt)
+        if matches!(name, "coretemp" | "k10temp" | "zenpower") {
+            // temp1_input is typically the package/Tdie temperature
+            if let Ok(val) = std::fs::read_to_string(path.join("temp1_input")) {
+                if let Ok(millideg) = val.trim().parse::<i64>() {
+                    return Some((millideg / 1000) as i32);
+                }
+            }
+        }
+    }
+    // Fallback: first thermal zone
+    if let Ok(val) = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp") {
+        if let Ok(millideg) = val.trim().parse::<i64>() {
+            return Some((millideg / 1000) as i32);
+        }
+    }
+    None
+}
+
+/// Read average CPU frequency and governor from cpufreq sysfs.
+fn read_cpu_frequency() -> (Option<u32>, Option<String>) {
+    let mut total_khz: u64 = 0;
+    let mut count: u32 = 0;
+    let mut governor: Option<String> = None;
+
+    let cpus = match std::fs::read_dir("/sys/devices/system/cpu") {
+        Ok(d) => d,
+        Err(_) => return (None, None),
+    };
+
+    for entry in cpus.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("cpu") || !name[3..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let cpufreq = entry.path().join("cpufreq");
+        if let Ok(val) = std::fs::read_to_string(cpufreq.join("scaling_cur_freq")) {
+            if let Ok(khz) = val.trim().parse::<u64>() {
+                total_khz += khz;
+                count += 1;
+            }
+        }
+        if governor.is_none() {
+            if let Ok(val) = std::fs::read_to_string(cpufreq.join("scaling_governor")) {
+                let g = val.trim().to_string();
+                if !g.is_empty() {
+                    governor = Some(g);
+                }
+            }
+        }
+    }
+
+    let avg_mhz = if count > 0 {
+        Some((total_khz / count as u64 / 1000) as u32)
+    } else {
+        None
+    };
+
+    (avg_mhz, governor)
 }
 
 // ── Memory ──────────────────────────────────────────────────────
