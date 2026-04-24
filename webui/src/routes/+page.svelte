@@ -336,106 +336,107 @@
 			{/each}
 		</div>
 	</div>
-	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+	<!-- Stats summary row -->
+	<div class="mb-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
 		<Card>
-			<CardHeader class="pb-2">
-				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">CPU</CardTitle>
-			</CardHeader>
-			<CardContent>
-				<div class="flex items-baseline gap-2">
+			<CardContent class="pt-4 pb-3">
+				<div class="text-xs uppercase tracking-wide text-muted-foreground">CPU Load</div>
+				<div class="mt-1 flex items-baseline gap-2">
 					<span class="text-2xl font-bold">{stats.cpu.load_1.toFixed(2)}</span>
 					<span class="text-xs text-muted-foreground">/ {stats.cpu.count} cores</span>
 				</div>
-				<div class="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
+				<div class="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary">
 					<div class="h-full rounded-full transition-all duration-500 {barColor(cpuPercent(stats))}" style="width: {cpuPercent(stats)}%"></div>
 				</div>
-				<div class="mt-2 flex justify-between text-xs tabular-nums">
-					<span><span class="text-muted-foreground">1m</span> {stats.cpu.load_1.toFixed(2)}</span>
-					<span><span class="text-muted-foreground">5m</span> {stats.cpu.load_5.toFixed(2)}</span>
-					<span><span class="text-muted-foreground">15m</span> {stats.cpu.load_15.toFixed(2)}</span>
-					{#if stats.cpu.temp_c != null}
-						<span class="text-muted-foreground">{stats.cpu.temp_c}°C</span>
-					{/if}
-					{#if stats.cpu.freq_mhz != null}
-						<span class="text-muted-foreground">{stats.cpu.freq_mhz >= 1000 ? (stats.cpu.freq_mhz / 1000).toFixed(1) + ' GHz' : stats.cpu.freq_mhz + ' MHz'}</span>
-					{/if}
-				</div>
-				<div class="mt-3">
-					<IoChart
-						samples={cpuChartSamples}
-						inLabel="Usage"
-						inColor="var(--chart-3)"
-						yFormat={(v) => v.toFixed(0) + '%'}
-						tooltipFormat={(v) => v.toFixed(1) + '%'}
-					/>
+				<div class="mt-1.5 flex justify-between text-xs tabular-nums text-muted-foreground">
+					<span>1m {stats.cpu.load_1.toFixed(2)}</span>
+					<span>5m {stats.cpu.load_5.toFixed(2)}</span>
+					<span>15m {stats.cpu.load_15.toFixed(2)}</span>
 				</div>
 			</CardContent>
 		</Card>
 
 		<Card>
-			<CardHeader class="pb-2">
-				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Memory</CardTitle>
-			</CardHeader>
-			<CardContent>
-				<div class="flex items-baseline gap-2">
+			<CardContent class="pt-4 pb-3">
+				<div class="text-xs uppercase tracking-wide text-muted-foreground">Memory</div>
+				<div class="mt-1 flex items-baseline gap-2">
 					<span class="text-2xl font-bold">{formatPercent(stats.memory.used_bytes, stats.memory.total_bytes)}</span>
 					<span class="text-xs text-muted-foreground">{formatBytes(stats.memory.used_bytes)} / {formatBytes(stats.memory.total_bytes)}</span>
 				</div>
-				<div class="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
+				<div class="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary">
 					<div class="h-full rounded-full transition-all duration-500 {barColor(memPercent(stats))}" style="width: {memPercent(stats)}%"></div>
 				</div>
 				{#if stats.memory.swap_total_bytes > 0}
-					<div class="mt-2 text-xs text-muted-foreground">
+					<div class="mt-1.5 text-xs text-muted-foreground">
 						Swap: {formatBytes(stats.memory.swap_used_bytes)} / {formatBytes(stats.memory.swap_total_bytes)}
 					</div>
 				{/if}
-				<div class="mt-3">
-					<IoChart
-						samples={memChartSamples}
-						inLabel="Used"
-						inColor="var(--chart-5)"
-						yFormat={(v) => v.toFixed(0) + '%'}
-						tooltipFormat={(v) => v.toFixed(1) + '%'}
-					/>
+			</CardContent>
+		</Card>
+
+		<Card>
+			<CardContent class="pt-4 pb-3">
+				<div class="text-xs uppercase tracking-wide text-muted-foreground">CPU Temp</div>
+				<div class="mt-1 flex items-baseline gap-2">
+					<span class="text-2xl font-bold">{stats.cpu.temp_c != null ? stats.cpu.temp_c + '°C' : '—'}</span>
 				</div>
+				<div class="mt-2 text-xs text-muted-foreground">
+					{#if stats.cpu.freq_mhz != null}
+						{stats.cpu.freq_mhz >= 1000 ? (stats.cpu.freq_mhz / 1000).toFixed(1) + ' GHz' : stats.cpu.freq_mhz + ' MHz'}
+					{/if}
+					{#if stats.cpu.governor}
+						<span class="ml-2">{stats.cpu.governor}</span>
+					{/if}
+				</div>
+			</CardContent>
+		</Card>
+
+		{#if filesystems.length > 0}
+			{@const storage = totalStorage(filesystems)}
+			<Card>
+				<CardContent class="pt-4 pb-3">
+					<div class="text-xs uppercase tracking-wide text-muted-foreground">Storage</div>
+					<div class="mt-1 flex items-baseline gap-2">
+						<span class="text-2xl font-bold">{formatPercent(storage.used, storage.total)}</span>
+						<span class="text-xs text-muted-foreground">{formatBytes(storage.used)} / {formatBytes(storage.total)}</span>
+					</div>
+					<div class="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary">
+						<div class="h-full rounded-full transition-all duration-500 {barColor(storagePercent(filesystems))}" style="width: {storagePercent(filesystems)}%"></div>
+					</div>
+					<div class="mt-1.5 text-xs text-muted-foreground">
+						{filesystems.length} filesystem{filesystems.length !== 1 ? 's' : ''}
+					</div>
+				</CardContent>
+			</Card>
+		{/if}
+	</div>
+
+	<!-- Charts row — equal height, aligned -->
+	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+		<Card>
+			<CardContent class="pt-4">
+				<IoChart
+					samples={cpuChartSamples}
+					inLabel="CPU Usage"
+					inColor="var(--chart-3)"
+					yFormat={(v) => v.toFixed(0) + '%'}
+					tooltipFormat={(v) => v.toFixed(1) + '%'}
+				/>
+			</CardContent>
+		</Card>
+		<Card>
+			<CardContent class="pt-4">
+				<IoChart
+					samples={memChartSamples}
+					inLabel="Memory Used"
+					inColor="var(--chart-5)"
+					yFormat={(v) => v.toFixed(0) + '%'}
+					tooltipFormat={(v) => v.toFixed(1) + '%'}
+				/>
 			</CardContent>
 		</Card>
 	</div>
 
-	{#if filesystems.length > 0}
-	<div class="mb-4">
-		<Card>
-			<CardHeader class="pb-2">
-				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Storage</CardTitle>
-			</CardHeader>
-			<CardContent>
-				{@const storage = totalStorage(filesystems)}
-				{#if storage.total > 0}
-					<div class="flex items-baseline gap-2">
-						<span class="text-2xl font-bold">{formatPercent(storage.used, storage.total)}</span>
-						<span class="text-xs text-muted-foreground">{formatBytes(storage.used)} / {formatBytes(storage.total)}</span>
-					</div>
-					<div class="mt-2 h-2 overflow-hidden rounded-full bg-secondary">
-						<div class="h-full rounded-full transition-all duration-500 {barColor(storagePercent(filesystems))}" style="width: {storagePercent(filesystems)}%"></div>
-					</div>
-				{/if}
-				<div class="mt-3 grid grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-4">
-					{#each filesystems as fs}
-						<div class="flex items-center gap-2 rounded px-2 py-1 text-sm">
-							<span class="font-semibold">{fs.name}</span>
-							<Badge variant={fs.mounted ? 'default' : 'destructive'} class="text-[0.6rem]">
-								{fs.mounted ? 'Mounted' : 'Unmounted'}
-							</Badge>
-							{#if fs.total_bytes > 0}
-								<span class="ml-auto text-xs tabular-nums text-muted-foreground">{formatBytes(fs.used_bytes)} / {formatBytes(fs.total_bytes)}</span>
-							{/if}
-						</div>
-					{/each}
-				</div>
-			</CardContent>
-		</Card>
-	</div>
-	{/if}
 {/if}
 
 <!-- Network & Disk I/O -->
