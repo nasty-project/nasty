@@ -147,7 +147,7 @@ in {
     smb.enable = mkEnableOption "Samba server for NASty shares" // { default = true; };
     iscsi.enable = mkEnableOption "iSCSI target (LIO) for NASty" // { default = true; };
     nvmeof.enable = mkEnableOption "NVMe-oF target for NASty" // { default = true; };
-    nut.enable = mkEnableOption "NUT (Network UPS Tools) for NASty" // { default = true; };
+    nut.enable = mkEnableOption "NUT (Network UPS Tools) for NASty";
 
     # VPN — not enabled by default (requires Tailscale auth key)
     tailscale.enable = mkEnableOption "Tailscale VPN for NASty";
