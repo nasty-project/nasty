@@ -76,22 +76,25 @@ impl MetricsDb {
     /// Query history for a given kind and optional resource name.
     ///
     /// `range` is one of: "5m", "1h", "1d", "7d", "30d".
+    /// `offset_ms` shifts the window into the past (0 = anchored to now).
     pub fn query(
         &self,
         kind: &str,
         name: Option<&str>,
         range: &str,
+        offset_ms: i64,
     ) -> Vec<ResourceHistory> {
         let (duration_ms, bucket_ms) = range_to_params(range);
-        let since = now_ms() - duration_ms;
+        let until = now_ms() - offset_ms;
+        let since = until - duration_ms;
         let conn = self.conn.lock().expect("metrics db mutex poisoned");
 
         let names: Vec<String> = if let Some(n) = name {
             vec![n.to_string()]
         } else {
-            match conn.prepare("SELECT DISTINCT name FROM io_samples WHERE kind = ?1 AND ts >= ?2") {
+            match conn.prepare("SELECT DISTINCT name FROM io_samples WHERE kind = ?1 AND ts >= ?2 AND ts <= ?3") {
                 Ok(mut stmt) => stmt
-                    .query_map(rusqlite::params![kind, since], |row| row.get(0))
+                    .query_map(rusqlite::params![kind, since, until], |row| row.get(0))
                     .map(|rows| rows.filter_map(|r| r.ok()).collect())
                     .unwrap_or_default(),
                 Err(e) => {
@@ -106,7 +109,7 @@ impl MetricsDb {
         if bucket_ms == 0 {
             let mut stmt = match conn.prepare(
                 "SELECT ts, in_rate, out_rate FROM io_samples
-                 WHERE kind = ?1 AND name = ?2 AND ts >= ?3
+                 WHERE kind = ?1 AND name = ?2 AND ts >= ?3 AND ts <= ?4
                  ORDER BY ts",
             ) {
                 Ok(s) => s,
@@ -118,7 +121,7 @@ impl MetricsDb {
 
             for n in &names {
                 let samples: Vec<IoSample> = stmt
-                    .query_map(rusqlite::params![kind, n, since], |row| {
+                    .query_map(rusqlite::params![kind, n, since, until], |row| {
                         Ok(IoSample {
                             ts: row.get(0)?,
                             in_rate: row.get(1)?,
@@ -132,10 +135,10 @@ impl MetricsDb {
             }
         } else {
             let mut stmt = match conn.prepare(
-                "SELECT (ts / ?4) * ?4 AS bucket,
+                "SELECT (ts / ?5) * ?5 AS bucket,
                         AVG(in_rate), AVG(out_rate)
                  FROM io_samples
-                 WHERE kind = ?1 AND name = ?2 AND ts >= ?3
+                 WHERE kind = ?1 AND name = ?2 AND ts >= ?3 AND ts <= ?4
                  GROUP BY bucket
                  ORDER BY bucket",
             ) {
@@ -148,7 +151,7 @@ impl MetricsDb {
 
             for n in &names {
                 let samples: Vec<IoSample> = stmt
-                    .query_map(rusqlite::params![kind, n, since, bucket_ms], |row| {
+                    .query_map(rusqlite::params![kind, n, since, until, bucket_ms], |row| {
                         Ok(IoSample {
                             ts: row.get(0)?,
                             in_rate: row.get(1)?,

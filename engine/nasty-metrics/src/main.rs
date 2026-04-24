@@ -116,6 +116,8 @@ struct HistoryQuery {
     kind: Option<String>,
     name: Option<String>,
     range: Option<String>,
+    /// Offset in milliseconds into the past (0 = anchored to now).
+    offset: Option<i64>,
 }
 
 async fn history_handler(
@@ -125,7 +127,8 @@ async fn history_handler(
     let kind = q.kind.as_deref().unwrap_or("net");
     let name = q.name.as_deref();
     let range = q.range.as_deref().unwrap_or("5m");
-    Json(state.db.query(kind, name, range))
+    let offset = q.offset.unwrap_or(0).max(0);
+    Json(state.db.query(kind, name, range, offset))
 }
 
 // ── Collectors ──────────────────────────────────────────────────

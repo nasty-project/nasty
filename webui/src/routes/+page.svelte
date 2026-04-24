@@ -22,6 +22,11 @@
 	let alerts: ActiveAlert[] = $state([]);
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
 	let metricsRange = $state<'5m' | '1h' | '1d' | '7d' | '30d'>('5m');
+	let metricsOffset = $state(0); // ms into the past, 0 = live
+
+	const rangeDurations: Record<string, number> = {
+		'5m': 300_000, '1h': 3_600_000, '1d': 86_400_000, '7d': 604_800_000, '30d': 2_592_000_000,
+	};
 
 	let prevDiskIo: DiskIoStats[] = $state([]);
 	let prevNetIo: NetIfStats[] = $state([]);
@@ -68,11 +73,12 @@
 
 	async function loadMetrics() {
 		try {
+			const params = { range: metricsRange, ...(metricsOffset > 0 ? { offset: metricsOffset } : {}) };
 			const [netHist, diskHist, cpuHist, memHist] = await Promise.all([
-				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'net', range: metricsRange }),
-				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'disk', range: metricsRange }),
-				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'cpu', range: metricsRange }),
-				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'mem', range: metricsRange }),
+				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'net', ...params }),
+				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'disk', ...params }),
+				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'cpu', ...params }),
+				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'mem', ...params }),
 			]);
 
 			netHistory.clear();
@@ -117,6 +123,22 @@
 
 	async function changeRange(r: typeof metricsRange) {
 		metricsRange = r;
+		metricsOffset = 0;
+		await loadMetrics();
+	}
+
+	async function navigateBack() {
+		metricsOffset += rangeDurations[metricsRange];
+		await loadMetrics();
+	}
+
+	async function navigateForward() {
+		metricsOffset = Math.max(0, metricsOffset - rangeDurations[metricsRange]);
+		await loadMetrics();
+	}
+
+	async function navigateLive() {
+		metricsOffset = 0;
 		await loadMetrics();
 	}
 
@@ -135,11 +157,11 @@
 						const readRate = Math.max(0, (curr.read_bytes - prev.read_bytes) / elapsed);
 						const writeRate = Math.max(0, (curr.write_bytes - prev.write_bytes) / elapsed);
 						dRates.set(curr.name, { readRate, writeRate });
-						if (metricsRange === '5m') diskHistory.push(curr.name, sampleTime, readRate, writeRate);
+						if (metricsRange === '5m' && metricsOffset === 0) diskHistory.push(curr.name, sampleTime, readRate, writeRate);
 					}
 				}
 				diskIoRates = dRates;
-				if (metricsRange === '5m') diskSamples = new Map(
+				if (metricsRange === '5m' && metricsOffset === 0) diskSamples = new Map(
 					newStats.disk_io.map(d => [d.name, [...diskHistory.getSamples(d.name)]])
 				);
 
@@ -150,17 +172,17 @@
 						const rxRate = Math.max(0, (curr.rx_bytes - prev.rx_bytes) / elapsed);
 						const txRate = Math.max(0, (curr.tx_bytes - prev.tx_bytes) / elapsed);
 						nRates.set(curr.name, { rxRate, txRate });
-						if (metricsRange === '5m') netHistory.push(curr.name, sampleTime, rxRate, txRate);
+						if (metricsRange === '5m' && metricsOffset === 0) netHistory.push(curr.name, sampleTime, rxRate, txRate);
 					}
 				}
 				netIoRates = nRates;
-				if (metricsRange === '5m') netSamples = new Map(
+				if (metricsRange === '5m' && metricsOffset === 0) netSamples = new Map(
 					newStats.network.map(n => [n.name, [...netHistory.getSamples(n.name)]])
 				);
 
 				// CPU and memory
 				const cpuPct = Math.min(100, (newStats.cpu.load_1 / newStats.cpu.count) * 100);
-				if (metricsRange === '5m') {
+				if (metricsRange === '5m' && metricsOffset === 0) {
 					cpuHistory.push('cpu', sampleTime, cpuPct, 0);
 					cpuChartSamples = [...cpuHistory.getSamples('cpu')];
 				}
@@ -168,7 +190,7 @@
 				const memPct = newStats.memory.total_bytes > 0
 					? (newStats.memory.used_bytes / newStats.memory.total_bytes) * 100
 					: 0;
-				if (metricsRange === '5m') {
+				if (metricsRange === '5m' && metricsOffset === 0) {
 					memHistory.push('mem', sampleTime, memPct, 0);
 					memChartSamples = [...memHistory.getSamples('mem')];
 				}
@@ -326,14 +348,40 @@
 <!-- Resource gauges -->
 {#if stats}
 	<div class="mb-3 flex items-center justify-between">
-		<span class="text-sm font-semibold">History</span>
-		<div class="flex rounded-md border border-border">
-			{#each (['5m', '1h', '1d', '7d', '30d'] as const) as r}
+		<div class="flex items-center gap-2">
+			<span class="text-sm font-semibold">History</span>
+			{#if metricsOffset > 0}
+				<span class="text-xs text-muted-foreground">
+					{new Date(Date.now() - metricsOffset - rangeDurations[metricsRange]).toLocaleTimeString()} — {new Date(Date.now() - metricsOffset).toLocaleTimeString()}
+				</span>
+			{/if}
+		</div>
+		<div class="flex items-center gap-1">
+			<button
+				onclick={navigateBack}
+				class="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+				title="Back"
+			>&larr;</button>
+			<div class="flex rounded-md border border-border">
+				{#each (['5m', '1h', '1d', '7d', '30d'] as const) as r}
+					<button
+						onclick={() => changeRange(r)}
+						class="px-3 py-1 text-xs font-medium transition-colors first:rounded-l-md last:rounded-r-md {metricsRange === r ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
+					>{r}</button>
+				{/each}
+			</div>
+			<button
+				onclick={navigateForward}
+				disabled={metricsOffset === 0}
+				class="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-30 disabled:cursor-default"
+				title="Forward"
+			>&rarr;</button>
+			{#if metricsOffset > 0}
 				<button
-					onclick={() => changeRange(r)}
-					class="px-3 py-1 text-xs font-medium transition-colors first:rounded-l-md last:rounded-r-md {metricsRange === r ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
-				>{r}</button>
-			{/each}
+					onclick={navigateLive}
+					class="rounded-md border border-border px-2 py-1 text-xs font-medium text-primary hover:bg-accent transition-colors"
+				>Live</button>
+			{/if}
 		</div>
 	</div>
 	<!-- Stats summary row -->

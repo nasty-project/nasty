@@ -407,8 +407,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             let kind = str_param(req, "kind").unwrap_or("net");
             let name = str_param(req, "name");
             let range = str_param(req, "range").unwrap_or("5m");
+            let offset = req.params.as_ref()
+                .and_then(|p| p.get("offset"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .max(0);
             let mut url = format!(
-                "{}/api/history?kind={kind}&range={range}",
+                "{}/api/history?kind={kind}&range={range}&offset={offset}",
                 crate::METRICS_BASE
             );
             if let Some(n) = name {
