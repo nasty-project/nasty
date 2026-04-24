@@ -478,7 +478,7 @@
 	async function openShell(name: string) {
 		const cmd = await client.call<string>('apps.exec_command', { name });
 		// Navigate to terminal with pre-filled command
-		window.location.href = `/terminal?cmd=${encodeURIComponent(cmd)}`;
+		goto(`/terminal?cmd=${encodeURIComponent(cmd)}`);
 	}
 
 	let expanded: Record<string, boolean> = $state({});
@@ -965,7 +965,7 @@
 								<td class="p-1.5">
 									{#if ct.status === 'running' && ct.container_id}
 										<div class="flex items-center gap-1.5">
-											<button class="rounded border border-border px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-muted hover:text-foreground" onclick={() => window.location.href = `/terminal?cmd=${encodeURIComponent(`docker exec -it ${ct.container_id} /bin/sh`)}`}>Shell</button>
+											<button class="rounded border border-border px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-muted hover:text-foreground" onclick={() => goto(`/terminal?cmd=${encodeURIComponent(`docker exec -it ${ct.container_id} /bin/sh`)}`)}>Shell</button>
 											<button class="rounded border border-border px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-muted hover:text-foreground" onclick={() => showLogs(ct.container_id, 'container')}>Logs</button>
 										</div>
 									{/if}
