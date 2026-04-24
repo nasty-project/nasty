@@ -414,10 +414,13 @@
 	<!-- Charts row — equal height, aligned -->
 	<div class="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
 		<Card>
-			<CardContent class="pt-4">
+			<CardHeader class="pb-2">
+				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">CPU Usage</CardTitle>
+			</CardHeader>
+			<CardContent>
 				<IoChart
 					samples={cpuChartSamples}
-					inLabel="CPU Usage"
+					inLabel="Usage"
 					inColor="var(--chart-3)"
 					yFormat={(v) => v.toFixed(0) + '%'}
 					tooltipFormat={(v) => v.toFixed(1) + '%'}
@@ -425,10 +428,13 @@
 			</CardContent>
 		</Card>
 		<Card>
-			<CardContent class="pt-4">
+			<CardHeader class="pb-2">
+				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Memory Usage</CardTitle>
+			</CardHeader>
+			<CardContent>
 				<IoChart
 					samples={memChartSamples}
-					inLabel="Memory Used"
+					inLabel="Used"
 					inColor="var(--chart-5)"
 					yFormat={(v) => v.toFixed(0) + '%'}
 					tooltipFormat={(v) => v.toFixed(1) + '%'}
