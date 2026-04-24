@@ -616,6 +616,8 @@
 	}
 
 	function devDisplayState(dev: FilesystemDevice): string | null {
+		if (dev.state === 'evacuating' && (!dev.has_data || dev.has_data === '(none)' || dev.has_data === '–'))
+			return 'evacuated';
 		return dev.state;
 	}
 
