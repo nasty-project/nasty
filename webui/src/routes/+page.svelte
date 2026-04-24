@@ -422,6 +422,7 @@
 			</CardContent>
 		</Card>
 
+		{#if stats.cpu.temp_c != null || stats.cpu.freq_mhz != null}
 		<Card>
 			<CardContent class="pt-4 pb-3">
 				<div class="text-xs uppercase tracking-wide text-muted-foreground">CPU Temp</div>
@@ -438,6 +439,7 @@
 				</div>
 			</CardContent>
 		</Card>
+		{/if}
 
 		{#if filesystems.length > 0}
 			{@const storage = totalStorage(filesystems)}
