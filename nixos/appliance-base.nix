@@ -6,6 +6,11 @@
   # Disable desktop-oriented services that are unnecessary on a headless NAS
   services.udisks2.enable = false;
 
+  # fwupd: disable the hourly metadata refresh timer — firmware checks are
+  # triggered on-demand from the UI. fwupd itself stays D-Bus activated so
+  # it starts when needed and exits after the idle timeout.
+  systemd.timers.fwupd-refresh.enable = false;
+
   # Boot loader — systemd-boot (UEFI)
   boot.loader.systemd-boot.enable = true;
   boot.loader.systemd-boot.configurationLimit = 20;
