@@ -112,6 +112,22 @@
 		if (p?.collection === 'filesystem') refresh();
 	}
 
+	let evacuationPoll: ReturnType<typeof setInterval> | null = null;
+
+	function startEvacuationPolling() {
+		if (evacuationPoll) return;
+		evacuationPoll = setInterval(async () => {
+			await refresh();
+			const hasEvacuating = filesystems.some(fs =>
+				fs.devices.some(d => d.state === 'evacuating')
+			);
+			if (!hasEvacuating && evacuationPoll) {
+				clearInterval(evacuationPoll);
+				evacuationPoll = null;
+			}
+		}, 5000);
+	}
+
 	onMount(async () => {
 		client.onEvent(handleEvent);
 		await refresh();
@@ -119,9 +135,15 @@
 		if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('create')) {
 			openWizard();
 		}
+		if (filesystems.some(fs => fs.devices.some(d => d.state === 'evacuating'))) {
+			startEvacuationPolling();
+		}
 	});
 
-	onDestroy(() => client.offEvent(handleEvent));
+	onDestroy(() => {
+		client.offEvent(handleEvent);
+		if (evacuationPoll) { clearInterval(evacuationPoll); evacuationPoll = null; }
+	});
 
 	async function refresh() {
 		await withToast(async () => {
@@ -470,6 +492,7 @@
 			`Evacuating ${devicePath} — this may take several minutes`
 		);
 		await refresh();
+		startEvacuationPolling();
 	}
 
 	async function setDeviceState(fsName: string, devicePath: string, state: DeviceState) {
@@ -1481,6 +1504,8 @@
 												{@const ds = devDisplayState(dev)}
 												{#if ds === 'evacuating'}
 													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
+												{:else if ds === 'evacuated'}
+													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 												{:else}
 													{#if ds === 'rw'}
 														<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'ro')}>Set RO</Button>
@@ -1488,9 +1513,7 @@
 													{:else if ds === 'ro'}
 														<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'rw')}>Set RW</Button>
 													{/if}
-													{#if ds !== 'spare'}
-														<Button variant="secondary" size="xs" onclick={() => evacuateDevice(fs.name, dev.path)}>Evacuate</Button>
-													{/if}
+													<Button variant="secondary" size="xs" onclick={() => evacuateDevice(fs.name, dev.path)}>Evacuate</Button>
 													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 												{/if}
 											{/if}
