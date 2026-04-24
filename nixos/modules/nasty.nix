@@ -321,25 +321,28 @@ in {
       ║               NASty Command Reference                ║
       ╚══════════════════════════════════════════════════════╝
 
+       Examples use /fs/first — replace if your filesystem differs.
+
        bcachefs — filesystem info
-         bcachefs fs usage /fs/<filesystem>        space by type (btree, data, cached, parity …)
-         bcachefs fs usage -h /fs/<filesystem>     human-readable sizes
+         bcachefs fs usage /fs/first        space by type (btree, data, cached, parity …)
+         bcachefs fs usage -h /fs/first     human-readable sizes
          bcachefs show-super /dev/<disk>           dump superblock (UUID, features, devices)
-         bcachefs device list /fs/<filesystem>      member devices with state and tier
+         bcachefs device list /fs/first      member devices with state and tier
          dmesg | grep -i bcachefs                  kernel messages
 
        bcachefs — live diagnostics (interactive, q to quit)
-         bcachefs fs top /fs/<filesystem>           btree ops per process
-         bcachefs fs timestats /fs/<filesystem>     op latency (min/max/mean/stddev/EWMA)
+         nasty-top                                  per-device IO, latency, time stats, tuning advisor
+         bcachefs fs top /fs/first           btree ops per process
+         bcachefs fs timestats /fs/first     op latency (min/max/mean/stddev/EWMA)
 
        bcachefs — device management
-         bcachefs device add /fs/<filesystem> /dev/<disk>      add a device
-         bcachefs device remove /fs/<filesystem> /dev/<disk>   remove a device (triggers rebalance)
+         bcachefs device add /fs/first /dev/<disk>      add a device
+         bcachefs device remove /fs/first /dev/<disk>   remove a device (triggers rebalance)
          bcachefs device set-state failed /dev/<disk>         mark device failed
-         bcachefs data rereplicate /fs/<filesystem>            rereplicate after device change
+         bcachefs data rereplicate /fs/first            rereplicate after device change
 
        bcachefs — subvolumes & snapshots
-         bcachefs subvolume list /fs/<filesystem>
+         bcachefs subvolume list /fs/first
          bcachefs subvolume snapshot <src> <dst>
 
        I/O monitoring
@@ -403,37 +406,37 @@ in {
       ║            NASty Benchmark Reference                 ║
       ╚══════════════════════════════════════════════════════╝
 
-       fio — storage tests  (replace <filesystem> with your filesystem name)
+       fio — storage tests  (examples use /fs/first — replace if your filesystem differs)
          # Sequential read — large block, measures throughput
          fio --name=seq-read \
              --ioengine=libaio --direct=1 --rw=read \
              --bs=1024k --iodepth=8 --numjobs=1 \
              --size=1g --runtime=30 \
-             --filename=/fs/<filesystem>/fiotest
+             --filename=/fs/first/fiotest
 
          # Sequential write
          fio --name=seq-write \
              --ioengine=libaio --direct=1 --rw=write \
              --bs=1024k --iodepth=8 --numjobs=1 \
              --size=1g --runtime=30 \
-             --filename=/fs/<filesystem>/fiotest
+             --filename=/fs/first/fiotest
 
          # Random read — small block, measures IOPS
          fio --name=rand-read \
              --ioengine=libaio --direct=1 --rw=randread \
              --bs=4k --iodepth=32 --numjobs=4 \
              --size=1g --runtime=30 \
-             --filename=/fs/<filesystem>/fiotest
+             --filename=/fs/first/fiotest
 
          # Random write
          fio --name=rand-write \
              --ioengine=libaio --direct=1 --rw=randwrite \
              --bs=4k --iodepth=32 --numjobs=4 \
              --size=1g --runtime=30 \
-             --filename=/fs/<filesystem>/fiotest
+             --filename=/fs/first/fiotest
 
          # Clean up test file afterwards
-         rm -f /fs/<filesystem>/fiotest
+         rm -f /fs/first/fiotest
 
        share results with devs
          fio ... | nc termbin.com 9999
