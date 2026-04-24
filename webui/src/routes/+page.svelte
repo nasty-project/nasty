@@ -351,6 +351,10 @@
 		<div class="flex items-center gap-2">
 			<span class="text-sm font-semibold">History</span>
 			{#if metricsOffset > 0}
+				<button
+					onclick={navigateLive}
+					class="rounded-md border border-border px-2 py-1 text-xs font-medium text-primary hover:bg-accent transition-colors"
+				>Live</button>
 				<span class="text-xs text-muted-foreground">
 					{new Date(Date.now() - metricsOffset - rangeDurations[metricsRange]).toLocaleTimeString()} — {new Date(Date.now() - metricsOffset).toLocaleTimeString()}
 				</span>
@@ -376,12 +380,6 @@
 				class="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-30 disabled:cursor-default"
 				title="Forward"
 			>&rarr;</button>
-			{#if metricsOffset > 0}
-				<button
-					onclick={navigateLive}
-					class="rounded-md border border-border px-2 py-1 text-xs font-medium text-primary hover:bg-accent transition-colors"
-				>Live</button>
-			{/if}
 		</div>
 	</div>
 	<!-- Stats summary row -->
