@@ -353,20 +353,13 @@
 					<span><span class="text-muted-foreground">1m</span> {stats.cpu.load_1.toFixed(2)}</span>
 					<span><span class="text-muted-foreground">5m</span> {stats.cpu.load_5.toFixed(2)}</span>
 					<span><span class="text-muted-foreground">15m</span> {stats.cpu.load_15.toFixed(2)}</span>
+					{#if stats.cpu.temp_c != null}
+						<span class="text-muted-foreground">{stats.cpu.temp_c}°C</span>
+					{/if}
+					{#if stats.cpu.freq_mhz != null}
+						<span class="text-muted-foreground">{stats.cpu.freq_mhz >= 1000 ? (stats.cpu.freq_mhz / 1000).toFixed(1) + ' GHz' : stats.cpu.freq_mhz + ' MHz'}</span>
+					{/if}
 				</div>
-				{#if stats.cpu.temp_c != null || stats.cpu.freq_mhz != null}
-					<div class="mt-2 flex gap-3 text-xs tabular-nums text-muted-foreground">
-						{#if stats.cpu.temp_c != null}
-							<span>{stats.cpu.temp_c}°C</span>
-						{/if}
-						{#if stats.cpu.freq_mhz != null}
-							<span>{stats.cpu.freq_mhz >= 1000 ? (stats.cpu.freq_mhz / 1000).toFixed(1) + ' GHz' : stats.cpu.freq_mhz + ' MHz'}</span>
-						{/if}
-						{#if stats.cpu.governor}
-							<span>{stats.cpu.governor}</span>
-						{/if}
-					</div>
-				{/if}
 				<div class="mt-3">
 					<IoChart
 						samples={cpuChartSamples}
