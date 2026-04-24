@@ -703,8 +703,7 @@
 						</label>
 					</div>
 					{#if availableDevices().length === 0}
-						<p class="text-sm text-muted-foreground">No available devices. You may need to prepare your disks first.</p>
-						<Button size="sm" class="mt-2" onclick={() => goto('/disks')}>Go to Disks</Button>
+						<p class="text-sm text-muted-foreground">No available devices. You may need to wipe or prepare disks in <a href="/disks" class="text-primary hover:underline" onclick={(e) => { e.preventDefault(); goto('/disks'); }}>Disks</a>.</p>
 					{:else}
 						<div class="space-y-1.5">
 							{#each availableDevices() as dev}
@@ -752,6 +751,7 @@
 								{/if}
 							{/each}
 						</div>
+						<p class="mt-2 text-xs text-muted-foreground">Need more devices? Wipe or prepare them in <a href="/disks" class="text-primary hover:underline" onclick={(e) => { e.preventDefault(); goto('/disks'); }}>Disks</a>.</p>
 					{/if}
 				</div>
 				<div class="flex gap-2">
@@ -1155,7 +1155,6 @@
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">No filesystems configured yet.</p>
 		<p class="mt-1 text-sm text-muted-foreground">Use the <strong>Create Filesystem</strong> button above to get started.</p>
-		<Button size="sm" class="mt-2" onclick={() => goto('/disks')}>Prepare Disks</Button>
 	</div>
 {:else}
 	{#each filesystems as fs}
