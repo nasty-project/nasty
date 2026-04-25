@@ -599,6 +599,18 @@ impl AppsService {
 
         info!("Installed app '{}' (image: {})", req.name, req.image);
 
+        // Save manifest so the app is visible even when Docker is not running
+        let manifest = serde_json::json!({
+            "name": req.name,
+            "image": req.image,
+            "kind": "simple",
+        });
+        let manifest_path = format!("{}/{}.json", COMPOSE_DIR, req.name);
+        let _ = tokio::fs::create_dir_all(COMPOSE_DIR).await;
+        if let Err(e) = tokio::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).await {
+            warn!("Failed to save app manifest: {e}");
+        }
+
         // Auto-create ingress for the first port
         if let Some(first_port) = req.ports.first() {
             let host_port = if let Some(hp) = first_port.host_port {
@@ -684,8 +696,10 @@ impl AppsService {
             )
             .await?;
 
-        // Clean up ingress
+        // Clean up ingress and manifest
         let _ = self.ingress_remove(name).await;
+        let manifest_path = format!("{}/{}.json", COMPOSE_DIR, name);
+        let _ = tokio::fs::remove_file(&manifest_path).await;
 
         info!("Removed app '{name}'");
         Ok(())
@@ -701,7 +715,7 @@ impl AppsService {
 
     /// List apps from on-disk state when Docker is not running.
     /// Compose apps are detected by docker-compose.yml files.
-    /// Simple container apps have no on-disk state without Docker.
+    /// Simple apps are detected by {name}.json manifest files.
     async fn list_offline() -> Result<Vec<App>, AppsError> {
         let apps_dir = std::path::Path::new(COMPOSE_DIR);
         if !apps_dir.is_dir() {
@@ -711,33 +725,56 @@ impl AppsService {
         let mut entries = tokio::fs::read_dir(apps_dir).await
             .map_err(|e| AppsError::CommandFailed(format!("read apps dir: {e}")))?;
         while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            let compose_path = entry.path().join("docker-compose.yml");
-            if compose_path.exists() {
-                // Parse compose YAML for primary image
-                let image = tokio::fs::read_to_string(&compose_path)
-                    .await
-                    .ok()
-                    .and_then(|content| {
-                        let parsed: serde_json::Value = serde_yaml_ng::from_str(&content).ok()?;
-                        parsed.get("services")?
-                            .as_object()?
-                            .values()
-                            .next()?
-                            .get("image")?
-                            .as_str()
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_default();
-                apps.push(App {
-                    name,
-                    image,
-                    status: "stopped".to_string(),
-                    created: String::new(),
-                    kind: "compose".to_string(),
-                    containers: Vec::new(),
-                    ports: Vec::new(),
-                });
+
+            if path.is_dir() {
+                // Compose app: directory with docker-compose.yml
+                let compose_path = path.join("docker-compose.yml");
+                if compose_path.exists() {
+                    let image = tokio::fs::read_to_string(&compose_path)
+                        .await
+                        .ok()
+                        .and_then(|content| {
+                            let parsed: serde_json::Value = serde_yaml_ng::from_str(&content).ok()?;
+                            parsed.get("services")?
+                                .as_object()?
+                                .values()
+                                .next()?
+                                .get("image")?
+                                .as_str()
+                                .map(|s| s.to_string())
+                        })
+                        .unwrap_or_default();
+                    apps.push(App {
+                        name,
+                        image,
+                        status: "stopped".to_string(),
+                        created: String::new(),
+                        kind: "compose".to_string(),
+                        containers: Vec::new(),
+                        ports: Vec::new(),
+                    });
+                }
+            } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                // Simple app: manifest JSON
+                if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                    if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let app_name = manifest.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                        let image = manifest.get("image").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                        if !app_name.is_empty() {
+                            apps.push(App {
+                                name: app_name,
+                                image,
+                                status: "stopped".to_string(),
+                                created: String::new(),
+                                kind: "simple".to_string(),
+                                containers: Vec::new(),
+                                ports: Vec::new(),
+                            });
+                        }
+                    }
+                }
             }
         }
         apps.sort_by(|a, b| a.name.cmp(&b.name));
