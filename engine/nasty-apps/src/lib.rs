@@ -32,7 +32,6 @@ const STATE_PATH: &str = "/var/lib/nasty/apps-enabled";
 const PROXY_CONF: &str = "/var/lib/nasty/apps-proxy.conf";
 const COMPOSE_DIR: &str = "/var/lib/nasty/apps";
 const DOCKER_SERVICE: &str = "docker.service";
-const DOCKER_DAEMON_JSON: &str = "/etc/docker/daemon.json";
 
 /// Label applied to all NASty-managed containers.
 const LABEL_MANAGED: &str = "nasty.managed";
@@ -1966,11 +1965,12 @@ async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
 }
 
 /// Configure Docker's data-root to store images/layers on bcachefs instead of root partition.
+/// Ensure Docker stores data on bcachefs by symlinking /var/lib/docker.
+/// Must be called before Docker starts — Docker reads data-root at startup.
 async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), AppsError> {
     let fs_name = if let Some(name) = filesystem {
         name.to_string()
     } else {
-        // Find first mounted filesystem
         let fs_base = Path::new("/fs");
         let mut entries = tokio::fs::read_dir(fs_base).await
             .map_err(|e| AppsError::CommandFailed(format!("cannot read /fs: {e}")))?;
@@ -1988,18 +1988,35 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
     tokio::fs::create_dir_all(&docker_data).await
         .map_err(|e| AppsError::CommandFailed(format!("create {docker_data}: {e}")))?;
 
-    // Write daemon.json with data-root pointing to bcachefs
-    tokio::fs::create_dir_all("/etc/docker").await
-        .map_err(|e| AppsError::CommandFailed(format!("create /etc/docker: {e}")))?;
+    let docker_lib = Path::new("/var/lib/docker");
 
-    let daemon_json = serde_json::json!({
-        "data-root": docker_data,
-    });
-    tokio::fs::write(DOCKER_DAEMON_JSON, serde_json::to_string_pretty(&daemon_json).unwrap())
-        .await
-        .map_err(|e| AppsError::CommandFailed(format!("write {DOCKER_DAEMON_JSON}: {e}")))?;
+    // If /var/lib/docker is already a symlink to the right place, nothing to do
+    if let Ok(target) = tokio::fs::read_link(docker_lib).await {
+        if target.to_string_lossy() == docker_data {
+            info!("Docker data symlink already points to {docker_data}");
+            return Ok(());
+        }
+    }
 
-    info!("Configured Docker data-root at {docker_data}");
+    // Stop Docker if running (we need to move/replace its data dir)
+    let _ = run_cmd("systemctl", &["stop", DOCKER_SERVICE]).await;
+
+    // Remove existing /var/lib/docker (empty default dir or old data)
+    if docker_lib.exists() {
+        if docker_lib.is_symlink() {
+            tokio::fs::remove_file(docker_lib).await
+                .map_err(|e| AppsError::CommandFailed(format!("remove old symlink: {e}")))?;
+        } else {
+            tokio::fs::remove_dir_all(docker_lib).await
+                .map_err(|e| AppsError::CommandFailed(format!("remove /var/lib/docker: {e}")))?;
+        }
+    }
+
+    // Create symlink
+    tokio::fs::symlink(&docker_data, docker_lib).await
+        .map_err(|e| AppsError::CommandFailed(format!("symlink {docker_data} -> /var/lib/docker: {e}")))?;
+
+    info!("Symlinked /var/lib/docker -> {docker_data}");
     Ok(())
 }
 
