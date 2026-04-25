@@ -75,10 +75,29 @@
 		}
 	});
 
+	// scrub polling
+	let scrubPollId: ReturnType<typeof setInterval> | null = null;
+
+	function startScrubPolling() {
+		if (scrubPollId) return;
+		scrubPollId = setInterval(async () => {
+			await refreshScrub();
+			if (!scrubRunning && scrubPollId) {
+				clearInterval(scrubPollId);
+				scrubPollId = null;
+			}
+		}, 5000);
+	}
+
+	function stopScrubPolling() {
+		if (scrubPollId) { clearInterval(scrubPollId); scrubPollId = null; }
+	}
+
 	onDestroy(() => {
 		stopAutoRefresh();
 		stopTopAutoRefresh();
 		stopTimestatsAutoRefresh();
+		stopScrubPolling();
 	});
 
 	// ── Usage tab ──────────────────────────────────────────────
@@ -150,6 +169,8 @@
 			const result = await getClient().call<{ raw: string; running: boolean }>('fs.scrub.status', { name: selectedFs });
 			scrubOutput = result.raw || 'No scrub data available.';
 			scrubRunning = result.running ?? false;
+			if (scrubRunning) startScrubPolling();
+			else stopScrubPolling();
 		} catch (e) {
 			scrubOutput = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -163,6 +184,7 @@
 			await getClient().call('fs.scrub.start', { name: selectedFs });
 			scrubRunning = true;
 			await refreshScrub();
+			startScrubPolling();
 		} catch (e) {
 			showError(e instanceof Error ? e.message : String(e));
 		}
