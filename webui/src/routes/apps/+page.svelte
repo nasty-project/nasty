@@ -312,8 +312,37 @@
 		newVolumes = newVolumes.filter((_, idx) => idx !== i);
 	}
 
+	async function ensureAppsEnabled(): Promise<boolean> {
+		if (status?.enabled && status?.running) return true;
+		if (!status?.enabled) {
+			enabling = true;
+			const ok = await withToast(
+				() => client.call('apps.enable', { filesystem: selectedFs || undefined }),
+				'Starting Docker runtime'
+			);
+			enabling = false;
+			if (ok === undefined) return false;
+			// Wait for Docker to be ready
+			for (let i = 0; i < 15; i++) {
+				await new Promise(r => setTimeout(r, 2000));
+				await refresh();
+				if (status?.running) return true;
+			}
+			await withToast(async () => { throw new Error('Docker failed to start in time'); }, '');
+			return false;
+		}
+		// Enabled but not running — wait
+		for (let i = 0; i < 15; i++) {
+			await new Promise(r => setTimeout(r, 2000));
+			await refresh();
+			if (status?.running) return true;
+		}
+		return false;
+	}
+
 	async function install() {
 		if (!newName || !newImage) return;
+		if (!await ensureAppsEnabled()) return;
 		const appName = newName.toLowerCase();
 		if (!isValidAppName(appName)) {
 			await withToast(async () => { throw new Error('Invalid app name: use lowercase letters, numbers, hyphens, and dots (max 53 chars)'); }, '');
@@ -501,6 +530,7 @@
 	// Compose functions
 	async function installCompose() {
 		if (!composeName || !composeContent.trim()) return;
+		if (!await ensureAppsEnabled()) return;
 		const name = composeName.toLowerCase();
 		if (!isValidAppName(name)) {
 			await withToast(async () => { throw new Error('Invalid app name'); }, '');
@@ -574,71 +604,13 @@
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
-{:else if !status?.enabled}
-	<!-- Setup Wizard -->
-	<Card class="mb-4 max-w-2xl">
-		<CardContent class="pt-6 pb-4">
-			<h3 class="mb-1 text-lg font-semibold">Apps Setup</h3>
-			<p class="mb-4 text-sm text-muted-foreground">
-				NASty runs containerized applications using Docker.
-				Lightweight — uses approximately 50 MiB of RAM for the runtime itself.
-			</p>
-
-			<div class="space-y-2">
-				<div class="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5">
-					{#if filesystems.length > 0}
-						<CircleCheck size={18} class="mt-0.5 shrink-0 text-green-500" />
-					{:else}
-						<Circle size={18} class="mt-0.5 shrink-0 text-muted-foreground" />
-					{/if}
-					<div class="flex-1 min-w-0">
-						<div class="text-sm font-medium">Filesystem</div>
-						<div class="text-xs text-muted-foreground">
-							{filesystems.length > 0
-								? `${filesystems.length} filesystem${filesystems.length !== 1 ? 's' : ''} available`
-								: 'No filesystem found — create one in Filesystems first'}
-						</div>
-					</div>
-					{#if filesystems.length === 0}
-						<Button size="sm" onclick={() => goto('/filesystems')}>
-							Filesystems
-						</Button>
-					{/if}
-				</div>
-
-				<div class="flex items-start gap-3 rounded-lg border border-border px-3 py-2.5">
-					{#if filesystems.length > 0}
-						<CircleCheck size={18} class="mt-0.5 shrink-0 text-green-500" />
-					{:else}
-						<Circle size={18} class="mt-0.5 shrink-0 text-muted-foreground" />
-					{/if}
-					<div class="flex-1 min-w-0">
-						<div class="text-sm font-medium">App Storage Location</div>
-						{#if filesystems.length > 0}
-							<div class="mt-1">
-								<select bind:value={selectedFs} class="h-7 rounded-md border border-input bg-transparent px-2 text-xs">
-									{#each filesystems as fs}
-										<option value={fs.name}>{fs.name}</option>
-									{/each}
-								</select>
-								<span class="ml-2 text-xs text-muted-foreground">App data will be stored on this filesystem</span>
-							</div>
-						{:else}
-							<div class="text-xs text-muted-foreground">Requires a filesystem first</div>
-						{/if}
-					</div>
-				</div>
-			</div>
-
-			<div class="mt-4">
-				<Button onclick={enableApps} disabled={enabling || filesystems.length === 0}>
-					{enabling ? 'Enabling...' : 'Enable Apps'}
-				</Button>
-			</div>
-		</CardContent>
-	</Card>
-{:else if !status?.running}
-	<Card>
+{:else if filesystems.length === 0}
+	<div class="flex flex-col items-center justify-center py-12 text-center">
+		<p class="text-muted-foreground">Apps need a filesystem to store data.</p>
+		<Button size="sm" class="mt-2" onclick={() => goto('/filesystems?create')}>Create Filesystem</Button>
+	</div>
+{:else if status?.enabled && !status?.running}
+	<Card class="mb-4">
 		<CardContent class="py-8 text-center">
 			<div class="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary"></div>
 			<p class="font-medium">Starting app runtime</p>
