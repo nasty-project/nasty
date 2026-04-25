@@ -343,6 +343,10 @@ in {
          bcachefs device set-state failed /dev/<disk>         mark device failed
          bcachefs data rereplicate /fs/first            rereplicate after device change
 
+       bcachefs — extended attributes
+         getfattr -R -d -m "^bcachefs\\." /fs/first    list all bcachefs xattrs (compression, replicas, etc.)
+         getfattr -d -m "^bcachefs\\." /fs/first/mydir  xattrs on a specific file or directory
+
        bcachefs — subvolumes & snapshots
          bcachefs subvolume list /fs/first
          bcachefs subvolume snapshot <src> <dst>
