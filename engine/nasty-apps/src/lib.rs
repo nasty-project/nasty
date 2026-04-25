@@ -1969,13 +1969,13 @@ async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
         return Some(apps_path);
     }
 
-    match tokio::fs::create_dir_all(&apps_path).await {
+    match run_cmd("bcachefs", &["subvolume", "create", &apps_path]).await {
         Ok(()) => {
-            info!("Created apps storage directory at {apps_path}");
+            info!("Created apps subvolume at {apps_path}");
             Some(apps_path)
         }
         Err(e) => {
-            error!("Failed to create apps storage at {apps_path}: {e}");
+            error!("Failed to create apps subvolume at {apps_path}: {e}");
             None
         }
     }
