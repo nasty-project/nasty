@@ -785,16 +785,10 @@
 				{#if filteredShareSubvolumes.length === 0 && !showInlineCreate}
 					<p class="mt-1 text-xs text-muted-foreground">
 						No {shareProtocol === 'iscsi' || shareProtocol === 'nvmeof' ? 'block' : 'filesystem'} subvolumes available.
-						<button
-							onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}
-							class="text-primary hover:underline"
-						>Create one</button>
 					</p>
+					<Button size="sm" class="mt-2" onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}>Create Subvolume</Button>
 				{:else if !showInlineCreate}
-					<button
-						onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}
-						class="mt-1 text-xs text-primary hover:underline"
-					>+ Create new subvolume</button>
+					<Button size="xs" variant="secondary" class="mt-2" onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}>Create Subvolume</Button>
 				{/if}
 				{#if showInlineCreate}
 					<div class="mt-3 rounded-lg border border-border bg-secondary/20 p-3 space-y-3">
