@@ -824,6 +824,18 @@ impl AppsService {
         Ok(apps)
     }
 
+    pub async fn inspect(&self, name: &str) -> Result<serde_json::Value, AppsError> {
+        self.require_ready().await?;
+        let cname = container_name(name);
+        let info = self
+            .docker()?
+            .inspect_container(&cname, None)
+            .await
+            .map_err(|_| AppsError::AppNotFound(name.to_string()))?;
+        serde_json::to_value(&info)
+            .map_err(|e| AppsError::CommandFailed(format!("serialize inspect: {e}")))
+    }
+
     pub async fn get(&self, name: &str) -> Result<App, AppsError> {
         let apps = self.list().await?;
         apps.into_iter()

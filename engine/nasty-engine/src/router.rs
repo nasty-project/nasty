@@ -1984,6 +1984,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+        "apps.inspect" => match require_str(req, "name") {
+            Ok(name) => match state.apps.inspect(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         "apps.install" => match parse_params(req) {
             Ok(p) => match state.apps.install(p).await {
                 Ok(v) => ok(req, v),

@@ -107,6 +107,8 @@
 	let editingApp: string | null = $state(null);
 	let logsApp: string | null = $state(null);
 	let logsContent = $state('');
+	let inspectData: string | null = $state(null);
+	let inspectName: string | null = $state(null);
 	let installMode: 'simple' | 'compose' = $state('simple');
 	let showRuntimeDetails = $state(false);
 
@@ -519,6 +521,17 @@
 
 	let expanded: Record<string, boolean> = $state({});
 
+	async function inspectApp(name: string) {
+		inspectName = name;
+		inspectData = 'Loading...';
+		try {
+			const result = await client.call<unknown>('apps.inspect', { name });
+			inspectData = JSON.stringify(result, null, 2);
+		} catch (e) {
+			inspectData = `Failed to inspect: ${e}`;
+		}
+	}
+
 	async function showLogs(name: string, kind: string) {
 		logsApp = name;
 		logsContent = 'Loading...';
@@ -920,6 +933,7 @@
 												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; openShell(app.name); }}>Shell</button>
 											{/if}
 											<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; pullApp(app.name); }}>Pull image</button>
+											<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; inspectApp(app.name); }}>Inspect</button>
 											{#if app.kind === 'simple'}
 												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; editApp(app.name); }}>Edit</button>
 											{:else}
@@ -990,6 +1004,20 @@
 {/if}
 
 <!-- Logs Modal -->
+{#if inspectName}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<div class="flex flex-col w-[90vw] max-w-4xl h-[70vh] rounded-lg border border-border bg-[#0f1117] shadow-2xl">
+			<div class="flex items-center justify-between px-4 py-2 border-b border-border">
+				<span class="text-sm font-semibold text-white">Inspect: {inspectName}</span>
+				<Button variant="ghost" size="xs" onclick={() => inspectName = null} class="text-white hover:text-white/80">
+					Close
+				</Button>
+			</div>
+			<pre class="flex-1 p-4 overflow-auto text-xs text-cyan-400 font-mono whitespace-pre-wrap">{inspectData}</pre>
+		</div>
+	</div>
+{/if}
+
 {#if logsApp}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
 		<div class="flex flex-col w-[90vw] max-w-4xl h-[70vh] rounded-lg border border-border bg-[#0f1117] shadow-2xl">
