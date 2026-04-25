@@ -303,16 +303,18 @@ in {
       echo "  Welcome to NASty!  |  $(hostname)  |  $(date '+%Y-%m-%d %H:%M %Z')"
       echo ""
       echo "  Type 'help'       to show bcachefs command reference."
+      echo "  Type 'system'     to show NASty system commands."
       echo "  Type 'debug'      to show advanced debugging (perf, oops)."
       echo "  Type 'benchmark'  to show storage benchmark commands."
       echo "  Type 'report'     to dump diagnostic info for bug reports."
       echo ""
 
       help()      { cat /etc/nasty/help-cheatsheet; }
+      system()    { cat /etc/nasty/system-cheatsheet; }
       debug()     { cat /etc/nasty/debug-cheatsheet; }
       benchmark() { cat /etc/nasty/benchmark-cheatsheet; }
       report()    { nasty-report; }
-      export -f help debug benchmark report
+      export -f help system debug benchmark report
     '';
 
     environment.etc."nasty/help-cheatsheet".text = ''
@@ -443,6 +445,47 @@ in {
 
     '';
 
+    environment.etc."nasty/system-cheatsheet".text = ''
+
+      ╔══════════════════════════════════════════════════════╗
+      ║             NASty System Commands                    ║
+      ╚══════════════════════════════════════════════════════╝
+
+       nasty — built-in tools
+         nasty-top                                  live IO, latency, tuning advisor
+         nasty-report                               dump diagnostic info for bug reports
+         nasty-cleanup                              remove old generations + garbage collect
+         nasty-rebuild                              force rebuild from current /etc/nixos
+
+       NixOS — system management
+         nixos-rebuild switch --flake /etc/nixos#nasty     rebuild and activate
+         nixos-rebuild boot --flake /etc/nixos#nasty       rebuild, activate on next boot
+         nix-env --list-generations -p /nix/var/nix/profiles/system   list generations
+         nix-env --delete-generations +3 -p /nix/var/nix/profiles/system   keep last 3
+
+       NixOS — flake management
+         nix flake update nasty --flake /etc/nixos         pull latest NASty
+         nix flake metadata /etc/nixos                     show current input revisions
+
+       disk space
+         df -h /                                           root partition usage
+         nix-collect-garbage                               remove unreferenced store paths
+         nix-collect-garbage -d                             also delete old generations
+         du -sh /nix/store | sort -h | tail -20            biggest store paths
+
+       services
+         systemctl status nasty-engine                     engine status
+         systemctl restart nasty-engine                    restart engine
+         journalctl -u nasty-engine -f                     follow engine logs
+         journalctl -u nasty-engine --since "1h ago"       last hour of logs
+
+       networking
+         ip addr                                           show all interfaces
+         ip route                                          show routes
+         ss -tlnp                                          listening ports
+
+    '';
+
     # Kernel modules for iSCSI/NVMe-oF are NOT auto-loaded at boot.
     # They are loaded on demand by the engine when the user enables
     # a protocol, keeping a clean default state on fresh installs.
@@ -504,6 +547,25 @@ in {
         cargoHash = "sha256-1HGu29yMYskUr0IEY9Rtw5V6fGlBu+PKyKFvf+TGBu0=";
         meta.mainProgram = "nasty-top";
       })
+
+      (writeShellScriptBin "nasty-cleanup" ''
+        set -euo pipefail
+        echo "==> Removing old NixOS generations (keeping last 3)..."
+        nix-env --delete-generations +3 -p /nix/var/nix/profiles/system 2>/dev/null || true
+        echo "==> Running garbage collection..."
+        nix-collect-garbage 2>&1
+        echo "==> Done."
+        df -h /
+      '')
+
+      (writeShellScriptBin "nasty-rebuild" ''
+        set -euo pipefail
+        echo "==> Rebuilding NASty from /etc/nixos..."
+        nixos-rebuild switch --flake /etc/nixos#nasty
+        NASTY_REV=$(${pkgs.jq}/bin/jq -r '.nodes["nasty"].locked.rev // empty' /etc/nixos/flake.lock 2>/dev/null || true)
+        [ -n "$NASTY_REV" ] && echo "''${NASTY_REV:0:7}" > /var/lib/nasty/version
+        echo "==> Done. Running: $(cat /var/lib/nasty/version 2>/dev/null || echo unknown)"
+      '')
 
       (writeShellScriptBin "nasty-report" ''
         set -euo pipefail
