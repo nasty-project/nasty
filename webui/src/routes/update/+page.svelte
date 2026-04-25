@@ -551,23 +551,26 @@
 									<div class="mt-2 text-sm text-muted-foreground">Already at latest commit.</div>
 								{/if}
 							</div>
-							<div class="flex flex-wrap items-start justify-end gap-3">
+							<div class="flex items-center gap-3">
 								{#if info}
-									<div class="min-w-[11rem] rounded-lg border border-border/60 bg-background/60 px-4 py-3 text-sm">
-										<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed NASty</div>
-										<div class="mt-1 font-mono text-lg font-semibold">{info.current_version}</div>
+									<div class="font-mono text-sm text-muted-foreground">
+										Installed: <span class="font-semibold text-foreground">{info.current_version}</span>
 									</div>
-								{/if}
-								<div class="flex flex-col gap-2">
-									<Button size="sm" variant="secondary" onclick={checkForUpdates} disabled={checking || upstreamBusy}>
-										{checking ? 'Checking...' : 'Refresh'}
-									</Button>
-									{#if checkInfo?.update_available}
-										<Button size="sm" onclick={upgradeDevBuild} disabled={startingDevUpgrade || status?.state === 'running'}>
-											{startingDevUpgrade ? 'Starting...' : 'Upgrade'}
-										</Button>
+									{#if checkInfo?.latest_version}
+										<span class="text-muted-foreground">→</span>
+										<div class="font-mono text-sm text-muted-foreground">
+											Latest: <span class="font-semibold text-foreground">{checkInfo.latest_version}</span>
+										</div>
 									{/if}
-								</div>
+								{/if}
+								<Button size="sm" variant="secondary" onclick={checkForUpdates} disabled={checking || upstreamBusy}>
+									{checking ? 'Checking...' : 'Check for Updates'}
+								</Button>
+								{#if checkInfo?.update_available}
+									<Button size="sm" onclick={upgradeDevBuild} disabled={startingDevUpgrade || status?.state === 'running'}>
+										{startingDevUpgrade ? 'Starting...' : 'Upgrade'}
+									</Button>
+								{/if}
 							</div>
 						</div>
 					</div>
@@ -612,11 +615,10 @@
 								</div>
 							{/if}
 						</div>
-						<div class="flex flex-wrap items-start justify-end gap-3">
+						<div class="flex items-center gap-3">
 							{#if !isDevBuild && info}
-								<div class="min-w-[11rem] rounded-lg border border-border/60 bg-background/60 px-4 py-3 text-sm">
-									<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Installed NASty</div>
-									<div class="mt-1 font-mono text-lg font-semibold">{info.current_version}</div>
+								<div class="font-mono text-sm text-muted-foreground">
+									Installed: <span class="font-semibold text-foreground">{info.current_version}</span>
 								</div>
 							{/if}
 							{#if taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url}
