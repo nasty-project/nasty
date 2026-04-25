@@ -76,19 +76,12 @@
 
 	let filesystems: { name: string; mounted: boolean }[] = $state([]);
 
-	$effect(() => {
-		if (wizardStep > 0) {
-			loadSubvolumes();
-			loadFilesystems();
-			loadImages();
-		}
-	});
-
-	function openWizard() {
-		wizardStep = canCreateVm ? 1 : -1; // -1 = prerequisites
+	async function openWizard() {
 		newName = ''; newCpus = 1; newMemory = 1024; newDisk = ''; newDiskCreate = false;
 		newDiskFs = ''; newDiskSize = 10; newIso = ''; newDescription = '';
 		newBootOrder = 'disk'; newAutostart = false; newPassthrough = [];
+		await Promise.all([loadSubvolumes(), loadFilesystems(), loadImages()]);
+		wizardStep = canCreateVm ? 1 : -1; // -1 = prerequisites
 	}
 
 	// Network state for create wizard
