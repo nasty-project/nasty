@@ -3,9 +3,6 @@
 {
   imports = [ ./binary-cache.nix ];
 
-  # Disable desktop-oriented services that are unnecessary on a headless NAS
-  services.udisks2.enable = lib.mkForce false;
-
   # fwupd: disable the hourly metadata refresh timer — firmware checks are
   # triggered on-demand from the UI. fwupd itself stays D-Bus activated so
   # it starts when needed and exits after the idle timeout.
