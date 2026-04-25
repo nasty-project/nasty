@@ -1217,7 +1217,8 @@
 												</Button>
 											</div>
 										{:else if vm.disks.length === 0}
-											<p class="mt-1 text-xs text-muted-foreground">No block subvolumes available. Create one in Subvolumes first.</p>
+											<p class="mt-1 text-xs text-muted-foreground">No block subvolumes available.</p>
+											<Button size="xs" class="mt-1" onclick={() => goto('/subvolumes')}>Subvolumes</Button>
 										{/if}
 									{/if}
 								</div>

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
@@ -1077,7 +1078,8 @@
 					{/each}
 				</select>
 				{#if smbSubvolumes.length === 0}
-					<span class="mt-1 block text-xs text-muted-foreground">No filesystem subvolumes found. Create one first.</span>
+					<span class="mt-1 block text-xs text-muted-foreground">No filesystem subvolumes found.</span>
+					<Button size="xs" class="mt-1" onclick={() => goto('/subvolumes')}>Subvolumes</Button>
 				{/if}
 			</div>
 			<div class="mb-4">
