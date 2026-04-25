@@ -949,7 +949,7 @@
 				<div class="space-y-2 mb-4">
 					{#each notifConfig.channels as ch}
 						<div class="flex items-center gap-3 rounded-lg border border-border px-4 py-3">
-							<button onclick={() => toggleChannel(ch.id)} class="shrink-0">
+							<button onclick={() => toggleChannel(ch.id)} class="shrink-0" title="{ch.enabled ? 'Disable' : 'Enable'} {ch.name}">
 								<span class="h-2 w-2 rounded-full inline-block {ch.enabled ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
 							</button>
 							<div class="flex-1 min-w-0">
@@ -983,35 +983,35 @@
 				<div class="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
 					<div class="text-sm font-medium">Add {notifAddType.toUpperCase()} channel</div>
 					<div>
-						<label class="text-xs text-muted-foreground">Name</label>
-						<input bind:value={nfName} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+						<label for="nf-name" class="text-xs text-muted-foreground">Name</label>
+						<input id="nf-name" bind:value={nfName} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
 					</div>
 
 					{#if notifAddType === 'smtp'}
 						<div class="grid grid-cols-2 gap-3">
 							<div>
-								<label class="text-xs text-muted-foreground">SMTP Host</label>
-								<input bind:value={nfHost} placeholder="smtp.gmail.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+								<label for="nf-host" class="text-xs text-muted-foreground">SMTP Host</label>
+								<input id="nf-host" bind:value={nfHost} placeholder="smtp.gmail.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
 							</div>
 							<div>
-								<label class="text-xs text-muted-foreground">Port</label>
-								<input type="number" bind:value={nfPort} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+								<label for="nf-port" class="text-xs text-muted-foreground">Port</label>
+								<input id="nf-port" type="number" bind:value={nfPort} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
 							</div>
 							<div>
-								<label class="text-xs text-muted-foreground">Username</label>
-								<input bind:value={nfUser} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+								<label for="nf-user" class="text-xs text-muted-foreground">Username</label>
+								<input id="nf-user" bind:value={nfUser} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
 							</div>
 							<div>
-								<label class="text-xs text-muted-foreground">Password</label>
-								<input type="password" bind:value={nfPass} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+								<label for="nf-pass" class="text-xs text-muted-foreground">Password</label>
+								<input id="nf-pass" type="password" bind:value={nfPass} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
 							</div>
 							<div>
-								<label class="text-xs text-muted-foreground">From</label>
-								<input bind:value={nfFrom} placeholder="nasty@example.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+								<label for="nf-from" class="text-xs text-muted-foreground">From</label>
+								<input id="nf-from" bind:value={nfFrom} placeholder="nasty@example.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
 							</div>
 							<div>
-								<label class="text-xs text-muted-foreground">To</label>
-								<input bind:value={nfTo} placeholder="admin@example.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+								<label for="nf-to" class="text-xs text-muted-foreground">To</label>
+								<input id="nf-to" bind:value={nfTo} placeholder="admin@example.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
 							</div>
 						</div>
 						<label class="flex items-center gap-2 text-sm">
@@ -1019,30 +1019,30 @@
 						</label>
 					{:else if notifAddType === 'telegram'}
 						<div>
-							<label class="text-xs text-muted-foreground">Bot Token</label>
-							<input bind:value={nfBotToken} placeholder="123456:ABC-DEF..." class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<label for="nf-bot-token" class="text-xs text-muted-foreground">Bot Token</label>
+							<input id="nf-bot-token" bind:value={nfBotToken} placeholder="123456:ABC-DEF..." class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
 						</div>
 						<div>
-							<label class="text-xs text-muted-foreground">Chat ID</label>
-							<input bind:value={nfChatId} placeholder="-1001234567890" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<label for="nf-chat-id" class="text-xs text-muted-foreground">Chat ID</label>
+							<input id="nf-chat-id" bind:value={nfChatId} placeholder="-1001234567890" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
 						</div>
 					{:else if notifAddType === 'webhook'}
 						<div>
-							<label class="text-xs text-muted-foreground">URL</label>
-							<input bind:value={nfUrl} placeholder="https://hooks.example.com/nasty" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<label for="nf-url" class="text-xs text-muted-foreground">URL</label>
+							<input id="nf-url" bind:value={nfUrl} placeholder="https://hooks.example.com/nasty" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
 						</div>
 					{:else if notifAddType === 'ntfy'}
 						<div>
-							<label class="text-xs text-muted-foreground">Server URL</label>
-							<input bind:value={nfNtfyServer} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<label for="nf-ntfy-server" class="text-xs text-muted-foreground">Server URL</label>
+							<input id="nf-ntfy-server" bind:value={nfNtfyServer} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
 						</div>
 						<div>
-							<label class="text-xs text-muted-foreground">Topic</label>
-							<input bind:value={nfNtfyTopic} placeholder="my-nasty-alerts" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<label for="nf-ntfy-topic" class="text-xs text-muted-foreground">Topic</label>
+							<input id="nf-ntfy-topic" bind:value={nfNtfyTopic} placeholder="my-nasty-alerts" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
 						</div>
 						<div>
-							<label class="text-xs text-muted-foreground">Token (optional)</label>
-							<input bind:value={nfNtfyToken} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<label for="nf-ntfy-token" class="text-xs text-muted-foreground">Token (optional)</label>
+							<input id="nf-ntfy-token" bind:value={nfNtfyToken} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
 						</div>
 					{/if}
 
