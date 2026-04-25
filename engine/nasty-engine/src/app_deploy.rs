@@ -11,6 +11,8 @@ use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use axum::response::IntoResponse;
+use bollard::query_parameters::CreateImageOptions;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -128,14 +130,10 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
         }
     };
 
-    // Step 1: Pull image with streaming output
+    // Step 1: Pull image via bollard with structured progress
     let _ = socket.send(Message::Text(DeployMessage::log(&format!("Pulling image: {image}")).into())).await;
 
-    if let Err(e) = stream_command(
-        socket,
-        "docker",
-        &["pull", &image],
-    ).await {
+    if let Err(e) = pull_image_with_progress(socket, &state, &image).await {
         let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed: {e}")).into())).await;
         return;
     }
@@ -304,7 +302,7 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
         };
 
         let _ = socket.send(Message::Text(DeployMessage::log(&format!("Pulling image: {image}")).into())).await;
-        if let Err(e) = stream_command(socket, "docker", &["pull", &image]).await {
+        if let Err(e) = pull_image_with_progress(socket, &state, &image).await {
             let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed: {e}")).into())).await;
             return;
         }
@@ -394,6 +392,72 @@ async fn stream_command(
         } else {
             err_lines.join("\n")
         });
+    }
+
+    Ok(())
+}
+
+/// Pull a Docker image using bollard's API with structured per-layer progress.
+async fn pull_image_with_progress(
+    socket: &mut WebSocket,
+    state: &AppState,
+    image: &str,
+) -> Result<(), String> {
+    let docker = state.apps.docker_client()
+        .map_err(|e| format!("Docker not ready: {e}"))?;
+
+    let (from_image, tag) = if let Some((img, tag)) = image.rsplit_once(':') {
+        (img.to_string(), tag.to_string())
+    } else {
+        (image.to_string(), "latest".to_string())
+    };
+
+    let options = CreateImageOptions {
+        from_image: Some(from_image.clone()),
+        tag: Some(tag.clone()),
+        ..Default::default()
+    };
+
+    let mut stream = docker.create_image(Some(options), None, None);
+    let mut layers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(info) => {
+                let id = info.id.as_deref().unwrap_or("");
+                let status = info.status.as_deref().unwrap_or("");
+
+                let line = if let Some(ref detail) = info.progress_detail {
+                    let current = detail.current.unwrap_or(0);
+                    let total = detail.total.unwrap_or(0);
+                    if total > 0 {
+                        let pct = (current as f64 / total as f64 * 100.0) as u32;
+                        let mb_current = current as f64 / 1_048_576.0;
+                        let mb_total = total as f64 / 1_048_576.0;
+                        format!("{id}: {status} {mb_current:.1}/{mb_total:.1} MB ({pct}%)")
+                    } else {
+                        format!("{id}: {status}")
+                    }
+                } else if !id.is_empty() {
+                    format!("{id}: {status}")
+                } else {
+                    status.to_string()
+                };
+
+                // Only send if the line changed for this layer (avoid flooding)
+                if id.is_empty() || layers.get(id) != Some(&line) {
+                    if !id.is_empty() {
+                        layers.insert(id.to_string(), line.clone());
+                    }
+                    let _ = socket
+                        .send(Message::Text(DeployMessage::log(&line).into()))
+                        .await;
+                }
+            }
+            Err(e) => {
+                return Err(format!("{e}"));
+            }
+        }
     }
 
     Ok(())

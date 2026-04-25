@@ -305,6 +305,11 @@ impl AppsService {
         Self { docker }
     }
 
+    /// Get a reference to the bollard Docker client (for use by deploy streaming).
+    pub fn docker_client(&self) -> Result<&Docker, AppsError> {
+        self.docker()
+    }
+
     fn docker(&self) -> Result<&Docker, AppsError> {
         self.docker.as_ref().ok_or_else(|| AppsError::NotReady("Docker socket not available".into()))
     }
