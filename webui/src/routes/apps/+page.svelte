@@ -312,37 +312,44 @@
 		newVolumes = newVolumes.filter((_, idx) => idx !== i);
 	}
 
+	/** Start Docker in background if not running. Returns true if already ready. */
 	async function ensureAppsEnabled(): Promise<boolean> {
 		if (status?.enabled && status?.running) return true;
 		if (!status?.enabled) {
+			const agreed = await confirm(
+				'Enable Docker?',
+				'Apps require Docker to run. It uses approximately 50 MiB of RAM. Docker will start in the background while you configure your app.'
+			);
+			if (!agreed) return false;
 			enabling = true;
-			const ok = await withToast(
+			await withToast(
 				() => client.call('apps.enable', { filesystem: selectedFs || undefined }),
-				'Starting Docker runtime'
+				'Docker is starting in the background'
 			);
 			enabling = false;
-			if (ok === undefined) return false;
-			// Wait for Docker to be ready
-			for (let i = 0; i < 15; i++) {
-				await new Promise(r => setTimeout(r, 2000));
-				await refresh();
-				if (status?.running) return true;
-			}
-			await withToast(async () => { throw new Error('Docker failed to start in time'); }, '');
-			return false;
+			startStartupPolling();
+		} else {
+			// Enabled but not yet running — just poll
+			startStartupPolling();
 		}
-		// Enabled but not running — wait
-		for (let i = 0; i < 15; i++) {
+		return true; // Let user proceed with form — install will wait for Docker
+	}
+
+	/** Wait until Docker is actually ready before submitting. */
+	async function waitForDocker(): Promise<boolean> {
+		if (status?.running) return true;
+		for (let i = 0; i < 30; i++) {
 			await new Promise(r => setTimeout(r, 2000));
 			await refresh();
 			if (status?.running) return true;
 		}
+		await withToast(async () => { throw new Error('Docker failed to start in time'); }, '');
 		return false;
 	}
 
 	async function install() {
 		if (!newName || !newImage) return;
-		if (!await ensureAppsEnabled()) return;
+		if (!await waitForDocker()) return;
 		const appName = newName.toLowerCase();
 		if (!isValidAppName(appName)) {
 			await withToast(async () => { throw new Error('Invalid app name: use lowercase letters, numbers, hyphens, and dots (max 53 chars)'); }, '');
@@ -530,7 +537,7 @@
 	// Compose functions
 	async function installCompose() {
 		if (!composeName || !composeContent.trim()) return;
-		if (!await ensureAppsEnabled()) return;
+		if (!await waitForDocker()) return;
 		const name = composeName.toLowerCase();
 		if (!isValidAppName(name)) {
 			await withToast(async () => { throw new Error('Invalid app name'); }, '');
@@ -668,7 +675,7 @@
 
 	<!-- Action bar -->
 	<div class="mb-4 flex items-center gap-3">
-		<Button size="sm" onclick={() => { if (showInstall || showCompose) { cancelEdit(); cancelCompose(); } else { editingApp = null; newPorts = [{ name: 'http', container_port: 80, host_port: '', protocol: 'TCP' }]; showInstall = true; installMode = 'simple'; } }}>
+		<Button size="sm" onclick={async () => { if (showInstall || showCompose) { cancelEdit(); cancelCompose(); } else { if (!status?.enabled && !await ensureAppsEnabled()) return; editingApp = null; newPorts = [{ name: 'http', container_port: 80, host_port: '', protocol: 'TCP' }]; showInstall = true; installMode = 'simple'; } }}>
 			{showInstall || showCompose ? 'Cancel' : 'Install App'}
 		</Button>
 		{#if apps.length > 3}
