@@ -870,7 +870,16 @@ LOCK_AFTER=$(sha256sum flake.lock 2>/dev/null | awk '{{print $1}}' || true)
 
 if [ "$LOCK_BEFORE" != "$LOCK_AFTER" ]; then
     echo "==> Rebuilding system..."
-    NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}
+    cp flake.lock flake.lock.pre-rebuild
+    if NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}; then
+        rm -f flake.lock.pre-rebuild
+    else
+        RC=$?
+        echo "==> Rebuild failed (exit $RC). Restoring previous flake.lock so update can be retried."
+        cp flake.lock.pre-rebuild flake.lock
+        rm -f flake.lock.pre-rebuild
+        exit "$RC"
+    fi
     _NGINX_CONF_AFTER=$(_nginx_conf)
     WEBUI_AFTER=$([ -n "$_NGINX_CONF_AFTER" ] && grep 'nasty-webui' "$_NGINX_CONF_AFTER" 2>/dev/null | head -1 || echo "")
     if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
