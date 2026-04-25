@@ -173,6 +173,9 @@ async fn main() -> anyhow::Result<()> {
     // Start daily anonymous telemetry (if not opted out)
     telemetry::spawn_daily(state.clone());
 
+    // Background alert evaluation + notifications
+    spawn_alert_notifier(state.clone());
+
     // Periodic config backup to bcachefs
     nasty_system::backup::spawn_periodic();
 
@@ -1328,4 +1331,62 @@ async fn wait_for_auth(
             None
         }
     }
+}
+
+// ── Background Alert Notifier ──────────────────────────────────
+
+fn spawn_alert_notifier(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        use std::collections::HashSet;
+        use nasty_system::notifications;
+        use nasty_system::alerts::ActiveAlert;
+
+        let mut previously_active: HashSet<(String, String)> = HashSet::new();
+
+        // Wait for system to fully start before first evaluation
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+            // Use the cached alerts from the RPC handler (populated by WebUI polling).
+            // This avoids duplicating the complex evaluation logic.
+            let active: Vec<ActiveAlert> = {
+                let cache = state.alerts_cache.lock().await;
+                match &*cache {
+                    Some((ts, cached)) if ts.elapsed() < std::time::Duration::from_secs(120) => {
+                        serde_json::from_value(cached.clone()).unwrap_or_default()
+                    }
+                    _ => continue, // No fresh alert data — skip this cycle
+                }
+            };
+
+            // Find newly fired alerts (not previously active)
+            let current_keys: HashSet<(String, String)> = active.iter()
+                .map(|a| (a.rule_id.clone(), a.source.clone()))
+                .collect();
+
+            let new_alerts: Vec<_> = active.iter()
+                .filter(|a| !previously_active.contains(&(a.rule_id.clone(), a.source.clone())))
+                .collect();
+
+            if !new_alerts.is_empty() {
+                let config = notifications::NotificationConfig::load();
+                if config.channels.iter().any(|ch| ch.enabled) {
+                    for alert in &new_alerts {
+                        let sev = match alert.severity {
+                            nasty_system::alerts::AlertSeverity::Warning => "WARNING",
+                            nasty_system::alerts::AlertSeverity::Critical => "CRITICAL",
+                        };
+                        let subject = format!("[NASty {sev}] {}", alert.rule_name);
+                        let body = format!("{}\n\nSource: {}\nValue: {:.1}\nThreshold: {:.1}",
+                            alert.message, alert.source, alert.current_value, alert.threshold);
+                        notifications::send(&config, &subject, &body).await;
+                    }
+                }
+            }
+
+            previously_active = current_keys;
+        }
+    });
 }

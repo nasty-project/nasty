@@ -506,6 +506,37 @@ export interface ActiveAlert {
 	source: string;
 }
 
+// ── Notifications ──────────────────────────────────────────
+
+export interface NotificationConfig {
+	channels: NotificationChannel[];
+}
+
+export interface NotificationChannel {
+	id: string;
+	name: string;
+	enabled: boolean;
+	type: 'smtp' | 'telegram' | 'webhook' | 'ntfy';
+	// SMTP
+	host?: string;
+	port?: number;
+	username?: string;
+	password?: string;
+	from?: string;
+	to?: string;
+	tls?: boolean;
+	// Telegram
+	bot_token?: string;
+	chat_id?: string;
+	// Webhook
+	url?: string;
+	headers?: Record<string, string>;
+	// ntfy
+	server_url?: string;
+	topic?: string;
+	token?: string;
+}
+
 // ── Virtual Machines ────────────────────────────────────────
 
 export interface VmDisk {

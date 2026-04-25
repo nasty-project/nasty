@@ -892,6 +892,25 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(r) => r,
         },
 
+        // ── Notifications ──────────────────────────────────────────
+        "notifications.config.get" => {
+            ok(req, nasty_system::notifications::NotificationConfig::load())
+        }
+        "notifications.config.update" => match parse_params::<nasty_system::notifications::NotificationConfig>(req) {
+            Ok(config) => match config.save().await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(e) => err(req, e),
+        },
+        "notifications.test" => match parse_params::<nasty_system::notifications::ChannelType>(req) {
+            Ok(channel) => match nasty_system::notifications::test_channel(&channel).await {
+                Ok(msg) => ok(req, msg),
+                Err(e) => err(req, e),
+            },
+            Err(e) => err(req, e),
+        },
+
         // ── Pools ───────────────────────────────────────────────
         "fs.list" => match state.filesystems.list().await {
             Ok(mut v) => {

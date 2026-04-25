@@ -2,6 +2,7 @@ pub mod alerts;
 pub mod backup;
 pub mod firmware;
 pub mod network;
+pub mod notifications;
 pub mod protocol;
 pub mod nut;
 pub mod settings;

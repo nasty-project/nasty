@@ -8,7 +8,23 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Copy, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
 
-	let activeTab: 'general' | 'network' | 'tls' | 'vpn' | 'metrics' | 'tuning' | 'ups' = $state('general');
+	let activeTab: 'general' | 'network' | 'notifications' | 'tls' | 'vpn' | 'metrics' | 'tuning' | 'ups' = $state('general');
+
+	// Notifications tab
+	import type { NotificationConfig, NotificationChannel } from '$lib/types';
+	let notifConfig: NotificationConfig = $state({ channels: [] });
+	let notifLoaded = $state(false);
+	let notifSaving = $state(false);
+	let notifTesting = $state<string | null>(null);
+	let notifAddType: 'smtp' | 'telegram' | 'webhook' | 'ntfy' | null = $state(null);
+	let notifEditId: string | null = $state(null);
+	// Form fields
+	let nfName = $state('');
+	let nfHost = $state(''); let nfPort = $state(587); let nfUser = $state(''); let nfPass = $state('');
+	let nfFrom = $state(''); let nfTo = $state(''); let nfTls = $state(true);
+	let nfBotToken = $state(''); let nfChatId = $state('');
+	let nfUrl = $state('');
+	let nfNtfyServer = $state('https://ntfy.sh'); let nfNtfyTopic = $state(''); let nfNtfyToken = $state('');
 
 	// Network tab — interface list
 	let netInterfaces: NetIfStats[] = $state([]);
@@ -360,6 +376,9 @@
 		if (tab === 'network' && !netIfLoaded) {
 			loadNetInterfaces();
 		}
+		if (tab === 'notifications' && !notifLoaded) {
+			loadNotifications();
+		}
 		if (tab === 'metrics' && !metricsText) {
 			loadMetrics();
 		}
@@ -372,6 +391,67 @@
 		} else {
 			stopUpsPolling();
 		}
+	}
+
+	async function loadNotifications() {
+		try {
+			notifConfig = await client.call<NotificationConfig>('notifications.config.get');
+			notifLoaded = true;
+		} catch { /* ignore */ }
+	}
+
+	async function saveNotifications() {
+		notifSaving = true;
+		await withToast(
+			() => client.call('notifications.config.update', notifConfig),
+			'Notification settings saved'
+		);
+		notifSaving = false;
+	}
+
+	async function testChannel(ch: NotificationChannel) {
+		notifTesting = ch.id;
+		const payload: Record<string, unknown> = { type: ch.type };
+		if (ch.type === 'smtp') Object.assign(payload, { host: ch.host, port: ch.port, username: ch.username, password: ch.password, from: ch.from, to: ch.to, tls: ch.tls });
+		else if (ch.type === 'telegram') Object.assign(payload, { bot_token: ch.bot_token, chat_id: ch.chat_id });
+		else if (ch.type === 'webhook') Object.assign(payload, { url: ch.url, headers: ch.headers || {} });
+		else if (ch.type === 'ntfy') Object.assign(payload, { server_url: ch.server_url, topic: ch.topic, token: ch.token });
+		await withToast(
+			() => client.call('notifications.test', payload),
+			'Test notification sent'
+		);
+		notifTesting = null;
+	}
+
+	function addChannel() {
+		if (!notifAddType || !nfName) return;
+		const id = crypto.randomUUID().slice(0, 8);
+		const ch: NotificationChannel = { id, name: nfName, enabled: true, type: notifAddType };
+		if (notifAddType === 'smtp') Object.assign(ch, { host: nfHost, port: nfPort, username: nfUser, password: nfPass, from: nfFrom, to: nfTo, tls: nfTls });
+		else if (notifAddType === 'telegram') Object.assign(ch, { bot_token: nfBotToken, chat_id: nfChatId });
+		else if (notifAddType === 'webhook') Object.assign(ch, { url: nfUrl, headers: {} });
+		else if (notifAddType === 'ntfy') Object.assign(ch, { server_url: nfNtfyServer, topic: nfNtfyTopic, token: nfNtfyToken || undefined });
+		notifConfig.channels = [...notifConfig.channels, ch];
+		resetNotifForm();
+		saveNotifications();
+	}
+
+	function removeChannel(id: string) {
+		notifConfig.channels = notifConfig.channels.filter(c => c.id !== id);
+		saveNotifications();
+	}
+
+	function toggleChannel(id: string) {
+		notifConfig.channels = notifConfig.channels.map(c => c.id === id ? { ...c, enabled: !c.enabled } : c);
+		saveNotifications();
+	}
+
+	function resetNotifForm() {
+		notifAddType = null; nfName = '';
+		nfHost = ''; nfPort = 587; nfUser = ''; nfPass = ''; nfFrom = ''; nfTo = ''; nfTls = true;
+		nfBotToken = ''; nfChatId = '';
+		nfUrl = '';
+		nfNtfyServer = 'https://ntfy.sh'; nfNtfyTopic = ''; nfNtfyToken = '';
 	}
 
 	async function loadTuning() {
@@ -528,6 +608,12 @@
 			? 'border-b-2 border-primary text-foreground'
 			: 'text-muted-foreground hover:text-foreground'}"
 	>Network</button>
+	<button
+		onclick={() => switchTab('notifications')}
+		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'notifications'
+			? 'border-b-2 border-primary text-foreground'
+			: 'text-muted-foreground hover:text-foreground'}"
+	>Notifications</button>
 	<button
 		onclick={() => switchTab('tls')}
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'tls'
@@ -846,6 +932,127 @@
 				</Button>
 			</section>
 		{/if}
+	</div>
+
+{:else if activeTab === 'notifications'}
+
+	<div class="max-w-2xl space-y-4">
+		<section class="rounded-lg border border-border p-5">
+			<h2 class="mb-1 text-base font-semibold">Notification Channels</h2>
+			<p class="mb-4 text-sm text-muted-foreground">
+				Get notified when alerts fire — disk failures, space issues, scrub errors, and more.
+			</p>
+
+			{#if notifConfig.channels.length === 0}
+				<p class="text-sm text-muted-foreground">No channels configured.</p>
+			{:else}
+				<div class="space-y-2 mb-4">
+					{#each notifConfig.channels as ch}
+						<div class="flex items-center gap-3 rounded-lg border border-border px-4 py-3">
+							<button onclick={() => toggleChannel(ch.id)} class="shrink-0">
+								<span class="h-2 w-2 rounded-full inline-block {ch.enabled ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
+							</button>
+							<div class="flex-1 min-w-0">
+								<div class="text-sm font-medium">{ch.name}</div>
+								<div class="text-xs text-muted-foreground">
+									{ch.type === 'smtp' ? `${ch.to} via ${ch.host}` :
+									 ch.type === 'telegram' ? `Chat ${ch.chat_id}` :
+									 ch.type === 'webhook' ? ch.url :
+									 ch.type === 'ntfy' ? `${ch.server_url}/${ch.topic}` : ch.type}
+								</div>
+							</div>
+							<div class="flex gap-2">
+								<Button size="xs" variant="secondary" onclick={() => testChannel(ch)} disabled={notifTesting === ch.id}>
+									{notifTesting === ch.id ? 'Sending...' : 'Test'}
+								</Button>
+								<Button size="xs" variant="destructive" onclick={() => removeChannel(ch.id)}>Remove</Button>
+							</div>
+						</div>
+					{/each}
+				</div>
+			{/if}
+
+			{#if notifAddType === null}
+				<div class="flex gap-2">
+					<Button size="sm" variant="secondary" onclick={() => { notifAddType = 'smtp'; nfName = 'Email'; }}>+ Email</Button>
+					<Button size="sm" variant="secondary" onclick={() => { notifAddType = 'telegram'; nfName = 'Telegram'; }}>+ Telegram</Button>
+					<Button size="sm" variant="secondary" onclick={() => { notifAddType = 'webhook'; nfName = 'Webhook'; }}>+ Webhook</Button>
+					<Button size="sm" variant="secondary" onclick={() => { notifAddType = 'ntfy'; nfName = 'ntfy'; }}>+ ntfy</Button>
+				</div>
+			{:else}
+				<div class="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
+					<div class="text-sm font-medium">Add {notifAddType.toUpperCase()} channel</div>
+					<div>
+						<label class="text-xs text-muted-foreground">Name</label>
+						<input bind:value={nfName} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+					</div>
+
+					{#if notifAddType === 'smtp'}
+						<div class="grid grid-cols-2 gap-3">
+							<div>
+								<label class="text-xs text-muted-foreground">SMTP Host</label>
+								<input bind:value={nfHost} placeholder="smtp.gmail.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+							</div>
+							<div>
+								<label class="text-xs text-muted-foreground">Port</label>
+								<input type="number" bind:value={nfPort} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+							</div>
+							<div>
+								<label class="text-xs text-muted-foreground">Username</label>
+								<input bind:value={nfUser} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+							</div>
+							<div>
+								<label class="text-xs text-muted-foreground">Password</label>
+								<input type="password" bind:value={nfPass} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+							</div>
+							<div>
+								<label class="text-xs text-muted-foreground">From</label>
+								<input bind:value={nfFrom} placeholder="nasty@example.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+							</div>
+							<div>
+								<label class="text-xs text-muted-foreground">To</label>
+								<input bind:value={nfTo} placeholder="admin@example.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
+							</div>
+						</div>
+						<label class="flex items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={nfTls} /> Use TLS
+						</label>
+					{:else if notifAddType === 'telegram'}
+						<div>
+							<label class="text-xs text-muted-foreground">Bot Token</label>
+							<input bind:value={nfBotToken} placeholder="123456:ABC-DEF..." class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+						<div>
+							<label class="text-xs text-muted-foreground">Chat ID</label>
+							<input bind:value={nfChatId} placeholder="-1001234567890" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+					{:else if notifAddType === 'webhook'}
+						<div>
+							<label class="text-xs text-muted-foreground">URL</label>
+							<input bind:value={nfUrl} placeholder="https://hooks.example.com/nasty" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+					{:else if notifAddType === 'ntfy'}
+						<div>
+							<label class="text-xs text-muted-foreground">Server URL</label>
+							<input bind:value={nfNtfyServer} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+						<div>
+							<label class="text-xs text-muted-foreground">Topic</label>
+							<input bind:value={nfNtfyTopic} placeholder="my-nasty-alerts" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+						<div>
+							<label class="text-xs text-muted-foreground">Token (optional)</label>
+							<input bind:value={nfNtfyToken} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+					{/if}
+
+					<div class="flex gap-2">
+						<Button size="sm" onclick={addChannel}>Add</Button>
+						<Button size="sm" variant="secondary" onclick={resetNotifForm}>Cancel</Button>
+					</div>
+				</div>
+			{/if}
+		</section>
 	</div>
 
 {:else if activeTab === 'tls'}

@@ -59,7 +59,7 @@ pub enum AlertSeverity {
     Critical,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ActiveAlert {
     /// ID of the rule that triggered this alert.
     pub rule_id: String,
