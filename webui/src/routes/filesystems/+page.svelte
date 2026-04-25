@@ -406,7 +406,9 @@
 		wizardProfile = 'single';
 		replicas = 1;
 		compression = '';
-		showPartitions = false;
+		// Auto-show partitions if no full disks are available
+		const hasFullDisks = devices.some(d => !d.in_use && d.dev_type !== 'part');
+		showPartitions = !hasFullDisks;
 		manualLabels = {};
 		manualFgTarget = '';
 		manualMetaTarget = '';
