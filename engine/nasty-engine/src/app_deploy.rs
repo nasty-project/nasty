@@ -209,18 +209,22 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
         return;
     }
 
-    // Pull images
+    // Pull images via bollard (parse compose YAML for image refs)
     let _ = socket.send(Message::Text(DeployMessage::log("Pulling images...").into())).await;
-    if let Err(e) = stream_command(
-        socket,
-        "docker",
-        &["compose", "-f", &compose_path, "--project-name", &req.name, "pull"],
-    ).await {
-        if !is_update {
-            let _ = tokio::fs::remove_dir_all(&compose_dir).await;
+    let images = extract_compose_images(&compose_content);
+    if images.is_empty() {
+        let _ = socket.send(Message::Text(DeployMessage::log("No images to pull (all built locally?)").into())).await;
+    } else {
+        for image in &images {
+            let _ = socket.send(Message::Text(DeployMessage::log(&format!("Pulling: {image}")).into())).await;
+            if let Err(e) = pull_image_with_progress(socket, state, image).await {
+                if !is_update {
+                    let _ = tokio::fs::remove_dir_all(&compose_dir).await;
+                }
+                let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed for {image}: {e}")).into())).await;
+                return;
+            }
         }
-        let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed: {e}")).into())).await;
-        return;
     }
 
     // Start containers
@@ -266,14 +270,21 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
     let compose_path = format!("/var/lib/nasty/apps/{}/docker-compose.yml", req.name);
 
     if std::path::Path::new(&compose_path).exists() {
-        // Compose app: pull + recreate
+        // Compose app: pull via bollard + recreate
         let _ = socket.send(Message::Text(DeployMessage::log("Pulling latest images...").into())).await;
-        if let Err(e) = stream_command(
-            socket, "docker",
-            &["compose", "-f", &compose_path, "--project-name", &req.name, "pull"],
-        ).await {
-            let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed: {e}")).into())).await;
-            return;
+        let compose_content = match tokio::fs::read_to_string(&compose_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = socket.send(Message::Text(DeployMessage::error(&format!("read compose file: {e}")).into())).await;
+                return;
+            }
+        };
+        for image in extract_compose_images(&compose_content) {
+            let _ = socket.send(Message::Text(DeployMessage::log(&format!("Pulling: {image}")).into())).await;
+            if let Err(e) = pull_image_with_progress(socket, state, &image).await {
+                let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed for {image}: {e}")).into())).await;
+                return;
+            }
         }
 
         let _ = socket.send(Message::Text(DeployMessage::log("Recreating containers...").into())).await;
@@ -395,6 +406,32 @@ async fn stream_command(
     }
 
     Ok(())
+}
+
+/// Extract image references from a docker-compose YAML string.
+/// Looks for `image:` fields under `services:` — skips services that use `build:` instead.
+fn extract_compose_images(yaml: &str) -> Vec<String> {
+    // Simple YAML parsing — look for services with image: fields
+    let parsed: serde_json::Value = match serde_yaml_ng::from_str(yaml) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut images = Vec::new();
+    if let Some(services) = parsed.get("services").and_then(|s| s.as_object()) {
+        for (_name, svc) in services {
+            if let Some(image) = svc.get("image").and_then(|i| i.as_str()) {
+                if !image.is_empty() && svc.get("build").is_none() {
+                    images.push(image.to_string());
+                }
+            }
+        }
+    }
+
+    // Deduplicate
+    images.sort();
+    images.dedup();
+    images
 }
 
 /// Pull a Docker image using bollard's API with structured per-layer progress.
