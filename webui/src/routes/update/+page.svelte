@@ -536,33 +536,36 @@
 		<Card class="mb-6">
 			<CardContent class="space-y-4 pt-6">
 				{#if isDevBuild}
-					<div class="rounded-lg border border-blue-500/40 bg-blue-500/10 px-4 py-4 text-sm">
-						<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-							<div class="min-w-0 flex-1">
-								<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Development Build</div>
-								<div class="mt-1 text-xs text-muted-foreground">
-									Tracking <code class="font-mono">{taggedReleaseBanner.kind === 'ready' ? taggedReleaseBanner.current_url : ''}</code>
-								</div>
-								{#if checkInfo?.update_available === true}
-									<div class="mt-2 text-sm font-medium text-blue-400">
-										Update available: <code class="font-mono">{checkInfo.latest_version}</code>
-									</div>
-								{:else if checkInfo?.update_available === false}
-									<div class="mt-2 text-sm text-muted-foreground">Already at latest commit.</div>
-								{/if}
+					<div class="rounded-lg border border-blue-500/40 bg-blue-500/10 text-sm">
+						<div class="flex items-center gap-2 border-b border-blue-500/20 px-4 py-2">
+							<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Development Build</span>
+							<span class="text-xs text-muted-foreground">·</span>
+							<code class="text-xs text-muted-foreground">{taggedReleaseBanner.kind === 'ready' ? taggedReleaseBanner.current_url : ''}</code>
+						</div>
+						<div class="flex items-stretch">
+							<div class="flex-1 px-4 py-3">
+								<table class="text-sm">
+									<tbody>
+									<tr>
+										<td class="pr-4 text-muted-foreground">Installed</td>
+										<td class="font-mono font-semibold">{info?.current_version ?? '—'}</td>
+									</tr>
+									<tr>
+										<td class="pr-4 text-muted-foreground">Available</td>
+										<td class="font-mono font-semibold">
+											{#if checkInfo?.update_available === true}
+												<span class="text-blue-400">{checkInfo.latest_version}</span>
+											{:else if checkInfo?.update_available === false}
+												<span class="text-muted-foreground">up to date</span>
+											{:else}
+												<span class="text-muted-foreground">—</span>
+											{/if}
+										</td>
+									</tr>
+									</tbody>
+								</table>
 							</div>
-							<div class="flex items-center gap-3">
-								{#if info}
-									<div class="font-mono text-sm text-muted-foreground">
-										Installed: <span class="font-semibold text-foreground">{info.current_version}</span>
-									</div>
-									{#if checkInfo?.latest_version}
-										<span class="text-muted-foreground">→</span>
-										<div class="font-mono text-sm text-muted-foreground">
-											Latest: <span class="font-semibold text-foreground">{checkInfo.latest_version}</span>
-										</div>
-									{/if}
-								{/if}
+							<div class="flex flex-col justify-center gap-2 border-l border-blue-500/20 px-4 py-3">
 								<Button size="sm" variant="secondary" onclick={checkForUpdates} disabled={checking || upstreamBusy}>
 									{checking ? 'Checking...' : 'Check for Updates'}
 								</Button>
@@ -577,7 +580,7 @@
 				{/if}
 
 				<div
-					class="rounded-lg border px-4 py-4 text-sm {isDevBuild
+					class="rounded-lg border text-sm {isDevBuild
 						? 'border-border/60 bg-muted/20'
 						: taggedReleaseBanner.kind === 'failure'
 							? 'border-amber-500/40 bg-amber-500/10'
@@ -585,48 +588,55 @@
 								? 'border-emerald-500/40 bg-emerald-500/10'
 								: 'border-border/60 bg-muted/20'}"
 				>
-					<div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-						<div class="min-w-0 flex-1">
-							<div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tagged Release</div>
-							{#if taggedReleaseBanner.kind === 'loading'}
-								<div class="mt-1 font-medium">Fetching newest version...</div>
-							{:else if taggedReleaseBanner.kind === 'switching'}
-								<div class="mt-1 font-medium">Switching...</div>
-							{:else if taggedReleaseBanner.kind === 'failure'}
-								<div class="mt-1 font-medium">Network failure, unable to fetch newest tagged release</div>
-							{:else if taggedReleaseBanner.current_is_latest_standard_url}
-								<div class="mt-1 font-medium">Already at newest tagged release</div>
-								<div class="mt-1 text-xs text-muted-foreground">
-									<code class="font-mono">{taggedReleaseBanner.latest_tag}</code>
-								</div>
+					<div class="flex items-center gap-2 border-b border-border/30 px-4 py-2">
+						<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tagged Release</span>
+						{#if taggedReleaseBanner.kind === 'loading'}
+							<span class="text-xs text-muted-foreground">· Fetching...</span>
+						{:else if taggedReleaseBanner.kind === 'failure'}
+							<span class="text-xs text-amber-400">· Network failure</span>
+						{/if}
+					</div>
+					<div class="flex items-stretch">
+						<div class="flex-1 px-4 py-3">
+							{#if !isDevBuild && info}
+								<table class="text-sm">
+									<tbody>
+									<tr>
+										<td class="pr-4 text-muted-foreground">Installed</td>
+										<td class="font-mono font-semibold">{info.current_version}</td>
+									</tr>
+									<tr>
+										<td class="pr-4 text-muted-foreground">Latest</td>
+										<td class="font-mono font-semibold">
+											{#if taggedReleaseBanner.kind === 'ready'}
+												{#if taggedReleaseBanner.current_is_latest_standard_url}
+													<span class="text-muted-foreground">up to date</span>
+												{:else}
+													<span class="text-emerald-400">{taggedReleaseBanner.latest_tag}</span>
+												{/if}
+											{:else}
+												<span class="text-muted-foreground">—</span>
+											{/if}
+										</td>
+									</tr>
+									</tbody>
+								</table>
 							{:else if isDevBuild}
-								<div class="mt-1 font-medium">
-									Switch to official tagged release
-								</div>
-								<div class="mt-1 text-xs text-muted-foreground">
-									Latest: <code class="font-mono">{taggedReleaseBanner.latest_tag}</code>
-								</div>
-							{:else}
-								<div class="mt-1 font-medium">
-									Newer tagged release available: {taggedReleaseBanner.latest_tag}
-								</div>
-								<div class="mt-1 text-xs text-muted-foreground">
-									<code class="font-mono">{taggedReleaseBanner.latest_url}</code>
+								<div class="text-sm">
+									{#if taggedReleaseBanner.kind === 'ready'}
+										Switch to official tagged release
+										<div class="mt-1 text-xs text-muted-foreground">Latest: <code class="font-mono">{taggedReleaseBanner.latest_tag}</code></div>
+									{/if}
 								</div>
 							{/if}
 						</div>
-						<div class="flex items-center gap-3">
-							{#if !isDevBuild && info}
-								<div class="font-mono text-sm text-muted-foreground">
-									Installed: <span class="font-semibold text-foreground">{info.current_version}</span>
-								</div>
-							{/if}
-							{#if taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url}
+						{#if taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url}
+							<div class="flex items-center border-l border-border/30 px-4 py-3">
 								<Button size="sm" variant={isDevBuild ? 'secondary' : 'default'} onclick={upgradeTaggedRelease} disabled={startingUpgrade || status?.state === 'running'}>
 									{startingUpgrade ? 'Starting...' : 'Switch to release'}
 								</Button>
-							{/if}
-						</div>
+							</div>
+						{/if}
 					</div>
 				</div>
 
