@@ -652,7 +652,7 @@ in {
         echo "$SEP"
         echo ""
       '')
-      # bcachefs debugging
+      # debugging & diagnostics
       perf               # perf record/report/script
       fio               # storage benchmarking
       iotop-c           # per-process I/O monitoring
@@ -663,6 +663,9 @@ in {
       netcat-gnu        # share output with devs: cmd | nc termbin.com 9999
       psmisc            # fuser, killall
       pciutils          # lspci for hardware identification
+      websocat          # WebSocket CLI client (test engine API)
+      tcpdump           # network packet capture
+      nmap              # network scanning and port discovery
 
       # kernel crash symbolization
       binutils          # addr2line, nm, objdump, readelf
