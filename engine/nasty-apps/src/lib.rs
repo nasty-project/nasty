@@ -692,8 +692,56 @@ impl AppsService {
     }
 
     pub async fn list(&self) -> Result<Vec<App>, AppsError> {
-        self.require_ready().await?;
-        self.list_internal().await
+        if self.require_ready().await.is_ok() {
+            return self.list_internal().await;
+        }
+        // Docker not running — return offline list from filesystem
+        Self::list_offline().await
+    }
+
+    /// List apps from on-disk state when Docker is not running.
+    /// Compose apps are detected by docker-compose.yml files.
+    /// Simple container apps have no on-disk state without Docker.
+    async fn list_offline() -> Result<Vec<App>, AppsError> {
+        let apps_dir = std::path::Path::new(COMPOSE_DIR);
+        if !apps_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut apps = Vec::new();
+        let mut entries = tokio::fs::read_dir(apps_dir).await
+            .map_err(|e| AppsError::CommandFailed(format!("read apps dir: {e}")))?;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let compose_path = entry.path().join("docker-compose.yml");
+            if compose_path.exists() {
+                // Parse compose YAML for primary image
+                let image = tokio::fs::read_to_string(&compose_path)
+                    .await
+                    .ok()
+                    .and_then(|content| {
+                        let parsed: serde_json::Value = serde_yaml_ng::from_str(&content).ok()?;
+                        parsed.get("services")?
+                            .as_object()?
+                            .values()
+                            .next()?
+                            .get("image")?
+                            .as_str()
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_default();
+                apps.push(App {
+                    name,
+                    image,
+                    status: "stopped".to_string(),
+                    created: String::new(),
+                    kind: "compose".to_string(),
+                    containers: Vec::new(),
+                    ports: Vec::new(),
+                });
+            }
+        }
+        apps.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(apps)
     }
 
     async fn list_internal(&self) -> Result<Vec<App>, AppsError> {

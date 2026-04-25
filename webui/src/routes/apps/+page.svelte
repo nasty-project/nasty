@@ -257,11 +257,10 @@
 	async function refresh() {
 		try {
 			status = await client.call<AppsStatus>('apps.status');
+			apps = await client.call<App[]>('apps.list');
 			if (status.enabled && status.running) {
-				apps = await client.call<App[]>('apps.list');
 				await loadIngresses();
 			} else {
-				apps = [];
 				ingresses = [];
 			}
 		} catch { /* ignore */ }
@@ -868,6 +867,10 @@
 
 	{#if apps.length === 0 && !showInstall && !showCompose}
 		<p class="text-muted-foreground">No apps installed.</p>
+	{:else if apps.length > 0 && !(status?.enabled && status?.running)}
+		<div class="mb-3 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
+			Docker runtime is not running. Apps are shown but cannot be managed until the runtime is started.
+		</div>
 	{/if}
 
 	<!-- Installed apps table -->
