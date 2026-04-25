@@ -534,109 +534,109 @@
 
 	{#if activeTab === 'version'}
 		<Card class="mb-6">
-			<CardContent class="space-y-4 pt-6">
-				{#if isDevBuild}
-					<div class="rounded-lg border border-blue-500/40 bg-blue-500/10 text-sm">
-						<div class="flex items-center gap-2 border-b border-blue-500/20 px-4 py-2">
-							<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Development Build</span>
-							<span class="text-xs text-muted-foreground">·</span>
-							<code class="text-xs text-muted-foreground">{taggedReleaseBanner.kind === 'ready' ? taggedReleaseBanner.current_url : ''}</code>
-						</div>
-						<div class="flex items-stretch">
-							<div class="flex-1 px-4 py-3">
+			<CardContent class="pt-6">
+				<div class="rounded-lg border border-border/60 text-sm">
+					<div class="grid grid-cols-1 lg:grid-cols-2">
+						<!-- Left: Current build / updates -->
+						<div class="{isDevBuild ? 'bg-blue-500/5' : 'bg-muted/10'}">
+							<div class="flex items-center gap-2 border-b border-border/30 px-4 py-2">
+								<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">{isDevBuild ? 'Development Build' : 'Current Version'}</span>
+								{#if isDevBuild}
+									<span class="text-xs text-muted-foreground">·</span>
+									<code class="text-xs text-muted-foreground">{taggedReleaseBanner.kind === 'ready' ? taggedReleaseBanner.current_url : ''}</code>
+								{/if}
+							</div>
+							<div class="px-4 py-3">
 								<table class="text-sm">
 									<tbody>
 									<tr>
 										<td class="pr-4 text-muted-foreground">Installed</td>
 										<td class="font-mono font-semibold">{info?.current_version ?? '—'}</td>
 									</tr>
-									<tr>
-										<td class="pr-4 text-muted-foreground">Available</td>
-										<td class="font-mono font-semibold">
-											{#if checkInfo?.update_available === true}
-												<span class="text-blue-400">{checkInfo.latest_version}</span>
-											{:else if checkInfo?.update_available === false}
-												<span class="text-muted-foreground">up to date</span>
-											{:else}
-												<span class="text-muted-foreground">—</span>
-											{/if}
-										</td>
-									</tr>
+									{#if isDevBuild}
+										<tr>
+											<td class="pr-4 text-muted-foreground">Available</td>
+											<td class="font-mono font-semibold">
+												{#if checkInfo?.update_available === true}
+													<span class="text-blue-400">{checkInfo.latest_version}</span>
+												{:else if checkInfo?.update_available === false}
+													<span class="text-muted-foreground">up to date</span>
+												{:else}
+													<span class="text-muted-foreground">—</span>
+												{/if}
+											</td>
+										</tr>
+									{:else}
+										<tr>
+											<td class="pr-4 text-muted-foreground">Latest</td>
+											<td class="font-mono font-semibold">
+												{#if taggedReleaseBanner.kind === 'ready'}
+													{#if taggedReleaseBanner.current_is_latest_standard_url}
+														<span class="text-muted-foreground">up to date</span>
+													{:else}
+														<span class="text-emerald-400">{taggedReleaseBanner.latest_tag}</span>
+													{/if}
+												{:else}
+													<span class="text-muted-foreground">—</span>
+												{/if}
+											</td>
+										</tr>
+									{/if}
 									</tbody>
 								</table>
+								<div class="mt-3 flex gap-2">
+									{#if isDevBuild}
+										<Button size="sm" variant="secondary" onclick={checkForUpdates} disabled={checking || upstreamBusy}>
+											{checking ? 'Checking...' : 'Check for Updates'}
+										</Button>
+										{#if checkInfo?.update_available}
+											<Button size="sm" onclick={upgradeDevBuild} disabled={startingDevUpgrade || status?.state === 'running'}>
+												{startingDevUpgrade ? 'Starting...' : 'Upgrade'}
+											</Button>
+										{/if}
+									{:else if taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url}
+										<Button size="sm" onclick={upgradeTaggedRelease} disabled={startingUpgrade || status?.state === 'running'}>
+											{startingUpgrade ? 'Starting...' : 'Upgrade'}
+										</Button>
+									{/if}
+								</div>
 							</div>
-							<div class="flex flex-col justify-center gap-2 border-l border-blue-500/20 px-4 py-3">
-								<Button size="sm" variant="secondary" onclick={checkForUpdates} disabled={checking || upstreamBusy}>
-									{checking ? 'Checking...' : 'Check for Updates'}
-								</Button>
-								{#if checkInfo?.update_available}
-									<Button size="sm" onclick={upgradeDevBuild} disabled={startingDevUpgrade || status?.state === 'running'}>
-										{startingDevUpgrade ? 'Starting...' : 'Upgrade'}
-									</Button>
+						</div>
+
+						<!-- Right: Tagged release -->
+						<div class="border-t lg:border-t-0 lg:border-l border-border/30">
+							<div class="flex items-center gap-2 border-b border-border/30 px-4 py-2">
+								<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tagged Release</span>
+								{#if taggedReleaseBanner.kind === 'loading'}
+									<span class="text-xs text-muted-foreground">· Fetching...</span>
+								{:else if taggedReleaseBanner.kind === 'failure'}
+									<span class="text-xs text-amber-400">· Network failure</span>
+								{/if}
+							</div>
+							<div class="px-4 py-3">
+								{#if taggedReleaseBanner.kind === 'ready'}
+									<table class="text-sm">
+										<tbody>
+										<tr>
+											<td class="pr-4 text-muted-foreground">Latest</td>
+											<td class="font-mono font-semibold">{taggedReleaseBanner.latest_tag}</td>
+										</tr>
+										</tbody>
+									</table>
+									{#if isDevBuild && !taggedReleaseBanner.current_is_latest_standard_url}
+										<div class="mt-3">
+											<Button size="sm" variant="secondary" onclick={upgradeTaggedRelease} disabled={startingUpgrade || status?.state === 'running'}>
+												{startingUpgrade ? 'Starting...' : 'Switch to release'}
+											</Button>
+										</div>
+									{:else if taggedReleaseBanner.current_is_latest_standard_url}
+										<div class="mt-2 text-xs text-muted-foreground">You are on this release.</div>
+									{/if}
+								{:else if taggedReleaseBanner.kind !== 'loading'}
+									<div class="text-xs text-muted-foreground">Could not fetch release info.</div>
 								{/if}
 							</div>
 						</div>
-					</div>
-				{/if}
-
-				<div
-					class="rounded-lg border text-sm {isDevBuild
-						? 'border-border/60 bg-muted/20'
-						: taggedReleaseBanner.kind === 'failure'
-							? 'border-amber-500/40 bg-amber-500/10'
-							: taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url
-								? 'border-emerald-500/40 bg-emerald-500/10'
-								: 'border-border/60 bg-muted/20'}"
-				>
-					<div class="flex items-center gap-2 border-b border-border/30 px-4 py-2">
-						<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tagged Release</span>
-						{#if taggedReleaseBanner.kind === 'loading'}
-							<span class="text-xs text-muted-foreground">· Fetching...</span>
-						{:else if taggedReleaseBanner.kind === 'failure'}
-							<span class="text-xs text-amber-400">· Network failure</span>
-						{/if}
-					</div>
-					<div class="flex items-stretch">
-						<div class="flex-1 px-4 py-3">
-							{#if !isDevBuild && info}
-								<table class="text-sm">
-									<tbody>
-									<tr>
-										<td class="pr-4 text-muted-foreground">Installed</td>
-										<td class="font-mono font-semibold">{info.current_version}</td>
-									</tr>
-									<tr>
-										<td class="pr-4 text-muted-foreground">Latest</td>
-										<td class="font-mono font-semibold">
-											{#if taggedReleaseBanner.kind === 'ready'}
-												{#if taggedReleaseBanner.current_is_latest_standard_url}
-													<span class="text-muted-foreground">up to date</span>
-												{:else}
-													<span class="text-emerald-400">{taggedReleaseBanner.latest_tag}</span>
-												{/if}
-											{:else}
-												<span class="text-muted-foreground">—</span>
-											{/if}
-										</td>
-									</tr>
-									</tbody>
-								</table>
-							{:else if isDevBuild}
-								<div class="text-sm">
-									{#if taggedReleaseBanner.kind === 'ready'}
-										Switch to official tagged release
-										<div class="mt-1 text-xs text-muted-foreground">Latest: <code class="font-mono">{taggedReleaseBanner.latest_tag}</code></div>
-									{/if}
-								</div>
-							{/if}
-						</div>
-						{#if taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url}
-							<div class="flex items-center border-l border-border/30 px-4 py-3">
-								<Button size="sm" variant={isDevBuild ? 'secondary' : 'default'} onclick={upgradeTaggedRelease} disabled={startingUpgrade || status?.state === 'running'}>
-									{startingUpgrade ? 'Starting...' : 'Switch to release'}
-								</Button>
-							</div>
-						{/if}
 					</div>
 				</div>
 
