@@ -32,6 +32,7 @@ const STATE_PATH: &str = "/var/lib/nasty/apps-enabled";
 const PROXY_CONF: &str = "/var/lib/nasty/apps-proxy.conf";
 const COMPOSE_DIR: &str = "/var/lib/nasty/apps";
 const DOCKER_SERVICE: &str = "docker.service";
+const DOCKER_DAEMON_JSON: &str = "/etc/docker/daemon.json";
 
 /// Label applied to all NASty-managed containers.
 const LABEL_MANAGED: &str = "nasty.managed";
@@ -340,6 +341,11 @@ impl AppsService {
             storage_path: None,
         };
         Self::save_config(&config).await?;
+
+        // Configure Docker data-root on bcachefs before starting
+        if let Err(e) = configure_docker_data_root(req.filesystem.as_deref()).await {
+            warn!("Could not configure Docker data-root on bcachefs: {e}");
+        }
 
         // Start Docker via systemd
         run_cmd("systemctl", &["start", DOCKER_SERVICE]).await?;
@@ -1930,7 +1936,17 @@ async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
         }
     };
 
-    let apps_path = format!("/fs/{fs_name}/.nasty/apps-data");
+    let apps_path = format!("/fs/{fs_name}/apps");
+
+    // Also support legacy path
+    let legacy_path = format!("/fs/{fs_name}/.nasty/apps-data");
+    if !Path::new(&apps_path).exists() && Path::new(&legacy_path).exists() {
+        info!("Migrating apps storage from {legacy_path} to {apps_path}");
+        if let Err(e) = tokio::fs::rename(&legacy_path, &apps_path).await {
+            warn!("Failed to migrate apps storage: {e}, using legacy path");
+            return Some(legacy_path);
+        }
+    }
 
     if Path::new(&apps_path).exists() {
         info!("Apps storage already exists at {apps_path}");
@@ -1947,6 +1963,44 @@ async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
             None
         }
     }
+}
+
+/// Configure Docker's data-root to store images/layers on bcachefs instead of root partition.
+async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), AppsError> {
+    let fs_name = if let Some(name) = filesystem {
+        name.to_string()
+    } else {
+        // Find first mounted filesystem
+        let fs_base = Path::new("/fs");
+        let mut entries = tokio::fs::read_dir(fs_base).await
+            .map_err(|e| AppsError::CommandFailed(format!("cannot read /fs: {e}")))?;
+        let mut found = None;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                found = Some(entry.file_name().to_string_lossy().to_string());
+                break;
+            }
+        }
+        found.ok_or_else(|| AppsError::CommandFailed("no filesystems under /fs".into()))?
+    };
+
+    let docker_data = format!("/fs/{fs_name}/apps/docker");
+    tokio::fs::create_dir_all(&docker_data).await
+        .map_err(|e| AppsError::CommandFailed(format!("create {docker_data}: {e}")))?;
+
+    // Write daemon.json with data-root pointing to bcachefs
+    tokio::fs::create_dir_all("/etc/docker").await
+        .map_err(|e| AppsError::CommandFailed(format!("create /etc/docker: {e}")))?;
+
+    let daemon_json = serde_json::json!({
+        "data-root": docker_data,
+    });
+    tokio::fs::write(DOCKER_DAEMON_JSON, serde_json::to_string_pretty(&daemon_json).unwrap())
+        .await
+        .map_err(|e| AppsError::CommandFailed(format!("write {DOCKER_DAEMON_JSON}: {e}")))?;
+
+    info!("Configured Docker data-root at {docker_data}");
+    Ok(())
 }
 
 // ── Container image inspection ──────────────────────────────

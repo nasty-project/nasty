@@ -2282,7 +2282,7 @@ struct VmImageListResult {
     images: Vec<serde_json::Value>,
 }
 
-/// List all VM images from `.nasty/images` directories across all filesystems.
+/// List all VM images from `vms/images` directories across all filesystems.
 async fn list_vm_images(state: &AppState) -> VmImageListResult {
     let filesystems = state.filesystems.list().await.unwrap_or_default();
     let mut images = Vec::new();
@@ -2295,7 +2295,14 @@ async fn list_vm_images(state: &AppState) -> VmImageListResult {
         let Some(ref mp) = fs.mount_point else {
             continue;
         };
-        let dir = format!("{mp}/.nasty/images");
+        // Check new path first, fall back to legacy
+        let new_dir = format!("{mp}/vms/images");
+        let legacy_dir = format!("{mp}/.nasty/images");
+        let dir = if std::path::Path::new(&new_dir).is_dir() {
+            new_dir
+        } else {
+            legacy_dir
+        };
         if !std::path::Path::new(&dir).is_dir() {
             continue;
         }
@@ -2340,7 +2347,8 @@ async fn list_vm_images(state: &AppState) -> VmImageListResult {
     }
 }
 
-/// Ensure the `.nasty/images` directory exists on a filesystem. Creates it if missing.
+/// Ensure the `vms/images` directory exists on a filesystem. Creates it if missing.
+/// Migrates from legacy `.nasty/images` path if present.
 async fn ensure_images_subvolume(state: &AppState, filesystem: &str) -> Result<String, String> {
     let mount_point = state
         .filesystems
@@ -2350,10 +2358,23 @@ async fn ensure_images_subvolume(state: &AppState, filesystem: &str) -> Result<S
         .mount_point
         .ok_or_else(|| "filesystem not mounted".to_string())?;
 
-    let images_path = format!("{mount_point}/.nasty/images");
+    let images_path = format!("{mount_point}/vms/images");
+    let legacy_path = format!("{mount_point}/.nasty/images");
+
+    // Migrate legacy path
+    if !std::path::Path::new(&images_path).exists() && std::path::Path::new(&legacy_path).exists() {
+        tokio::fs::create_dir_all(format!("{mount_point}/vms")).await
+            .map_err(|e| format!("failed to create vms dir: {e}"))?;
+        if let Err(e) = tokio::fs::rename(&legacy_path, &images_path).await {
+            tracing::warn!("Failed to migrate VM images from {legacy_path}: {e}, using legacy path");
+            return Ok(legacy_path);
+        }
+        tracing::info!("Migrated VM images from {legacy_path} to {images_path}");
+    }
+
     tokio::fs::create_dir_all(&images_path)
         .await
-        .map_err(|e| format!("failed to create .nasty/images: {e}"))?;
+        .map_err(|e| format!("failed to create vms/images: {e}"))?;
 
     Ok(images_path)
 }
