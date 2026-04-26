@@ -291,7 +291,7 @@ pub struct PortConflict {
 // ── Service ─────────────────────────────────────────────────────
 
 pub struct AppsService {
-    docker: Option<Docker>,
+    docker: std::sync::Mutex<Option<Docker>>,
 }
 
 impl AppsService {
@@ -300,18 +300,33 @@ impl AppsService {
             .or_else(|_| Docker::connect_with_unix("/var/run/docker.sock", 120, &bollard::API_DEFAULT_VERSION))
             .ok();
         if docker.is_none() {
-            warn!("Docker not available at startup — app management will be unavailable until engine restart");
+            info!("Docker not available at startup — will connect on demand");
         }
-        Self { docker }
+        Self { docker: std::sync::Mutex::new(docker) }
     }
 
     /// Get a reference to the bollard Docker client (for use by deploy streaming).
-    pub fn docker_client(&self) -> Result<&Docker, AppsError> {
-        self.docker()
+    pub fn docker_client(&self) -> Result<Docker, AppsError> {
+        self.docker_conn()
     }
 
-    fn docker(&self) -> Result<&Docker, AppsError> {
-        self.docker.as_ref().ok_or_else(|| AppsError::NotReady("Docker socket not available".into()))
+    fn docker_conn(&self) -> Result<Docker, AppsError> {
+        let guard = self.docker.lock().unwrap();
+        if let Some(ref d) = *guard {
+            return Ok(d.clone());
+        }
+        drop(guard);
+        // Try to connect (Docker may have started after engine)
+        let d = Docker::connect_with_unix_defaults()
+            .or_else(|_| Docker::connect_with_unix("/var/run/docker.sock", 120, &bollard::API_DEFAULT_VERSION))
+            .map_err(|_| AppsError::NotReady("Docker socket not available".into()))?;
+        *self.docker.lock().unwrap() = Some(d.clone());
+        info!("Connected to Docker socket");
+        Ok(d)
+    }
+
+    fn docker(&self) -> Result<Docker, AppsError> {
+        self.docker_conn()
     }
 
     // ── Enable/Disable ──────────────────────────────────────
