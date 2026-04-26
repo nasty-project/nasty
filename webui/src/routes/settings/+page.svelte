@@ -875,44 +875,44 @@
 					</div>
 				</section>
 
-				<!-- Log Level -->
-				<section class="rounded-lg border border-border p-5">
-					<h2 class="mb-4 text-base font-semibold">Log Level</h2>
-
-					<div class="mb-3 flex flex-wrap gap-2">
-						{#each logPresets as preset}
-							<button
-								onclick={() => logFilter = preset.value}
-								class="rounded-md border px-3 py-1 text-xs transition-colors
-									{logFilter === preset.value
-										? 'border-primary bg-primary text-primary-foreground'
-										: 'border-border text-muted-foreground hover:bg-accent'}"
-							>{preset.label}</button>
-						{/each}
-					</div>
-
-					<div class="mb-3">
-						<input
-							type="text"
-							bind:value={logFilter}
-							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-							placeholder="nasty_engine=debug,nasty_system=trace"
-						/>
-						<span class="mt-1 block text-xs text-muted-foreground">
-							Uses <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html" target="_blank" class="text-blue-400 hover:underline">tracing EnvFilter</a> syntax. Applied immediately, resets on engine restart.
-						</span>
-					</div>
-
-					<Button size="sm" onclick={applyLogLevel} disabled={savingLog || !logFilter.trim()}>
-						{savingLog ? 'Applying…' : 'Apply'}
-					</Button>
-				</section>
-
 
 			</div>
 
 			<!-- Right column -->
 			<div class="flex flex-col gap-6">
+
+			<!-- Log Level -->
+			<section class="rounded-lg border border-border p-5">
+				<h2 class="mb-4 text-base font-semibold">Log Level</h2>
+
+				<div class="mb-3 flex flex-wrap gap-2">
+					{#each logPresets as preset}
+						<button
+							onclick={() => logFilter = preset.value}
+							class="rounded-md border px-3 py-1 text-xs transition-colors
+								{logFilter === preset.value
+									? 'border-primary bg-primary text-primary-foreground'
+									: 'border-border text-muted-foreground hover:bg-accent'}"
+						>{preset.label}</button>
+					{/each}
+				</div>
+
+				<div class="mb-3">
+					<input
+						type="text"
+						bind:value={logFilter}
+						class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+						placeholder="nasty_engine=debug,nasty_system=trace"
+					/>
+					<span class="mt-1 block text-xs text-muted-foreground">
+						Uses <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html" target="_blank" class="text-blue-400 hover:underline">tracing EnvFilter</a> syntax. Applied immediately, resets on engine restart.
+					</span>
+				</div>
+
+				<Button size="sm" onclick={applyLogLevel} disabled={savingLog || !logFilter.trim()}>
+					{savingLog ? 'Applying…' : 'Apply'}
+				</Button>
+			</section>
 
 			<!-- Telemetry -->
 			<section class="rounded-lg border border-border p-5">
@@ -945,7 +945,9 @@
 
 {:else if activeTab === 'network'}
 
-	<div class="max-w-3xl space-y-6">
+	<div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+		<!-- Left column: Interfaces + Advanced -->
+		<div class="space-y-6">
 		<!-- Interface list — click to configure -->
 		<section class="rounded-lg border border-border p-5">
 			<h2 class="mb-4 text-base font-semibold">Interfaces</h2>
@@ -1147,6 +1149,10 @@
 			{/if}
 		</section>
 
+		</div>
+
+		<!-- Right column: Firewall -->
+		<div class="space-y-6">
 		<!-- Firewall status -->
 		<section class="rounded-lg border border-border p-5">
 			<h2 class="mb-4 text-base font-semibold">Firewall</h2>
@@ -1228,6 +1234,7 @@
 				</p>
 			{/if}
 		</section>
+		</div>
 	</div>
 
 {:else if activeTab === 'notifications'}
