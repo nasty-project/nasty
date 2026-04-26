@@ -26,9 +26,25 @@
 	let nfUrl = $state('');
 	let nfNtfyServer = $state('https://ntfy.sh'); let nfNtfyTopic = $state(''); let nfNtfyToken = $state('');
 
-	// Network tab — interface list
+	// Network tab
 	let netInterfaces: NetIfStats[] = $state([]);
 	let netIfLoaded = $state(false);
+	let selectedIface: string | null = $state(null);
+	// IPv6 form
+	let netIpv6Method: 'slaac' | 'static' | 'dhcp' | 'disabled' = $state('slaac');
+	let netIpv6Address = $state('');
+	let netIpv6Gateway = $state('');
+	// Bond form
+	let showBondForm = $state(false);
+	let bondName = $state('bond0');
+	let bondMembers: string[] = $state([]);
+	let bondMode: 'lacp' | 'active_backup' | 'balance_rr' | 'balance_xor' = $state('active_backup');
+	// VLAN form
+	let showVlanForm = $state(false);
+	let vlanParent = $state('');
+	let vlanId = $state(100);
+	// Firewall
+	let firewallStatus: { active: boolean; rules: { service: string; ports: { port: number; transport: string }[]; active: boolean }[] } | null = $state(null);
 
 	// ── General tab state ───────────────────────────────────
 	let settings: Settings | null = $state(null);
@@ -397,8 +413,9 @@
 
 	function switchTab(tab: typeof activeTab) {
 		activeTab = tab;
-		if (tab === 'network' && !netIfLoaded) {
-			loadNetInterfaces();
+		if (tab === 'network') {
+			if (!netIfLoaded) loadNetInterfaces();
+			loadFirewall();
 		}
 		if (tab === 'notifications' && !notifLoaded) {
 			loadNotifications();
@@ -415,6 +432,87 @@
 		} else {
 			stopUpsPolling();
 		}
+	}
+
+	function selectInterface(name: string) {
+		selectedIface = selectedIface === name ? null : name;
+		if (selectedIface && network) {
+			const cfg = network.interfaces.find((i: {name: string}) => i.name === name);
+			if (cfg) {
+				netDhcp = cfg.ipv4.method === 'dhcp';
+				if (cfg.ipv4.addresses.length > 0) {
+					const parts = cfg.ipv4.addresses[0].split('/');
+					netAddress = parts[0] ?? '';
+					netPrefix = parts[1] ?? '24';
+				} else { netAddress = ''; netPrefix = '24'; }
+				netGateway = cfg.ipv4.gateway ?? '';
+				netIpv6Method = cfg.ipv6.method as typeof netIpv6Method;
+				netIpv6Address = cfg.ipv6.addresses[0] ?? '';
+				netIpv6Gateway = cfg.ipv6.gateway ?? '';
+			} else {
+				netDhcp = true; netAddress = ''; netPrefix = '24'; netGateway = '';
+				netIpv6Method = 'slaac'; netIpv6Address = ''; netIpv6Gateway = '';
+			}
+			netChanged = false;
+		}
+	}
+
+	async function saveInterfaceConfig() {
+		if (!selectedIface || !network) return;
+		savingNetwork = true;
+		const nameservers = netNameservers.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+		const ipv4 = {
+			method: netDhcp ? 'dhcp' as const : 'static' as const,
+			addresses: netDhcp ? [] : [`${netAddress.trim()}/${netPrefix}`],
+			gateway: netDhcp ? null : (netGateway.trim() || null),
+		};
+		const ipv6 = {
+			method: netIpv6Method,
+			addresses: netIpv6Method === 'static' && netIpv6Address ? [netIpv6Address] : [],
+			gateway: netIpv6Method === 'static' ? (netIpv6Gateway || null) : null,
+		};
+
+		// Update or add the interface in config
+		const ifaces = [...(network.interfaces || [])];
+		const idx = ifaces.findIndex((i: {name: string}) => i.name === selectedIface);
+		const entry = { name: selectedIface, enabled: true, ipv4, ipv6, mtu: null };
+		if (idx >= 0) ifaces[idx] = entry; else ifaces.push(entry);
+
+		const payload = { interfaces: ifaces, dns: nameservers, bonds: network.bonds || [], vlans: network.vlans || [] };
+		await withToast(() => client.call('system.network.update', payload), 'Network configuration applied');
+		networkState = await client.call<NetworkState>('system.network.get');
+		netChanged = false;
+		savingNetwork = false;
+	}
+
+	async function createBond() {
+		if (!bondName || bondMembers.length < 2 || !network) return;
+		const payload = {
+			interfaces: network.interfaces || [],
+			dns: network.dns || [],
+			bonds: [...(network.bonds || []), { name: bondName, members: bondMembers, mode: bondMode, ipv4: { method: 'dhcp', addresses: [], gateway: null }, ipv6: { method: 'slaac', addresses: [], gateway: null } }],
+			vlans: network.vlans || [],
+		};
+		await withToast(() => client.call('system.network.update', payload), `Bond ${bondName} created`);
+		networkState = await client.call<NetworkState>('system.network.get');
+		showBondForm = false; bondName = 'bond0'; bondMembers = [];
+	}
+
+	async function createVlan() {
+		if (!vlanParent || vlanId < 1 || vlanId > 4094 || !network) return;
+		const payload = {
+			interfaces: network.interfaces || [],
+			dns: network.dns || [],
+			bonds: network.bonds || [],
+			vlans: [...(network.vlans || []), { parent: vlanParent, vlan_id: vlanId, ipv4: { method: 'dhcp', addresses: [], gateway: null }, ipv6: { method: 'slaac', addresses: [], gateway: null } }],
+		};
+		await withToast(() => client.call('system.network.update', payload), `VLAN ${vlanParent}.${vlanId} created`);
+		networkState = await client.call<NetworkState>('system.network.get');
+		showVlanForm = false; vlanParent = ''; vlanId = 100;
+	}
+
+	async function loadFirewall() {
+		try { firewallStatus = await client.call('system.firewall.status'); } catch { /* ignore */ }
 	}
 
 	async function loadNotifications() {
@@ -820,9 +918,9 @@
 
 {:else if activeTab === 'network'}
 
-	<div class="max-w-3xl">
-		<!-- Interface list -->
-		<section class="mb-6 rounded-lg border border-border p-5">
+	<div class="max-w-3xl space-y-6">
+		<!-- Interface list — click to configure -->
+		<section class="rounded-lg border border-border p-5">
 			<h2 class="mb-4 text-base font-semibold">Interfaces</h2>
 			{#if !networkState}
 				<p class="text-sm text-muted-foreground">Loading...</p>
@@ -832,27 +930,96 @@
 				<div class="space-y-2">
 					{#each networkState.interfaces as iface}
 						{@const isConfigured = network?.interfaces?.some((i: {name: string}) => i.name === iface.name)}
-						<div class="flex items-center gap-4 rounded-lg border border-border px-4 py-3 {isConfigured ? 'border-primary/50 bg-primary/5' : ''}">
-							<div class="flex-1 min-w-0">
-								<div class="flex items-center gap-2">
-									<span class="font-mono text-sm font-medium">{iface.name}</span>
-									<Badge variant={iface.up ? 'default' : 'secondary'} class="text-[0.6rem]">
-										{iface.up ? 'Up' : 'Down'}
-									</Badge>
-									<Badge variant="outline" class="text-[0.6rem]">{iface.kind}</Badge>
-									{#if isConfigured}
-										<Badge variant="outline" class="text-[0.6rem]">Configured</Badge>
-									{/if}
-								</div>
-								{#if iface.ipv4_addresses.length > 0 || iface.ipv6_addresses.length > 0}
-									<div class="mt-0.5 font-mono text-xs text-muted-foreground">
-										{[...iface.ipv4_addresses, ...iface.ipv6_addresses].join(', ')}
+						{@const isSelected = selectedIface === iface.name}
+						<div>
+							<button
+								class="w-full text-left flex items-center gap-4 rounded-lg border px-4 py-3 transition-colors
+									{isSelected ? 'border-primary bg-primary/10' : isConfigured ? 'border-primary/50 bg-primary/5' : 'border-border hover:bg-muted/30'}"
+								onclick={() => selectInterface(iface.name)}
+							>
+								<div class="flex-1 min-w-0">
+									<div class="flex items-center gap-2">
+										<span class="font-mono text-sm font-medium">{iface.name}</span>
+										<Badge variant={iface.up ? 'default' : 'secondary'} class="text-[0.6rem]">{iface.up ? 'Up' : 'Down'}</Badge>
+										<Badge variant="outline" class="text-[0.6rem]">{iface.kind}</Badge>
+										{#if isConfigured}<Badge variant="outline" class="text-[0.6rem]">Configured</Badge>{/if}
 									</div>
+									{#if iface.ipv4_addresses.length > 0 || iface.ipv6_addresses.length > 0}
+										<div class="mt-0.5 font-mono text-xs text-muted-foreground">{[...iface.ipv4_addresses, ...iface.ipv6_addresses].join(', ')}</div>
+									{/if}
+									<div class="mt-0.5 text-xs text-muted-foreground">{iface.mac} · MTU {iface.mtu}</div>
+								</div>
+								{#if iface.speed_mbps}
+									<span class="text-xs text-muted-foreground">{iface.speed_mbps >= 1000 ? `${iface.speed_mbps / 1000}G` : `${iface.speed_mbps}M`}</span>
 								{/if}
-								<div class="mt-0.5 text-xs text-muted-foreground">{iface.mac} · MTU {iface.mtu}</div>
-							</div>
-							{#if iface.speed_mbps}
-								<span class="text-xs text-muted-foreground">{iface.speed_mbps >= 1000 ? `${iface.speed_mbps / 1000}G` : `${iface.speed_mbps}M`}</span>
+							</button>
+
+							<!-- Inline config when selected -->
+							{#if isSelected}
+								<div class="mt-2 rounded-lg border border-border bg-secondary/20 p-4 space-y-4">
+									<!-- IPv4 -->
+									<div>
+										<div class="mb-2 text-sm font-medium">IPv4</div>
+										<div class="flex w-fit rounded-md border border-border text-sm mb-3">
+											<button onclick={() => { netDhcp = true; netChanged = true; }} class="rounded-l-md px-3 py-1 font-medium transition-colors {netDhcp ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}">DHCP</button>
+											<button onclick={() => { netDhcp = false; netChanged = true; }} class="rounded-r-md px-3 py-1 font-medium transition-colors {!netDhcp ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}">Static</button>
+										</div>
+										{#if !netDhcp}
+											<div class="grid grid-cols-3 gap-2">
+												<div>
+													<label for="net-address" class="text-xs text-muted-foreground">Address</label>
+													<input id="net-address" bind:value={netAddress} placeholder="192.168.1.100" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+												</div>
+												<div>
+													<label for="net-prefix" class="text-xs text-muted-foreground">Prefix</label>
+													<input id="net-prefix" bind:value={netPrefix} type="number" min="1" max="32" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+												</div>
+												<div>
+													<label for="net-gateway" class="text-xs text-muted-foreground">Gateway</label>
+													<input id="net-gateway" bind:value={netGateway} placeholder="192.168.1.1" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+												</div>
+											</div>
+										{/if}
+									</div>
+
+									<!-- IPv6 -->
+									<div>
+										<div class="mb-2 text-sm font-medium">IPv6</div>
+										<div class="flex w-fit rounded-md border border-border text-xs mb-3">
+											{#each ['slaac', 'dhcp', 'static', 'disabled'] as m}
+												<button onclick={() => { netIpv6Method = m as typeof netIpv6Method; netChanged = true; }}
+													class="px-3 py-1 font-medium transition-colors first:rounded-l-md last:rounded-r-md {netIpv6Method === m ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
+												>{m === 'slaac' ? 'SLAAC' : m === 'dhcp' ? 'DHCPv6' : m === 'static' ? 'Static' : 'Off'}</button>
+											{/each}
+										</div>
+										{#if netIpv6Method === 'static'}
+											<div class="grid grid-cols-2 gap-2">
+												<div>
+													<label for="net-ipv6-addr" class="text-xs text-muted-foreground">Address (CIDR)</label>
+													<input id="net-ipv6-addr" bind:value={netIpv6Address} placeholder="fd00::1/64" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+												</div>
+												<div>
+													<label for="net-ipv6-gw" class="text-xs text-muted-foreground">Gateway</label>
+													<input id="net-ipv6-gw" bind:value={netIpv6Gateway} placeholder="fd00::1" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+												</div>
+											</div>
+										{/if}
+									</div>
+
+									<!-- DNS -->
+									<div>
+										<label for="net-dns" class="text-xs text-muted-foreground">DNS Servers</label>
+										<input id="net-dns" bind:value={netNameservers} placeholder="1.1.1.1, 8.8.8.8" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+									</div>
+
+									{#if netChanged && !netDhcp}
+										<p class="text-xs text-amber-500">Changing the IP will move your connection to the new address.</p>
+									{/if}
+
+									<Button size="sm" onclick={saveInterfaceConfig} disabled={savingNetwork || !netChanged}>
+										{savingNetwork ? 'Applying\u2026' : 'Apply'}
+									</Button>
+								</div>
 							{/if}
 						</div>
 					{/each}
@@ -860,104 +1027,120 @@
 			{/if}
 		</section>
 
-		<!-- Network configuration (for primary interface) -->
-		{#if network}
-			{@const primaryName = network.interfaces?.[0]?.name || networkState?.interfaces?.[0]?.name || '—'}
-			{@const liveIface = networkState?.interfaces?.find(i => i.name === primaryName)}
-			<section class="rounded-lg border border-border p-5">
-				<h2 class="mb-1 text-base font-semibold">Configuration</h2>
-				<p class="mb-4 text-xs text-muted-foreground">
-					Settings for <span class="font-mono">{primaryName}</span>
-				</p>
+		<!-- Bond / VLAN creation -->
+		<section class="rounded-lg border border-border p-5">
+			<div class="flex items-center gap-3 mb-4">
+				<h2 class="text-base font-semibold">Advanced</h2>
+				<Button size="xs" variant="secondary" onclick={() => { showBondForm = !showBondForm; showVlanForm = false; }}>{showBondForm ? 'Cancel' : '+ Bond'}</Button>
+				<Button size="xs" variant="secondary" onclick={() => { showVlanForm = !showVlanForm; showBondForm = false; }}>{showVlanForm ? 'Cancel' : '+ VLAN'}</Button>
+			</div>
 
-				{#if liveIface && (liveIface.ipv4_addresses.length > 0 || liveIface.ipv6_addresses.length > 0)}
-					<div class="mb-4 flex items-start justify-between gap-4">
-						<span class="shrink-0 text-sm text-muted-foreground">Active Address</span>
-						<div class="text-right font-mono text-sm font-medium">
-							{[...liveIface.ipv4_addresses, ...liveIface.ipv6_addresses].join(', ')}
+			{#if showBondForm}
+				<div class="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
+					<div class="text-sm font-medium">Create Bond Interface</div>
+					<p class="text-xs text-muted-foreground">Combine multiple interfaces for redundancy or throughput.</p>
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<label for="bond-name" class="text-xs text-muted-foreground">Name</label>
+							<input id="bond-name" bind:value={bondName} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
+						</div>
+						<div>
+							<label for="bond-mode" class="text-xs text-muted-foreground">Mode</label>
+							<select id="bond-mode" bind:value={bondMode} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm">
+								<option value="active_backup">Active-Backup (failover)</option>
+								<option value="lacp">LACP (802.3ad)</option>
+								<option value="balance_rr">Balance Round-Robin</option>
+								<option value="balance_xor">Balance XOR</option>
+							</select>
 						</div>
 					</div>
-				{/if}
-
-				<div class="mb-4">
-					<div class="mb-2 text-sm text-muted-foreground">Mode</div>
-					<div class="flex w-fit rounded-md border border-border text-sm">
-						<button
-							onclick={() => { netDhcp = true; netChanged = true; }}
-							class="rounded-l-md px-4 py-1.5 font-medium transition-colors {netDhcp ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
-						>DHCP</button>
-						<button
-							onclick={() => { netDhcp = false; netChanged = true; }}
-							class="rounded-r-md px-4 py-1.5 font-medium transition-colors {!netDhcp ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
-						>Static</button>
+					<div>
+						<div class="text-xs text-muted-foreground mb-1">Members (select 2+)</div>
+						{#if networkState}
+							<div class="flex flex-wrap gap-2">
+								{#each networkState.interfaces.filter(i => i.kind === 'physical') as iface}
+									<label class="flex items-center gap-1.5 text-sm">
+										<input type="checkbox" checked={bondMembers.includes(iface.name)}
+											onchange={() => { bondMembers = bondMembers.includes(iface.name) ? bondMembers.filter(m => m !== iface.name) : [...bondMembers, iface.name]; }} />
+										{iface.name}
+									</label>
+								{/each}
+							</div>
+						{/if}
 					</div>
+					<Button size="sm" onclick={createBond} disabled={bondMembers.length < 2}>Create Bond</Button>
 				</div>
+			{/if}
 
-				<div class="mb-4 grid grid-cols-2 gap-3">
-					<div>
-						<label for="net-address" class="mb-1 block text-xs text-muted-foreground">IP Address</label>
-						<input
-							id="net-address"
-							type="text"
-							value={netDhcp ? (liveIface?.ipv4_addresses[0]?.split('/')[0] ?? '') : netAddress}
-							oninput={(e) => { if (!netDhcp) { netAddress = (e.target as HTMLInputElement).value; netChanged = true; } }}
-							disabled={netDhcp}
-							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-							placeholder="192.168.1.100"
-						/>
+			{#if showVlanForm}
+				<div class="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
+					<div class="text-sm font-medium">Create VLAN Interface</div>
+					<p class="text-xs text-muted-foreground">Tag traffic on a physical interface with a VLAN ID.</p>
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<label for="vlan-parent" class="text-xs text-muted-foreground">Parent Interface</label>
+							<select id="vlan-parent" bind:value={vlanParent} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm">
+								<option value="">Select...</option>
+								{#if networkState}
+									{#each networkState.interfaces.filter(i => i.kind === 'physical' || i.kind === 'bond') as iface}
+										<option value={iface.name}>{iface.name}</option>
+									{/each}
+								{/if}
+							</select>
+						</div>
+						<div>
+							<label for="vlan-id" class="text-xs text-muted-foreground">VLAN ID (1-4094)</label>
+							<input id="vlan-id" type="number" min="1" max="4094" bind:value={vlanId} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
+						</div>
 					</div>
-					<div>
-						<label for="net-prefix" class="mb-1 block text-xs text-muted-foreground">Prefix Length</label>
-						<input
-							id="net-prefix"
-							type="number"
-							min="1"
-							max="32"
-							value={netDhcp ? (liveIface?.ipv4_addresses[0]?.split('/')[1] ?? '') : netPrefix}
-							oninput={(e) => { if (!netDhcp) { netPrefix = (e.target as HTMLInputElement).value; netChanged = true; } }}
-							disabled={netDhcp}
-							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-							placeholder="24"
-						/>
-					</div>
-					<div>
-						<label for="net-gateway" class="mb-1 block text-xs text-muted-foreground">Gateway</label>
-						<input
-							id="net-gateway"
-							type="text"
-							value={netDhcp ? '' : netGateway}
-							oninput={(e) => { if (!netDhcp) { netGateway = (e.target as HTMLInputElement).value; netChanged = true; } }}
-							disabled={netDhcp}
-							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-							placeholder="192.168.1.1"
-						/>
-					</div>
-					<div>
-						<label for="net-dns" class="mb-1 block text-xs text-muted-foreground">DNS Servers</label>
-						<input
-							id="net-dns"
-							type="text"
-							bind:value={netNameservers}
-							oninput={() => { if (!netDhcp) netChanged = true; }}
-							disabled={netDhcp}
-							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-							placeholder="1.1.1.1, 8.8.8.8"
-						/>
-					</div>
+					<Button size="sm" onclick={createVlan} disabled={!vlanParent}>Create VLAN</Button>
 				</div>
+			{/if}
 
-				{#if netChanged && !netDhcp}
-					<p class="mb-3 text-xs text-amber-500">
-						Changing the static IP will move your connection to the new address.
-						If it differs from the current one, reconnect to continue.
-					</p>
+			{#if !showBondForm && !showVlanForm}
+				{#if network && (network.bonds?.length > 0 || network.vlans?.length > 0)}
+					<div class="space-y-1 text-sm">
+						{#each network.bonds as bond}
+							<div class="flex items-center gap-2 rounded px-2 py-1">
+								<Badge variant="outline" class="text-[0.6rem]">bond</Badge>
+								<span class="font-mono">{bond.name}</span>
+								<span class="text-xs text-muted-foreground">{bond.mode} · {bond.members.join(', ')}</span>
+							</div>
+						{/each}
+						{#each network.vlans as vlan}
+							<div class="flex items-center gap-2 rounded px-2 py-1">
+								<Badge variant="outline" class="text-[0.6rem]">vlan</Badge>
+								<span class="font-mono">{vlan.parent}.{vlan.vlan_id}</span>
+							</div>
+						{/each}
+					</div>
+				{:else}
+					<p class="text-xs text-muted-foreground">No bonds or VLANs configured.</p>
 				{/if}
+			{/if}
+		</section>
 
-				<Button size="sm" onclick={saveNetwork} disabled={savingNetwork || !netChanged}>
-					{savingNetwork ? 'Applying\u2026' : 'Apply'}
-				</Button>
-			</section>
-		{/if}
+		<!-- Firewall status -->
+		<section class="rounded-lg border border-border p-5">
+			<h2 class="mb-4 text-base font-semibold">Firewall</h2>
+			{#if !firewallStatus}
+				<p class="text-sm text-muted-foreground">Loading...</p>
+			{:else}
+				<div class="space-y-1">
+					{#each firewallStatus.rules as rule}
+						<div class="flex items-center gap-3 rounded px-3 py-2 text-sm {rule.active ? '' : 'opacity-40'}">
+							<span class="h-2 w-2 rounded-full {rule.active ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
+							<span class="font-medium w-20">{rule.service}</span>
+							<span class="font-mono text-xs text-muted-foreground">
+								{rule.ports.map(p => `${p.port}/${p.transport}`).join(', ')}
+							</span>
+							<span class="ml-auto text-xs {rule.active ? 'text-green-400' : 'text-muted-foreground'}">{rule.active ? 'Open' : 'Closed'}</span>
+						</div>
+					{/each}
+				</div>
+				<p class="mt-3 text-xs text-muted-foreground">Ports open and close automatically when services are enabled/disabled in Services.</p>
+			{/if}
+		</section>
 	</div>
 
 {:else if activeTab === 'notifications'}
