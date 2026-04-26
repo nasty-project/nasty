@@ -331,7 +331,10 @@
 		}
 	}
 
-	const SYSTEM_SUBVOLUMES: Record<string, string> = {};
+	const SYSTEM_SUBVOLUMES: Record<string, string> = {
+		'apps': 'Docker apps and container data',
+		'vms': 'Virtual machine images and disk storage',
+	};
 
 	async function deleteSubvolume(name: string) {
 		const systemUse = SYSTEM_SUBVOLUMES[name];
