@@ -31,9 +31,11 @@
 	let netInterfaces: NetIfStats[] = $state([]);
 	let netIfLoaded = $state(false);
 	let selectedIface: string | null = $state(null);
+	// Multiple IPv4/IPv6 addresses
+	let netIpv4Addrs: string[] = $state(['']);
+	let netIpv6Addrs: string[] = $state(['']);
 	// IPv6 form
 	let netIpv6Method: 'slaac' | 'static' | 'dhcp' | 'disabled' = $state('slaac');
-	let netIpv6Address = $state('');
 	let netIpv6Gateway = $state('');
 	// Bond form
 	let showBondForm = $state(false);
@@ -66,6 +68,7 @@
 	});
 	let savingNetwork = $state(false);
 	let netDhcp = $state(true);
+	// Legacy single-address vars (used by syncNetworkForm for onMount compat)
 	let netAddress = $state('');
 	let netPrefix = $state('24');
 	let netGateway = $state('');
@@ -488,18 +491,14 @@
 			const cfg = network.interfaces.find((i: {name: string}) => i.name === name);
 			if (cfg) {
 				netDhcp = cfg.ipv4.method === 'dhcp';
-				if (cfg.ipv4.addresses.length > 0) {
-					const parts = cfg.ipv4.addresses[0].split('/');
-					netAddress = parts[0] ?? '';
-					netPrefix = parts[1] ?? '24';
-				} else { netAddress = ''; netPrefix = '24'; }
+				netIpv4Addrs = cfg.ipv4.addresses.length > 0 ? [...cfg.ipv4.addresses] : [''];
 				netGateway = cfg.ipv4.gateway ?? '';
 				netIpv6Method = cfg.ipv6.method as typeof netIpv6Method;
-				netIpv6Address = cfg.ipv6.addresses[0] ?? '';
+				netIpv6Addrs = cfg.ipv6.addresses.length > 0 ? [...cfg.ipv6.addresses] : [''];
 				netIpv6Gateway = cfg.ipv6.gateway ?? '';
 			} else {
-				netDhcp = true; netAddress = ''; netPrefix = '24'; netGateway = '';
-				netIpv6Method = 'slaac'; netIpv6Address = ''; netIpv6Gateway = '';
+				netDhcp = true; netIpv4Addrs = ['']; netGateway = '';
+				netIpv6Method = 'slaac'; netIpv6Addrs = ['']; netIpv6Gateway = '';
 			}
 			netChanged = false;
 		}
@@ -511,12 +510,12 @@
 		const nameservers = netNameservers.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
 		const ipv4 = {
 			method: netDhcp ? 'dhcp' as const : 'static' as const,
-			addresses: netDhcp ? [] : [`${netAddress.trim()}/${netPrefix}`],
+			addresses: netDhcp ? [] : netIpv4Addrs.filter(a => a.trim()),
 			gateway: netDhcp ? null : (netGateway.trim() || null),
 		};
 		const ipv6 = {
 			method: netIpv6Method,
-			addresses: netIpv6Method === 'static' && netIpv6Address ? [netIpv6Address] : [],
+			addresses: netIpv6Method === 'static' ? netIpv6Addrs.filter(a => a.trim()) : [],
 			gateway: netIpv6Method === 'static' ? (netIpv6Gateway || null) : null,
 		};
 
@@ -1089,19 +1088,20 @@
 											<button onclick={() => { netDhcp = false; netChanged = true; }} class="rounded-r-md px-3 py-1 font-medium transition-colors {!netDhcp ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}">Static</button>
 										</div>
 										{#if !netDhcp}
-											<div class="grid grid-cols-3 gap-2">
-												<div>
-													<label for="net-address" class="text-xs text-muted-foreground">Address</label>
-													<input id="net-address" bind:value={netAddress} placeholder="192.168.1.100" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
-												</div>
-												<div>
-													<label for="net-prefix" class="text-xs text-muted-foreground">Prefix</label>
-													<input id="net-prefix" bind:value={netPrefix} type="number" min="1" max="32" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
-												</div>
-												<div>
-													<label for="net-gateway" class="text-xs text-muted-foreground">Gateway</label>
-													<input id="net-gateway" bind:value={netGateway} placeholder="192.168.1.1" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
-												</div>
+											<div class="space-y-1">
+												{#each netIpv4Addrs as addr, i}
+													<div class="flex items-center gap-2">
+														<input bind:value={netIpv4Addrs[i]} placeholder="192.168.1.100/24" oninput={() => netChanged = true} class="flex-1 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+														{#if netIpv4Addrs.length > 1}
+															<button onclick={() => { netIpv4Addrs = netIpv4Addrs.filter((_, j) => j !== i); netChanged = true; }} class="text-xs text-muted-foreground hover:text-foreground">x</button>
+														{/if}
+													</div>
+												{/each}
+												<button onclick={() => { netIpv4Addrs = [...netIpv4Addrs, '']; }} class="text-xs text-primary hover:underline">+ Add address</button>
+											</div>
+											<div class="mt-2">
+												<label for="net-gateway" class="text-xs text-muted-foreground">Gateway</label>
+												<input id="net-gateway" bind:value={netGateway} placeholder="192.168.1.1" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
 											</div>
 										{/if}
 									</div>
@@ -1117,15 +1117,20 @@
 											{/each}
 										</div>
 										{#if netIpv6Method === 'static'}
-											<div class="grid grid-cols-2 gap-2">
-												<div>
-													<label for="net-ipv6-addr" class="text-xs text-muted-foreground">Address (CIDR)</label>
-													<input id="net-ipv6-addr" bind:value={netIpv6Address} placeholder="fd00::1/64" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
-												</div>
-												<div>
-													<label for="net-ipv6-gw" class="text-xs text-muted-foreground">Gateway</label>
-													<input id="net-ipv6-gw" bind:value={netIpv6Gateway} placeholder="fd00::1" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
-												</div>
+											<div class="space-y-1">
+												{#each netIpv6Addrs as addr, i}
+													<div class="flex items-center gap-2">
+														<input bind:value={netIpv6Addrs[i]} placeholder="fd00::1/64" oninput={() => netChanged = true} class="flex-1 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+														{#if netIpv6Addrs.length > 1}
+															<button onclick={() => { netIpv6Addrs = netIpv6Addrs.filter((_, j) => j !== i); netChanged = true; }} class="text-xs text-muted-foreground hover:text-foreground">x</button>
+														{/if}
+													</div>
+												{/each}
+												<button onclick={() => { netIpv6Addrs = [...netIpv6Addrs, '']; }} class="text-xs text-primary hover:underline">+ Add address</button>
+											</div>
+											<div class="mt-2">
+												<label for="net-ipv6-gw" class="text-xs text-muted-foreground">Gateway</label>
+												<input id="net-ipv6-gw" bind:value={netIpv6Gateway} placeholder="fd00::1" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
 											</div>
 										{/if}
 									</div>
