@@ -854,10 +854,11 @@
 						</div>
 					{/if}
 					{#each newPorts as port, i}
+						{@const hasConflict = portConflicts.some(c => c.port === (parseInt(port.host_port) || port.container_port))}
 						<div class="grid grid-cols-[1fr_80px_90px_60px_auto] gap-2 mt-1 items-center">
 							<Input bind:value={port.name} placeholder="e.g. http" class="h-8 text-xs" />
 							<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" disabled />
-							<Input bind:value={port.host_port} placeholder={String(port.container_port)} class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
+							<Input bind:value={port.host_port} placeholder={String(port.container_port)} class="h-8 text-xs {hasConflict ? 'border-amber-500 ring-1 ring-amber-500/50' : ''}" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
 							<select bind:value={port.protocol} class="h-8 rounded-md border border-input bg-transparent px-1 text-xs">
 								<option>TCP</option>
 								<option>UDP</option>
