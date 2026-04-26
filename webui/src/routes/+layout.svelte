@@ -74,6 +74,15 @@
 	let profileOpen = $state(false);
 	let helpOpen = $state(false);
 
+	// SSH password auth warning
+	let sshPasswordAuth = $state(false);
+	async function checkSshStatus() {
+		try {
+			const result = await getClient().call<{ password_auth: boolean; keys: string[] }>('system.ssh.status');
+			sshPasswordAuth = result.password_auth;
+		} catch { /* ignore */ }
+	}
+
 	// Forced password change
 	let showPasswordChange = $state(false);
 	let newPassword = $state('');
@@ -165,6 +174,7 @@
 		const tick = setInterval(() => { now = new Date(); }, 1000);
 		const rebootPoll = setInterval(checkRebootRequired, 30_000);
 		const authPoll = setInterval(checkAuth, 60_000);
+		checkSshStatus();
 		return () => {
 			getClient().offReconnect(onReconnect);
 			getClient().offDisconnect(onDisconnect);
@@ -606,6 +616,12 @@
 					<div class="fixed top-0 left-0 right-0 z-50 h-0.5 bg-primary/20">
 						<div class="h-full w-1/3 bg-primary animate-[indeterminate_1.5s_ease-in-out_infinite]"></div>
 					</div>
+				{/if}
+				{#if sshPasswordAuth}
+					<a href="/settings" onclick={() => {}} class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400 no-underline hover:bg-amber-500/20 transition-colors">
+						<span>SSH password authentication is enabled — add an SSH key and disable it for better security.</span>
+						<span class="ml-auto text-xs shrink-0">Settings &rarr;</span>
+					</a>
 				{/if}
 				{#if !connected}
 					<p class="text-muted-foreground">Connecting to engine...</p>

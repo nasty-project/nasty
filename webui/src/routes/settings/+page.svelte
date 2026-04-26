@@ -122,6 +122,48 @@
 	let savingTls = $state(false);
 	let tlsChanged = $state(false);
 
+	// SSH
+	let sshKeys: string[] = $state([]);
+	let sshPasswordAuth = $state(true);
+	let sshNewKey = $state('');
+	let sshLoaded = $state(false);
+
+	async function loadSsh() {
+		try {
+			const result = await client.call<{ password_auth: boolean; keys: string[] }>('system.ssh.status');
+			sshKeys = result.keys;
+			sshPasswordAuth = result.password_auth;
+			sshLoaded = true;
+		} catch { /* ignore */ }
+	}
+
+	async function addSshKey() {
+		if (!sshNewKey.trim()) return;
+		await withToast(
+			() => client.call('system.ssh.add_key', { key: sshNewKey.trim() }),
+			'SSH key added'
+		);
+		sshNewKey = '';
+		await loadSsh();
+	}
+
+	async function removeSshKey(key: string) {
+		await withToast(
+			() => client.call('system.ssh.remove_key', { key }),
+			'SSH key removed'
+		);
+		await loadSsh();
+	}
+
+	async function toggleSshPasswordAuth() {
+		const newVal = !sshPasswordAuth;
+		await withToast(
+			() => client.call('system.ssh.set_password_auth', { enabled: newVal }),
+			newVal ? 'Password auth enabled' : 'Password auth disabled'
+		);
+		await loadSsh();
+	}
+
 	// Telemetry
 	let sendingTelemetry = $state(false);
 
@@ -235,6 +277,7 @@
 			tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
 			tlsAcmeStaging = (settings as any)?.tls_acme_staging ?? false;
 			syncNetworkForm();
+			loadSsh();
 
 			// Load ACME status
 			try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
@@ -937,6 +980,58 @@
 				<Button size="sm" onclick={sendTelemetry} disabled={sendingTelemetry || !settings.telemetry_enabled}>
 					{sendingTelemetry ? 'Sending…' : 'Send Now'}
 				</Button>
+			</section>
+
+			<!-- SSH Access -->
+			<section class="rounded-lg border border-border p-5">
+				<h2 class="mb-2 text-base font-semibold">SSH Access</h2>
+				<p class="mb-4 text-sm text-muted-foreground">
+					Manage SSH keys and password authentication. Key-based auth is more secure.
+				</p>
+
+				{#if sshPasswordAuth}
+					<div class="mb-4 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+						<span class="text-sm text-amber-400">Password authentication is enabled. Add an SSH key and disable it for better security.</span>
+					</div>
+				{/if}
+
+				<div class="mb-4">
+					<div class="flex items-center justify-between mb-2">
+						<span class="text-sm font-medium">Password Authentication</span>
+						<Button size="xs" variant={sshPasswordAuth ? 'destructive' : 'secondary'} onclick={toggleSshPasswordAuth}
+							disabled={!sshPasswordAuth && sshKeys.length === 0}>
+							{sshPasswordAuth ? 'Disable' : 'Enable'}
+						</Button>
+					</div>
+				</div>
+
+				<div class="mb-3">
+					<span class="text-sm font-medium">Authorized Keys</span>
+					{#if sshKeys.length === 0}
+						<p class="mt-1 text-xs text-muted-foreground">No SSH keys configured.</p>
+					{:else}
+						<div class="mt-2 space-y-1">
+							{#each sshKeys as key}
+								<div class="flex items-center gap-2 rounded border border-border px-3 py-1.5">
+									<span class="flex-1 font-mono text-xs truncate">{key.length > 80 ? key.slice(0, 40) + '...' + key.slice(-30) : key}</span>
+									<Button size="xs" variant="ghost" onclick={() => removeSshKey(key)}>x</Button>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</div>
+
+				<div>
+					<label for="ssh-new-key" class="text-xs text-muted-foreground">Add public key</label>
+					<textarea
+						id="ssh-new-key"
+						bind:value={sshNewKey}
+						placeholder="ssh-ed25519 AAAA... user@host"
+						rows="2"
+						class="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
+					></textarea>
+					<Button size="sm" class="mt-2" onclick={addSshKey} disabled={!sshNewKey.trim()}>Add Key</Button>
+				</div>
 			</section>
 
 			</div>

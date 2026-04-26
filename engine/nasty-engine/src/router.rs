@@ -103,6 +103,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.network.get"
                 | "system.logs"
                 | "system.logs.units"
+                | "system.ssh.status"
                 | "system.alerts"
                 | "system.settings.get"
                 | "system.tuning.get"
@@ -427,6 +428,86 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 }
             }
             ok(req, available)
+        }
+        "system.ssh.status" => {
+            let password_auth = std::fs::read_to_string("/etc/ssh/sshd_config")
+                .unwrap_or_default()
+                .lines()
+                .any(|l| {
+                    let l = l.trim();
+                    l == "PasswordAuthentication yes" || (!l.starts_with('#') && l.contains("PasswordAuthentication") && l.contains("yes"))
+                });
+            let keys = std::fs::read_to_string("/root/.ssh/authorized_keys")
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>();
+            ok(req, serde_json::json!({
+                "password_auth": password_auth,
+                "keys": keys,
+            }))
+        }
+        "system.ssh.add_key" => {
+            let key = match require_str(req, "key") {
+                Ok(k) => k.trim().to_string(),
+                Err(r) => return r,
+            };
+            if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") {
+                return err(req, "Invalid SSH public key — must start with ssh-rsa, ssh-ed25519, etc.");
+            }
+            let _ = tokio::fs::create_dir_all("/root/.ssh").await;
+            let mut existing = tokio::fs::read_to_string("/root/.ssh/authorized_keys").await.unwrap_or_default();
+            if !existing.contains(&key) {
+                if !existing.ends_with('\n') && !existing.is_empty() { existing.push('\n'); }
+                existing.push_str(&key);
+                existing.push('\n');
+                if let Err(e) = tokio::fs::write("/root/.ssh/authorized_keys", &existing).await {
+                    return err(req, format!("write authorized_keys: {e}"));
+                }
+                // Set permissions
+                let _ = tokio::process::Command::new("chmod").args(["600", "/root/.ssh/authorized_keys"]).status().await;
+                let _ = tokio::process::Command::new("chmod").args(["700", "/root/.ssh"]).status().await;
+            }
+            ok(req, "Key added")
+        }
+        "system.ssh.remove_key" => {
+            let key = match require_str(req, "key") {
+                Ok(k) => k.trim().to_string(),
+                Err(r) => return r,
+            };
+            let content = tokio::fs::read_to_string("/root/.ssh/authorized_keys").await.unwrap_or_default();
+            let filtered: String = content.lines()
+                .filter(|l| l.trim() != key)
+                .map(|l| format!("{l}\n"))
+                .collect();
+            if let Err(e) = tokio::fs::write("/root/.ssh/authorized_keys", &filtered).await {
+                return err(req, format!("write authorized_keys: {e}"));
+            }
+            ok(req, "Key removed")
+        }
+        "system.ssh.set_password_auth" => {
+            let enabled = req.params.as_ref()
+                .and_then(|p| p.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            // Check that at least one key exists before disabling password auth
+            if !enabled {
+                let keys = tokio::fs::read_to_string("/root/.ssh/authorized_keys").await.unwrap_or_default();
+                let key_count = keys.lines().filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#')).count();
+                if key_count == 0 {
+                    return err(req, "Cannot disable password authentication without at least one SSH key — you would be locked out");
+                }
+            }
+            // Update sshd_config via sed
+            let val = if enabled { "yes" } else { "no" };
+            let _ = tokio::process::Command::new("sed")
+                .args(["-i", &format!("s/^.*PasswordAuthentication.*/PasswordAuthentication {val}/"), "/etc/ssh/sshd_config"])
+                .status().await;
+            let _ = tokio::process::Command::new("systemctl")
+                .args(["reload", "sshd"])
+                .status().await;
+            ok(req, format!("Password authentication {}", if enabled { "enabled" } else { "disabled" }))
         }
         "system.network.get" => ok(req, state.network.get().await),
         "system.network.update" => {
