@@ -2101,7 +2101,15 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
         found.ok_or_else(|| AppsError::CommandFailed("no filesystems under /fs".into()))?
     };
 
-    let docker_data = format!("/fs/{fs_name}/apps/docker");
+    // Ensure the apps subvolume exists first
+    let apps_path = format!("/fs/{fs_name}/apps");
+    if !Path::new(&apps_path).exists() {
+        run_cmd("bcachefs", &["subvolume", "create", &apps_path]).await
+            .map_err(|e| AppsError::CommandFailed(format!("create apps subvolume: {e}")))?;
+        info!("Created apps subvolume at {apps_path}");
+    }
+
+    let docker_data = format!("{apps_path}/docker");
     tokio::fs::create_dir_all(&docker_data).await
         .map_err(|e| AppsError::CommandFailed(format!("create {docker_data}: {e}")))?;
 
