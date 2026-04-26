@@ -101,6 +101,8 @@ fn is_read_only(method: &str) -> bool {
                 | "system.stats"
                 | "system.disks"
                 | "system.network.get"
+                | "system.logs"
+                | "system.logs.units"
                 | "system.alerts"
                 | "system.settings.get"
                 | "system.tuning.get"
@@ -383,6 +385,49 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
         },
+        "system.logs" => {
+            let unit = str_param(req, "unit").unwrap_or("nasty-engine");
+            let lines: u32 = req.params.as_ref()
+                .and_then(|p| p.get("lines"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as u32;
+            let output = tokio::process::Command::new("journalctl")
+                .args([
+                    "-u", unit,
+                    "-n", &lines.to_string(),
+                    "--no-pager",
+                    "--output", "short-iso",
+                ])
+                .output()
+                .await;
+            match output {
+                Ok(o) => ok(req, String::from_utf8_lossy(&o.stdout).to_string()),
+                Err(e) => err(req, format!("journalctl: {e}")),
+            }
+        }
+        "system.logs.units" => {
+            // Return list of interesting systemd units
+            let units = vec![
+                "nasty-engine", "nasty-metrics", "nginx",
+                "nfs-server", "samba-smbd", "samba-nmbd",
+                "docker", "sshd", "avahi-daemon",
+                "smartd", "nut-driver", "nut-server", "nut-monitor",
+            ];
+            let mut available = Vec::new();
+            for unit in units {
+                let svc = format!("{unit}.service");
+                let exists = tokio::process::Command::new("systemctl")
+                    .args(["cat", &svc])
+                    .output()
+                    .await
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if exists {
+                    available.push(unit);
+                }
+            }
+            ok(req, available)
+        }
         "system.network.get" => ok(req, state.network.get().await),
         "system.network.update" => {
             match parse_params::<nasty_system::network::NetworkConfig>(req) {
