@@ -49,6 +49,11 @@ pub enum ChannelType {
         #[serde(default)]
         token: Option<String>,
     },
+    Signal {
+        api_url: String,
+        from_number: String,
+        to_number: String,
+    },
 }
 
 // ── Config persistence ─────────────────────────────────────────
@@ -105,6 +110,9 @@ async fn send_to_channel(channel: &ChannelType, subject: &str, body: &str) -> Re
         }
         ChannelType::Ntfy { server_url, topic, token } => {
             send_ntfy(server_url, topic, token.as_deref(), subject, body).await
+        }
+        ChannelType::Signal { api_url, from_number, to_number } => {
+            send_signal(api_url, from_number, to_number, subject, body).await
         }
     }
 }
@@ -237,6 +245,35 @@ async fn send_ntfy(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("ntfy error {status}: {body}"));
+    }
+
+    Ok(())
+}
+
+// ── Signal ─────────────────────────────────────────────────────
+
+async fn send_signal(
+    api_url: &str, from_number: &str, to_number: &str,
+    subject: &str, body: &str,
+) -> Result<(), String> {
+    let message = format!("{subject}\n\n{body}");
+    let url = format!("{}/v2/send", api_url.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let resp = client.post(&url)
+        .json(&serde_json::json!({
+            "message": message,
+            "number": from_number,
+            "recipients": [to_number],
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("signal request: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("signal API error {status}: {body}"));
     }
 
     Ok(())

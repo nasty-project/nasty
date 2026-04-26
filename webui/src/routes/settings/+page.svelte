@@ -16,7 +16,7 @@
 	let notifLoaded = $state(false);
 	let notifSaving = $state(false);
 	let notifTesting = $state<string | null>(null);
-	let notifAddType: 'smtp' | 'telegram' | 'webhook' | 'ntfy' | null = $state(null);
+	let notifAddType: 'smtp' | 'telegram' | 'webhook' | 'ntfy' | 'signal' | null = $state(null);
 	let notifEditId: string | null = $state(null);
 	// Form fields
 	let nfName = $state('');
@@ -25,6 +25,7 @@
 	let nfBotToken = $state(''); let nfChatId = $state('');
 	let nfUrl = $state('');
 	let nfNtfyServer = $state('https://ntfy.sh'); let nfNtfyTopic = $state(''); let nfNtfyToken = $state('');
+	let nfSignalUrl = $state('http://localhost:8080'); let nfSignalFrom = $state(''); let nfSignalTo = $state('');
 
 	// Network tab
 	let netInterfaces: NetIfStats[] = $state([]);
@@ -558,6 +559,7 @@
 		else if (ch.type === 'telegram') Object.assign(payload, { bot_token: ch.bot_token, chat_id: ch.chat_id });
 		else if (ch.type === 'webhook') Object.assign(payload, { url: ch.url, headers: ch.headers || {} });
 		else if (ch.type === 'ntfy') Object.assign(payload, { server_url: ch.server_url, topic: ch.topic, token: ch.token });
+		else if (ch.type === 'signal') Object.assign(payload, { api_url: ch.api_url, from_number: ch.from_number, to_number: ch.to_number });
 		await withToast(
 			() => client.call('notifications.test', payload),
 			'Test notification sent'
@@ -573,6 +575,7 @@
 		else if (notifAddType === 'telegram') Object.assign(ch, { bot_token: nfBotToken, chat_id: nfChatId });
 		else if (notifAddType === 'webhook') Object.assign(ch, { url: nfUrl, headers: {} });
 		else if (notifAddType === 'ntfy') Object.assign(ch, { server_url: nfNtfyServer, topic: nfNtfyTopic, token: nfNtfyToken || undefined });
+		else if (notifAddType === 'signal') Object.assign(ch, { api_url: nfSignalUrl, from_number: nfSignalFrom, to_number: nfSignalTo });
 		notifConfig.channels = [...notifConfig.channels, ch];
 		resetNotifForm();
 		saveNotifications();
@@ -594,6 +597,7 @@
 		nfBotToken = ''; nfChatId = '';
 		nfUrl = '';
 		nfNtfyServer = 'https://ntfy.sh'; nfNtfyTopic = ''; nfNtfyToken = '';
+		nfSignalUrl = 'http://localhost:8080'; nfSignalFrom = ''; nfSignalTo = '';
 	}
 
 	async function loadTuning() {
@@ -1219,7 +1223,8 @@
 									{ch.type === 'smtp' ? `${ch.to} via ${ch.host}` :
 									 ch.type === 'telegram' ? `Chat ${ch.chat_id}` :
 									 ch.type === 'webhook' ? ch.url :
-									 ch.type === 'ntfy' ? `${ch.server_url}/${ch.topic}` : ch.type}
+									 ch.type === 'ntfy' ? `${ch.server_url}/${ch.topic}` :
+								 ch.type === 'signal' ? `${ch.to_number} via ${ch.api_url}` : ch.type}
 								</div>
 							</div>
 							<div class="flex gap-2">
@@ -1239,6 +1244,7 @@
 					<Button size="sm" variant="secondary" onclick={() => { notifAddType = 'telegram'; nfName = 'Telegram'; }}>+ Telegram</Button>
 					<Button size="sm" variant="secondary" onclick={() => { notifAddType = 'webhook'; nfName = 'Webhook'; }}>+ Webhook</Button>
 					<Button size="sm" variant="secondary" onclick={() => { notifAddType = 'ntfy'; nfName = 'ntfy'; }}>+ ntfy</Button>
+					<Button size="sm" variant="secondary" onclick={() => { notifAddType = 'signal'; nfName = 'Signal'; }}>+ Signal</Button>
 				</div>
 			{:else}
 				<div class="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
@@ -1251,6 +1257,8 @@
 						<p class="text-xs text-muted-foreground">Send a JSON POST to any URL when alerts fire. The payload includes <code class="font-mono">subject</code>, <code class="font-mono">body</code>, <code class="font-mono">source</code>, and <code class="font-mono">timestamp</code> fields. Works with Discord webhooks, Slack incoming webhooks, Home Assistant, or any custom endpoint.</p>
 					{:else if notifAddType === 'ntfy'}
 						<p class="text-xs text-muted-foreground">Push notifications via <a href="https://ntfy.sh" target="_blank" rel="noopener" class="text-primary hover:underline">ntfy</a> — install the ntfy app on your phone, subscribe to your topic, and alerts arrive as push notifications. The free ntfy.sh server works without a token. Self-hosted servers may require one.</p>
+					{:else if notifAddType === 'signal'}
+						<p class="text-xs text-muted-foreground">Send alerts via Signal. Requires a <a href="https://github.com/bbernhard/signal-cli-rest-api" target="_blank" rel="noopener" class="text-primary hover:underline">signal-cli-rest-api</a> container running — deploy it as a NASty app, then point the API URL here. You'll need a registered phone number as the sender.</p>
 					{/if}
 					<div>
 						<label for="nf-name" class="text-xs text-muted-foreground">Name</label>
@@ -1314,6 +1322,19 @@
 						<div>
 							<label for="nf-ntfy-token" class="text-xs text-muted-foreground">Token (optional)</label>
 							<input id="nf-ntfy-token" bind:value={nfNtfyToken} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+					{:else if notifAddType === 'signal'}
+						<div>
+							<label for="nf-signal-url" class="text-xs text-muted-foreground">API URL</label>
+							<input id="nf-signal-url" bind:value={nfSignalUrl} placeholder="http://localhost:8080" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+						<div>
+							<label for="nf-signal-from" class="text-xs text-muted-foreground">From Number</label>
+							<input id="nf-signal-from" bind:value={nfSignalFrom} placeholder="+1234567890" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+						</div>
+						<div>
+							<label for="nf-signal-to" class="text-xs text-muted-foreground">To Number</label>
+							<input id="nf-signal-to" bind:value={nfSignalTo} placeholder="+0987654321" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
 						</div>
 					{/if}
 

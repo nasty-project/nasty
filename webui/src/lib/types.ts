@@ -576,7 +576,7 @@ export interface NotificationChannel {
 	id: string;
 	name: string;
 	enabled: boolean;
-	type: 'smtp' | 'telegram' | 'webhook' | 'ntfy';
+	type: 'smtp' | 'telegram' | 'webhook' | 'ntfy' | 'signal';
 	// SMTP
 	host?: string;
 	port?: number;
@@ -595,6 +595,10 @@ export interface NotificationChannel {
 	server_url?: string;
 	topic?: string;
 	token?: string;
+	// Signal
+	api_url?: string;
+	from_number?: string;
+	to_number?: string;
 }
 
 // ── Virtual Machines ────────────────────────────────────────
