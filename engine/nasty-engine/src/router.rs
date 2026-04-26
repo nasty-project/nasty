@@ -137,6 +137,21 @@ fn is_read_only(method: &str) -> bool {
                 | "system.settings.timezones"
                 | "audit.list"
                 | "apps.check_ports"
+                | "apps.status"
+                | "apps.logs"
+                | "apps.compose.logs"
+                | "apps.container.logs"
+                | "apps.inspect"
+                | "system.firewall.status"
+                | "vm.capabilities"
+                | "firmware.available"
+                | "firmware.check"
+                | "firmware.devices"
+                | "notifications.config.get"
+                | "apps.config"
+                | "apps.inspect_image"
+                | "bcachefs.timestats"
+                | "bcachefs.top"
         )
 }
 
