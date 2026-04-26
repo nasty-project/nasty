@@ -1139,16 +1139,9 @@ in {
     };
 
     # ── Firewall ───────────────────────────────────────────────
-
-    networking.firewall.allowedTCPPorts = lib.flatten [
-      [ cfg.webui.port cfg.webui.httpPort ]
-      (lib.optional cfg.nfs.enable 2049)
-      (lib.optional cfg.iscsi.enable 3260)
-      (lib.optionals cfg.smb.enable [ 445 139 ])
-      (lib.optional cfg.nvmeof.enable 4420)
-      (lib.optional cfg.nut.enable 3493)
-    ];
-
-    networking.firewall.allowedUDPPorts = lib.optionals cfg.tailscale.enable [ 41641 ];
+    # Disable NixOS's static iptables firewall — the engine manages
+    # nftables rules dynamically via `table inet nasty`.
+    networking.firewall.enable = false;
+    networking.nftables.enable = true;
   };
 }

@@ -87,7 +87,7 @@
     };
   };
 
-  networking.firewall.allowedTCPPorts = [ 22 ];
+  # SSH port is managed by the engine's dynamic nftables firewall.
 
   services.avahi = {
     enable = true;

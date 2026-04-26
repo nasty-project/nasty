@@ -44,6 +44,7 @@ pub struct AppState {
     pub alerts: nasty_system::alerts::AlertService,
     pub network: nasty_system::network::NetworkService,
     pub protocols: nasty_system::protocol::ProtocolService,
+    pub firewall: nasty_system::firewall::FirewallService,
     pub updates: nasty_system::update::UpdateService,
     pub tailscale: nasty_system::tailscale::TailscaleService,
     pub metrics_client: reqwest::Client,
@@ -112,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         alerts: nasty_system::alerts::AlertService::new().await,
         network: nasty_system::network::NetworkService::new(),
         protocols: nasty_system::protocol::ProtocolService::new(),
+        firewall: nasty_system::firewall::FirewallService::new(),
         updates: nasty_system::update::UpdateService::new(),
         tailscale: nasty_system::tailscale::TailscaleService::new().await,
         metrics_client: reqwest::Client::new(),
@@ -143,6 +145,18 @@ async fn main() -> anyhow::Result<()> {
         state.iscsi.remap_device_paths(&dev_map).await;
     }
     state.protocols.restore().await;
+
+    // Initialize firewall based on current protocol states
+    {
+        use nasty_system::protocol::Protocol;
+        let mut proto_states = Vec::new();
+        for p in Protocol::ALL {
+            let enabled = state.protocols.is_enabled(*p).await;
+            proto_states.push((*p, enabled));
+        }
+        state.firewall.init(&proto_states).await;
+    }
+
     state.nvmeof.restore().await;
     state.vms.restore().await;
     state.apps.restore().await;

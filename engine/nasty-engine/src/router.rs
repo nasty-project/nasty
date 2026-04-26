@@ -697,18 +697,29 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "service.protocol.list" => ok(req, state.protocols.list().await),
         "service.protocol.enable" => match require_str(req, "name") {
             Ok(name) => match state.protocols.enable(name).await {
-                Ok(v) => ok(req, v),
+                Ok(v) => {
+                    if let Some(proto) = nasty_system::protocol::Protocol::from_name(name) {
+                        state.firewall.open(proto).await;
+                    }
+                    ok(req, v)
+                },
                 Err(e) => err(req, e),
             },
             Err(r) => r,
         },
         "service.protocol.disable" => match require_str(req, "name") {
             Ok(name) => match state.protocols.disable(name).await {
-                Ok(v) => ok(req, v),
+                Ok(v) => {
+                    if let Some(proto) = nasty_system::protocol::Protocol::from_name(name) {
+                        state.firewall.close(proto).await;
+                    }
+                    ok(req, v)
+                },
                 Err(e) => err(req, e),
             },
             Err(r) => r,
         },
+        "system.firewall.status" => ok(req, state.firewall.status().await),
 
         // ── Alerts ───────────────────────────────────────────────
         "telemetry.send" => {

@@ -470,15 +470,74 @@ export interface TuningConfig {
 	vm_dirty_writeback_centisecs: number;
 }
 
-export interface NetworkConfig {
-	dhcp: boolean;
-	interface: string;
-	address: string | null;
-	prefix_length: number | null;
+// ── Networking ─────────────────────────────────────────────
+
+export type IpMethod = 'dhcp' | 'static' | 'slaac' | 'disabled';
+
+export interface IpConfig {
+	method: IpMethod;
+	addresses: string[];
 	gateway: string | null;
-	nameservers: string[];
-	live_addresses: string[];
-	live_gateway: string | null;
+}
+
+export interface InterfaceConfig {
+	name: string;
+	enabled: boolean;
+	ipv4: IpConfig;
+	ipv6: IpConfig;
+	mtu: number | null;
+}
+
+export type BondMode = 'lacp' | 'active_backup' | 'balance_rr' | 'balance_xor';
+
+export interface BondConfig {
+	name: string;
+	members: string[];
+	mode: BondMode;
+	ipv4: IpConfig;
+	ipv6: IpConfig;
+}
+
+export interface VlanConfig {
+	parent: string;
+	vlan_id: number;
+	ipv4: IpConfig;
+	ipv6: IpConfig;
+}
+
+export interface NetworkConfig {
+	interfaces: InterfaceConfig[];
+	dns: string[];
+	bonds: BondConfig[];
+	vlans: VlanConfig[];
+}
+
+export interface LiveInterface {
+	name: string;
+	mac: string;
+	up: boolean;
+	speed_mbps: number | null;
+	carrier: boolean;
+	ipv4_addresses: string[];
+	ipv6_addresses: string[];
+	mtu: number;
+	kind: string;
+}
+
+export interface NetworkState {
+	config: NetworkConfig;
+	interfaces: LiveInterface[];
+}
+
+export interface FirewallRule {
+	service: string;
+	ports: { port: number; transport: 'tcp' | 'udp'; source: string | null }[];
+	active: boolean;
+}
+
+export interface FirewallStatus {
+	active: boolean;
+	rules: FirewallRule[];
 }
 
 export interface AlertRule {

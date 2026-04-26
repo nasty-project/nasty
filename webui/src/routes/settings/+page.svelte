@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
-	import type { Settings, SystemInfo, NetworkConfig, TuningConfig, NutConfig, UpsStatus, NetIfStats } from '$lib/types';
+	import type { Settings, SystemInfo, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NutConfig, UpsStatus, NetIfStats } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Copy, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
@@ -39,7 +39,10 @@
 	let hostnameInput = $state('');
 
 	// Network
-	let network: NetworkConfig | null = $state(null);
+	let networkState: NetworkState | null = $state(null);
+	const network = $derived.by((): NetworkConfig | null => {
+		return networkState?.config ?? null;
+	});
 	let savingNetwork = $state(false);
 	let netDhcp = $state(true);
 	let netAddress = $state('');
@@ -196,11 +199,11 @@
 
 	onMount(async () => {
 		await withToast(async () => {
-			[settings, info, timezones, network] = await Promise.all([
+			[settings, info, timezones, networkState] = await Promise.all([
 				client.call<Settings>('system.settings.get'),
 				client.call<SystemInfo>('system.info'),
 				client.call<string[]>('system.settings.timezones'),
-				client.call<NetworkConfig>('system.network.get'),
+				client.call<NetworkState>('system.network.get'),
 			]);
 			hostnameInput = settings.hostname ?? info.hostname;
 			tlsDomain = settings?.tls_domain ?? '';
@@ -223,12 +226,19 @@
 	});
 
 	function syncNetworkForm() {
-		if (!network) return;
-		netDhcp = network.dhcp;
-		netAddress = network.address ?? '';
-		netPrefix = String(network.prefix_length ?? 24);
-		netGateway = network.gateway ?? '';
-		netNameservers = network.nameservers.join(', ');
+		if (!network || !network.interfaces.length) return;
+		const iface = network.interfaces[0];
+		netDhcp = iface.ipv4.method === 'dhcp';
+		if (iface.ipv4.addresses.length > 0) {
+			const parts = iface.ipv4.addresses[0].split('/');
+			netAddress = parts[0] ?? '';
+			netPrefix = parts[1] ?? '24';
+		} else {
+			netAddress = '';
+			netPrefix = '24';
+		}
+		netGateway = iface.ipv4.gateway ?? '';
+		netNameservers = network.dns.join(', ');
 		netChanged = false;
 	}
 
@@ -328,17 +338,31 @@
 			.split(/[,\s]+/)
 			.map((s) => s.trim())
 			.filter(Boolean);
-		const payload: Partial<NetworkConfig> = { dhcp: netDhcp, nameservers };
-		if (!netDhcp) {
-			payload.address = netAddress.trim() || null;
-			payload.prefix_length = parseInt(netPrefix) || null;
-			payload.gateway = netGateway.trim() || null;
-		}
+
+		// Build new config from current state + form values
+		const ifaceName = network?.interfaces?.[0]?.name || networkState?.interfaces?.[0]?.name || 'eth0';
+		const ipv4Method = netDhcp ? 'dhcp' : 'static';
+		const ipv4Addresses = netDhcp ? [] : [`${netAddress.trim()}/${netPrefix}`];
+		const ipv4Gateway = netDhcp ? null : (netGateway.trim() || null);
+
+		const payload: NetworkConfig = {
+			interfaces: [{
+				name: ifaceName,
+				enabled: true,
+				ipv4: { method: ipv4Method, addresses: ipv4Addresses, gateway: ipv4Gateway },
+				ipv6: network?.interfaces?.[0]?.ipv6 ?? { method: 'slaac', addresses: [], gateway: null },
+				mtu: network?.interfaces?.[0]?.mtu ?? null,
+			}],
+			dns: nameservers,
+			bonds: network?.bonds ?? [],
+			vlans: network?.vlans ?? [],
+		};
+
 		await withToast(
 			() => client.call('system.network.update', payload),
 			'Network configuration applied'
 		);
-		network = await client.call<NetworkConfig>('system.network.get');
+		networkState = await client.call<NetworkState>('system.network.get');
 		syncNetworkForm();
 		savingNetwork = false;
 	}
@@ -800,27 +824,32 @@
 		<!-- Interface list -->
 		<section class="mb-6 rounded-lg border border-border p-5">
 			<h2 class="mb-4 text-base font-semibold">Interfaces</h2>
-			{#if !netIfLoaded}
+			{#if !networkState}
 				<p class="text-sm text-muted-foreground">Loading...</p>
-			{:else if netInterfaces.length === 0}
+			{:else if networkState.interfaces.length === 0}
 				<p class="text-sm text-muted-foreground">No network interfaces detected.</p>
 			{:else}
 				<div class="space-y-2">
-					{#each netInterfaces as iface}
-						<div class="flex items-center gap-4 rounded-lg border border-border px-4 py-3 {network?.interface === iface.name ? 'border-primary/50 bg-primary/5' : ''}">
+					{#each networkState.interfaces as iface}
+						{@const isConfigured = network?.interfaces?.some((i: {name: string}) => i.name === iface.name)}
+						<div class="flex items-center gap-4 rounded-lg border border-border px-4 py-3 {isConfigured ? 'border-primary/50 bg-primary/5' : ''}">
 							<div class="flex-1 min-w-0">
 								<div class="flex items-center gap-2">
 									<span class="font-mono text-sm font-medium">{iface.name}</span>
 									<Badge variant={iface.up ? 'default' : 'secondary'} class="text-[0.6rem]">
 										{iface.up ? 'Up' : 'Down'}
 									</Badge>
-									{#if network?.interface === iface.name}
+									<Badge variant="outline" class="text-[0.6rem]">{iface.kind}</Badge>
+									{#if isConfigured}
 										<Badge variant="outline" class="text-[0.6rem]">Configured</Badge>
 									{/if}
 								</div>
-								{#if iface.addresses.length > 0}
-									<div class="mt-0.5 font-mono text-xs text-muted-foreground">{iface.addresses.join(', ')}</div>
+								{#if iface.ipv4_addresses.length > 0 || iface.ipv6_addresses.length > 0}
+									<div class="mt-0.5 font-mono text-xs text-muted-foreground">
+										{[...iface.ipv4_addresses, ...iface.ipv6_addresses].join(', ')}
+									</div>
 								{/if}
+								<div class="mt-0.5 text-xs text-muted-foreground">{iface.mac} · MTU {iface.mtu}</div>
 							</div>
 							{#if iface.speed_mbps}
 								<span class="text-xs text-muted-foreground">{iface.speed_mbps >= 1000 ? `${iface.speed_mbps / 1000}G` : `${iface.speed_mbps}M`}</span>
@@ -831,24 +860,21 @@
 			{/if}
 		</section>
 
-		<!-- Network configuration (for configured interface) -->
+		<!-- Network configuration (for primary interface) -->
 		{#if network}
+			{@const primaryName = network.interfaces?.[0]?.name || networkState?.interfaces?.[0]?.name || '—'}
+			{@const liveIface = networkState?.interfaces?.find(i => i.name === primaryName)}
 			<section class="rounded-lg border border-border p-5">
 				<h2 class="mb-1 text-base font-semibold">Configuration</h2>
 				<p class="mb-4 text-xs text-muted-foreground">
-					Settings for <span class="font-mono">{network.interface || 'primary interface'}</span>
+					Settings for <span class="font-mono">{primaryName}</span>
 				</p>
 
-				{#if network.live_addresses.length > 0}
+				{#if liveIface && (liveIface.ipv4_addresses.length > 0 || liveIface.ipv6_addresses.length > 0)}
 					<div class="mb-4 flex items-start justify-between gap-4">
 						<span class="shrink-0 text-sm text-muted-foreground">Active Address</span>
-						<div class="text-right">
-							<div class="text-sm font-medium font-mono">
-								{network.live_addresses.join(', ')}
-								{#if network.live_gateway}
-									<span class="ml-1 text-muted-foreground">via {network.live_gateway}</span>
-								{/if}
-							</div>
+						<div class="text-right font-mono text-sm font-medium">
+							{[...liveIface.ipv4_addresses, ...liveIface.ipv6_addresses].join(', ')}
 						</div>
 					</div>
 				{/if}
@@ -873,7 +899,7 @@
 						<input
 							id="net-address"
 							type="text"
-							value={netDhcp ? (network.live_addresses[0]?.split('/')[0] ?? '') : netAddress}
+							value={netDhcp ? (liveIface?.ipv4_addresses[0]?.split('/')[0] ?? '') : netAddress}
 							oninput={(e) => { if (!netDhcp) { netAddress = (e.target as HTMLInputElement).value; netChanged = true; } }}
 							disabled={netDhcp}
 							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
@@ -887,7 +913,7 @@
 							type="number"
 							min="1"
 							max="32"
-							value={netDhcp ? (network.live_addresses[0]?.split('/')[1] ?? '') : netPrefix}
+							value={netDhcp ? (liveIface?.ipv4_addresses[0]?.split('/')[1] ?? '') : netPrefix}
 							oninput={(e) => { if (!netDhcp) { netPrefix = (e.target as HTMLInputElement).value; netChanged = true; } }}
 							disabled={netDhcp}
 							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
@@ -899,7 +925,7 @@
 						<input
 							id="net-gateway"
 							type="text"
-							value={netDhcp ? (network.live_gateway ?? '') : netGateway}
+							value={netDhcp ? '' : netGateway}
 							oninput={(e) => { if (!netDhcp) { netGateway = (e.target as HTMLInputElement).value; netChanged = true; } }}
 							disabled={netDhcp}
 							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
