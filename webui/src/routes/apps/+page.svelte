@@ -114,6 +114,14 @@
 	let showPasteDocker = $state(false);
 	let pasteDockerCmd = $state('');
 
+	/** Expand common shell variables in paths to NASty-appropriate defaults. */
+	function expandShellVars(s: string): string {
+		return s
+			.replace(/\$HOME|\$\{HOME\}|~/g, '/root')
+			.replace(/\$PWD|\$\{PWD\}/g, '/var/lib/nasty/apps')
+			.replace(/\$[A-Z_]+/g, ''); // strip any remaining unresolved vars
+	}
+
 	function parseDockerRun(cmd: string) {
 		// Normalize: join backslash-continuations, trim
 		const line = cmd.replace(/\\\s*\n/g, ' ').replace(/^\s*(sudo\s+)?docker\s+run\s*/, '').trim();
@@ -159,7 +167,7 @@
 			} else if ((t === '-v' || t === '--volume') && i + 1 < tokens.length) {
 				const parts = tokens[++i].split(':');
 				if (parts.length >= 2) {
-					volumes.push({ name: `vol-${volumes.length}`, host_path: parts[0], mount_path: parts[1] });
+					volumes.push({ name: `vol-${volumes.length}`, host_path: expandShellVars(parts[0]), mount_path: parts[1] });
 				}
 			} else if (t === '-d' || t === '--detach' || t === '--restart' || t === '--restart=always' || t.startsWith('--restart=')) {
 				// skip flags we handle implicitly
