@@ -1019,31 +1019,35 @@
 										:{app.ports[0].host_port}
 									</a>
 								{/if}
-								{#if app.status === 'running'}
-									<Button variant="outline" size="xs" onclick={() => stopApp(app.name)}>Stop</Button>
-								{:else}
-									<Button variant="outline" size="xs" onclick={() => startApp(app.name)}>Start</Button>
-								{/if}
-								<Button variant="outline" size="xs" onclick={() => showLogs(app.name, app.kind)}>Logs</Button>
-								<div class="relative">
-									<Button variant="outline" size="xs" onclick={() => expanded[`menu-${app.name}`] = !expanded[`menu-${app.name}`]}>···</Button>
-									{#if expanded[`menu-${app.name}`]}
-										<div class="absolute right-0 top-full z-10 mt-1 min-w-[120px] rounded-md border border-border bg-popover py-1 shadow-md">
-											{#if app.status === 'running'}
-												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; restartApp(app.name); }}>Restart</button>
-												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; openShell(app.name); }}>Shell</button>
-											{/if}
-											<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; pullApp(app.name); }}>Pull image</button>
-											<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; inspectApp(app.name); }}>Inspect</button>
-											{#if app.kind === 'simple'}
-												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; editApp(app.name); }}>Edit</button>
-											{:else}
-												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; editCompose(app.name); }}>Edit</button>
-											{/if}
-											<button class="w-full px-3 py-1.5 text-left text-xs text-destructive hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; removeApp(app.name); }}>Remove</button>
-										</div>
+								{#if status?.running}
+									{#if app.status === 'running'}
+										<Button variant="outline" size="xs" onclick={() => stopApp(app.name)}>Stop</Button>
+									{:else}
+										<Button variant="outline" size="xs" onclick={() => startApp(app.name)}>Start</Button>
 									{/if}
-								</div>
+									<Button variant="outline" size="xs" onclick={() => showLogs(app.name, app.kind)}>Logs</Button>
+									<div class="relative">
+										<Button variant="outline" size="xs" onclick={() => expanded[`menu-${app.name}`] = !expanded[`menu-${app.name}`]}>···</Button>
+										{#if expanded[`menu-${app.name}`]}
+											<div class="absolute right-0 top-full z-10 mt-1 min-w-[120px] rounded-md border border-border bg-popover py-1 shadow-md">
+												{#if app.status === 'running'}
+													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; restartApp(app.name); }}>Restart</button>
+													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; openShell(app.name); }}>Shell</button>
+												{/if}
+												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; pullApp(app.name); }}>Pull image</button>
+												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; inspectApp(app.name); }}>Inspect</button>
+												{#if app.kind === 'simple'}
+													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; editApp(app.name); }}>Edit</button>
+												{:else}
+													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; editCompose(app.name); }}>Edit</button>
+												{/if}
+												<button class="w-full px-3 py-1.5 text-left text-xs text-destructive hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; removeApp(app.name); }}>Remove</button>
+											</div>
+										{/if}
+									</div>
+								{:else}
+									<span class="text-xs text-muted-foreground">Docker stopped</span>
+								{/if}
 							</div>
 						</td>
 					</tr>
