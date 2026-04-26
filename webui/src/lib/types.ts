@@ -531,7 +531,7 @@ export interface NetworkState {
 
 export interface FirewallRule {
 	service: string;
-	ports: { port: number; transport: 'tcp' | 'udp'; source: string | null }[];
+	ports: { port: number; transport: 'tcp' | 'udp'; source: string | null; iface: string | null }[];
 	active: boolean;
 }
 
@@ -539,6 +539,7 @@ export interface FirewallStatus {
 	active: boolean;
 	rules: FirewallRule[];
 	restrictions: Record<string, string[]>;
+	interface_restrictions: Record<string, string[]>;
 }
 
 export interface AlertRule {

@@ -49,6 +49,7 @@
 	let firewallStatus: FirewallStatus | null = $state(null);
 	let fwEditService: string | null = $state(null);
 	let fwEditSources = $state('');
+	let fwEditIfaces: string[] = $state([]);
 
 	// ── General tab state ───────────────────────────────────
 	let settings: Settings | null = $state(null);
@@ -522,17 +523,19 @@
 	function startEditRestriction(service: string) {
 		fwEditService = service;
 		fwEditSources = (firewallStatus?.restrictions[service] ?? []).join(', ');
+		fwEditIfaces = [...(firewallStatus?.interface_restrictions[service] ?? [])];
 	}
 
 	async function saveRestriction() {
 		if (!fwEditService) return;
 		const sources = fwEditSources.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
 		await withToast(
-			() => client.call('system.firewall.restrict', { service: fwEditService, sources }),
-			sources.length > 0 ? `Access restricted for ${fwEditService}` : `Restriction removed for ${fwEditService}`
+			() => client.call('system.firewall.restrict', { service: fwEditService, sources, interfaces: fwEditIfaces }),
+			'Firewall restriction updated'
 		);
 		fwEditService = null;
 		fwEditSources = '';
+		fwEditIfaces = [];
 		await loadFirewall();
 	}
 
@@ -1169,20 +1172,48 @@
 										{firewallStatus.restrictions[rule.service].length} source{firewallStatus.restrictions[rule.service].length !== 1 ? 's' : ''}
 									</span>
 								{/if}
+								{#if firewallStatus.interface_restrictions[rule.service]?.length}
+									<span class="text-xs text-blue-400">
+										{firewallStatus.interface_restrictions[rule.service].join(', ')}
+									</span>
+								{/if}
 								<span class="ml-auto text-xs {rule.active ? 'text-green-400' : 'text-muted-foreground'}">{rule.active ? 'Open' : 'Closed'}</span>
 							</button>
 
 							{#if fwEditService === rule.service}
-								<div class="mx-3 mb-2 rounded-lg border border-border bg-secondary/20 p-3 space-y-2">
+								<div class="mx-3 mb-2 rounded-lg border border-border bg-secondary/20 p-3 space-y-3">
 									<div class="text-xs font-medium">Restrict access to {rule.service}</div>
-									<p class="text-xs text-muted-foreground">
-										Enter allowed source IPs or CIDRs, comma-separated. Leave empty to allow all.
-									</p>
-									<input
-										bind:value={fwEditSources}
-										placeholder="e.g. 192.168.1.0/24, 10.0.0.5"
-										class="w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
-									/>
+
+									<div>
+										<div class="text-xs text-muted-foreground mb-1">Allowed source IPs (comma-separated, empty = all)</div>
+										<input
+											bind:value={fwEditSources}
+											placeholder="e.g. 192.168.1.0/24, 10.0.0.5"
+											class="w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
+										/>
+									</div>
+
+									<div>
+										<div class="text-xs text-muted-foreground mb-1">Allowed interfaces (none selected = all)</div>
+										{#if networkState}
+											<div class="flex flex-wrap gap-2">
+												{#each networkState.interfaces as iface}
+													<label class="flex items-center gap-1.5 text-xs">
+														<input type="checkbox"
+															checked={fwEditIfaces.includes(iface.name)}
+															onchange={() => {
+																fwEditIfaces = fwEditIfaces.includes(iface.name)
+																	? fwEditIfaces.filter(i => i !== iface.name)
+																	: [...fwEditIfaces, iface.name];
+															}}
+														/>
+														<span class="font-mono">{iface.name}</span>
+													</label>
+												{/each}
+											</div>
+										{/if}
+									</div>
+
 									<div class="flex gap-2">
 										<Button size="xs" onclick={saveRestriction}>Save</Button>
 										<Button size="xs" variant="secondary" onclick={() => fwEditService = null}>Cancel</Button>

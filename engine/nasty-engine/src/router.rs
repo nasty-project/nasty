@@ -729,7 +729,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 .and_then(|p| p.get("sources"))
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
-            match state.firewall.set_restriction(&service, sources).await {
+            let interfaces: Vec<String> = req.params.as_ref()
+                .and_then(|p| p.get("interfaces"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            match state.firewall.set_restriction(&service, sources, interfaces).await {
                 Ok(()) => ok(req, "ok"),
                 Err(e) => err(req, e),
             }

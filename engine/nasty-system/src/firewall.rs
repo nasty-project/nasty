@@ -12,12 +12,17 @@ use tracing::{error, info, warn};
 
 const RESTRICTIONS_PATH: &str = "/var/lib/nasty/firewall-restrictions.json";
 
-/// Persisted per-service source IP restrictions.
+/// Persisted per-service access restrictions.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FirewallRestrictions {
     /// Map of service name → list of allowed source CIDRs.
     /// If empty or absent, all sources are allowed.
+    #[serde(default)]
     pub services: HashMap<String, Vec<String>>,
+    /// Map of service name → list of allowed interfaces.
+    /// If empty or absent, all interfaces are accepted.
+    #[serde(default)]
+    pub interfaces: HashMap<String, Vec<String>>,
 }
 
 impl FirewallRestrictions {
@@ -52,6 +57,9 @@ pub struct PortSpec {
     /// Optional source IP/CIDR restriction (e.g. "192.168.1.0/24").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Optional interface restriction (e.g. "tailscale0").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -73,16 +81,18 @@ pub struct FirewallStatus {
     pub rules: Vec<FirewallRule>,
     /// Per-service source IP restrictions.
     pub restrictions: HashMap<String, Vec<String>>,
+    /// Per-service interface restrictions.
+    pub interface_restrictions: HashMap<String, Vec<String>>,
 }
 
 // ── Port mapping ───────────────────────────────────────────────
 
 fn tcp(port: u16) -> PortSpec {
-    PortSpec { port, transport: Transport::Tcp, source: None }
+    PortSpec { port, transport: Transport::Tcp, source: None, iface: None }
 }
 
 fn udp(port: u16) -> PortSpec {
-    PortSpec { port, transport: Transport::Udp, source: None }
+    PortSpec { port, transport: Transport::Udp, source: None, iface: None }
 }
 
 /// Return the ports that should be open for a given protocol.
@@ -127,9 +137,10 @@ impl FirewallService {
 
         // WebUI is always open
         let webui_sources = restrictions.services.get("webui").cloned().unwrap_or_default();
+        let webui_ifaces = restrictions.interfaces.get("webui").cloned().unwrap_or_default();
         state.rules.push(FirewallRule {
             service: "webui".to_string(),
-            ports: apply_sources(webui_ports(), &webui_sources),
+            ports: apply_restrictions(webui_ports(), &webui_sources, &webui_ifaces),
             active: true,
         });
 
@@ -140,7 +151,8 @@ impl FirewallService {
                 continue;
             }
             let sources = restrictions.services.get(proto.name()).cloned().unwrap_or_default();
-            ports = apply_sources(ports, &sources);
+            let ifaces = restrictions.interfaces.get(proto.name()).cloned().unwrap_or_default();
+            ports = apply_restrictions(ports, &sources, &ifaces);
             state.rules.push(FirewallRule {
                 service: proto.name().to_string(),
                 ports,
@@ -207,26 +219,29 @@ impl FirewallService {
             active: true,
             rules: state.rules.clone(),
             restrictions: restrictions.services.clone(),
+            interface_restrictions: restrictions.interfaces.clone(),
         }
     }
 
-    /// Set source IP restrictions for a service and rebuild firewall.
-    pub async fn set_restriction(&self, service: &str, sources: Vec<String>) -> Result<(), String> {
+    /// Set source IP and/or interface restrictions for a service and rebuild firewall.
+    pub async fn set_restriction(
+        &self, service: &str,
+        sources: Vec<String>,
+        ifaces: Vec<String>,
+    ) -> Result<(), String> {
         // Update persisted restrictions
         {
             let mut restrictions = self.restrictions.lock().await;
-            if sources.is_empty() {
-                restrictions.services.remove(service);
-            } else {
-                restrictions.services.insert(service.to_string(), sources.clone());
-            }
+            if sources.is_empty() { restrictions.services.remove(service); }
+            else { restrictions.services.insert(service.to_string(), sources.clone()); }
+            if ifaces.is_empty() { restrictions.interfaces.remove(service); }
+            else { restrictions.interfaces.insert(service.to_string(), ifaces.clone()); }
             restrictions.save().await?;
         }
 
         // Update rules in state
         let mut state = self.state.lock().await;
         if let Some(rule) = state.rules.iter_mut().find(|r| r.service == service) {
-            // Rebuild ports with new source restrictions
             let base_ports = if service == "webui" {
                 webui_ports()
             } else if let Some(proto) = Protocol::from_name(service) {
@@ -234,7 +249,7 @@ impl FirewallService {
             } else {
                 return Err(format!("unknown service: {service}"));
             };
-            rule.ports = apply_sources(base_ports, &sources);
+            rule.ports = apply_restrictions(base_ports, &sources, &ifaces);
         }
 
         apply_nftables(&state).await?;
@@ -248,21 +263,44 @@ impl FirewallService {
     }
 }
 
-/// Apply source restrictions to a set of ports.
-/// If sources is empty, ports have no restriction (open to all).
-/// If sources is non-empty, each port is duplicated for each source.
-fn apply_sources(ports: Vec<PortSpec>, sources: &[String]) -> Vec<PortSpec> {
-    if sources.is_empty() {
+/// Apply source and interface restrictions to a set of ports.
+fn apply_restrictions(ports: Vec<PortSpec>, sources: &[String], ifaces: &[String]) -> Vec<PortSpec> {
+    if sources.is_empty() && ifaces.is_empty() {
         return ports;
     }
+
     let mut result = Vec::new();
     for port in &ports {
-        for src in sources {
-            result.push(PortSpec {
-                port: port.port,
-                transport: port.transport,
-                source: Some(src.clone()),
-            });
+        if !sources.is_empty() && !ifaces.is_empty() {
+            // Both: create a rule for each source × interface combination
+            for src in sources {
+                for iface in ifaces {
+                    result.push(PortSpec {
+                        port: port.port,
+                        transport: port.transport,
+                        source: Some(src.clone()),
+                        iface: Some(iface.clone()),
+                    });
+                }
+            }
+        } else if !sources.is_empty() {
+            for src in sources {
+                result.push(PortSpec {
+                    port: port.port,
+                    transport: port.transport,
+                    source: Some(src.clone()),
+                    iface: None,
+                });
+            }
+        } else {
+            for iface in ifaces {
+                result.push(PortSpec {
+                    port: port.port,
+                    transport: port.transport,
+                    source: None,
+                    iface: Some(iface.clone()),
+                });
+            }
         }
     }
     result
@@ -294,17 +332,18 @@ async fn apply_nftables(state: &FirewallState) -> Result<(), String> {
                 Transport::Tcp => "tcp",
                 Transport::Udp => "udp",
             };
-            if let Some(ref src) = port.source {
-                rules.push_str(&format!(
-                    "        ip saddr {src} {proto} dport {} accept # {}\n",
-                    port.port, rule.service
-                ));
-            } else {
-                rules.push_str(&format!(
-                    "        {proto} dport {} accept # {}\n",
-                    port.port, rule.service
-                ));
+            let mut conditions = Vec::new();
+            if let Some(ref iface) = port.iface {
+                conditions.push(format!("iifname \"{iface}\""));
             }
+            if let Some(ref src) = port.source {
+                conditions.push(format!("ip saddr {src}"));
+            }
+            conditions.push(format!("{proto} dport {}", port.port));
+            rules.push_str(&format!(
+                "        {} accept # {}\n",
+                conditions.join(" "), rule.service
+            ));
         }
     }
 
