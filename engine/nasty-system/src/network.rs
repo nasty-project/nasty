@@ -297,16 +297,22 @@ async fn enumerate_interfaces() -> Vec<LiveInterface> {
         };
 
         let mac = read_file("address");
-        let up = read_file("operstate") == "up";
+        let operstate = read_file("operstate");
+        // TUN/TAP and some virtual interfaces report "unknown" when they're working
+        let up = operstate == "up" || operstate == "unknown";
         let carrier = read_file("carrier") == "1";
         let mtu: u32 = read_file("mtu").parse().unwrap_or(1500);
         let speed: Option<u32> = read_file("speed").parse().ok().filter(|&s: &u32| s > 0 && s < 100_000);
 
+        // Detect interface type from sysfs
+        let tun_flags = read_file("tun_flags");
+        let dev_type = read_file("type");
+
         let kind = if path.join("bonding").is_dir() {
             "bond"
-        } else if std::fs::read_to_string(path.join("type")).unwrap_or_default().trim() == "772" {
-            "virtual"
-        } else if name.contains('.') {
+        } else if !tun_flags.is_empty() || name.starts_with("tun") || name.starts_with("tap") || name.starts_with("tailscale") || name.starts_with("wg") {
+            "tunnel"
+        } else if dev_type == "772" {
             "vlan"
         } else if path.join("bridge").is_dir() {
             "bridge"
