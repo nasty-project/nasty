@@ -179,6 +179,10 @@
 
 	function switchTab(tab: Tab) {
 		activeTab = tab;
+		// Sync wizard protocol with active tab
+		if (shareWizardStep > 0) {
+			shareProtocol = tab;
+		}
 		window.location.hash = tab;
 	}
 
