@@ -982,6 +982,15 @@
 			{:else}
 				<div class="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
 					<div class="text-sm font-medium">Add {notifAddType.toUpperCase()} channel</div>
+					{#if notifAddType === 'smtp'}
+						<p class="text-xs text-muted-foreground">Send alerts via email. Use your email provider's SMTP settings (e.g. Gmail: smtp.gmail.com, port 587, TLS on). For Gmail, use an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener" class="text-primary hover:underline">App Password</a>.</p>
+					{:else if notifAddType === 'telegram'}
+						<p class="text-xs text-muted-foreground">Send alerts to a Telegram chat. Create a bot via <a href="https://t.me/BotFather" target="_blank" rel="noopener" class="text-primary hover:underline">@BotFather</a>, copy the token. Then send a message to the bot and get your Chat ID from <code class="font-mono">https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code>.</p>
+					{:else if notifAddType === 'webhook'}
+						<p class="text-xs text-muted-foreground">Send a JSON POST to any URL when alerts fire. The payload includes <code class="font-mono">subject</code>, <code class="font-mono">body</code>, <code class="font-mono">source</code>, and <code class="font-mono">timestamp</code> fields. Works with Discord webhooks, Slack incoming webhooks, Home Assistant, or any custom endpoint.</p>
+					{:else if notifAddType === 'ntfy'}
+						<p class="text-xs text-muted-foreground">Push notifications via <a href="https://ntfy.sh" target="_blank" rel="noopener" class="text-primary hover:underline">ntfy</a> — install the ntfy app on your phone, subscribe to your topic, and alerts arrive as push notifications. The free ntfy.sh server works without a token. Self-hosted servers may require one.</p>
+					{/if}
 					<div>
 						<label for="nf-name" class="text-xs text-muted-foreground">Name</label>
 						<input id="nf-name" bind:value={nfName} class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
@@ -1029,7 +1038,8 @@
 					{:else if notifAddType === 'webhook'}
 						<div>
 							<label for="nf-url" class="text-xs text-muted-foreground">URL</label>
-							<input id="nf-url" bind:value={nfUrl} placeholder="https://hooks.example.com/nasty" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<input id="nf-url" bind:value={nfUrl} placeholder="https://discord.com/api/webhooks/..." class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<p class="mt-1 text-xs text-muted-foreground">Example: Discord webhook URL, Slack incoming webhook, or any endpoint that accepts JSON POST.</p>
 						</div>
 					{:else if notifAddType === 'ntfy'}
 						<div>
