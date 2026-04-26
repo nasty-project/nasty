@@ -111,6 +111,78 @@
 	let inspectName: string | null = $state(null);
 	let installMode: 'simple' | 'compose' = $state('simple');
 	let showRuntimeDetails = $state(false);
+	let showPasteDocker = $state(false);
+	let pasteDockerCmd = $state('');
+
+	function parseDockerRun(cmd: string) {
+		// Normalize: join backslash-continuations, trim
+		const line = cmd.replace(/\\\s*\n/g, ' ').replace(/^\s*(sudo\s+)?docker\s+run\s*/, '').trim();
+		const tokens: string[] = [];
+		let current = '';
+		let inQuote = '';
+		for (const ch of line) {
+			if (inQuote) {
+				if (ch === inQuote) { inQuote = ''; } else { current += ch; }
+			} else if (ch === "'" || ch === '"') {
+				inQuote = ch;
+			} else if (ch === ' ' || ch === '\t') {
+				if (current) { tokens.push(current); current = ''; }
+			} else {
+				current += ch;
+			}
+		}
+		if (current) tokens.push(current);
+
+		let name = '';
+		let image = '';
+		const ports: typeof newPorts = [];
+		const envs: typeof newEnvs = [];
+		const volumes: typeof newVolumes = [];
+
+		let i = 0;
+		while (i < tokens.length) {
+			const t = tokens[i];
+			if (t === '--name' && i + 1 < tokens.length) {
+				name = tokens[++i];
+			} else if ((t === '-p' || t === '--publish') && i + 1 < tokens.length) {
+				const parts = tokens[++i].split(':');
+				const host = parts.length >= 2 ? parts[0] : '';
+				const container = parts.length >= 2 ? parts[1] : parts[0];
+				const proto = parts.length >= 3 ? parts[2]?.toUpperCase() : 'TCP';
+				ports.push({ name: `port-${ports.length}`, container_port: parseInt(container) || 80, host_port: host, protocol: proto || 'TCP' });
+			} else if ((t === '-e' || t === '--env') && i + 1 < tokens.length) {
+				const val = tokens[++i];
+				const eq = val.indexOf('=');
+				if (eq > 0) {
+					envs.push({ name: val.slice(0, eq), value: val.slice(eq + 1) });
+				}
+			} else if ((t === '-v' || t === '--volume') && i + 1 < tokens.length) {
+				const parts = tokens[++i].split(':');
+				if (parts.length >= 2) {
+					volumes.push({ name: `vol-${volumes.length}`, host_path: parts[0], mount_path: parts[1] });
+				}
+			} else if (t === '-d' || t === '--detach' || t === '--restart' || t === '--restart=always' || t.startsWith('--restart=')) {
+				// skip flags we handle implicitly
+			} else if (t.startsWith('-')) {
+				// Unknown flag — skip its value if it looks like a flag with arg
+				if (!t.includes('=') && i + 1 < tokens.length && !tokens[i + 1].startsWith('-')) { i++; }
+			} else {
+				// Positional: image name (last non-flag token)
+				image = t;
+			}
+			i++;
+		}
+
+		// Apply to form
+		if (name) newName = name.toLowerCase();
+		if (image) newImage = image;
+		if (ports.length > 0) newPorts = ports;
+		if (envs.length > 0) newEnvs = envs;
+		if (volumes.length > 0) newVolumes = volumes;
+
+		showPasteDocker = false;
+		pasteDockerCmd = '';
+	}
 
 	// Setup wizard state
 	let filesystems: Filesystem[] = $state([]);
@@ -715,6 +787,32 @@
 				{/if}
 
 				{#if installMode === 'simple' && (showInstall || editingApp)}
+
+				<!-- Paste docker run -->
+				{#if !editingApp}
+					{#if showPasteDocker}
+						<div class="mb-4 rounded-lg border border-border bg-secondary/20 p-3 space-y-2">
+							<div class="text-xs font-medium">Paste a <code class="font-mono">docker run</code> command</div>
+							<p class="text-xs text-muted-foreground">Paste a command from documentation or tutorials — NASty will fill in the form automatically.</p>
+							<textarea
+								bind:value={pasteDockerCmd}
+								placeholder={"docker run -d --name signal-api -p 8080:8080 \\\n  -v /data:/home/.local/share/signal-cli \\\n  -e 'MODE=native' bbernhard/signal-cli-rest-api"}
+								rows="4"
+								class="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
+							></textarea>
+							<div class="flex gap-2">
+								<Button size="xs" onclick={() => parseDockerRun(pasteDockerCmd)} disabled={!pasteDockerCmd.trim()}>Apply</Button>
+								<Button size="xs" variant="secondary" onclick={() => { showPasteDocker = false; pasteDockerCmd = ''; }}>Cancel</Button>
+							</div>
+						</div>
+					{:else}
+						<button
+							onclick={() => showPasteDocker = true}
+							class="mb-4 text-xs text-primary hover:underline"
+						>Paste a docker run command</button>
+					{/if}
+				{/if}
+
 				<div class="mb-4">
 					<Label for="app-name">App Name</Label>
 					<Input id="app-name" value={newName} oninput={(e) => { newName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="whoami" class="mt-1" disabled={!!editingApp} />
