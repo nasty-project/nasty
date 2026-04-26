@@ -310,15 +310,23 @@ in
           "  networking.nameservers = [''${NS_LIST} ];" \
           '}' \
           > /mnt/etc/nixos/networking.nix
-        # Also write networking.json so WebUI shows the configured values
+        # Write networking.json in new multi-interface format
         printf '%s\n' \
           '{' \
-          '  "dhcp": false,' \
-          "  \"interface\": \"''${NET_IFACE}\"," \
-          "  \"address\": \"''${NET_IP}\"," \
-          "  \"prefix_length\": ''${NET_PREFIX}," \
-          "  \"gateway\": \"''${NET_GW}\"," \
-          "  \"nameservers\": [$(echo "$NET_DNS" | sed 's/ /, /g; s/[^ ,][^ ,]*/\"&\"/g')]" \
+          '  "interfaces": [{' \
+          "    \"name\": \"''${NET_IFACE}\"," \
+          '    "enabled": true,' \
+          '    "ipv4": {' \
+          '      "method": "static",' \
+          "      \"addresses\": [\"''${NET_IP}/''${NET_PREFIX}\"]," \
+          "      \"gateway\": \"''${NET_GW}\"" \
+          '    },' \
+          '    "ipv6": { "method": "slaac", "addresses": [], "gateway": null },' \
+          '    "mtu": null' \
+          '  }],' \
+          "  \"dns\": [$(echo "$NET_DNS" | sed 's/ /, /g; s/[^ ,][^ ,]*/\"&\"/g')]," \
+          '  "bonds": [],' \
+          '  "vlans": []' \
           '}' \
           > /mnt/var/lib/nasty/networking.json
       else
@@ -329,6 +337,10 @@ in
           '  networking.useDHCP = true;' \
           '}' \
           > /mnt/etc/nixos/networking.nix
+        # Write default DHCP networking.json
+        printf '%s\n' \
+          '{ "interfaces": [], "dns": [], "bonds": [], "vlans": [] }' \
+          > /mnt/var/lib/nasty/networking.json
       fi
 
       echo "==> Recording installed NASty version..."
