@@ -720,6 +720,20 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(r) => r,
         },
         "system.firewall.status" => ok(req, state.firewall.status().await),
+        "system.firewall.restrict" => {
+            let service = match require_str(req, "service") {
+                Ok(s) => s.to_string(),
+                Err(r) => return r,
+            };
+            let sources: Vec<String> = req.params.as_ref()
+                .and_then(|p| p.get("sources"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            match state.firewall.set_restriction(&service, sources).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            }
+        },
 
         // ── Alerts ───────────────────────────────────────────────
         "telemetry.send" => {

@@ -538,6 +538,7 @@ export interface FirewallRule {
 export interface FirewallStatus {
 	active: boolean;
 	rules: FirewallRule[];
+	restrictions: Record<string, string[]>;
 }
 
 export interface AlertRule {

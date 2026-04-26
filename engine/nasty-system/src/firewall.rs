@@ -10,6 +10,32 @@ use std::collections::HashMap;
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
+const RESTRICTIONS_PATH: &str = "/var/lib/nasty/firewall-restrictions.json";
+
+/// Persisted per-service source IP restrictions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FirewallRestrictions {
+    /// Map of service name → list of allowed source CIDRs.
+    /// If empty or absent, all sources are allowed.
+    pub services: HashMap<String, Vec<String>>,
+}
+
+impl FirewallRestrictions {
+    pub fn load() -> Self {
+        std::fs::read_to_string(RESTRICTIONS_PATH)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub async fn save(&self) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("serialize: {e}"))?;
+        tokio::fs::write(RESTRICTIONS_PATH, json).await
+            .map_err(|e| format!("write {RESTRICTIONS_PATH}: {e}"))
+    }
+}
+
 // ── Types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -45,6 +71,8 @@ pub struct FirewallState {
 pub struct FirewallStatus {
     pub active: bool,
     pub rules: Vec<FirewallRule>,
+    /// Per-service source IP restrictions.
+    pub restrictions: HashMap<String, Vec<String>>,
 }
 
 // ── Port mapping ───────────────────────────────────────────────
@@ -80,12 +108,14 @@ pub fn webui_ports() -> Vec<PortSpec> {
 
 pub struct FirewallService {
     state: tokio::sync::Mutex<FirewallState>,
+    restrictions: tokio::sync::Mutex<FirewallRestrictions>,
 }
 
 impl FirewallService {
     pub fn new() -> Self {
         Self {
             state: tokio::sync::Mutex::new(FirewallState::default()),
+            restrictions: tokio::sync::Mutex::new(FirewallRestrictions::load()),
         }
     }
 
@@ -93,20 +123,24 @@ impl FirewallService {
     /// Called at engine startup after protocol restore.
     pub async fn init(&self, enabled_protocols: &[(Protocol, bool)]) {
         let mut state = self.state.lock().await;
+        let restrictions = self.restrictions.lock().await;
 
         // WebUI is always open
+        let webui_sources = restrictions.services.get("webui").cloned().unwrap_or_default();
         state.rules.push(FirewallRule {
             service: "webui".to_string(),
-            ports: webui_ports(),
+            ports: apply_sources(webui_ports(), &webui_sources),
             active: true,
         });
 
         // Add rules for each protocol
         for (proto, enabled) in enabled_protocols {
-            let ports = ports_for_protocol(*proto);
+            let mut ports = ports_for_protocol(*proto);
             if ports.is_empty() {
                 continue;
             }
+            let sources = restrictions.services.get(proto.name()).cloned().unwrap_or_default();
+            ports = apply_sources(ports, &sources);
             state.rules.push(FirewallRule {
                 service: proto.name().to_string(),
                 ports,
@@ -165,14 +199,73 @@ impl FirewallService {
         }
     }
 
-    /// Get current firewall status.
+    /// Get current firewall status including restrictions.
     pub async fn status(&self) -> FirewallStatus {
         let state = self.state.lock().await;
+        let restrictions = self.restrictions.lock().await;
         FirewallStatus {
             active: true,
             rules: state.rules.clone(),
+            restrictions: restrictions.services.clone(),
         }
     }
+
+    /// Set source IP restrictions for a service and rebuild firewall.
+    pub async fn set_restriction(&self, service: &str, sources: Vec<String>) -> Result<(), String> {
+        // Update persisted restrictions
+        {
+            let mut restrictions = self.restrictions.lock().await;
+            if sources.is_empty() {
+                restrictions.services.remove(service);
+            } else {
+                restrictions.services.insert(service.to_string(), sources.clone());
+            }
+            restrictions.save().await?;
+        }
+
+        // Update rules in state
+        let mut state = self.state.lock().await;
+        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == service) {
+            // Rebuild ports with new source restrictions
+            let base_ports = if service == "webui" {
+                webui_ports()
+            } else if let Some(proto) = Protocol::from_name(service) {
+                ports_for_protocol(proto)
+            } else {
+                return Err(format!("unknown service: {service}"));
+            };
+            rule.ports = apply_sources(base_ports, &sources);
+        }
+
+        apply_nftables(&state).await?;
+        info!("Firewall: updated restrictions for {service}");
+        Ok(())
+    }
+
+    /// Get restrictions for a specific service.
+    pub async fn get_restrictions(&self) -> HashMap<String, Vec<String>> {
+        self.restrictions.lock().await.services.clone()
+    }
+}
+
+/// Apply source restrictions to a set of ports.
+/// If sources is empty, ports have no restriction (open to all).
+/// If sources is non-empty, each port is duplicated for each source.
+fn apply_sources(ports: Vec<PortSpec>, sources: &[String]) -> Vec<PortSpec> {
+    if sources.is_empty() {
+        return ports;
+    }
+    let mut result = Vec::new();
+    for port in &ports {
+        for src in sources {
+            result.push(PortSpec {
+                port: port.port,
+                transport: port.transport,
+                source: Some(src.clone()),
+            });
+        }
+    }
+    result
 }
 
 // ── nftables application ───────────────────────────────────────

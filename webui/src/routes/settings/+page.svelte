@@ -44,7 +44,10 @@
 	let vlanParent = $state('');
 	let vlanId = $state(100);
 	// Firewall
-	let firewallStatus: { active: boolean; rules: { service: string; ports: { port: number; transport: string }[]; active: boolean }[] } | null = $state(null);
+	import type { FirewallStatus } from '$lib/types';
+	let firewallStatus: FirewallStatus | null = $state(null);
+	let fwEditService: string | null = $state(null);
+	let fwEditSources = $state('');
 
 	// ── General tab state ───────────────────────────────────
 	let settings: Settings | null = $state(null);
@@ -512,7 +515,24 @@
 	}
 
 	async function loadFirewall() {
-		try { firewallStatus = await client.call('system.firewall.status'); } catch { /* ignore */ }
+		try { firewallStatus = await client.call<FirewallStatus>('system.firewall.status'); } catch { /* ignore */ }
+	}
+
+	function startEditRestriction(service: string) {
+		fwEditService = service;
+		fwEditSources = (firewallStatus?.restrictions[service] ?? []).join(', ');
+	}
+
+	async function saveRestriction() {
+		if (!fwEditService) return;
+		const sources = fwEditSources.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+		await withToast(
+			() => client.call('system.firewall.restrict', { service: fwEditService, sources }),
+			sources.length > 0 ? `Access restricted for ${fwEditService}` : `Restriction removed for ${fwEditService}`
+		);
+		fwEditService = null;
+		fwEditSources = '';
+		await loadFirewall();
 	}
 
 	async function loadNotifications() {
@@ -1128,17 +1148,49 @@
 			{:else}
 				<div class="space-y-1">
 					{#each firewallStatus.rules as rule}
-						<div class="flex items-center gap-3 rounded px-3 py-2 text-sm {rule.active ? '' : 'opacity-40'}">
-							<span class="h-2 w-2 rounded-full {rule.active ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
-							<span class="font-medium w-20">{rule.service}</span>
-							<span class="font-mono text-xs text-muted-foreground">
-								{rule.ports.map(p => `${p.port}/${p.transport}`).join(', ')}
-							</span>
-							<span class="ml-auto text-xs {rule.active ? 'text-green-400' : 'text-muted-foreground'}">{rule.active ? 'Open' : 'Closed'}</span>
+						<div>
+							<button
+								class="w-full text-left flex items-center gap-3 rounded px-3 py-2 text-sm transition-colors hover:bg-muted/30 {rule.active ? '' : 'opacity-40'}"
+								onclick={() => startEditRestriction(rule.service)}
+							>
+								<span class="h-2 w-2 rounded-full shrink-0 {rule.active ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
+								<span class="font-medium w-20">{rule.service}</span>
+								<span class="font-mono text-xs text-muted-foreground">
+									{#each [...new Set(rule.ports.map(p => `${p.port}/${p.transport}`))] as port}
+										{port}{' '}
+									{/each}
+								</span>
+								{#if firewallStatus.restrictions[rule.service]?.length}
+									<span class="text-xs text-amber-400">
+										{firewallStatus.restrictions[rule.service].length} source{firewallStatus.restrictions[rule.service].length !== 1 ? 's' : ''}
+									</span>
+								{/if}
+								<span class="ml-auto text-xs {rule.active ? 'text-green-400' : 'text-muted-foreground'}">{rule.active ? 'Open' : 'Closed'}</span>
+							</button>
+
+							{#if fwEditService === rule.service}
+								<div class="mx-3 mb-2 rounded-lg border border-border bg-secondary/20 p-3 space-y-2">
+									<div class="text-xs font-medium">Restrict access to {rule.service}</div>
+									<p class="text-xs text-muted-foreground">
+										Enter allowed source IPs or CIDRs, comma-separated. Leave empty to allow all.
+									</p>
+									<input
+										bind:value={fwEditSources}
+										placeholder="e.g. 192.168.1.0/24, 10.0.0.5"
+										class="w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
+									/>
+									<div class="flex gap-2">
+										<Button size="xs" onclick={saveRestriction}>Save</Button>
+										<Button size="xs" variant="secondary" onclick={() => fwEditService = null}>Cancel</Button>
+									</div>
+								</div>
+							{/if}
 						</div>
 					{/each}
 				</div>
-				<p class="mt-3 text-xs text-muted-foreground">Ports open and close automatically when services are enabled/disabled in Services.</p>
+				<p class="mt-3 text-xs text-muted-foreground">
+					Ports open/close automatically with services. Click a service to restrict access by source IP.
+				</p>
 			{/if}
 		</section>
 	</div>
