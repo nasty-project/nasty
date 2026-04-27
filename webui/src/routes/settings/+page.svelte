@@ -1,14 +1,14 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
-	import type { Settings, SystemInfo, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NutConfig, UpsStatus, NetIfStats } from '$lib/types';
+	import type { Settings, SystemInfo, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NetIfStats } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Copy, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
 
-	let activeTab: 'general' | 'network' | 'notifications' | 'tls' | 'vpn' | 'metrics' | 'tuning' | 'ups' = $state('general');
+	let activeTab: 'general' | 'network' | 'notifications' | 'metrics' | 'tuning' = $state('general');
 
 	// Notifications tab
 	import type { NotificationConfig, NotificationChannel } from '$lib/types';
@@ -46,13 +46,6 @@
 	let showVlanForm = $state(false);
 	let vlanParent = $state('');
 	let vlanId = $state(100);
-	// Firewall
-	import type { FirewallStatus } from '$lib/types';
-	let firewallStatus: FirewallStatus | null = $state(null);
-	let fwEditService: string | null = $state(null);
-	let fwEditSources = $state('');
-	let fwEditIfaces: string[] = $state([]);
-
 	// ── General tab state ───────────────────────────────────
 	let settings: Settings | null = $state(null);
 	let info: SystemInfo | null = $state(null);
@@ -100,31 +93,6 @@
 	let tVmDirtyExpire = $state('');
 	let tVmDirtyWriteback = $state('');
 
-	// UPS (NUT)
-	let nutConfig: NutConfig | null = $state(null);
-	let savingNut = $state(false);
-	let upsStatus: UpsStatus | null = $state(null);
-	let upsStatusInterval: ReturnType<typeof setInterval> | null = null;
-	let nutDriver = $state('');
-	let nutPort = $state('');
-	let nutUpsName = $state('');
-	let nutDescription = $state('');
-	let nutShutdownPercent = $state('');
-	let nutShutdownSeconds = $state('');
-	let nutShutdownCommand = $state('');
-
-	// TLS
-	let tlsDomain = $state('');
-	let tlsAcmeEmail = $state('');
-	let tlsAcmeEnabled = $state(false);
-	let acmeStatus: { state: string; message: string; domain?: string; last_attempt?: string } | null = $state(null);
-	let tlsAcmeStaging = $state(false);
-	let tlsChallengeType = $state<'tls-alpn' | 'dns'>('tls-alpn');
-	let tlsDnsProvider = $state('');
-	let tlsDnsCredentials = $state('');
-	let savingTls = $state(false);
-	let tlsChanged = $state(false);
-
 	// SSH
 	let sshKeys: string[] = $state([]);
 	let sshPasswordAuth = $state(true);
@@ -169,38 +137,6 @@
 
 	// Telemetry
 	let sendingTelemetry = $state(false);
-
-// VPN (Tailscale)
-	interface TailscaleStatus {
-		enabled: boolean;
-		daemon_running: boolean;
-		connected: boolean;
-		ip?: string;
-		hostname?: string;
-		version?: string;
-		has_auth_key: boolean;
-	}
-	let tsStatus: TailscaleStatus | null = $state(null);
-	let tsAuthKey = $state('');
-	let tsLoading = $state(false);
-
-	const popularDnsProviders = [
-		{ code: 'cloudflare', name: 'Cloudflare' },
-		{ code: 'route53', name: 'Amazon Route 53' },
-		{ code: 'gcloud', name: 'Google Cloud' },
-		{ code: 'azuredns', name: 'Azure DNS' },
-		{ code: 'digitalocean', name: 'DigitalOcean' },
-		{ code: 'hetzner', name: 'Hetzner' },
-		{ code: 'godaddy', name: 'GoDaddy' },
-		{ code: 'namecheap', name: 'Namecheap' },
-		{ code: 'ovh', name: 'OVH' },
-		{ code: 'porkbun', name: 'Porkbun' },
-		{ code: 'vultr', name: 'Vultr' },
-		{ code: 'linode', name: 'Linode' },
-		{ code: 'duckdns', name: 'Duck DNS' },
-		{ code: 'desec', name: 'deSEC.io' },
-		{ code: 'oraclecloud', name: 'Oracle Cloud' },
-	];
 
 	// ── Metrics tab state ───────────────────────────────────
 	let metricsText = $state('');
@@ -272,23 +208,8 @@
 				client.call<NetworkState>('system.network.get'),
 			]);
 			hostnameInput = settings.hostname ?? info.hostname;
-			tlsDomain = settings?.tls_domain ?? '';
-			tlsAcmeEmail = settings?.tls_acme_email ?? '';
-			tlsAcmeEnabled = settings?.tls_acme_enabled ?? false;
-			tlsChallengeType = settings?.tls_challenge_type ?? 'tls-alpn';
-			tlsDnsProvider = settings?.tls_dns_provider ?? '';
-			tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
-			tlsAcmeStaging = (settings as any)?.tls_acme_staging ?? false;
 			syncNetworkForm();
 			loadSsh();
-
-			// Load ACME status
-			try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
-
-// Load Tailscale status
-			try {
-				tsStatus = await client.call<TailscaleStatus>('system.tailscale.get');
-			} catch { /* ignore — tailscale module may not be enabled */ }
 		});
 	});
 
@@ -368,37 +289,6 @@
 		savingLog = false;
 	}
 
-	async function saveTls() {
-		savingTls = true;
-		const result = await withToast(
-			() => client.call<Settings>('system.settings.update', {
-				tls_domain: tlsDomain || null,
-				tls_acme_email: tlsAcmeEmail || null,
-				tls_acme_enabled: tlsAcmeEnabled,
-				tls_challenge_type: tlsChallengeType,
-				tls_dns_provider: tlsDnsProvider || null,
-				tls_dns_credentials: tlsDnsCredentials || null,
-				tls_acme_staging: tlsAcmeStaging,
-			}),
-			tlsAcmeEnabled ? 'Let\'s Encrypt certificate requested — check status below' : 'TLS settings saved'
-		);
-		if (result !== undefined) {
-			settings = result;
-			tlsChanged = false;
-			// Poll ACME status for a few seconds to show progress
-			if (tlsAcmeEnabled) {
-				const poll = setInterval(async () => {
-					try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
-					if (acmeStatus && (acmeStatus.state === 'success' || acmeStatus.state === 'error')) {
-						clearInterval(poll);
-					}
-				}, 3000);
-				setTimeout(() => clearInterval(poll), 120000); // stop after 2 min
-			}
-		}
-		savingTls = false;
-	}
-
 	async function saveNetwork() {
 		savingNetwork = true;
 		const nameservers = netNameservers
@@ -466,7 +356,6 @@
 		activeTab = tab;
 		if (tab === 'network') {
 			if (!netIfLoaded) loadNetInterfaces();
-			loadFirewall();
 		}
 		if (tab === 'notifications' && !notifLoaded) {
 			loadNotifications();
@@ -476,12 +365,6 @@
 		}
 		if (tab === 'tuning' && !tuning) {
 			loadTuning();
-		}
-		if (tab === 'ups') {
-			if (!nutConfig) loadNut();
-			else startUpsPolling();
-		} else {
-			stopUpsPolling();
 		}
 	}
 
@@ -556,29 +439,6 @@
 		await withToast(() => client.call('system.network.update', payload), `VLAN ${vlanParent}.${vlanId} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
 		showVlanForm = false; vlanParent = ''; vlanId = 100;
-	}
-
-	async function loadFirewall() {
-		try { firewallStatus = await client.call<FirewallStatus>('system.firewall.status'); } catch { /* ignore */ }
-	}
-
-	function startEditRestriction(service: string) {
-		fwEditService = service;
-		fwEditSources = (firewallStatus?.restrictions[service] ?? []).join(', ');
-		fwEditIfaces = [...(firewallStatus?.interface_restrictions[service] ?? [])];
-	}
-
-	async function saveRestriction() {
-		if (!fwEditService) return;
-		const sources = fwEditSources.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
-		await withToast(
-			() => client.call('system.firewall.restrict', { service: fwEditService, sources, interfaces: fwEditIfaces }),
-			'Firewall restriction updated'
-		);
-		fwEditService = null;
-		fwEditSources = '';
-		fwEditIfaces = [];
-		await loadFirewall();
 	}
 
 	async function loadNotifications() {
@@ -686,102 +546,6 @@
 		await loadTuning();
 	}
 
-	async function loadNut() {
-		nutConfig = await client.call<NutConfig>('system.nut.config.get');
-		if (nutConfig) {
-			nutDriver = nutConfig.driver;
-			nutPort = nutConfig.port;
-			nutUpsName = nutConfig.ups_name;
-			nutDescription = nutConfig.description;
-			nutShutdownPercent = nutConfig.shutdown_on_battery_percent.toString();
-			nutShutdownSeconds = nutConfig.shutdown_on_battery_seconds.toString();
-			nutShutdownCommand = nutConfig.shutdown_command;
-		}
-		await refreshUpsStatus();
-		startUpsPolling();
-	}
-
-	async function saveNut() {
-		savingNut = true;
-		await withToast(
-			() => client.call('system.nut.config.update', {
-				driver: nutDriver,
-				port: nutPort,
-				ups_name: nutUpsName,
-				description: nutDescription || undefined,
-				shutdown_on_battery_percent: parseInt(nutShutdownPercent) || undefined,
-				shutdown_on_battery_seconds: parseInt(nutShutdownSeconds) || undefined,
-				shutdown_command: nutShutdownCommand || undefined,
-			}),
-			'UPS configuration saved'
-		);
-		savingNut = false;
-		await loadNut();
-	}
-
-	async function refreshUpsStatus() {
-		try {
-			upsStatus = await client.call<UpsStatus>('system.nut.status');
-		} catch {
-			upsStatus = null;
-		}
-	}
-
-	function startUpsPolling() {
-		stopUpsPolling();
-		upsStatusInterval = setInterval(refreshUpsStatus, 5000);
-	}
-
-	function stopUpsPolling() {
-		if (upsStatusInterval) {
-			clearInterval(upsStatusInterval);
-			upsStatusInterval = null;
-		}
-	}
-
-	function upsStatusColor(s: string): string {
-		if (s === 'OL' || s.startsWith('OL ')) return 'text-green-500';
-		if (s.includes('OB')) return 'text-yellow-500';
-		if (s.includes('LB')) return 'text-red-500';
-		return 'text-muted-foreground';
-	}
-
-	function upsStatusLabel(s: string): string {
-		return s.split(' ').map(code => {
-			switch (code) {
-				case 'OL': return 'Online';
-				case 'OB': return 'On Battery';
-				case 'LB': return 'Low Battery';
-				case 'HB': return 'High Battery';
-				case 'RB': return 'Replace Battery';
-				case 'CHRG': return 'Charging';
-				case 'DISCHRG': return 'Discharging';
-				case 'BYPASS': return 'Bypass';
-				case 'CAL': return 'Calibrating';
-				case 'OFF': return 'Offline';
-				case 'OVER': return 'Overloaded';
-				case 'TRIM': return 'Trimming';
-				case 'BOOST': return 'Boosting';
-				case 'FSD': return 'Forced Shutdown';
-				default: return code;
-			}
-		}).join(' / ');
-	}
-
-	function formatUpsRuntime(seconds: number): string {
-		if (seconds >= 3600) {
-			const h = Math.floor(seconds / 3600);
-			const m = Math.floor((seconds % 3600) / 60);
-			return `${h}h ${m}m`;
-		}
-		const m = Math.floor(seconds / 60);
-		const s = seconds % 60;
-		return `${m}m ${s}s`;
-	}
-
-	onDestroy(() => {
-		stopUpsPolling();
-	});
 </script>
 
 
@@ -806,29 +570,11 @@
 			: 'text-muted-foreground hover:text-foreground'}"
 	>Notifications</button>
 	<button
-		onclick={() => switchTab('tls')}
-		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'tls'
-			? 'border-b-2 border-primary text-foreground'
-			: 'text-muted-foreground hover:text-foreground'}"
-	>TLS</button>
-	<button
-		onclick={() => switchTab('vpn')}
-		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'vpn'
-			? 'border-b-2 border-primary text-foreground'
-			: 'text-muted-foreground hover:text-foreground'}"
-	>VPN</button>
-	<button
 		onclick={() => switchTab('tuning')}
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'tuning'
 			? 'border-b-2 border-primary text-foreground'
 			: 'text-muted-foreground hover:text-foreground'}"
 	>Tuning</button>
-	<button
-		onclick={() => switchTab('ups')}
-		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'ups'
-			? 'border-b-2 border-primary text-foreground'
-			: 'text-muted-foreground hover:text-foreground'}"
-	>UPS</button>
 	<button
 		onclick={() => switchTab('metrics')}
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'metrics'
@@ -1250,91 +996,6 @@
 		</section>
 
 		</div>
-
-		<!-- Right column: Firewall -->
-		<div class="space-y-6">
-		<!-- Firewall status -->
-		<section class="rounded-lg border border-border p-5">
-			<h2 class="mb-4 text-base font-semibold">Firewall</h2>
-			{#if !firewallStatus}
-				<p class="text-sm text-muted-foreground">Loading...</p>
-			{:else}
-				<div class="space-y-1">
-					{#each firewallStatus.rules as rule}
-						<div>
-							<button
-								class="w-full text-left flex items-center gap-3 rounded px-3 py-2 text-sm transition-colors hover:bg-muted/30 {rule.active ? '' : 'opacity-40'}"
-								onclick={() => startEditRestriction(rule.service)}
-							>
-								<span class="h-2 w-2 rounded-full shrink-0 {rule.active ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
-								<span class="font-medium w-20">{rule.service}</span>
-								<span class="font-mono text-xs text-muted-foreground">
-									{#each [...new Set(rule.ports.map(p => `${p.port}/${p.transport}`))] as port}
-										{port}{' '}
-									{/each}
-								</span>
-								{#if firewallStatus.restrictions[rule.service]?.length}
-									<span class="text-xs text-amber-400">
-										{firewallStatus.restrictions[rule.service].length} source{firewallStatus.restrictions[rule.service].length !== 1 ? 's' : ''}
-									</span>
-								{/if}
-								{#if firewallStatus.interface_restrictions[rule.service]?.length}
-									<span class="text-xs text-blue-400">
-										{firewallStatus.interface_restrictions[rule.service].join(', ')}
-									</span>
-								{/if}
-								<span class="ml-auto text-xs {rule.active ? 'text-green-400' : 'text-muted-foreground'}">{rule.active ? 'Open' : 'Closed'}</span>
-							</button>
-
-							{#if fwEditService === rule.service}
-								<div class="mx-3 mb-2 rounded-lg border border-border bg-secondary/20 p-3 space-y-3">
-									<div class="text-xs font-medium">Restrict access to {rule.service}</div>
-
-									<div>
-										<div class="text-xs text-muted-foreground mb-1">Allowed source IPs (comma-separated, empty = all)</div>
-										<input
-											bind:value={fwEditSources}
-											placeholder="e.g. 192.168.1.0/24, 10.0.0.5"
-											class="w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
-										/>
-									</div>
-
-									<div>
-										<div class="text-xs text-muted-foreground mb-1">Allowed interfaces (none selected = all)</div>
-										{#if networkState}
-											<div class="flex flex-wrap gap-2">
-												{#each networkState.interfaces as iface}
-													<label class="flex items-center gap-1.5 text-xs">
-														<input type="checkbox"
-															checked={fwEditIfaces.includes(iface.name)}
-															onchange={() => {
-																fwEditIfaces = fwEditIfaces.includes(iface.name)
-																	? fwEditIfaces.filter(i => i !== iface.name)
-																	: [...fwEditIfaces, iface.name];
-															}}
-														/>
-														<span class="font-mono">{iface.name}</span>
-													</label>
-												{/each}
-											</div>
-										{/if}
-									</div>
-
-									<div class="flex gap-2">
-										<Button size="xs" onclick={saveRestriction}>Save</Button>
-										<Button size="xs" variant="secondary" onclick={() => fwEditService = null}>Cancel</Button>
-									</div>
-								</div>
-							{/if}
-						</div>
-					{/each}
-				</div>
-				<p class="mt-3 text-xs text-muted-foreground">
-					Ports open/close automatically with services. Click a service to restrict access by source IP.
-				</p>
-			{/if}
-		</section>
-		</div>
 	</div>
 
 {:else if activeTab === 'notifications'}
@@ -1485,167 +1146,6 @@
 		</section>
 	</div>
 
-{:else if activeTab === 'tls'}
-
-	<div class="max-w-xl">
-		<section class="rounded-lg border border-border p-5">
-			<h2 class="mb-2 text-base font-semibold">TLS Certificate</h2>
-			<p class="mb-5 text-sm text-muted-foreground">
-				NASty uses a self-signed certificate by default. Enable Let's Encrypt for a trusted certificate
-				that browsers accept without warnings.
-			</p>
-
-			<div class="mb-4">
-				<label class="flex items-center gap-2 text-sm cursor-pointer">
-					<input
-						type="checkbox"
-						bind:checked={tlsAcmeEnabled}
-						onchange={() => tlsChanged = true}
-						class="rounded border-input"
-					/>
-					<span class="font-medium">Enable Let's Encrypt</span>
-				</label>
-				{#if tlsAcmeEnabled}
-					<label class="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer mt-2 ml-6">
-						<input type="checkbox" bind:checked={tlsAcmeStaging} onchange={() => tlsChanged = true} class="rounded border-input" />
-						Use staging environment (for testing, certs not trusted by browsers)
-					</label>
-				{/if}
-			</div>
-
-			{#if acmeStatus && acmeStatus.state !== 'idle'}
-				<div class="mb-4 rounded border border-border p-3 text-xs">
-					<div class="flex items-center gap-2">
-						{#if acmeStatus.state === 'running'}
-							<span class="inline-block h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span>
-							<span class="text-yellow-500 font-medium">Provisioning...</span>
-						{:else if acmeStatus.state === 'success'}
-							<span class="inline-block h-2 w-2 rounded-full bg-green-500"></span>
-							<span class="text-green-500 font-medium">Certificate active</span>
-						{:else if acmeStatus.state === 'error'}
-							<span class="inline-block h-2 w-2 rounded-full bg-red-500"></span>
-							<span class="text-red-500 font-medium">Error</span>
-						{/if}
-						{#if acmeStatus.domain}
-							<span class="text-muted-foreground">({acmeStatus.domain})</span>
-						{/if}
-					</div>
-					{#if acmeStatus.message}
-						<p class="mt-1 text-muted-foreground">{acmeStatus.message}</p>
-					{/if}
-				</div>
-			{/if}
-
-			{#if tlsAcmeEnabled}
-				<div class="mb-4">
-					<label for="tls-domain" class="mb-1 block text-xs text-muted-foreground">Domain Name</label>
-					<input
-						id="tls-domain"
-						type="text"
-						bind:value={tlsDomain}
-						oninput={() => tlsChanged = true}
-						class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-						placeholder="nasty.example.com"
-					/>
-					<span class="mt-1 block text-xs text-muted-foreground">Must resolve to this machine's public IP.</span>
-				</div>
-
-				<div class="mb-4">
-					<label for="tls-email" class="mb-1 block text-xs text-muted-foreground">Email</label>
-					<input
-						id="tls-email"
-						type="email"
-						bind:value={tlsAcmeEmail}
-						oninput={() => tlsChanged = true}
-						class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-						placeholder="admin@example.com"
-					/>
-					<span class="mt-1 block text-xs text-muted-foreground">Let's Encrypt sends expiry warnings here.</span>
-				</div>
-
-				<div class="mb-4">
-					<span class="mb-1 block text-xs text-muted-foreground">Challenge Type</span>
-					<div class="flex w-fit rounded-md border border-border text-sm">
-						<button
-							onclick={() => { tlsChallengeType = 'tls-alpn'; tlsChanged = true; }}
-							class="rounded-l-md px-4 py-1.5 font-medium transition-colors {tlsChallengeType === 'tls-alpn' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
-						>TLS (port 443)</button>
-						<button
-							onclick={() => { tlsChallengeType = 'dns'; tlsChanged = true; }}
-							class="rounded-r-md px-4 py-1.5 font-medium transition-colors {tlsChallengeType === 'dns' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
-						>DNS</button>
-					</div>
-				</div>
-
-				{#if tlsChallengeType === 'tls-alpn'}
-					<div class="mb-4 rounded-lg border border-blue-800 bg-blue-950 px-4 py-3 text-xs text-blue-200">
-						The TLS-ALPN-01 challenge verifies domain ownership over port 443. No additional ports needed,
-						but port 443 must be reachable from the internet.
-					</div>
-				{:else}
-					<div class="mb-4">
-						<label for="tls-dns-provider" class="mb-1 block text-xs text-muted-foreground">DNS Provider</label>
-						<select
-							id="tls-dns-provider"
-							bind:value={tlsDnsProvider}
-							onchange={() => tlsChanged = true}
-							class="w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm"
-						>
-							<option value="">Select provider...</option>
-							{#each popularDnsProviders as p}
-								<option value={p.code}>{p.name}</option>
-							{/each}
-							<option disabled>───────────</option>
-							<option value="_custom">Other (enter code manually)</option>
-						</select>
-						{#if tlsDnsProvider === '_custom'}
-							<input
-								type="text"
-								bind:value={tlsDnsProvider}
-								oninput={() => tlsChanged = true}
-								class="mt-2 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-								placeholder="provider code (e.g. inwx, gandi)"
-							/>
-						{/if}
-						<span class="mt-1 block text-xs text-muted-foreground">
-							See <a href="https://go-acme.github.io/lego/dns/" target="_blank" class="text-blue-400 hover:underline">lego DNS providers</a> for the full list and required credentials.
-						</span>
-					</div>
-
-					<div class="mb-4">
-						<label for="tls-dns-creds" class="mb-1 block text-xs text-muted-foreground">API Credentials</label>
-						<textarea
-							id="tls-dns-creds"
-							bind:value={tlsDnsCredentials}
-							oninput={() => tlsChanged = true}
-							rows={4}
-							class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-							placeholder={"CLOUDFLARE_DNS_API_TOKEN=xxxxx\nCLOUDFLARE_ZONE_API_TOKEN=xxxxx"}
-						></textarea>
-						<span class="mt-1 block text-xs text-muted-foreground">
-							One KEY=VALUE per line. These are passed as environment variables to the ACME client.
-							No inbound ports needed — verification happens via DNS records.
-						</span>
-					</div>
-				{/if}
-
-				{#if !tlsDomain.trim() || !tlsAcmeEmail.trim() || (tlsChallengeType === 'dns' && !tlsDnsProvider)}
-					<p class="mb-3 text-xs text-destructive">
-						{#if !tlsDomain.trim()}Domain is required.
-						{:else if !tlsAcmeEmail.trim()}Email is required.
-						{:else}DNS provider is required.
-						{/if}
-					</p>
-				{/if}
-
-				{/if}
-
-			<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged}>
-				{savingTls ? 'Saving…' : 'Save'}
-			</Button>
-		</section>
-	</div>
-
 {:else if activeTab === 'tuning'}
 
 	{#if !tuning}
@@ -1763,135 +1263,6 @@
 		</div>
 	{/if}
 
-{:else if activeTab === 'ups'}
-
-	{#if !nutConfig}
-		<p class="text-muted-foreground">Loading...</p>
-	{:else}
-		<div class="flex flex-col gap-6">
-			{#if upsStatus?.available}
-				<section class="rounded-lg border border-border p-5">
-					<h3 class="mb-4 text-sm font-semibold">UPS Status</h3>
-					<div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
-						<div>
-							<p class="text-xs text-muted-foreground">Status</p>
-							<p class="text-lg font-semibold {upsStatusColor(upsStatus.status)}">
-								{upsStatusLabel(upsStatus.status)}
-							</p>
-						</div>
-						{#if upsStatus.battery_charge != null}
-							<div>
-								<p class="text-xs text-muted-foreground">Battery</p>
-								<p class="text-lg font-semibold">{upsStatus.battery_charge.toFixed(0)}%</p>
-							</div>
-						{/if}
-						{#if upsStatus.battery_runtime != null}
-							<div>
-								<p class="text-xs text-muted-foreground">Runtime</p>
-								<p class="text-lg font-semibold">{formatUpsRuntime(upsStatus.battery_runtime)}</p>
-							</div>
-						{/if}
-						{#if upsStatus.ups_load != null}
-							<div>
-								<p class="text-xs text-muted-foreground">Load</p>
-								<p class="text-lg font-semibold">{upsStatus.ups_load.toFixed(0)}%</p>
-							</div>
-						{/if}
-						{#if upsStatus.input_voltage != null}
-							<div>
-								<p class="text-xs text-muted-foreground">Input Voltage</p>
-								<p class="text-sm">{upsStatus.input_voltage.toFixed(1)} V</p>
-							</div>
-						{/if}
-						{#if upsStatus.output_voltage != null}
-							<div>
-								<p class="text-xs text-muted-foreground">Output Voltage</p>
-								<p class="text-sm">{upsStatus.output_voltage.toFixed(1)} V</p>
-							</div>
-						{/if}
-						{#if upsStatus.ups_model}
-							<div>
-								<p class="text-xs text-muted-foreground">Model</p>
-								<p class="text-sm">{upsStatus.ups_model}</p>
-							</div>
-						{/if}
-						{#if upsStatus.ups_serial}
-							<div>
-								<p class="text-xs text-muted-foreground">Serial</p>
-								<p class="text-sm font-mono">{upsStatus.ups_serial}</p>
-							</div>
-						{/if}
-					</div>
-				</section>
-			{/if}
-
-			<section class="rounded-lg border border-border p-5">
-				<h3 class="mb-4 text-sm font-semibold">UPS Hardware</h3>
-				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-					<div>
-						<label for="nut-driver" class="mb-1 block text-xs text-muted-foreground">Driver</label>
-						<select id="nut-driver" bind:value={nutDriver}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm">
-							<option value="usbhid-ups">usbhid-ups (USB HID)</option>
-							<option value="blazer_usb">blazer_usb (Megatec/Q1 USB)</option>
-							<option value="nutdrv_qx">nutdrv_qx (Q* protocol USB)</option>
-							<option value="snmp-ups">snmp-ups (SNMP)</option>
-							<option value="apcsmart">apcsmart (APC Smart serial)</option>
-						</select>
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">NUT driver for your UPS hardware.</p>
-					</div>
-					<div>
-						<label for="nut-port" class="mb-1 block text-xs text-muted-foreground">Port</label>
-						<input id="nut-port" type="text" bind:value={nutPort}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">"auto" for USB, or a device path like /dev/ttyS0.</p>
-					</div>
-					<div>
-						<label for="nut-name" class="mb-1 block text-xs text-muted-foreground">UPS Name</label>
-						<input id="nut-name" type="text" bind:value={nutUpsName}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Identifier for upsc (e.g. "ups").</p>
-					</div>
-					<div class="sm:col-span-2 lg:col-span-3">
-						<label for="nut-desc" class="mb-1 block text-xs text-muted-foreground">Description</label>
-						<input id="nut-desc" type="text" bind:value={nutDescription} placeholder="My UPS"
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-					</div>
-				</div>
-			</section>
-
-			<section class="rounded-lg border border-border p-5">
-				<h3 class="mb-4 text-sm font-semibold">Shutdown Policy</h3>
-				<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-					<div>
-						<label for="nut-pct" class="mb-1 block text-xs text-muted-foreground">Battery threshold (%)</label>
-						<input id="nut-pct" type="number" min="0" max="100" bind:value={nutShutdownPercent}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Shutdown when battery drops below this.</p>
-					</div>
-					<div>
-						<label for="nut-secs" class="mb-1 block text-xs text-muted-foreground">On-battery timeout (s)</label>
-						<input id="nut-secs" type="number" min="0" bind:value={nutShutdownSeconds}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Shutdown after N seconds on battery. 0 = disabled.</p>
-					</div>
-					<div>
-						<label for="nut-cmd" class="mb-1 block text-xs text-muted-foreground">Shutdown command</label>
-						<input id="nut-cmd" type="text" bind:value={nutShutdownCommand}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
-					</div>
-				</div>
-			</section>
-
-			<div>
-				<Button onclick={saveNut} disabled={savingNut}>
-					{savingNut ? 'Saving...' : 'Save UPS Configuration'}
-				</Button>
-				<span class="ml-2 text-xs text-muted-foreground">If NUT is running, services will be restarted automatically.</span>
-			</div>
-		</div>
-	{/if}
-
 {:else if activeTab === 'metrics'}
 
 	<!-- Metrics tab -->
@@ -1944,115 +1315,6 @@
 						{/if}
 					</div>
 				{/each}
-			</div>
-		{/if}
-	</div>
-
-{:else if activeTab === 'vpn'}
-
-	<div class="space-y-6">
-		<div>
-			<h3 class="text-lg font-semibold mb-1">Tailscale VPN</h3>
-			<p class="text-sm text-muted-foreground">Connect your NASty to a Tailscale network for secure remote access.</p>
-		</div>
-
-		{#if !tsStatus}
-			<p class="text-muted-foreground">Loading...</p>
-		{:else if tsStatus.connected}
-			<!-- Connected state -->
-			<div class="rounded-lg border border-green-500/30 bg-green-500/5 p-4 space-y-2">
-				<div class="flex items-center gap-2">
-					<span class="w-2 h-2 rounded-full bg-green-500"></span>
-					<span class="text-sm font-medium text-green-500">Connected</span>
-				</div>
-				{#if tsStatus.ip}
-					<div class="text-sm"><span class="text-muted-foreground">Tailscale IP:</span> <span class="font-mono">{tsStatus.ip}</span></div>
-				{/if}
-				{#if tsStatus.hostname}
-					<div class="text-sm"><span class="text-muted-foreground">Hostname:</span> {tsStatus.hostname}</div>
-				{/if}
-				{#if tsStatus.version}
-					<div class="text-sm"><span class="text-muted-foreground">Version:</span> {tsStatus.version}</div>
-				{/if}
-			</div>
-
-			<Button
-				disabled={tsLoading}
-				variant="destructive"
-				onclick={async () => {
-					tsLoading = true;
-					const result = await withToast(
-						() => client.call('system.tailscale.disconnect'),
-						'Tailscale disconnected'
-					);
-					if (result) {
-						tsStatus = result as TailscaleStatus;
-						tsAuthKey = '';
-					}
-					tsLoading = false;
-				}}
-			>
-				{tsLoading ? 'Disconnecting...' : 'Disconnect'}
-			</Button>
-		{:else}
-			<!-- Disconnected state -->
-			<div class="rounded-lg border p-4">
-				<div class="flex items-center gap-2">
-					<span class="w-2 h-2 rounded-full bg-muted-foreground"></span>
-					<span class="text-sm text-muted-foreground">Not connected</span>
-				</div>
-			</div>
-
-			<div class="space-y-4">
-				{#if tsStatus?.has_auth_key}
-					<p class="text-xs text-muted-foreground">A stored auth key is available. Click Reconnect to use it, or enter a new key below.</p>
-					<Button
-						disabled={tsLoading}
-						onclick={async () => {
-							tsLoading = true;
-							const result = await withToast(
-								() => client.call('system.tailscale.connect', { auth_key: '' }),
-								'Tailscale connected'
-							);
-							if (result) tsStatus = result as TailscaleStatus;
-							tsLoading = false;
-						}}
-					>
-						{tsLoading ? 'Connecting...' : 'Reconnect'}
-					</Button>
-				{/if}
-
-				<div>
-					<label for="ts-authkey" class="block text-sm font-medium mb-1">{tsStatus?.has_auth_key ? 'New Auth Key (optional)' : 'Auth Key'}</label>
-					<input
-						id="ts-authkey"
-						type="password"
-						bind:value={tsAuthKey}
-						placeholder="tskey-auth-..."
-						class="w-full max-w-md rounded-md border bg-background px-3 py-2 text-sm"
-					/>
-					<p class="text-xs text-muted-foreground mt-1">
-						Generate at <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" class="underline">Tailscale admin console</a>. Use a reusable key for persistent connections.
-					</p>
-				</div>
-
-				<Button
-					disabled={!tsAuthKey || tsLoading}
-					onclick={async () => {
-						tsLoading = true;
-						const result = await withToast(
-							() => client.call('system.tailscale.connect', { auth_key: tsAuthKey }),
-							'Tailscale connected'
-						);
-						if (result) {
-							tsStatus = result as TailscaleStatus;
-							tsAuthKey = '';
-						}
-						tsLoading = false;
-					}}
-				>
-					{tsLoading ? 'Connecting...' : 'Connect with new key'}
-				</Button>
 			</div>
 		{/if}
 	</div>

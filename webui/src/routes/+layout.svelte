@@ -47,6 +47,15 @@
 		ExternalLink,
 		MessageCircle,
 		Code2,
+		ChevronRight,
+		Shield,
+		Flame,
+		Lock,
+		Zap,
+		Globe,
+		Cpu,
+		Server,
+		Wrench,
 	} from '@lucide/svelte';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
@@ -276,38 +285,88 @@
 		try { await getClient().call('system.shutdown'); } catch { /* expected — engine dies */ }
 	}
 
-	const nav = $derived.by(() => {
-		const items = [
-			{ href: '/',              label: 'Dashboard',      icon: LayoutDashboard },
-			{ href: '/filesystems',   label: 'Filesystems',    icon: Database },
-			{ href: '/subvolumes',    label: 'Subvolumes',     icon: Layers },
-			{ href: '/sharing',       label: 'Sharing',         icon: Share2 },
-			{ href: '/files',         label: 'Files',           icon: FolderOpen },
-		];
+	type NavItem = { href: string; label: string; icon: any };
+	type NavGroup = { label: string; icon: any; children: NavItem[] };
+	type NavEntry = NavItem | NavGroup;
+	function isGroup(e: NavEntry): e is NavGroup { return 'children' in e; }
+
+	const nav = $derived.by((): NavEntry[] => {
+		const computeChildren: NavItem[] = [{ href: '/apps', label: 'Apps', icon: Box }];
 		if (sysInfo?.kvm_available) {
-			items.push({ href: '/vms', label: 'VMs', icon: Monitor });
+			computeChildren.unshift({ href: '/vms', label: 'VMs', icon: Monitor });
 		}
-		items.push(
-			{ href: '/apps',          label: 'Apps',             icon: Box },
-			{ href: '/backups',       label: 'Backups',          icon: Archive },
-			{ href: '/disks',         label: 'Disks',           icon: HardDrive },
-			{ href: '/alerts',        label: 'Alerts',          icon: Bell },
-			{ href: '/services',      label: 'Services',        icon: Network },
-			{ href: '/update',        label: 'Update',          icon: RefreshCw },
-			{ href: '/terminal',      label: 'Terminal',        icon: Terminal },
-			{ href: '/users',         label: 'Access Control',  icon: ShieldCheck },
-			{ href: '/settings',      label: 'Settings',        icon: Settings },
-		);
+		return [
+			{ href: '/', label: 'Dashboard', icon: LayoutDashboard },
+			{ label: 'Storage', icon: Database, children: [
+				{ href: '/filesystems', label: 'Filesystems', icon: Database },
+				{ href: '/subvolumes', label: 'Subvolumes', icon: Layers },
+				{ href: '/disks',      label: 'Disks',       icon: HardDrive },
+				{ href: '/files',      label: 'Files',       icon: FolderOpen },
+			]},
+			{ href: '/sharing', label: 'Sharing', icon: Share2 },
+			{ label: 'Protection', icon: Shield, children: [
+				{ href: '/backups',  label: 'Backups',  icon: Archive },
+				{ href: '/alerts',   label: 'Alerts',   icon: Bell },
+				{ href: '/firewall', label: 'Firewall', icon: Flame },
+				{ href: '/tls',      label: 'TLS',      icon: Lock },
+				{ href: '/ups',      label: 'UPS',      icon: Zap },
+				{ href: '/vpn',      label: 'VPN',      icon: Globe },
+			]},
+			{ label: 'Compute', icon: Cpu, children: computeChildren },
+			{ href: '/terminal', label: 'Terminal', icon: Terminal },
+			{ label: 'System', icon: Wrench, children: [
+				{ href: '/services', label: 'Services',       icon: Server },
+				{ href: '/update',   label: 'Update',         icon: RefreshCw },
+				{ href: '/users',    label: 'Access Control', icon: ShieldCheck },
+				{ href: '/settings', label: 'Settings',       icon: Settings },
+			]},
+		];
+	});
+
+	// Flatten all nav items for matching
+	const allNavItems = $derived.by((): NavItem[] => {
+		const items: NavItem[] = [];
+		for (const entry of nav) {
+			if (isGroup(entry)) items.push(...entry.children);
+			else items.push(entry);
+		}
 		return items;
 	});
 
 	// Derive current nav entry from path
 	const currentNav = $derived.by(() => {
 		const path = $page.url.pathname;
-		// Match longest prefix first
-		return [...nav].sort((a, b) => b.href.length - a.href.length)
-			.find(n => path === n.href || (n.href !== '/' && path.startsWith(n.href))) ?? nav[0];
+		return [...allNavItems].sort((a, b) => b.href.length - a.href.length)
+			.find(n => path === n.href || (n.href !== '/' && path.startsWith(n.href))) ?? allNavItems[0];
 	});
+
+	// Track which groups are expanded — auto-expand based on active route
+	const SIDEBAR_GROUPS_KEY = 'nasty:sidebar_groups';
+	let expandedGroups: Record<string, boolean> = $state(
+		typeof localStorage !== 'undefined'
+			? JSON.parse(localStorage.getItem(SIDEBAR_GROUPS_KEY) || '{}')
+			: {}
+	);
+
+	function toggleGroup(label: string) {
+		expandedGroups[label] = !expandedGroups[label];
+		localStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify(expandedGroups));
+	}
+
+	// Auto-expand the group containing the active route
+	const activeGroup = $derived.by((): string | null => {
+		const path = $page.url.pathname;
+		for (const entry of nav) {
+			if (isGroup(entry) && entry.children.some(c => path === c.href || (c.href !== '/' && path.startsWith(c.href)))) {
+				return entry.label;
+			}
+		}
+		return null;
+	});
+
+	function isGroupExpanded(label: string): boolean {
+		return expandedGroups[label] || activeGroup === label;
+	}
 </script>
 
 <svelte:head>
@@ -386,21 +445,69 @@
 
 			<!-- Nav — scrollable -->
 			<nav class="flex-1 overflow-y-auto py-2">
-				{#each nav as item}
-					{@const Icon = item.icon}
-					{@const active = currentNav.href === item.href}
-					<a
-						href={item.href}
-						title={sidebarCollapsed ? item.label : undefined}
-						class="relative mx-2 flex items-center rounded-md py-2 text-sm no-underline transition-all border-2
-							{sidebarCollapsed ? 'justify-center px-0' : 'gap-2.5 pl-4 pr-4'}
-							{active
-								? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
-								: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
-					>
-						<Icon size={15} class="shrink-0" />
-						{#if !sidebarCollapsed}{item.label}{/if}
-					</a>
+				{#each nav as entry}
+					{#if isGroup(entry)}
+						{@const GroupIcon = entry.icon}
+						{@const expanded = isGroupExpanded(entry.label)}
+						{@const groupActive = activeGroup === entry.label}
+						{#if sidebarCollapsed}
+							{#each entry.children as child}
+								{@const ChildIcon = child.icon}
+								{@const active = currentNav.href === child.href}
+								<a
+									href={child.href}
+									title={child.label}
+									class="relative mx-2 flex items-center justify-center rounded-md py-2 text-sm no-underline transition-all border-2
+										{active
+											? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
+											: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
+								>
+									<ChildIcon size={15} class="shrink-0" />
+								</a>
+							{/each}
+						{:else}
+							<button
+								onclick={() => toggleGroup(entry.label)}
+								class="mx-2 flex w-[calc(100%-1rem)] items-center gap-2.5 rounded-md py-2 pl-4 pr-3 text-sm transition-colors
+									{groupActive ? 'text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'}"
+							>
+								<GroupIcon size={15} class="shrink-0" />
+								{entry.label}
+								<ChevronRight size={13} class="ml-auto shrink-0 transition-transform duration-200 {expanded ? 'rotate-90' : ''}" />
+							</button>
+							{#if expanded}
+								{#each entry.children as child}
+									{@const ChildIcon = child.icon}
+									{@const active = currentNav.href === child.href}
+									<a
+										href={child.href}
+										class="relative mx-2 flex items-center gap-2.5 rounded-md py-1.5 pl-8 pr-4 text-sm no-underline transition-all border-2
+											{active
+												? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
+												: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
+									>
+										<ChildIcon size={14} class="shrink-0" />
+										{child.label}
+									</a>
+								{/each}
+							{/if}
+						{/if}
+					{:else}
+						{@const Icon = entry.icon}
+						{@const active = currentNav.href === entry.href}
+						<a
+							href={entry.href}
+							title={sidebarCollapsed ? entry.label : undefined}
+							class="relative mx-2 flex items-center rounded-md py-2 text-sm no-underline transition-all border-2
+								{sidebarCollapsed ? 'justify-center px-0' : 'gap-2.5 pl-4 pr-4'}
+								{active
+									? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
+									: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
+						>
+							<Icon size={15} class="shrink-0" />
+							{#if !sidebarCollapsed}{entry.label}{/if}
+						</a>
+					{/if}
 				{/each}
 			</nav>
 
