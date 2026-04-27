@@ -222,11 +222,20 @@ impl ProtocolService {
                 }
             }
 
-            // Start associated services
+            // Start associated services — auto-disable if any fail
+            let mut failed = false;
             for svc in proto.services() {
                 if let Err(e) = systemctl("start", svc).await {
                     warn!("Failed to start {svc}: {e}");
+                    failed = true;
+                    break;
                 }
+            }
+            if failed {
+                warn!("Auto-disabling {} — service units not available", proto.display_name());
+                let mut state = load_state().await;
+                state.set(proto, false);
+                let _ = save_state(&state).await;
             }
         }
     }
@@ -281,12 +290,23 @@ impl ProtocolService {
             }
         }
 
-        // Start associated services
-        for svc in proto.services() {
+        // Start associated services — roll back if any fail
+        let services = proto.services();
+        let mut started: Vec<&str> = Vec::new();
+        for svc in services {
             info!("Starting service {svc} for protocol {}", proto.display_name());
             if let Err(e) = systemctl("start", svc).await {
                 warn!("Failed to start {svc}: {e}");
+                // Roll back: stop any services we already started
+                for started_svc in &started {
+                    let _ = systemctl("stop", started_svc).await;
+                }
+                // Roll back persistent state
+                state.set(proto, false);
+                let _ = save_state(&state).await;
+                return Err(format!("Failed to start {}: {e}", proto.display_name()));
             }
+            started.push(*svc);
         }
 
         let running = is_protocol_running(proto).await;

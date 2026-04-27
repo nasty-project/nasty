@@ -898,6 +898,7 @@ in {
         lego                         # ACME client for Let's Encrypt
         rsync                        # config backup to bcachefs
         procps                       # sysctl (vm.dirty_* tuning)
+        nftables                     # nft (dynamic firewall rules)
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
