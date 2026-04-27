@@ -11,6 +11,7 @@ members = [
     "nasty-system",
     "nasty-vm",
     "nasty-apps",
+    "nasty-backup",
 ]
 
 [workspace.package]

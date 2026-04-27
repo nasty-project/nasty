@@ -1,0 +1,15 @@
+[package]
+name = "nasty-backup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+schemars.workspace = true
+uuid.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

@@ -567,6 +567,61 @@ export interface ActiveAlert {
 	source: string;
 }
 
+// ── Backups ────────────────────────────────────────────────
+
+export interface BackupProfile {
+	id: string;
+	name: string;
+	enabled: boolean;
+	sources: string[];
+	target: BackupTarget;
+	schedule: string | null;
+	retention: RetentionPolicy;
+	password: string;
+	snapshot_before: boolean;
+	repo_initialized: boolean;
+	last_run: BackupRunResult | null;
+}
+
+export type BackupTarget =
+	| { type: 'local'; path: string }
+	| { type: 's3'; endpoint: string; bucket: string; access_key: string; secret_key: string; region?: string }
+	| { type: 'sftp'; host: string; user: string; path: string; port?: number }
+	| { type: 'rest'; url: string }
+	| { type: 'b2'; bucket: string; account_id: string; account_key: string };
+
+export interface RetentionPolicy {
+	keep_last: number | null;
+	keep_daily: number | null;
+	keep_weekly: number | null;
+	keep_monthly: number | null;
+	keep_yearly: number | null;
+}
+
+export interface BackupRunResult {
+	timestamp: string;
+	success: boolean;
+	message: string;
+	duration_secs: number;
+	bytes_added: number | null;
+	files_new: number | null;
+	files_changed: number | null;
+}
+
+export interface BackupSnapshot {
+	id: string;
+	time: string;
+	hostname: string;
+	paths: string[];
+	tags: string[];
+}
+
+export interface BackupStatus {
+	running: boolean;
+	profile_id: string | null;
+	progress: string | null;
+}
+
 // ── Notifications ──────────────────────────────────────────
 
 export interface NotificationConfig {

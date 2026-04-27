@@ -23,6 +23,7 @@
 		Layers,
 		Share2,
 		HardDrive,
+		Archive,
 		Bell,
 		Settings,
 		RefreshCw,
@@ -288,6 +289,7 @@
 		}
 		items.push(
 			{ href: '/apps',          label: 'Apps',             icon: Box },
+			{ href: '/backups',       label: 'Backups',          icon: Archive },
 			{ href: '/disks',         label: 'Disks',           icon: HardDrive },
 			{ href: '/alerts',        label: 'Alerts',          icon: Bell },
 			{ href: '/services',      label: 'Services',        icon: Network },

@@ -57,6 +57,7 @@ pub struct AppState {
     pub nvmeof: Arc<nasty_sharing::NvmeofService>,
     pub vms: nasty_vm::VmService,
     pub apps: nasty_apps::AppsService,
+    pub backups: nasty_backup::BackupService,
     pub firmware: nasty_system::firmware::FirmwareService,
     /// Cached alerts result (timestamp, json value). Avoids re-evaluating
     /// all alert checks on every WebUI poll (called every few seconds).
@@ -126,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         nvmeof,
         vms: nasty_vm::VmService::new(),
         apps: nasty_apps::AppsService::new(),
+        backups: nasty_backup::BackupService::new(),
         firmware: nasty_system::firmware::FirmwareService::new(),
         alerts_cache: tokio::sync::Mutex::new(None),
     });

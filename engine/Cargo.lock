@@ -1064,6 +1064,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nasty-backup"
+version = "0.0.4"
+dependencies = [
+ "chrono",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nasty-common"
 version = "0.0.4"
 dependencies = [
@@ -1086,6 +1100,7 @@ dependencies = [
  "bollard",
  "futures-util",
  "nasty-apps",
+ "nasty-backup",
  "nasty-common",
  "nasty-sharing",
  "nasty-snapshot",

@@ -359,6 +359,16 @@ in {
          # → type 'debug' for perf profiling and kernel oops symbolization
          # → type 'benchmark' for fio storage tests
 
+       rustic — backup (restic-compatible, deduplicating, encrypted)
+         rustic -r /path/to/repo -p <password> init              initialize a new backup repo
+         rustic -r /path/to/repo -p <password> backup /fs/first  back up a filesystem
+         rustic -r /path/to/repo -p <password> snapshots         list snapshots
+         rustic -r /path/to/repo -p <password> restore <id> /restore/target  restore a snapshot
+         rustic -r /path/to/repo -p <password> forget --prune \
+           --keep-daily 7 --keep-weekly 4 --keep-monthly 6       prune old snapshots
+         rustic -r /path/to/repo -p <password> check             verify repo integrity
+         # Managed via WebUI → Backups, or configure via API
+
     '';
 
     environment.etc."nasty/debug-cheatsheet".text = ''
@@ -539,6 +549,7 @@ in {
       docker-compose    # Docker Compose for multi-container apps
       lego              # ACME client for Let's Encrypt certificates
       croc              # peer-to-peer file transfer for sending debug reports
+      rustic             # deduplicating encrypted backups (restic-compatible)
       (pkgs.rustPlatform.buildRustPackage {
         pname = "nasty-top";
         version = "0.0.4";
