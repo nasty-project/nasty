@@ -132,11 +132,12 @@
 </script>
 
 <div class="space-y-4">
-	<div class="flex items-center justify-between">
-		<div>
-			<h1 class="text-2xl font-bold">Backups</h1>
-			<p class="text-sm text-muted-foreground mt-0.5">Deduplicating, encrypted backups with retention policies.</p>
-		</div>
+	<div>
+		<h1 class="text-2xl font-bold">Backups</h1>
+		<p class="text-sm text-muted-foreground mt-0.5">Deduplicating, encrypted backups with retention policies.</p>
+	</div>
+
+	<div class="mb-4 flex items-center gap-3">
 		<Button size="sm" onclick={() => showCreate = !showCreate}>
 			{showCreate ? 'Cancel' : 'Create Backup'}
 		</Button>
