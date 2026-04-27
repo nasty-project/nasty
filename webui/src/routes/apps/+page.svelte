@@ -122,6 +122,14 @@
 			.replace(/\$[A-Z_]+/g, ''); // strip any remaining unresolved vars
 	}
 
+	function highlightJson(json: string): string {
+		return json.replace(/("(?:\\.|[^"\\])*")\s*:/g, '<span class="text-purple-400">$1</span>:')
+			.replace(/:\s*("(?:\\.|[^"\\])*")/g, ': <span class="text-green-400">$1</span>')
+			.replace(/:\s*(true|false)/g, ': <span class="text-amber-400">$1</span>')
+			.replace(/:\s*(\d+\.?\d*)/g, ': <span class="text-blue-400">$1</span>')
+			.replace(/:\s*(null)/g, ': <span class="text-red-400">$1</span>');
+	}
+
 	function parseDockerRun(cmd: string) {
 		// Normalize: join backslash-continuations, trim
 		const line = cmd.replace(/\\\s*\n/g, ' ').replace(/^\s*(sudo\s+)?docker\s+run\s*/, '').trim();
@@ -1127,7 +1135,7 @@
 					Close
 				</Button>
 			</div>
-			<pre class="flex-1 p-4 overflow-auto text-xs text-cyan-400 font-mono whitespace-pre-wrap">{inspectData}</pre>
+			<pre class="flex-1 p-4 overflow-auto text-xs font-mono whitespace-pre-wrap">{@html highlightJson(inspectData ?? '')}</pre>
 		</div>
 	</div>
 {/if}
