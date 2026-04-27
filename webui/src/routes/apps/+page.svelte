@@ -764,8 +764,14 @@
 					<CardContent class="py-4">
 						<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Maintenance</h4>
 						<div class="flex flex-col gap-2">
-							<Button size="sm" variant="outline" onclick={pruneDocker}>Cleanup Unused Images</Button>
-							<Button size="sm" variant="destructive" onclick={disableApps}>Disable Apps</Button>
+							{#if status?.running}
+								<Button size="sm" variant="outline" onclick={pruneDocker}>Cleanup Unused Images</Button>
+								<Button size="sm" variant="destructive" onclick={disableApps}>Disable Apps</Button>
+							{:else}
+								<Button size="sm" onclick={enableApps} disabled={enabling}>
+									{enabling ? 'Starting...' : 'Enable Apps'}
+								</Button>
+							{/if}
 						</div>
 					</CardContent>
 				</Card>
@@ -984,7 +990,10 @@
 		<p class="text-muted-foreground">No apps installed.</p>
 	{:else if apps.length > 0 && !(status?.enabled && status?.running)}
 		<div class="mb-3 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
-			Docker runtime is not running. Apps are shown but cannot be managed until the runtime is started.
+			<span class="flex-1">Docker runtime is not running. Apps are shown but cannot be managed until the runtime is started.</span>
+			<Button size="xs" onclick={enableApps} disabled={enabling}>
+				{enabling ? 'Starting...' : 'Enable Apps'}
+			</Button>
 		</div>
 	{/if}
 
