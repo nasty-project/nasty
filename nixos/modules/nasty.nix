@@ -543,6 +543,7 @@ in {
       tree              # directory structure visualization
       eza               # modern ls replacement (colors, git, tree)
       strace            # system call tracing for debugging
+      trace-cmd         # ftrace frontend for kernel tracing
       dig               # DNS debugging
       nano              # quick file editing
       qemu              # QEMU/KVM for virtual machines
