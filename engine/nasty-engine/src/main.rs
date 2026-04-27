@@ -157,26 +157,40 @@ async fn main() -> anyhow::Result<()> {
         state.firewall.init(&proto_states).await;
     }
 
-    // Ensure ssh.nix exists for existing installations (new installs create it)
-    if !std::path::Path::new("/etc/nixos/ssh.nix").exists() {
-        let _ = tokio::fs::write("/etc/nixos/ssh.nix",
-            "# Managed by NASty — edit via WebUI Settings > SSH Access\n{ ... }:\n{\n  services.openssh.settings.PasswordAuthentication = true;\n}\n"
+    // Determine desired SSH password auth state from persisted config
+    let ssh_password_auth = if let Ok(content) = tokio::fs::read_to_string("/var/lib/nasty/ssh.json").await {
+        serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .and_then(|v| v.get("password_auth").and_then(|v| v.as_bool()))
+            .unwrap_or(true)
+    } else if let Ok(nix) = tokio::fs::read_to_string("/etc/nixos/ssh.nix").await {
+        !nix.contains("false")
+    } else {
+        true
+    };
+
+    // Ensure ssh.nix exists and reflects the correct state
+    {
+        let val = if ssh_password_auth { "true" } else { "false" };
+        let nix = format!(
+            "# Managed by NASty — edit via WebUI Settings > SSH Access\n{{ ... }}:\n{{\n  services.openssh.settings.PasswordAuthentication = {val};\n}}\n"
+        );
+        let _ = tokio::fs::write("/etc/nixos/ssh.nix", &nix).await;
+        // Also ensure ssh.json exists
+        let _ = tokio::fs::write("/var/lib/nasty/ssh.json",
+            serde_json::json!({ "password_auth": ssh_password_auth }).to_string()
         ).await;
     }
 
-    // Re-apply SSH password auth setting from persisted state (survives reboot before rebuild)
-    if let Ok(content) = tokio::fs::read_to_string("/var/lib/nasty/ssh.json").await {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(false) = v.get("password_auth").and_then(|v| v.as_bool()) {
-                let _ = tokio::process::Command::new("sed")
-                    .args(["-i", "s/^.*PasswordAuthentication.*/PasswordAuthentication no/", "/etc/ssh/sshd_config"])
-                    .status().await;
-                let _ = tokio::process::Command::new("systemctl")
-                    .args(["reload", "sshd"])
-                    .status().await;
-                info!("SSH password authentication disabled (restored from config)");
-            }
-        }
+    // Apply SSH setting (handles reboot before rebuild)
+    if !ssh_password_auth {
+        let _ = tokio::process::Command::new("sed")
+            .args(["-i", "s/^.*PasswordAuthentication.*/PasswordAuthentication no/", "/etc/ssh/sshd_config"])
+            .status().await;
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["reload", "sshd"])
+            .status().await;
+        info!("SSH password authentication disabled (restored from config)");
     }
 
     state.nvmeof.restore().await;
