@@ -384,6 +384,13 @@ in {
          perf record -e 'bcachefs:*' -- sleep 5 && perf script    capture bcachefs tracepoints
          perf record -g -p $(pgrep -f bcachefs) && perf report    call-graph profile of bcachefs process
 
+       trace-cmd — kernel ftrace frontend
+         trace-cmd list -e 'bcachefs:*'                            list available bcachefs tracepoints
+         trace-cmd record -e 'bcachefs:*' sleep 5                  capture 5s of bcachefs events
+         trace-cmd report                                          show captured trace (reads trace.dat)
+         trace-cmd record -e block:block_rq_complete sleep 5       trace block I/O completions
+         trace-cmd record -p function_graph -g bch2_write sleep 3  function call graph for bch2_write
+
        kernel oops symbolization (bcachefs crash)
          # From an oops line like: RIP: 0010:bch2_btree_node_get+0x8d/0x5f0 [bcachefs]
          faddr2line bch2_btree_node_get+0x8d/0x5f0
