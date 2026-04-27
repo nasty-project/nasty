@@ -83,7 +83,7 @@
     enable = true;
     settings = {
       PermitRootLogin = "yes";
-      PasswordAuthentication = true;
+      # PasswordAuthentication is managed by /etc/nixos/ssh.nix (engine-controlled)
     };
   };
 

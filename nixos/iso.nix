@@ -343,6 +343,15 @@ in
           > /mnt/var/lib/nasty/networking.json
       fi
 
+      # Default SSH config (password auth enabled, engine can change later)
+      printf '%s\n' \
+        '# Managed by NASty — edit via WebUI Settings > SSH Access' \
+        '{ ... }:' \
+        '{' \
+        '  services.openssh.settings.PasswordAuthentication = true;' \
+        '}' \
+        > /mnt/etc/nixos/ssh.nix
+
       echo "==> Recording installed NASty version..."
       NASTY_REF=$(jq -r '.nodes["nasty"].original.ref // empty' /mnt/etc/nixos/flake.lock 2>/dev/null || true)
       NASTY_REV=$(jq -r '.nodes["nasty"].locked.rev // empty' /mnt/etc/nixos/flake.lock 2>/dev/null || true)

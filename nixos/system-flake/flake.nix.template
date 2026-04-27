@@ -47,6 +47,7 @@
             # Machine-local overlay files live directly under /etc/nixos.
             ./hardware-configuration.nix
             ./networking.nix
+            ./ssh.nix
           ];
         };
     in {
