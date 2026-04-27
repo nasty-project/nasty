@@ -174,7 +174,6 @@
 		const tick = setInterval(() => { now = new Date(); }, 1000);
 		const rebootPoll = setInterval(checkRebootRequired, 30_000);
 		const authPoll = setInterval(checkAuth, 60_000);
-		checkSshStatus();
 		return () => {
 			getClient().offReconnect(onReconnect);
 			getClient().offDisconnect(onDisconnect);
@@ -193,6 +192,7 @@
 			authInfo = await client.connect(token);
 			connected = true;
 			showLogin = false;
+			checkSshStatus();
 			// Capture engine commit on first connect for reconnect version check
 			if (!initialCommit) {
 				try {
