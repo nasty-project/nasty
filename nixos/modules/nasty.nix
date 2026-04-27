@@ -148,6 +148,7 @@ in {
     iscsi.enable = mkEnableOption "iSCSI target (LIO) for NASty" // { default = true; };
     nvmeof.enable = mkEnableOption "NVMe-oF target for NASty" // { default = true; };
     nut.enable = mkEnableOption "NUT (Network UPS Tools) for NASty";
+    rest-server.enable = mkEnableOption "restic REST server for receiving backups from other NASties";
 
     # VPN — not enabled by default (requires Tailscale auth key)
     tailscale.enable = mkEnableOption "Tailscale VPN for NASty";
@@ -550,6 +551,7 @@ in {
       lego              # ACME client for Let's Encrypt certificates
       croc              # peer-to-peer file transfer for sending debug reports
       rustic             # deduplicating encrypted backups (restic-compatible)
+      restic-rest-server # REST API server for receiving backups from other machines
       (pkgs.rustPlatform.buildRustPackage {
         pname = "nasty-top";
         version = "0.0.4";
@@ -1039,6 +1041,21 @@ in {
         Environment = "NUT_CONFPATH=/var/lib/nasty/nut";
       };
       wantedBy = lib.mkForce [];
+    };
+
+    # ── Backup REST server (receives backups from other NASties) ─
+    systemd.services.nasty-rest-server = mkIf cfg.rest-server.enable {
+      description = "restic REST server for NASty backups";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = "${pkgs.restic-rest-server}/bin/rest-server --listen :8000 --path /var/lib/nasty/rest-server --no-auth";
+        StateDirectory = "nasty/rest-server";
+        Restart = "on-failure";
+        RestartSec = "5s";
+      };
+      wantedBy = lib.mkForce [];  # engine starts on demand
     };
 
     # ── WebUI via nginx ────────────────────────────────────────

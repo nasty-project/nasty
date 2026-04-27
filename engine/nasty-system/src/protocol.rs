@@ -21,6 +21,7 @@ pub enum Protocol {
     Ssh,
     Avahi,
     Smart,
+    RestServer,
 }
 
 impl Protocol {
@@ -33,10 +34,11 @@ impl Protocol {
         Protocol::Ssh,
         Protocol::Avahi,
         Protocol::Smart,
+        Protocol::RestServer,
     ];
 
     pub fn is_system_service(&self) -> bool {
-        matches!(self, Protocol::Nut | Protocol::Ssh | Protocol::Avahi | Protocol::Smart)
+        matches!(self, Protocol::Nut | Protocol::Ssh | Protocol::Avahi | Protocol::Smart | Protocol::RestServer)
     }
 
     pub fn name(&self) -> &'static str {
@@ -49,6 +51,7 @@ impl Protocol {
             Protocol::Ssh => "ssh",
             Protocol::Avahi => "avahi",
             Protocol::Smart => "smart",
+            Protocol::RestServer => "rest-server",
         }
     }
 
@@ -62,6 +65,7 @@ impl Protocol {
             Protocol::Ssh => "SSH",
             Protocol::Avahi => "mDNS (Avahi)",
             Protocol::Smart => "SMART",
+            Protocol::RestServer => "Backup Server",
         }
     }
 
@@ -76,6 +80,7 @@ impl Protocol {
             Protocol::Ssh => &["sshd.service"],
             Protocol::Avahi => &["avahi-daemon.service"],
             Protocol::Smart => &["smartd.service"],
+            Protocol::RestServer => &["nasty-rest-server.service"],
         }
     }
 
@@ -89,6 +94,7 @@ impl Protocol {
             "ssh" => Some(Protocol::Ssh),
             "avahi" => Some(Protocol::Avahi),
             "smart" => Some(Protocol::Smart),
+            "rest-server" => Some(Protocol::RestServer),
             _ => None,
         }
     }
@@ -126,6 +132,8 @@ struct ProtocolState {
     avahi: bool,
     #[serde(default = "default_true")]
     smart: bool,
+    #[serde(default)]
+    rest_server: bool,
 }
 
 fn default_true() -> bool { true }
@@ -141,6 +149,7 @@ impl Default for ProtocolState {
             ssh: true,
             avahi: true,
             smart: true,
+            rest_server: false,
         }
     }
 }
@@ -156,6 +165,7 @@ impl ProtocolState {
             Protocol::Ssh => self.ssh,
             Protocol::Avahi => self.avahi,
             Protocol::Smart => self.smart,
+            Protocol::RestServer => self.rest_server,
         }
     }
 
@@ -169,6 +179,7 @@ impl ProtocolState {
             Protocol::Ssh => self.ssh = enabled,
             Protocol::Avahi => self.avahi = enabled,
             Protocol::Smart => self.smart = enabled,
+            Protocol::RestServer => self.rest_server = enabled,
         }
     }
 }
@@ -330,6 +341,7 @@ async fn is_protocol_running(proto: Protocol) -> bool {
         Protocol::Ssh => systemctl_is_active("sshd.service").await,
         Protocol::Avahi => systemctl_is_active("avahi-daemon.service").await,
         Protocol::Smart => systemctl_is_active("smartd.service").await,
+        Protocol::RestServer => systemctl_is_active("nasty-rest-server.service").await,
     }
 }
 

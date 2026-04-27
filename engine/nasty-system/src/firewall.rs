@@ -106,6 +106,7 @@ pub fn ports_for_protocol(proto: Protocol) -> Vec<PortSpec> {
         Protocol::Ssh => vec![tcp(22)],
         Protocol::Avahi => vec![udp(5353)],
         Protocol::Smart => vec![], // no network port
+        Protocol::RestServer => vec![tcp(8000)],
     }
 }
 
