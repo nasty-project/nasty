@@ -77,6 +77,7 @@
 	// SSH password auth warning
 	let sshPasswordAuth = $state(false);
 	async function checkSshStatus() {
+		if (!connected) return;
 		try {
 			const result = await getClient().call<{ password_auth: boolean; keys: string[] }>('system.ssh.status');
 			sshPasswordAuth = result.password_auth;
@@ -174,10 +175,12 @@
 		const tick = setInterval(() => { now = new Date(); }, 1000);
 		const rebootPoll = setInterval(checkRebootRequired, 30_000);
 		const authPoll = setInterval(checkAuth, 60_000);
+		const sshPoll = setInterval(checkSshStatus, 30_000);
 		return () => {
 			getClient().offReconnect(onReconnect);
 			getClient().offDisconnect(onDisconnect);
 			getClient().disconnect();
+			clearInterval(sshPoll);
 			clearInterval(tick);
 			clearInterval(rebootPoll);
 			clearInterval(authPoll);
