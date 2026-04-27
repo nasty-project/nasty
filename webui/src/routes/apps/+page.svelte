@@ -1015,7 +1015,7 @@
 								{/if}
 							</div>
 						</td>
-						<td class="p-3 text-xs text-muted-foreground font-mono max-w-[200px] truncate">{app.kind === 'compose' && app.containers.length > 1 ? `${app.containers.length} images` : app.image}</td>
+						<td class="p-3 text-xs text-muted-foreground font-mono max-w-[200px] truncate">{app.kind === 'compose' && (app.containers?.length ?? 0) > 1 ? `${app.containers?.length} images` : app.image}</td>
 						<td class="p-3 text-xs font-mono text-muted-foreground">
 							{#if app.ports && app.ports.length > 0}
 								{app.ports.map(p => `${p.host_port}:${p.container_port}`).join(', ')}
