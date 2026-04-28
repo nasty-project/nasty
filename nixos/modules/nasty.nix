@@ -910,6 +910,7 @@ in {
         rsync                        # config backup to bcachefs
         procps                       # sysctl (vm.dirty_* tuning)
         nftables                     # nft (dynamic firewall rules)
+        rustic                       # rustic (backup engine)
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
