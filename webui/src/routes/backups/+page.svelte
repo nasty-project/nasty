@@ -3,6 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
+	import { formatBytes } from '$lib/format';
 	import type { BackupProfile, BackupSnapshot, BackupStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -42,10 +43,18 @@
 		loading = false;
 	});
 
+	let snapshotCounts: Record<string, number> = $state({});
+
 	async function refresh() {
 		try {
 			profiles = await client.call<BackupProfile[]>('backup.profile.list');
 			backupStatus = await client.call<BackupStatus>('backup.status');
+			// Fetch snapshot counts for initialized repos
+			for (const p of profiles.filter(p => p.repo_initialized)) {
+				client.call<BackupSnapshot[]>('backup.snapshots', { id: p.id })
+					.then(snaps => { snapshotCounts[p.id] = snaps.length; })
+					.catch(() => {});
+			}
 		} catch { /* ignore */ }
 	}
 
@@ -257,6 +266,17 @@
 								</div>
 								<div class="mt-1 text-xs text-muted-foreground font-mono">{targetSummary(profile.target)}</div>
 								<div class="mt-0.5 text-xs text-muted-foreground">{profile.sources.join(', ')}</div>
+								<div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+									{#if snapshotCounts[profile.id] != null}
+										<span>{snapshotCounts[profile.id]} snapshot{snapshotCounts[profile.id] !== 1 ? 's' : ''}</span>
+									{/if}
+									{#if profile.last_run?.bytes_added != null}
+										<span>Last added: {formatBytes(profile.last_run.bytes_added)}</span>
+									{/if}
+									{#if profile.last_run?.files_new != null || profile.last_run?.files_changed != null}
+										<span>{profile.last_run.files_new ?? 0} new, {profile.last_run.files_changed ?? 0} changed</span>
+									{/if}
+								</div>
 								{#if profile.last_run}
 									<div class="mt-1 text-xs {profile.last_run.success ? 'text-green-400' : 'text-red-400'}">
 										Last: {profile.last_run.success ? 'Success' : 'Failed'} — {profile.last_run.timestamp.slice(0, 19).replace('T', ' ')} ({profile.last_run.duration_secs}s)
