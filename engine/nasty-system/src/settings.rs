@@ -394,7 +394,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             // (Cloudflare) return NXDOMAIN for _acme-challenge when the
             // parent name has no A record.
             if settings.tls_dns_disable_propagation_check {
-                args.push("--dns.disable-cp".to_string());
+                args.push("--dns.propagation-disable-ans".to_string());
             }
         } else {
             return Err("DNS challenge selected but no provider configured".to_string());
