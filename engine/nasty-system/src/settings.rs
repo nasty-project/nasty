@@ -390,10 +390,13 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
                 .unwrap_or("1.1.1.1:53");
             args.push("--dns.resolvers".to_string());
             args.push(resolver.to_string());
-            // Optionally disable authoritative NS check — some providers
-            // (Cloudflare) return NXDOMAIN for _acme-challenge when the
-            // parent name has no A record.
+            // Use recursive-only propagation check by default — avoids issues
+            // where the authoritative NS returns NXDOMAIN (e.g. Cloudflare
+            // when no A record exists yet). The recursive resolver (1.1.1.1)
+            // will still wait for the TXT record to propagate properly.
+            args.push("--dns.propagation-rns".to_string());
             if settings.tls_dns_disable_propagation_check {
+                // User explicitly wants to skip all propagation checks
                 args.push("--dns.propagation-disable-ans".to_string());
             }
         } else {

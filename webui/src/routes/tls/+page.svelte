@@ -225,10 +225,10 @@
 
 				<label class="flex items-center gap-2 text-sm cursor-pointer mb-4">
 					<input type="checkbox" bind:checked={tlsDnsDisablePropagationCheck} onchange={() => tlsChanged = true} class="rounded border-input" />
-					<span>Skip authoritative NS check</span>
+					<span>Skip all propagation checks</span>
 				</label>
 				<p class="mt-[-0.5rem] mb-4 ml-6 text-xs text-muted-foreground">
-					Enable if the parent domain has no A record and the authoritative nameserver returns NXDOMAIN for the ACME challenge TXT record.
+					Submits the challenge immediately without waiting for DNS propagation. Only use if propagation checks keep timing out despite the record being created.
 				</p>
 			{/if}
 
