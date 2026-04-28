@@ -83,8 +83,11 @@
     enable = true;
     settings = {
       PermitRootLogin = "yes";
-      # PasswordAuthentication is managed by /etc/nixos/ssh.nix (engine-controlled)
+      PasswordAuthentication = false; # default secure; engine overrides via Include
     };
+    extraConfig = ''
+      Include /var/lib/nasty/sshd_override.conf
+    '';
   };
 
   # SSH port is managed by the engine's dynamic nftables firewall.

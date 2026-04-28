@@ -804,6 +804,7 @@ in {
       "d /var/lib/nasty/shares/nvmeof 0750 root root -"
       "d /var/lib/nasty/vms 0750 root root -"
       "f /var/lib/nasty/apps-proxy.conf 0644 root root - # empty = no app proxies"
+      "C /var/lib/nasty/sshd_override.conf 0644 root root - ${pkgs.writeText "sshd-default" "PasswordAuthentication yes\n"}"
       "d ${cfg.storage.mountBase} 0755 root root -"
       "d /etc/exports.d 0755 root root -"
       "d /etc/target 0750 root root -"

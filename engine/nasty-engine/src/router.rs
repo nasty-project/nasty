@@ -447,13 +447,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             ok(req, available)
         }
         "system.ssh.status" => {
-            let password_auth = std::fs::read_to_string("/etc/ssh/sshd_config")
+            // Read from the engine-managed override file (source of truth)
+            let password_auth = std::fs::read_to_string("/var/lib/nasty/sshd_override.conf")
                 .unwrap_or_default()
-                .lines()
-                .any(|l| {
-                    let l = l.trim();
-                    l == "PasswordAuthentication yes" || (!l.starts_with('#') && l.contains("PasswordAuthentication") && l.contains("yes"))
-                });
+                .contains("yes");
             let keys = std::fs::read_to_string("/root/.ssh/authorized_keys")
                 .unwrap_or_default()
                 .lines()
@@ -516,20 +513,15 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     return err(req, "Cannot disable password authentication without at least one SSH key — you would be locked out");
                 }
             }
-            // 1. Write ssh.nix — single source of truth, survives nixos-rebuild
-            let nix = format!(
-                "# Managed by NASty — edit via WebUI Settings > SSH Access\n\
-                 {{ ... }}:\n{{\n  services.openssh.settings.PasswordAuthentication = {};\n}}\n",
-                if enabled { "true" } else { "false" }
-            );
-            if let Err(e) = tokio::fs::write("/etc/nixos/ssh.nix", &nix).await {
-                tracing::warn!("Failed to write ssh.nix: {e}");
-            }
-            // 2. Apply immediately via sed + reload (takes effect before next rebuild)
+            // Write sshd override file and reload — takes effect immediately
+            // and survives reboots + rebuilds (NixOS sshd_config includes this file)
             let val = if enabled { "yes" } else { "no" };
-            let _ = tokio::process::Command::new("sed")
-                .args(["-i", &format!("s/^.*PasswordAuthentication.*/PasswordAuthentication {val}/"), "/etc/ssh/sshd_config"])
-                .status().await;
+            if let Err(e) = tokio::fs::write(
+                "/var/lib/nasty/sshd_override.conf",
+                format!("PasswordAuthentication {val}\n"),
+            ).await {
+                tracing::warn!("Failed to write sshd override: {e}");
+            }
             let _ = tokio::process::Command::new("systemctl")
                 .args(["reload", "sshd"])
                 .status().await;
