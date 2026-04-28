@@ -85,7 +85,7 @@
 	<p class="text-sm text-muted-foreground mt-0.5">Manage HTTPS certificates for the NASty web interface.</p>
 </div>
 
-<div class="mt-6 max-w-xl">
+<div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
 	<section class="rounded-lg border border-border p-5">
 		<p class="mb-5 text-sm text-muted-foreground">
 			NASty uses a self-signed certificate by default. Enable Let's Encrypt for a trusted certificate
@@ -109,29 +109,6 @@
 				</label>
 			{/if}
 		</div>
-
-		{#if acmeStatus && acmeStatus.state !== 'idle'}
-			<div class="mb-4 rounded border border-border p-3 text-xs">
-				<div class="flex items-center gap-2">
-					{#if acmeStatus.state === 'running'}
-						<span class="inline-block h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span>
-						<span class="text-yellow-500 font-medium">Provisioning...</span>
-					{:else if acmeStatus.state === 'success'}
-						<span class="inline-block h-2 w-2 rounded-full bg-green-500"></span>
-						<span class="text-green-500 font-medium">Certificate active</span>
-					{:else if acmeStatus.state === 'error'}
-						<span class="inline-block h-2 w-2 rounded-full bg-red-500"></span>
-						<span class="text-red-500 font-medium">Error</span>
-					{/if}
-					{#if acmeStatus.domain}
-						<span class="text-muted-foreground">({acmeStatus.domain})</span>
-					{/if}
-				</div>
-				{#if acmeStatus.message}
-					<p class="mt-1 text-muted-foreground">{acmeStatus.message}</p>
-				{/if}
-			</div>
-		{/if}
 
 		{#if tlsAcmeEnabled}
 			<div class="mb-4">
@@ -240,5 +217,53 @@
 		<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged}>
 			{savingTls ? 'Saving…' : 'Save'}
 		</Button>
+	</section>
+
+	<!-- Status panel (right column) -->
+	<section class="rounded-lg border border-border p-5 self-start">
+		<h3 class="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Certificate Status</h3>
+		{#if !acmeStatus || acmeStatus.state === 'idle'}
+			<div class="flex items-center gap-2 text-sm">
+				<span class="h-2 w-2 rounded-full bg-muted-foreground"></span>
+				<span class="text-muted-foreground">Self-signed (default)</span>
+			</div>
+			<p class="mt-2 text-xs text-muted-foreground">Browsers will show a security warning. Enable Let's Encrypt for a trusted certificate.</p>
+		{:else if acmeStatus.state === 'running'}
+			<div class="flex items-center gap-2 text-sm">
+				<span class="h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span>
+				<span class="text-yellow-500 font-medium">Provisioning</span>
+			</div>
+			{#if acmeStatus.domain}
+				<p class="mt-1 text-xs text-muted-foreground">{acmeStatus.domain}</p>
+			{/if}
+			<div class="mt-3 rounded bg-muted/30 p-3">
+				<p class="text-xs text-muted-foreground whitespace-pre-wrap break-words">{acmeStatus.message}</p>
+			</div>
+			<div class="mt-3 h-1 overflow-hidden rounded-full bg-secondary">
+				<div class="h-full w-1/3 bg-yellow-500 animate-[indeterminate_1.5s_ease-in-out_infinite]"></div>
+			</div>
+		{:else if acmeStatus.state === 'success'}
+			<div class="flex items-center gap-2 text-sm">
+				<span class="h-2 w-2 rounded-full bg-green-500"></span>
+				<span class="text-green-500 font-medium">Certificate active</span>
+			</div>
+			{#if acmeStatus.domain}
+				<p class="mt-1 text-xs font-mono">{acmeStatus.domain}</p>
+			{/if}
+			{#if acmeStatus.message}
+				<p class="mt-2 text-xs text-muted-foreground">{acmeStatus.message}</p>
+			{/if}
+		{:else if acmeStatus.state === 'error'}
+			<div class="flex items-center gap-2 text-sm">
+				<span class="h-2 w-2 rounded-full bg-red-500"></span>
+				<span class="text-red-500 font-medium">Error</span>
+			</div>
+			{#if acmeStatus.domain}
+				<p class="mt-1 text-xs font-mono">{acmeStatus.domain}</p>
+			{/if}
+			{#if acmeStatus.message}
+				<pre class="mt-2 max-h-48 overflow-auto rounded bg-red-950/30 p-3 text-xs text-red-300 whitespace-pre-wrap break-words">{acmeStatus.message}</pre>
+			{/if}
+		{/if}
 	</section>
 </div>

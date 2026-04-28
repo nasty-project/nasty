@@ -383,11 +383,13 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         set_acme_status("running", &format!("Running ACME {action} — waiting for Let's Encrypt verification..."), Some(domain));
     }
 
-    // Run lego — ensure nginx is ALWAYS restarted even on failure
+    // Run lego — stream stderr to status updates, ensure nginx is ALWAYS restarted
     let lego_result = async {
         let mut cmd = tokio::process::Command::new("lego");
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         cmd.args(&arg_refs);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
         if settings.tls_challenge_type == "dns" {
             if let Some(ref creds) = settings.tls_dns_credentials {
@@ -399,21 +401,54 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             }
         }
 
-        cmd.output().await
-            .map_err(|e| format!("failed to run lego: {e}"))
+        let mut child = cmd.spawn()
+            .map_err(|e| format!("failed to run lego: {e}"))?;
+
+        // Stream stderr lines to ACME status so the UI shows real-time progress
+        let domain_owned = domain.to_string();
+        let stderr_handle = if let Some(stderr) = child.stderr.take() {
+            let handle = tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stderr).lines();
+                let mut collected = Vec::new();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let line = line.trim().to_string();
+                    if !line.is_empty() {
+                        set_acme_status("running", &line, Some(&domain_owned));
+                        collected.push(line);
+                    }
+                }
+                collected
+            });
+            Some(handle)
+        } else {
+            None
+        };
+
+        let status = child.wait().await
+            .map_err(|e| format!("lego wait: {e}"))?;
+
+        let stderr_lines = if let Some(h) = stderr_handle {
+            h.await.unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        Ok::<_, String>((status, stderr_lines))
     }.await;
 
     // ALWAYS restart nginx, regardless of lego success/failure
     if need_nginx_stop {
+        set_acme_status("running", "Restarting web server...", Some(domain));
         let _ = tokio::process::Command::new("systemctl")
             .args(["start", "nginx"])
             .output().await;
     }
 
-    let output = lego_result?;
+    let (exit_status, stderr_lines) = lego_result?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !exit_status.success() {
+        let stderr = stderr_lines.join("\n");
         let msg = format!("lego {action} failed: {stderr}");
         set_acme_status("error", &msg, Some(domain));
         return Err(msg);
