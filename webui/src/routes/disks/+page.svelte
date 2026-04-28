@@ -98,6 +98,8 @@
 		switch (cls) {
 			case 'nvme': return 'bg-purple-950 text-purple-400';
 			case 'ssd': return 'bg-blue-950 text-blue-400';
+			case 'mmc': return 'bg-amber-950 text-amber-400';
+			case 'hdd': return 'bg-emerald-950 text-emerald-400';
 			default: return 'bg-secondary text-muted-foreground';
 		}
 	}

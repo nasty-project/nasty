@@ -164,7 +164,7 @@
 		const sel = selectedDeviceObjects();
 		const hasNvme = sel.some(d => d.device_class === 'nvme');
 		const hasSsd  = sel.some(d => d.device_class === 'ssd');
-		const hasHdd  = sel.some(d => d.device_class === 'hdd');
+		const hasHdd  = sel.some(d => d.device_class === 'hdd' || d.device_class === 'mmc');
 		const hasFast = hasNvme || hasSsd;
 		const hasSlow = hasHdd;
 		const has3Tiers = hasNvme && (hasSsd || hasHdd);
@@ -175,7 +175,7 @@
 
 		// Write-cache labels: fast = nvme/ssd → "fast", hdd → "slow"
 		const wcLabels: Record<string, string> = {};
-		sel.forEach(d => { wcLabels[d.path] = d.device_class === 'hdd' ? 'slow' : 'fast'; });
+		sel.forEach(d => { wcLabels[d.path] = (d.device_class === 'hdd' || d.device_class === 'mmc') ? 'slow' : 'fast'; });
 
 		// Full-tier labels by device class
 		const ftLabels: Record<string, string> = {};
@@ -662,7 +662,8 @@
 		switch (cls) {
 			case 'nvme': return 'bg-violet-950 text-violet-300';
 			case 'ssd':  return 'bg-blue-950 text-blue-300';
-			case 'hdd':  return 'bg-amber-950 text-amber-300';
+			case 'mmc':  return 'bg-amber-950 text-amber-300';
+			case 'hdd':  return 'bg-emerald-950 text-emerald-300';
 			default:     return 'bg-secondary text-muted-foreground';
 		}
 	}

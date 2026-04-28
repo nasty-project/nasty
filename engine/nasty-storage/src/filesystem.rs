@@ -1109,6 +1109,9 @@ impl FilesystemService {
                 if name.starts_with("nvme") {
                     return (false, "nvme".to_string());
                 }
+                if name.starts_with("mmcblk") {
+                    return (false, "mmc".to_string());
+                }
                 if rota {
                     (true, "hdd".to_string())
                 } else {
