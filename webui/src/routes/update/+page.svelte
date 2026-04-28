@@ -110,9 +110,13 @@
 		versionRows.some((row) => row.url.trim() !== row.initialUrl || row.update)
 	);
 
+	// Cache dev build status so it doesn't flip when the banner is loading/switching
+	let cachedIsDevBuild: boolean | null = $state(null);
 	const isDevBuild = $derived.by(() => {
-		if (taggedReleaseBanner.kind !== 'ready') return false;
-		return !isOfficialTaggedReleaseUrl(taggedReleaseBanner.current_url);
+		if (taggedReleaseBanner.kind === 'ready') {
+			cachedIsDevBuild = !isOfficialTaggedReleaseUrl(taggedReleaseBanner.current_url);
+		}
+		return cachedIsDevBuild ?? false;
 	});
 
 	const upstreamBusy = $derived.by(() =>
@@ -368,8 +372,6 @@
 		startingDevUpgrade = true;
 		logCollapsed = false;
 		status = { state: 'running', log: '', reboot_required: false, webui_changed: false };
-		writeVersionPageAction('version-switch');
-		taggedReleaseBanner = { kind: 'switching' };
 		const result = await withToast(
 			() => client.call('system.version.switch', {
 				inputs: versionRows.map((row) => ({
@@ -383,8 +385,7 @@
 		if (result !== undefined) {
 			startPolling();
 		} else {
-			writeVersionPageAction(null);
-			status = null;
+			status = null; // RPC failed — clear running state, keep everything else
 		}
 		startingDevUpgrade = false;
 	}
