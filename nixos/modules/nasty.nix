@@ -391,6 +391,7 @@ in {
          trace-cmd record -e block:block_rq_complete sleep 5       trace block I/O completions
          trace-cmd record -p function_graph -g bch2_write sleep 3  function call graph for bch2_write
          trace-cmd stream -e 'bcachefs:*' | tee logfile.txt      live-stream bcachefs events to terminal + file
+         trace-cmd stream -e bcachefs:reconcile_data             watch reconcile progress in real time
 
        kernel oops symbolization (bcachefs crash)
          # From an oops line like: RIP: 0010:bch2_btree_node_get+0x8d/0x5f0 [bcachefs]
