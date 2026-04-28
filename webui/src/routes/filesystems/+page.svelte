@@ -1390,59 +1390,59 @@
 
 				{#if expandedFs === fs.name}
 					<div class="mt-4 border-t border-border pt-4">
-						<div class="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs">
-							<span class="text-muted-foreground">Replicas</span>
-							<span>{fs.options.data_replicas ?? 1}</span>
-							<span class="text-muted-foreground">Checksum</span>
-							<span>{fs.options.data_checksum ?? '—'}</span>
-							<span class="text-muted-foreground">Compression</span>
-							<span>{fs.options.compression ?? 'none'}{#if fs.options.background_compression} / bg: {fs.options.background_compression}{/if}</span>
-							<span class="text-muted-foreground">Erasure Code</span>
-							<span>{fs.options.erasure_code ? 'Enabled' : 'No'}</span>
-							<span class="text-muted-foreground">Encrypted</span>
-							<span>
-								{#if fs.options.encrypted}
-									Yes
-									{#if fs.options.locked}
-										<Badge variant="destructive" class="ml-1 text-[0.6rem]">Locked</Badge>
+						<div class="mb-4 grid grid-cols-1 gap-6 lg:grid-cols-2">
+							<!-- Properties -->
+							<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs self-start">
+								<span class="text-muted-foreground">Replicas</span>
+								<span>{fs.options.data_replicas ?? 1}</span>
+								<span class="text-muted-foreground">Checksum</span>
+								<span>{fs.options.data_checksum ?? '—'}</span>
+								<span class="text-muted-foreground">Compression</span>
+								<span>{fs.options.compression ?? 'none'}{#if fs.options.background_compression} / bg: {fs.options.background_compression}{/if}</span>
+								<span class="text-muted-foreground">Erasure Code</span>
+								<span>{fs.options.erasure_code ? 'Enabled' : 'No'}</span>
+								<span class="text-muted-foreground">Encrypted</span>
+								<span>
+									{#if fs.options.encrypted}
+										Yes
+										{#if fs.options.locked}
+											<Badge variant="destructive" class="ml-1 text-[0.6rem]">Locked</Badge>
+										{:else}
+											<Badge variant="default" class="ml-1 text-[0.6rem]">Unlocked</Badge>
+										{/if}
+										{#if fs.options.key_stored}
+											<Badge variant="secondary" class="ml-1 text-[0.6rem]">Auto-unlock</Badge>
+										{/if}
 									{:else}
-										<Badge variant="default" class="ml-1 text-[0.6rem]">Unlocked</Badge>
+										No
 									{/if}
-									{#if fs.options.key_stored}
-										<Badge variant="secondary" class="ml-1 text-[0.6rem]">Auto-unlock</Badge>
-									{/if}
-								{:else}
-									No
+								</span>
+								{#if fs.options.error_action}
+									<span class="text-muted-foreground">Error Action</span>
+									<span>{fs.options.error_action}</span>
 								{/if}
-							</span>
-							{#if fs.options.foreground_target}
-								<span class="text-muted-foreground">Foreground Target</span>
-								<span>{fs.options.foreground_target}</span>
-							{/if}
-							{#if fs.options.background_target}
-								<span class="text-muted-foreground">Background Target</span>
-								<span>{fs.options.background_target}</span>
-							{/if}
-							{#if fs.options.promote_target}
-								<span class="text-muted-foreground">Promote Target</span>
-								<span>{fs.options.promote_target}</span>
-							{/if}
-							{#if fs.options.metadata_target}
-								<span class="text-muted-foreground">Metadata Target</span>
-								<span>{fs.options.metadata_target}</span>
-							{/if}
-							{#if fs.options.error_action}
-								<span class="text-muted-foreground">Error Action</span>
-								<span>{fs.options.error_action}</span>
-							{/if}
-							{#if fs.options.journal_flush_delay}
-								<span class="text-muted-foreground">Journal Flush Delay</span>
-								<span>{fs.options.journal_flush_delay} µs</span>
-							{/if}
-							{#if fs.options.io_scheduler}
-								<span class="text-muted-foreground">I/O Scheduler</span>
-								<span>{fs.options.io_scheduler}</span>
-							{/if}
+								{#if fs.options.journal_flush_delay}
+									<span class="text-muted-foreground">Journal Flush Delay</span>
+									<span>{fs.options.journal_flush_delay} µs</span>
+								{/if}
+								{#if fs.options.io_scheduler}
+									<span class="text-muted-foreground">I/O Scheduler</span>
+									<span>{fs.options.io_scheduler}</span>
+								{/if}
+							</div>
+
+							<!-- Targets -->
+							<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs self-start">
+								<span class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground col-span-2 mb-1">Data Targets</span>
+								<span class="text-muted-foreground">Foreground</span>
+								<span>{fs.options.foreground_target ?? '—'}</span>
+								<span class="text-muted-foreground">Background</span>
+								<span>{fs.options.background_target ?? '—'}</span>
+								<span class="text-muted-foreground">Metadata</span>
+								<span>{fs.options.metadata_target ?? '—'}</span>
+								<span class="text-muted-foreground">Promote</span>
+								<span>{fs.options.promote_target ?? '—'}</span>
+							</div>
 						</div>
 
 						<table class="w-full text-sm">
