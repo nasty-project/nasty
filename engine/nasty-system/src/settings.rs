@@ -317,7 +317,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     let email = settings.tls_acme_email.as_deref()
         .ok_or("ACME email not set")?;
 
-    set_acme_status("running", &format!("Requesting certificate for {domain}..."), Some(domain));
+    set_acme_status("running", &format!("Preparing certificate for {domain}..."), Some(domain));
 
     // Create lego data directory
     // Use separate lego directories per ACME server so staging/production data coexist
@@ -371,9 +371,16 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     // For TLS-ALPN challenge, stop nginx briefly so lego can bind to :443
     let need_nginx_stop = settings.tls_challenge_type != "dns";
     if need_nginx_stop {
+        set_acme_status("running", "Stopping web server for TLS challenge...", Some(domain));
         let _ = tokio::process::Command::new("systemctl")
             .args(["stop", "nginx"])
             .output().await;
+    }
+
+    if settings.tls_challenge_type == "dns" {
+        set_acme_status("running", &format!("Running ACME {action} — creating DNS records and waiting for propagation (this can take 1-2 minutes)..."), Some(domain));
+    } else {
+        set_acme_status("running", &format!("Running ACME {action} — waiting for Let's Encrypt verification..."), Some(domain));
     }
 
     // Run lego — ensure nginx is ALWAYS restarted even on failure

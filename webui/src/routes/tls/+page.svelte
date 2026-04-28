@@ -72,8 +72,8 @@
 					if (acmeStatus && (acmeStatus.state === 'success' || acmeStatus.state === 'error')) {
 						clearInterval(poll);
 					}
-				}, 3000);
-				setTimeout(() => clearInterval(poll), 120000);
+				}, 2000);
+				setTimeout(() => clearInterval(poll), 300000); // 5 min (DNS propagation can be slow)
 			}
 		}
 		savingTls = false;
