@@ -86,6 +86,12 @@
 							<div class="mx-3 mb-2 rounded-lg border border-border bg-secondary/20 p-3 space-y-3">
 								<div class="text-xs font-medium">Restrict access to {rule.service}</div>
 
+								{#if rule.service === 'webui'}
+									<div class="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+										Restricting the WebUI also restricts Terminal, VM console, app deployment, and log streaming — they all use the same port.
+									</div>
+								{/if}
+
 								<div>
 									<div class="text-xs text-muted-foreground mb-1">Allowed source IPs (comma-separated, empty = all)</div>
 									<input
