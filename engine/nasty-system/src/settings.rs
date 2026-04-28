@@ -357,6 +357,10 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         if let Some(ref provider) = settings.tls_dns_provider {
             args.push("--dns".to_string());
             args.push(provider.clone());
+            // Use public DNS for propagation checks instead of the system's
+            // local resolver, which may not see the ACME TXT records.
+            args.push("--dns.resolvers".to_string());
+            args.push("1.1.1.1:53".to_string());
         } else {
             return Err("DNS challenge selected but no provider configured".to_string());
         }
