@@ -747,20 +747,23 @@ impl AppsService {
                 // Compose app: directory with docker-compose.yml
                 let compose_path = path.join("docker-compose.yml");
                 if compose_path.exists() {
-                    let image = tokio::fs::read_to_string(&compose_path)
+                    let images: Vec<String> = tokio::fs::read_to_string(&compose_path)
                         .await
                         .ok()
                         .and_then(|content| {
                             let parsed: serde_json::Value = serde_yaml_ng::from_str(&content).ok()?;
-                            parsed.get("services")?
+                            Some(parsed.get("services")?
                                 .as_object()?
                                 .values()
-                                .next()?
-                                .get("image")?
-                                .as_str()
-                                .map(|s| s.to_string())
+                                .filter_map(|svc| svc.get("image")?.as_str().map(|s| s.to_string()))
+                                .collect())
                         })
                         .unwrap_or_default();
+                    let image = if images.len() == 1 {
+                        images[0].clone()
+                    } else {
+                        format!("{} images", images.len())
+                    };
                     apps.push(App {
                         name,
                         image,
