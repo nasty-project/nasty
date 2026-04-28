@@ -17,12 +17,13 @@
 	let smartProtocol: ProtocolStatus | null = $state(null);
 	let loading = $state(true);
 	let expandedDisk = $state<string | null>(null);
+	let isVirtual = $state(false);
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
 
 	const client = getClient();
 
 	onMount(async () => {
-		await Promise.all([loadBlockDevices(), loadSmartProtocol()]);
+		await Promise.all([loadBlockDevices(), loadSmartProtocol(), loadVmStatus()]);
 		loading = false;
 		pollInterval = setInterval(refresh, 30000);
 	});
@@ -35,6 +36,13 @@
 		await withToast(async () => {
 			blockDevices = await client.call<BlockDevice[]>('device.list');
 		});
+	}
+
+	async function loadVmStatus() {
+		try {
+			const info = await client.call<{ is_virtual: boolean }>('system.info');
+			isVirtual = info.is_virtual;
+		} catch { /* ignore */ }
 	}
 
 	async function loadSmartProtocol() {
@@ -190,6 +198,9 @@
 
 	<!-- SMART Health tab -->
 	{:else if activeTab === 'smart'}
+		{#if isVirtual}
+			<p class="text-sm text-muted-foreground">SMART monitoring is not available on virtual machines.</p>
+		{:else}
 		<div class="mb-4 flex items-center gap-4">
 			{#if smartProtocol}
 				<Badge variant={smartProtocol.enabled ? 'default' : 'secondary'}>
@@ -299,14 +310,11 @@
 				</Card>
 			{/each}
 		{/if}
+		{/if}
 
 	<!-- Topology tab -->
 	{:else if activeTab === 'topology'}
-		{#if !smartProtocol?.enabled}
-			<p class="text-sm text-muted-foreground">Enable SMART monitoring in the SMART Health tab to see disk topology.</p>
-		{:else if disks.length === 0}
-			<p class="text-sm text-muted-foreground">No disks detected.</p>
-		{:else}
+		{#if smartProtocol?.enabled && disks.length > 0}
 			{#each groupByController(disks) as group}
 				<div class="mb-6">
 					<div class="mb-3 flex items-baseline gap-3">
@@ -347,6 +355,38 @@
 					</table>
 				</div>
 			{/each}
+		{:else}
+			<!-- Show basic topology from block devices (no SMART needed) -->
+			{@const wholeDiskDevices = blockDevices.filter(d => !d.path.match(/\d+$/) || d.dev_type === 'disk')}
+			{#if wholeDiskDevices.length === 0}
+				<p class="text-sm text-muted-foreground">No disk devices detected.</p>
+			{:else}
+				<table class="w-full text-sm">
+					<thead>
+						<tr>
+							<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Device</th>
+							<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Type</th>
+							<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Capacity</th>
+							<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Filesystem</th>
+							<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Mount</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each blockDevices as dev}
+							<tr class="border-b border-border">
+								<td class="p-3 font-mono text-sm">{dev.path}</td>
+								<td class="p-3"><Badge variant="secondary" class={deviceClassBadge(dev.device_class)}>{dev.device_class.toUpperCase()}</Badge></td>
+								<td class="p-3 text-sm">{formatBytes(dev.size_bytes)}</td>
+								<td class="p-3 font-mono text-xs text-muted-foreground">{dev.fs_type ?? '—'}</td>
+								<td class="p-3 font-mono text-xs text-muted-foreground">{dev.mount_point ?? '—'}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+				{#if !smartProtocol?.enabled && !isVirtual}
+					<p class="mt-3 text-xs text-muted-foreground">Enable SMART monitoring for detailed topology with controller, model, serial, and health info.</p>
+				{/if}
+			{/if}
 		{/if}
 	{/if}
 {/if}

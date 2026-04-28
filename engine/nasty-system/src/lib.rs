@@ -73,6 +73,8 @@ pub struct SystemInfo {
     pub bcachefs_debug_checks: bool,
     /// Whether KVM hardware virtualization is available (/dev/kvm exists).
     pub kvm_available: bool,
+    /// Whether the system is running inside a virtual machine.
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -169,6 +171,11 @@ impl SystemService {
             bcachefs_debug_symbols: cached.debug_symbols,
             bcachefs_debug_checks: cached.bcachefs_debug_checks,
             kvm_available: std::path::Path::new("/dev/kvm").exists(),
+            is_virtual: std::process::Command::new("systemd-detect-virt")
+                .arg("--vm")
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
         }
     }
 
