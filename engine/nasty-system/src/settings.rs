@@ -361,6 +361,10 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             // local resolver, which may not see the ACME TXT records.
             args.push("--dns.resolvers".to_string());
             args.push("1.1.1.1:53".to_string());
+            // Disable authoritative NS check — some providers (Cloudflare)
+            // return NXDOMAIN for _acme-challenge when the parent name has
+            // no A record, even though the TXT record was created.
+            args.push("--dns.disable-cp".to_string());
         } else {
             return Err("DNS challenge selected but no provider configured".to_string());
         }
