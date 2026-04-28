@@ -516,20 +516,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     return err(req, "Cannot disable password authentication without at least one SSH key — you would be locked out");
                 }
             }
-            // Apply immediately via sed + reload
-            let val = if enabled { "yes" } else { "no" };
-            let _ = tokio::process::Command::new("sed")
-                .args(["-i", &format!("s/^.*PasswordAuthentication.*/PasswordAuthentication {val}/"), "/etc/ssh/sshd_config"])
-                .status().await;
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["reload", "sshd"])
-                .status().await;
-            // Persist for engine startup re-apply (survives reboot before rebuild)
-            let _ = tokio::fs::write(
-                "/var/lib/nasty/ssh.json",
-                serde_json::json!({ "password_auth": enabled }).to_string(),
-            ).await;
-            // Generate NixOS config (survives rebuild)
+            // 1. Write ssh.nix — single source of truth, survives nixos-rebuild
             let nix = format!(
                 "# Managed by NASty — edit via WebUI Settings > SSH Access\n\
                  {{ ... }}:\n{{\n  services.openssh.settings.PasswordAuthentication = {};\n}}\n",
@@ -538,6 +525,14 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             if let Err(e) = tokio::fs::write("/etc/nixos/ssh.nix", &nix).await {
                 tracing::warn!("Failed to write ssh.nix: {e}");
             }
+            // 2. Apply immediately via sed + reload (takes effect before next rebuild)
+            let val = if enabled { "yes" } else { "no" };
+            let _ = tokio::process::Command::new("sed")
+                .args(["-i", &format!("s/^.*PasswordAuthentication.*/PasswordAuthentication {val}/"), "/etc/ssh/sshd_config"])
+                .status().await;
+            let _ = tokio::process::Command::new("systemctl")
+                .args(["reload", "sshd"])
+                .status().await;
             ok(req, format!("Password authentication {}", if enabled { "enabled" } else { "disabled" }))
         }
         "system.network.get" => ok(req, state.network.get().await),
