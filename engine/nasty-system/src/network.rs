@@ -418,13 +418,30 @@ async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
         apply_ip_config(&iface.name, &iface.ipv6, true).await?;
     }
 
-    // Apply DNS
+    // Apply DNS via resolvconf (NixOS manages /etc/resolv.conf — writing it
+    // directly causes "signature mismatch" errors on the next rebuild).
     if !config.dns.is_empty() {
         let resolv: String = config.dns.iter()
             .map(|ns| format!("nameserver {ns}\n"))
             .collect();
-        tokio::fs::write("/etc/resolv.conf", resolv).await
-            .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
+        use tokio::io::AsyncWriteExt;
+        let mut child = tokio::process::Command::new("resolvconf")
+            .args(["-a", "nasty", "-m", "0"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("resolvconf: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(resolv.as_bytes()).await
+                .map_err(|e| format!("resolvconf stdin: {e}"))?;
+        }
+        let output = child.wait_with_output().await
+            .map_err(|e| format!("resolvconf wait: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("resolvconf failed: {stderr}");
+        }
     }
 
     Ok(())
