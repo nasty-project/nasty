@@ -28,13 +28,6 @@
 		'5m': 300_000, '1h': 3_600_000, '1d': 86_400_000, '7d': 604_800_000, '30d': 2_592_000_000,
 	};
 
-	// Logs
-	let logUnits: string[] = $state([]);
-	let logSelectedUnit = $state('nasty-engine');
-	let logContent = $state('');
-	let logLoading = $state(false);
-	let logLines = $state(100);
-
 	let prevDiskIo: DiskIoStats[] = $state([]);
 	let prevNetIo: NetIfStats[] = $state([]);
 	let prevSampleTime = $state(0);
@@ -76,7 +69,6 @@
 			prevSampleTime = Date.now();
 		}
 		await loadMetrics();
-		loadLogUnits();
 	}
 
 	async function loadMetrics() {
@@ -148,20 +140,6 @@
 	async function navigateLive() {
 		metricsOffset = 0;
 		await loadMetrics();
-	}
-
-	async function loadLogUnits() {
-		try { logUnits = await client.call<string[]>('system.logs.units'); } catch { /* ignore */ }
-	}
-
-	async function loadLogs() {
-		logLoading = true;
-		try {
-			logContent = await client.call<string>('system.logs', { unit: logSelectedUnit, lines: logLines });
-		} catch (e) {
-			logContent = `Error: ${e}`;
-		}
-		logLoading = false;
 	}
 
 	async function refreshStats() {
@@ -659,47 +637,3 @@
 	</Card>
 {/if}
 
-<!-- Logs -->
-{#if stats}
-	<Card class="mt-4">
-		<CardHeader class="pb-2">
-			<div class="flex items-center justify-between">
-				<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">Logs</CardTitle>
-				<div class="flex items-center gap-2">
-					<select
-						bind:value={logSelectedUnit}
-						onchange={() => loadLogs()}
-						class="h-7 rounded-md border border-input bg-transparent px-2 text-xs"
-					>
-						{#if logUnits.length === 0}
-							<option value="nasty-engine">nasty-engine</option>
-						{/if}
-						{#each logUnits as unit}
-							<option value={unit}>{unit}</option>
-						{/each}
-					</select>
-					<select
-						bind:value={logLines}
-						onchange={() => { if (logContent) loadLogs(); }}
-						class="h-7 rounded-md border border-input bg-transparent px-2 text-xs"
-					>
-						<option value={50}>50 lines</option>
-						<option value={100}>100 lines</option>
-						<option value={200}>200 lines</option>
-						<option value={500}>500 lines</option>
-					</select>
-					<Button size="xs" variant="secondary" onclick={loadLogs} disabled={logLoading}>
-						{logLoading ? 'Loading...' : 'Load'}
-					</Button>
-				</div>
-			</div>
-		</CardHeader>
-		<CardContent>
-			{#if logContent}
-				<pre class="max-h-96 overflow-auto rounded-lg bg-[#0f1117] p-3 text-xs text-green-400 font-mono whitespace-pre-wrap">{logContent}</pre>
-			{:else}
-				<p class="text-sm text-muted-foreground">Select a service and click Load to view logs.</p>
-			{/if}
-		</CardContent>
-	</Card>
-{/if}

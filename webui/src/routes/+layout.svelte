@@ -56,6 +56,7 @@
 		Cpu,
 		Server,
 		Wrench,
+		ScrollText,
 	} from '@lucide/svelte';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
@@ -316,6 +317,7 @@
 			{ href: '/terminal', label: 'Terminal', icon: Terminal },
 			{ label: 'System', icon: Wrench, children: [
 				{ href: '/services', label: 'Services',       icon: Server },
+				{ href: '/logs',     label: 'Logs',           icon: ScrollText },
 				{ href: '/update',   label: 'Update',         icon: RefreshCw },
 				{ href: '/users',    label: 'Access Control', icon: ShieldCheck },
 				{ href: '/settings', label: 'Settings',       icon: Settings },
