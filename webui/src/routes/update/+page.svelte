@@ -401,6 +401,7 @@
 					status = await client.call<UpdateStatus>('system.update.status');
 					if (status && (status.state === 'success' || status.state === 'failed')) {
 						stopPolling();
+						checkInfo = null; // clear stale "available" after upgrade
 						await loadVersionPage();
 						writeVersionPageAction(null);
 						if (status.state === 'success') {
