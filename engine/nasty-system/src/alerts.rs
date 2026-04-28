@@ -40,6 +40,8 @@ pub enum AlertMetric {
     BcachefsIOErrors,
     BcachefsScrubErrors,
     BcachefsReconcileStalled,
+    /// Root partition free space in GB.
+    RootDiskFreeGb,
     // Kernel error monitoring
     KernelErrors,
 }
@@ -462,6 +464,25 @@ impl AlertService {
                         });
                     }
                 }
+                AlertMetric::RootDiskFreeGb => {
+                    if let Some(free_gb) = root_free_gb() {
+                        if check_condition(free_gb, &rule.condition, rule.threshold) {
+                            alerts.push(ActiveAlert {
+                                rule_id: rule.id.clone(),
+                                rule_name: rule.name.clone(),
+                                severity: rule.severity.clone(),
+                                metric: rule.metric.clone(),
+                                message: format!(
+                                    "Root partition has {:.1} GB free (threshold: {:.0} GB)",
+                                    free_gb, rule.threshold
+                                ),
+                                current_value: free_gb,
+                                threshold: rule.threshold,
+                                source: "/".into(),
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -535,6 +556,17 @@ pub struct AlertRuleUpdate {
     /// New severity level (optional).
     #[serde(default)]
     pub severity: Option<AlertSeverity>,
+}
+
+fn root_free_gb() -> Option<f64> {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+    let path = CString::new("/").ok()?;
+    let mut buf = MaybeUninit::<libc::statvfs>::uninit();
+    let ret = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
+    if ret != 0 { return None; }
+    let stat = unsafe { buf.assume_init() };
+    Some(stat.f_bavail as f64 * stat.f_frsize as f64 / 1_073_741_824.0)
 }
 
 fn check_condition(value: f64, condition: &AlertCondition, threshold: f64) -> bool {
@@ -664,6 +696,25 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Warning,
+        },
+        // Root partition space
+        AlertRule {
+            id: "root-disk-low".into(),
+            name: "Root partition low on space".into(),
+            enabled: true,
+            metric: AlertMetric::RootDiskFreeGb,
+            condition: AlertCondition::Below,
+            threshold: 10.0,
+            severity: AlertSeverity::Warning,
+        },
+        AlertRule {
+            id: "root-disk-crit".into(),
+            name: "Root partition critically low".into(),
+            enabled: true,
+            metric: AlertMetric::RootDiskFreeGb,
+            condition: AlertCondition::Below,
+            threshold: 3.0,
+            severity: AlertSeverity::Critical,
         },
         // Kernel error monitoring
         AlertRule {
