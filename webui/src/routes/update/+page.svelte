@@ -110,13 +110,17 @@
 		versionRows.some((row) => row.url.trim() !== row.initialUrl || row.update)
 	);
 
-	// Cache dev build status so it doesn't flip when the banner is loading/switching
-	let cachedIsDevBuild: boolean | null = $state(null);
 	const isDevBuild = $derived.by(() => {
+		// Use banner data if available (most accurate)
 		if (taggedReleaseBanner.kind === 'ready') {
-			cachedIsDevBuild = !isOfficialTaggedReleaseUrl(taggedReleaseBanner.current_url);
+			return !isOfficialTaggedReleaseUrl(taggedReleaseBanner.current_url);
 		}
-		return cachedIsDevBuild ?? false;
+		// Fall back to version rows while banner is loading/switching
+		const nastyRow = versionRows.find(r => r.name === 'nasty');
+		if (nastyRow) {
+			return !isOfficialTaggedReleaseUrl(nastyRow.url);
+		}
+		return false;
 	});
 
 	const upstreamBusy = $derived.by(() =>
