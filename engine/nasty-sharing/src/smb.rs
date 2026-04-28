@@ -308,7 +308,10 @@ async fn write_share_conf(share: &SmbShare) -> Result<(), SmbError> {
     } else if !share.valid_users.is_empty() {
         // Authenticated share: force operations as the first valid user
         // so writes use that identity regardless of the connecting user.
-        conf.push_str(&format!("    force user = {}\n", sanitize_smb_value(&share.valid_users[0])));
+        // Skip @group entries — they're not user accounts.
+        if let Some(first_user) = share.valid_users.iter().find(|u| !u.starts_with('@')) {
+            conf.push_str(&format!("    force user = {}\n", sanitize_smb_value(first_user)));
+        }
         conf.push_str("    create mask = 0664\n");
         conf.push_str("    directory mask = 0775\n");
     }
@@ -545,6 +548,141 @@ impl SmbService {
         }
         Ok(users)
     }
+}
+
+// ── SMB Group Management ────────────────────────────────────────
+
+const SMB_GROUP_GID_MIN: u32 = 3000;
+
+/// SMB group info returned by list.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SmbGroup {
+    /// Linux group name.
+    pub name: String,
+    /// Unix GID.
+    pub gid: u32,
+    /// Group members (usernames).
+    pub members: Vec<String>,
+}
+
+impl SmbService {
+    /// Create a Linux system group for SMB access control.
+    pub async fn create_group(&self, name: &str) -> Result<SmbGroup, SmbError> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 32 {
+            return Err(SmbError::InvalidName("group name must be 1-32 characters".into()));
+        }
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(SmbError::InvalidName("group name must be alphanumeric, hyphens, or underscores".into()));
+        }
+
+        // Check if group already exists
+        let check = tokio::process::Command::new("getent")
+            .args(["group", name])
+            .output().await
+            .map_err(|e| SmbError::ReloadFailed(format!("getent: {e}")))?;
+        if check.status.success() {
+            return Err(SmbError::NameExists(name.to_string()));
+        }
+
+        let gid = next_available_gid().await;
+
+        let output = tokio::process::Command::new("groupadd")
+            .args(["--gid", &gid.to_string(), name])
+            .output().await
+            .map_err(|e| SmbError::ReloadFailed(format!("groupadd: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SmbError::ReloadFailed(format!("groupadd failed: {stderr}")));
+        }
+
+        info!("Created SMB group '{name}' (GID {gid})");
+        Ok(SmbGroup { name: name.to_string(), gid, members: vec![] })
+    }
+
+    /// Delete a Linux system group.
+    pub async fn delete_group(&self, name: &str) -> Result<(), SmbError> {
+        let output = tokio::process::Command::new("groupdel")
+            .arg(name)
+            .output().await
+            .map_err(|e| SmbError::ReloadFailed(format!("groupdel: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SmbError::ReloadFailed(format!("groupdel failed: {stderr}")));
+        }
+        info!("Deleted SMB group '{name}'");
+        Ok(())
+    }
+
+    /// List SMB-managed groups (GIDs in the 3000+ range).
+    pub async fn list_groups(&self) -> Result<Vec<SmbGroup>, SmbError> {
+        let content = tokio::fs::read_to_string("/etc/group").await
+            .map_err(|e| SmbError::ReloadFailed(format!("read /etc/group: {e}")))?;
+
+        let mut groups = Vec::new();
+        for line in content.lines() {
+            // /etc/group format: name:x:gid:member1,member2
+            let parts: Vec<&str> = line.splitn(4, ':').collect();
+            if parts.len() >= 3 {
+                if let Ok(gid) = parts[2].parse::<u32>() {
+                    if gid >= SMB_GROUP_GID_MIN && gid < SMB_GROUP_GID_MIN + 1000 {
+                        let members = parts.get(3)
+                            .map(|m| m.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+                            .unwrap_or_default();
+                        groups.push(SmbGroup {
+                            name: parts[0].to_string(),
+                            gid,
+                            members,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(groups)
+    }
+
+    /// Add a user to a group.
+    pub async fn add_group_member(&self, group: &str, user: &str) -> Result<(), SmbError> {
+        let output = tokio::process::Command::new("usermod")
+            .args(["-aG", group, user])
+            .output().await
+            .map_err(|e| SmbError::ReloadFailed(format!("usermod: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SmbError::ReloadFailed(format!("usermod failed: {stderr}")));
+        }
+        info!("Added user '{user}' to group '{group}'");
+        Ok(())
+    }
+
+    /// Remove a user from a group.
+    pub async fn remove_group_member(&self, group: &str, user: &str) -> Result<(), SmbError> {
+        let output = tokio::process::Command::new("gpasswd")
+            .args(["-d", user, group])
+            .output().await
+            .map_err(|e| SmbError::ReloadFailed(format!("gpasswd: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SmbError::ReloadFailed(format!("gpasswd failed: {stderr}")));
+        }
+        info!("Removed user '{user}' from group '{group}'");
+        Ok(())
+    }
+}
+
+/// Find the next available GID starting from SMB_GROUP_GID_MIN.
+async fn next_available_gid() -> u32 {
+    for gid in SMB_GROUP_GID_MIN..SMB_GROUP_GID_MIN + 1000 {
+        let check = tokio::process::Command::new("getent")
+            .args(["group", &gid.to_string()])
+            .output().await;
+        if let Ok(out) = check {
+            if !out.status.success() {
+                return gid;
+            }
+        }
+    }
+    SMB_GROUP_GID_MIN
 }
 
 /// Set Samba password for a user via smbpasswd stdin.

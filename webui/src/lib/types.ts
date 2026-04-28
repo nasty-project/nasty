@@ -193,6 +193,12 @@ export interface SmbShare {
 	enabled: boolean;
 }
 
+export interface SmbGroup {
+	name: string;
+	gid: number;
+	members: string[];
+}
+
 export interface IscsiTarget {
 	id: string;
 	iqn: string;

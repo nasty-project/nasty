@@ -31,6 +31,7 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "smb.user.create"
                 | "smb.user.delete"
                 | "smb.user.set_password"
+                | "smb.group.delete"
                 | "share.iscsi.create"
                 | "share.iscsi.delete"
                 | "share.iscsi.add_lun"
@@ -125,6 +126,7 @@ fn is_read_only(method: &str) -> bool {
                 | "subvolume.find_by_property"
                 | "subvolume.children"
                 | "smb.user.list"
+                | "smb.group.list"
                 | "system.update.version"
                 | "system.update.status"
                 | "system.reboot_required"
@@ -1887,6 +1889,52 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
             match parse_params::<P>(req) {
                 Ok(p) => match state.smb.set_user_password(&p.username, &p.password).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+
+        // ── SMB Groups ─────────────────────────────────────────
+        "smb.group.list" => match state.smb.list_groups().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
+        "smb.group.create" => {
+            match require_str(req, "name") {
+                Ok(name) => match state.smb.create_group(name).await {
+                    Ok(g) => ok(req, g),
+                    Err(e) => err(req, e),
+                },
+                Err(r) => r,
+            }
+        }
+        "smb.group.delete" => {
+            match require_str(req, "name") {
+                Ok(name) => match state.smb.delete_group(name).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(r) => r,
+            }
+        }
+        "smb.group.add_member" => {
+            #[derive(Deserialize)]
+            struct P { group: String, user: String }
+            match parse_params::<P>(req) {
+                Ok(p) => match state.smb.add_group_member(&p.group, &p.user).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "smb.group.remove_member" => {
+            #[derive(Deserialize)]
+            struct P { group: String, user: String }
+            match parse_params::<P>(req) {
+                Ok(p) => match state.smb.remove_group_member(&p.group, &p.user).await {
                     Ok(()) => ok(req, "ok"),
                     Err(e) => err(req, e),
                 },

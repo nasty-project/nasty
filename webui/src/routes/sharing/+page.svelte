@@ -6,7 +6,7 @@
 	import { confirm } from '$lib/confirm.svelte';
 	import type {
 		NfsShare, SmbShare, IscsiTarget, NvmeofSubsystem,
-		Subvolume, ProtocolStatus
+		Subvolume, ProtocolStatus, SmbGroup
 	} from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -312,6 +312,7 @@
 	let smbExpanded = $state<Record<string, boolean>>({});
 	let smbAddUserShare = $state<string | null>(null);
 	let smbAddUserName = $state('');
+	let smbGroups: SmbGroup[] = $state([]);
 	let smbSearch = $state('');
 	type SmbSortKey = 'name' | 'path' | 'status';
 	let smbSortKey = $state<SmbSortKey | null>(null);
@@ -345,7 +346,12 @@
 	});
 
 	async function smbRefresh() {
-		await withToast(async () => { smbShares = await client.call<SmbShare[]>('share.smb.list'); });
+		await withToast(async () => {
+			[smbShares, smbGroups] = await Promise.all([
+				client.call<SmbShare[]>('share.smb.list'),
+				client.call<SmbGroup[]>('smb.group.list').catch(() => [] as SmbGroup[]),
+			]);
+		});
 	}
 	async function smbLoadProtocol() {
 		try {
@@ -1138,7 +1144,11 @@
 						<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">{share.read_only ? 'RO' : 'RW'}</span>
 						{#if share.guest_ok}<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">Guest</span>{/if}
 						{#if share.valid_users.length > 0}
-							<span class="inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">{share.valid_users.length} user{share.valid_users.length !== 1 ? 's' : ''}</span>
+							{@const userCount = share.valid_users.filter(u => !u.startsWith('@')).length}
+							{@const groupCount = share.valid_users.filter(u => u.startsWith('@')).length}
+							<span class="inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">
+								{#if userCount > 0}{userCount} user{userCount !== 1 ? 's' : ''}{/if}{#if userCount > 0 && groupCount > 0}, {/if}{#if groupCount > 0}{groupCount} group{groupCount !== 1 ? 's' : ''}{/if}
+							</span>
 						{/if}
 					</td>
 					<td class="p-3">
@@ -1180,31 +1190,56 @@
 									</div>
 								</div>
 								<div class="flex-1">
-									<p class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Valid Users</p>
+									<p class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Valid Users & Groups</p>
 									{#if share.valid_users.length === 0}
 										<p class="mb-3 text-xs text-muted-foreground">No restrictions — all authenticated users may access.</p>
 									{:else}
-										<div class="mb-3 space-y-1.5">
-											{#each share.valid_users as username}
-												<div class="flex items-center gap-3">
-													<code class="text-xs">{username}</code>
-													<Button variant="destructive" size="xs" onclick={(e) => { e.stopPropagation(); smbRemoveUser(share, username); }}>Remove</Button>
-												</div>
+										<div class="mb-3 flex flex-wrap gap-2">
+											{#each share.valid_users as entry}
+												<span class="flex items-center gap-1 rounded-md border px-2 py-1 text-xs {entry.startsWith('@') ? 'border-blue-500/40 bg-blue-500/10' : 'border-border'}">
+													{#if entry.startsWith('@')}
+														<span class="text-blue-400">{entry}</span>
+													{:else}
+														{entry}
+													{/if}
+													<button class="ml-1 text-muted-foreground hover:text-destructive" onclick={(e) => { e.stopPropagation(); smbRemoveUser(share, entry); }}>&times;</button>
+												</span>
 											{/each}
 										</div>
 									{/if}
 									{#if smbAddUserShare === share.id}
-										<div class="flex items-end gap-2" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+										<div class="flex items-end gap-2 flex-wrap" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 											<div>
 												<Label class="text-xs">Username</Label>
 												<Input bind:value={smbAddUserName} placeholder="johndoe" class="mt-1 h-8 w-40 text-xs" />
 											</div>
-											<Button size="xs" onclick={() => smbAddUser(share)} disabled={!smbAddUserName}>Add</Button>
-											<Button variant="secondary" size="xs" onclick={() => { smbAddUserShare = null; smbAddUserName = ''; }}>Cancel</Button>
+											<Button size="xs" onclick={() => smbAddUser(share)} disabled={!smbAddUserName}>Add User</Button>
+											{#if smbGroups.length > 0}
+												{@const availableGroups = smbGroups.filter(g => !share.valid_users.includes(`@${g.name}`))}
+												{#if availableGroups.length > 0}
+													<select
+														class="h-8 rounded-md border border-input bg-transparent px-2 text-xs"
+														onchange={(e) => {
+															const val = (e.target as HTMLSelectElement).value;
+															if (val) {
+																const valid_users = [...share.valid_users, `@${val}`];
+																withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `Group @${val} added`).then(() => smbRefresh());
+																(e.target as HTMLSelectElement).value = '';
+															}
+														}}
+													>
+														<option value="">Add group...</option>
+														{#each availableGroups as group}
+															<option value={group.name}>@{group.name}</option>
+														{/each}
+													</select>
+												{/if}
+											{/if}
+											<Button variant="secondary" size="xs" onclick={() => { smbAddUserShare = null; smbAddUserName = ''; }}>Done</Button>
 										</div>
 									{:else}
 										<Button variant="secondary" size="xs" onclick={(e) => { e.stopPropagation(); smbAddUserShare = share.id; smbAddUserName = ''; }}>
-											Add User
+											Add User / Group
 										</Button>
 									{/if}
 								</div>

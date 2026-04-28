@@ -3,7 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Filesystem } from '$lib/types';
+	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Filesystem, SmbGroup } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -48,6 +48,14 @@
 	let sysPwNew = $state('');
 	let sysPwConfirm = $state('');
 
+	// Groups
+	let groups: SmbGroup[] = $state([]);
+	let showCreateGroup = $state(false);
+	let newGroupName = $state('');
+	let expandedGroup = $state<string | null>(null);
+	let addMemberGroup = $state<string | null>(null);
+	let addMemberUser = $state('');
+
 	const client = getClient();
 
 	onMount(async () => {
@@ -57,11 +65,12 @@
 
 	async function refresh() {
 		await withToast(async () => {
-			[users, apiTokens, filesystems, systemUsers] = await Promise.all([
+			[users, apiTokens, filesystems, systemUsers, groups] = await Promise.all([
 				client.call<UserInfo[]>('auth.list_users'),
 				client.call<ApiTokenInfo[]>('auth.token.list'),
 				client.call<Filesystem[]>('fs.list'),
 				client.call<SystemUser[]>('smb.user.list').catch(() => [] as SystemUser[]),
+				client.call<SmbGroup[]>('smb.group.list').catch(() => [] as SmbGroup[]),
 			]);
 		});
 	}
@@ -155,6 +164,47 @@
 		await navigator.clipboard.writeText(createdToken.token);
 		tokenCopied = true;
 		setTimeout(() => tokenCopied = false, 2000);
+	}
+
+	async function createGroup() {
+		if (!newGroupName.trim()) return;
+		const ok = await withToast(
+			() => client.call('smb.group.create', { name: newGroupName.trim() }),
+			`Group "${newGroupName}" created`
+		);
+		if (ok !== undefined) {
+			showCreateGroup = false;
+			newGroupName = '';
+			await refresh();
+		}
+	}
+
+	async function deleteGroup(name: string) {
+		if (!await confirm(`Delete group "${name}"?`, 'Users in this group will lose access to shares that reference it.')) return;
+		await withToast(
+			() => client.call('smb.group.delete', { name }),
+			`Group "${name}" deleted`
+		);
+		await refresh();
+	}
+
+	async function addMember() {
+		if (!addMemberGroup || !addMemberUser) return;
+		await withToast(
+			() => client.call('smb.group.add_member', { group: addMemberGroup, user: addMemberUser }),
+			`Added "${addMemberUser}" to "${addMemberGroup}"`
+		);
+		addMemberUser = '';
+		addMemberGroup = null;
+		await refresh();
+	}
+
+	async function removeMember(group: string, user: string) {
+		await withToast(
+			() => client.call('smb.group.remove_member', { group, user }),
+			`Removed "${user}" from "${group}"`
+		);
+		await refresh();
 	}
 
 	async function createSystemUser() {
@@ -425,6 +475,81 @@
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
+
+<!-- Groups -->
+<h2 class="mb-3 text-xl font-semibold">Groups</h2>
+<p class="mb-4 text-sm text-muted-foreground">
+	Groups for share access control. Add system users to a group, then reference <code>@groupname</code> in share "Valid Users".
+</p>
+
+<div class="mb-4">
+	<Button size="sm" onclick={() => showCreateGroup = !showCreateGroup}>
+		{showCreateGroup ? 'Cancel' : 'Create Group'}
+	</Button>
+</div>
+
+{#if showCreateGroup}
+	<Card class="mb-4 max-w-md">
+		<CardContent class="pt-4 space-y-3">
+			<div>
+				<Label for="group-name">Group Name</Label>
+				<Input id="group-name" bind:value={newGroupName} placeholder="e.g. engineering" class="mt-1" />
+			</div>
+			<Button size="sm" onclick={createGroup} disabled={!newGroupName.trim()}>Create</Button>
+		</CardContent>
+	</Card>
+{/if}
+
+{#if groups.length === 0 && !showCreateGroup}
+	<p class="mb-6 text-sm text-muted-foreground">No groups configured.</p>
+{:else if groups.length > 0}
+	<div class="mb-6 space-y-2">
+		{#each groups as group}
+			<Card>
+				<CardContent class="py-3">
+					<div class="flex items-center justify-between">
+						<button class="flex items-center gap-2 text-left" onclick={() => expandedGroup = expandedGroup === group.name ? null : group.name}>
+							<span class="font-medium">{group.name}</span>
+							<Badge variant="secondary" class="text-[0.6rem]">GID {group.gid}</Badge>
+							<span class="text-xs text-muted-foreground">{group.members.length} member{group.members.length !== 1 ? 's' : ''}</span>
+						</button>
+						<Button size="xs" variant="destructive" onclick={() => deleteGroup(group.name)}>Delete</Button>
+					</div>
+					{#if expandedGroup === group.name}
+						<div class="mt-3 border-t border-border pt-3">
+							{#if group.members.length > 0}
+								<div class="flex flex-wrap gap-2 mb-3">
+									{#each group.members as member}
+										<span class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs">
+											{member}
+											<button class="ml-1 text-muted-foreground hover:text-destructive" onclick={() => removeMember(group.name, member)} title="Remove">&times;</button>
+										</span>
+									{/each}
+								</div>
+							{:else}
+								<p class="mb-3 text-xs text-muted-foreground">No members yet.</p>
+							{/if}
+							{#if addMemberGroup === group.name}
+								<div class="flex items-center gap-2">
+									<select bind:value={addMemberUser} class="h-8 rounded-md border border-input bg-transparent px-2 text-sm">
+										<option value="">Select user...</option>
+										{#each systemUsers.filter(u => !group.members.includes(u.username)) as user}
+											<option value={user.username}>{user.username}</option>
+										{/each}
+									</select>
+									<Button size="xs" onclick={addMember} disabled={!addMemberUser}>Add</Button>
+									<Button size="xs" variant="secondary" onclick={() => addMemberGroup = null}>Cancel</Button>
+								</div>
+							{:else}
+								<Button size="xs" variant="secondary" onclick={() => addMemberGroup = group.name}>Add Member</Button>
+							{/if}
+						</div>
+					{/if}
+				</CardContent>
+			</Card>
+		{/each}
+	</div>
+{/if}
 
 <!-- System Users -->
 <h2 class="mb-3 text-xl font-semibold">System Users</h2>
