@@ -251,7 +251,10 @@
 			return;
 		}
 		const requestId = ++taggedReleaseBannerRequestId;
-		taggedReleaseBanner = { kind: 'loading' };
+		const prev = taggedReleaseBanner;
+		if (prev.kind !== 'ready') {
+			taggedReleaseBanner = { kind: 'loading' };
+		}
 		try {
 			const releaseStatus = await client.call<VersionTaggedReleaseStatus>(
 				'system.version.tagged_release_notice'
@@ -260,9 +263,10 @@
 				taggedReleaseBanner = { kind: 'ready', ...releaseStatus };
 			}
 		} catch {
-			if (requestId === taggedReleaseBannerRequestId) {
+			if (requestId === taggedReleaseBannerRequestId && prev.kind !== 'ready') {
 				taggedReleaseBanner = { kind: 'failure' };
 			}
+			// If we already had release info, keep it rather than showing an error
 		}
 	}
 
