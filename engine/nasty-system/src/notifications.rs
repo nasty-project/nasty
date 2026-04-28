@@ -145,7 +145,9 @@ async fn send_smtp(
 
     let creds = Credentials::new(username.to_string(), password.to_string());
 
-    let transport = if tls {
+    // Port 465 = implicit TLS (relay), port 587/25 = STARTTLS.
+    // The tls flag is kept for backward compat but port takes precedence.
+    let transport = if port == 465 {
         AsyncSmtpTransport::<Tokio1Executor>::relay(host)
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
