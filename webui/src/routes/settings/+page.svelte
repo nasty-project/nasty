@@ -472,6 +472,22 @@
 		notifTesting = null;
 	}
 
+	async function testNewChannel() {
+		if (!notifAddType) return;
+		notifTesting = '_new';
+		const payload: Record<string, unknown> = { type: notifAddType };
+		if (notifAddType === 'smtp') Object.assign(payload, { host: nfHost, port: nfPort, username: nfUser, password: nfPass, from: nfFrom, to: nfTo, tls: nfTls });
+		else if (notifAddType === 'telegram') Object.assign(payload, { bot_token: nfBotToken, chat_id: nfChatId });
+		else if (notifAddType === 'webhook') Object.assign(payload, { url: nfUrl, headers: {} });
+		else if (notifAddType === 'ntfy') Object.assign(payload, { server_url: nfNtfyServer, topic: nfNtfyTopic, token: nfNtfyToken || undefined });
+		else if (notifAddType === 'signal') Object.assign(payload, { api_url: nfSignalUrl, from_number: nfSignalFrom, to_number: nfSignalTo });
+		await withToast(
+			() => client.call('notifications.test', payload),
+			'Test notification sent'
+		);
+		notifTesting = null;
+	}
+
 	function addChannel() {
 		if (!notifAddType || !nfName) return;
 		const id = crypto.randomUUID().slice(0, 8);
@@ -1139,6 +1155,9 @@
 
 					<div class="flex gap-2">
 						<Button size="sm" onclick={addChannel}>Add</Button>
+						<Button size="sm" variant="secondary" onclick={testNewChannel} disabled={notifTesting === '_new'}>
+							{notifTesting === '_new' ? 'Sending...' : 'Test'}
+						</Button>
 						<Button size="sm" variant="secondary" onclick={resetNotifForm}>Cancel</Button>
 					</div>
 				</div>
