@@ -16,6 +16,8 @@
 	let tlsChallengeType = $state<'tls-alpn' | 'dns'>('tls-alpn');
 	let tlsDnsProvider = $state('');
 	let tlsDnsCredentials = $state('');
+	let tlsDnsResolver = $state('');
+	let tlsDnsDisablePropagationCheck = $state(false);
 	let savingTls = $state(false);
 	let tlsChanged = $state(false);
 
@@ -46,6 +48,8 @@
 		tlsDnsProvider = settings?.tls_dns_provider ?? '';
 		tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
 		tlsAcmeStaging = (settings as any)?.tls_acme_staging ?? false;
+		tlsDnsResolver = (settings as any)?.tls_dns_resolver ?? '';
+		tlsDnsDisablePropagationCheck = (settings as any)?.tls_dns_disable_propagation_check ?? false;
 		try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
 	});
 
@@ -60,6 +64,8 @@
 				tls_dns_provider: tlsDnsProvider || null,
 				tls_dns_credentials: tlsDnsCredentials || null,
 				tls_acme_staging: tlsAcmeStaging,
+				tls_dns_resolver: tlsDnsResolver || null,
+				tls_dns_disable_propagation_check: tlsDnsDisablePropagationCheck,
 			}),
 			tlsAcmeEnabled ? 'Let\'s Encrypt certificate requested — check status below' : 'TLS settings saved'
 		);
@@ -201,6 +207,29 @@
 						No inbound ports needed — verification happens via DNS records.
 					</span>
 				</div>
+
+				<div class="mb-4">
+					<label for="tls-dns-resolver" class="mb-1 block text-xs text-muted-foreground">DNS Resolver for propagation checks</label>
+					<input
+						id="tls-dns-resolver"
+						type="text"
+						bind:value={tlsDnsResolver}
+						oninput={() => tlsChanged = true}
+						class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+						placeholder="1.1.1.1:53 (default)"
+					/>
+					<span class="mt-1 block text-xs text-muted-foreground">
+						Public resolver used to verify TXT record propagation. Default: 1.1.1.1. Change if your setup uses a different public DNS.
+					</span>
+				</div>
+
+				<label class="flex items-center gap-2 text-sm cursor-pointer mb-4">
+					<input type="checkbox" bind:checked={tlsDnsDisablePropagationCheck} onchange={() => tlsChanged = true} class="rounded border-input" />
+					<span>Skip authoritative NS check</span>
+				</label>
+				<p class="mt-[-0.5rem] mb-4 ml-6 text-xs text-muted-foreground">
+					Enable if the parent domain has no A record and the authoritative nameserver returns NXDOMAIN for the ACME challenge TXT record.
+				</p>
 			{/if}
 
 			{#if !tlsDomain.trim() || !tlsAcmeEmail.trim() || (tlsChallengeType === 'dns' && !tlsDnsProvider)}

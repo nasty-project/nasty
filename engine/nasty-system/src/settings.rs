@@ -89,6 +89,14 @@ pub struct Settings {
     /// Use Let's Encrypt staging environment (for testing, avoids rate limits).
     #[serde(default)]
     pub tls_acme_staging: bool,
+    /// Custom DNS resolver for ACME propagation checks (e.g. "1.1.1.1:53").
+    /// Default: use system resolver. Useful when local DNS doesn't see public records.
+    #[serde(default)]
+    pub tls_dns_resolver: Option<String>,
+    /// Disable authoritative NS propagation check. Useful when the parent domain
+    /// has no A record and the authoritative NS returns NXDOMAIN for the TXT record.
+    #[serde(default)]
+    pub tls_dns_disable_propagation_check: bool,
     /// Whether anonymous telemetry is enabled (drive count, storage capacity).
     #[serde(default = "default_telemetry_enabled")]
     pub telemetry_enabled: bool,
@@ -123,6 +131,8 @@ impl Default for Settings {
             tls_dns_provider: None,
             tls_dns_credentials: None,
             tls_acme_staging: false,
+            tls_dns_resolver: None,
+            tls_dns_disable_propagation_check: false,
             telemetry_enabled: default_telemetry_enabled(),
         }
     }
@@ -150,6 +160,10 @@ pub struct SettingsUpdate {
     pub tls_dns_credentials: Option<String>,
     /// Use staging environment.
     pub tls_acme_staging: Option<bool>,
+    /// Custom DNS resolver for propagation checks.
+    pub tls_dns_resolver: Option<String>,
+    /// Disable authoritative NS propagation check.
+    pub tls_dns_disable_propagation_check: Option<bool>,
     /// Enable/disable anonymous telemetry.
     pub telemetry_enabled: Option<bool>,
 }
@@ -239,6 +253,18 @@ impl SettingsService {
         if let Some(staging) = update.tls_acme_staging {
             if settings.tls_acme_staging != staging {
                 settings.tls_acme_staging = staging;
+                tls_changed = true;
+            }
+        }
+        if let Some(resolver) = update.tls_dns_resolver {
+            if settings.tls_dns_resolver != Some(resolver.clone()) {
+                settings.tls_dns_resolver = if resolver.is_empty() { None } else { Some(resolver) };
+                tls_changed = true;
+            }
+        }
+        if let Some(disable_cp) = update.tls_dns_disable_propagation_check {
+            if settings.tls_dns_disable_propagation_check != disable_cp {
+                settings.tls_dns_disable_propagation_check = disable_cp;
                 tls_changed = true;
             }
         }
@@ -357,14 +383,19 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         if let Some(ref provider) = settings.tls_dns_provider {
             args.push("--dns".to_string());
             args.push(provider.clone());
-            // Use public DNS for propagation checks instead of the system's
-            // local resolver, which may not see the ACME TXT records.
+            // Custom resolver for propagation checks (default: 1.1.1.1 to avoid
+            // issues with local DNS not seeing public ACME TXT records).
+            let resolver = settings.tls_dns_resolver.as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("1.1.1.1:53");
             args.push("--dns.resolvers".to_string());
-            args.push("1.1.1.1:53".to_string());
-            // Disable authoritative NS check — some providers (Cloudflare)
-            // return NXDOMAIN for _acme-challenge when the parent name has
-            // no A record, even though the TXT record was created.
-            args.push("--dns.disable-cp".to_string());
+            args.push(resolver.to_string());
+            // Optionally disable authoritative NS check — some providers
+            // (Cloudflare) return NXDOMAIN for _acme-challenge when the
+            // parent name has no A record.
+            if settings.tls_dns_disable_propagation_check {
+                args.push("--dns.disable-cp".to_string());
+            }
         } else {
             return Err("DNS challenge selected but no provider configured".to_string());
         }
