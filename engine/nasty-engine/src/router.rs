@@ -409,13 +409,24 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 .and_then(|p| p.get("lines"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as u32;
+            let grep = req.params.as_ref()
+                .and_then(|p| p.get("grep"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let lines_str = lines.to_string();
+            let mut args = vec![
+                "-u", unit,
+                "-n", lines_str.as_str(),
+                "--no-pager",
+                "--output", "short-iso",
+            ];
+            if let Some(ref g) = grep {
+                args.push("--grep");
+                args.push(g.as_str());
+            }
             let output = tokio::process::Command::new("journalctl")
-                .args([
-                    "-u", unit,
-                    "-n", &lines.to_string(),
-                    "--no-pager",
-                    "--output", "short-iso",
-                ])
+                .args(&args)
                 .output()
                 .await;
             match output {
