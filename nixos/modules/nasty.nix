@@ -330,7 +330,7 @@ in {
          bcachefs fs usage /fs/first        space by type (btree, data, cached, parity …)
          bcachefs fs usage -h /fs/first     human-readable sizes
          bcachefs show-super /dev/<disk>           dump superblock (UUID, features, devices)
-         bcachefs device list /fs/first      member devices with state and tier
+         bcachefs fs usage /fs/first           member devices with state, usage, and data types
          dmesg | grep -i bcachefs                  kernel messages
 
        bcachefs — live diagnostics (interactive, q to quit)
@@ -342,7 +342,7 @@ in {
          bcachefs device add /fs/first /dev/<disk>      add a device
          bcachefs device remove /fs/first /dev/<disk>   remove a device (triggers rebalance)
          bcachefs device set-state failed /dev/<disk>         mark device failed
-         bcachefs data rereplicate /fs/first            rereplicate after device change
+         bcachefs device evacuate /fs/first /dev/<disk>  move data off a device before removal
 
        bcachefs — extended attributes
          getfattr -R -d -m "^bcachefs\\." /fs/first    list all bcachefs xattrs (compression, replicas, etc.)
@@ -624,7 +624,7 @@ in {
           bcachefs fs usage -h "$mp" 2>/dev/null || echo "  (not mounted or error)"
           echo ""
           echo "  Devices:"
-          bcachefs device list "$mp" 2>/dev/null | sed 's/^/    /' || true
+          bcachefs fs usage "$mp" 2>/dev/null | head -20 | sed 's/^/    /' || true
         done
         if ! ls /fs/*/ >/dev/null 2>&1; then
           echo "  (no mounted filesystems)"
