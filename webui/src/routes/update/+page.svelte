@@ -344,7 +344,7 @@
 		if (result !== undefined) {
 			startPolling();
 		} else {
-			await loadVersionPage();
+			status = null;
 		}
 		startingUpgrade = false;
 	}
@@ -384,7 +384,7 @@
 			startPolling();
 		} else {
 			writeVersionPageAction(null);
-			void loadTaggedReleaseBanner();
+			status = null;
 		}
 		startingDevUpgrade = false;
 	}
@@ -395,11 +395,9 @@
 			try {
 					status = await client.call<UpdateStatus>('system.update.status');
 					if (status && (status.state === 'success' || status.state === 'failed')) {
-						if (readVersionPageAction() === 'version-switch') {
-							writeVersionPageAction(null);
-						}
 						stopPolling();
 						await loadVersionPage();
+						writeVersionPageAction(null);
 						if (status.state === 'success') {
 						if (status.webui_changed) refreshState.set();
 						if (status.reboot_required) rebootState.set();
