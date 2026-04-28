@@ -628,6 +628,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
 
         "system.acme.status" => ok(req, nasty_system::settings::get_acme_status()),
+        "system.acme.reset" => {
+            nasty_system::settings::reset_acme_status();
+            ok(req, "ok")
+        }
 
         // ── Tuning ───────────────────────────────────────────────
         "system.tuning.get" => ok(req, state.tuning.get().await),

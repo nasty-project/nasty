@@ -85,7 +85,7 @@
 	<p class="text-sm text-muted-foreground mt-0.5">Manage HTTPS certificates for the NASty web interface.</p>
 </div>
 
-<div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
+<div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
 	<section class="rounded-lg border border-border p-5">
 		<p class="mb-5 text-sm text-muted-foreground">
 			NASty uses a self-signed certificate by default. Enable Let's Encrypt for a trusted certificate
@@ -242,6 +242,9 @@
 			<div class="mt-3 h-1 overflow-hidden rounded-full bg-secondary">
 				<div class="h-full w-1/3 bg-yellow-500 animate-[indeterminate_1.5s_ease-in-out_infinite]"></div>
 			</div>
+			<Button size="xs" variant="secondary" class="mt-3" onclick={async () => { await client.call('system.acme.reset'); acmeStatus = await client.call('system.acme.status'); }}>
+				Dismiss
+			</Button>
 		{:else if acmeStatus.state === 'success'}
 			<div class="flex items-center gap-2 text-sm">
 				<span class="h-2 w-2 rounded-full bg-green-500"></span>
@@ -264,6 +267,9 @@
 			{#if acmeStatus.message}
 				<pre class="mt-2 max-h-48 overflow-auto rounded bg-red-950/30 p-3 text-xs text-red-300 whitespace-pre-wrap break-words">{acmeStatus.message}</pre>
 			{/if}
+			<Button size="xs" variant="secondary" class="mt-3" onclick={async () => { await client.call('system.acme.reset'); acmeStatus = await client.call('system.acme.status'); }}>
+				Dismiss
+			</Button>
 		{/if}
 	</section>
 </div>

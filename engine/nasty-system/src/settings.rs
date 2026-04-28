@@ -48,6 +48,10 @@ pub fn get_acme_status() -> AcmeStatus {
     status.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
+pub fn reset_acme_status() {
+    set_acme_status("idle", "", None);
+}
+
 const STATE_PATH: &str = "/var/lib/nasty/settings.json";
 const STATE_DIR: &str = "/var/lib/nasty";
 const TLS_CERT_PATH: &str = "/var/lib/nasty/tls/cert.pem";
