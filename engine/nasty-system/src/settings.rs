@@ -578,33 +578,35 @@ struct CertInfo {
     issuer: Option<String>,
 }
 
-/// Read certificate details from a PEM file using openssl via shell.
+/// Read certificate details from a PEM file.
 async fn read_cert_info(cert_path: &str) -> CertInfo {
-    let output = tokio::process::Command::new("sh")
-        .args(["-c", &format!(
-            "openssl x509 -in {cert_path} -noout -enddate -startdate -issuer 2>/dev/null || \
-             nix-shell -p openssl --run 'openssl x509 -in {cert_path} -noout -enddate -startdate -issuer' 2>/dev/null"
-        )])
-        .output().await;
-
     let mut info = CertInfo { expires: None, issued: None, issuer: None };
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        for line in stdout.lines() {
-            if let Some(val) = line.strip_prefix("notAfter=") {
-                info.expires = Some(val.trim().to_string());
-            } else if let Some(val) = line.strip_prefix("notBefore=") {
-                info.issued = Some(val.trim().to_string());
-            } else if let Some(val) = line.strip_prefix("issuer=") {
-                // Extract CN or O from issuer
-                let issuer = val.trim();
-                if let Some(cn) = issuer.split("CN = ").nth(1) {
-                    info.issuer = Some(cn.split(',').next().unwrap_or(cn).trim().to_string());
-                } else if let Some(o) = issuer.split("O = ").nth(1) {
-                    info.issuer = Some(o.split(',').next().unwrap_or(o).trim().to_string());
-                } else {
-                    info.issuer = Some(issuer.to_string());
-                }
+    let pem_data = match tokio::fs::read(cert_path).await {
+        Ok(d) => d,
+        Err(_) => return info,
+    };
+    let pem = match x509_parser::pem::parse_x509_pem(&pem_data) {
+        Ok((_, pem)) => pem,
+        Err(_) => return info,
+    };
+    let cert = match pem.parse_x509() {
+        Ok(c) => c,
+        Err(_) => return info,
+    };
+    let validity = cert.validity();
+    info.issued = Some(validity.not_before.to_rfc2822().unwrap_or_else(|_| validity.not_before.to_string()));
+    info.expires = Some(validity.not_after.to_rfc2822().unwrap_or_else(|_| validity.not_after.to_string()));
+    // Extract CN or O from issuer
+    for rdn in cert.issuer().iter() {
+        for attr in rdn.iter() {
+            let val = attr.as_str().unwrap_or_default();
+            let oid = attr.attr_type();
+            // OID 2.5.4.3 = CN, 2.5.4.10 = O
+            if *oid == x509_parser::oid_registry::OID_X509_COMMON_NAME {
+                info.issuer = Some(val.to_string());
+                break;
+            } else if *oid == x509_parser::oid_registry::OID_X509_ORGANIZATION_NAME && info.issuer.is_none() {
+                info.issuer = Some(val.to_string());
             }
         }
     }

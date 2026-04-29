@@ -16,6 +16,7 @@ schemars.workspace = true
 libc.workspace = true
 base64.workspace = true
 rnix = "0.12"
+x509-parser = "0.16"
 rowan = "0.15"
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
