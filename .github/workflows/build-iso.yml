@@ -47,7 +47,7 @@ jobs:
           set -o pipefail
           nix build .#nixosConfigurations.${{ matrix.nix_config }}.config.system.build.isoImage \
             --no-link --print-out-paths -L 2>&1 | tee /tmp/build.log
-          grep '^/nix/store' /tmp/build.log | tail -1 > /tmp/iso-path.txt
+          grep -a '^/nix/store' /tmp/build.log | tail -1 > /tmp/iso-path.txt
           cat /tmp/iso-path.txt
 
       - name: Prepare ISO
