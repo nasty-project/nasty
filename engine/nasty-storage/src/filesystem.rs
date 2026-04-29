@@ -363,65 +363,68 @@ impl FilesystemService {
     /// Mount filesystems that were previously tracked as mounted.
     /// Called at startup to restore filesystem state across reboots.
     /// Restore filesystem mounts from saved state. Returns names of filesystems
-    /// that failed to mount after all retry attempts.
+    /// that failed to mount.
     pub async fn restore_mounts(&self) -> Vec<String> {
         let state = load_fs_state().await;
         if state.is_empty() {
             info!("No filesystems to restore");
             return vec![];
         }
+
+        // Wait for udev to finish device enumeration before any mount attempts.
+        info!("Waiting for block devices to settle...");
+        let _ = tokio::process::Command::new("udevadm")
+            .args(["settle", "--timeout=30"])
+            .status().await;
+
         let mut failed_names = Vec::new();
 
-        // Retry mounting with backoff — block devices may not be ready
-        // immediately after boot (SCSI/virtio enumeration, blkid cache).
-        const MAX_ATTEMPTS: u32 = 5;
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+        for (name, opts) in &state {
+            let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
 
-        let mut pending: Vec<_> = state.iter().collect();
+            if is_mountpoint(&mount_point).await {
+                info!("Filesystem '{name}' already mounted at {mount_point}");
+                continue;
+            }
 
-        for attempt in 1..=MAX_ATTEMPTS {
-            let mut still_pending = Vec::new();
-
-            for (name, opts) in &pending {
-                let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
-
-                if is_mountpoint(&mount_point).await {
-                    info!("Filesystem '{name}' already mounted at {mount_point}");
-                    continue;
-                }
-
-                let dev_info = if !opts.devices.is_empty() {
-                    format!(" [{}]", opts.devices.join(", "))
-                } else {
-                    String::new()
-                };
-                info!("Restoring filesystem '{name}'{dev_info} (attempt {attempt}/{MAX_ATTEMPTS})...");
-                match self.mount_with_opts(name, opts).await {
-                    Ok(_) => info!("Filesystem '{name}' mounted at {mount_point}"),
-                    Err(e) => {
-                        if attempt < MAX_ATTEMPTS {
-                            warn!("Failed to mount '{name}': {e} — retrying in {}s", RETRY_DELAY.as_secs());
-                            still_pending.push((*name, *opts));
-                        } else {
-                            error!("Failed to mount '{name}' after {MAX_ATTEMPTS} attempts: {e}");
-                            failed_names.push(name.to_string());
-                        }
+            // If we know the expected devices, wait for them to appear
+            if !opts.devices.is_empty() {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                loop {
+                    let missing: Vec<&String> = opts.devices.iter()
+                        .filter(|d| !std::path::Path::new(d).exists())
+                        .collect();
+                    if missing.is_empty() {
+                        break;
                     }
+                    if std::time::Instant::now() >= deadline {
+                        error!(
+                            "Filesystem '{name}': devices still missing after 60s: {}",
+                            missing.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")
+                        );
+                        break;
+                    }
+                    info!(
+                        "Filesystem '{name}': waiting for {} device(s): {}",
+                        missing.len(),
+                        missing.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+                // Refresh blkid cache after devices appear
+                let _ = tokio::process::Command::new("blkid")
+                    .arg("-g")
+                    .output().await;
+            }
+
+            info!("Mounting filesystem '{name}'...");
+            match self.mount_with_opts(name, opts).await {
+                Ok(_) => info!("Filesystem '{name}' mounted at {mount_point}"),
+                Err(e) => {
+                    error!("Failed to mount filesystem '{name}': {e}");
+                    failed_names.push(name.to_string());
                 }
             }
-
-            if still_pending.is_empty() {
-                break;
-            }
-
-            // Invalidate blkid cache before retrying
-            let _ = tokio::process::Command::new("blkid")
-                .arg("-g")
-                .output()
-                .await;
-
-            pending = still_pending;
-            tokio::time::sleep(RETRY_DELAY).await;
         }
         failed_names
     }
