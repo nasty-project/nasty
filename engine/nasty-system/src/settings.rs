@@ -412,10 +412,10 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
                 .unwrap_or("1.1.1.1:53");
             args.push("--dns.resolvers".to_string());
             args.push(resolver.to_string());
-            args.push("--dns.propagation-rns".to_string());
-            if settings.tls_dns_disable_propagation_check {
-                args.push("--dns.propagation-disable-ans".to_string());
-            }
+            // Wait 60s before checking propagation — Cloudflare and other
+            // providers need time to propagate TXT records to recursive resolvers.
+            args.push("--dns.propagation-wait".to_string());
+            args.push("60s".to_string());
         } else {
             return Err("DNS challenge selected but no provider configured".to_string());
         }
