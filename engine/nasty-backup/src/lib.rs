@@ -1,11 +1,18 @@
-//! Backup system — deduplicating, encrypted backups via rustic/restic.
+//! Backup system — deduplicating, encrypted backups via rustic_core.
 //!
-//! Manages backup profiles, scheduling, and execution. Uses rustic CLI
-//! for the actual backup operations (restic-compatible repo format).
+//! Manages backup profiles, scheduling, and execution. Uses rustic_core
+//! library directly for backup operations (restic-compatible repo format).
 
+use rustic_backend::BackendOptions;
+use rustic_core::{
+    repofile::SnapshotFile,
+    BackupOptions, CheckOptions, ConfigOptions, Credentials, ForgetGroups, Grouped,
+    KeyOptions, KeepOptions, PathList, Repository, RepositoryOptions,
+    SnapshotGroupCriterion, SnapshotOptions,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use std::collections::BTreeMap;
 use tracing::{error, info, warn};
 
 const STATE_PATH: &str = "/var/lib/nasty/backups.json";
@@ -17,25 +24,17 @@ pub struct BackupProfile {
     pub id: String,
     pub name: String,
     pub enabled: bool,
-    /// Source paths to back up (e.g. ["/fs/first/media", "/fs/first/docs"]).
     pub sources: Vec<String>,
-    /// Backup target configuration.
     pub target: BackupTarget,
-    /// Cron expression for scheduled backups (e.g. "0 3 * * *" = daily 3am).
     #[serde(default)]
     pub schedule: Option<String>,
-    /// Retention policy for snapshot pruning.
     #[serde(default)]
     pub retention: RetentionPolicy,
-    /// Encryption password for the repository.
     pub password: String,
-    /// Whether to create a bcachefs snapshot before backup.
     #[serde(default = "default_true")]
     pub snapshot_before: bool,
-    /// Whether the repo has been initialized.
     #[serde(default)]
     pub repo_initialized: bool,
-    /// Last backup result.
     #[serde(default)]
     pub last_run: Option<BackupRunResult>,
 }
@@ -45,83 +44,63 @@ fn default_true() -> bool { true }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackupTarget {
-    Local {
-        path: String,
-    },
+    Local { path: String },
     S3 {
-        endpoint: String,
-        bucket: String,
-        access_key: String,
-        secret_key: String,
-        #[serde(default)]
-        region: Option<String>,
+        endpoint: String, bucket: String,
+        access_key: String, secret_key: String,
+        #[serde(default)] region: Option<String>,
     },
     Sftp {
-        host: String,
-        user: String,
-        path: String,
-        #[serde(default)]
-        port: Option<u16>,
+        host: String, user: String, path: String,
+        #[serde(default)] port: Option<u16>,
     },
-    Rest {
-        url: String,
-    },
-    B2 {
-        bucket: String,
-        account_id: String,
-        account_key: String,
-    },
+    Rest { url: String },
+    B2 { bucket: String, account_id: String, account_key: String },
 }
 
 impl BackupTarget {
-    /// Convert to restic/rustic repository URL.
-    fn to_repo_url(&self) -> String {
+    fn to_backend_options(&self) -> BackendOptions {
         match self {
-            BackupTarget::Local { path } => path.clone(),
-            BackupTarget::S3 { endpoint, bucket, .. } => {
-                if endpoint.contains("amazonaws.com") {
-                    format!("s3:{endpoint}/{bucket}")
-                } else {
-                    format!("s3:{endpoint}/{bucket}")
-                }
+            BackupTarget::Local { path } => {
+                BackendOptions::default().repository(path)
+            }
+            BackupTarget::S3 { endpoint, bucket, access_key, secret_key, region } => {
+                let mut opts = BTreeMap::new();
+                opts.insert("bucket".into(), bucket.clone());
+                opts.insert("endpoint".into(), endpoint.clone());
+                opts.insert("access_key_id".into(), access_key.clone());
+                opts.insert("secret_access_key".into(), secret_key.clone());
+                if let Some(r) = region { opts.insert("region".into(), r.clone()); }
+                BackendOptions::default().repository("opendal:s3").options(opts)
             }
             BackupTarget::Sftp { host, user, path, port } => {
-                let p = port.unwrap_or(22);
-                format!("sftp:{user}@{host}:{p}/{path}")
+                let mut opts = BTreeMap::new();
+                opts.insert("endpoint".into(), format!("{}:{}", host, port.unwrap_or(22)));
+                opts.insert("user".into(), user.clone());
+                opts.insert("root".into(), path.clone());
+                BackendOptions::default().repository("opendal:sftp").options(opts)
             }
-            BackupTarget::Rest { url } => format!("rest:{url}"),
-            BackupTarget::B2 { bucket, .. } => format!("b2:{bucket}"),
-        }
-    }
-
-    /// Get environment variables for authentication.
-    fn env_vars(&self) -> Vec<(String, String)> {
-        match self {
-            BackupTarget::S3 { access_key, secret_key, .. } => vec![
-                ("AWS_ACCESS_KEY_ID".into(), access_key.clone()),
-                ("AWS_SECRET_ACCESS_KEY".into(), secret_key.clone()),
-            ],
-            BackupTarget::B2 { account_id, account_key, .. } => vec![
-                ("B2_ACCOUNT_ID".into(), account_id.clone()),
-                ("B2_ACCOUNT_KEY".into(), account_key.clone()),
-            ],
-            _ => vec![],
+            BackupTarget::Rest { url } => {
+                BackendOptions::default().repository(&format!("rest:{url}"))
+            }
+            BackupTarget::B2 { bucket, account_id, account_key } => {
+                let mut opts = BTreeMap::new();
+                opts.insert("bucket".into(), bucket.clone());
+                opts.insert("account_id".into(), account_id.clone());
+                opts.insert("account_key".into(), account_key.clone());
+                BackendOptions::default().repository("opendal:b2").options(opts)
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct RetentionPolicy {
-    #[serde(default)]
-    pub keep_last: Option<u32>,
-    #[serde(default)]
-    pub keep_daily: Option<u32>,
-    #[serde(default)]
-    pub keep_weekly: Option<u32>,
-    #[serde(default)]
-    pub keep_monthly: Option<u32>,
-    #[serde(default)]
-    pub keep_yearly: Option<u32>,
+    #[serde(default)] pub keep_last: Option<u32>,
+    #[serde(default)] pub keep_daily: Option<u32>,
+    #[serde(default)] pub keep_weekly: Option<u32>,
+    #[serde(default)] pub keep_monthly: Option<u32>,
+    #[serde(default)] pub keep_yearly: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -166,9 +145,22 @@ pub enum BackupError {
 }
 
 impl BackupError {
-    pub fn to_rpc_error(&self) -> String {
-        self.to_string()
-    }
+    pub fn to_rpc_error(&self) -> String { self.to_string() }
+}
+
+// ── Repository helpers ────────────────────────────────────────
+
+/// Build a Repository from a profile's target and password.
+fn make_repo(profile: &BackupProfile) -> Result<Repository<()>, BackupError> {
+    let backends = profile.target.to_backend_options().to_backends()
+        .map_err(|e| BackupError::Failed(format!("backend: {e}")))?;
+    let repo_opts = RepositoryOptions::default();
+    Repository::new(&repo_opts, &backends)
+        .map_err(|e| BackupError::Failed(format!("repo: {e}")))
+}
+
+fn creds(password: &str) -> Credentials {
+    Credentials::password(password)
 }
 
 // ── Service ────────────────────────────────────────────────────
@@ -180,19 +172,14 @@ pub struct BackupService {
 
 impl BackupService {
     pub fn new() -> Self {
-        let profiles = load_profiles();
         Self {
-            profiles: std::sync::Arc::new(tokio::sync::Mutex::new(profiles)),
+            profiles: std::sync::Arc::new(tokio::sync::Mutex::new(load_profiles())),
             running: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
-    /// Clone for use in spawned tasks.
     pub fn clone_for_task(&self) -> Self {
-        Self {
-            profiles: self.profiles.clone(),
-            running: self.running.clone(),
-        }
+        Self { profiles: self.profiles.clone(), running: self.running.clone() }
     }
 
     pub async fn list_profiles(&self) -> Vec<BackupProfile> {
@@ -201,8 +188,7 @@ impl BackupService {
 
     pub async fn get_profile(&self, id: &str) -> Result<BackupProfile, BackupError> {
         self.profiles.lock().await.iter()
-            .find(|p| p.id == id)
-            .cloned()
+            .find(|p| p.id == id).cloned()
             .ok_or_else(|| BackupError::NotFound(id.into()))
     }
 
@@ -233,9 +219,7 @@ impl BackupService {
         let mut profiles = self.profiles.lock().await;
         let len = profiles.len();
         profiles.retain(|p| p.id != id);
-        if profiles.len() == len {
-            return Err(BackupError::NotFound(id.into()));
-        }
+        if profiles.len() == len { return Err(BackupError::NotFound(id.into())); }
         save_profiles(&profiles).await;
         info!("Deleted backup profile '{id}'");
         Ok(())
@@ -243,91 +227,74 @@ impl BackupService {
 
     pub async fn status(&self) -> BackupStatus {
         let running_id = self.running.lock().await.clone();
-        BackupStatus {
-            running: running_id.is_some(),
-            profile_id: running_id,
-            progress: None,
-        }
+        BackupStatus { running: running_id.is_some(), profile_id: running_id, progress: None }
     }
 
-    /// Initialize a backup repository at the target.
     pub async fn init_repo(&self, id: &str) -> Result<String, BackupError> {
         let profile = self.get_profile(id).await?;
-        let repo = profile.target.to_repo_url();
-        let env = profile.target.env_vars();
+        tokio::task::spawn_blocking(move || {
+            let repo = make_repo(&profile)?;
+            repo.init(&creds(&profile.password), &KeyOptions::default(), &ConfigOptions::default())
+                .map_err(|e| BackupError::Failed(format!("init: {e}")))?;
+            Ok::<_, BackupError>(())
+        }).await.map_err(|e| BackupError::Failed(format!("spawn: {e}")))??;
 
-        let mut cmd = Command::new("rustic");
-        cmd.args(["--repository", &repo, "--password", &profile.password, "init"]);
-        for (k, v) in &env { cmd.env(k, v); }
-
-        let output = cmd.output().await
-            .map_err(|e| BackupError::Failed(format!("rustic init: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BackupError::Failed(format!("init failed: {stderr}")));
-        }
-
-        // Mark as initialized
         let mut profiles = self.profiles.lock().await;
         if let Some(p) = profiles.iter_mut().find(|p| p.id == id) {
             p.repo_initialized = true;
         }
         save_profiles(&profiles).await;
-
-        info!("Initialized backup repo for profile '{id}' at {repo}");
+        info!("Initialized backup repo for profile '{id}'");
         Ok("Repository initialized".into())
     }
 
-    /// Run a backup for a profile (blocking — use in background task or WS stream).
     pub async fn run_backup(&self, id: &str) -> Result<BackupRunResult, BackupError> {
         let profile = self.get_profile(id).await?;
-        let repo = profile.target.to_repo_url();
-        let env = profile.target.env_vars();
         let start = std::time::Instant::now();
-
-        // Set running state
         *self.running.lock().await = Some(id.to_string());
 
-        let mut cmd = Command::new("rustic");
-        cmd.args(["--repository", &repo, "--password", &profile.password, "backup"]);
-        for src in &profile.sources {
-            cmd.arg(src);
-        }
-        for (k, v) in &env { cmd.env(k, v); }
+        let sources = profile.sources.clone();
+        let backup_result = tokio::task::spawn_blocking(move || {
+            let repo = make_repo(&profile)?;
+            let repo = repo.open(&creds(&profile.password))
+                .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
+            let repo = repo.to_indexed_ids()
+                .map_err(|e| BackupError::Failed(format!("index: {e}")))?;
 
-        let output = cmd.output().await
-            .map_err(|e| BackupError::Failed(format!("rustic backup: {e}")))?;
+            let source = PathList::from_iter(sources.iter().map(|s| s.as_str()));
+            let snap = SnapshotOptions::default().to_snapshot()
+                .map_err(|e| BackupError::Failed(format!("snapshot opts: {e}")))?;
 
-        // Clear running state
+            let result = repo.backup(&BackupOptions::default(), &source, snap)
+                .map_err(|e| BackupError::Failed(format!("backup: {e}")))?;
+
+            Ok::<_, BackupError>((
+                result.summary.as_ref().map(|s| s.data_added),
+                result.summary.as_ref().map(|s| s.files_new),
+                result.summary.as_ref().map(|s| s.files_changed),
+            ))
+        }).await.map_err(|e| BackupError::Failed(format!("spawn: {e}")))?;
+
         *self.running.lock().await = None;
-
         let duration = start.elapsed().as_secs();
 
-        let result = if output.status.success() {
-            BackupRunResult {
+        let result = match backup_result {
+            Ok((bytes_added, files_new, files_changed)) => BackupRunResult {
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 success: true,
                 message: "Backup completed successfully".into(),
                 duration_secs: duration,
-                bytes_added: None, // TODO: parse from rustic output
-                files_new: None,
-                files_changed: None,
-            }
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            BackupRunResult {
+                bytes_added, files_new, files_changed,
+            },
+            Err(e) => BackupRunResult {
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 success: false,
-                message: format!("Backup failed: {stderr}"),
+                message: format!("Backup failed: {e}"),
                 duration_secs: duration,
-                bytes_added: None,
-                files_new: None,
-                files_changed: None,
-            }
+                bytes_added: None, files_new: None, files_changed: None,
+            },
         };
 
-        // Save result to profile
         {
             let mut profiles = self.profiles.lock().await;
             if let Some(p) = profiles.iter_mut().find(|p| p.id == id) {
@@ -337,122 +304,79 @@ impl BackupService {
         }
 
         if result.success {
-            info!("Backup '{}' completed in {}s", profile.name, duration);
-            // Auto-prune with retention policy
-            if let Err(e) = self.prune(id).await {
-                warn!("Auto-prune after backup failed: {e}");
-            }
+            info!("Backup completed in {}s", duration);
+            if let Err(e) = self.prune(id).await { warn!("Auto-prune failed: {e}"); }
         } else {
-            error!("Backup '{}' failed: {}", profile.name, result.message);
+            error!("Backup failed: {}", result.message);
         }
-
         Ok(result)
     }
 
-    /// List snapshots in a profile's repository.
     pub async fn list_snapshots(&self, id: &str) -> Result<Vec<BackupSnapshot>, BackupError> {
         let profile = self.get_profile(id).await?;
-        let repo = profile.target.to_repo_url();
-        let env = profile.target.env_vars();
+        tokio::task::spawn_blocking(move || {
+            let repo = make_repo(&profile)?;
+            let repo = repo.open(&creds(&profile.password))
+                .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
+            let snaps: Vec<SnapshotFile> = repo.get_all_snapshots()
+                .map_err(|e| BackupError::Failed(format!("snapshots: {e}")))?;
 
-        let mut cmd = Command::new("rustic");
-        cmd.args(["--repository", &repo, "--password", &profile.password, "snapshots", "--json"]);
-        for (k, v) in &env { cmd.env(k, v); }
-
-        let output = cmd.output().await
-            .map_err(|e| BackupError::Failed(format!("rustic snapshots: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BackupError::Failed(format!("list snapshots: {stderr}")));
-        }
-
-        // rustic --json outputs grouped snapshots: [{ group_key: ..., snapshots: [...] }]
-        let snapshots: Vec<BackupSnapshot> = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-            .ok()
-            .and_then(|val| {
-                // Try grouped format first
-                if let Some(groups) = val.as_array() {
-                    let mut all = Vec::new();
-                    for group in groups {
-                        if let Some(snaps) = group.get("snapshots").and_then(|s| s.as_array()) {
-                            for snap in snaps {
-                                let id = snap.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                                let time = snap.get("time").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                                let hostname = snap.get("hostname").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                                let paths = snap.get("paths").and_then(|v| v.as_array())
-                                    .map(|a| a.iter().filter_map(|p| p.as_str().map(|s| s.to_string())).collect())
-                                    .unwrap_or_default();
-                                let tags = snap.get("tags").and_then(|v| v.as_array())
-                                    .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
-                                    .unwrap_or_default();
-                                all.push(BackupSnapshot { id, time, hostname, paths, tags });
-                            }
-                        }
-                    }
-                    Some(all)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-        Ok(snapshots)
+            Ok(snaps.into_iter().map(|s| BackupSnapshot {
+                id: s.id.to_hex().to_string(),
+                time: s.time.to_string(),
+                hostname: s.hostname.clone(),
+                paths: s.paths.iter().map(|p| p.to_string()).collect(),
+                tags: s.tags.iter().map(|t| t.to_string()).collect(),
+            }).collect())
+        }).await.map_err(|e| BackupError::Failed(format!("spawn: {e}")))?
     }
 
-    /// Prune old snapshots based on retention policy.
     async fn prune(&self, id: &str) -> Result<(), BackupError> {
         let profile = self.get_profile(id).await?;
-        let repo = profile.target.to_repo_url();
-        let env = profile.target.env_vars();
-        let r = &profile.retention;
+        let r = profile.retention.clone();
 
-        let mut args = vec![
-            "--repository".to_string(), repo,
-            "--password".to_string(), profile.password.clone(),
-            "forget".to_string(), "--prune".to_string(),
-        ];
+        tokio::task::spawn_blocking(move || {
+            let repo = make_repo(&profile)?;
+            let repo = repo.open(&creds(&profile.password))
+                .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
 
-        if let Some(n) = r.keep_last { args.extend(["--keep-last".into(), n.to_string()]); }
-        if let Some(n) = r.keep_daily { args.extend(["--keep-daily".into(), n.to_string()]); }
-        if let Some(n) = r.keep_weekly { args.extend(["--keep-weekly".into(), n.to_string()]); }
-        if let Some(n) = r.keep_monthly { args.extend(["--keep-monthly".into(), n.to_string()]); }
-        if let Some(n) = r.keep_yearly { args.extend(["--keep-yearly".into(), n.to_string()]); }
+            let snaps = repo.get_all_snapshots()
+                .map_err(|e| BackupError::Failed(format!("get snapshots: {e}")))?;
 
-        let mut cmd = Command::new("rustic");
-        cmd.args(&args);
-        for (k, v) in &env { cmd.env(k, v); }
+            let mut keep = KeepOptions::default();
+            if let Some(n) = r.keep_last { keep = keep.keep_last(n as i32); }
+            if let Some(n) = r.keep_daily { keep = keep.keep_daily(n as i32); }
+            if let Some(n) = r.keep_weekly { keep = keep.keep_weekly(n as i32); }
+            if let Some(n) = r.keep_monthly { keep = keep.keep_monthly(n as i32); }
+            if let Some(n) = r.keep_yearly { keep = keep.keep_yearly(n as i32); }
 
-        let output = cmd.output().await
-            .map_err(|e| BackupError::Failed(format!("rustic forget: {e}")))?;
+            let criterion = SnapshotGroupCriterion::default();
+            let grouped = Grouped::from_items(snaps, criterion);
+            let now = jiff::Zoned::now();
+            let forget = ForgetGroups::from_grouped_snapshots_with_retention(grouped, &keep, &now)
+                .map_err(|e| BackupError::Failed(format!("forget plan: {e}")))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BackupError::Failed(format!("prune failed: {stderr}")));
-        }
-
+            let ids = forget.into_forget_ids();
+            if !ids.is_empty() {
+                info!("Pruning {} snapshot(s)", ids.len());
+                repo.delete_snapshots(&ids)
+                    .map_err(|e| BackupError::Failed(format!("delete: {e}")))?;
+            }
+            Ok::<_, BackupError>(())
+        }).await.map_err(|e| BackupError::Failed(format!("spawn: {e}")))??;
         Ok(())
     }
 
-    /// Check repository integrity.
     pub async fn check_repo(&self, id: &str) -> Result<String, BackupError> {
         let profile = self.get_profile(id).await?;
-        let repo = profile.target.to_repo_url();
-        let env = profile.target.env_vars();
-
-        let mut cmd = Command::new("rustic");
-        cmd.args(["--repository", &repo, "--password", &profile.password, "check"]);
-        for (k, v) in &env { cmd.env(k, v); }
-
-        let output = cmd.output().await
-            .map_err(|e| BackupError::Failed(format!("rustic check: {e}")))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if output.status.success() {
-            Ok(stdout.to_string())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(BackupError::Failed(format!("check failed: {stderr}")))
-        }
+        tokio::task::spawn_blocking(move || {
+            let repo = make_repo(&profile)?;
+            let repo = repo.open(&creds(&profile.password))
+                .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
+            repo.check(CheckOptions::default())
+                .map_err(|e| BackupError::Failed(format!("check: {e}")))?;
+            Ok("Repository check passed".to_string())
+        }).await.map_err(|e| BackupError::Failed(format!("spawn: {e}")))?
     }
 }
 
