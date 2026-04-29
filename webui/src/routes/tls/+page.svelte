@@ -20,6 +20,8 @@
 	let tlsDnsDisablePropagationCheck = $state(false);
 	let savingTls = $state(false);
 	let tlsChanged = $state(false);
+	let editing = $state(false);
+	const certActive = $derived.by(() => Boolean(acmeStatus && acmeStatus.state === 'success' && tlsAcmeEnabled));
 
 	const popularDnsProviders = [
 		{ code: 'cloudflare', name: 'Cloudflare' },
@@ -72,6 +74,7 @@
 		if (result !== undefined) {
 			settings = result;
 			tlsChanged = false;
+			editing = false;
 			if (tlsAcmeEnabled) {
 				const poll = setInterval(async () => {
 					try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
@@ -93,6 +96,27 @@
 
 <div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
 	<section class="rounded-lg border border-border p-5">
+		{#if certActive && !editing}
+			<!-- Summary view when cert is active -->
+			<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+				<span class="text-muted-foreground">Domain</span>
+				<span class="font-mono">{tlsDomain}</span>
+				<span class="text-muted-foreground">Challenge</span>
+				<span>{tlsChallengeType === 'dns' ? `DNS (${tlsDnsProvider || 'custom'})` : 'TLS-ALPN (port 443)'}</span>
+				<span class="text-muted-foreground">Email</span>
+				<span>{tlsAcmeEmail}</span>
+			</div>
+			<div class="mt-4 flex gap-2">
+				<Button size="sm" variant="secondary" onclick={() => editing = true}>Reconfigure</Button>
+				<Button size="sm" variant="destructive" onclick={async () => {
+					tlsAcmeEnabled = false;
+					tlsChanged = true;
+					await saveTls();
+					editing = false;
+				}}>Disable</Button>
+			</div>
+		{:else}
+		<!-- Full form -->
 		<p class="mb-5 text-sm text-muted-foreground">
 			NASty uses a self-signed certificate by default. Enable Let's Encrypt for a trusted certificate
 			that browsers accept without warnings.
@@ -262,6 +286,7 @@
 				</Button>
 			{/if}
 		</div>
+		{/if}
 	</section>
 
 	<!-- Status panel (right column) -->
