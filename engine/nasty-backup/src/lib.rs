@@ -367,7 +367,34 @@ impl BackupService {
             return Err(BackupError::Failed(format!("list snapshots: {stderr}")));
         }
 
-        let snapshots: Vec<BackupSnapshot> = serde_json::from_slice(&output.stdout)
+        // rustic --json outputs grouped snapshots: [{ group_key: ..., snapshots: [...] }]
+        let snapshots: Vec<BackupSnapshot> = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .ok()
+            .and_then(|val| {
+                // Try grouped format first
+                if let Some(groups) = val.as_array() {
+                    let mut all = Vec::new();
+                    for group in groups {
+                        if let Some(snaps) = group.get("snapshots").and_then(|s| s.as_array()) {
+                            for snap in snaps {
+                                let id = snap.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                                let time = snap.get("time").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                                let hostname = snap.get("hostname").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                                let paths = snap.get("paths").and_then(|v| v.as_array())
+                                    .map(|a| a.iter().filter_map(|p| p.as_str().map(|s| s.to_string())).collect())
+                                    .unwrap_or_default();
+                                let tags = snap.get("tags").and_then(|v| v.as_array())
+                                    .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
+                                    .unwrap_or_default();
+                                all.push(BackupSnapshot { id, time, hostname, paths, tags });
+                            }
+                        }
+                    }
+                    Some(all)
+                } else {
+                    None
+                }
+            })
             .unwrap_or_default();
         Ok(snapshots)
     }
