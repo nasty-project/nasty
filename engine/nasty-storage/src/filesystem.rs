@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::cmd;
 
@@ -369,20 +369,50 @@ impl FilesystemService {
             return;
         }
 
-        for (name, opts) in &state {
-            let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
+        // Retry mounting with backoff — block devices may not be ready
+        // immediately after boot (SCSI/virtio enumeration, blkid cache).
+        const MAX_ATTEMPTS: u32 = 5;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
-            // Skip if already mounted
-            if is_mountpoint(&mount_point).await {
-                info!("Filesystem '{name}' already mounted at {mount_point}");
-                continue;
+        let mut pending: Vec<_> = state.iter().collect();
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let mut still_pending = Vec::new();
+
+            for (name, opts) in &pending {
+                let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
+
+                if is_mountpoint(&mount_point).await {
+                    info!("Filesystem '{name}' already mounted at {mount_point}");
+                    continue;
+                }
+
+                info!("Restoring filesystem '{name}' (attempt {attempt}/{MAX_ATTEMPTS})...");
+                match self.mount_with_opts(name, opts).await {
+                    Ok(_) => info!("Filesystem '{name}' mounted at {mount_point}"),
+                    Err(e) => {
+                        if attempt < MAX_ATTEMPTS {
+                            warn!("Failed to mount '{name}': {e} — retrying in {}s", RETRY_DELAY.as_secs());
+                            still_pending.push((*name, *opts));
+                        } else {
+                            error!("Failed to mount '{name}' after {MAX_ATTEMPTS} attempts: {e}");
+                        }
+                    }
+                }
             }
 
-            info!("Restoring filesystem '{name}'...");
-            match self.mount_with_opts(name, opts).await {
-                Ok(_) => info!("Filesystem '{name}' mounted at {mount_point}"),
-                Err(e) => tracing::warn!("Failed to mount filesystem '{name}': {e}"),
+            if still_pending.is_empty() {
+                break;
             }
+
+            // Invalidate blkid cache before retrying
+            let _ = tokio::process::Command::new("blkid")
+                .arg("-g")
+                .output()
+                .await;
+
+            pending = still_pending;
+            tokio::time::sleep(RETRY_DELAY).await;
         }
     }
 
