@@ -299,7 +299,20 @@
 				{#if newTargetType === 'local'}
 					<div>
 						<Label for="bk-local-path">Path</Label>
-						<Input id="bk-local-path" bind:value={newLocalPath} placeholder="/fs/first/backups" class="mt-1 font-mono" />
+						<div class="mt-1 flex gap-2">
+							<Input id="bk-local-path" bind:value={newLocalPath} placeholder="/fs/first/backups" class="font-mono" />
+							{#if newLocalPath && newLocalPath.match(/^\/fs\/\w+\//)}
+								{@const parts = newLocalPath.match(/^\/fs\/(\w+)\/(.+)/)}
+								{#if parts}
+									<Button size="sm" variant="secondary" onclick={async () => {
+										await withToast(
+											() => client.call('subvolume.create', { filesystem: parts[1], name: parts[2] }),
+											`Subvolume "${parts[2]}" created on ${parts[1]}`
+										);
+									}}>Create subvolume</Button>
+								{/if}
+							{/if}
+						</div>
 						{#if filesystems.length > 0 && !newLocalPath}
 							<div class="mt-2 flex flex-wrap gap-2">
 								{#each filesystems.filter(f => f.mounted) as fs}
