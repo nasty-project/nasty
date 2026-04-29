@@ -205,74 +205,11 @@ fn validate_ip_config(ip: &IpConfig, label: &str) -> Result<(), String> {
 
 async fn load_config() -> NetworkConfig {
     match tokio::fs::read_to_string(JSON_PATH).await {
-        Ok(content) => {
-            // Try new format first
-            if let Ok(config) = serde_json::from_str::<NetworkConfig>(&content) {
-                return config;
-            }
-            // Try legacy single-interface format and migrate
-            if let Ok(legacy) = serde_json::from_str::<LegacyNetworkConfig>(&content) {
-                let config = migrate_legacy(legacy);
-                info!("Migrated legacy network config to multi-interface format");
-                // Save migrated config
-                if let Ok(json) = serde_json::to_string_pretty(&config) {
-                    let _ = tokio::fs::write(JSON_PATH, &json).await;
-                }
-                return config;
-            }
-            warn!("Failed to parse {JSON_PATH}, using defaults");
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+            warn!("Failed to parse {JSON_PATH}: {e}, using defaults");
             NetworkConfig::default()
-        }
+        }),
         Err(_) => NetworkConfig::default(),
-    }
-}
-
-/// Legacy single-interface config for migration.
-#[derive(Deserialize)]
-struct LegacyNetworkConfig {
-    dhcp: bool,
-    #[serde(default)]
-    interface: String,
-    address: Option<String>,
-    prefix_length: Option<u8>,
-    gateway: Option<String>,
-    #[serde(default)]
-    nameservers: Vec<String>,
-}
-
-fn migrate_legacy(legacy: LegacyNetworkConfig) -> NetworkConfig {
-    let iface_name = if legacy.interface.is_empty() {
-        "eth0".to_string()
-    } else {
-        legacy.interface
-    };
-
-    let ipv4 = if legacy.dhcp {
-        IpConfig { method: IpMethod::Dhcp, addresses: vec![], gateway: None }
-    } else {
-        let addr = match (legacy.address, legacy.prefix_length) {
-            (Some(a), Some(p)) => vec![format!("{a}/{p}")],
-            (Some(a), None) => vec![format!("{a}/24")],
-            _ => vec![],
-        };
-        IpConfig {
-            method: IpMethod::Static,
-            addresses: addr,
-            gateway: legacy.gateway,
-        }
-    };
-
-    NetworkConfig {
-        interfaces: vec![InterfaceConfig {
-            name: iface_name,
-            enabled: true,
-            ipv4,
-            ipv6: IpConfig { method: IpMethod::Slaac, ..Default::default() },
-            mtu: None,
-        }],
-        dns: legacy.nameservers,
-        bonds: vec![],
-        vlans: vec![],
     }
 }
 

@@ -21,7 +21,7 @@
 	// Form fields
 	let nfName = $state('');
 	let nfHost = $state(''); let nfPort = $state(587); let nfUser = $state(''); let nfPass = $state('');
-	let nfFrom = $state(''); let nfTo = $state(''); let nfTls = $state(true);
+	let nfFrom = $state(''); let nfTo = $state('');
 	let nfBotToken = $state(''); let nfChatId = $state('');
 	let nfUrl = $state('');
 	let nfNtfyServer = $state('https://ntfy.sh'); let nfNtfyTopic = $state(''); let nfNtfyToken = $state('');
@@ -460,7 +460,7 @@
 	async function testChannel(ch: NotificationChannel) {
 		notifTesting = ch.id;
 		const payload: Record<string, unknown> = { type: ch.type };
-		if (ch.type === 'smtp') Object.assign(payload, { host: ch.host, port: ch.port, username: ch.username, password: ch.password, from: ch.from, to: ch.to, tls: ch.tls });
+		if (ch.type === 'smtp') Object.assign(payload, { host: ch.host, port: ch.port, username: ch.username, password: ch.password, from: ch.from, to: ch.to });
 		else if (ch.type === 'telegram') Object.assign(payload, { bot_token: ch.bot_token, chat_id: ch.chat_id });
 		else if (ch.type === 'webhook') Object.assign(payload, { url: ch.url, headers: ch.headers || {} });
 		else if (ch.type === 'ntfy') Object.assign(payload, { server_url: ch.server_url, topic: ch.topic, token: ch.token });
@@ -476,7 +476,7 @@
 		if (!notifAddType) return;
 		notifTesting = '_new';
 		const payload: Record<string, unknown> = { type: notifAddType };
-		if (notifAddType === 'smtp') Object.assign(payload, { host: nfHost, port: nfPort, username: nfUser, password: nfPass, from: nfFrom, to: nfTo, tls: nfTls });
+		if (notifAddType === 'smtp') Object.assign(payload, { host: nfHost, port: nfPort, username: nfUser, password: nfPass, from: nfFrom, to: nfTo });
 		else if (notifAddType === 'telegram') Object.assign(payload, { bot_token: nfBotToken, chat_id: nfChatId });
 		else if (notifAddType === 'webhook') Object.assign(payload, { url: nfUrl, headers: {} });
 		else if (notifAddType === 'ntfy') Object.assign(payload, { server_url: nfNtfyServer, topic: nfNtfyTopic, token: nfNtfyToken || undefined });
@@ -492,7 +492,7 @@
 		if (!notifAddType || !nfName) return;
 		const id = crypto.randomUUID().slice(0, 8);
 		const ch: NotificationChannel = { id, name: nfName, enabled: true, type: notifAddType };
-		if (notifAddType === 'smtp') Object.assign(ch, { host: nfHost, port: nfPort, username: nfUser, password: nfPass, from: nfFrom, to: nfTo, tls: nfTls });
+		if (notifAddType === 'smtp') Object.assign(ch, { host: nfHost, port: nfPort, username: nfUser, password: nfPass, from: nfFrom, to: nfTo });
 		else if (notifAddType === 'telegram') Object.assign(ch, { bot_token: nfBotToken, chat_id: nfChatId });
 		else if (notifAddType === 'webhook') Object.assign(ch, { url: nfUrl, headers: {} });
 		else if (notifAddType === 'ntfy') Object.assign(ch, { server_url: nfNtfyServer, topic: nfNtfyTopic, token: nfNtfyToken || undefined });
@@ -514,7 +514,7 @@
 
 	function resetNotifForm() {
 		notifAddType = null; nfName = '';
-		nfHost = ''; nfPort = 587; nfUser = ''; nfPass = ''; nfFrom = ''; nfTo = ''; nfTls = true;
+		nfHost = ''; nfPort = 587; nfUser = ''; nfPass = ''; nfFrom = ''; nfTo = '';
 		nfBotToken = ''; nfChatId = '';
 		nfUrl = '';
 		nfNtfyServer = 'https://ntfy.sh'; nfNtfyTopic = ''; nfNtfyToken = '';
@@ -1107,9 +1107,6 @@
 								<input id="nf-to" bind:value={nfTo} placeholder="admin@example.com" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" />
 							</div>
 						</div>
-						<label class="flex items-center gap-2 text-sm">
-							<input type="checkbox" bind:checked={nfTls} /> Use TLS
-						</label>
 					{:else if notifAddType === 'telegram'}
 						<div>
 							<label for="nf-bot-token" class="text-xs text-muted-foreground">Bot Token</label>

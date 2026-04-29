@@ -2057,16 +2057,6 @@ async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
 
     let apps_path = format!("/fs/{fs_name}/apps");
 
-    // Also support legacy path
-    let legacy_path = format!("/fs/{fs_name}/.nasty/apps-data");
-    if !Path::new(&apps_path).exists() && Path::new(&legacy_path).exists() {
-        info!("Migrating apps storage from {legacy_path} to {apps_path}");
-        if let Err(e) = tokio::fs::rename(&legacy_path, &apps_path).await {
-            warn!("Failed to migrate apps storage: {e}, using legacy path");
-            return Some(legacy_path);
-        }
-    }
-
     if Path::new(&apps_path).exists() {
         info!("Apps storage already exists at {apps_path}");
         return Some(apps_path);

@@ -2644,14 +2644,7 @@ async fn list_vm_images(state: &AppState) -> VmImageListResult {
         let Some(ref mp) = fs.mount_point else {
             continue;
         };
-        // Check new path first, fall back to legacy
-        let new_dir = format!("{mp}/vms/images");
-        let legacy_dir = format!("{mp}/.nasty/images");
-        let dir = if std::path::Path::new(&new_dir).is_dir() {
-            new_dir
-        } else {
-            legacy_dir
-        };
+        let dir = format!("{mp}/vms/images");
         if !std::path::Path::new(&dir).is_dir() {
             continue;
         }

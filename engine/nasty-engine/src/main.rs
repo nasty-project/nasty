@@ -167,26 +167,8 @@ async fn main() -> anyhow::Result<()> {
         state.firewall.init(&proto_states).await;
     }
 
-    // SSH password auth: ensure the sshd override file exists.
-    // NixOS sshd_config defaults to PasswordAuthentication=no and includes
-    // /var/lib/nasty/sshd_override.conf which the engine manages at runtime.
-    // If the override file doesn't exist yet, create it matching the default.
-    {
-        let override_path = "/var/lib/nasty/sshd_override.conf";
-        if tokio::fs::metadata(override_path).await.is_err() {
-            // Fresh install or upgrade from old system — create override.
-            // Check if there's a legacy ssh.nix to migrate from.
-            let password_auth = tokio::fs::read_to_string("/etc/nixos/ssh.nix").await
-                .map(|nix| !nix.contains("false"))
-                .unwrap_or(true);
-            let val = if password_auth { "yes" } else { "no" };
-            let _ = tokio::fs::write(override_path, format!("PasswordAuthentication {val}\n")).await;
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["reload", "sshd"])
-                .status().await;
-            info!("SSH password auth override created: {val}");
-        }
-    }
+    // SSH password auth is managed via /var/lib/nasty/sshd_override.conf
+    // (created by tmpfiles with default "yes", toggled by the WebUI).
 
     state.nvmeof.restore().await;
     state.vms.restore().await;
@@ -413,7 +395,7 @@ async fn upload_vm_image_handler(
                     .into_response();
             }
         };
-        let path = format!("{mp}/.nasty/images");
+        let path = format!("{mp}/vms/images");
         if let Err(e) = tokio::fs::create_dir_all(&path).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

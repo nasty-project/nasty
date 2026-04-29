@@ -113,12 +113,6 @@ pub struct NfsService;
 
 impl NfsService {
     pub fn new() -> Self {
-        // Clean up legacy monolithic exports file if it exists.
-        // Per-share files in /etc/exports.d/nasty-{id}.exports replace it.
-        let legacy = format!("{NASTY_EXPORTS_DIR}/nasty.exports");
-        if Path::new(&legacy).exists() {
-            let _ = std::fs::remove_file(&legacy);
-        }
         Self
     }
 

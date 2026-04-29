@@ -32,7 +32,6 @@ pub enum ChannelType {
         password: String,
         from: String,
         to: String,
-        tls: bool,
     },
     Telegram {
         bot_token: String,
@@ -99,8 +98,8 @@ pub async fn test_channel(channel: &ChannelType) -> Result<String, String> {
 
 async fn send_to_channel(channel: &ChannelType, subject: &str, body: &str) -> Result<(), String> {
     match channel {
-        ChannelType::Smtp { host, port, username, password, from, to, tls } => {
-            send_smtp(host, *port, username, password, from, to, *tls, subject, body).await
+        ChannelType::Smtp { host, port, username, password, from, to } => {
+            send_smtp(host, *port, username, password, from, to, subject, body).await
         }
         ChannelType::Telegram { bot_token, chat_id } => {
             send_telegram(bot_token, chat_id, subject, body).await
@@ -121,7 +120,7 @@ async fn send_to_channel(channel: &ChannelType, subject: &str, body: &str) -> Re
 
 async fn send_smtp(
     host: &str, port: u16, username: &str, password: &str,
-    from: &str, to: &str, tls: bool,
+    from: &str, to: &str,
     subject: &str, body: &str,
 ) -> Result<(), String> {
     use lettre::{

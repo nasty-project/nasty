@@ -1,5 +1,4 @@
 pub mod alerts;
-pub mod backup;
 pub mod firewall;
 pub mod firmware;
 pub mod network;

@@ -46,9 +46,8 @@ pub struct Session {
     /// For API tokens: only subvolumes with this owner are visible/manageable.
     #[serde(default)]
     pub owner: Option<String>,
-    /// Unix timestamp when this session was created. None for legacy sessions.
-    #[serde(default)]
-    pub created_at: Option<u64>,
+    /// Unix timestamp when this session was created.
+    pub created_at: u64,
     /// When true, the user must change their password before doing anything else.
     #[serde(default)]
     pub must_change_password: bool,
@@ -190,15 +189,13 @@ impl AuthService {
             role: user.role.clone(),
             filesystem: None,
             owner: None,
-            created_at: Some(now),
+            created_at: now,
             must_change_password: user.must_change_password,
             client_ip: Some(client_ip.to_string()),
         };
 
         // Prune expired sessions while we hold the write lock
-        state.sessions.retain(|s| {
-            s.created_at.map_or(true, |c| now - c <= SESSION_TTL_SECS)
-        });
+        state.sessions.retain(|s| now - s.created_at <= SESSION_TTL_SECS);
 
         state.sessions.push(session);
         save_state(&state).await?;
@@ -217,16 +214,13 @@ impl AuthService {
             .as_secs();
         // Check login sessions first
         if let Some(session) = state.sessions.iter().find(|s| s.token == token) {
-            // Check TTL — sessions without created_at (legacy) are treated as valid
-            if let Some(created) = session.created_at {
-                if now - created > SESSION_TTL_SECS {
-                    drop(state);
-                    // Clean up the expired session
-                    let mut state = self.state.write().await;
-                    state.sessions.retain(|s| s.token != token);
-                    save_state(&state).await.ok();
-                    return Err(AuthError::TokenExpired);
-                }
+            // Check TTL
+            if now - session.created_at > SESSION_TTL_SECS {
+                drop(state);
+                let mut state = self.state.write().await;
+                state.sessions.retain(|s| s.token != token);
+                save_state(&state).await.ok();
+                return Err(AuthError::TokenExpired);
             }
             // Verify client IP matches the one that created this session
             if let Some(ref bound_ip) = session.client_ip {
@@ -270,7 +264,7 @@ impl AuthService {
             role: t.role.clone(),
             filesystem: t.filesystem.clone(),
             owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
-            created_at: Some(t.created_at),
+            created_at: t.created_at,
             must_change_password: false,
             client_ip: None,
         })
