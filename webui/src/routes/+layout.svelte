@@ -57,7 +57,9 @@
 		Server,
 		Wrench,
 		ScrollText,
+		Search,
 	} from '@lucide/svelte';
+	import { goto } from '$app/navigation';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
@@ -386,6 +388,46 @@
 		return null;
 	});
 
+	// ── Sidebar search ──────────────────────────────
+	interface SearchEntry { href: string; label: string; keywords: string[] }
+	const searchIndex: SearchEntry[] = [
+		{ href: '/', label: 'Dashboard', keywords: ['dashboard', 'overview', 'stats', 'cpu', 'memory', 'load', 'charts', 'home'] },
+		{ href: '/filesystems', label: 'Filesystems', keywords: ['filesystem', 'pool', 'bcachefs', 'format', 'mount', 'unmount', 'create', 'encryption', 'replicas', 'erasure', 'tiering', 'compression'] },
+		{ href: '/subvolumes', label: 'Subvolumes', keywords: ['subvolume', 'snapshot', 'quota', 'block device', 'dataset'] },
+		{ href: '/disks', label: 'Disks', keywords: ['disk', 'drive', 'smart', 'health', 'temperature', 'ssd', 'hdd', 'nvme', 'topology', 'device'] },
+		{ href: '/files', label: 'Files', keywords: ['file', 'browser', 'folder', 'directory', 'upload', 'download'] },
+		{ href: '/sharing', label: 'Sharing', keywords: ['share', 'nfs', 'smb', 'samba', 'cifs', 'iscsi', 'nvmeof', 'nvme-of', 'export', 'target', 'lun', 'acl'] },
+		{ href: '/backups', label: 'Backups', keywords: ['backup', 'restore', 'rustic', 'restic', 'snapshot', 'retention', 'schedule', 'offsite', 'encrypt'] },
+		{ href: '/alerts', label: 'Alerts', keywords: ['alert', 'notification', 'warning', 'critical', 'rule', 'threshold', 'monitor'] },
+		{ href: '/firewall', label: 'Firewall', keywords: ['firewall', 'port', 'nftables', 'restrict', 'ip', 'interface', 'security', 'network'] },
+		{ href: '/tls', label: 'TLS', keywords: ['tls', 'ssl', 'certificate', 'https', 'encrypt', 'letsencrypt', 'acme', 'dns', 'cloudflare', 'domain'] },
+		{ href: '/ups', label: 'UPS', keywords: ['ups', 'nut', 'battery', 'power', 'shutdown', 'uninterruptible'] },
+		{ href: '/vpn', label: 'VPN', keywords: ['vpn', 'tailscale', 'remote', 'access', 'tunnel', 'wireguard'] },
+		{ href: '/vms', label: 'VMs', keywords: ['vm', 'virtual', 'machine', 'qemu', 'kvm', 'cpu', 'vnc', 'passthrough'] },
+		{ href: '/apps', label: 'Apps', keywords: ['app', 'docker', 'container', 'compose', 'install', 'image', 'port'] },
+		{ href: '/terminal', label: 'Terminal', keywords: ['terminal', 'shell', 'ssh', 'console', 'command', 'bash'] },
+		{ href: '/services', label: 'Services', keywords: ['service', 'protocol', 'nfs', 'smb', 'iscsi', 'smart', 'avahi', 'mdns', 'enable', 'disable', 'rest server'] },
+		{ href: '/logs', label: 'Logs', keywords: ['log', 'journal', 'systemd', 'debug', 'error', 'follow', 'stream'] },
+		{ href: '/update', label: 'Update', keywords: ['update', 'upgrade', 'version', 'release', 'nixos', 'rebuild', 'generation'] },
+		{ href: '/users', label: 'Access Control', keywords: ['user', 'password', 'role', 'admin', 'group', 'permission', 'token', 'api', 'access', 'auth', 'login'] },
+		{ href: '/settings', label: 'Settings', keywords: ['setting', 'hostname', 'timezone', 'clock', 'network', 'ip', 'dhcp', 'dns', 'bond', 'vlan', 'notification', 'email', 'smtp', 'telegram', 'webhook', 'tuning', 'nfs threads', 'metrics', 'prometheus', 'telemetry', 'log level'] },
+	];
+
+	let sidebarSearch = $state('');
+	const searchResults = $derived.by(() => {
+		const q = sidebarSearch.trim().toLowerCase();
+		if (!q) return [];
+		return searchIndex.filter(e =>
+			e.label.toLowerCase().includes(q) ||
+			e.keywords.some(k => k.includes(q))
+		);
+	});
+
+	function selectSearchResult(href: string) {
+		sidebarSearch = '';
+		goto(href);
+	}
+
 	function isGroupExpanded(label: string): boolean {
 		return expandedGroups[label] || activeGroup === label;
 	}
@@ -462,6 +504,33 @@
 					<button onclick={toggleSidebar} class="absolute top-2 right-2 text-muted-foreground/50 hover:text-foreground transition-colors" title="Collapse sidebar">
 						<PanelLeftClose size={15} />
 					</button>
+				</div>
+			{/if}
+
+			<!-- Search bar -->
+			{#if !sidebarCollapsed}
+				<div class="shrink-0 px-2 pt-2 relative">
+					<div class="relative">
+						<Search size={13} class="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50" />
+						<input
+							type="text"
+							bind:value={sidebarSearch}
+							placeholder="Search..."
+							class="w-full rounded-md border border-border bg-transparent pl-8 pr-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-ring"
+						/>
+					</div>
+					{#if searchResults.length > 0}
+						<div class="absolute left-2 right-2 top-full z-50 mt-1 rounded-md border border-border bg-popover py-1 shadow-lg">
+							{#each searchResults as result}
+								<button
+									class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-popover-foreground hover:bg-accent transition-colors text-left"
+									onclick={() => selectSearchResult(result.href)}
+								>
+									{result.label}
+								</button>
+							{/each}
+						</div>
+					{/if}
 				</div>
 			{/if}
 
