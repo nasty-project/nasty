@@ -38,7 +38,7 @@
 	let subvolumes: Subvolume[] = $state([]);
 	let filesystems: Filesystem[] = $state([]);
 	let selectedSources: Set<string> = $state(new Set());
-	let schedulePreset: 'daily' | 'weekly' | 'hourly' | 'custom' | 'manual' = $state('daily');
+	let schedulePreset: 'daily' | 'weekly' | 'hourly' | 'custom' = $state('daily');
 
 	async function loadSourceData() {
 		try {
@@ -62,8 +62,7 @@
 			case 'hourly': newSchedule = '0 * * * *'; break;
 			case 'daily': newSchedule = '0 3 * * *'; break;
 			case 'weekly': newSchedule = '0 2 * * 0'; break;
-			case 'manual': newSchedule = ''; break;
-			case 'custom': break; // keep current value
+			case 'custom': newSchedule = ''; break;
 		}
 	}
 
@@ -355,15 +354,15 @@
 				<div>
 					<Label>Schedule</Label>
 					<div class="mt-1 flex w-fit rounded-md border border-border text-xs">
-						{#each [['hourly', 'Hourly'], ['daily', 'Daily (3am)'], ['weekly', 'Weekly (Sun 2am)'], ['manual', 'Manual'], ['custom', 'Custom']] as [val, label]}
+						{#each [['hourly', 'Hourly'], ['daily', 'Daily (3am)'], ['weekly', 'Weekly (Sun 2am)'], ['custom', 'Custom']] as [val, label]}
 							<button onclick={() => applySchedulePreset(val as typeof schedulePreset)}
 								class="px-3 py-1.5 font-medium transition-colors first:rounded-l-md last:rounded-r-md {schedulePreset === val ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
 							>{label}</button>
 						{/each}
 					</div>
 					{#if schedulePreset === 'custom'}
-						<Input bind:value={newSchedule} placeholder="0 3 * * *" class="mt-2 max-w-xs font-mono" />
-						<p class="mt-1 text-xs text-muted-foreground">Cron format: minute hour day month weekday</p>
+						<Input bind:value={newSchedule} placeholder="Leave empty for manual only" class="mt-2 max-w-md font-mono" />
+						<p class="mt-1 text-xs text-muted-foreground">Cron format: minute hour day month weekday. Empty = manual only (use "Run Now").</p>
 					{:else if newSchedule}
 						<p class="mt-2 text-xs text-muted-foreground font-mono">{newSchedule}</p>
 					{/if}
