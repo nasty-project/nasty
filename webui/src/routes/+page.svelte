@@ -68,7 +68,46 @@
 			prevNetIo = stats.network;
 			prevSampleTime = Date.now();
 		}
-		await loadMetrics();
+		// Load history in the background — don't block dashboard rendering
+		loadMetrics();
+	}
+
+	function applyHistory(netHist: ResourceHistory[], diskHist: ResourceHistory[], cpuHist: ResourceHistory[], memHist: ResourceHistory[]) {
+		netHistory.clear();
+		diskHistory.clear();
+		cpuHistory.clear();
+		memHistory.clear();
+
+		for (const rh of netHist) {
+			for (const s of rh.samples) {
+				netHistory.push(rh.name, new Date(s.ts), s.in_rate, s.out_rate);
+			}
+		}
+		for (const rh of diskHist) {
+			for (const s of rh.samples) {
+				diskHistory.push(rh.name, new Date(s.ts), s.in_rate, s.out_rate);
+			}
+		}
+		for (const rh of cpuHist) {
+			for (const s of rh.samples) {
+				cpuHistory.push('cpu', new Date(s.ts), s.in_rate, 0);
+			}
+		}
+		for (const rh of memHist) {
+			for (const s of rh.samples) {
+				memHistory.push('mem', new Date(s.ts), s.in_rate, 0);
+			}
+		}
+		if (stats) {
+			netSamples = new Map(
+				stats.network.map(n => [n.name, [...netHistory.getSamples(n.name)]])
+			);
+			diskSamples = new Map(
+				stats.disk_io.map(d => [d.name, [...diskHistory.getSamples(d.name)]])
+			);
+		}
+		cpuChartSamples = [...cpuHistory.getSamples('cpu')];
+		memChartSamples = [...memHistory.getSamples('mem')];
 	}
 
 	async function loadMetrics() {
@@ -80,42 +119,7 @@
 				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'cpu', ...params }),
 				client.call<ResourceHistory[]>('system.metrics.history', { kind: 'mem', ...params }),
 			]);
-
-			netHistory.clear();
-			diskHistory.clear();
-			cpuHistory.clear();
-			memHistory.clear();
-
-			for (const rh of netHist) {
-				for (const s of rh.samples) {
-					netHistory.push(rh.name, new Date(s.ts), s.in_rate, s.out_rate);
-				}
-			}
-			for (const rh of diskHist) {
-				for (const s of rh.samples) {
-					diskHistory.push(rh.name, new Date(s.ts), s.in_rate, s.out_rate);
-				}
-			}
-			for (const rh of cpuHist) {
-				for (const s of rh.samples) {
-					cpuHistory.push('cpu', new Date(s.ts), s.in_rate, 0);
-				}
-			}
-			for (const rh of memHist) {
-				for (const s of rh.samples) {
-					memHistory.push('mem', new Date(s.ts), s.in_rate, 0);
-				}
-			}
-			if (stats) {
-				netSamples = new Map(
-					stats.network.map(n => [n.name, [...netHistory.getSamples(n.name)]])
-				);
-				diskSamples = new Map(
-					stats.disk_io.map(d => [d.name, [...diskHistory.getSamples(d.name)]])
-				);
-			}
-			cpuChartSamples = [...cpuHistory.getSamples('cpu')];
-			memChartSamples = [...memHistory.getSamples('mem')];
+			applyHistory(netHist, diskHist, cpuHist, memHist);
 		} catch {
 			// Metrics history not available yet, charts will populate over time
 		}
