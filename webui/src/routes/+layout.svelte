@@ -414,19 +414,16 @@
 	];
 
 	let sidebarSearch = $state('');
-	const searchResults = $derived.by(() => {
+	const searchMatches = $derived.by((): Set<string> => {
 		const q = sidebarSearch.trim().toLowerCase();
-		if (!q) return [];
-		return searchIndex.filter(e =>
-			e.label.toLowerCase().includes(q) ||
-			e.keywords.some(k => k.includes(q))
+		if (!q) return new Set();
+		return new Set(
+			searchIndex
+				.filter(e => e.label.toLowerCase().includes(q) || e.keywords.some(k => k.includes(q)))
+				.map(e => e.href)
 		);
 	});
-
-	function selectSearchResult(href: string) {
-		sidebarSearch = '';
-		goto(href);
-	}
+	const isSearching = $derived(sidebarSearch.trim().length > 0);
 
 	function isGroupExpanded(label: string): boolean {
 		return expandedGroups[label] || activeGroup === label;
@@ -519,18 +516,6 @@
 							class="w-full rounded-md border border-border bg-transparent pl-8 pr-3 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-ring"
 						/>
 					</div>
-					{#if searchResults.length > 0}
-						<div class="absolute left-2 right-2 top-full z-50 mt-1 rounded-md border border-border bg-popover py-1 shadow-lg">
-							{#each searchResults as result}
-								<button
-									class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-popover-foreground hover:bg-accent transition-colors text-left"
-									onclick={() => selectSearchResult(result.href)}
-								>
-									{result.label}
-								</button>
-							{/each}
-						</div>
-					{/if}
 				</div>
 			{/if}
 
@@ -541,8 +526,11 @@
 						{@const GroupIcon = entry.icon}
 						{@const expanded = isGroupExpanded(entry.label)}
 						{@const groupActive = activeGroup === entry.label}
-						{#if sidebarCollapsed}
-							{#each entry.children as child}
+						{@const matchingChildren = isSearching ? entry.children.filter(c => searchMatches.has(c.href)) : entry.children}
+						{#if matchingChildren.length === 0 && isSearching}
+							<!-- Group has no matching children during search — hide entirely -->
+						{:else if sidebarCollapsed}
+							{#each matchingChildren as child}
 								{@const ChildIcon = child.icon}
 								{@const active = currentNav.href === child.href}
 								<a
@@ -554,6 +542,23 @@
 											: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
 								>
 									<ChildIcon size={15} class="shrink-0" />
+								</a>
+							{/each}
+						{:else if isSearching}
+							<!-- During search: show matching children flat, no group header -->
+							{#each matchingChildren as child}
+								{@const ChildIcon = child.icon}
+								{@const active = currentNav.href === child.href}
+								<a
+									href={child.href}
+									onclick={() => { sidebarSearch = ''; }}
+									class="relative mx-2 flex items-center gap-2.5 rounded-md py-2 pl-4 pr-4 text-sm no-underline transition-all border-2
+										{active
+											? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
+											: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
+								>
+									<ChildIcon size={14} class="shrink-0" />
+									{child.label}
 								</a>
 							{/each}
 						{:else}
@@ -584,10 +589,12 @@
 							{/if}
 						{/if}
 					{:else}
+						{#if !isSearching || searchMatches.has(entry.href)}
 						{@const Icon = entry.icon}
 						{@const active = currentNav.href === entry.href}
 						<a
 							href={entry.href}
+							onclick={() => { if (isSearching) sidebarSearch = ''; }}
 							title={sidebarCollapsed ? entry.label : undefined}
 							class="relative mx-2 flex items-center rounded-md py-2 text-sm no-underline transition-all border-2
 								{sidebarCollapsed ? 'justify-center px-0' : 'gap-2.5 pl-4 pr-4'}
@@ -598,6 +605,7 @@
 							<Icon size={15} class="shrink-0" />
 							{#if !sidebarCollapsed}{entry.label}{/if}
 						</a>
+						{/if}
 					{/if}
 				{/each}
 			</nav>
