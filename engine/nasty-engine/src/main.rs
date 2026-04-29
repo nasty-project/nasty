@@ -12,7 +12,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use serde::Deserialize;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::{prelude::*, reload};
 
 mod app_deploy;
@@ -50,6 +50,8 @@ pub struct AppState {
     pub tailscale: nasty_system::tailscale::TailscaleService,
     pub metrics_client: reqwest::Client,
     pub filesystems: nasty_storage::FilesystemService,
+    /// Filesystems that failed to mount on startup (persistent alert source).
+    pub mount_failures: tokio::sync::Mutex<Vec<String>>,
     pub subvolumes: Arc<nasty_storage::SubvolumeService>,
     pub snapshots: nasty_snapshot::SnapshotService,
     pub nfs: nasty_sharing::NfsService,
@@ -120,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         tailscale: nasty_system::tailscale::TailscaleService::new().await,
         metrics_client: reqwest::Client::new(),
         filesystems: nasty_storage::FilesystemService::new(),
+        mount_failures: tokio::sync::Mutex::new(Vec::new()),
         snapshots: nasty_snapshot::SnapshotService::new(subvolumes.clone()),
         subvolumes,
         nfs: nasty_sharing::NfsService::new(),
@@ -138,7 +141,11 @@ async fn main() -> anyhow::Result<()> {
     // 2. Re-attach loop devices for block subvolumes
     // 3. Start enabled protocols (services + kernel modules)
     // 4. Restore NVMe-oF configfs (volatile, needs modules from step 3)
-    state.filesystems.restore_mounts().await;
+    let mount_failures = state.filesystems.restore_mounts().await;
+    if !mount_failures.is_empty() {
+        error!("CRITICAL: {} filesystem(s) failed to mount: {}", mount_failures.len(), mount_failures.join(", "));
+        *state.mount_failures.lock().await = mount_failures;
+    }
     // Re-attach loop devices and get the current name→device mapping.
     // Loop device numbers change across reboots, so NVMe-oF and iSCSI state
     // files must be patched before their respective restore steps run.

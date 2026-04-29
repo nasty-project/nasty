@@ -1048,7 +1048,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     .collect(),
             };
 
-            let alerts = state
+            let mut alerts = state
                 .alerts
                 .evaluate(
                     &stats,
@@ -1058,6 +1058,22 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     &kernel_alert,
                 )
                 .await;
+
+            // Inject mount failure alerts (from boot)
+            let mount_failures = state.mount_failures.lock().await;
+            for name in mount_failures.iter() {
+                alerts.push(nasty_system::alerts::ActiveAlert {
+                    rule_id: "mount-failure".into(),
+                    rule_name: "Filesystem failed to mount".into(),
+                    severity: nasty_system::alerts::AlertSeverity::Critical,
+                    metric: nasty_system::alerts::AlertMetric::BcachefsDegraded,
+                    message: format!("Filesystem \"{name}\" failed to mount after boot. Check disk connectivity and logs."),
+                    current_value: 1.0,
+                    threshold: 0.0,
+                    source: name.clone(),
+                });
+            }
+            drop(mount_failures);
 
             // Cache for subsequent polls
             let value = serde_json::to_value(&alerts).unwrap_or_default();
