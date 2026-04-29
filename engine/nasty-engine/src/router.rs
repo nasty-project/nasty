@@ -632,6 +632,12 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             nasty_system::settings::reset_acme_status();
             ok(req, "ok")
         }
+        "system.acme.retry" => {
+            match nasty_system::settings::retry_acme().await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            }
+        }
 
         // ── Tuning ───────────────────────────────────────────────
         "system.tuning.get" => ok(req, state.tuning.get().await),

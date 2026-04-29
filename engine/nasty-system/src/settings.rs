@@ -52,6 +52,24 @@ pub fn reset_acme_status() {
     set_acme_status("idle", "", None);
 }
 
+/// Retry ACME provisioning with current settings.
+pub async fn retry_acme() -> Result<(), String> {
+    let settings = load().await;
+    if !settings.tls_acme_enabled {
+        return Err("ACME is not enabled".into());
+    }
+    if settings.tls_challenge_type == "dns" {
+        write_dns_credentials(&settings).await;
+    }
+    tokio::spawn(async move {
+        match run_lego(&settings).await {
+            Ok(()) => info!("ACME certificate provisioned successfully"),
+            Err(e) => warn!("ACME certificate provisioning failed: {e}"),
+        }
+    });
+    Ok(())
+}
+
 const STATE_PATH: &str = "/var/lib/nasty/settings.json";
 const STATE_DIR: &str = "/var/lib/nasty";
 const TLS_CERT_PATH: &str = "/var/lib/nasty/tls/cert.pem";
@@ -390,13 +408,8 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
                 .unwrap_or("1.1.1.1:53");
             args.push("--dns.resolvers".to_string());
             args.push(resolver.to_string());
-            // Use recursive-only propagation check by default — avoids issues
-            // where the authoritative NS returns NXDOMAIN (e.g. Cloudflare
-            // when no A record exists yet). The recursive resolver (1.1.1.1)
-            // will still wait for the TXT record to propagate properly.
             args.push("--dns.propagation-rns".to_string());
             if settings.tls_dns_disable_propagation_check {
-                // User explicitly wants to skip all propagation checks
                 args.push("--dns.propagation-disable-ans".to_string());
             }
         } else {

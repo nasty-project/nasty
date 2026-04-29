@@ -247,8 +247,17 @@
 			<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged}>
 				{savingTls ? 'Saving…' : 'Save'}
 			</Button>
-			{#if tlsAcmeEnabled && !tlsChanged && acmeStatus?.state !== 'running'}
-				<Button size="sm" variant="secondary" onclick={() => { tlsChanged = true; saveTls(); }}>
+			{#if tlsAcmeEnabled && acmeStatus?.state !== 'running'}
+				<Button size="sm" variant="secondary" onclick={async () => {
+					await withToast(() => client.call('system.acme.retry'), 'Provisioning started');
+					const poll = setInterval(async () => {
+						try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
+						if (acmeStatus && (acmeStatus.state === 'success' || acmeStatus.state === 'error')) {
+							clearInterval(poll);
+						}
+					}, 2000);
+					setTimeout(() => clearInterval(poll), 300000);
+				}}>
 					Retry
 				</Button>
 			{/if}
