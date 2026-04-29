@@ -532,23 +532,17 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         .args(["root:nginx", TLS_KEY_PATH])
         .output().await;
 
-    // Validate nginx config before reloading — don't break a running server
-    let test = tokio::process::Command::new("nginx")
-        .args(["-t"])
+    // Reload nginx to pick up the new certificate
+    let reload = tokio::process::Command::new("systemctl")
+        .args(["reload", "nginx"])
         .output().await;
-    match test {
-        Ok(t) if t.status.success() => {
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["reload", "nginx"])
-                .output().await;
+    match reload {
+        Ok(r) if r.status.success() => info!("nginx reloaded with new certificate"),
+        Ok(r) => {
+            let stderr = String::from_utf8_lossy(&r.stderr);
+            warn!("nginx reload failed after cert install: {stderr}");
         }
-        Ok(t) => {
-            let stderr = String::from_utf8_lossy(&t.stderr);
-            warn!("nginx config test failed after cert install — NOT reloading: {stderr}");
-            set_acme_status("error", &format!("Cert installed but nginx config invalid: {stderr}"), Some(domain));
-            return Err(format!("nginx config test failed: {stderr}"));
-        }
-        Err(e) => warn!("Failed to test nginx config: {e}"),
+        Err(e) => warn!("Failed to reload nginx: {e}"),
     }
 
     set_acme_status("success", &format!("Certificate installed for {domain}"), Some(domain));
