@@ -5,7 +5,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import { formatBytes } from '$lib/format';
-	import type { BackupProfile, BackupSnapshot, BackupStatus } from '$lib/types';
+	import type { BackupProfile, BackupSnapshot, BackupStatus, Subvolume, Filesystem } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
@@ -33,6 +33,39 @@
 	let newKeepDaily = $state('7');
 	let newKeepWeekly = $state('4');
 	let newKeepMonthly = $state('6');
+
+	// Source picker data
+	let subvolumes: Subvolume[] = $state([]);
+	let filesystems: Filesystem[] = $state([]);
+	let selectedSources: Set<string> = $state(new Set());
+	let schedulePreset: 'daily' | 'weekly' | 'hourly' | 'custom' | 'manual' = $state('daily');
+
+	async function loadSourceData() {
+		try {
+			[subvolumes, filesystems] = await Promise.all([
+				client.call<Subvolume[]>('subvolume.list'),
+				client.call<Filesystem[]>('fs.list'),
+			]);
+		} catch { /* ignore */ }
+	}
+
+	function toggleSource(path: string) {
+		const s = new Set(selectedSources);
+		if (s.has(path)) s.delete(path); else s.add(path);
+		selectedSources = s;
+		newSources = [...s].join(', ');
+	}
+
+	function applySchedulePreset(preset: typeof schedulePreset) {
+		schedulePreset = preset;
+		switch (preset) {
+			case 'hourly': newSchedule = '0 * * * *'; break;
+			case 'daily': newSchedule = '0 3 * * *'; break;
+			case 'weekly': newSchedule = '0 2 * * 0'; break;
+			case 'manual': newSchedule = ''; break;
+			case 'custom': break; // keep current value
+		}
+	}
 
 	// Edit
 	let editId: string | null = $state(null);
@@ -97,6 +130,8 @@
 			newName = 'NASty Config';
 			newSources = '/var/lib/nasty';
 			newSchedule = '0 3 * * *';
+			selectedSources = new Set(['/var/lib/nasty']);
+			loadSourceData();
 		}
 	});
 
@@ -204,7 +239,7 @@
 	</div>
 
 	<div class="mb-4 flex items-center gap-3">
-		<Button size="sm" onclick={() => showCreate = !showCreate}>
+		<Button size="sm" onclick={() => { showCreate = !showCreate; if (showCreate) loadSourceData(); }}>
 			{showCreate ? 'Cancel' : 'Create Backup'}
 		</Button>
 	</div>
@@ -222,14 +257,31 @@
 			<CardContent class="pt-6 space-y-4">
 				<h3 class="text-lg font-semibold">New Backup Profile</h3>
 
-				<div class="grid grid-cols-2 gap-4">
-					<div>
-						<Label for="bk-name">Name</Label>
-						<Input id="bk-name" bind:value={newName} placeholder="Daily offsite" class="mt-1" />
+				<div>
+					<Label for="bk-name">Name</Label>
+					<Input id="bk-name" bind:value={newName} placeholder="Daily offsite" class="mt-1 max-w-sm" />
+				</div>
+
+				<div>
+					<Label>Sources</Label>
+					<div class="mt-1 space-y-1">
+						<!-- System config -->
+						<label class="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/30 {selectedSources.has('/var/lib/nasty') ? 'bg-muted/20' : ''}">
+							<input type="checkbox" checked={selectedSources.has('/var/lib/nasty')} onchange={() => toggleSource('/var/lib/nasty')} class="rounded border-input" />
+							<span class="font-mono text-xs">/var/lib/nasty</span>
+							<span class="text-xs text-muted-foreground">NASty configuration</span>
+						</label>
+						<!-- Subvolumes -->
+						{#each subvolumes as sv}
+							{@const path = `/fs/${sv.filesystem}/${sv.name}`}
+							<label class="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/30 {selectedSources.has(path) ? 'bg-muted/20' : ''}">
+								<input type="checkbox" checked={selectedSources.has(path)} onchange={() => toggleSource(path)} class="rounded border-input" />
+								<span class="font-mono text-xs">{path}</span>
+							</label>
+						{/each}
 					</div>
-					<div>
-						<Label for="bk-sources">Sources (comma-separated paths)</Label>
-						<Input id="bk-sources" bind:value={newSources} placeholder="/fs/first/media, /fs/first/docs" class="mt-1 font-mono" />
+					<div class="mt-2">
+						<Input bind:value={newSources} placeholder="Additional paths (comma-separated)" class="font-mono text-xs" />
 					</div>
 				</div>
 
@@ -248,6 +300,15 @@
 					<div>
 						<Label for="bk-local-path">Path</Label>
 						<Input id="bk-local-path" bind:value={newLocalPath} placeholder="/fs/first/backups" class="mt-1 font-mono" />
+						{#if filesystems.length > 0 && !newLocalPath}
+							<div class="mt-2 flex flex-wrap gap-2">
+								{#each filesystems.filter(f => f.mounted) as fs}
+									<Button size="xs" variant="secondary" onclick={() => newLocalPath = `/fs/${fs.name}/backups`}>
+										/fs/{fs.name}/backups
+									</Button>
+								{/each}
+							</div>
+						{/if}
 					</div>
 				{:else if newTargetType === 's3'}
 					<div class="grid grid-cols-2 gap-3">
@@ -279,9 +340,20 @@
 				</div>
 
 				<div>
-					<Label for="bk-schedule">Schedule (cron, optional)</Label>
-					<Input id="bk-schedule" bind:value={newSchedule} placeholder="0 3 * * *" class="mt-1 font-mono" />
-					<p class="mt-1 text-xs text-muted-foreground">Examples: <code>0 3 * * *</code> (daily 3am), <code>0 2 * * 0</code> (weekly Sunday 2am), leave empty for manual only.</p>
+					<Label>Schedule</Label>
+					<div class="mt-1 flex w-fit rounded-md border border-border text-xs">
+						{#each [['hourly', 'Hourly'], ['daily', 'Daily (3am)'], ['weekly', 'Weekly (Sun 2am)'], ['manual', 'Manual'], ['custom', 'Custom']] as [val, label]}
+							<button onclick={() => applySchedulePreset(val as typeof schedulePreset)}
+								class="px-3 py-1.5 font-medium transition-colors first:rounded-l-md last:rounded-r-md {schedulePreset === val ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
+							>{label}</button>
+						{/each}
+					</div>
+					{#if schedulePreset === 'custom'}
+						<Input bind:value={newSchedule} placeholder="0 3 * * *" class="mt-2 max-w-xs font-mono" />
+						<p class="mt-1 text-xs text-muted-foreground">Cron format: minute hour day month weekday</p>
+					{:else if newSchedule}
+						<p class="mt-2 text-xs text-muted-foreground font-mono">{newSchedule}</p>
+					{/if}
 				</div>
 
 				<div>
