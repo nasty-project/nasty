@@ -759,10 +759,10 @@
 				{/if}
 				{#if configBackupMissing}
 					<div class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
-						<a href="/backups" class="flex-1 no-underline text-amber-400 hover:text-amber-300">
-							NASty configuration is not backed up — create a backup profile for <code class="font-mono">/var/lib/nasty</code>.
-						</a>
-						<button onclick={dismissConfigBackup} class="ml-2 text-xs text-amber-400/60 hover:text-amber-400 shrink-0" title="Dismiss">dismiss</button>
+						<span class="flex-1">NASty configuration is not backed up.</span>
+						<a href="/backups?create=config" class="text-xs font-medium text-amber-400 hover:text-amber-300 shrink-0 no-underline">Create backup</a>
+						<span class="text-amber-400/30">|</span>
+						<button onclick={dismissConfigBackup} class="text-xs text-amber-400/60 hover:text-amber-400 shrink-0">dismiss</button>
 					</div>
 				{/if}
 				{#if !connected}

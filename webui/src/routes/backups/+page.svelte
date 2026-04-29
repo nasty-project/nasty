@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
@@ -90,6 +91,13 @@
 	onMount(async () => {
 		await refresh();
 		loading = false;
+		// Auto-open create form with config preset from ?create=config
+		if ($page.url.searchParams.get('create') === 'config') {
+			showCreate = true;
+			newName = 'NASty Config';
+			newSources = '/var/lib/nasty';
+			newSchedule = '0 3 * * *';
+		}
 	});
 
 	let snapshotCounts: Record<string, number> = $state({});
