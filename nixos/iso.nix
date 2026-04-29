@@ -245,7 +245,7 @@ in
 
       echo "==> Formatting partitions..."
       mkfs.fat -F32 "$PART1"
-      mkfs.ext4 -F "$PART2"
+      mkfs.ext4 -F -m 1 "$PART2"
       sync
 
       if [ "$PART_MODE" = "2" ]; then
