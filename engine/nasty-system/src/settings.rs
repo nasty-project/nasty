@@ -115,10 +115,9 @@ pub struct Settings {
     /// Default: use system resolver. Useful when local DNS doesn't see public records.
     #[serde(default)]
     pub tls_dns_resolver: Option<String>,
-    /// Disable authoritative NS propagation check. Useful when the parent domain
-    /// has no A record and the authoritative NS returns NXDOMAIN for the TXT record.
+    /// Seconds to wait before checking DNS propagation. Default: 30.
     #[serde(default)]
-    pub tls_dns_disable_propagation_check: bool,
+    pub tls_dns_propagation_wait: Option<u32>,
     /// Whether anonymous telemetry is enabled (drive count, storage capacity).
     #[serde(default = "default_telemetry_enabled")]
     pub telemetry_enabled: bool,
@@ -154,7 +153,7 @@ impl Default for Settings {
             tls_dns_credentials: None,
             tls_acme_staging: false,
             tls_dns_resolver: None,
-            tls_dns_disable_propagation_check: false,
+            tls_dns_propagation_wait: None,
             telemetry_enabled: default_telemetry_enabled(),
         }
     }
@@ -184,8 +183,8 @@ pub struct SettingsUpdate {
     pub tls_acme_staging: Option<bool>,
     /// Custom DNS resolver for propagation checks.
     pub tls_dns_resolver: Option<String>,
-    /// Disable authoritative NS propagation check.
-    pub tls_dns_disable_propagation_check: Option<bool>,
+    /// Seconds to wait before checking DNS propagation.
+    pub tls_dns_propagation_wait: Option<u32>,
     /// Enable/disable anonymous telemetry.
     pub telemetry_enabled: Option<bool>,
 }
@@ -284,9 +283,9 @@ impl SettingsService {
                 tls_changed = true;
             }
         }
-        if let Some(disable_cp) = update.tls_dns_disable_propagation_check {
-            if settings.tls_dns_disable_propagation_check != disable_cp {
-                settings.tls_dns_disable_propagation_check = disable_cp;
+        if let Some(wait) = update.tls_dns_propagation_wait {
+            if settings.tls_dns_propagation_wait != Some(wait) {
+                settings.tls_dns_propagation_wait = Some(wait);
                 tls_changed = true;
             }
         }
@@ -412,10 +411,12 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
                 .unwrap_or("1.1.1.1:53");
             args.push("--dns.resolvers".to_string());
             args.push(resolver.to_string());
-            // Wait 60s before checking propagation — Cloudflare and other
-            // providers need time to propagate TXT records to recursive resolvers.
+            // Wait before checking propagation — DNS providers need time to
+            // propagate TXT records to recursive resolvers.
+            // Default 30s, user-configurable via tls_dns_propagation_wait.
+            let wait = settings.tls_dns_propagation_wait.unwrap_or(30);
             args.push("--dns.propagation-wait".to_string());
-            args.push("60s".to_string());
+            args.push(format!("{wait}s"));
         } else {
             return Err("DNS challenge selected but no provider configured".to_string());
         }

@@ -17,7 +17,7 @@
 	let tlsDnsProvider = $state('');
 	let tlsDnsCredentials = $state('');
 	let tlsDnsResolver = $state('');
-	let tlsDnsDisablePropagationCheck = $state(false);
+	let tlsDnsPropagationWait = $state(30);
 	let savingTls = $state(false);
 	let tlsChanged = $state(false);
 	let editing = $state(false);
@@ -51,7 +51,7 @@
 		tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
 		tlsAcmeStaging = (settings as any)?.tls_acme_staging ?? false;
 		tlsDnsResolver = (settings as any)?.tls_dns_resolver ?? '';
-		tlsDnsDisablePropagationCheck = (settings as any)?.tls_dns_disable_propagation_check ?? false;
+		tlsDnsPropagationWait = (settings as any)?.tls_dns_propagation_wait ?? 30;
 		try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
 	});
 
@@ -67,7 +67,7 @@
 				tls_dns_credentials: tlsDnsCredentials || null,
 				tls_acme_staging: tlsAcmeStaging,
 				tls_dns_resolver: tlsDnsResolver || null,
-				tls_dns_disable_propagation_check: tlsDnsDisablePropagationCheck,
+				tls_dns_propagation_wait: tlsDnsPropagationWait,
 			}),
 			tlsAcmeEnabled ? 'Let\'s Encrypt certificate requested — check status below' : 'TLS settings saved'
 		);
@@ -247,13 +247,21 @@
 					</span>
 				</div>
 
-				<label class="flex items-center gap-2 text-sm cursor-pointer mb-4">
-					<input type="checkbox" bind:checked={tlsDnsDisablePropagationCheck} onchange={() => tlsChanged = true} class="rounded border-input" />
-					<span>Skip all propagation checks</span>
-				</label>
-				<p class="mt-[-0.5rem] mb-4 ml-6 text-xs text-muted-foreground">
-					Submits the challenge immediately without waiting for DNS propagation. Only use if propagation checks keep timing out despite the record being created.
-				</p>
+				<div class="mb-4">
+					<label for="tls-dns-wait" class="mb-1 block text-xs text-muted-foreground">Propagation wait (seconds)</label>
+					<input
+						id="tls-dns-wait"
+						type="number"
+						min="0"
+						max="300"
+						bind:value={tlsDnsPropagationWait}
+						oninput={() => tlsChanged = true}
+						class="w-24 rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+					/>
+					<span class="mt-1 block text-xs text-muted-foreground">
+						Wait this many seconds after creating the TXT record before checking propagation. Default: 30. Increase if propagation checks keep timing out.
+					</span>
+				</div>
 			{/if}
 
 			{#if !tlsDomain.trim() || !tlsAcmeEmail.trim() || (tlsChallengeType === 'dns' && !tlsDnsProvider)}
