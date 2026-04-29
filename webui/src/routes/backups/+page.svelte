@@ -109,7 +109,7 @@
 			},
 		};
 		await withToast(
-			() => client.call('backup.profile.update', { id: editId, ...updated }),
+			() => client.call('backup.profile.update', updated),
 			'Profile updated'
 		);
 		editId = null;
