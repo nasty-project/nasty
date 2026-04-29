@@ -62,12 +62,18 @@ impl MetricsDb {
         }
     }
 
-    /// Prune samples older than the retention period.
+    /// Prune samples older than the retention period and reclaim disk space.
     pub fn prune(&self) {
         let cutoff = now_ms() - RETENTION_SECS * 1000;
         let conn = self.conn.lock().expect("metrics db mutex poisoned");
         match conn.execute("DELETE FROM io_samples WHERE ts < ?1", [cutoff]) {
-            Ok(n) if n > 0 => info!("Pruned {n} old metric samples"),
+            Ok(n) if n > 0 => {
+                info!("Pruned {n} old metric samples");
+                // Reclaim disk space after deleting rows
+                if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                    warn!("WAL checkpoint failed: {e}");
+                }
+            }
             Err(e) => warn!("Failed to prune metrics: {e}"),
             _ => {}
         }

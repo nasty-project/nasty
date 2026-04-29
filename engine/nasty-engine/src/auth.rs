@@ -557,9 +557,21 @@ pub enum AuthError {
     Io(#[from] std::io::Error),
 }
 
+/// Max audit log size before rotation (1 MiB).
+const AUDIT_LOG_MAX_BYTES: u64 = 1_048_576;
+
 /// Append a structured event to the audit log (JSONL, append-only).
+/// Rotates to .old when the log exceeds 1 MiB.
 pub fn audit(event: &str, user: &str, ip: &str, detail: &str) {
     use std::io::Write;
+
+    // Rotate if too large
+    if let Ok(meta) = std::fs::metadata(AUDIT_LOG_PATH) {
+        if meta.len() > AUDIT_LOG_MAX_BYTES {
+            let _ = std::fs::rename(AUDIT_LOG_PATH, format!("{AUDIT_LOG_PATH}.old"));
+        }
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
