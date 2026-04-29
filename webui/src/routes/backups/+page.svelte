@@ -453,10 +453,10 @@
 								<div>
 									<Label>Retention</Label>
 									<div class="mt-1 grid grid-cols-4 gap-3">
-										<div><label class="text-xs text-muted-foreground">Keep Last</label><Input type="number" bind:value={editKeepLast} class="mt-1" /></div>
-										<div><label class="text-xs text-muted-foreground">Keep Daily</label><Input type="number" bind:value={editKeepDaily} class="mt-1" /></div>
-										<div><label class="text-xs text-muted-foreground">Keep Weekly</label><Input type="number" bind:value={editKeepWeekly} class="mt-1" /></div>
-										<div><label class="text-xs text-muted-foreground">Keep Monthly</label><Input type="number" bind:value={editKeepMonthly} class="mt-1" /></div>
+										<div><label for="ed-kl" class="text-xs text-muted-foreground">Keep Last</label><Input id="ed-kl" type="number" bind:value={editKeepLast} class="mt-1" /></div>
+										<div><label for="ed-kd" class="text-xs text-muted-foreground">Keep Daily</label><Input id="ed-kd" type="number" bind:value={editKeepDaily} class="mt-1" /></div>
+										<div><label for="ed-kw" class="text-xs text-muted-foreground">Keep Weekly</label><Input id="ed-kw" type="number" bind:value={editKeepWeekly} class="mt-1" /></div>
+										<div><label for="ed-km" class="text-xs text-muted-foreground">Keep Monthly</label><Input id="ed-km" type="number" bind:value={editKeepMonthly} class="mt-1" /></div>
 									</div>
 								</div>
 								<div class="flex gap-2">
