@@ -243,9 +243,16 @@
 
 		{/if}
 
-		<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged}>
-			{savingTls ? 'Saving…' : 'Save'}
-		</Button>
+		<div class="flex gap-2">
+			<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged}>
+				{savingTls ? 'Saving…' : 'Save'}
+			</Button>
+			{#if tlsAcmeEnabled && !tlsChanged && acmeStatus?.state !== 'running'}
+				<Button size="sm" variant="secondary" onclick={() => { tlsChanged = true; saveTls(); }}>
+					Retry
+				</Button>
+			{/if}
+		</div>
 	</section>
 
 	<!-- Status panel (right column) -->
