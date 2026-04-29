@@ -455,6 +455,9 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         cmd.stderr(std::process::Stdio::piped());
 
         if settings.tls_challenge_type == "dns" {
+            // Default 5 min propagation timeout (user can override via credentials)
+            cmd.env("CLOUDFLARE_PROPAGATION_TIMEOUT", "300");
+            cmd.env("CF_PROPAGATION_TIMEOUT", "300");
             if let Some(ref creds) = settings.tls_dns_credentials {
                 for line in creds.lines() {
                     if let Some((key, value)) = line.split_once('=') {
