@@ -33,6 +33,55 @@
 	let newKeepWeekly = $state('4');
 	let newKeepMonthly = $state('6');
 
+	// Edit
+	let editId: string | null = $state(null);
+	let editName = $state('');
+	let editSources = $state('');
+	let editSchedule = $state('');
+	let editPassword = $state('');
+	let editKeepLast = $state('');
+	let editKeepDaily = $state('');
+	let editKeepWeekly = $state('');
+	let editKeepMonthly = $state('');
+
+	function startEdit(p: BackupProfile) {
+		editId = p.id;
+		editName = p.name;
+		editSources = p.sources.join(', ');
+		editSchedule = p.schedule ?? '';
+		editPassword = p.password;
+		editKeepLast = (p.retention.keep_last ?? '').toString();
+		editKeepDaily = (p.retention.keep_daily ?? '').toString();
+		editKeepWeekly = (p.retention.keep_weekly ?? '').toString();
+		editKeepMonthly = (p.retention.keep_monthly ?? '').toString();
+	}
+
+	async function saveEdit() {
+		if (!editId) return;
+		const profile = profiles.find(p => p.id === editId);
+		if (!profile) return;
+		const updated = {
+			...profile,
+			name: editName,
+			sources: editSources.split(',').map(s => s.trim()).filter(Boolean),
+			schedule: editSchedule || null,
+			password: editPassword,
+			retention: {
+				keep_last: parseInt(editKeepLast) || null,
+				keep_daily: parseInt(editKeepDaily) || null,
+				keep_weekly: parseInt(editKeepWeekly) || null,
+				keep_monthly: parseInt(editKeepMonthly) || null,
+				keep_yearly: profile.retention.keep_yearly,
+			},
+		};
+		await withToast(
+			() => client.call('backup.profile.update', { id: editId, ...updated }),
+			'Profile updated'
+		);
+		editId = null;
+		await refresh();
+	}
+
 	// Snapshots viewer
 	let viewSnapshotsId: string | null = $state(null);
 	let snapshots: BackupSnapshot[] = $state([]);
@@ -295,9 +344,47 @@
 									<Button size="xs" variant="secondary" onclick={() => loadSnapshots(profile.id)}>Snapshots</Button>
 									<Button size="xs" variant="secondary" onclick={() => checkRepo(profile.id)}>Check</Button>
 								{/if}
+								<Button size="xs" variant="secondary" onclick={() => startEdit(profile)}>Edit</Button>
 								<Button size="xs" variant="destructive" onclick={() => deleteProfile(profile.id)}>Delete</Button>
 							</div>
 						</div>
+						{#if editId === profile.id}
+							<div class="mt-4 border-t border-border pt-4 space-y-3">
+								<div class="grid grid-cols-2 gap-3">
+									<div>
+										<Label>Name</Label>
+										<Input bind:value={editName} class="mt-1" />
+									</div>
+									<div>
+										<Label>Sources (comma-separated)</Label>
+										<Input bind:value={editSources} class="mt-1 font-mono" />
+									</div>
+								</div>
+								<div class="grid grid-cols-2 gap-3">
+									<div>
+										<Label>Schedule (cron)</Label>
+										<Input bind:value={editSchedule} placeholder="0 3 * * *" class="mt-1 font-mono" />
+									</div>
+									<div>
+										<Label>Encryption Password</Label>
+										<Input type="password" bind:value={editPassword} class="mt-1" />
+									</div>
+								</div>
+								<div>
+									<Label>Retention</Label>
+									<div class="mt-1 grid grid-cols-4 gap-3">
+										<div><label class="text-xs text-muted-foreground">Keep Last</label><Input type="number" bind:value={editKeepLast} class="mt-1" /></div>
+										<div><label class="text-xs text-muted-foreground">Keep Daily</label><Input type="number" bind:value={editKeepDaily} class="mt-1" /></div>
+										<div><label class="text-xs text-muted-foreground">Keep Weekly</label><Input type="number" bind:value={editKeepWeekly} class="mt-1" /></div>
+										<div><label class="text-xs text-muted-foreground">Keep Monthly</label><Input type="number" bind:value={editKeepMonthly} class="mt-1" /></div>
+									</div>
+								</div>
+								<div class="flex gap-2">
+									<Button size="sm" onclick={saveEdit}>Save</Button>
+									<Button size="sm" variant="secondary" onclick={() => editId = null}>Cancel</Button>
+								</div>
+							</div>
+						{/if}
 					</CardContent>
 				</Card>
 			{/each}
