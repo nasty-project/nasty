@@ -11,7 +11,7 @@
 	let tlsDomain = $state('');
 	let tlsAcmeEmail = $state('');
 	let tlsAcmeEnabled = $state(false);
-	let acmeStatus: { state: string; message: string; domain?: string; last_attempt?: string } | null = $state(null);
+	let acmeStatus: { state: string; message: string; domain?: string; expires?: string; issued?: string; issuer?: string; last_attempt?: string } | null = $state(null);
 	let tlsAcmeStaging = $state(false);
 	let tlsChallengeType = $state<'tls-alpn' | 'dns'>('tls-alpn');
 	let tlsDnsProvider = $state('');
@@ -298,9 +298,20 @@
 			{#if acmeStatus.domain}
 				<p class="mt-1 text-xs font-mono">{acmeStatus.domain}</p>
 			{/if}
-			{#if acmeStatus.message}
-				<p class="mt-2 text-xs text-muted-foreground">{acmeStatus.message}</p>
-			{/if}
+			<div class="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+				{#if acmeStatus.issuer}
+					<span class="text-muted-foreground">Issuer</span>
+					<span>{acmeStatus.issuer}</span>
+				{/if}
+				{#if acmeStatus.issued}
+					<span class="text-muted-foreground">Issued</span>
+					<span>{acmeStatus.issued}</span>
+				{/if}
+				{#if acmeStatus.expires}
+					<span class="text-muted-foreground">Expires</span>
+					<span>{acmeStatus.expires}</span>
+				{/if}
+			</div>
 		{:else if acmeStatus.state === 'error'}
 			<div class="flex items-center gap-2 text-sm">
 				<span class="h-2 w-2 rounded-full bg-red-500"></span>

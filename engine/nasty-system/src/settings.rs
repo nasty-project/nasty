@@ -17,15 +17,19 @@ pub struct AcmeStatus {
     pub message: String,
     /// Domain the cert is for
     pub domain: Option<String>,
-    /// When the cert expires (ISO 8601), if known
+    /// When the cert expires, if known
     pub expires: Option<String>,
+    /// When the cert was issued, if known
+    pub issued: Option<String>,
+    /// Certificate issuer (e.g. "Let's Encrypt")
+    pub issuer: Option<String>,
     /// When the last attempt was made
     pub last_attempt: Option<String>,
 }
 
 impl Default for AcmeStatus {
     fn default() -> Self {
-        Self { state: "idle".into(), message: String::new(), domain: None, expires: None, last_attempt: None }
+        Self { state: "idle".into(), message: String::new(), domain: None, expires: None, issued: None, issuer: None, last_attempt: None }
     }
 }
 
@@ -545,9 +549,66 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         Err(e) => warn!("Failed to reload nginx: {e}"),
     }
 
-    set_acme_status("success", &format!("Certificate installed for {domain}"), Some(domain));
+    // Read cert details and populate status
+    let cert_info = read_cert_info(TLS_CERT_PATH).await;
+    {
+        let status = ACME_STATUS.get_or_init(|| std::sync::Mutex::new(AcmeStatus::default()));
+        if let Ok(mut s) = status.lock() {
+            s.state = "success".to_string();
+            s.message = format!("Certificate installed for {domain}");
+            s.domain = Some(domain.to_string());
+            s.expires = cert_info.expires;
+            s.issued = cert_info.issued;
+            s.issuer = cert_info.issuer;
+            s.last_attempt = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs().to_string())
+                    .unwrap_or_default()
+            );
+        }
+    }
     info!("ACME certificate installed for {domain}");
     Ok(())
+}
+
+struct CertInfo {
+    expires: Option<String>,
+    issued: Option<String>,
+    issuer: Option<String>,
+}
+
+/// Read certificate details from a PEM file using openssl via shell.
+async fn read_cert_info(cert_path: &str) -> CertInfo {
+    let output = tokio::process::Command::new("sh")
+        .args(["-c", &format!(
+            "openssl x509 -in {cert_path} -noout -enddate -startdate -issuer 2>/dev/null || \
+             nix-shell -p openssl --run 'openssl x509 -in {cert_path} -noout -enddate -startdate -issuer' 2>/dev/null"
+        )])
+        .output().await;
+
+    let mut info = CertInfo { expires: None, issued: None, issuer: None };
+    if let Ok(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            if let Some(val) = line.strip_prefix("notAfter=") {
+                info.expires = Some(val.trim().to_string());
+            } else if let Some(val) = line.strip_prefix("notBefore=") {
+                info.issued = Some(val.trim().to_string());
+            } else if let Some(val) = line.strip_prefix("issuer=") {
+                // Extract CN or O from issuer
+                let issuer = val.trim();
+                if let Some(cn) = issuer.split("CN = ").nth(1) {
+                    info.issuer = Some(cn.split(',').next().unwrap_or(cn).trim().to_string());
+                } else if let Some(o) = issuer.split("O = ").nth(1) {
+                    info.issuer = Some(o.split(',').next().unwrap_or(o).trim().to_string());
+                } else {
+                    info.issuer = Some(issuer.to_string());
+                }
+            }
+        }
+    }
+    info
 }
 
 /// Write DNS credentials to a file readable by the ACME client.
@@ -572,6 +633,21 @@ pub async fn check_acme_renewal() {
     }
     if settings.tls_domain.is_none() || settings.tls_acme_email.is_none() {
         return;
+    }
+
+    // Populate cert info on startup so the UI shows details immediately
+    if std::path::Path::new(TLS_CERT_PATH).exists() {
+        let cert_info = read_cert_info(TLS_CERT_PATH).await;
+        let domain = settings.tls_domain.as_deref().unwrap_or("");
+        let status = ACME_STATUS.get_or_init(|| std::sync::Mutex::new(AcmeStatus::default()));
+        if let Ok(mut s) = status.lock() {
+            s.state = "success".to_string();
+            s.message = format!("Certificate installed for {domain}");
+            s.domain = Some(domain.to_string());
+            s.expires = cert_info.expires;
+            s.issued = cert_info.issued;
+            s.issuer = cert_info.issuer;
+        }
     }
 
     // Check if cert exists and is near expiry (within 30 days)
