@@ -514,15 +514,15 @@ impl FilesystemService {
         }
 
         // Discover unmounted bcachefs filesystems via blkid
+        let state = load_fs_state().await;
         let unmounted = discover_unmounted_bcachefs(&seen_uuids).await;
-        for (uuid, label, devices) in unmounted {
-            // Infer filesystem name: use label if available, else check for existing mount dir
-            let name = if !label.is_empty() {
-                label
-            } else {
-                // Look for an existing directory under mount base
-                find_fs_name_by_devices(&devices).unwrap_or_else(|| uuid[..8].to_string())
-            };
+        for (uuid, _label, devices) in unmounted {
+            // Infer filesystem name from existing mount directory or fs-state.json.
+            // Note: blkid's LABEL_SUB is the bcachefs per-device tiering label
+            // (e.g. "fast", "slow"), NOT the filesystem name — don't use it.
+            let name = find_fs_name_by_uuid(&state, &uuid)
+                .or_else(|| find_fs_name_by_devices(&devices))
+                .unwrap_or_else(|| uuid[..8].to_string());
 
             let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
             let has_mount_dir = Path::new(&mount_point).is_dir();
@@ -2260,6 +2260,16 @@ async fn is_device_bcachefs(device: &str) -> bool {
 
 /// Discover unmounted bcachefs filesystems via blkid.
 /// Returns Vec of (uuid, label, devices) for filesystems not in seen_uuids.
+/// Look up a filesystem name by UUID in the persisted fs-state.json.
+fn find_fs_name_by_uuid(state: &FsState, uuid: &str) -> Option<String> {
+    for (name, opts) in state {
+        if opts.uuid.as_deref() == Some(uuid) {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
 async fn discover_unmounted_bcachefs(
     seen_uuids: &std::collections::HashSet<String>,
 ) -> Vec<(String, String, Vec<String>)> {
