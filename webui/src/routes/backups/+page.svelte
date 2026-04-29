@@ -152,28 +152,6 @@
 		</Button>
 	</div>
 
-	{#if !profiles.some(p => p.sources.some(s => s.includes('/var/lib/nasty'))) && !showCreate && !(typeof localStorage !== 'undefined' && localStorage.getItem('nasty:config_backup_dismissed') === '1')}
-		<div class="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm">
-			<div class="flex-1">
-				<p class="font-medium text-amber-400">NASty configuration is not backed up</p>
-				<p class="mt-1 text-xs text-amber-400/80">
-					Your settings, shares, certificates, and user accounts live in <code class="font-mono">/var/lib/nasty</code>.
-					Create a backup profile with this path as a source to protect your configuration.
-					{#if profiles.length > 0}
-						You can also add it as a source to an existing profile.
-					{/if}
-				</p>
-			</div>
-			<button onclick={() => {
-				showCreate = true;
-				newName = 'NASty Config';
-				newSources = '/var/lib/nasty';
-				newSchedule = '0 3 * * *';
-			}} class="text-xs font-medium text-amber-400 hover:text-amber-300 shrink-0">Create backup</button>
-			<span class="text-amber-400/30">|</span>
-			<button onclick={() => { localStorage.setItem('nasty:config_backup_dismissed', '1'); location.reload(); }} class="text-xs text-amber-400/60 hover:text-amber-400 shrink-0">dismiss</button>
-		</div>
-	{/if}
 
 	{#if backupStatus?.running}
 		<div class="flex items-center gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-4 py-2 text-sm text-blue-400">
