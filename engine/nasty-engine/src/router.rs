@@ -740,10 +740,6 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(e) => err(req, e),
             }
         }
-        "system.version.cleanup" => match state.updates.version_cleanup().await {
-            Ok(()) => ok(req, "ok"),
-            Err(e) => err(req, e),
-        },
         "system.version.switch" => {
             match parse_params::<nasty_system::update::VersionSwitchRequest>(req) {
                 Ok(p) => match state.updates.version_switch(p).await {

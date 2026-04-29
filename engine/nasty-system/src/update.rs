@@ -18,7 +18,6 @@ const LOCAL_REPO: &str = "/etc/nixos";
 const NIXOS_FLAKE_DIR: &str = "/etc/nixos";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
 const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
-const VERSION_SWITCH_BACKUP_DIR: &str = "/var/lib/nasty/etc-nixos-backup";
 const DEFAULT_NASTY_OWNER: &str = "nasty-project";
 const DEFAULT_NASTY_REPO: &str = "nasty";
 const DEFAULT_NASTY_REF: &str = "main";
@@ -114,11 +113,6 @@ async fn write_channel(channel: ReleaseChannel) -> Result<(), std::io::Error> {
     tokio::fs::write(RELEASE_CHANNEL_PATH, channel.to_string()).await
 }
 
-// TODO: Remove token-based auth once the repo is public.
-// The token file is only needed for private repo access.
-// When removing, delete check_via_github_api(), GITHUB_TOKEN_PATH,
-// and revert check() to use git ls-remote directly.
-const GITHUB_TOKEN_PATH: &str = "/var/lib/nasty/github-token";
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct VersionInputInfo {
@@ -337,7 +331,6 @@ impl UpdateService {
             return Err(UpdateError::AlreadyRunning);
         }
 
-        self.purge_stale_version_backup().await?;
 
         let release_status = self.version_tagged_release_status().await?;
         if release_status.current_is_latest_standard_url {
@@ -463,11 +456,6 @@ echo "==> Update complete!"
 
     /// Legacy endpoint kept for compatibility with older web UIs.
     /// Newer builds do not restore from a backup; they only purge any stale
-    /// backup directory left behind by an older implementation.
-    pub async fn version_cleanup(&self) -> Result<(), UpdateError> {
-        self.purge_stale_version_backup().await
-    }
-
     /// Get or set the release channel.
     pub async fn get_channel(&self) -> ReleaseChannel {
         read_channel().await
@@ -708,7 +696,6 @@ echo "==> Update complete!"
             return Err(UpdateError::AlreadyRunning);
         }
 
-        self.purge_stale_version_backup().await?;
 
         let current_urls = read_flake_input_urls().await?;
         let mut seen = HashSet::new();
@@ -1318,24 +1305,9 @@ echo "==> Switch to generation {gen_id} complete!"
         }
     }
 
-    async fn purge_stale_version_backup(&self) -> Result<(), UpdateError> {
-        if tokio::fs::metadata(VERSION_SWITCH_BACKUP_DIR)
-            .await
-            .is_err()
-        {
-            return Ok(());
-        }
-
-        tokio::fs::remove_dir_all(VERSION_SWITCH_BACKUP_DIR)
-            .await
-            .map_err(|e| {
-                UpdateError::CommandFailed(format!("remove stale {VERSION_SWITCH_BACKUP_DIR}: {e}"))
-            })?;
-        Ok(())
-    }
 }
 
-/// TODO: Remove once repo access no longer requires token fallbacks.
+///
 /// Find the latest tag matching a glob pattern (e.g. "v*", "s*") via git ls-remote.
 async fn check_latest_tag(
     token: Option<&str>,
@@ -1567,19 +1539,9 @@ async fn check_via_github_api_branch(
     repo: &str,
     branch: &str,
 ) -> Result<String, UpdateError> {
-    let token = tokio::fs::read_to_string(GITHUB_TOKEN_PATH)
-        .await
-        .map(|s| s.trim().to_string())
-        .map_err(|_| UpdateError::CommandFailed("no github token configured".into()))?;
-
-    if token.is_empty() {
-        return Err(UpdateError::CommandFailed("empty github token".into()));
-    }
-
     let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{branch}");
     let body: serde_json::Value = github_http_client()?
         .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "nasty-engine")
         .send()
@@ -1685,11 +1647,7 @@ async fn is_reboot_required() -> bool {
 
 /// TODO: Remove once repo is public.
 async fn read_github_token() -> Option<String> {
-    tokio::fs::read_to_string(GITHUB_TOKEN_PATH)
-        .await
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    None
 }
 
 /// Build the full flake reference for nixos-rebuild.

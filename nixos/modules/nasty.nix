@@ -901,13 +901,13 @@ in {
         nixos-rebuild-ng # nixos-rebuild (for system updates)
         nix              # nix flake lock (for bcachefs-tools version switching)
         git              # for update check (git ls-remote)
-        curl             # for update check (GitHub API, TODO: remove when repo is public)
         qemu             # QEMU/KVM for virtual machines
         docker                       # Docker for apps runtime
         docker-compose               # Docker Compose for multi-container apps
         fwupd                        # fwupdmgr for firmware updates
         lego                         # ACME client for Let's Encrypt
-        rsync                        # config backup to bcachefs
+        curl                         # HTTP debugging
+        rsync                        # file sync
         procps                       # sysctl (vm.dirty_* tuning)
         nftables                     # nft (dynamic firewall rules)
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
