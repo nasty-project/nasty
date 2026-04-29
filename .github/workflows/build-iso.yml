@@ -77,7 +77,12 @@ jobs:
           if gh release view "$TAG" &>/dev/null; then
             gh release upload "$TAG" "${{ env.iso_dest }}" --clobber
           else
+            PRERELEASE=""
+            if [[ "$TAG" != v* ]]; then
+              PRERELEASE="--prerelease"
+            fi
             gh release create "$TAG" "${{ env.iso_dest }}" \
               --title "NASty $TAG" \
-              --notes "NASty ISO build — $(git rev-parse --short HEAD)"
+              --notes "NASty ISO build — $(git rev-parse --short HEAD)" \
+              $PRERELEASE
           fi
