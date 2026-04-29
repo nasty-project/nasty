@@ -210,9 +210,15 @@ async fn main() -> anyhow::Result<()> {
     state.system.info().await;
     info!("Caches warm in {}ms", t0.elapsed().as_millis());
 
-    // Check ACME cert renewal in background (non-blocking)
+    // Check ACME cert renewal on startup and daily thereafter
     tokio::spawn(async {
         nasty_system::settings::check_acme_renewal().await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            interval.tick().await;
+            nasty_system::settings::check_acme_renewal().await;
+        }
     });
 
     // Start daily anonymous telemetry (if not opted out)
