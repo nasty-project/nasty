@@ -227,9 +227,6 @@ async fn main() -> anyhow::Result<()> {
     // Background alert evaluation + notifications
     spawn_alert_notifier(state.clone());
 
-    // Periodic config backup to bcachefs
-    nasty_system::backup::spawn_periodic();
-
     // Signal systemd that startup is complete
     sd_notify_ready();
 

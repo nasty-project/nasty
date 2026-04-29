@@ -95,6 +95,25 @@
 		} catch { /* ignore */ }
 	}
 
+	// Config backup warning
+	const BACKUP_DISMISSED_KEY = 'nasty:config_backup_dismissed';
+	let configBackupMissing = $state(false);
+	let configBackupDismissed = $state(
+		typeof localStorage !== 'undefined' && localStorage.getItem(BACKUP_DISMISSED_KEY) === '1'
+	);
+	async function checkConfigBackup() {
+		if (!connected || configBackupDismissed) return;
+		try {
+			const profiles = await getClient().call<{ sources: string[] }[]>('backup.profile.list');
+			configBackupMissing = !profiles.some(p => p.sources.some(s => s.includes('/var/lib/nasty')));
+		} catch { /* ignore */ }
+	}
+	function dismissConfigBackup() {
+		configBackupDismissed = true;
+		configBackupMissing = false;
+		localStorage.setItem(BACKUP_DISMISSED_KEY, '1');
+	}
+
 	// Forced password change
 	let showPasswordChange = $state(false);
 	let newPassword = $state('');
@@ -207,6 +226,7 @@
 			connected = true;
 			showLogin = false;
 			checkSshStatus();
+			checkConfigBackup();
 			// Capture engine commit on first connect for reconnect version check
 			if (!initialCommit) {
 				try {
@@ -736,6 +756,14 @@
 						<span>SSH password authentication is enabled — add an SSH key and disable it for better security.</span>
 						<span class="ml-auto text-xs shrink-0">Settings &rarr;</span>
 					</a>
+				{/if}
+				{#if configBackupMissing}
+					<div class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
+						<a href="/backups" class="flex-1 no-underline text-amber-400 hover:text-amber-300">
+							NASty configuration is not backed up — create a backup profile for <code class="font-mono">/var/lib/nasty</code>.
+						</a>
+						<button onclick={dismissConfigBackup} class="ml-2 text-xs text-amber-400/60 hover:text-amber-400 shrink-0" title="Dismiss">dismiss</button>
+					</div>
 				{/if}
 				{#if !connected}
 					<p class="text-muted-foreground">Connecting to engine...</p>
