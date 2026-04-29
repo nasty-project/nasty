@@ -164,6 +164,13 @@
 					{/if}
 				</p>
 			</div>
+			<button onclick={() => {
+				showCreate = true;
+				newName = 'NASty Config';
+				newSources = '/var/lib/nasty';
+				newSchedule = '0 3 * * *';
+			}} class="text-xs font-medium text-amber-400 hover:text-amber-300 shrink-0">Create backup</button>
+			<span class="text-amber-400/30">|</span>
 			<button onclick={() => { localStorage.setItem('nasty:config_backup_dismissed', '1'); location.reload(); }} class="text-xs text-amber-400/60 hover:text-amber-400 shrink-0">dismiss</button>
 		</div>
 	{/if}
