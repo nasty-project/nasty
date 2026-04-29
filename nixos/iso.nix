@@ -254,9 +254,9 @@ in
       fi
 
       echo "==> Mounting..."
-      mount "$PART2" /mnt
+      mount -t ext4 "$PART2" /mnt
       mkdir -p /mnt/boot
-      mount "$PART1" /mnt/boot
+      mount -t vfat "$PART1" /mnt/boot
 
       echo "==> Bootstrapping local system flake..."
       mkdir -p /mnt/etc/nixos
