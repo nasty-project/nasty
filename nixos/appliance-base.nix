@@ -83,7 +83,7 @@
     enable = true;
     settings = {
       PermitRootLogin = "yes";
-      PasswordAuthentication = false; # default secure; engine overrides via Include
+      PasswordAuthentication = lib.mkDefault false; # engine overrides via Include; mkDefault avoids conflict with legacy ssh.nix
     };
     extraConfig = ''
       Include /var/lib/nasty/sshd_override.conf

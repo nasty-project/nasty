@@ -349,12 +349,12 @@ in
           > /mnt/var/lib/nasty/networking.json
       fi
 
-      # Default SSH config (password auth enabled, engine can change later)
+      # Empty SSH module — kept for backward compatibility with existing flakes
+      # that import ./ssh.nix. SSH password auth is managed via sshd_override.conf.
       printf '%s\n' \
-        '# Managed by NASty — edit via WebUI Settings > SSH Access' \
+        '# Managed by NASty — SSH password auth is controlled via /var/lib/nasty/sshd_override.conf' \
         '{ ... }:' \
         '{' \
-        '  services.openssh.settings.PasswordAuthentication = true;' \
         '}' \
         > /mnt/etc/nixos/ssh.nix
 
