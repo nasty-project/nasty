@@ -235,12 +235,18 @@ in
           mkpart data 20GiB 100%
       fi
 
+      # Re-read partition table and wait for devices to settle
+      partprobe "$DISK" 2>/dev/null || true
+      udevadm settle --timeout=10
+      sleep 1
+
       PART1="''${DISK}''${PSEP}1"
       PART2="''${DISK}''${PSEP}2"
 
       echo "==> Formatting partitions..."
       mkfs.fat -F32 "$PART1"
       mkfs.ext4 -F "$PART2"
+      sync
 
       if [ "$PART_MODE" = "2" ]; then
         PART3="''${DISK}''${PSEP}3"
