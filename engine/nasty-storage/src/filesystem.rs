@@ -362,12 +362,15 @@ impl FilesystemService {
 
     /// Mount filesystems that were previously tracked as mounted.
     /// Called at startup to restore filesystem state across reboots.
-    pub async fn restore_mounts(&self) {
+    /// Restore filesystem mounts from saved state. Returns names of filesystems
+    /// that failed to mount after all retry attempts.
+    pub async fn restore_mounts(&self) -> Vec<String> {
         let state = load_fs_state().await;
         if state.is_empty() {
             info!("No filesystems to restore");
-            return;
+            return vec![];
         }
+        let mut failed_names = Vec::new();
 
         // Retry mounting with backoff — block devices may not be ready
         // immediately after boot (SCSI/virtio enumeration, blkid cache).
@@ -387,7 +390,12 @@ impl FilesystemService {
                     continue;
                 }
 
-                info!("Restoring filesystem '{name}' (attempt {attempt}/{MAX_ATTEMPTS})...");
+                let dev_info = if !opts.devices.is_empty() {
+                    format!(" [{}]", opts.devices.join(", "))
+                } else {
+                    String::new()
+                };
+                info!("Restoring filesystem '{name}'{dev_info} (attempt {attempt}/{MAX_ATTEMPTS})...");
                 match self.mount_with_opts(name, opts).await {
                     Ok(_) => info!("Filesystem '{name}' mounted at {mount_point}"),
                     Err(e) => {
@@ -396,6 +404,7 @@ impl FilesystemService {
                             still_pending.push((*name, *opts));
                         } else {
                             error!("Failed to mount '{name}' after {MAX_ATTEMPTS} attempts: {e}");
+                            failed_names.push(name.to_string());
                         }
                     }
                 }
@@ -414,6 +423,7 @@ impl FilesystemService {
             pending = still_pending;
             tokio::time::sleep(RETRY_DELAY).await;
         }
+        failed_names
     }
 
     /// List all bcachefs filesystems (mounted and known via blkid).
@@ -799,11 +809,14 @@ impl FilesystemService {
             }
         }
 
-        // Track mount state for boot reconciliation
-        save_fs_mounted_with_opts(&req.name, mount_opts).await;
-
         // Read back the filesystem info
         let uuid = get_fs_uuid(&req.devices[0].path).await.unwrap_or_default();
+
+        // Track mount state with identity info for boot reconciliation
+        let mut saved_opts = mount_opts;
+        saved_opts.uuid = Some(uuid.clone());
+        saved_opts.devices = req.devices.iter().map(|d| d.path.clone()).collect();
+        save_fs_mounted_with_opts(&req.name, saved_opts).await;
         let (total, used, available) = get_mount_usage(&mount_point).await.unwrap_or((0, 0, 0));
 
         let fs_devices = req
@@ -938,8 +951,11 @@ impl FilesystemService {
             }
         }
 
-        // Track mount state for boot reconciliation
-        save_fs_mounted_with_opts(name, opts.clone()).await;
+        // Track mount state with identity info for boot reconciliation
+        let mut saved_opts = opts.clone();
+        saved_opts.uuid = Some(fs.uuid.clone());
+        saved_opts.devices = fs.devices.iter().map(|d| d.path.clone()).collect();
+        save_fs_mounted_with_opts(name, saved_opts).await;
 
         self.invalidate_list_cache().await;
         self.get(name).await
@@ -2291,6 +2307,12 @@ async fn discover_unmounted_bcachefs(
 /// Per-filesystem mount state, persisted across reboots.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct FsMountOptions {
+    /// bcachefs filesystem UUID — used to verify identity on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uuid: Option<String>,
+    /// Device paths that were part of the filesystem at last mount.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    devices: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encrypted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
