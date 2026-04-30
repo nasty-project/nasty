@@ -829,10 +829,19 @@
 					</div>
 				{/if}
 				{#if sshPasswordAuth}
-					<a href="/services" class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400 no-underline hover:bg-amber-500/20 transition-colors">
-						<span>SSH password authentication is enabled — add an SSH key and disable it for better security.</span>
-						<span class="ml-auto text-xs shrink-0">Services &rarr;</span>
-					</a>
+					<div class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
+						<a href="/services" class="flex-1 no-underline text-amber-400 hover:text-amber-300">
+							SSH password authentication is enabled — disable it for better security.
+						</a>
+						<button onclick={async () => {
+							try {
+								await getClient().call('system.ssh.set_password_auth', { enabled: false });
+								sshPasswordAuth = false;
+							} catch (e) {
+								// Likely no keys — need to add one first
+							}
+						}} class="text-xs font-medium text-amber-400 hover:text-amber-300 shrink-0">Disable now</button>
+					</div>
 				{/if}
 				{#if configBackupMissing}
 					<div class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
