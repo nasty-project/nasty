@@ -829,9 +829,9 @@
 					</div>
 				{/if}
 				{#if sshPasswordAuth}
-					<a href="/settings" onclick={() => {}} class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400 no-underline hover:bg-amber-500/20 transition-colors">
+					<a href="/services" class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400 no-underline hover:bg-amber-500/20 transition-colors">
 						<span>SSH password authentication is enabled — add an SSH key and disable it for better security.</span>
-						<span class="ml-auto text-xs shrink-0">Settings &rarr;</span>
+						<span class="ml-auto text-xs shrink-0">Services &rarr;</span>
 					</a>
 				{/if}
 				{#if configBackupMissing}
