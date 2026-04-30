@@ -221,6 +221,62 @@
 		snapshotsLoading = false;
 	}
 
+	function describeSchedule(cron: string): string {
+		const parts = cron.trim().split(/\s+/);
+		if (parts.length < 5) return cron;
+		const [min, hour, dom, mon, dow] = parts;
+		const time = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
+		const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+		if (dom === '*' && mon === '*' && dow === '*') {
+			if (hour === '*') return `Every hour at :${min.padStart(2, '0')}`;
+			return `Daily at ${time}`;
+		}
+		if (dom === '*' && mon === '*' && dow !== '*') {
+			const d = parseInt(dow);
+			return `Weekly on ${days[d] ?? dow} at ${time}`;
+		}
+		if (dom !== '*' && mon === '*') return `Monthly on day ${dom} at ${time}`;
+		return cron;
+	}
+
+	function nextRun(cron: string): string | null {
+		const parts = cron.trim().split(/\s+/);
+		if (parts.length < 5) return null;
+		const [minS, hourS, , , dowS] = parts;
+		const now = new Date();
+		const min = parseInt(minS);
+		const hour = parseInt(hourS);
+		if (isNaN(min) || isNaN(hour)) return null;
+
+		const next = new Date(now);
+		next.setSeconds(0, 0);
+
+		if (dowS !== '*') {
+			// Weekly
+			const dow = parseInt(dowS);
+			if (!isNaN(dow)) {
+				next.setHours(hour, min);
+				while (next.getDay() !== dow || next <= now) next.setDate(next.getDate() + 1);
+				next.setHours(hour, min);
+			}
+		} else if (hourS === '*') {
+			// Hourly
+			next.setMinutes(min);
+			if (next <= now) next.setHours(next.getHours() + 1);
+		} else {
+			// Daily
+			next.setHours(hour, min);
+			if (next <= now) next.setDate(next.getDate() + 1);
+		}
+
+		const diff = next.getTime() - now.getTime();
+		const hours = Math.floor(diff / 3600000);
+		const mins = Math.floor((diff % 3600000) / 60000);
+		if (hours > 24) return `in ${Math.floor(hours / 24)}d ${hours % 24}h`;
+		if (hours > 0) return `in ${hours}h ${mins}m`;
+		return `in ${mins}m`;
+	}
+
 	function targetSummary(t: BackupProfile['target']): string {
 		if (t.type === 'local') return t.path;
 		if (t.type === 's3') return `s3://${t.bucket}`;
@@ -403,7 +459,13 @@
 										{profile.repo_initialized ? 'Ready' : 'Not initialized'}
 									</Badge>
 									{#if profile.schedule}
-										<Badge variant="outline" class="text-[0.6rem] font-mono">{profile.schedule}</Badge>
+										<Badge variant="outline" class="text-[0.6rem]">{describeSchedule(profile.schedule)}</Badge>
+										{@const nr = nextRun(profile.schedule)}
+										{#if nr}
+											<span class="text-[0.6rem] text-muted-foreground">Next: {nr}</span>
+										{/if}
+									{:else}
+										<Badge variant="secondary" class="text-[0.6rem]">Manual</Badge>
 									{/if}
 								</div>
 								<div class="mt-1 text-xs text-muted-foreground font-mono">{targetSummary(profile.target)}</div>
