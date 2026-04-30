@@ -231,9 +231,9 @@
 					<td class="p-3">
 						<div class="flex gap-1.5">
 							<Button
-								variant={proto.enabled ? 'secondary' : 'default'}
+								variant="secondary"
 								size="xs"
-								class="min-w-[60px]"
+								class="w-[65px] justify-center"
 								onclick={() => toggle(proto)}
 							>
 								{proto.enabled ? 'Disable' : 'Enable'}
@@ -403,9 +403,9 @@
 				<td class="p-3">
 					<div class="flex gap-1.5">
 					{#if dockerStatus?.enabled}
-							<Button variant="secondary" size="xs" class="min-w-[60px]" onclick={disableDocker}>Disable</Button>
+							<Button variant="secondary" size="xs" class="w-[65px] justify-center" onclick={disableDocker}>Disable</Button>
 					{:else}
-							<Button size="xs" class="min-w-[60px]" onclick={async () => { if (!selectedFs) await loadFilesystems(); enableDocker(); }} disabled={dockerEnabling}>
+							<Button variant="secondary" size="xs" class="w-[65px] justify-center" onclick={async () => { if (!selectedFs) await loadFilesystems(); enableDocker(); }} disabled={dockerEnabling}>
 								{dockerEnabling ? 'Enabling...' : 'Enable'}
 							</Button>
 					{/if}
