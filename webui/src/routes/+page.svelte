@@ -17,7 +17,6 @@
 	let health: SystemHealth | null = $state(null);
 	let stats: SystemStats | null = $state(null);
 	let filesystems: Filesystem[] = $state([]);
-	let disks: DiskHealth[] = $state([]);
 	let settings: Settings | null = $state(null);
 	let alerts: ActiveAlert[] = $state([]);
 	let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -53,12 +52,11 @@
 
 	async function loadAll() {
 		await withToast(async () => {
-			[info, health, stats, filesystems, disks, settings, alerts] = await Promise.all([
+			[info, health, stats, filesystems, settings, alerts] = await Promise.all([
 				client.call<SystemInfo>('system.info'),
 				client.call<SystemHealth>('system.health'),
 				client.call<SystemStats>('system.stats'),
 				client.call<Filesystem[]>('fs.list'),
-				client.call<DiskHealth[]>('system.disks'),
 				client.call<Settings>('system.settings.get'),
 				client.call<ActiveAlert[]>('system.alerts'),
 			]);
@@ -607,37 +605,4 @@
 	</div>
 {/if}
 
-<!-- Disk Health -->
-{#if disks.length > 0}
-	<Card>
-		<CardHeader class="pb-2">
-			<CardTitle class="text-xs uppercase tracking-wide text-muted-foreground">S.M.A.R.T.</CardTitle>
-		</CardHeader>
-		<CardContent>
-			<div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-				{#each disks as disk}
-					<div class="flex items-center gap-3 rounded-lg border border-border px-3 py-2">
-						<span class="h-2.5 w-2.5 shrink-0 rounded-full {disk.health_passed ? 'bg-green-400' : 'bg-red-400'}"></span>
-						<div class="min-w-0 flex-1">
-							<div class="flex items-center gap-2">
-								<span class="font-mono text-sm font-semibold">{disk.device}</span>
-								<span class="rounded px-1.5 py-0.5 text-[0.6rem] font-semibold {disk.health_passed ? 'bg-green-950 text-green-400' : 'bg-red-950 text-red-400'}">
-									{disk.smart_status}
-								</span>
-							</div>
-							<div class="flex gap-2 text-xs text-muted-foreground">
-								<span class="truncate">{disk.model}</span>
-								<span class="shrink-0">{formatBytes(disk.capacity_bytes)}</span>
-								{#if disk.temperature_c != null}
-									<span class="shrink-0 font-semibold {disk.temperature_c > 50 ? 'text-amber-500' : ''}">{disk.temperature_c}°C</span>
-								{/if}
-							</div>
-						</div>
-					</div>
-				{/each}
-			</div>
-			<div class="mt-3 text-xs"><a href="/disks" class="text-primary hover:underline">View details</a></div>
-		</CardContent>
-	</Card>
-{/if}
 
