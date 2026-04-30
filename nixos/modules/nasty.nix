@@ -148,7 +148,6 @@ in {
     iscsi.enable = mkEnableOption "iSCSI target (LIO) for NASty" // { default = true; };
     nvmeof.enable = mkEnableOption "NVMe-oF target for NASty" // { default = true; };
     nut.enable = mkEnableOption "NUT (Network UPS Tools) for NASty";
-    rest-server.enable = mkEnableOption "restic REST server for receiving backups from other NASties";
 
     # VPN — not enabled by default (requires Tailscale auth key)
     tailscale.enable = mkEnableOption "Tailscale VPN for NASty";
@@ -1056,7 +1055,7 @@ in {
     };
 
     # ── Backup REST server (receives backups from other NASties) ─
-    systemd.services.nasty-rest-server = mkIf cfg.rest-server.enable {
+    systemd.services.nasty-rest-server = {
       description = "restic REST server for NASty backups";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
