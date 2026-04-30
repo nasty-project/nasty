@@ -2,11 +2,15 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { ProtocolStatus } from '$lib/types';
+	import type { ProtocolStatus, AppsStatus, Filesystem } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 
 	let protocols: ProtocolStatus[] = $state([]);
+	let dockerStatus: AppsStatus | null = $state(null);
+	let filesystems: Filesystem[] = $state([]);
+	let selectedFs = $state('');
+	let dockerEnabling = $state(false);
 	let loading = $state(true);
 
 	const client = getClient();
@@ -26,8 +30,38 @@
 
 	async function refresh() {
 		await withToast(async () => {
-			protocols = await client.call<ProtocolStatus[]>('service.protocol.list');
+			[protocols, dockerStatus] = await Promise.all([
+				client.call<ProtocolStatus[]>('service.protocol.list'),
+				client.call<AppsStatus>('apps.status').catch(() => null),
+			]);
 		});
+	}
+
+	async function loadFilesystems() {
+		try { filesystems = await client.call<Filesystem[]>('fs.list'); } catch { /* ignore */ }
+		const mounted = filesystems.filter(f => f.mounted);
+		if (mounted.length > 0 && !selectedFs) selectedFs = mounted[0].name;
+	}
+
+	async function enableDocker() {
+		if (!selectedFs) await loadFilesystems();
+		dockerEnabling = true;
+		await withToast(
+			() => client.call('apps.enable', { filesystem: selectedFs || undefined }),
+			'Docker enabled — starting runtime'
+		);
+		dockerEnabling = false;
+		// Poll until running
+		const poll = setInterval(async () => {
+			dockerStatus = await client.call<AppsStatus>('apps.status').catch(() => null);
+			if (dockerStatus?.running) { clearInterval(poll); }
+		}, 3000);
+		setTimeout(() => clearInterval(poll), 60000);
+	}
+
+	async function disableDocker() {
+		await withToast(() => client.call('apps.disable'), 'Docker disabled');
+		await refresh();
 	}
 
 	async function toggle(proto: ProtocolStatus) {
@@ -87,6 +121,54 @@
 {:else}
 	<h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Sharing Protocols</h2>
 	{@render serviceTable(sharingProtocols)}
+
+	<h2 class="mb-3 mt-8 text-sm font-semibold uppercase tracking-wide text-muted-foreground">App Runtime</h2>
+	<table class="w-full max-w-2xl text-sm">
+		<thead>
+			<tr>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Service</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Running</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
+			</tr>
+		</thead>
+		<tbody>
+			<tr class="border-b border-border">
+				<td class="p-3"><strong>Docker</strong></td>
+				<td class="p-3">
+					<Badge variant={dockerStatus?.enabled ? 'default' : 'secondary'}>
+						{dockerStatus?.enabled ? 'Enabled' : 'Disabled'}
+					</Badge>
+				</td>
+				<td class="p-3">
+					<span class="inline-block h-2 w-2 rounded-full {dockerStatus?.running ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
+					<span class="ml-1 text-xs text-muted-foreground">{dockerStatus?.running ? 'Running' : 'Stopped'}</span>
+				</td>
+				<td class="p-3">
+					{#if dockerStatus?.enabled}
+						<Button variant="secondary" size="xs" onclick={disableDocker}>Disable</Button>
+					{:else}
+						<div class="flex items-center gap-2">
+							{#if filesystems.length === 0}
+								<Button size="xs" onclick={async () => { await loadFilesystems(); enableDocker(); }} disabled={dockerEnabling}>
+									{dockerEnabling ? 'Enabling...' : 'Enable'}
+								</Button>
+							{:else}
+								<select bind:value={selectedFs} class="h-7 rounded-md border border-input bg-transparent px-2 text-xs">
+									{#each filesystems.filter(f => f.mounted) as fs}
+										<option value={fs.name}>{fs.name}</option>
+									{/each}
+								</select>
+								<Button size="xs" onclick={enableDocker} disabled={dockerEnabling}>
+									{dockerEnabling ? 'Enabling...' : 'Enable'}
+								</Button>
+							{/if}
+						</div>
+					{/if}
+				</td>
+			</tr>
+		</tbody>
+	</table>
 
 	<h2 class="mb-3 mt-8 text-sm font-semibold uppercase tracking-wide text-muted-foreground">System Services</h2>
 	{@render serviceTable(systemServices)}

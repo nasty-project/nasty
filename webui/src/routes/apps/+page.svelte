@@ -404,24 +404,9 @@
 	/** Start Docker in background if not running. Returns true if already ready. */
 	async function ensureAppsEnabled(): Promise<boolean> {
 		if (status?.enabled && status?.running) return true;
-		if (!status?.enabled) {
-			const agreed = await confirm(
-				'Enable Docker?',
-				'Apps require Docker to run. It uses approximately 50 MiB of RAM. Docker will start in the background while you configure your app.'
-			);
-			if (!agreed) return false;
-			enabling = true;
-			await withToast(
-				() => client.call('apps.enable', { filesystem: selectedFs || undefined }),
-				'Docker is starting in the background'
-			);
-			enabling = false;
-			startStartupPolling();
-		} else {
-			// Enabled but not yet running — just poll
-			startStartupPolling();
-		}
-		return true; // Let user proceed with form — install will wait for Docker
+		// Redirect to Services page to enable Docker
+		goto('/services');
+		return false;
 	}
 
 	/** Wait until Docker is actually ready before submitting. */
@@ -768,9 +753,7 @@
 								<Button size="sm" variant="outline" onclick={pruneDocker}>Cleanup Unused Images</Button>
 								<Button size="sm" variant="destructive" onclick={disableApps}>Disable Apps</Button>
 							{:else}
-								<Button size="sm" onclick={enableApps} disabled={enabling}>
-									{enabling ? 'Starting...' : 'Enable Apps'}
-								</Button>
+								<a href="/services" class="text-sm text-blue-400 no-underline hover:text-blue-300">Enable in Services →</a>
 							{/if}
 						</div>
 					</CardContent>
@@ -991,9 +974,7 @@
 	{:else if apps.length > 0 && !(status?.enabled && status?.running)}
 		<div class="mb-3 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
 			<span class="flex-1">Docker runtime is not running. Apps are shown but cannot be managed until the runtime is started.</span>
-			<Button size="xs" onclick={enableApps} disabled={enabling}>
-				{enabling ? 'Starting...' : 'Enable Apps'}
-			</Button>
+			<a href="/services" class="text-xs text-amber-400 no-underline hover:text-amber-300 shrink-0">Enable in Services →</a>
 		</div>
 	{/if}
 

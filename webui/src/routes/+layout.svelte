@@ -406,7 +406,7 @@
 		{ href: '/vms', label: 'VMs', keywords: ['vm', 'virtual', 'machine', 'qemu', 'kvm', 'cpu', 'vnc', 'passthrough'] },
 		{ href: '/apps', label: 'Apps', keywords: ['app', 'docker', 'container', 'compose', 'install', 'image', 'port'] },
 		{ href: '/terminal', label: 'Terminal', keywords: ['terminal', 'shell', 'ssh', 'console', 'command', 'bash'] },
-		{ href: '/services', label: 'Services', keywords: ['service', 'protocol', 'nfs', 'smb', 'iscsi', 'smart', 'avahi', 'mdns', 'enable', 'disable', 'rest server'] },
+		{ href: '/services', label: 'Services', keywords: ['service', 'protocol', 'nfs', 'smb', 'iscsi', 'smart', 'avahi', 'mdns', 'enable', 'disable', 'rest server', 'docker', 'container', 'runtime'] },
 		{ href: '/logs', label: 'Logs', keywords: ['log', 'journal', 'systemd', 'debug', 'error', 'follow', 'stream'] },
 		{ href: '/update', label: 'Update', keywords: ['update', 'upgrade', 'version', 'release', 'nixos', 'rebuild', 'generation'] },
 		{ href: '/users', label: 'Access Control', keywords: ['user', 'password', 'role', 'admin', 'group', 'permission', 'token', 'api', 'access', 'auth', 'login'] },
