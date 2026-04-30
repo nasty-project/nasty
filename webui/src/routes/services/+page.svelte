@@ -59,10 +59,34 @@
 		await loadTuning();
 	}
 
+	// Base name config for iSCSI/NVMe-oF
+	let baseIqn = $state('');
+	let baseNqn = $state('');
+	let baseNamesLoaded = $state(false);
+
+	async function loadBaseNames() {
+		if (baseNamesLoaded) return;
+		try {
+			const cfg = await client.call<{ iqn_prefix: string; nqn_prefix: string }>('service.base_names.get');
+			baseIqn = cfg.iqn_prefix;
+			baseNqn = cfg.nqn_prefix;
+			baseNamesLoaded = true;
+		} catch { /* ignore */ }
+	}
+
+	async function saveBaseIqn() {
+		await withToast(() => client.call('service.base_names.update', { iqn_prefix: baseIqn }), 'Base IQN updated');
+	}
+
+	async function saveBaseNqn() {
+		await withToast(() => client.call('service.base_names.update', { nqn_prefix: baseNqn }), 'Base NQN updated');
+	}
+
 	function toggleConfig(name: string) {
 		if (configOpen === name) { configOpen = null; return; }
 		configOpen = name;
 		if (['nfs', 'smb', 'iscsi'].includes(name)) loadTuning();
+		if (['iscsi', 'nvmeof'].includes(name)) loadBaseNames();
 		if (name === 'rest-server' && !restConfigLoaded) loadRestConfig();
 	}
 
@@ -174,7 +198,7 @@
 							>
 								{proto.enabled ? 'Disable' : 'Enable'}
 							</Button>
-							{#if ['nfs', 'smb', 'iscsi', 'rest-server'].includes(proto.name)}
+							{#if ['nfs', 'smb', 'iscsi', 'nvmeof', 'rest-server'].includes(proto.name)}
 								<Button variant="secondary" size="xs" onclick={() => toggleConfig(proto.name)}>
 									{configOpen === proto.name ? 'Close' : 'Configure'}
 								</Button>
@@ -220,7 +244,7 @@
 								</div>
 								<Button size="sm" class="mt-3" onclick={saveTuning} disabled={savingTuning}>{savingTuning ? 'Applying...' : 'Apply'}</Button>
 							{:else if proto.name === 'iscsi' && tuning}
-								<div class="grid grid-cols-1 gap-3 sm:grid-cols-2 max-w-md">
+								<div class="grid grid-cols-1 gap-3 sm:grid-cols-3 max-w-xl">
 									<div>
 										<label for="s-iscsi-cmd" class="mb-1 block text-xs text-muted-foreground">Command queue depth</label>
 										<input id="s-iscsi-cmd" type="number" min="1" bind:value={tIscsiCmdsnDepth} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
@@ -229,8 +253,23 @@
 										<label for="s-iscsi-timeout" class="mb-1 block text-xs text-muted-foreground">Login timeout (s)</label>
 										<input id="s-iscsi-timeout" type="number" min="1" bind:value={tIscsiLoginTimeout} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
 									</div>
+									<div class="sm:col-span-3">
+										<label for="s-base-iqn" class="mb-1 block text-xs text-muted-foreground">Base IQN</label>
+										<input id="s-base-iqn" type="text" bind:value={baseIqn} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
+										<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Prefix for all iSCSI target IQNs (e.g. iqn.2137-04.storage.nasty).</p>
+									</div>
 								</div>
-								<Button size="sm" class="mt-3" onclick={saveTuning} disabled={savingTuning}>{savingTuning ? 'Applying...' : 'Apply'}</Button>
+								<div class="mt-3 flex gap-2">
+									<Button size="sm" onclick={saveTuning} disabled={savingTuning}>{savingTuning ? 'Applying...' : 'Apply Tuning'}</Button>
+									<Button size="sm" variant="secondary" onclick={saveBaseIqn}>Save IQN</Button>
+								</div>
+							{:else if proto.name === 'nvmeof'}
+								<div class="max-w-xl">
+									<label for="s-base-nqn" class="mb-1 block text-xs text-muted-foreground">Base NQN</label>
+									<input id="s-base-nqn" type="text" bind:value={baseNqn} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
+									<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Prefix for all NVMe-oF subsystem NQNs (e.g. nqn.2137-04.storage.nasty).</p>
+								</div>
+								<Button size="sm" class="mt-3" onclick={saveBaseNqn}>Save</Button>
 							{:else if proto.name === 'rest-server'}
 								<div class="flex items-end gap-2">
 									<div class="flex-1 max-w-md">

@@ -128,6 +128,7 @@ fn is_read_only(method: &str) -> bool {
                 | "smb.user.list"
                 | "smb.group.list"
                 | "service.rest_server.config"
+                | "service.base_names.get"
                 | "system.update.version"
                 | "system.update.status"
                 | "system.reboot_required"
@@ -883,6 +884,22 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+        "service.base_names.get" => {
+            let iqn = tokio::fs::read_to_string("/var/lib/nasty/iscsi-base-iqn").await
+                .unwrap_or_else(|_| "iqn.2137-04.storage.nasty".into());
+            let nqn = tokio::fs::read_to_string("/var/lib/nasty/nvmeof-base-nqn").await
+                .unwrap_or_else(|_| "nqn.2137-04.storage.nasty".into());
+            ok(req, serde_json::json!({ "iqn_prefix": iqn.trim(), "nqn_prefix": nqn.trim() }))
+        }
+        "service.base_names.update" => {
+            if let Some(iqn) = req.params.as_ref().and_then(|p| p.get("iqn_prefix")).and_then(|v| v.as_str()) {
+                let _ = tokio::fs::write("/var/lib/nasty/iscsi-base-iqn", iqn.trim()).await;
+            }
+            if let Some(nqn) = req.params.as_ref().and_then(|p| p.get("nqn_prefix")).and_then(|v| v.as_str()) {
+                let _ = tokio::fs::write("/var/lib/nasty/nvmeof-base-nqn", nqn.trim()).await;
+            }
+            ok(req, "ok")
+        }
         "service.rest_server.config" => {
             let path = tokio::fs::read_to_string("/var/lib/nasty/rest-server-path").await
                 .unwrap_or_else(|_| "/var/lib/nasty/rest-server".into());
