@@ -97,6 +97,46 @@
 		await loadNut();
 	}
 
+	// SSH config
+	let sshKeys: string[] = $state([]);
+	let sshPasswordAuth = $state(true);
+	let sshNewKey = $state('');
+	let sshLoaded = $state(false);
+
+	async function loadSsh() {
+		if (sshLoaded) return;
+		try {
+			const result = await client.call<{ password_auth: boolean; keys: string[] }>('system.ssh.status');
+			sshKeys = result.keys;
+			sshPasswordAuth = result.password_auth;
+			sshLoaded = true;
+		} catch { /* ignore */ }
+	}
+
+	async function addSshKey() {
+		if (!sshNewKey.trim()) return;
+		await withToast(() => client.call('system.ssh.add_key', { key: sshNewKey.trim() }), 'SSH key added');
+		sshNewKey = '';
+		sshLoaded = false;
+		await loadSsh();
+	}
+
+	async function removeSshKey(key: string) {
+		await withToast(() => client.call('system.ssh.remove_key', { key }), 'SSH key removed');
+		sshLoaded = false;
+		await loadSsh();
+	}
+
+	async function toggleSshPasswordAuth() {
+		const newVal = !sshPasswordAuth;
+		await withToast(
+			() => client.call('system.ssh.set_password_auth', { enabled: newVal }),
+			newVal ? 'Password auth enabled' : 'Password auth disabled'
+		);
+		sshLoaded = false;
+		await loadSsh();
+	}
+
 	// Base name config for iSCSI/NVMe-oF
 	let baseIqn = $state('');
 	let baseNqn = $state('');
@@ -126,6 +166,7 @@
 		if (['nfs', 'smb', 'iscsi'].includes(name)) loadTuning();
 		if (['iscsi', 'nvmeof'].includes(name)) loadBaseNames();
 		if (name === 'nut') loadNut();
+		if (name === 'ssh') loadSsh();
 		if (name === 'rest-server' && !restConfigLoaded) loadRestConfig();
 	}
 
@@ -238,7 +279,7 @@
 							>
 								{proto.enabled ? 'Disable' : 'Enable'}
 							</Button>
-							{#if ['nfs', 'smb', 'iscsi', 'nvmeof', 'nut', 'rest-server'].includes(proto.name)}
+							{#if ['nfs', 'smb', 'iscsi', 'nvmeof', 'nut', 'ssh', 'rest-server'].includes(proto.name)}
 								<Button variant="secondary" size="xs" onclick={() => toggleConfig(proto.name)}>
 									{configOpen === proto.name ? 'Close' : 'Configure'}
 								</Button>
@@ -350,6 +391,37 @@
 									</div>
 								</div>
 								<Button size="sm" class="mt-3" onclick={saveNut} disabled={savingNut}>{savingNut ? 'Saving...' : 'Save'}</Button>
+							{:else if proto.name === 'ssh' && sshLoaded}
+								<div class="max-w-xl space-y-3">
+									<label class="flex items-center gap-2 text-sm cursor-pointer">
+										<input type="checkbox" checked={sshPasswordAuth} onchange={toggleSshPasswordAuth} class="rounded border-input" />
+										<span>Allow password authentication</span>
+									</label>
+									{#if sshPasswordAuth}
+										<p class="text-xs text-amber-400">Password authentication is enabled. Add an SSH key and disable it for better security.</p>
+									{/if}
+
+									<div>
+										<p class="mb-2 text-xs font-semibold text-muted-foreground">Authorized Keys ({sshKeys.length})</p>
+										{#if sshKeys.length > 0}
+											<div class="space-y-1 mb-3">
+												{#each sshKeys as key}
+													<div class="flex items-center gap-2 rounded bg-muted/30 px-2 py-1">
+														<code class="flex-1 text-[0.65rem] truncate">{key}</code>
+														<button onclick={() => removeSshKey(key)} class="text-xs text-destructive hover:text-destructive/80 shrink-0">Remove</button>
+													</div>
+												{/each}
+											</div>
+										{:else}
+											<p class="mb-3 text-xs text-muted-foreground">No SSH keys configured.</p>
+										{/if}
+										<div class="flex gap-2">
+											<input type="text" bind:value={sshNewKey} placeholder="ssh-ed25519 AAAA... user@host"
+												class="flex-1 h-8 rounded-md border border-input bg-background px-2 text-xs font-mono" />
+											<Button size="xs" onclick={addSshKey} disabled={!sshNewKey.trim()}>Add Key</Button>
+										</div>
+									</div>
+								</div>
 							{:else if proto.name === 'rest-server'}
 								<div class="flex items-end gap-2">
 									<div class="flex-1 max-w-md">
