@@ -153,18 +153,7 @@
 </script>
 
 
-{#snippet serviceTable(rows: ProtocolStatus[])}
-	<table class="w-full max-w-2xl text-sm">
-		<thead>
-			<tr>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Service</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Running</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each rows as proto}
+{#snippet serviceRow(proto: ProtocolStatus)}
 				<tr class="border-b border-border">
 					<td class="p-3"><strong>{proto.display_name}</strong></td>
 					<td class="p-3">
@@ -258,28 +247,29 @@
 						</td>
 					</tr>
 				{/if}
-			{/each}
-		</tbody>
-	</table>
 {/snippet}
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
 {:else}
-	<h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Sharing Protocols</h2>
-	{@render serviceTable(sharingProtocols)}
-
-	<h2 class="mb-3 mt-8 text-sm font-semibold uppercase tracking-wide text-muted-foreground">App Runtime</h2>
-	<table class="w-full max-w-2xl text-sm">
+	<table class="w-full max-w-3xl text-sm">
 		<thead>
 			<tr>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Service</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Running</th>
+				<th class="w-[180px] border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Service</th>
+				<th class="w-[100px] border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
+				<th class="w-[100px] border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Running</th>
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
 			</tr>
 		</thead>
 		<tbody>
+			<!-- Sharing Protocols -->
+			<tr><td colspan="4" class="pt-4 pb-1 px-3 text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground/60">Sharing Protocols</td></tr>
+			{#each sharingProtocols as proto}
+				{@render serviceRow(proto)}
+			{/each}
+
+			<!-- App Runtime -->
+			<tr><td colspan="4" class="pt-6 pb-1 px-3 text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground/60">App Runtime</td></tr>
 			<tr class="border-b border-border">
 				<td class="p-3"><strong>Docker</strong></td>
 				<td class="p-3">
@@ -341,9 +331,11 @@
 					</td>
 				</tr>
 			{/if}
+			<!-- System Services -->
+			<tr><td colspan="4" class="pt-6 pb-1 px-3 text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground/60">System Services</td></tr>
+			{#each systemServices as proto}
+				{@render serviceRow(proto)}
+			{/each}
 		</tbody>
 	</table>
-
-	<h2 class="mb-3 mt-8 text-sm font-semibold uppercase tracking-wide text-muted-foreground">System Services</h2>
-	{@render serviceTable(systemServices)}
 {/if}
