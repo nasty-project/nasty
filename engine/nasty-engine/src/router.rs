@@ -127,6 +127,7 @@ fn is_read_only(method: &str) -> bool {
                 | "subvolume.children"
                 | "smb.user.list"
                 | "smb.group.list"
+                | "service.rest_server.config"
                 | "system.update.version"
                 | "system.update.status"
                 | "system.reboot_required"
@@ -882,6 +883,48 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             },
             Err(r) => r,
         },
+        "service.rest_server.config" => {
+            let path = tokio::fs::read_to_string("/var/lib/nasty/rest-server-path").await
+                .unwrap_or_else(|_| "/var/lib/nasty/rest-server".into());
+            ok(req, serde_json::json!({ "path": path.trim() }))
+        }
+        "service.rest_server.configure" => {
+            let path = match require_str(req, "path") { Ok(s) => s.to_string(), Err(r) => return r };
+
+            // Create subvolume if path is under /fs/ and doesn't exist
+            if path.starts_with("/fs/") && !std::path::Path::new(&path).exists() {
+                if let Some(rest) = path.strip_prefix("/fs/") {
+                    if let Some((fs_name, subvol_name)) = rest.split_once('/') {
+                        let create_req = nasty_storage::subvolume::CreateSubvolumeRequest {
+                            filesystem: fs_name.to_string(),
+                            name: subvol_name.to_string(),
+                            subvolume_type: nasty_storage::subvolume::SubvolumeType::Filesystem,
+                            volsize_bytes: None,
+                            compression: None,
+                            comments: Some("Backup Server storage".to_string()),
+                            direct_io: None,
+                            foreground_target: None,
+                            background_target: None,
+                            promote_target: None,
+                            metadata_target: None,
+                            data_replicas: None,
+                        };
+                        let _ = state.subvolumes.create(create_req, None).await;
+                    }
+                }
+            }
+
+            if let Err(e) = tokio::fs::write("/var/lib/nasty/rest-server-path", &path).await {
+                return err(req, format!("write config: {e}"));
+            }
+
+            // Restart rest-server to pick up new path
+            let _ = tokio::process::Command::new("systemctl")
+                .args(["restart", "nasty-rest-server"])
+                .output().await;
+
+            ok(req, "ok")
+        }
         "system.firewall.status" => ok(req, state.firewall.status().await),
         "system.firewall.restrict" => {
             let service = match require_str(req, "service") {

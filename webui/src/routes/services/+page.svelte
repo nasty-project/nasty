@@ -13,6 +13,28 @@
 	let dockerEnabling = $state(false);
 	let loading = $state(true);
 
+	// Backup Server config
+	let restServerPath = $state('');
+	let showRestConfig = $state(false);
+	let restConfigLoaded = $state(false);
+
+	async function loadRestConfig() {
+		try {
+			const cfg = await client.call<{ path: string }>('service.rest_server.config');
+			restServerPath = cfg.path;
+			restConfigLoaded = true;
+		} catch { /* ignore */ }
+	}
+
+	async function saveRestConfig() {
+		await withToast(
+			() => client.call('service.rest_server.configure', { path: restServerPath }),
+			'Backup Server path updated'
+		);
+		showRestConfig = false;
+		await refresh();
+	}
+
 	const client = getClient();
 
 	function handleEvent(_: string, params: unknown) {
@@ -102,15 +124,43 @@
 						<span class="ml-1 text-xs text-muted-foreground">{proto.running ? 'Running' : 'Stopped'}</span>
 					</td>
 					<td class="p-3">
-						<Button
-							variant={proto.enabled ? 'secondary' : 'default'}
-							size="xs"
-							onclick={() => toggle(proto)}
-						>
-							{proto.enabled ? 'Disable' : 'Enable'}
-						</Button>
+						<div class="flex gap-1.5">
+							<Button
+								variant={proto.enabled ? 'secondary' : 'default'}
+								size="xs"
+								onclick={() => toggle(proto)}
+							>
+								{proto.enabled ? 'Disable' : 'Enable'}
+							</Button>
+							{#if proto.name === 'rest-server'}
+								<Button variant="secondary" size="xs" onclick={() => { showRestConfig = !showRestConfig; if (showRestConfig && !restConfigLoaded) loadRestConfig(); }}>
+									Configure
+								</Button>
+							{/if}
+						</div>
 					</td>
 				</tr>
+				{#if proto.name === 'rest-server' && showRestConfig}
+					<tr class="border-b border-border bg-muted/20">
+						<td colspan="4" class="p-3">
+							<div class="flex items-end gap-2">
+								<div class="flex-1 max-w-md">
+									<label for="rest-path" class="text-xs text-muted-foreground">Storage path</label>
+									<input
+										id="rest-path"
+										type="text"
+										bind:value={restServerPath}
+										placeholder="/fs/first/backups"
+										class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm"
+									/>
+									<p class="mt-1 text-xs text-muted-foreground">Use a path on bcachefs (e.g. /fs/first/backups). A subvolume will be created automatically if it doesn't exist.</p>
+								</div>
+								<Button size="sm" onclick={saveRestConfig}>Save</Button>
+								<Button size="sm" variant="secondary" onclick={() => showRestConfig = false}>Cancel</Button>
+							</div>
+						</td>
+					</tr>
+				{/if}
 			{/each}
 		</tbody>
 	</table>

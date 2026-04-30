@@ -1061,7 +1061,16 @@ in {
       wants = [ "network-online.target" ];
       serviceConfig = {
         Type = "simple";
-        ExecStart = "${pkgs.restic-rest-server}/bin/rest-server --listen :8000 --path /var/lib/nasty/rest-server --no-auth";
+        ExecStart = pkgs.writeShellScript "nasty-rest-server-start" ''
+          PATH_FILE="/var/lib/nasty/rest-server-path"
+          if [ -f "$PATH_FILE" ]; then
+            REPO_PATH=$(cat "$PATH_FILE")
+          else
+            REPO_PATH="/var/lib/nasty/rest-server"
+          fi
+          mkdir -p "$REPO_PATH"
+          exec ${pkgs.restic-rest-server}/bin/rest-server --listen :8000 --path "$REPO_PATH" --no-auth
+        '';
         StateDirectory = "nasty/rest-server";
         Restart = "on-failure";
         RestartSec = "5s";
