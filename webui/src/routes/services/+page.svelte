@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { ProtocolStatus, AppsStatus, Filesystem, TuningConfig } from '$lib/types';
+	import type { ProtocolStatus, AppsStatus, Filesystem, TuningConfig, NutConfig, UpsStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -59,6 +59,44 @@
 		await loadTuning();
 	}
 
+	// UPS (NUT) config
+	let nutConfig: NutConfig | null = $state(null);
+	let upsStatus: UpsStatus | null = $state(null);
+	let savingNut = $state(false);
+	let nutDriver = $state(''); let nutPort = $state(''); let nutUpsName = $state('');
+	let nutDescription = $state('');
+	let nutShutdownPercent = $state(''); let nutShutdownSeconds = $state('');
+
+	async function loadNut() {
+		if (nutConfig) return;
+		nutConfig = await client.call<NutConfig>('system.nut.config.get');
+		if (nutConfig) {
+			nutDriver = nutConfig.driver;
+			nutPort = nutConfig.port;
+			nutUpsName = nutConfig.ups_name;
+			nutDescription = nutConfig.description;
+			nutShutdownPercent = nutConfig.shutdown_on_battery_percent.toString();
+			nutShutdownSeconds = nutConfig.shutdown_on_battery_seconds.toString();
+		}
+		try { upsStatus = await client.call<UpsStatus>('system.nut.status'); } catch { /* ignore */ }
+	}
+
+	async function saveNut() {
+		savingNut = true;
+		await withToast(
+			() => client.call('system.nut.config.update', {
+				driver: nutDriver, port: nutPort, ups_name: nutUpsName,
+				description: nutDescription || undefined,
+				shutdown_on_battery_percent: parseInt(nutShutdownPercent) || undefined,
+				shutdown_on_battery_seconds: parseInt(nutShutdownSeconds) || undefined,
+			}),
+			'UPS configuration saved'
+		);
+		savingNut = false;
+		nutConfig = null;
+		await loadNut();
+	}
+
 	// Base name config for iSCSI/NVMe-oF
 	let baseIqn = $state('');
 	let baseNqn = $state('');
@@ -87,6 +125,7 @@
 		configOpen = name;
 		if (['nfs', 'smb', 'iscsi'].includes(name)) loadTuning();
 		if (['iscsi', 'nvmeof'].includes(name)) loadBaseNames();
+		if (name === 'nut') loadNut();
 		if (name === 'rest-server' && !restConfigLoaded) loadRestConfig();
 	}
 
@@ -198,7 +237,7 @@
 							>
 								{proto.enabled ? 'Disable' : 'Enable'}
 							</Button>
-							{#if ['nfs', 'smb', 'iscsi', 'nvmeof', 'rest-server'].includes(proto.name)}
+							{#if ['nfs', 'smb', 'iscsi', 'nvmeof', 'nut', 'rest-server'].includes(proto.name)}
 								<Button variant="secondary" size="xs" onclick={() => toggleConfig(proto.name)}>
 									{configOpen === proto.name ? 'Close' : 'Configure'}
 								</Button>
@@ -270,6 +309,46 @@
 									<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Prefix for all NVMe-oF subsystem NQNs (e.g. nqn.2137-04.storage.nasty).</p>
 								</div>
 								<Button size="sm" class="mt-3" onclick={saveBaseNqn}>Save</Button>
+							{:else if proto.name === 'nut'}
+								{#if upsStatus?.available}
+									<div class="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4 max-w-xl text-xs">
+										<div><span class="text-muted-foreground">Status</span><br/><strong>{upsStatus.status}</strong></div>
+										{#if upsStatus.battery_charge != null}<div><span class="text-muted-foreground">Battery</span><br/><strong>{upsStatus.battery_charge.toFixed(0)}%</strong></div>{/if}
+										{#if upsStatus.input_voltage != null}<div><span class="text-muted-foreground">Input</span><br/><strong>{upsStatus.input_voltage.toFixed(1)}V</strong></div>{/if}
+										{#if upsStatus.ups_model}<div><span class="text-muted-foreground">Model</span><br/><strong>{upsStatus.ups_model}</strong></div>{/if}
+									</div>
+								{/if}
+								<div class="grid grid-cols-1 gap-3 sm:grid-cols-3 max-w-xl">
+									<div>
+										<label for="s-nut-driver" class="mb-1 block text-xs text-muted-foreground">Driver</label>
+										<select id="s-nut-driver" bind:value={nutDriver} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm">
+											<option value="usbhid-ups">usbhid-ups (USB HID)</option>
+											<option value="blazer_usb">blazer_usb (Megatec USB)</option>
+											<option value="nutdrv_qx">nutdrv_qx (Q* USB)</option>
+											<option value="snmp-ups">snmp-ups (SNMP)</option>
+											<option value="apcsmart">apcsmart (APC serial)</option>
+										</select>
+									</div>
+									<div>
+										<label for="s-nut-port" class="mb-1 block text-xs text-muted-foreground">Port</label>
+										<input id="s-nut-port" type="text" bind:value={nutPort} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
+										<p class="mt-0.5 text-[0.6rem] text-muted-foreground">"auto" for USB.</p>
+									</div>
+									<div>
+										<label for="s-nut-name" class="mb-1 block text-xs text-muted-foreground">UPS Name</label>
+										<input id="s-nut-name" type="text" bind:value={nutUpsName} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+									</div>
+									<div>
+										<label for="s-nut-pct" class="mb-1 block text-xs text-muted-foreground">Shutdown at battery (%)</label>
+										<input id="s-nut-pct" type="number" min="0" max="100" bind:value={nutShutdownPercent} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+									</div>
+									<div>
+										<label for="s-nut-secs" class="mb-1 block text-xs text-muted-foreground">On-battery timeout (s)</label>
+										<input id="s-nut-secs" type="number" min="0" bind:value={nutShutdownSeconds} class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+										<p class="mt-0.5 text-[0.6rem] text-muted-foreground">0 = disabled.</p>
+									</div>
+								</div>
+								<Button size="sm" class="mt-3" onclick={saveNut} disabled={savingNut}>{savingNut ? 'Saving...' : 'Save'}</Button>
 							{:else if proto.name === 'rest-server'}
 								<div class="flex items-end gap-2">
 									<div class="flex-1 max-w-md">
