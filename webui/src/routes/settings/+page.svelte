@@ -590,7 +590,7 @@
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'tuning'
 			? 'border-b-2 border-primary text-foreground'
 			: 'text-muted-foreground hover:text-foreground'}"
-	>Tuning</button>
+	>System Tuning</button>
 	<button
 		onclick={() => switchTab('metrics')}
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'metrics'
@@ -1168,75 +1168,9 @@
 		<p class="text-muted-foreground">Loading...</p>
 	{:else}
 		<div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
-
-			<!-- NFS -->
-			<section class="rounded-lg border border-border p-5">
-				<h3 class="mb-4 text-sm font-semibold">NFS Server</h3>
-				<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-					<div>
-						<label for="nfs-threads" class="mb-1 block text-xs text-muted-foreground">Threads</label>
-						<input id="nfs-threads" type="number" min="1" bind:value={tNfsThreads}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Kernel nfsd threads (default: 8). Increase under heavy concurrent load.</p>
-					</div>
-					<div>
-						<label for="nfs-lease" class="mb-1 block text-xs text-muted-foreground">Lease time (s)</label>
-						<input id="nfs-lease" type="number" min="1" bind:value={tNfsLeaseTime}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">NFSv4 lease window. Clients must renew state within this period.</p>
-					</div>
-					<div>
-						<label for="nfs-grace" class="mb-1 block text-xs text-muted-foreground">Grace time (s)</label>
-						<input id="nfs-grace" type="number" min="1" bind:value={tNfsGraceTime}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Grace period after restart for clients to reclaim locks.</p>
-					</div>
-				</div>
-			</section>
-
-			<!-- SMB -->
-			<section class="rounded-lg border border-border p-5">
-				<h3 class="mb-4 text-sm font-semibold">SMB Server</h3>
-				<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-					<div>
-						<label for="smb-maxconn" class="mb-1 block text-xs text-muted-foreground">Max connections</label>
-						<input id="smb-maxconn" type="number" min="0" bind:value={tSmbMaxConnections}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">0 = unlimited.</p>
-					</div>
-					<div>
-						<label for="smb-deadtime" class="mb-1 block text-xs text-muted-foreground">Dead time (min)</label>
-						<input id="smb-deadtime" type="number" min="0" bind:value={tSmbDeadtime}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Disconnect idle clients after N minutes. 0 = never.</p>
-					</div>
-					<div class="sm:col-span-3">
-						<label for="smb-sockopts" class="mb-1 block text-xs text-muted-foreground">Socket options</label>
-						<input id="smb-sockopts" type="text" bind:value={tSmbSocketOptions} placeholder="SO_RCVBUF=131072 SO_SNDBUF=131072"
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">TCP socket tuning. Leave empty for kernel defaults.</p>
-					</div>
-				</div>
-			</section>
-
-			<!-- iSCSI -->
-			<section class="rounded-lg border border-border p-5">
-				<h3 class="mb-4 text-sm font-semibold">iSCSI Target</h3>
-				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-					<div>
-						<label for="iscsi-cmdsn" class="mb-1 block text-xs text-muted-foreground">Command queue depth</label>
-						<input id="iscsi-cmdsn" type="number" min="1" bind:value={tIscsiCmdsnDepth}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Default CmdSN depth per session (default: 64).</p>
-					</div>
-					<div>
-						<label for="iscsi-timeout" class="mb-1 block text-xs text-muted-foreground">Login timeout (s)</label>
-						<input id="iscsi-timeout" type="number" min="1" bind:value={tIscsiLoginTimeout}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Seconds before login attempt times out.</p>
-					</div>
-				</div>
-			</section>
+			<p class="text-sm text-muted-foreground col-span-full">
+				NFS, SMB, and iSCSI tuning is now in <a href="/services" class="text-blue-400 hover:underline">Services</a> → Configure.
+			</p>
 
 			<!-- VM Writeback -->
 			<section class="rounded-lg border border-border p-5">
