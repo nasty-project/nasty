@@ -152,7 +152,7 @@ in
       echo ""
       echo "Partitioning mode:"
       echo "  1) Use entire disk for NASty OS (recommended if you have separate data disks)"
-      echo "  2) Split disk: 30 GiB for OS, rest for data (single-disk setup)"
+      echo "  2) Split disk: 20 GiB for OS, rest for data (single-disk setup)"
       echo ""
       read -p "Choose [1/2]: " PART_MODE
 
@@ -161,10 +161,10 @@ in
         exit 1
       fi
 
-      if [ "$PART_MODE" = "2" ] && [ "$DISK_SIZE_G" -lt 50 ]; then
+      if [ "$PART_MODE" = "2" ] && [ "$DISK_SIZE_G" -lt 40 ]; then
         echo ""
-        echo "WARNING: Disk is only ''${DISK_SIZE_G} GiB. After 30 GiB for the OS,"
-        echo "only $(( DISK_SIZE_G - 30 )) GiB will remain for data."
+        echo "WARNING: Disk is only ''${DISK_SIZE_G} GiB. After 20 GiB for the OS,"
+        echo "only $(( DISK_SIZE_G - 20 )) GiB will remain for data."
         echo "Consider using mode 1 with a separate data disk instead."
         read -p "Continue anyway? (yes/no): " SMALL_CONFIRM
         if [ "$SMALL_CONFIRM" != "yes" ]; then
