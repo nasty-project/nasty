@@ -233,6 +233,7 @@
 							<Button
 								variant={proto.enabled ? 'secondary' : 'default'}
 								size="xs"
+								class="min-w-[60px]"
 								onclick={() => toggle(proto)}
 							>
 								{proto.enabled ? 'Disable' : 'Enable'}
@@ -400,52 +401,51 @@
 					<span class="ml-1 text-xs text-muted-foreground">{dockerStatus?.running ? 'Running' : 'Stopped'}</span>
 				</td>
 				<td class="p-3">
+					<div class="flex gap-1.5">
 					{#if dockerStatus?.enabled}
-						<div class="flex gap-1.5">
-							<Button variant="secondary" size="xs" onclick={disableDocker}>Disable</Button>
-							<Button variant="secondary" size="xs" onclick={() => configOpen = configOpen === 'docker' ? null : 'docker'}>
-								{configOpen === 'docker' ? 'Close' : 'Configure'}
-							</Button>
-						</div>
+							<Button variant="secondary" size="xs" class="min-w-[60px]" onclick={disableDocker}>Disable</Button>
 					{:else}
-						<div class="flex items-center gap-2">
-							{#if filesystems.length === 0}
-								<Button size="xs" onclick={async () => { await loadFilesystems(); enableDocker(); }} disabled={dockerEnabling}>
-									{dockerEnabling ? 'Enabling...' : 'Enable'}
-								</Button>
-							{:else}
-								<select bind:value={selectedFs} class="h-7 rounded-md border border-input bg-transparent px-2 text-xs">
+							<Button size="xs" class="min-w-[60px]" onclick={async () => { if (!selectedFs) await loadFilesystems(); enableDocker(); }} disabled={dockerEnabling}>
+								{dockerEnabling ? 'Enabling...' : 'Enable'}
+							</Button>
+					{/if}
+						<Button variant="secondary" size="xs" onclick={() => { configOpen = configOpen === 'docker' ? null : 'docker'; if (configOpen === 'docker' && !dockerStatus?.enabled) loadFilesystems(); }}>
+							{configOpen === 'docker' ? 'Close' : 'Configure'}
+						</Button>
+					</div>
+				</td>
+			</tr>
+			{#if configOpen === 'docker'}
+				<tr class="border-b border-border bg-muted/20">
+					<td colspan="4" class="p-4">
+						{#if dockerStatus?.enabled}
+							<div class="flex flex-wrap gap-4 text-xs">
+								{#if dockerStatus.storage_path}
+									<span class="text-muted-foreground">Storage: <code class="font-mono">{dockerStatus.storage_path}</code></span>
+								{/if}
+								{#if dockerStatus.docker_version}
+									<span class="text-muted-foreground">Version: {dockerStatus.docker_version}</span>
+								{/if}
+								{#if dockerStatus.memory_bytes}
+									<span class="text-muted-foreground">Memory: {(dockerStatus.memory_bytes / 1048576).toFixed(0)} MiB</span>
+								{/if}
+							</div>
+							<div class="mt-3">
+								<Button size="sm" variant="secondary" onclick={async () => {
+									await withToast(() => client.call('apps.prune'), 'Cleanup complete');
+								}}>Cleanup Unused Images</Button>
+							</div>
+						{:else}
+							<div class="flex items-center gap-2">
+								<label for="docker-fs" class="text-xs text-muted-foreground">Storage filesystem:</label>
+								<select id="docker-fs" bind:value={selectedFs} class="h-7 rounded-md border border-input bg-transparent px-2 text-xs">
 									{#each filesystems.filter(f => f.mounted) as fs}
 										<option value={fs.name}>{fs.name}</option>
 									{/each}
 								</select>
-								<Button size="xs" onclick={enableDocker} disabled={dockerEnabling}>
-									{dockerEnabling ? 'Enabling...' : 'Enable'}
-								</Button>
-							{/if}
-						</div>
-					{/if}
-				</td>
-			</tr>
-			{#if configOpen === 'docker' && dockerStatus?.enabled}
-				<tr class="border-b border-border bg-muted/20">
-					<td colspan="4" class="p-4">
-						<div class="flex flex-wrap gap-4 text-xs">
-							{#if dockerStatus.storage_path}
-								<span class="text-muted-foreground">Storage: <code class="font-mono">{dockerStatus.storage_path}</code></span>
-							{/if}
-							{#if dockerStatus.docker_version}
-								<span class="text-muted-foreground">Version: {dockerStatus.docker_version}</span>
-							{/if}
-							{#if dockerStatus.memory_bytes}
-								<span class="text-muted-foreground">Memory: {(dockerStatus.memory_bytes / 1048576).toFixed(0)} MiB</span>
-							{/if}
-						</div>
-						<div class="mt-3">
-							<Button size="sm" variant="secondary" onclick={async () => {
-								await withToast(() => client.call('apps.prune'), 'Cleanup complete');
-							}}>Cleanup Unused Images</Button>
-						</div>
+								<p class="text-xs text-muted-foreground">Docker data will be stored on this filesystem.</p>
+							</div>
+						{/if}
 					</td>
 				</tr>
 			{/if}
