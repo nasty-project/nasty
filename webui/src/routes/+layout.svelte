@@ -208,11 +208,13 @@
 		const rebootPoll = setInterval(checkRebootRequired, 30_000);
 		const authPoll = setInterval(checkAuth, 60_000);
 		const sshPoll = setInterval(checkSshStatus, 30_000);
+		const backupPoll = setInterval(checkConfigBackup, 30_000);
 		return () => {
 			getClient().offReconnect(onReconnect);
 			getClient().offDisconnect(onDisconnect);
 			getClient().disconnect();
 			clearInterval(sshPoll);
+			clearInterval(backupPoll);
 			clearInterval(tick);
 			clearInterval(rebootPoll);
 			clearInterval(authPoll);

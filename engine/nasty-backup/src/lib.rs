@@ -250,6 +250,14 @@ impl BackupService {
 
     pub async fn run_backup(&self, id: &str) -> Result<BackupRunResult, BackupError> {
         let profile = self.get_profile(id).await?;
+
+        // Auto-init repo if not yet initialized
+        if !profile.repo_initialized {
+            info!("Auto-initializing backup repo for profile '{}'", profile.name);
+            self.init_repo(id).await?;
+        }
+
+        let profile = self.get_profile(id).await?;
         let start = std::time::Instant::now();
         *self.running.lock().await = Some(id.to_string());
 
