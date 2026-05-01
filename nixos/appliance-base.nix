@@ -31,14 +31,20 @@
     };
     path = [ pkgs.iproute2 pkgs.gawk pkgs.coreutils ];
     script = ''
-      # Try routing-based detection first (most accurate)
-      IP=$(ip -4 route get 1.1.1.1 2>/dev/null \
-        | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
-      # Fallback: first non-loopback address on any interface
-      if [ -z "$IP" ]; then
-        IP=$(ip -4 addr show \
-          | awk '/inet / && !/127\./ {print $2}' | cut -d/ -f1 | head -1)
-      fi
+      # Wait up to 30s for a non-link-local IP (DHCP may take a moment)
+      for i in $(seq 1 15); do
+        IP=$(ip -4 route get 1.1.1.1 2>/dev/null \
+          | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
+        if [ -z "$IP" ]; then
+          IP=$(ip -4 addr show \
+            | awk '/inet / && !/127\./ {print $2}' | cut -d/ -f1 | head -1)
+        fi
+        # Got a real IP (not link-local 169.254.x.x)?
+        if [ -n "$IP" ] && ! echo "$IP" | grep -q '^169\.254\.'; then
+          break
+        fi
+        sleep 2
+      done
       IP=''${IP:-"(not yet assigned)"}
       printf '\n  NASty -- Storage with attitude\n\n  WebUI:   https://%s\n  Login:   admin / admin\n\n' \
         "$IP" > /run/nasty-issue
