@@ -27,6 +27,8 @@
 	let shareSmbName = $state('');
 	let shareSmbGuestOk = $state(false);
 	let shareSmbReadOnly = $state(false);
+	let shareSmbValidUsers: string[] = $state([]);
+	let smbSystemUsers: { username: string; uid: number }[] = $state([]);
 	// iSCSI access
 	let shareIscsiName = $state('');
 	// NVMe-oF access
@@ -86,7 +88,7 @@
 		shareProtocol = activeTab;
 		shareSubvolume = '';
 		shareNfsHost = ''; shareNfsOptions = 'rw,sync,no_subtree_check';
-		shareSmbName = ''; shareSmbGuestOk = false; shareSmbReadOnly = false;
+		shareSmbName = ''; shareSmbGuestOk = false; shareSmbReadOnly = false; shareSmbValidUsers = [];
 		shareIscsiName = ''; shareNvmeofName = '';
 		shareNvmeofAddr = '0.0.0.0'; shareNvmeofPort = '4420';
 		showInlineCreate = false;
@@ -131,6 +133,7 @@
 					path: sv.path,
 					guest_ok: shareSmbGuestOk,
 					read_only: shareSmbReadOnly,
+					valid_users: shareSmbValidUsers,
 				}),
 				'SMB share created'
 			);
@@ -843,6 +846,9 @@
 						if (shareProtocol === 'nvmeof' && !shareNvmeofName) shareNvmeofName = sv.name;
 					}
 					shareWizardStep = 3;
+					if (shareProtocol === 'smb' && smbSystemUsers.length === 0) {
+						client.call<{ username: string; uid: number }[]>('smb.user.list').then(u => { smbSystemUsers = u; }).catch(() => {});
+					}
 				}} disabled={!shareSubvolume}>Next: Access →</Button>
 			</div>
 
@@ -872,6 +878,37 @@
 						Read-only
 					</label>
 				</div>
+				{#if !shareSmbGuestOk}
+					<div class="mb-4">
+						<Label>Allowed Users & Groups</Label>
+						<p class="mt-1 mb-2 text-xs text-muted-foreground">Select who can access this share. Leave empty to allow all authenticated users.</p>
+						{#if shareSmbValidUsers.length > 0}
+							<div class="mb-2 flex flex-wrap gap-2">
+								{#each shareSmbValidUsers as entry}
+									<span class="flex items-center gap-1 rounded-md border px-2 py-1 text-xs {entry.startsWith('@') ? 'border-blue-500/40 bg-blue-500/10' : 'border-border'}">
+										{entry}
+										<button class="ml-1 text-muted-foreground hover:text-destructive" onclick={() => { shareSmbValidUsers = shareSmbValidUsers.filter(u => u !== entry); }}>&times;</button>
+									</span>
+								{/each}
+							</div>
+						{/if}
+						<div class="flex flex-wrap gap-2">
+							{#each smbSystemUsers.filter(u => !shareSmbValidUsers.includes(u.username)) as user}
+								<Button size="xs" variant="secondary" onclick={() => { shareSmbValidUsers = [...shareSmbValidUsers, user.username]; }}>
+									{user.username}
+								</Button>
+							{/each}
+							{#each smbGroups.filter(g => !shareSmbValidUsers.includes(`@${g.name}`)) as group}
+								<Button size="xs" variant="secondary" class="text-blue-400" onclick={() => { shareSmbValidUsers = [...shareSmbValidUsers, `@${group.name}`]; }}>
+									@{group.name}
+								</Button>
+							{/each}
+						</div>
+						{#if smbSystemUsers.length === 0 && smbGroups.length === 0}
+							<p class="mt-2 text-xs text-muted-foreground">No users or groups configured. Create them in <a href="/users" class="text-blue-400 hover:underline">Access Control</a>.</p>
+						{/if}
+					</div>
+				{/if}
 			{:else if shareProtocol === 'iscsi'}
 				<div class="mb-4">
 					<Label>Target Name</Label>
