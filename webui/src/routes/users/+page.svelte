@@ -255,6 +255,11 @@
 </script>
 
 
+<h2 class="mb-3 text-xl font-semibold">WebUI Users</h2>
+<p class="mb-4 text-sm text-muted-foreground">
+	Login accounts for the NASty web interface. These control who can manage the system, not who can access shares.
+</p>
+
 <div class="mb-4">
 	<Button size="sm" onclick={() => showCreate = !showCreate}>
 		{showCreate ? 'Cancel' : 'Create User'}
