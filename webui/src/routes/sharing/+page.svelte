@@ -807,9 +807,9 @@
 					<p class="mt-1 text-xs text-muted-foreground">
 						No {shareProtocol === 'iscsi' || shareProtocol === 'nvmeof' ? 'block' : 'filesystem'} subvolumes available.
 					</p>
-					<Button size="sm" variant="secondary" class="mt-2" onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}>Create Subvolume</Button>
+					<Button size="sm" class="mt-2" onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}>Create Subvolume</Button>
 				{:else if !showInlineCreate}
-					<Button size="xs" variant="secondary" class="mt-2" onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}>Create Subvolume</Button>
+					<Button size="sm" class="mt-2" onclick={() => { showInlineCreate = true; loadInlineFilesystems(); }}>Create Subvolume</Button>
 				{/if}
 				{#if showInlineCreate}
 					<div class="mt-3 rounded-lg border border-border bg-secondary/20 p-3 space-y-3">
