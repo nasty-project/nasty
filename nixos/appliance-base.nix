@@ -32,7 +32,7 @@
     path = [ pkgs.iproute2 pkgs.gawk pkgs.coreutils ];
     script = ''
       # Wait up to 30s for a non-link-local IP (DHCP may take a moment)
-      for i in $(seq 1 15); do
+      for i in $(seq 1 5); do
         IP=$(ip -4 route get 1.1.1.1 2>/dev/null \
           | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
         if [ -z "$IP" ]; then
