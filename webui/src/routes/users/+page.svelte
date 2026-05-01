@@ -44,6 +44,7 @@
 	let newSysPasswordConfirm = $state('');
 	let newSysSmbAccess = $state(true);
 	let creatingSysUser = $state(false);
+	let newSysGroups: string[] = $state([]);
 	let sysPwUser = $state<string | null>(null);
 	let sysPwNew = $state('');
 	let sysPwConfirm = $state('');
@@ -215,11 +216,16 @@
 			`System user "${newSysUsername}" created`
 		);
 		if (ok !== undefined) {
+			// Add to selected groups
+			for (const group of newSysGroups) {
+				await client.call('smb.group.add_member', { group, user: newSysUsername }).catch(() => {});
+			}
 			showCreateSystemUser = false;
 			newSysUsername = '';
 			newSysPassword = '';
 			newSysPasswordConfirm = '';
 			newSysSmbAccess = true;
+			newSysGroups = [];
 			await refresh();
 		}
 		creatingSysUser = false;
@@ -359,13 +365,26 @@
 					<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 				{/if}
 			</div>
-			<div class="mb-4">
-				<h4 class="mb-2 text-sm font-medium">Allow Access</h4>
-				<label class="flex items-center gap-2 text-sm cursor-pointer">
-					<input type="checkbox" bind:checked={newSysSmbAccess} class="rounded border-input" />
-					SMB Access
-				</label>
-			</div>
+			{#if groups.length > 0}
+				<div class="mb-4">
+					<h4 class="mb-2 text-sm font-medium">Add to Groups</h4>
+					<div class="flex flex-wrap gap-2">
+						{#each groups as group}
+							<label class="flex items-center gap-1.5 text-sm cursor-pointer rounded border border-border px-2 py-1 hover:bg-muted/30">
+								<input type="checkbox" class="rounded border-input"
+									onchange={(e) => {
+										const checked = (e.target as HTMLInputElement).checked;
+										if (checked) newSysGroups = [...newSysGroups, group.name];
+										else newSysGroups = newSysGroups.filter(g => g !== group.name);
+									}}
+									checked={newSysGroups.includes(group.name)}
+								/>
+								{group.name}
+							</label>
+						{/each}
+					</div>
+				</div>
+			{/if}
 			<Button onclick={createSystemUser} disabled={creatingSysUser || !newSysUsername || !newSysPassword || newSysPassword !== newSysPasswordConfirm}>
 				{creatingSysUser ? 'Creating…' : 'Create'}
 			</Button>

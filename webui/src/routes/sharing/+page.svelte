@@ -29,6 +29,10 @@
 	let shareSmbReadOnly = $state(false);
 	let shareSmbValidUsers: string[] = $state([]);
 	let smbSystemUsers: { username: string; uid: number }[] = $state([]);
+	let showInlineUserCreate = $state(false);
+	let inlineUsername = $state('');
+	let inlinePassword = $state('');
+	let inlinePasswordConfirm = $state('');
 	// iSCSI access
 	let shareIscsiName = $state('');
 	// NVMe-oF access
@@ -904,8 +908,35 @@
 								</Button>
 							{/each}
 						</div>
-						{#if smbSystemUsers.length === 0 && smbGroups.length === 0}
-							<div class="mt-2"><Button size="xs" variant="secondary" onclick={() => goto('/users')}>Create in Access Control</Button></div>
+						{#if showInlineUserCreate}
+							<div class="mt-2 rounded-lg border border-border p-3 space-y-2 max-w-sm">
+								<p class="text-xs font-semibold">New System User</p>
+								<Input bind:value={inlineUsername} placeholder="Username" class="h-8 text-xs" />
+								<Input type="password" bind:value={inlinePassword} placeholder="Password" class="h-8 text-xs" />
+								<Input type="password" bind:value={inlinePasswordConfirm} placeholder="Confirm password" class="h-8 text-xs" />
+								{#if inlinePasswordConfirm && inlinePassword !== inlinePasswordConfirm}
+									<p class="text-xs text-destructive">Passwords do not match</p>
+								{/if}
+								<div class="flex gap-2">
+									<Button size="xs" disabled={!inlineUsername || !inlinePassword || inlinePassword !== inlinePasswordConfirm} onclick={async () => {
+										const ok = await withToast(
+											() => client.call('smb.user.create', { username: inlineUsername, password: inlinePassword }),
+											`User "${inlineUsername}" created`
+										);
+										if (ok !== undefined) {
+											shareSmbValidUsers = [...shareSmbValidUsers, inlineUsername];
+											smbSystemUsers = [...smbSystemUsers, { username: inlineUsername, uid: 0 }];
+											showInlineUserCreate = false;
+											inlineUsername = ''; inlinePassword = ''; inlinePasswordConfirm = '';
+										}
+									}}>Create & Add</Button>
+									<Button size="xs" variant="secondary" onclick={() => { showInlineUserCreate = false; }}>Cancel</Button>
+								</div>
+							</div>
+						{:else}
+							<div class="mt-2">
+								<Button size="xs" variant="secondary" onclick={() => showInlineUserCreate = true}>Create System User</Button>
+							</div>
 						{/if}
 					</div>
 				{/if}
