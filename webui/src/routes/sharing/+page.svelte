@@ -751,7 +751,7 @@
 						<div class="flex items-center gap-2">
 							<div class="flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold
 								{shareWizardStep > i + 1 ? 'bg-primary text-primary-foreground' :
-								 shareWizardStep === i + 1 ? 'bg-primary text-primary-foreground' :
+								 shareWizardStep === i + 1 ? 'bg-primary text-primary-foreground ring-2 ring-primary ring-offset-2 ring-offset-background' :
 								 'bg-secondary text-muted-foreground'}">
 								{num}
 							</div>
