@@ -34,6 +34,8 @@
 	let inlinePassword = $state('');
 	let inlinePasswordConfirm = $state('');
 	let inlineGroups: string[] = $state([]);
+	let showInlineGroupCreate = $state(false);
+	let inlineGroupName = $state('');
 	// iSCSI access
 	let shareIscsiName = $state('');
 	// NVMe-oF access
@@ -886,29 +888,39 @@
 				{#if !shareSmbGuestOk}
 					<div class="mb-4">
 						<Label>Allowed Users & Groups</Label>
-						<p class="mt-1 mb-2 text-xs text-muted-foreground">Select who can access this share. Leave empty to allow all authenticated users.</p>
+						<p class="mt-1 mb-3 text-xs text-muted-foreground">Leave empty to allow all authenticated users.</p>
+
 						{#if shareSmbValidUsers.length > 0}
-							<div class="mb-2 flex flex-wrap gap-2">
-								{#each shareSmbValidUsers as entry}
-									<span class="flex items-center gap-1 rounded-md border px-2 py-1 text-xs {entry.startsWith('@') ? 'border-blue-500/40 bg-blue-500/10' : 'border-border'}">
-										{entry}
-										<button class="ml-1 text-muted-foreground hover:text-destructive" onclick={() => { shareSmbValidUsers = shareSmbValidUsers.filter(u => u !== entry); }}>&times;</button>
-									</span>
-								{/each}
+							<div class="mb-3 rounded-md border border-green-500/30 bg-green-500/5 p-3">
+								<p class="mb-2 text-[0.65rem] font-semibold uppercase tracking-wide text-green-400/70">Has access</p>
+								<div class="flex flex-wrap gap-2">
+									{#each shareSmbValidUsers as entry}
+										<span class="flex items-center gap-1 rounded-md border border-green-500/30 bg-green-500/10 px-2 py-1 text-xs">
+											{entry}
+											<button class="ml-1 text-muted-foreground hover:text-destructive" onclick={() => { shareSmbValidUsers = shareSmbValidUsers.filter(u => u !== entry); }}>&times;</button>
+										</span>
+									{/each}
+								</div>
 							</div>
 						{/if}
-						<div class="flex flex-wrap gap-2">
-							{#each smbSystemUsers.filter(u => !shareSmbValidUsers.includes(u.username)) as user}
-								<Button size="xs" variant="secondary" onclick={() => { shareSmbValidUsers = [...shareSmbValidUsers, user.username]; }}>
-									{user.username}
-								</Button>
-							{/each}
-							{#each smbGroups.filter(g => !shareSmbValidUsers.includes(`@${g.name}`)) as group}
-								<Button size="xs" variant="secondary" class="text-blue-400" onclick={() => { shareSmbValidUsers = [...shareSmbValidUsers, `@${group.name}`]; }}>
-									@{group.name}
-								</Button>
-							{/each}
-						</div>
+
+						{#if smbSystemUsers.some(u => !shareSmbValidUsers.includes(u.username)) || smbGroups.some(g => !shareSmbValidUsers.includes(`@${g.name}`))}
+							<div class="mb-3 rounded-md border border-border p-3">
+								<p class="mb-2 text-[0.65rem] font-semibold uppercase tracking-wide text-muted-foreground/70">Click to add</p>
+								<div class="flex flex-wrap gap-2">
+									{#each smbSystemUsers.filter(u => !shareSmbValidUsers.includes(u.username)) as user}
+										<Button size="xs" variant="secondary" onclick={() => { shareSmbValidUsers = [...shareSmbValidUsers, user.username]; }}>
+											{user.username}
+										</Button>
+									{/each}
+									{#each smbGroups.filter(g => !shareSmbValidUsers.includes(`@${g.name}`)) as group}
+										<Button size="xs" variant="secondary" class="text-blue-400" onclick={() => { shareSmbValidUsers = [...shareSmbValidUsers, `@${group.name}`]; }}>
+											@{group.name}
+										</Button>
+									{/each}
+								</div>
+							</div>
+						{/if}
 						{#if showInlineUserCreate}
 							<Card class="mt-3 max-w-md">
 								<CardContent class="pt-4">
@@ -928,26 +940,39 @@
 											<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 										{/if}
 									</div>
-									{#if smbGroups.length > 0}
-										<div class="mb-4">
-											<Label>Add to Groups</Label>
-											<div class="mt-1 flex flex-wrap gap-2">
-												{#each smbGroups as group}
-													<label class="flex items-center gap-1.5 text-sm cursor-pointer rounded border border-border px-2 py-1 hover:bg-muted/30">
-														<input type="checkbox" class="rounded border-input"
-															onchange={(e) => {
-																const checked = (e.target as HTMLInputElement).checked;
-																if (checked) inlineGroups = [...inlineGroups, group.name];
-																else inlineGroups = inlineGroups.filter(g => g !== group.name);
-															}}
-															checked={inlineGroups.includes(group.name)}
-														/>
-														{group.name}
-													</label>
-												{/each}
-											</div>
+									<div class="mb-4">
+										<Label>Add to Groups</Label>
+										<div class="mt-1 flex flex-wrap gap-2">
+											{#each smbGroups as group}
+												<label class="flex items-center gap-1.5 text-sm cursor-pointer rounded border border-border px-2 py-1 hover:bg-muted/30">
+													<input type="checkbox" class="rounded border-input"
+														onchange={(e) => {
+															const checked = (e.target as HTMLInputElement).checked;
+															if (checked) inlineGroups = [...inlineGroups, group.name];
+															else inlineGroups = inlineGroups.filter(g => g !== group.name);
+														}}
+														checked={inlineGroups.includes(group.name)}
+													/>
+													{group.name}
+												</label>
+											{/each}
+											{#if showInlineGroupCreate}
+												<div class="flex items-center gap-1.5">
+													<Input bind:value={inlineGroupName} placeholder="Group name" class="h-7 w-32 text-xs" />
+													<Button size="xs" disabled={!inlineGroupName.trim()} onclick={async () => {
+														await withToast(() => client.call('smb.group.create', { name: inlineGroupName.trim() }), `Group "${inlineGroupName}" created`);
+														smbGroups = await client.call('smb.group.list');
+														inlineGroups = [...inlineGroups, inlineGroupName.trim()];
+														inlineGroupName = '';
+														showInlineGroupCreate = false;
+													}}>Create</Button>
+													<Button size="xs" variant="secondary" onclick={() => showInlineGroupCreate = false}>Cancel</Button>
+												</div>
+											{:else}
+												<Button size="xs" variant="secondary" onclick={() => showInlineGroupCreate = true}>Create Group</Button>
+											{/if}
 										</div>
-									{/if}
+									</div>
 									<div class="flex gap-2">
 										<Button onclick={async () => {
 											const ok = await withToast(
