@@ -905,7 +905,7 @@
 							{/each}
 						</div>
 						{#if smbSystemUsers.length === 0 && smbGroups.length === 0}
-							<p class="mt-2 text-xs text-muted-foreground">No users or groups configured. Create them in <a href="/users" class="text-blue-400 hover:underline">Access Control</a>.</p>
+							<div class="mt-2"><Button size="xs" variant="secondary" onclick={() => goto('/users')}>Create in Access Control</Button></div>
 						{/if}
 					</div>
 				{/if}

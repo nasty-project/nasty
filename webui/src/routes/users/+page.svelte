@@ -327,6 +327,189 @@
 	</table>
 {/if}
 
+
+<!-- System Users -->
+<h2 class="mb-3 text-xl font-semibold">System Users</h2>
+<p class="mb-4 text-sm text-muted-foreground">
+	Linux users for protocol access (SMB). Create users here, then reference them in share "Valid Users" for authenticated access.
+</p>
+
+<div class="mb-4">
+	<Button size="sm" onclick={() => showCreateSystemUser = !showCreateSystemUser}>
+		{showCreateSystemUser ? 'Cancel' : 'Create System User'}
+	</Button>
+</div>
+
+{#if showCreateSystemUser}
+	<Card class="mb-6 max-w-md">
+		<CardContent class="pt-6">
+			<h3 class="mb-4 text-lg font-semibold">New System User</h3>
+			<div class="mb-4">
+				<Label for="sys-username">Username</Label>
+				<Input id="sys-username" bind:value={newSysUsername} placeholder="nasty-csi" autocomplete="off" class="mt-1" />
+			</div>
+			<div class="mb-4">
+				<Label for="sys-password">Password</Label>
+				<Input id="sys-password" type="password" bind:value={newSysPassword} autocomplete="new-password" class="mt-1" />
+			</div>
+			<div class="mb-4">
+				<Label for="sys-password-confirm">Confirm Password</Label>
+				<Input id="sys-password-confirm" type="password" bind:value={newSysPasswordConfirm} autocomplete="new-password" class="mt-1" />
+				{#if newSysPasswordConfirm && newSysPassword !== newSysPasswordConfirm}
+					<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
+				{/if}
+			</div>
+			<div class="mb-4">
+				<h4 class="mb-2 text-sm font-medium">Allow Access</h4>
+				<label class="flex items-center gap-2 text-sm cursor-pointer">
+					<input type="checkbox" bind:checked={newSysSmbAccess} class="rounded border-input" />
+					SMB Access
+				</label>
+			</div>
+			<Button onclick={createSystemUser} disabled={creatingSysUser || !newSysUsername || !newSysPassword || newSysPassword !== newSysPasswordConfirm}>
+				{creatingSysUser ? 'Creating…' : 'Create'}
+			</Button>
+		</CardContent>
+	</Card>
+{/if}
+
+{#if !loading}
+	{#if systemUsers.length === 0}
+		<p class="text-sm text-muted-foreground">No system users configured.</p>
+	{:else}
+		<table class="w-full text-sm">
+			<thead>
+				<tr>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Username</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">UID</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Access</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each systemUsers as user}
+					<tr class="border-b border-border">
+						<td class="p-3 font-mono text-xs"><strong>{user.username}</strong></td>
+						<td class="p-3 text-xs text-muted-foreground">{user.uid}</td>
+						<td class="p-3">
+							<Badge variant="secondary" class="bg-blue-950 text-blue-400">SMB</Badge>
+						</td>
+						<td class="p-3">
+							<div class="flex gap-2">
+								<Button variant="secondary" size="xs" onclick={() => { sysPwUser = user.username; sysPwNew = ''; sysPwConfirm = ''; }}>
+									Change Password
+								</Button>
+								<Button variant="destructive" size="xs" onclick={() => deleteSystemUser(user.username)}>Delete</Button>
+							</div>
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/if}
+{/if}
+
+<!-- Change System User Password Dialog -->
+<Dialog.Root open={sysPwUser !== null} onOpenChange={(open) => { if (!open) sysPwUser = null; }}>
+	<Dialog.Content>
+		<Dialog.Header>
+			<Dialog.Title>Change Password for "{sysPwUser}"</Dialog.Title>
+		</Dialog.Header>
+		<div class="mb-4">
+			<Label for="sys-pw-new">New Password</Label>
+			<Input id="sys-pw-new" type="password" bind:value={sysPwNew} autocomplete="new-password" class="mt-1" />
+		</div>
+		<div class="mb-4">
+			<Label for="sys-pw-confirm">Confirm Password</Label>
+			<Input id="sys-pw-confirm" type="password" bind:value={sysPwConfirm} autocomplete="new-password" class="mt-1" />
+			{#if sysPwConfirm && sysPwNew !== sysPwConfirm}
+				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
+			{/if}
+		</div>
+		<Dialog.Footer>
+			<Button size="sm" onclick={changeSysPassword} disabled={!sysPwNew || sysPwNew !== sysPwConfirm}>
+				Change Password
+			</Button>
+			<Button variant="secondary" size="sm" onclick={() => sysPwUser = null}>Cancel</Button>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- Groups -->
+<h2 class="mb-3 text-xl font-semibold">Groups</h2>
+<p class="mb-4 text-sm text-muted-foreground">
+	Groups for share access control. Add system users to a group, then reference <code>@groupname</code> in share "Valid Users".
+</p>
+
+<div class="mb-4">
+	<Button size="sm" onclick={() => showCreateGroup = !showCreateGroup}>
+		{showCreateGroup ? 'Cancel' : 'Create Group'}
+	</Button>
+</div>
+
+{#if showCreateGroup}
+	<Card class="mb-4 max-w-md">
+		<CardContent class="pt-4 space-y-3">
+			<div>
+				<Label for="group-name">Group Name</Label>
+				<Input id="group-name" bind:value={newGroupName} placeholder="e.g. engineering" class="mt-1" />
+			</div>
+			<Button size="sm" onclick={createGroup} disabled={!newGroupName.trim()}>Create</Button>
+		</CardContent>
+	</Card>
+{/if}
+
+{#if groups.length === 0 && !showCreateGroup}
+	<p class="mb-6 text-sm text-muted-foreground">No groups configured.</p>
+{:else if groups.length > 0}
+	<div class="mb-6 space-y-2">
+		{#each groups as group}
+			<Card>
+				<CardContent class="py-3">
+					<div class="flex items-center justify-between">
+						<button class="flex items-center gap-2 text-left" onclick={() => expandedGroup = expandedGroup === group.name ? null : group.name}>
+							<span class="font-medium">{group.name}</span>
+							<Badge variant="secondary" class="text-[0.6rem]">GID {group.gid}</Badge>
+							<span class="text-xs text-muted-foreground">{group.members.length} member{group.members.length !== 1 ? 's' : ''}</span>
+						</button>
+						<Button size="xs" variant="destructive" onclick={() => deleteGroup(group.name)}>Delete</Button>
+					</div>
+					{#if expandedGroup === group.name}
+						<div class="mt-3 border-t border-border pt-3">
+							{#if group.members.length > 0}
+								<div class="flex flex-wrap gap-2 mb-3">
+									{#each group.members as member}
+										<span class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs">
+											{member}
+											<button class="ml-1 text-muted-foreground hover:text-destructive" onclick={() => removeMember(group.name, member)} title="Remove">&times;</button>
+										</span>
+									{/each}
+								</div>
+							{:else}
+								<p class="mb-3 text-xs text-muted-foreground">No members yet.</p>
+							{/if}
+							{#if addMemberGroup === group.name}
+								<div class="flex items-center gap-2">
+									<select bind:value={addMemberUser} class="h-8 rounded-md border border-input bg-transparent px-2 text-sm">
+										<option value="">Select user...</option>
+										{#each systemUsers.filter(u => !group.members.includes(u.username)) as user}
+											<option value={user.username}>{user.username}</option>
+										{/each}
+									</select>
+									<Button size="xs" onclick={addMember} disabled={!addMemberUser}>Add</Button>
+									<Button size="xs" variant="secondary" onclick={() => addMemberGroup = null}>Cancel</Button>
+								</div>
+							{:else}
+								<Button size="xs" variant="secondary" onclick={() => addMemberGroup = group.name}>Add Member</Button>
+							{/if}
+						</div>
+					{/if}
+				</CardContent>
+			</Card>
+		{/each}
+	</div>
+{/if}
+
 <h2 class="mb-3 text-xl font-semibold">API Tokens</h2>
 <div class="mb-4 flex items-center gap-3">
 	<Button size="sm" onclick={() => showCreateToken = !showCreateToken}>
@@ -476,184 +659,4 @@
 	</Dialog.Content>
 </Dialog.Root>
 
-<!-- Groups -->
-<h2 class="mb-3 text-xl font-semibold">Groups</h2>
-<p class="mb-4 text-sm text-muted-foreground">
-	Groups for share access control. Add system users to a group, then reference <code>@groupname</code> in share "Valid Users".
-</p>
 
-<div class="mb-4">
-	<Button size="sm" onclick={() => showCreateGroup = !showCreateGroup}>
-		{showCreateGroup ? 'Cancel' : 'Create Group'}
-	</Button>
-</div>
-
-{#if showCreateGroup}
-	<Card class="mb-4 max-w-md">
-		<CardContent class="pt-4 space-y-3">
-			<div>
-				<Label for="group-name">Group Name</Label>
-				<Input id="group-name" bind:value={newGroupName} placeholder="e.g. engineering" class="mt-1" />
-			</div>
-			<Button size="sm" onclick={createGroup} disabled={!newGroupName.trim()}>Create</Button>
-		</CardContent>
-	</Card>
-{/if}
-
-{#if groups.length === 0 && !showCreateGroup}
-	<p class="mb-6 text-sm text-muted-foreground">No groups configured.</p>
-{:else if groups.length > 0}
-	<div class="mb-6 space-y-2">
-		{#each groups as group}
-			<Card>
-				<CardContent class="py-3">
-					<div class="flex items-center justify-between">
-						<button class="flex items-center gap-2 text-left" onclick={() => expandedGroup = expandedGroup === group.name ? null : group.name}>
-							<span class="font-medium">{group.name}</span>
-							<Badge variant="secondary" class="text-[0.6rem]">GID {group.gid}</Badge>
-							<span class="text-xs text-muted-foreground">{group.members.length} member{group.members.length !== 1 ? 's' : ''}</span>
-						</button>
-						<Button size="xs" variant="destructive" onclick={() => deleteGroup(group.name)}>Delete</Button>
-					</div>
-					{#if expandedGroup === group.name}
-						<div class="mt-3 border-t border-border pt-3">
-							{#if group.members.length > 0}
-								<div class="flex flex-wrap gap-2 mb-3">
-									{#each group.members as member}
-										<span class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs">
-											{member}
-											<button class="ml-1 text-muted-foreground hover:text-destructive" onclick={() => removeMember(group.name, member)} title="Remove">&times;</button>
-										</span>
-									{/each}
-								</div>
-							{:else}
-								<p class="mb-3 text-xs text-muted-foreground">No members yet.</p>
-							{/if}
-							{#if addMemberGroup === group.name}
-								<div class="flex items-center gap-2">
-									<select bind:value={addMemberUser} class="h-8 rounded-md border border-input bg-transparent px-2 text-sm">
-										<option value="">Select user...</option>
-										{#each systemUsers.filter(u => !group.members.includes(u.username)) as user}
-											<option value={user.username}>{user.username}</option>
-										{/each}
-									</select>
-									<Button size="xs" onclick={addMember} disabled={!addMemberUser}>Add</Button>
-									<Button size="xs" variant="secondary" onclick={() => addMemberGroup = null}>Cancel</Button>
-								</div>
-							{:else}
-								<Button size="xs" variant="secondary" onclick={() => addMemberGroup = group.name}>Add Member</Button>
-							{/if}
-						</div>
-					{/if}
-				</CardContent>
-			</Card>
-		{/each}
-	</div>
-{/if}
-
-<!-- System Users -->
-<h2 class="mb-3 text-xl font-semibold">System Users</h2>
-<p class="mb-4 text-sm text-muted-foreground">
-	Linux users for protocol access (SMB). Create users here, then reference them in share "Valid Users" for authenticated access.
-</p>
-
-<div class="mb-4">
-	<Button size="sm" onclick={() => showCreateSystemUser = !showCreateSystemUser}>
-		{showCreateSystemUser ? 'Cancel' : 'Create System User'}
-	</Button>
-</div>
-
-{#if showCreateSystemUser}
-	<Card class="mb-6 max-w-md">
-		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New System User</h3>
-			<div class="mb-4">
-				<Label for="sys-username">Username</Label>
-				<Input id="sys-username" bind:value={newSysUsername} placeholder="nasty-csi" autocomplete="off" class="mt-1" />
-			</div>
-			<div class="mb-4">
-				<Label for="sys-password">Password</Label>
-				<Input id="sys-password" type="password" bind:value={newSysPassword} autocomplete="new-password" class="mt-1" />
-			</div>
-			<div class="mb-4">
-				<Label for="sys-password-confirm">Confirm Password</Label>
-				<Input id="sys-password-confirm" type="password" bind:value={newSysPasswordConfirm} autocomplete="new-password" class="mt-1" />
-				{#if newSysPasswordConfirm && newSysPassword !== newSysPasswordConfirm}
-					<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
-				{/if}
-			</div>
-			<div class="mb-4">
-				<h4 class="mb-2 text-sm font-medium">Allow Access</h4>
-				<label class="flex items-center gap-2 text-sm cursor-pointer">
-					<input type="checkbox" bind:checked={newSysSmbAccess} class="rounded border-input" />
-					SMB Access
-				</label>
-			</div>
-			<Button onclick={createSystemUser} disabled={creatingSysUser || !newSysUsername || !newSysPassword || newSysPassword !== newSysPasswordConfirm}>
-				{creatingSysUser ? 'Creating…' : 'Create'}
-			</Button>
-		</CardContent>
-	</Card>
-{/if}
-
-{#if !loading}
-	{#if systemUsers.length === 0}
-		<p class="text-sm text-muted-foreground">No system users configured.</p>
-	{:else}
-		<table class="w-full text-sm">
-			<thead>
-				<tr>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Username</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">UID</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Access</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each systemUsers as user}
-					<tr class="border-b border-border">
-						<td class="p-3 font-mono text-xs"><strong>{user.username}</strong></td>
-						<td class="p-3 text-xs text-muted-foreground">{user.uid}</td>
-						<td class="p-3">
-							<Badge variant="secondary" class="bg-blue-950 text-blue-400">SMB</Badge>
-						</td>
-						<td class="p-3">
-							<div class="flex gap-2">
-								<Button variant="secondary" size="xs" onclick={() => { sysPwUser = user.username; sysPwNew = ''; sysPwConfirm = ''; }}>
-									Change Password
-								</Button>
-								<Button variant="destructive" size="xs" onclick={() => deleteSystemUser(user.username)}>Delete</Button>
-							</div>
-						</td>
-					</tr>
-				{/each}
-			</tbody>
-		</table>
-	{/if}
-{/if}
-
-<!-- Change System User Password Dialog -->
-<Dialog.Root open={sysPwUser !== null} onOpenChange={(open) => { if (!open) sysPwUser = null; }}>
-	<Dialog.Content>
-		<Dialog.Header>
-			<Dialog.Title>Change Password for "{sysPwUser}"</Dialog.Title>
-		</Dialog.Header>
-		<div class="mb-4">
-			<Label for="sys-pw-new">New Password</Label>
-			<Input id="sys-pw-new" type="password" bind:value={sysPwNew} autocomplete="new-password" class="mt-1" />
-		</div>
-		<div class="mb-4">
-			<Label for="sys-pw-confirm">Confirm Password</Label>
-			<Input id="sys-pw-confirm" type="password" bind:value={sysPwConfirm} autocomplete="new-password" class="mt-1" />
-			{#if sysPwConfirm && sysPwNew !== sysPwConfirm}
-				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
-			{/if}
-		</div>
-		<Dialog.Footer>
-			<Button size="sm" onclick={changeSysPassword} disabled={!sysPwNew || sysPwNew !== sysPwConfirm}>
-				Change Password
-			</Button>
-			<Button variant="secondary" size="sm" onclick={() => sysPwUser = null}>Cancel</Button>
-		</Dialog.Footer>
-	</Dialog.Content>
-</Dialog.Root>
