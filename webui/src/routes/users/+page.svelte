@@ -45,6 +45,7 @@
 	let newSysSmbAccess = $state(true);
 	let creatingSysUser = $state(false);
 	let newSysGroups: string[] = $state([]);
+	let expandedUser = $state<string | null>(null);
 	let sysPwUser = $state<string | null>(null);
 	let sysPwNew = $state('');
 	let sysPwConfirm = $state('');
@@ -407,13 +408,17 @@
 			</thead>
 			<tbody>
 				{#each systemUsers as user}
-					<tr class="border-b border-border">
+					{@const userGroups = groups.filter(g => g.members.includes(user.username))}
+					<tr class="border-b border-border cursor-pointer hover:bg-muted/20" onclick={() => expandedUser = expandedUser === user.username ? null : user.username}>
 						<td class="p-3 font-mono text-xs"><strong>{user.username}</strong></td>
 						<td class="p-3 text-xs text-muted-foreground">{user.uid}</td>
 						<td class="p-3">
 							<Badge variant="secondary" class="bg-blue-950 text-blue-400">SMB</Badge>
+							{#each userGroups as g}
+								<Badge variant="secondary" class="ml-1 text-[0.6rem]">@{g.name}</Badge>
+							{/each}
 						</td>
-						<td class="p-3">
+						<td class="p-3" onclick={(e) => e.stopPropagation()}>
 							<div class="flex gap-2">
 								<Button variant="secondary" size="xs" onclick={() => { sysPwUser = user.username; sysPwNew = ''; sysPwConfirm = ''; }}>
 									Change Password
@@ -422,6 +427,32 @@
 							</div>
 						</td>
 					</tr>
+					{#if expandedUser === user.username && groups.length > 0}
+						<tr class="border-b border-border bg-muted/20">
+							<td colspan="4" class="p-3">
+								<span class="text-xs font-medium text-muted-foreground">Groups:</span>
+								<div class="mt-1 flex flex-wrap gap-2">
+									{#each groups as group}
+										{@const isMember = group.members.includes(user.username)}
+										<label class="flex items-center gap-1.5 text-sm cursor-pointer rounded border px-2 py-1 transition-colors {isMember ? 'border-blue-500/40 bg-blue-500/10' : 'border-border hover:bg-muted/30'}">
+											<input type="checkbox" class="rounded border-input"
+												checked={isMember}
+												onchange={async () => {
+													if (isMember) {
+														await withToast(() => client.call('smb.group.remove_member', { group: group.name, user: user.username }), `Removed from ${group.name}`);
+													} else {
+														await withToast(() => client.call('smb.group.add_member', { group: group.name, user: user.username }), `Added to ${group.name}`);
+													}
+													await refresh();
+												}}
+											/>
+											{group.name}
+										</label>
+									{/each}
+								</div>
+							</td>
+						</tr>
+					{/if}
 				{/each}
 			</tbody>
 		</table>
