@@ -969,7 +969,7 @@
 													<Button size="xs" variant="secondary" onclick={() => showInlineGroupCreate = false}>Cancel</Button>
 												</div>
 											{:else}
-												<Button size="xs" variant="secondary" onclick={() => showInlineGroupCreate = true}>Create Group</Button>
+												<Button size="sm" onclick={() => showInlineGroupCreate = true}>Create Group</Button>
 											{/if}
 										</div>
 									</div>
