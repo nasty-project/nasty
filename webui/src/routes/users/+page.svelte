@@ -330,7 +330,9 @@
 							<Button variant="secondary" size="xs" onclick={() => { pwUser = user.username; pwNew = ''; pwConfirm = ''; }}>
 								Change Password
 							</Button>
-							<Button variant="destructive" size="xs" onclick={() => deleteUser(user.username)}>Delete</Button>
+							{#if !(user.role === 'admin' && users.filter(u => u.role === 'admin').length === 1)}
+								<Button variant="destructive" size="xs" onclick={() => deleteUser(user.username)}>Delete</Button>
+							{/if}
 						</div>
 					</td>
 				</tr>
