@@ -768,8 +768,8 @@
 			<div class="mb-4">
 				<Label>Protocol</Label>
 				<select bind:value={shareProtocol} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-					<option value="nfs">NFS — Network File System</option>
 					<option value="smb">SMB — Windows/Samba File Sharing</option>
+					<option value="nfs">NFS — Network File System</option>
 					<option value="iscsi">iSCSI — Block Storage over TCP</option>
 					<option value="nvmeof">NVMe-oF — NVMe over Fabrics (TCP)</option>
 				</select>
