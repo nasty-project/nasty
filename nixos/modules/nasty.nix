@@ -909,6 +909,7 @@ in {
         rsync                        # file sync
         procps                       # sysctl (vm.dirty_* tuning)
         nftables                     # nft (dynamic firewall rules)
+        getent                       # getent (user/group lookups)
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
