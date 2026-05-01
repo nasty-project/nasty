@@ -972,7 +972,7 @@
 							</Card>
 						{:else}
 							<div class="mt-2 flex gap-2">
-								<Button size="sm" variant="secondary" onclick={() => showInlineUserCreate = true}>Create System User</Button>
+								<Button size="sm" onclick={() => showInlineUserCreate = true}>Create System User</Button>
 							</div>
 						{/if}
 					</div>
