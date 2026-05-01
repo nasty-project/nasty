@@ -18,7 +18,7 @@
 
 	// ── Share creation wizard ────────────────────────────
 	let shareWizardStep: 0 | 1 | 2 | 3 | 4 = $state(0);
-	let shareProtocol: Tab = $state('nfs');
+	let shareProtocol: Tab = $state('smb');
 	let shareSubvolume = $state('');
 	// NFS access
 	let shareNfsHost = $state('');
@@ -165,17 +165,17 @@
 	// ── Tab state ────────────────────────────────────────
 	type Tab = 'nfs' | 'smb' | 'iscsi' | 'nvmeof';
 	const TABS: { key: Tab; label: string; hash: string }[] = [
-		{ key: 'nfs',    label: 'NFS',     hash: '#nfs' },
 		{ key: 'smb',    label: 'SMB',     hash: '#smb' },
+		{ key: 'nfs',    label: 'NFS',     hash: '#nfs' },
 		{ key: 'iscsi',  label: 'iSCSI',   hash: '#iscsi' },
 		{ key: 'nvmeof', label: 'NVMe-oF', hash: '#nvmeof' },
 	];
 
 	function tabFromHash(): Tab {
-		if (typeof window === 'undefined') return 'nfs';
+		if (typeof window === 'undefined') return 'smb';
 		const h = window.location.hash.replace('#', '');
 		if (TABS.some(t => t.key === h)) return h as Tab;
-		return 'nfs';
+		return 'smb';
 	}
 
 	let activeTab: Tab = $state(tabFromHash());
@@ -1245,37 +1245,33 @@
 										</div>
 									{/if}
 									{#if smbAddUserShare === share.id}
-										<div class="flex items-end gap-2 flex-wrap" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-											<div>
-												<Label class="text-xs">Username</Label>
-												<Input bind:value={smbAddUserName} placeholder="johndoe" class="mt-1 h-8 w-40 text-xs" />
-											</div>
-											<Button size="xs" onclick={() => smbAddUser(share)} disabled={!smbAddUserName}>Add User</Button>
-											{#if smbGroups.length > 0}
-												{@const availableGroups = smbGroups.filter(g => !share.valid_users.includes(`@${g.name}`))}
-												{#if availableGroups.length > 0}
-													<select
-														class="h-8 rounded-md border border-input bg-transparent px-2 text-xs"
-														onchange={(e) => {
-															const val = (e.target as HTMLSelectElement).value;
-															if (val) {
-																const valid_users = [...share.valid_users, `@${val}`];
-																withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `Group @${val} added`).then(() => smbRefresh());
-																(e.target as HTMLSelectElement).value = '';
-															}
-														}}
-													>
-														<option value="">Add group...</option>
-														{#each availableGroups as group}
-															<option value={group.name}>@{group.name}</option>
-														{/each}
-													</select>
-												{/if}
+										<div class="flex flex-wrap gap-1.5" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+											{#each smbSystemUsers.filter(u => !share.valid_users.includes(u.username)) as user}
+												<Button size="xs" variant="secondary" onclick={() => {
+													const valid_users = [...share.valid_users, user.username];
+													withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `${user.username} added`).then(() => smbRefresh());
+												}}>{user.username}</Button>
+											{/each}
+											{#each smbGroups.filter(g => !share.valid_users.includes(`@${g.name}`)) as group}
+												<Button size="xs" variant="secondary" class="text-blue-400" onclick={() => {
+													const valid_users = [...share.valid_users, `@${group.name}`];
+													withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `@${group.name} added`).then(() => smbRefresh());
+												}}>@{group.name}</Button>
+											{/each}
+											{#if smbSystemUsers.length === 0 && smbGroups.length === 0}
+												<span class="text-xs text-muted-foreground">No users or groups.</span>
+												<Button size="xs" variant="secondary" onclick={() => goto('/users')}>Create in Access Control</Button>
 											{/if}
-											<Button variant="secondary" size="xs" onclick={() => { smbAddUserShare = null; smbAddUserName = ''; }}>Done</Button>
+											<Button variant="secondary" size="xs" onclick={() => { smbAddUserShare = null; }}>Done</Button>
 										</div>
 									{:else}
-										<Button variant="secondary" size="xs" onclick={(e) => { e.stopPropagation(); smbAddUserShare = share.id; smbAddUserName = ''; }}>
+										<Button variant="secondary" size="xs" onclick={(e) => {
+											e.stopPropagation();
+											smbAddUserShare = share.id;
+											if (smbSystemUsers.length === 0) {
+												client.call<{ username: string; uid: number }[]>('smb.user.list').then(u => { smbSystemUsers = u; }).catch(() => {});
+											}
+										}}>
 											Add User / Group
 										</Button>
 									{/if}
