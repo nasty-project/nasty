@@ -33,6 +33,7 @@
 	let inlineUsername = $state('');
 	let inlinePassword = $state('');
 	let inlinePasswordConfirm = $state('');
+	let inlineGroups: string[] = $state([]);
 	// iSCSI access
 	let shareIscsiName = $state('');
 	// NVMe-oF access
@@ -909,33 +910,69 @@
 							{/each}
 						</div>
 						{#if showInlineUserCreate}
-							<div class="mt-2 rounded-lg border border-border p-3 space-y-2 max-w-sm">
-								<p class="text-xs font-semibold">New System User</p>
-								<Input bind:value={inlineUsername} placeholder="Username" class="h-8 text-xs" />
-								<Input type="password" bind:value={inlinePassword} placeholder="Password" class="h-8 text-xs" />
-								<Input type="password" bind:value={inlinePasswordConfirm} placeholder="Confirm password" class="h-8 text-xs" />
-								{#if inlinePasswordConfirm && inlinePassword !== inlinePasswordConfirm}
-									<p class="text-xs text-destructive">Passwords do not match</p>
-								{/if}
-								<div class="flex gap-2">
-									<Button size="xs" disabled={!inlineUsername || !inlinePassword || inlinePassword !== inlinePasswordConfirm} onclick={async () => {
-										const ok = await withToast(
-											() => client.call('smb.user.create', { username: inlineUsername, password: inlinePassword }),
-											`User "${inlineUsername}" created`
-										);
-										if (ok !== undefined) {
-											shareSmbValidUsers = [...shareSmbValidUsers, inlineUsername];
-											smbSystemUsers = [...smbSystemUsers, { username: inlineUsername, uid: 0 }];
-											showInlineUserCreate = false;
-											inlineUsername = ''; inlinePassword = ''; inlinePasswordConfirm = '';
-										}
-									}}>Create & Add</Button>
-									<Button size="xs" variant="secondary" onclick={() => { showInlineUserCreate = false; }}>Cancel</Button>
-								</div>
-							</div>
+							<Card class="mt-3 max-w-md">
+								<CardContent class="pt-4">
+									<h3 class="mb-4 text-lg font-semibold">New System User</h3>
+									<div class="mb-4">
+										<Label for="inline-username">Username</Label>
+										<Input id="inline-username" bind:value={inlineUsername} placeholder="johndoe" autocomplete="off" class="mt-1" />
+									</div>
+									<div class="mb-4">
+										<Label for="inline-password">Password</Label>
+										<Input id="inline-password" type="password" bind:value={inlinePassword} autocomplete="new-password" class="mt-1" />
+									</div>
+									<div class="mb-4">
+										<Label for="inline-password-confirm">Confirm Password</Label>
+										<Input id="inline-password-confirm" type="password" bind:value={inlinePasswordConfirm} autocomplete="new-password" class="mt-1" />
+										{#if inlinePasswordConfirm && inlinePassword !== inlinePasswordConfirm}
+											<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
+										{/if}
+									</div>
+									{#if smbGroups.length > 0}
+										<div class="mb-4">
+											<Label>Add to Groups</Label>
+											<div class="mt-1 flex flex-wrap gap-2">
+												{#each smbGroups as group}
+													<label class="flex items-center gap-1.5 text-sm cursor-pointer rounded border border-border px-2 py-1 hover:bg-muted/30">
+														<input type="checkbox" class="rounded border-input"
+															onchange={(e) => {
+																const checked = (e.target as HTMLInputElement).checked;
+																if (checked) inlineGroups = [...inlineGroups, group.name];
+																else inlineGroups = inlineGroups.filter(g => g !== group.name);
+															}}
+															checked={inlineGroups.includes(group.name)}
+														/>
+														{group.name}
+													</label>
+												{/each}
+											</div>
+										</div>
+									{/if}
+									<div class="flex gap-2">
+										<Button onclick={async () => {
+											const ok = await withToast(
+												() => client.call('smb.user.create', { username: inlineUsername, password: inlinePassword }),
+												`User "${inlineUsername}" created`
+											);
+											if (ok !== undefined) {
+												for (const g of inlineGroups) {
+													await client.call('smb.group.add_member', { group: g, user: inlineUsername }).catch(() => {});
+												}
+												shareSmbValidUsers = [...shareSmbValidUsers, inlineUsername];
+												smbSystemUsers = [...smbSystemUsers, { username: inlineUsername, uid: 0 }];
+												showInlineUserCreate = false;
+												inlineUsername = ''; inlinePassword = ''; inlinePasswordConfirm = ''; inlineGroups = [];
+											}
+										}} disabled={!inlineUsername || !inlinePassword || inlinePassword !== inlinePasswordConfirm}>
+											Create & Add
+										</Button>
+										<Button variant="secondary" onclick={() => { showInlineUserCreate = false; }}>Cancel</Button>
+									</div>
+								</CardContent>
+							</Card>
 						{:else}
-							<div class="mt-2">
-								<Button size="xs" variant="secondary" onclick={() => showInlineUserCreate = true}>Create System User</Button>
+							<div class="mt-2 flex gap-2">
+								<Button size="sm" variant="secondary" onclick={() => showInlineUserCreate = true}>Create System User</Button>
 							</div>
 						{/if}
 					</div>
