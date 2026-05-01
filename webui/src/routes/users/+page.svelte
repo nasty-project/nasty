@@ -486,7 +486,8 @@
 			<Card>
 				<CardContent class="py-3">
 					<div class="flex items-center justify-between">
-						<button class="flex items-center gap-2 text-left" onclick={() => expandedGroup = expandedGroup === group.name ? null : group.name}>
+						<button class="flex items-center gap-2 text-left hover:text-foreground transition-colors" onclick={() => expandedGroup = expandedGroup === group.name ? null : group.name}>
+							<span class="text-xs text-muted-foreground transition-transform {expandedGroup === group.name ? 'rotate-90' : ''}">▶</span>
 							<span class="font-medium">{group.name}</span>
 							<Badge variant="secondary" class="text-[0.6rem]">GID {group.gid}</Badge>
 							<span class="text-xs text-muted-foreground">{group.members.length} member{group.members.length !== 1 ? 's' : ''}</span>
