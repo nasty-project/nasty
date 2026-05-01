@@ -519,23 +519,39 @@
 {#if groups.length === 0 && !showCreateGroup}
 	<p class="mb-6 text-sm text-muted-foreground">No groups configured.</p>
 {:else if groups.length > 0}
-	<div class="mb-6 space-y-2">
-		{#each groups as group}
-			<Card>
-				<CardContent class="py-3">
-					<div class="flex items-center justify-between">
-						<button class="flex items-center gap-2 text-left hover:text-foreground transition-colors" onclick={() => expandedGroup = expandedGroup === group.name ? null : group.name}>
-							<span class="text-xs text-muted-foreground transition-transform {expandedGroup === group.name ? 'rotate-90' : ''}">▶</span>
-							<span class="font-medium">{group.name}</span>
-							<Badge variant="secondary" class="text-[0.6rem]">GID {group.gid}</Badge>
-							<span class="text-xs text-muted-foreground">{group.members.length} member{group.members.length !== 1 ? 's' : ''}</span>
-						</button>
-						<Button size="xs" variant="destructive" onclick={() => deleteGroup(group.name)}>Delete</Button>
-					</div>
-					{#if expandedGroup === group.name}
-						<div class="mt-3 border-t border-border pt-3">
+	<table class="mb-6 w-full text-sm">
+		<thead>
+			<tr>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Group Name</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">GID</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Members</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
+			</tr>
+		</thead>
+		<tbody>
+			{#each groups as group}
+				<tr class="border-b border-border cursor-pointer hover:bg-muted/20" onclick={() => expandedGroup = expandedGroup === group.name ? null : group.name}>
+					<td class="p-3 font-mono text-xs"><strong>{group.name}</strong></td>
+					<td class="p-3 text-xs text-muted-foreground">{group.gid}</td>
+					<td class="p-3">
+						{#if group.members.length > 0}
+							{#each group.members as member}
+								<Badge variant="secondary" class="mr-1 text-[0.6rem]">{member}</Badge>
+							{/each}
+						{:else}
+							<span class="text-xs text-muted-foreground">No members</span>
+						{/if}
+					</td>
+					<td class="p-3" onclick={(e) => e.stopPropagation()}>
+						<Button variant="destructive" size="xs" onclick={() => deleteGroup(group.name)}>Delete</Button>
+					</td>
+				</tr>
+				{#if expandedGroup === group.name}
+					<tr class="border-b border-border bg-muted/20">
+						<td colspan="4" class="p-3">
+							<span class="text-xs font-medium text-muted-foreground">Members:</span>
 							{#if group.members.length > 0}
-								<div class="flex flex-wrap gap-2 mb-3">
+								<div class="mt-1 flex flex-wrap gap-2 mb-3">
 									{#each group.members as member}
 										<span class="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs">
 											{member}
@@ -544,7 +560,7 @@
 									{/each}
 								</div>
 							{:else}
-								<p class="mb-3 text-xs text-muted-foreground">No members yet.</p>
+								<p class="mt-1 mb-3 text-xs text-muted-foreground">No members yet.</p>
 							{/if}
 							{#if addMemberGroup === group.name}
 								<div class="flex items-center gap-2">
@@ -560,12 +576,12 @@
 							{:else}
 								<Button size="xs" variant="secondary" onclick={() => addMemberGroup = group.name}>Add Member</Button>
 							{/if}
-						</div>
-					{/if}
-				</CardContent>
-			</Card>
-		{/each}
-	</div>
+						</td>
+					</tr>
+				{/if}
+			{/each}
+		</tbody>
+	</table>
 {/if}
 
 <h2 class="mb-3 text-xl font-semibold">API Tokens</h2>
