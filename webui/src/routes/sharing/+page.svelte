@@ -1326,10 +1326,7 @@
 													withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `@${group.name} added`).then(() => smbRefresh());
 												}}>@{group.name}</Button>
 											{/each}
-											{#if smbSystemUsers.length === 0 && smbGroups.length === 0}
-												<span class="text-xs text-muted-foreground">No users or groups.</span>
-												<Button size="xs" variant="secondary" onclick={() => goto('/users')}>Create in Access Control</Button>
-											{/if}
+											<Button size="xs" variant="secondary" onclick={() => goto('/users')}>Create User / Group</Button>
 											<Button variant="secondary" size="xs" onclick={() => { smbAddUserShare = null; }}>Done</Button>
 										</div>
 									{:else}
