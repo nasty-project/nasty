@@ -1047,6 +1047,8 @@
 					<span>{shareSmbName || sv?.name}</span>
 					{#if shareSmbGuestOk}<span class="text-muted-foreground">Guests</span><span>Allowed</span>{/if}
 					{#if shareSmbReadOnly}<span class="text-muted-foreground">Access</span><span>Read-only</span>{/if}
+					<span class="text-muted-foreground">Allowed Users</span>
+					<span>{shareSmbValidUsers.length > 0 ? shareSmbValidUsers.join(', ') : 'All authenticated users'}</span>
 				{:else if shareProtocol === 'iscsi'}
 					<span class="text-muted-foreground">Target</span>
 					<span class="font-mono text-xs">iqn.2137-01.com.nasty:{shareIscsiName || sv?.name}</span>
