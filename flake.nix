@@ -5,10 +5,10 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # ── bcachefs override (optional) ──────────────────────────────
-    # Pinned to v1.37 release tag.
+    # Pinned to v1.38.2 release tag.
     # To revert to pure nixpkgs: comment out these two lines.
     # No other changes needed — bcachefs.nix defaults to pkgs.bcachefs-tools.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.0";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.2";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
   };

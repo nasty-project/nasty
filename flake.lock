@@ -13,16 +13,16 @@
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1776633705,
-        "narHash": "sha256-ARSrlQozhefNV4K75aiaKxgfKIkE9mPrDksDhuvXfA4=",
+        "lastModified": 1777745911,
+        "narHash": "sha256-zUrvqds6gkqZLV5BbwZDf+IsClNn8CwiC4VdAUO2CWY=",
         "owner": "koverstreet",
         "repo": "bcachefs-tools",
-        "rev": "44ea2cc69c1ac40215c1aec4ab388a2370eaea76",
+        "rev": "bba7b97dcdd6e22cde5a2dc6e2dfff64751838f2",
         "type": "github"
       },
       "original": {
         "owner": "koverstreet",
-        "ref": "v1.38.0",
+        "ref": "v1.38.2",
         "repo": "bcachefs-tools",
         "type": "github"
       }
