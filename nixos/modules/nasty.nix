@@ -1184,8 +1184,17 @@ in {
         };
 
         # Serve user-uploaded file content under a sandbox CSP so a previewed
-        # HTML/SVG file cannot run scripts in the WebUI's origin. Overrides
-        # the vhost-level CSP for this location only.
+        # HTML/SVG file cannot run scripts in the WebUI's origin.
+        #
+        # nginx gotcha: when a location declares ANY add_header, it stops
+        # inheriting *all* parent add_header directives — not just the
+        # overridden one. Every header we want on this response has to be
+        # re-declared here, including HSTS / Referrer-Policy.
+        #
+        # X-Frame-Options is intentionally SAMEORIGIN (not DENY like the
+        # vhost) because the WebUI's file preview iframes this endpoint.
+        # frame-ancestors 'self' in the CSP enforces the same constraint
+        # for modern browsers that prefer CSP over the older header.
         locations."/api/files/content" = {
           proxyPass = "http://127.0.0.1:${toString cfg.engine.port}";
           priority = 300;
@@ -1193,8 +1202,11 @@ in {
             proxy_request_buffering off;
             proxy_read_timeout 3600s;
             proxy_send_timeout 3600s;
+            add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
             add_header X-Content-Type-Options "nosniff" always;
-            add_header Content-Security-Policy "sandbox; default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'" always;
+            add_header X-Frame-Options "SAMEORIGIN" always;
+            add_header Referrer-Policy "same-origin" always;
+            add_header Content-Security-Policy "sandbox; default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'; frame-ancestors 'self'" always;
           '';
         };
 
