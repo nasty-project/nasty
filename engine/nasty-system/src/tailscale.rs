@@ -261,11 +261,14 @@ async fn load_config() -> TailscaleConfig {
 }
 
 async fn save_config(config: &TailscaleConfig) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
     let dir = std::path::Path::new(STATE_PATH).parent().unwrap();
     tokio::fs::create_dir_all(dir).await?;
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    tokio::fs::write(STATE_PATH, json).await
+    tokio::fs::write(STATE_PATH, json).await?;
+    // Contains the Tailscale auth key (reusable).
+    tokio::fs::set_permissions(STATE_PATH, std::fs::Permissions::from_mode(0o600)).await
 }
 
 // ── Command helper ──────────────────────────────────────────────

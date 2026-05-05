@@ -7,29 +7,39 @@
 #
 # The resulting image has:
 #   - NASty engine + WebUI running on boot
-#   - admin / admin credentials
 #   - DHCP networking
-#   - SSH enabled (root login, password auth)
+#   - SSH enabled (key-based auth only)
 #   - cloud-init for provider provisioning
 #   - No pre-configured storage pool
 #
-# This is a CI/testing artifact. Not intended for production deployment.
+# CI builds opt in to known credentials (root password "nasty", password SSH)
+# by passing NASTY_CLOUD_TESTING_CREDS=1 in the build environment. Production
+# images must never be built with this flag.
 
 { config, lib, pkgs, nasty-engine, nasty-webui ? null, ... }:
 
+let
+  # Refuse to bake known-bad credentials unless the operator explicitly opts in
+  # by setting NASTY_CLOUD_TESTING_CREDS=1 at build time.
+  testingCreds = (builtins.getEnv "NASTY_CLOUD_TESTING_CREDS") == "1";
+in
 {
   networking.hostName = "nasty-cloud";
 
-  # Known credentials for CI access
-  users.users.root.initialPassword = "nasty";
+  # Default: SSH key-based root login, no password auth.
+  # CI: opts in to a known root password via NASTY_CLOUD_TESTING_CREDS=1.
+  users.users.root.initialPassword = lib.mkIf testingCreds "nasty";
   services.openssh = {
     enable = true;
     settings = {
-      PermitRootLogin = "yes";
-      PasswordAuthentication = true;
+      PermitRootLogin = if testingCreds then "yes" else "prohibit-password";
+      PasswordAuthentication = testingCreds;
     };
   };
   networking.firewall.allowedTCPPorts = [ 22 ];
+
+  warnings = lib.optional testingCreds
+    "cloud.nix: NASTY_CLOUD_TESTING_CREDS=1 is set — image will ship root:nasty and password SSH. DO NOT publish this image.";
 
   services.nasty = {
     enable = true;

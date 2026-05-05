@@ -459,6 +459,8 @@ async fn save(settings: &Settings) -> Result<(), std::io::Error> {
     tokio::fs::create_dir_all(STATE_DIR).await?;
     let json = serde_json::to_string_pretty(settings).unwrap();
     tokio::fs::write(STATE_PATH, json).await?;
+    // Contains OIDC client_secret and ACME/DNS provider config.
+    tokio::fs::set_permissions(STATE_PATH, std::fs::Permissions::from_mode(0o600)).await?;
     Ok(())
 }
 

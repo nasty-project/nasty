@@ -229,13 +229,17 @@ async fn main() -> anyhow::Result<()> {
     // Signal systemd that startup is complete
     sd_notify_ready();
 
-    let app = Router::new()
+    let ws_routes = Router::new()
         .route("/ws", get(ws_handler))
         .route("/ws/terminal", get(terminal::terminal_handler))
         .route("/ws/apps/deploy", get(app_deploy::deploy_handler))
         .route("/ws/system/logs", get(log_stream::logs_handler))
         .route("/ws/vm/{vm_id}/vnc", get(vm_console::vnc_handler))
         .route("/ws/vm/{vm_id}/serial", get(vm_console::serial_handler))
+        .layer(axum::middleware::from_fn(ws_origin_check));
+
+    let app = Router::new()
+        .merge(ws_routes)
         .route("/api/login", post(login_handler))
         .route("/api/auth/oidc/available", get(oidc_available_handler))
         .route("/api/auth/oidc/start", get(oidc_start_handler))
@@ -1361,6 +1365,44 @@ async fn oidc_callback_handler(
 }
 
 // ── WebSocket with auth ─────────────────────────────────────────
+
+/// Reject WebSocket upgrades whose `Origin` header does not match `Host`.
+/// Defends against cross-site WebSocket hijacking: a malicious page in the
+/// user's browser cannot open a WS to the appliance and ride existing auth.
+///
+/// No Origin header → non-browser client (curl, kubectl, CSI driver) → allow.
+async fn ws_origin_check(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let headers = req.headers();
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+
+    if let Some(origin) = origin {
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok());
+        let origin_authority = origin
+            .strip_prefix("https://")
+            .or_else(|| origin.strip_prefix("http://"))
+            .map(|s| s.split('/').next().unwrap_or(s));
+        let allowed = matches!(
+            (origin_authority, host),
+            (Some(o), Some(h)) if o.eq_ignore_ascii_case(h)
+        );
+        if !allowed {
+            tracing::warn!(
+                "WS rejected: Origin '{}' does not match Host '{}'",
+                origin,
+                host.unwrap_or("")
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    Ok(next.run(req).await)
+}
 
 async fn ws_handler(
     ws: WebSocketUpgrade,

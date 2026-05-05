@@ -66,11 +66,16 @@ impl NotificationConfig {
     }
 
     pub async fn save(&self) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("serialize: {e}"))?;
         tokio::fs::write(CONFIG_PATH, json)
             .await
-            .map_err(|e| format!("write {CONFIG_PATH}: {e}"))
+            .map_err(|e| format!("write {CONFIG_PATH}: {e}"))?;
+        // Contains SMTP passwords, Telegram bot tokens, webhook URLs.
+        tokio::fs::set_permissions(CONFIG_PATH, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|e| format!("chmod {CONFIG_PATH}: {e}"))
     }
 }
 

@@ -67,9 +67,18 @@ async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: Str
         _ => return,
     };
 
-    if state.auth.validate(&req.token, &client_ip).await.is_err() {
-        let _ = socket.send(Message::Text(LogMessage::error("invalid token").into())).await;
-        return;
+    // Admin only — system journals can leak secrets, IPs, and audit detail.
+    match state.auth.validate(&req.token, &client_ip).await {
+        Ok(s) if s.role == crate::auth::Role::Admin => {}
+        Ok(s) => {
+            crate::auth::audit("log_stream_denied", &s.username, &client_ip, &format!("role={:?}", s.role));
+            let _ = socket.send(Message::Text(LogMessage::error("forbidden: admin role required").into())).await;
+            return;
+        }
+        Err(_) => {
+            let _ = socket.send(Message::Text(LogMessage::error("invalid token").into())).await;
+            return;
+        }
     }
 
     info!("Log stream started for unit '{}' (follow mode)", req.unit);

@@ -98,12 +98,23 @@ async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
         _ => return,
     };
 
-    // Authenticate
-    if state.auth.validate(&req.token, &client_ip).await.is_err() {
-        let _ = socket
-            .send(Message::Text(DeployMessage::error("invalid token").into()))
-            .await;
-        return;
+    // Authenticate — admin only. Compose deploys can mount host paths and run
+    // privileged containers, so this is effectively root-equivalent.
+    match state.auth.validate(&req.token, &client_ip).await {
+        Ok(s) if s.role == crate::auth::Role::Admin => {}
+        Ok(s) => {
+            crate::auth::audit("app_deploy_denied", &s.username, &client_ip, &format!("role={:?}", s.role));
+            let _ = socket
+                .send(Message::Text(DeployMessage::error("forbidden: admin role required").into()))
+                .await;
+            return;
+        }
+        Err(_) => {
+            let _ = socket
+                .send(Message::Text(DeployMessage::error("invalid token").into()))
+                .await;
+            return;
+        }
     }
 
     info!("Deploy stream started for '{}' (kind: {})", req.name, req.kind);

@@ -87,9 +87,18 @@ async fn proxy_unix_socket(
         }
     };
 
-    if state.auth.validate(&token, &client_ip).await.is_err() {
-        let _ = ws.send(Message::Text("unauthorized".into())).await;
-        return;
+    // Admin or Operator — VM console is interactive root inside the guest.
+    match state.auth.validate(&token, &client_ip).await {
+        Ok(s) if s.role == crate::auth::Role::Admin || s.role == crate::auth::Role::Operator => {}
+        Ok(s) => {
+            crate::auth::audit("vm_console_denied", &s.username, &client_ip, &format!("role={:?} vm={}", s.role, vm_id));
+            let _ = ws.send(Message::Text("forbidden".into())).await;
+            return;
+        }
+        Err(_) => {
+            let _ = ws.send(Message::Text("unauthorized".into())).await;
+            return;
+        }
     }
 
     // Verify VM exists

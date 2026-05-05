@@ -243,7 +243,7 @@ async fn wait_for_terminal_auth(
     };
 
     match state.auth.validate(&auth.token, client_ip).await {
-        Ok(session) => {
+        Ok(session) if session.role == crate::auth::Role::Admin => {
             let _ = socket
                 .send(Message::Text(r#"{"authenticated":true}"#.into()))
                 .await;
@@ -253,6 +253,15 @@ async fn wait_for_terminal_auth(
                 rows: auth.rows,
                 cmd: auth.cmd,
             })
+        }
+        Ok(session) => {
+            warn!("Terminal access denied for '{}': role={:?}", session.username, session.role);
+            crate::auth::audit("terminal_denied", &session.username, client_ip, &format!("role={:?}", session.role));
+            let _ = socket
+                .send(Message::Text(r#"{"error":"forbidden: admin role required"}"#.into()))
+                .await;
+            let _ = socket.send(Message::Close(None)).await;
+            None
         }
         Err(_) => {
             let _ = socket

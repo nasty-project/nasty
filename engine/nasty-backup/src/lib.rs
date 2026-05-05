@@ -398,9 +398,15 @@ fn load_profiles() -> Vec<BackupProfile> {
 }
 
 async fn save_profiles(profiles: &[BackupProfile]) {
+    use std::os::unix::fs::PermissionsExt;
     if let Ok(json) = serde_json::to_string_pretty(profiles) {
         if let Err(e) = tokio::fs::write(STATE_PATH, json).await {
             error!("Failed to save backup profiles: {e}");
+            return;
+        }
+        // Contains S3/B2/SFTP credentials and the repo passphrase.
+        if let Err(e) = tokio::fs::set_permissions(STATE_PATH, std::fs::Permissions::from_mode(0o600)).await {
+            error!("Failed to chmod backup profiles: {e}");
         }
     }
 }
