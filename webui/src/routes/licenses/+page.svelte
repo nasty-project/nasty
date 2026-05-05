@@ -25,7 +25,7 @@
 		<h2 class="mb-3 text-base font-semibold">Third-Party Licenses</h2>
 		{#each thirdPartyText.split('\n## ') as section, i}
 			{#if i === 0}
-				<p class="mb-4 text-sm text-muted-foreground">{@html section.replace(/^# .*\n+/, '').replace(/\n/g, '<br>')}</p>
+				<p class="mb-4 whitespace-pre-line text-sm text-muted-foreground">{section.replace(/^# .*\n+/, '')}</p>
 			{:else}
 				{@const lines = section.split('\n')}
 				{@const title = lines[0]}

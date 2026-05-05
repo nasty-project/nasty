@@ -123,8 +123,17 @@
 	}
 
 	function highlightJson(json: string): string {
-		return json.replace(/("(?:\\.|[^"\\])*")\s*:/g, '<span class="text-purple-400">$1</span>:')
-			.replace(/:\s*("(?:\\.|[^"\\])*")/g, ': <span class="text-green-400">$1</span>')
+		// Escape first so attacker-controlled values inside the JSON (container
+		// names, env vars, labels) cannot reconstruct script tags. Spans below
+		// are added after escaping, so they remain live HTML.
+		const escaped = json
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+			.replace(/"/g, '&quot;');
+		return escaped
+			.replace(/(&quot;(?:\\.|[^&\\]|&(?!quot;))*?&quot;)\s*:/g, '<span class="text-purple-400">$1</span>:')
+			.replace(/:\s*(&quot;(?:\\.|[^&\\]|&(?!quot;))*?&quot;)/g, ': <span class="text-green-400">$1</span>')
 			.replace(/:\s*(true|false)/g, ': <span class="text-amber-400">$1</span>')
 			.replace(/:\s*(\d+\.?\d*)/g, ': <span class="text-blue-400">$1</span>')
 			.replace(/:\s*(null)/g, ': <span class="text-red-400">$1</span>');

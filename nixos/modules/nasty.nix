@@ -1100,6 +1100,14 @@ in {
 
         extraConfig = ''
           add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+          add_header X-Content-Type-Options "nosniff" always;
+          add_header X-Frame-Options "DENY" always;
+          add_header Referrer-Policy "same-origin" always;
+          # CSP: 'unsafe-inline' is required because SvelteKit emits inline
+          # bootstrap and theme-detection scripts in index.html. Tightening to
+          # nonces/hashes is a follow-up; this still blocks third-party script
+          # loads, object embeds, and cross-origin form submission.
+          add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' ws: wss:; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
           proxy_set_header X-Real-IP $remote_addr;
           include /var/lib/nasty/apps-proxy.conf;
         '';
@@ -1143,6 +1151,21 @@ in {
             proxy_request_buffering off;
             proxy_read_timeout 3600s;
             proxy_send_timeout 3600s;
+          '';
+        };
+
+        # Serve user-uploaded file content under a sandbox CSP so a previewed
+        # HTML/SVG file cannot run scripts in the WebUI's origin. Overrides
+        # the vhost-level CSP for this location only.
+        locations."/api/files/content" = {
+          proxyPass = "http://127.0.0.1:${toString cfg.engine.port}";
+          priority = 300;
+          extraConfig = ''
+            proxy_request_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header Content-Security-Policy "sandbox; default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'" always;
           '';
         };
 

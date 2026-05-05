@@ -28,21 +28,47 @@ pub enum NfsError {
     Io(#[from] std::io::Error),
 }
 
-/// Validate an NFS client host and options string.
-/// Rejects values containing whitespace, newlines, parentheses, quotes, or semicolons
-/// which could inject additional export entries.
-fn validate_nfs_client(client: &NfsClient) -> Result<(), NfsError> {
-    let bad_chars = |s: &str| -> bool {
-        s.chars().any(|c| c.is_whitespace() || matches!(c, '\n' | '\r' | '(' | ')' | '"' | '\'' | ';'))
-    };
-    if bad_chars(&client.host) {
+/// Validate an NFS client host. Rejects whitespace, control chars, parentheses,
+/// quotes, semicolons, and commas — anything that could let a value escape its
+/// position in `host(opts) host(opts) ...` and inject a fresh export entry.
+fn validate_nfs_host(host: &str) -> Result<(), NfsError> {
+    if host.is_empty() {
+        return Err(NfsError::InvalidClient("host is empty".to_string()));
+    }
+    if host.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '(' | ')' | '"' | '\'' | ';' | ',' | '\\')) {
         return Err(NfsError::InvalidClient(format!(
-            "host '{}' contains invalid characters", client.host
+            "host '{host}' contains invalid characters"
         )));
     }
-    if bad_chars(&client.options) {
+    Ok(())
+}
+
+/// Validate NFS export options. Allows the standard option grammar
+/// (alphanumerics, `_`, `-`, `=`, `,`, `/`, `.`, `:`, `@`) — rejects whitespace,
+/// control chars, parentheses, quotes, and semicolons.
+fn validate_nfs_options(options: &str) -> Result<(), NfsError> {
+    if options.chars().any(|c| {
+        !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '=' | ',' | '/' | '.' | ':' | '@'))
+    }) {
         return Err(NfsError::InvalidClient(format!(
-            "options '{}' contain invalid characters", client.options
+            "options '{options}' contain invalid characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_nfs_client(client: &NfsClient) -> Result<(), NfsError> {
+    validate_nfs_host(&client.host)?;
+    validate_nfs_options(&client.options)?;
+    Ok(())
+}
+
+/// Reject any export path containing characters that would let a maliciously-named
+/// directory inject a new line or column into the exports file.
+fn validate_export_path(path: &str) -> Result<(), NfsError> {
+    if path.chars().any(|c| c.is_control() || matches!(c, '\t' | '\n' | '\r' | '"' | '\'' | '\\')) {
+        return Err(NfsError::InvalidClient(format!(
+            "path '{path}' contains invalid characters for an exports file"
         )));
     }
     Ok(())
@@ -133,6 +159,7 @@ impl NfsService {
 
     /// Create a new NFS share
     pub async fn create(&self, req: CreateNfsShareRequest) -> Result<NfsShare, NfsError> {
+        validate_export_path(&req.path)?;
         if !Path::new(&req.path).exists() {
             return Err(NfsError::PathNotFound(req.path));
         }
@@ -182,6 +209,9 @@ impl NfsService {
             share.comment = Some(comment);
         }
         if let Some(clients) = req.clients {
+            for client in &clients {
+                validate_nfs_client(client)?;
+            }
             share.clients = clients;
         }
         if let Some(enabled) = req.enabled {
@@ -223,6 +253,14 @@ async fn write_export_file(share: &NfsShare) -> Result<(), NfsError> {
         // Disabled or stale — remove the file if it exists
         let _ = tokio::fs::remove_file(&path).await;
         return Ok(());
+    }
+
+    // Belt-and-braces: every value that lands in /etc/exports.d gets re-validated
+    // here, regardless of which RPC produced the share. Anything containing a
+    // newline or unbalanced quoting could otherwise inject a new export line.
+    validate_export_path(&share.path)?;
+    for client in &share.clients {
+        validate_nfs_client(client)?;
     }
 
     let fsid = stable_fsid(&share.id);
