@@ -2,40 +2,31 @@ use std::sync::Arc;
 
 use axum::extract::{
     Path,
-    Query,
     State,
     ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tracing::{info, warn};
 
 use crate::AppState;
 
-#[derive(Deserialize, Default)]
-pub struct ConsoleQuery {
-    /// Auth token passed as query param (used by noVNC which can't send a message before RFB handshake)
-    token: Option<String>,
-}
-
 const QMP_DIR: &str = "/run/nasty/vm";
 
 /// WebSocket handler for VNC console (binary frames → VNC unix socket).
-/// Used by noVNC in the browser.
+/// Used by noVNC in the browser. Auth is via the session cookie (browser)
+/// or Authorization: Bearer header (CLI). The legacy `?token=` query
+/// fallback was removed — cookies cover same-origin noVNC connections.
 pub async fn vnc_handler(
     ws: WebSocketUpgrade,
     Path(vm_id): Path<String>,
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ConsoleQuery>,
 ) -> impl IntoResponse {
     let client_ip = extract_client_ip(&headers);
-    // Cookie / Bearer wins over the legacy ?token= query param so a stray
-    // bookmarked URL with a stale token doesn't override a fresh session.
-    let pre_auth_token = crate::token_from_headers(&headers).or(query.token);
+    let pre_auth_token = crate::token_from_headers(&headers);
     ws.on_upgrade(move |socket| proxy_unix_socket(socket, format!("{QMP_DIR}/{vm_id}.vnc"), "vnc", vm_id, state, client_ip, pre_auth_token))
 }
 
@@ -45,10 +36,9 @@ pub async fn serial_handler(
     Path(vm_id): Path<String>,
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ConsoleQuery>,
 ) -> impl IntoResponse {
     let client_ip = extract_client_ip(&headers);
-    let pre_auth_token = crate::token_from_headers(&headers).or(query.token);
+    let pre_auth_token = crate::token_from_headers(&headers);
     ws.on_upgrade(move |socket| proxy_unix_socket(socket, format!("{QMP_DIR}/{vm_id}.serial"), "serial", vm_id, state, client_ip, pre_auth_token))
 }
 

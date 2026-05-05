@@ -1079,19 +1079,15 @@ async fn files_mkdir_handler(
 
 /// Serve file content with appropriate Content-Type for browser preview.
 /// GET /api/files/content?path=first/photos/image.jpg
-/// Accepts auth via Authorization header or ?token= query param (for media tags).
+///
+/// Auth is via the session cookie (same-origin browsers — `<img>` / `<iframe>`
+/// send it automatically) or `Authorization: Bearer` (CLI tools).
 async fn files_content_handler(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    // Browser <img>/<video>/<audio> tags can't set custom headers, but they DO
-    // send same-origin cookies — so the cookie path covers them now. Keep the
-    // ?token= query as a fallback for non-browser clients (curl, wget) and the
-    // Bearer header for CLI tools.
-    let token = token_from_headers(&headers)
-        .or_else(|| params.get("token").cloned().filter(|s| !s.is_empty()));
-    let token = match token {
+    let token = match token_from_headers(&headers) {
         Some(t) => t,
         None => {
             return (
