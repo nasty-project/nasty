@@ -119,24 +119,78 @@ struct AuthState {
     initialized: bool,
 }
 
-/// Max failed login attempts before lockout.
+/// Per-username failed login limit. Tighter than the per-IP limit because
+/// a username is the natural attacker target.
 const MAX_FAILED_ATTEMPTS: usize = 5;
-/// Window for counting failed attempts and lockout duration (seconds).
+/// Window for counting per-username failures and the lockout duration.
 const LOCKOUT_WINDOW_SECS: u64 = 15 * 60; // 15 minutes
+
+/// Per-IP failed login limit, applied across *all* usernames. Stops a single
+/// IP from spraying many usernames at low per-username rates.
+const MAX_IP_FAILED_ATTEMPTS: usize = 20;
+/// Window for counting per-IP failures.
+const IP_LOCKOUT_WINDOW_SECS: u64 = 60 * 60; // 1 hour
+
+const RATE_LIMIT_PATH: &str = "/var/lib/nasty/auth-rate-limit.json";
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct RateLimitState {
+    /// Failure timestamps per username.
+    #[serde(default)]
+    by_user: std::collections::HashMap<String, Vec<u64>>,
+    /// Failure timestamps per source IP.
+    #[serde(default)]
+    by_ip: std::collections::HashMap<String, Vec<u64>>,
+}
+
+impl RateLimitState {
+    /// Drop entries older than their relevant window so the file doesn't
+    /// grow without bound.
+    fn prune(&mut self, now: u64) {
+        for v in self.by_user.values_mut() {
+            v.retain(|&t| now.saturating_sub(t) < LOCKOUT_WINDOW_SECS);
+        }
+        self.by_user.retain(|_, v| !v.is_empty());
+        for v in self.by_ip.values_mut() {
+            v.retain(|&t| now.saturating_sub(t) < IP_LOCKOUT_WINDOW_SECS);
+        }
+        self.by_ip.retain(|_, v| !v.is_empty());
+    }
+
+    fn user_failures(&self, username: &str, now: u64) -> usize {
+        self.by_user.get(username)
+            .map(|v| v.iter().filter(|&&t| now.saturating_sub(t) < LOCKOUT_WINDOW_SECS).count())
+            .unwrap_or(0)
+    }
+
+    fn ip_failures(&self, ip: &str, now: u64) -> usize {
+        self.by_ip.get(ip)
+            .map(|v| v.iter().filter(|&&t| now.saturating_sub(t) < IP_LOCKOUT_WINDOW_SECS).count())
+            .unwrap_or(0)
+    }
+}
 
 pub struct AuthService {
     state: Arc<RwLock<AuthState>>,
-    /// In-memory failed login tracking: username → list of failure timestamps.
-    /// Not persisted — resets on engine restart.
-    failed_attempts: Arc<RwLock<std::collections::HashMap<String, Vec<u64>>>>,
+    /// Failed-login tracking, keyed both per-username (tight) and per-IP
+    /// (broad spray). Persisted to disk so an engine restart does not reset
+    /// the lockout — that would let an attacker dodge limits by killing the
+    /// service via, say, a memory-pressure DoS.
+    rate_limit: Arc<RwLock<RateLimitState>>,
 }
 
 impl AuthService {
     pub async fn new() -> Self {
         let state = load_state().await;
+        let mut rl = load_rate_limit().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        rl.prune(now);
         let svc = Self {
             state: Arc::new(RwLock::new(state)),
-            failed_attempts: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            rate_limit: Arc::new(RwLock::new(rl)),
         };
 
         // If no users exist, create default admin
@@ -166,15 +220,48 @@ impl AuthService {
             .unwrap_or_default()
             .as_secs();
 
-        // Check if the account is locked out due to too many failed attempts
+        // Per-IP rate limit applies first, regardless of whether the username
+        // exists. This blocks a single attacker spraying many usernames from
+        // one address — the per-username limit alone wouldn't catch that.
+        // Skip the bucket "unknown" because it pools every legitimate user
+        // behind a misconfigured proxy with every potential attacker.
+        if client_ip != "unknown" {
+            let rl = self.rate_limit.read().await;
+            let ip_fails = rl.ip_failures(client_ip, now);
+            if ip_fails >= MAX_IP_FAILED_ATTEMPTS {
+                tracing::warn!(
+                    "Login blocked from {client_ip}: {ip_fails} failed attempts in the last hour"
+                );
+                audit("login_ip_locked", username, client_ip, &format!("{ip_fails} failed attempts"));
+                return Err(AuthError::AccountLocked);
+            }
+        }
+
+        // Per-username lockout is suppressed when the locked user is the only
+        // Admin in the system — locking them would lock the whole appliance.
+        // The per-IP limit above still protects against spray; a distributed
+        // attacker is still slowed by per-IP limits at every source they use.
+        let only_admin = self.is_only_local_admin(username).await;
         {
-            let attempts = self.failed_attempts.read().await;
-            if let Some(failures) = attempts.get(username) {
-                let recent: Vec<_> = failures.iter().filter(|&&t| now - t < LOCKOUT_WINDOW_SECS).collect();
-                if recent.len() >= MAX_FAILED_ATTEMPTS {
-                    tracing::warn!("Login blocked for '{}': {} failed attempts in last {} minutes",
-                        username, recent.len(), LOCKOUT_WINDOW_SECS / 60);
-                    audit("login_locked", username, client_ip, &format!("{} failed attempts", recent.len()));
+            let rl = self.rate_limit.read().await;
+            let user_fails = rl.user_failures(username, now);
+            if user_fails >= MAX_FAILED_ATTEMPTS {
+                if only_admin {
+                    tracing::warn!(
+                        "Per-username lockout for '{username}' suppressed (only Admin); per-IP limit still applies"
+                    );
+                    audit(
+                        "login_lockout_suppressed_only_admin",
+                        username,
+                        client_ip,
+                        &format!("{user_fails} failed attempts"),
+                    );
+                } else {
+                    tracing::warn!(
+                        "Login blocked for '{}': {} failed attempts in last {} minutes",
+                        username, user_fails, LOCKOUT_WINDOW_SECS / 60
+                    );
+                    audit("login_locked", username, client_ip, &format!("{user_fails} failed attempts"));
                     return Err(AuthError::AccountLocked);
                 }
             }
@@ -192,7 +279,7 @@ impl AuthService {
             Ok(u) => u,
             Err(e) => {
                 audit("login_failed", username, client_ip, "user not found");
-                self.record_failed_attempt(username, now).await;
+                self.record_failed_attempt(username, client_ip, now).await;
                 return Err(e);
             }
         };
@@ -201,7 +288,7 @@ impl AuthService {
             Some(h) => h,
             None => {
                 audit("login_failed", username, client_ip, "no local password (OIDC-only user)");
-                self.record_failed_attempt(username, now).await;
+                self.record_failed_attempt(username, client_ip, now).await;
                 return Err(AuthError::InvalidCredentials);
             }
         };
@@ -209,12 +296,14 @@ impl AuthService {
             Ok(()) => {}
             Err(e) => {
                 audit("login_failed", username, client_ip, "wrong password");
-                self.record_failed_attempt(username, now).await;
+                self.record_failed_attempt(username, client_ip, now).await;
                 return Err(e);
             }
         }
 
-        // Successful login — clear failed attempts
+        // Successful login — clear per-username failures. We deliberately
+        // leave per-IP failures alone: a successful login from one user does
+        // not "redeem" the IP if it was just spraying other usernames.
         self.clear_failed_attempts(username).await;
 
         let token = generate_token();
@@ -637,17 +726,40 @@ impl AuthService {
             .collect()
     }
 
-    async fn record_failed_attempt(&self, username: &str, now: u64) {
-        let mut attempts = self.failed_attempts.write().await;
-        let entry = attempts.entry(username.to_string()).or_default();
-        entry.push(now);
-        // Prune old entries outside the window
-        entry.retain(|&t| now - t < LOCKOUT_WINDOW_SECS);
+    async fn record_failed_attempt(&self, username: &str, client_ip: &str, now: u64) {
+        let mut rl = self.rate_limit.write().await;
+        let user_entry = rl.by_user.entry(username.to_string()).or_default();
+        user_entry.push(now);
+        user_entry.retain(|&t| now.saturating_sub(t) < LOCKOUT_WINDOW_SECS);
+        if client_ip != "unknown" {
+            let ip_entry = rl.by_ip.entry(client_ip.to_string()).or_default();
+            ip_entry.push(now);
+            ip_entry.retain(|&t| now.saturating_sub(t) < IP_LOCKOUT_WINDOW_SECS);
+        }
+        let snapshot = rl.clone();
+        drop(rl);
+        if let Err(e) = save_rate_limit(&snapshot).await {
+            tracing::warn!("Failed to persist rate-limit state: {e}");
+        }
     }
 
     async fn clear_failed_attempts(&self, username: &str) {
-        let mut attempts = self.failed_attempts.write().await;
-        attempts.remove(username);
+        let mut rl = self.rate_limit.write().await;
+        if rl.by_user.remove(username).is_none() {
+            return;
+        }
+        let snapshot = rl.clone();
+        drop(rl);
+        if let Err(e) = save_rate_limit(&snapshot).await {
+            tracing::warn!("Failed to persist rate-limit state: {e}");
+        }
+    }
+
+    /// True when `username` is an Admin and the only Admin in the system.
+    /// Used to suppress per-username lockout for the last admin standing.
+    async fn is_only_local_admin(&self, username: &str) -> bool {
+        let state = self.state.read().await;
+        is_only_admin(&state.users, username)
     }
 
     /// Check if the token has admin role
@@ -839,4 +951,111 @@ async fn save_state(state: &AuthState) -> Result<(), AuthError> {
     tokio::fs::write(STATE_PATH, json).await?;
     tokio::fs::set_permissions(STATE_PATH, std::fs::Permissions::from_mode(0o600)).await?;
     Ok(())
+}
+
+async fn load_rate_limit() -> RateLimitState {
+    match tokio::fs::read_to_string(RATE_LIMIT_PATH).await {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => RateLimitState::default(),
+    }
+}
+
+async fn save_rate_limit(state: &RateLimitState) -> Result<(), AuthError> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::create_dir_all(STATE_DIR).await?;
+    let json = serde_json::to_string(state).unwrap();
+    tokio::fs::write(RATE_LIMIT_PATH, json).await?;
+    // 0600: holds source IPs of attackers, who don't always count as PII but
+    // are non-trivial to leak. Match auth.json's permissions.
+    tokio::fs::set_permissions(RATE_LIMIT_PATH, std::fs::Permissions::from_mode(0o600)).await?;
+    Ok(())
+}
+
+/// Pure helper: returns true when `username` is the only `Admin` in `users`.
+fn is_only_admin(users: &[User], username: &str) -> bool {
+    let admins: Vec<&User> = users.iter().filter(|u| u.role == Role::Admin).collect();
+    admins.len() == 1 && admins[0].username == username
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(name: &str, role: Role) -> User {
+        User {
+            username: name.to_string(),
+            password_hash: Some("hash".to_string()),
+            role,
+            must_change_password: false,
+            oidc_subject: None,
+            oidc_issuer: None,
+        }
+    }
+
+    #[test]
+    fn only_admin_when_alone() {
+        let users = vec![user("alice", Role::Admin), user("bob", Role::ReadOnly)];
+        assert!(is_only_admin(&users, "alice"));
+        assert!(!is_only_admin(&users, "bob"));
+    }
+
+    #[test]
+    fn not_only_admin_when_two() {
+        let users = vec![user("alice", Role::Admin), user("bob", Role::Admin)];
+        assert!(!is_only_admin(&users, "alice"));
+        assert!(!is_only_admin(&users, "bob"));
+    }
+
+    #[test]
+    fn not_only_admin_when_user_isnt_admin() {
+        let users = vec![user("alice", Role::Admin), user("bob", Role::Operator)];
+        assert!(!is_only_admin(&users, "bob"));
+    }
+
+    #[test]
+    fn rate_limit_user_failures_window() {
+        let now = 1_000_000;
+        let mut rl = RateLimitState::default();
+        rl.by_user.insert(
+            "alice".to_string(),
+            vec![now - LOCKOUT_WINDOW_SECS - 1, now - 30, now],
+        );
+        // The very-old entry is outside the window and shouldn't count.
+        assert_eq!(rl.user_failures("alice", now), 2);
+        assert_eq!(rl.user_failures("bob", now), 0);
+    }
+
+    #[test]
+    fn rate_limit_ip_failures_window() {
+        let now = 1_000_000;
+        let mut rl = RateLimitState::default();
+        rl.by_ip.insert(
+            "10.0.0.1".to_string(),
+            vec![now - IP_LOCKOUT_WINDOW_SECS - 1, now - 60, now - 30, now],
+        );
+        assert_eq!(rl.ip_failures("10.0.0.1", now), 3);
+    }
+
+    #[test]
+    fn rate_limit_prune_drops_expired_and_empty() {
+        let now = 1_000_000;
+        let mut rl = RateLimitState::default();
+        rl.by_user.insert(
+            "alice".to_string(),
+            vec![now - LOCKOUT_WINDOW_SECS - 100, now - 5],
+        );
+        rl.by_user.insert(
+            "bob".to_string(),
+            vec![now - LOCKOUT_WINDOW_SECS - 100],
+        );
+        rl.by_ip.insert(
+            "1.2.3.4".to_string(),
+            vec![now - IP_LOCKOUT_WINDOW_SECS - 1],
+        );
+        rl.prune(now);
+        // alice keeps the recent entry, bob drops out, ip drops out.
+        assert_eq!(rl.by_user.get("alice").map(|v| v.len()), Some(1));
+        assert!(!rl.by_user.contains_key("bob"));
+        assert!(rl.by_ip.is_empty());
+    }
 }
