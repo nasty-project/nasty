@@ -1026,7 +1026,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
 
         "system.alerts" => {
-            // Return cached result if fresh (< 10s old)
+            // Cheap path for the WebUI dashboard, which polls every few seconds:
+            // serve a cached result when it's <20s old. The cache is also
+            // populated by the background notifier, so even with no browser
+            // open the first WebUI poll after a minute returns instantly.
             {
                 let cache = state.alerts_cache.lock().await;
                 if let Some((ts, ref cached)) = *cache {
@@ -1036,159 +1039,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 }
             }
 
-            // Evaluate current alert rules against live system state
-            let stats = match fetch_metrics_json::<nasty_system::SystemStats>(
-                &state.metrics_client,
-                "/api/stats",
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => return err(req, e),
-            };
-            let fs_list = state.filesystems.list().await;
-            let disk_health: Vec<nasty_system::DiskHealth> = if state
-                .protocols
-                .is_enabled(nasty_system::protocol::Protocol::Smart)
-                .await
-            {
-                fetch_metrics_json(&state.metrics_client, "/api/disks")
-                    .await
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            let filesystems = fs_list.unwrap_or_default();
-            let fs_usage_list: Vec<nasty_system::alerts::FsUsage> = filesystems
-                .iter()
-                .map(|p| nasty_system::alerts::FsUsage {
-                    name: p.name.clone(),
-                    used_bytes: p.used_bytes,
-                    total_bytes: p.total_bytes,
-                })
-                .collect();
-
-            let disk_summary: Vec<nasty_system::alerts::DiskHealthSummary> = disk_health
-                .into_iter()
-                .map(|d| nasty_system::alerts::DiskHealthSummary {
-                    device: d.device,
-                    temperature_c: d.temperature_c,
-                    health_passed: d.health_passed,
-                })
-                .collect();
-
-            // Collect bcachefs health from mounted filesystems — run all checks in parallel
-            let mut health_tasks = tokio::task::JoinSet::new();
-            for fs in filesystems.iter().filter(|fs| fs.mounted) {
-                let fs_service = state.filesystems.clone();
-                let fs = fs.clone();
-                health_tasks.spawn(async move {
-                    let degraded = fs.options.degraded.unwrap_or(false);
-                    let devices: Vec<nasty_system::alerts::BcachefsDeviceHealth> = fs
-                        .devices
-                        .iter()
-                        .map(|d| nasty_system::alerts::BcachefsDeviceHealth {
-                            path: d.path.clone(),
-                            state: d.state.clone().unwrap_or_else(|| "rw".into()),
-                            has_errors: d
-                                .has_data
-                                .as_deref()
-                                .map_or(false, |s| s.contains("error")),
-                        })
-                        .collect();
-
-                    // Run IO error count, scrub status, and reconcile status in parallel
-                    let (io_error_count, scrub_result, reconcile_result) = tokio::join!(
-                        read_bcachefs_error_count(&fs.uuid),
-                        fs_service.scrub_status(&fs.name),
-                        fs_service.reconcile_status(&fs.name),
-                    );
-
-                    let scrub_errors = match scrub_result {
-                        Ok(s) => s.raw.to_lowercase().contains("error"),
-                        Err(_) => false,
-                    };
-
-                    let reconcile_stalled = match reconcile_result {
-                        Ok(s) => {
-                            let raw = s.raw.to_lowercase();
-                            let scan_pending = raw
-                                .lines()
-                                .find(|l| l.contains("scan pending"))
-                                .and_then(|l| l.split_whitespace().last())
-                                .and_then(|n| n.parse::<u64>().ok())
-                                .unwrap_or(0)
-                                > 0;
-                            let work_pending = raw
-                                .lines()
-                                .find(|l| l.trim().starts_with("pending:"))
-                                .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
-                                .unwrap_or(false);
-                            (scan_pending || work_pending) && !raw.contains("running")
-                        }
-                        Err(_) => false,
-                    };
-
-                    nasty_system::alerts::BcachefsHealth {
-                        fs_name: fs.name.clone(),
-                        degraded,
-                        devices,
-                        io_error_count,
-                        scrub_errors,
-                        reconcile_stalled,
-                    }
-                });
-            }
-            let mut bcachefs_health = Vec::new();
-            while let Some(result) = health_tasks.join_next().await {
-                if let Ok(health) = result {
-                    bcachefs_health.push(health);
-                }
-            }
-
-            // Collect kernel errors from metrics service
-            let kernel_summary: nasty_common::metrics_types::KernelErrorSummary =
-                fetch_metrics_json(&state.metrics_client, "/api/kernel_errors")
-                    .await
-                    .unwrap_or_default();
-            let kernel_alert = nasty_system::alerts::KernelErrorAlert {
-                total_count: kernel_summary.total_count,
-                categories: kernel_summary
-                    .by_category
-                    .iter()
-                    .map(|c| c.category.clone())
-                    .collect(),
-            };
-
-            let mut alerts = state
-                .alerts
-                .evaluate(
-                    &stats,
-                    &fs_usage_list,
-                    &disk_summary,
-                    &bcachefs_health,
-                    &kernel_alert,
-                )
-                .await;
-
-            // Inject mount failure alerts (from boot)
-            let mount_failures = state.mount_failures.lock().await;
-            for name in mount_failures.iter() {
-                alerts.push(nasty_system::alerts::ActiveAlert {
-                    rule_id: "mount-failure".into(),
-                    rule_name: "Filesystem failed to mount".into(),
-                    severity: nasty_system::alerts::AlertSeverity::Critical,
-                    metric: nasty_system::alerts::AlertMetric::BcachefsDegraded,
-                    message: format!("Filesystem \"{name}\" failed to mount after boot. Check disk connectivity and logs."),
-                    current_value: 1.0,
-                    threshold: 0.0,
-                    source: name.clone(),
-                });
-            }
-            drop(mount_failures);
-
-            // Cache for subsequent polls
+            let alerts = evaluate_active_alerts(&state).await;
             let value = serde_json::to_value(&alerts).unwrap_or_default();
             *state.alerts_cache.lock().await = Some((std::time::Instant::now(), value));
 
@@ -3111,6 +2962,177 @@ async fn vm_clone(
         .create(create_req)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Evaluate the full alert ruleset against live system state and return any
+/// firing alerts. Used by both the `system.alerts` RPC handler (which adds a
+/// 20s cache for cheap WebUI polling) and the background notifier in
+/// `spawn_alert_notifier` (which previously depended on a browser polling to
+/// populate that same cache — meaning alerts only fired when an admin had
+/// the dashboard open).
+///
+/// Errors fetching individual signals are swallowed and the corresponding
+/// alert family is treated as "no data" so a metrics-service blip doesn't
+/// silence everything else.
+pub(crate) async fn evaluate_active_alerts(state: &AppState) -> Vec<nasty_system::alerts::ActiveAlert> {
+    use nasty_system::alerts;
+
+    // System stats — required for CPU/memory/temp rules. If the metrics
+    // service is down, evaluating those rules without data is meaningless;
+    // return an empty alert set rather than fabricating false positives.
+    let stats = match fetch_metrics_json::<nasty_system::SystemStats>(
+        &state.metrics_client,
+        "/api/stats",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("alert evaluation: stats fetch failed: {e}");
+            return Vec::new();
+        }
+    };
+
+    let filesystems = state.filesystems.list().await.unwrap_or_default();
+    let disk_health: Vec<nasty_system::DiskHealth> = if state
+        .protocols
+        .is_enabled(nasty_system::protocol::Protocol::Smart)
+        .await
+    {
+        fetch_metrics_json(&state.metrics_client, "/api/disks")
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let fs_usage_list: Vec<alerts::FsUsage> = filesystems
+        .iter()
+        .map(|p| alerts::FsUsage {
+            name: p.name.clone(),
+            used_bytes: p.used_bytes,
+            total_bytes: p.total_bytes,
+        })
+        .collect();
+
+    let disk_summary: Vec<alerts::DiskHealthSummary> = disk_health
+        .into_iter()
+        .map(|d| alerts::DiskHealthSummary {
+            device: d.device,
+            temperature_c: d.temperature_c,
+            health_passed: d.health_passed,
+        })
+        .collect();
+
+    // Run bcachefs health checks for every mounted filesystem in parallel.
+    let mut health_tasks = tokio::task::JoinSet::new();
+    for fs in filesystems.iter().filter(|fs| fs.mounted) {
+        let fs_service = state.filesystems.clone();
+        let fs = fs.clone();
+        health_tasks.spawn(async move {
+            let degraded = fs.options.degraded.unwrap_or(false);
+            let devices: Vec<alerts::BcachefsDeviceHealth> = fs
+                .devices
+                .iter()
+                .map(|d| alerts::BcachefsDeviceHealth {
+                    path: d.path.clone(),
+                    state: d.state.clone().unwrap_or_else(|| "rw".into()),
+                    has_errors: d
+                        .has_data
+                        .as_deref()
+                        .map_or(false, |s| s.contains("error")),
+                })
+                .collect();
+
+            let (io_error_count, scrub_result, reconcile_result) = tokio::join!(
+                read_bcachefs_error_count(&fs.uuid),
+                fs_service.scrub_status(&fs.name),
+                fs_service.reconcile_status(&fs.name),
+            );
+
+            let scrub_errors = match scrub_result {
+                Ok(s) => s.raw.to_lowercase().contains("error"),
+                Err(_) => false,
+            };
+
+            let reconcile_stalled = match reconcile_result {
+                Ok(s) => {
+                    let raw = s.raw.to_lowercase();
+                    let scan_pending = raw
+                        .lines()
+                        .find(|l| l.contains("scan pending"))
+                        .and_then(|l| l.split_whitespace().last())
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .unwrap_or(0)
+                        > 0;
+                    let work_pending = raw
+                        .lines()
+                        .find(|l| l.trim().starts_with("pending:"))
+                        .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
+                        .unwrap_or(false);
+                    (scan_pending || work_pending) && !raw.contains("running")
+                }
+                Err(_) => false,
+            };
+
+            alerts::BcachefsHealth {
+                fs_name: fs.name.clone(),
+                degraded,
+                devices,
+                io_error_count,
+                scrub_errors,
+                reconcile_stalled,
+            }
+        });
+    }
+    let mut bcachefs_health = Vec::new();
+    while let Some(result) = health_tasks.join_next().await {
+        if let Ok(health) = result {
+            bcachefs_health.push(health);
+        }
+    }
+
+    // Kernel error counters from the metrics service.
+    let kernel_summary: nasty_common::metrics_types::KernelErrorSummary =
+        fetch_metrics_json(&state.metrics_client, "/api/kernel_errors")
+            .await
+            .unwrap_or_default();
+    let kernel_alert = alerts::KernelErrorAlert {
+        total_count: kernel_summary.total_count,
+        categories: kernel_summary
+            .by_category
+            .iter()
+            .map(|c| c.category.clone())
+            .collect(),
+    };
+
+    let mut active = state
+        .alerts
+        .evaluate(
+            &stats,
+            &fs_usage_list,
+            &disk_summary,
+            &bcachefs_health,
+            &kernel_alert,
+        )
+        .await;
+
+    // Mount failures recorded at boot stay live until the engine is restarted.
+    let mount_failures = state.mount_failures.lock().await;
+    for name in mount_failures.iter() {
+        active.push(alerts::ActiveAlert {
+            rule_id: "mount-failure".into(),
+            rule_name: "Filesystem failed to mount".into(),
+            severity: alerts::AlertSeverity::Critical,
+            metric: alerts::AlertMetric::BcachefsDegraded,
+            message: format!("Filesystem \"{name}\" failed to mount after boot. Check disk connectivity and logs."),
+            current_value: 1.0,
+            threshold: 0.0,
+            source: name.clone(),
+        });
+    }
+
+    active
 }
 
 /// Read bcachefs error counters from sysfs. Returns total read+write error count.

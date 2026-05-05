@@ -1671,27 +1671,28 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
     tokio::spawn(async move {
         use std::collections::HashSet;
         use nasty_system::notifications;
-        use nasty_system::alerts::ActiveAlert;
 
         let mut previously_active: HashSet<(String, String)> = HashSet::new();
 
-        // Wait for system to fully start before first evaluation
+        // Wait for the metrics service and the rest of the system to come up
+        // before the first evaluation; first-boot stats are noisy.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
-            // Use the cached alerts from the RPC handler (populated by WebUI polling).
-            // This avoids duplicating the complex evaluation logic.
-            let active: Vec<ActiveAlert> = {
-                let cache = state.alerts_cache.lock().await;
-                match &*cache {
-                    Some((ts, cached)) if ts.elapsed() < std::time::Duration::from_secs(120) => {
-                        serde_json::from_value(cached.clone()).unwrap_or_default()
-                    }
-                    _ => continue, // No fresh alert data — skip this cycle
-                }
-            };
+            // Evaluate directly. The previous version read state.alerts_cache,
+            // which was only populated by the WebUI dashboard polling — meaning
+            // the notifier silently skipped every cycle when no admin had a
+            // browser open. A drive failing at 3am went unalerted until someone
+            // opened the dashboard the next morning.
+            let active = crate::router::evaluate_active_alerts(&state).await;
+
+            // Refresh the RPC cache as a side effect so the next WebUI poll
+            // returns instantly with up-to-date data.
+            if let Ok(value) = serde_json::to_value(&active) {
+                *state.alerts_cache.lock().await = Some((std::time::Instant::now(), value));
+            }
 
             // Find newly fired alerts (not previously active)
             let current_keys: HashSet<(String, String)> = active.iter()
