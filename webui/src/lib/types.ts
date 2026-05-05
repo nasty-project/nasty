@@ -753,6 +753,8 @@ export interface App {
 	kind: string; // "simple" or "compose"
 	containers?: AppContainer[];
 	ports?: MappedPort[];
+	/** True if deployed with allow_unsafe (elevated privileges). */
+	unsafe_mode?: boolean;
 }
 
 export interface AppContainer {
@@ -776,6 +778,8 @@ export interface AppConfig {
 	volumes: { name: string; mount_path: string; host_path: string }[];
 	cpu_limit: string | null;
 	memory_limit: string | null;
+	/** True if app was originally deployed with allow_unsafe. */
+	allow_unsafe?: boolean;
 }
 
 export interface ImageInspectResult {

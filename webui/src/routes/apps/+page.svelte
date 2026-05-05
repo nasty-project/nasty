@@ -227,6 +227,10 @@
 	let newVolumes = $state<{ name: string; mount_path: string; host_path: string }[]>([]);
 	let newCpuLimit = $state('');
 	let newMemoryLimit = $state('');
+	/** Opt out of the strict bind-mount sandbox for simple apps. Persisted per-app. */
+	let newAllowUnsafe = $state(false);
+	/** Same flag, separate state for the compose dialog. */
+	let composeAllowUnsafe = $state(false);
 	let inspecting = $state(false);
 	let lastInspectedImage = '';
 
@@ -468,6 +472,7 @@
 			name: appName,
 			image: newImage,
 			install_params: params,
+			allow_unsafe: newAllowUnsafe,
 		});
 		if (ok) {
 			showInstall = false;
@@ -495,6 +500,7 @@
 		newVolumes = config.volumes.map(v => ({ name: v.name, mount_path: v.mount_path, host_path: v.host_path }));
 		newCpuLimit = config.cpu_limit ?? '';
 		newMemoryLimit = config.memory_limit ?? '';
+		newAllowUnsafe = config.allow_unsafe ?? false;
 		installMode = 'simple';
 		showInstall = true;
 	}
@@ -525,6 +531,7 @@
 		}
 		if (newCpuLimit) params.cpu_limit = newCpuLimit;
 		if (newMemoryLimit) params.memory_limit = newMemoryLimit;
+		params.allow_unsafe = newAllowUnsafe;
 
 		const result = await withToast(
 			() => client.call('apps.update', params, 300_000),
@@ -541,6 +548,7 @@
 	function resetForm() {
 		newName = ''; newImage = ''; newPorts = []; newEnvs = []; newVolumes = [];
 		newCpuLimit = ''; newMemoryLimit = '';
+		newAllowUnsafe = false;
 		lastInspectedImage = '';
 	}
 
@@ -641,11 +649,13 @@
 			kind: 'compose',
 			name,
 			compose_file: composeContent,
+			allow_unsafe: composeAllowUnsafe,
 		});
 		if (ok) {
 			showCompose = false;
 			editingCompose = null;
 			composeName = ''; composeContent = '';
+			composeAllowUnsafe = false;
 		}
 		await refresh();
 	}
@@ -659,6 +669,9 @@
 		editingCompose = name;
 		composeName = name;
 		composeContent = content;
+		// Pre-fill the unsafe flag from the live apps list — compose apps store
+		// it in .nasty-meta.json next to the yaml; the engine surfaces it on App.
+		composeAllowUnsafe = apps.find(a => a.name === name)?.unsafe_mode ?? false;
 		installMode = 'compose';
 		showCompose = true;
 	}
@@ -669,6 +682,7 @@
 		portConflicts = [];
 		composeErrorLines = [];
 		composeName = ''; composeContent = '';
+		composeAllowUnsafe = false;
 	}
 
 	// Ingress
@@ -931,6 +945,26 @@
 					</div>
 				</div>
 
+				<!-- Allow unsafe — opt out of strict bind-mount sandbox -->
+				<div class="mb-4 rounded-md border border-border p-3">
+					<label class="flex items-start gap-2 cursor-pointer">
+						<input type="checkbox" bind:checked={newAllowUnsafe} class="mt-0.5" />
+						<span class="flex-1">
+							<span class="block text-sm font-medium">Allow unsafe</span>
+							<span class="block text-xs text-muted-foreground">
+								Permit bind mounts outside the app's data dir and <code>/fs/</code>.
+								Engine state under <code>/var/lib/nasty/</code>, the host root, and
+								<code>..</code> traversals are still rejected.
+							</span>
+						</span>
+					</label>
+					{#if newAllowUnsafe}
+						<p class="mt-2 text-xs text-amber-500">
+							⚠ This app will run with relaxed sandbox rules. The deploy is logged in the audit trail and shown with an unsafe badge in the app list.
+						</p>
+					{/if}
+				</div>
+
 				<div class="flex gap-2">
 					{#if editingApp}
 						<Button onclick={updateApp} disabled={!newImage}>Save</Button>
@@ -965,6 +999,27 @@
 							<div><span class="font-semibold">Line {lineNo}:</span> port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span> — change to e.g. <code>{alt}</code></div>
 							{/each}
 						</div>
+					{/if}
+				</div>
+				<!-- Allow unsafe — opt out of strict compose sandbox -->
+				<div class="mb-4 rounded-md border border-border p-3">
+					<label class="flex items-start gap-2 cursor-pointer">
+						<input type="checkbox" bind:checked={composeAllowUnsafe} class="mt-0.5" />
+						<span class="flex-1">
+							<span class="block text-sm font-medium">Allow unsafe</span>
+							<span class="block text-xs text-muted-foreground">
+								Permit <code>privileged</code>, host namespaces, dangerous capabilities,
+								host devices, and bind mounts outside the standard sandbox.
+								Required for Tailscale, Plex/Jellyfin GPU transcoding, and similar workloads.
+								Engine state under <code>/var/lib/nasty/</code>, the host root, and
+								<code>..</code> traversals are still rejected.
+							</span>
+						</span>
+					</label>
+					{#if composeAllowUnsafe}
+						<p class="mt-2 text-xs text-amber-500">
+							⚠ This stack will run with elevated privileges. The deploy is logged in the audit trail and shown with an unsafe badge in the app list.
+						</p>
 					{/if}
 				</div>
 				<div class="flex gap-2">
@@ -1007,6 +1062,15 @@
 							<div class="flex items-center gap-2">
 								<span class="font-semibold">{app.name}</span>
 								<Badge variant="outline" class="text-[0.6rem]">{app.kind}</Badge>
+								{#if app.unsafe_mode}
+									<Badge
+										class="bg-amber-500/15 text-amber-400 border-amber-500/40 text-[0.6rem]"
+										variant="outline"
+										title="Deployed with allow_unsafe — relaxed sandbox rules"
+									>
+										unsafe
+									</Badge>
+								{/if}
 								{#if app.containers && app.containers.length > 1}
 									<button class="text-xs text-muted-foreground hover:text-foreground" onclick={() => expanded[app.name] = !expanded[app.name]}>
 										{app.containers.length} containers {expanded[app.name] ? '▾' : '▸'}
