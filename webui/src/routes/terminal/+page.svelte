@@ -3,7 +3,6 @@
 	import { Terminal } from '@xterm/xterm';
 	import { FitAddon } from '@xterm/addon-fit';
 	import { WebLinksAddon } from '@xterm/addon-web-links';
-	import { getToken } from '$lib/auth';
 	import { Button } from '$lib/components/ui/button';
 	import { Maximize2, Minimize2 } from '@lucide/svelte';
 	import { terminalStatus } from '$lib/terminalStatus.svelte';
@@ -75,13 +74,8 @@
 	});
 
 	function connect() {
-		const token = getToken();
-		if (!token) {
-			status = 'disconnected';
-			term?.writeln('\r\n\x1b[31mNot authenticated. Please sign in first.\x1b[0m');
-			return;
-		}
-
+		// Cookie auth: the WS upgrade carries `nasty_session` automatically;
+		// the first message just supplies terminal size.
 		const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 		ws = new WebSocket(`${proto}//${window.location.host}/ws/terminal`);
 		status = 'connecting';
@@ -89,7 +83,7 @@
 		ws.onopen = () => {
 			const cols = term?.cols ?? 80;
 			const rows = term?.rows ?? 24;
-			ws?.send(JSON.stringify({ token, cols, rows }));
+			ws?.send(JSON.stringify({ cols, rows }));
 		};
 
 		ws.onmessage = (event) => {

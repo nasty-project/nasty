@@ -22,12 +22,17 @@ pub async fn terminal_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string();
-    ws.on_upgrade(move |socket| handle_terminal(socket, state, client_ip))
+    let pre_auth_token = crate::token_from_headers(&headers);
+    ws.on_upgrade(move |socket| handle_terminal(socket, state, client_ip, pre_auth_token))
 }
 
 #[derive(Deserialize)]
 struct TerminalAuth {
-    token: String,
+    /// Session token. Optional when the WS upgrade already carried a session
+    /// cookie or Bearer header — in that case the first message just supplies
+    /// terminal size and (optionally) the command.
+    #[serde(default)]
+    token: Option<String>,
     #[serde(default = "default_cols")]
     cols: u16,
     #[serde(default = "default_rows")]
@@ -54,9 +59,9 @@ struct ControlMessage {
     rows: u16,
 }
 
-async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>, client_ip: String) {
+async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>, client_ip: String, pre_auth_token: Option<String>) {
     // Phase 1: authenticate and get terminal size
-    let auth = match wait_for_terminal_auth(&mut socket, &state, &client_ip).await {
+    let auth = match wait_for_terminal_auth(&mut socket, &state, &client_ip, pre_auth_token).await {
         Some(a) => a,
         None => return,
     };
@@ -212,6 +217,7 @@ async fn wait_for_terminal_auth(
     socket: &mut WebSocket,
     state: &AppState,
     client_ip: &str,
+    pre_auth_token: Option<String>,
 ) -> Option<TerminalAuthResult> {
     let msg = tokio::time::timeout(std::time::Duration::from_secs(10), socket.recv())
         .await
@@ -242,7 +248,20 @@ async fn wait_for_terminal_auth(
         }
     };
 
-    match state.auth.validate(&auth.token, client_ip).await {
+    // Cookie-based browser flow → token is on the upgrade request.
+    // Non-browser CLI flow → token is in the first message.
+    let token = match pre_auth_token.or(auth.token) {
+        Some(t) => t,
+        None => {
+            let _ = socket
+                .send(Message::Text(r#"{"error":"missing session"}"#.into()))
+                .await;
+            let _ = socket.send(Message::Close(None)).await;
+            return None;
+        }
+    };
+
+    match state.auth.validate(&token, client_ip).await {
         Ok(session) if session.role == crate::auth::Role::Admin => {
             let _ = socket
                 .send(Message::Text(r#"{"authenticated":true}"#.into()))

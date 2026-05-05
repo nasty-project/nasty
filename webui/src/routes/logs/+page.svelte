@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { getClient } from '$lib/client';
-	import { getToken } from '$lib/auth';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 
@@ -57,8 +56,8 @@
 		followWs = ws;
 
 		ws.onopen = () => {
+			// Cookie auth — token is carried by the WS upgrade itself.
 			ws.send(JSON.stringify({
-				token: getToken(),
 				unit: selectedUnit,
 				lines: content ? 0 : lines,
 				grep: grepPattern.trim() || undefined,

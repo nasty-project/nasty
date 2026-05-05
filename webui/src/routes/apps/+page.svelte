@@ -14,7 +14,6 @@
 	import SortTh from '$lib/components/SortTh.svelte';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 	import { CircleCheck, Circle } from '@lucide/svelte';
-	import { getToken } from '$lib/auth';
 	import type { Filesystem } from '$lib/types';
 
 	// Deploy stream state
@@ -34,7 +33,8 @@
 			const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/apps/deploy`);
 
 			ws.onopen = () => {
-				ws.send(JSON.stringify({ token: getToken(), ...params }));
+				// Cookie auth — the WS upgrade already carried the session.
+				ws.send(JSON.stringify(params));
 			};
 
 			ws.onmessage = (event) => {

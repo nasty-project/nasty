@@ -23,12 +23,15 @@ pub async fn logs_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string();
-    ws.on_upgrade(move |socket| handle_logs(socket, state, client_ip))
+    let pre_auth_token = crate::token_from_headers(&headers);
+    ws.on_upgrade(move |socket| handle_logs(socket, state, client_ip, pre_auth_token))
 }
 
 #[derive(Deserialize)]
 struct LogRequest {
-    token: String,
+    /// Optional when the WS upgrade carried a session cookie or Bearer token.
+    #[serde(default)]
+    token: Option<String>,
     unit: String,
     #[serde(default = "default_lines")]
     lines: u32,
@@ -54,8 +57,8 @@ impl LogMessage {
     }
 }
 
-async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: String) {
-    // First message: auth + params
+async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: String, pre_auth_token: Option<String>) {
+    // First message: params (token optional now — cookie may have provided it)
     let req: LogRequest = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
             Ok(r) => r,
@@ -67,8 +70,16 @@ async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: Str
         _ => return,
     };
 
+    let token = match pre_auth_token.or_else(|| req.token.clone()) {
+        Some(t) => t,
+        None => {
+            let _ = socket.send(Message::Text(LogMessage::error("missing session").into())).await;
+            return;
+        }
+    };
+
     // Admin only — system journals can leak secrets, IPs, and audit detail.
-    match state.auth.validate(&req.token, &client_ip).await {
+    match state.auth.validate(&token, &client_ip).await {
         Ok(s) if s.role == crate::auth::Role::Admin => {}
         Ok(s) => {
             crate::auth::audit("log_stream_denied", &s.username, &client_ip, &format!("role={:?}", s.role));

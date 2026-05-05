@@ -241,6 +241,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .merge(ws_routes)
         .route("/api/login", post(login_handler))
+        .route("/api/logout", post(logout_handler))
         .route("/api/auth/oidc/available", get(oidc_available_handler))
         .route("/api/auth/oidc/start", get(oidc_start_handler))
         .route("/api/auth/oidc/callback", get(oidc_callback_handler))
@@ -346,14 +347,8 @@ async fn upload_vm_image_handler(
 
     info!("VM image upload request from {}", client_ip);
 
-    // Authenticate
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
-
-    let token = match token {
+    // Authenticate — accepts the session cookie or a Bearer token.
+    let token = match token_from_headers(&headers) {
         Some(t) => t,
         None => {
             info!(
@@ -625,13 +620,8 @@ async fn files_browse_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    // Auth check
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
-    let token = match token {
+    // Auth check — accepts session cookie or Bearer token.
+    let token = match token_from_headers(&headers) {
         Some(t) => t,
         None => {
             return (
@@ -741,16 +731,52 @@ async fn files_browse_handler(
 }
 
 /// Validate bearer token from request headers. Returns client_ip on success.
+/// Name of the httpOnly session cookie set by /api/login and /api/auth/oidc/callback.
+const SESSION_COOKIE: &str = "nasty_session";
+
+/// Pull the session token from (in priority order):
+///   1. The httpOnly `nasty_session` cookie set by /api/login (browser flow).
+///   2. The `Authorization: Bearer ...` header (CLI / kubectl / CSI clients).
+///   3. A `?token=...` query parameter (only consulted by routes that accept it,
+///      e.g. noVNC and the file-content fallback — handled at the call site).
+pub(crate) fn token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(t) = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_session_cookie)
+    {
+        return Some(t);
+    }
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
+/// Parse a Cookie header value (e.g. "a=1; nasty_session=xyz; b=2") and pull
+/// out the session cookie if present. Quietly returns None on any malformed
+/// segment rather than throwing — that matches how cookie parsers in stdlib
+/// implementations behave.
+fn parse_session_cookie(header: &str) -> Option<String> {
+    for part in header.split(';') {
+        let part = part.trim();
+        let (name, value) = match part.split_once('=') {
+            Some(t) => t,
+            None => continue,
+        };
+        if name == SESSION_COOKIE && !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 async fn validate_bearer(
     headers: &axum::http::HeaderMap,
     auth: &AuthService,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
-    let token = match token {
+    let token = match token_from_headers(headers) {
         Some(t) => t,
         None => {
             return Err((
@@ -1059,20 +1085,15 @@ async fn files_content_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    // Accept token from query param (for <img>/<video>/<audio> tags) or header
-    let token = params
-        .get("token")
-        .cloned()
-        .or_else(|| {
-            headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .map(|s| s.to_string())
-        });
+    // Browser <img>/<video>/<audio> tags can't set custom headers, but they DO
+    // send same-origin cookies — so the cookie path covers them now. Keep the
+    // ?token= query as a fallback for non-browser clients (curl, wget) and the
+    // Bearer header for CLI tools.
+    let token = token_from_headers(&headers)
+        .or_else(|| params.get("token").cloned().filter(|s| !s.is_empty()));
     let token = match token {
-        Some(t) if !t.is_empty() => t,
-        _ => {
+        Some(t) => t,
+        None => {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Missing token"})),
@@ -1243,7 +1264,23 @@ async fn login_handler(
                 "Login successful: user '{}' from {}",
                 req.username, client_ip
             );
-            (StatusCode::OK, Json(serde_json::json!({ "token": token }))).into_response()
+            // Two delivery channels for the same token:
+            //   - Set-Cookie for browsers — httpOnly, so XSS can't read it.
+            //   - JSON body for CLI clients (kubectl, CSI driver) that don't
+            //     have a cookie jar.
+            // The token in the body is the same value the cookie carries; both
+            // are valid until the session TTL expires.
+            let mut resp_headers = axum::http::HeaderMap::new();
+            resp_headers.insert(
+                axum::http::header::SET_COOKIE,
+                build_session_cookie(&token).parse().unwrap(),
+            );
+            (
+                StatusCode::OK,
+                resp_headers,
+                Json(serde_json::json!({ "token": token })),
+            )
+                .into_response()
         }
         Err(_) => {
             tracing::warn!("Login failed: user '{}' from {}", req.username, client_ip);
@@ -1254,6 +1291,40 @@ async fn login_handler(
                 .into_response()
         }
     }
+}
+
+/// Revoke the current session and clear the cookie. Browsers can't remove an
+/// httpOnly cookie themselves, so logout has to round-trip to the server.
+async fn logout_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let mut resp_headers = axum::http::HeaderMap::new();
+    resp_headers.insert(
+        axum::http::header::SET_COOKIE,
+        build_session_clear_cookie().parse().unwrap(),
+    );
+    if let Some(token) = token_from_headers(&headers) {
+        // Best-effort revoke; if the token is already invalid we still want
+        // the browser to drop the cookie below.
+        let _ = state.auth.logout(&token).await;
+    }
+    (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+/// 8h, matches SESSION_TTL_SECS in auth.rs (kept in sync by hand).
+const SESSION_COOKIE_MAX_AGE_SECS: u64 = 8 * 3600;
+
+fn build_session_cookie(token: &str) -> String {
+    format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}"
+    )
+}
+
+fn build_session_clear_cookie() -> String {
+    format!(
+        "{SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
+    )
 }
 
 // ── OIDC SSO ─────────────────────────────────────────────────────
@@ -1356,7 +1427,21 @@ async fn oidc_callback_handler(
         )
         .await
     {
-        Ok(token) => bounce(format!("nasty_token={}&oidc=1", url_encode(&token))),
+        // Token is delivered via httpOnly cookie now — never lands in the URL,
+        // browser history, or referer header. The fragment is just a flag the
+        // SPA reads to know "we just came back from OIDC, refresh state".
+        Ok(token) => {
+            let mut resp_headers = axum::http::HeaderMap::new();
+            resp_headers.insert(
+                axum::http::header::SET_COOKIE,
+                build_session_cookie(&token).parse().unwrap(),
+            );
+            (
+                resp_headers,
+                axum::response::Redirect::to("/#oidc=1"),
+            )
+                .into_response()
+        }
         Err(e) => bounce(format!(
             "oidc_error={}",
             url_encode(&e.to_string())
@@ -1414,17 +1499,22 @@ async fn ws_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string();
-    ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip))
+    // Browsers send the session cookie on the upgrade request automatically;
+    // resolve it here so the WS task doesn't have to wait for an auth message.
+    // Non-browser clients (kubectl, CSI driver) typically don't have a cookie
+    // and still send {"token": "..."} as the first message — handled in
+    // handle_socket().
+    let pre_auth_token = token_from_headers(&headers);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip, pre_auth_token))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, client_ip: String) {
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, client_ip: String, pre_auth_token: Option<String>) {
     use futures_util::{SinkExt, StreamExt};
     use nasty_common::Notification;
 
     info!("WebSocket client connected from {client_ip}, awaiting authentication");
 
-    // First message must be an auth token
-    let session = match wait_for_auth(&mut socket, &state, &client_ip).await {
+    let session = match resolve_session(&mut socket, &state, &client_ip, pre_auth_token).await {
         Some(s) => s,
         None => return,
     };
@@ -1464,6 +1554,47 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
     }
 
     info!("WebSocket client '{}' disconnected", session.username);
+}
+
+/// Pick the right auth path for a WebSocket connection. If the upgrade
+/// request carried a session cookie or Bearer token, validate it directly
+/// and acknowledge — that's the browser path now. Otherwise, fall back to
+/// waiting for a `{"token": "..."}` message, which is how non-browser
+/// clients (kubectl, CSI driver) authenticate.
+async fn resolve_session(
+    socket: &mut WebSocket,
+    state: &AppState,
+    client_ip: &str,
+    pre_auth_token: Option<String>,
+) -> Option<Session> {
+    if let Some(token) = pre_auth_token {
+        return match state.auth.validate(&token, client_ip).await {
+            Ok(session) => {
+                let _ = socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "authenticated": true,
+                            "username": session.username,
+                            "role": session.role,
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await;
+                Some(session)
+            }
+            Err(_) => {
+                let _ = socket
+                    .send(Message::Text(
+                        r#"{"error":"invalid session"}"#.into(),
+                    ))
+                    .await;
+                let _ = socket.send(Message::Close(None)).await;
+                None
+            }
+        };
+    }
+    wait_for_auth(socket, state, client_ip).await
 }
 
 /// Wait for the first message which must be: {"token": "..."}

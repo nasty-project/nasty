@@ -41,15 +41,17 @@ export class NastyClient {
 		return this._authenticated;
 	}
 
-	/** Connect and authenticate with a token */
-	connect(token: string): Promise<AuthResult> {
+	/** Connect and authenticate. The session cookie set by /api/login is sent
+	 *  automatically with the WS upgrade; the client doesn't send any auth
+	 *  message itself. The server replies first with `{authenticated: true}`
+	 *  or `{error: ...}`. */
+	connect(): Promise<AuthResult> {
 		return new Promise((resolve, reject) => {
 			this.ws = new WebSocket(this.url);
 			let authResolved = false;
 
 			this.ws.onopen = () => {
-				// Send token as first message
-				this.ws!.send(JSON.stringify({ token }));
+				// Cookie auth: nothing to send on open. Server speaks first.
 			};
 
 			this.ws.onmessage = (event) => {
@@ -104,7 +106,7 @@ export class NastyClient {
 				// Keep retrying as long as we haven't been explicitly disconnected.
 				if (this._shouldReconnect) {
 					for (const h of this.disconnectHandlers) h();
-					this._scheduleReconnect(token);
+					this._scheduleReconnect();
 				}
 			};
 
@@ -113,7 +115,7 @@ export class NastyClient {
 				// If this was a reconnect attempt that failed to even open,
 				// onclose may not fire, so schedule retry here too.
 				if (this._shouldReconnect && !this._authenticated) {
-					this._scheduleReconnect(token);
+					this._scheduleReconnect();
 				}
 			};
 		});
@@ -159,14 +161,14 @@ export class NastyClient {
 	}
 
 	/** Schedule a reconnection attempt. Deduplicates to avoid multiple timers. */
-	private _scheduleReconnect(token: string) {
+	private _scheduleReconnect() {
 		if (this.reconnectTimer) return; // already scheduled
 		this._readyPromise = new Promise((res) => { this._readyResolve = res; });
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
-			this.connect(token).catch((err) => {
-				// Auth failure after reboot (token invalidated) — force page reload.
-				// The new page will show the login form with a fresh token.
+			this.connect().catch((err) => {
+				// Auth failure after reboot (cookie invalidated) — force page reload.
+				// The new page will show the login form.
 				if (err instanceof Error && (
 					err.message.includes('Invalid') ||
 					err.message.includes('Unauthorized') ||
@@ -177,7 +179,7 @@ export class NastyClient {
 				}
 				// Connection failed (server still down) — schedule another attempt
 				if (this._shouldReconnect) {
-					this._scheduleReconnect(token);
+					this._scheduleReconnect();
 				}
 			});
 		}, 3000);

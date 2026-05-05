@@ -2,7 +2,6 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getClient } from '$lib/client';
-	import { getToken } from '$lib/auth';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { VmStatus, VmCapabilities, Subvolume } from '$lib/types';
@@ -127,9 +126,7 @@
 
 			const xhr = new XMLHttpRequest();
 			xhr.open('POST', '/api/upload/vm-image');
-
-			const token = getToken();
-			if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+			// Cookie auth — XHR sends same-origin cookies automatically.
 
 			xhr.upload.onprogress = (e) => {
 				if (e.lengthComputable) {
@@ -191,9 +188,9 @@
 			consoleTerm = term;
 			consoleFit = fit;
 
-			const token = getToken();
+			// Cookie auth — the WS upgrade carries `nasty_session` automatically.
 			const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-			const ws = new WebSocket(`${proto}//${window.location.host}/ws/vm/${consoleVm.id}/serial?token=${encodeURIComponent(token ?? '')}`);
+			const ws = new WebSocket(`${proto}//${window.location.host}/ws/vm/${consoleVm.id}/serial`);
 			ws.binaryType = 'arraybuffer';
 
 			ws.onopen = () => {
@@ -225,9 +222,9 @@
 	// Initialize VNC console (noVNC) when element mounts
 	$effect(() => {
 		if (vncEl && consoleVm && consoleMode === 'vnc' && !vncRfb) {
-			const token = getToken();
+			// Cookie auth — noVNC's WebSocket carries `nasty_session` on upgrade.
 			const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-			const url = `${proto}//${window.location.host}/ws/vm/${consoleVm.id}/vnc?token=${encodeURIComponent(token ?? '')}`;
+			const url = `${proto}//${window.location.host}/ws/vm/${consoleVm.id}/vnc`;
 
 			import('@novnc/novnc/lib/rfb.js').then(({ default: RFB }) => {
 				const rfb = new RFB(vncEl!, url, {

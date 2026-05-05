@@ -33,7 +33,9 @@ pub async fn vnc_handler(
     Query(query): Query<ConsoleQuery>,
 ) -> impl IntoResponse {
     let client_ip = extract_client_ip(&headers);
-    let pre_auth_token = query.token;
+    // Cookie / Bearer wins over the legacy ?token= query param so a stray
+    // bookmarked URL with a stale token doesn't override a fresh session.
+    let pre_auth_token = crate::token_from_headers(&headers).or(query.token);
     ws.on_upgrade(move |socket| proxy_unix_socket(socket, format!("{QMP_DIR}/{vm_id}.vnc"), "vnc", vm_id, state, client_ip, pre_auth_token))
 }
 
@@ -46,7 +48,7 @@ pub async fn serial_handler(
     Query(query): Query<ConsoleQuery>,
 ) -> impl IntoResponse {
     let client_ip = extract_client_ip(&headers);
-    let pre_auth_token = query.token;
+    let pre_auth_token = crate::token_from_headers(&headers).or(query.token);
     ws.on_upgrade(move |socket| proxy_unix_socket(socket, format!("{QMP_DIR}/{vm_id}.serial"), "serial", vm_id, state, client_ip, pre_auth_token))
 }
 

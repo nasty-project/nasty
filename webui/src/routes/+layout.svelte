@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getClient, resetClient } from '$lib/client';
-	import { getToken, setToken, clearToken, login as doLogin } from '$lib/auth';
+	import { login as doLogin, logout as doLogout } from '$lib/auth';
 	import { error as showError, isBusy } from '$lib/toast.svelte';
 	import Toasts from '$lib/components/Toasts.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -77,16 +77,17 @@
 	let loginError = $state('');
 	let ssoEnabled = $state(false);
 
-	// Consume an SSO redirect's URL fragment: `#nasty_token=…&oidc=1` carries
-	// a freshly-minted session token from /api/auth/oidc/callback;
-	// `#oidc_error=…` carries a human-readable failure message.
+	// Consume an OIDC redirect's URL fragment. The fragment used to carry
+	// `#nasty_token=…` but the engine now sets the session via httpOnly
+	// Set-Cookie, so the fragment is just a flag (`#oidc=1`) for "we just
+	// came back from SSO, treat the session as live". `#oidc_error=…` still
+	// carries a human-readable failure message.
 	function consumeSsoFragment(): boolean {
 		if (typeof window === 'undefined' || !window.location.hash) return false;
 		const params = new URLSearchParams(window.location.hash.slice(1));
-		const tok = params.get('nasty_token');
+		const oidcOk = params.get('oidc') === '1';
 		const err = params.get('oidc_error');
-		if (tok) {
-			setToken(tok);
+		if (oidcOk) {
 			history.replaceState(null, '', window.location.pathname + window.location.search);
 			return true;
 		}
@@ -186,14 +187,11 @@
 	});
 
 	async function checkAuth() {
-		const token = getToken();
-		if (!token || !connected) return;
+		if (!connected) return;
 		try {
-			const res = await fetch('/api/auth/check', {
-				headers: { 'Authorization': `Bearer ${token}` },
-			});
+			// Cookie auth: same-origin fetch sends `nasty_session` automatically.
+			const res = await fetch('/api/auth/check');
 			if (res.status === 401) {
-				clearToken();
 				resetClient();
 				location.reload();
 			}
@@ -260,15 +258,25 @@
 
 	async function tryConnect() {
 		consumeSsoFragment();
-		const token = getToken();
-		if (!token) {
+		// Probe the cookie before opening a WS — saves us from the WS auth
+		// timeout when the user isn't logged in yet.
+		try {
+			const probe = await fetch('/api/auth/check');
+			if (probe.status !== 200) {
+				refreshSsoAvailability();
+				showLogin = true;
+				return;
+			}
+		} catch {
+			// Engine offline — let the reconnect machinery surface that, but
+			// don't block the login form.
 			refreshSsoAvailability();
 			showLogin = true;
 			return;
 		}
 		try {
 			const client = getClient();
-			authInfo = await client.connect(token);
+			authInfo = await client.connect();
 			connected = true;
 			showLogin = false;
 			checkSshStatus();
@@ -282,7 +290,6 @@
 			}
 			showPasswordChange = !!authInfo?.must_change_password;
 		} catch (e) {
-			clearToken();
 			resetClient();
 			refreshSsoAvailability();
 			showLogin = true;
@@ -330,8 +337,10 @@
 	}
 
 	async function handleLogout() {
-		try { await getClient().call('auth.logout'); } catch { /* ignore */ }
-		clearToken();
+		// /api/logout revokes the session AND tells the browser to drop the
+		// httpOnly cookie. Hitting the WS auth.logout RPC isn't enough on its
+		// own because JS can't clear an httpOnly cookie itself.
+		await doLogout();
 		resetClient();
 		connected = false;
 		authInfo = null;

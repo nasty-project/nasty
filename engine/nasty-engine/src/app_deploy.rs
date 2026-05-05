@@ -30,12 +30,15 @@ pub async fn deploy_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string();
-    ws.on_upgrade(move |socket| handle_deploy(socket, state, client_ip))
+    let pre_auth_token = crate::token_from_headers(&headers);
+    ws.on_upgrade(move |socket| handle_deploy(socket, state, client_ip, pre_auth_token))
 }
 
 #[derive(Deserialize)]
 struct DeployRequest {
-    token: String,
+    /// Optional when the WS upgrade carried a session cookie or Bearer token.
+    #[serde(default)]
+    token: Option<String>,
     /// "simple" or "compose"
     kind: String,
     /// App name
@@ -88,9 +91,10 @@ impl DeployMessage {
     }
 }
 
-async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: String) {
+async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: String, pre_auth_token: Option<String>) {
 
-    // Wait for deploy request (first message must contain token + params)
+    // Wait for deploy request (first message must contain params; token is
+    // optional now that the upgrade may have carried a session cookie).
     let req: DeployRequest = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
             Ok(r) => r,
@@ -104,9 +108,19 @@ async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
         _ => return,
     };
 
+    let token = match pre_auth_token.or_else(|| req.token.clone()) {
+        Some(t) => t,
+        None => {
+            let _ = socket
+                .send(Message::Text(DeployMessage::error("missing session").into()))
+                .await;
+            return;
+        }
+    };
+
     // Authenticate — admin only. Compose deploys can mount host paths and run
     // privileged containers, so this is effectively root-equivalent.
-    match state.auth.validate(&req.token, &client_ip).await {
+    match state.auth.validate(&token, &client_ip).await {
         Ok(s) if s.role == crate::auth::Role::Admin => {}
         Ok(s) => {
             crate::auth::audit("app_deploy_denied", &s.username, &client_ip, &format!("role={:?}", s.role));

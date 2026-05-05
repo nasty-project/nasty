@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { getToken } from '$lib/auth';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
 	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download } from '@lucide/svelte';
@@ -48,8 +47,9 @@
 
 	function contentUrl(entry: FileEntry): string {
 		const path = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-		const token = getToken();
-		return `/api/files/content?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token ?? '')}`;
+		// No ?token= — browsers send the session cookie automatically with
+		// same-origin <img>/<video>/<audio>/<iframe> requests.
+		return `/api/files/content?path=${encodeURIComponent(path)}`;
 	}
 
 	function openPreview(entry: FileEntry) {
@@ -67,11 +67,8 @@
 	let previewText = $state('');
 	async function loadTextPreview(entry: FileEntry) {
 		try {
-			const token = getToken();
 			const path = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-			const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`, {
-				headers: { 'Authorization': `Bearer ${token}` },
-			});
+			const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`);
 			previewText = await res.text();
 		} catch {
 			previewText = 'Failed to load file content';
@@ -107,10 +104,7 @@
 	async function browse(path: string) {
 		loading = true;
 		try {
-			const token = getToken();
-			const res = await fetch(`/api/files/browse?path=${encodeURIComponent(path)}`, {
-				headers: { 'Authorization': `Bearer ${token}` },
-			});
+			const res = await fetch(`/api/files/browse?path=${encodeURIComponent(path)}`);
 			const data = await res.json();
 			if (res.ok) {
 				currentPath = data.path || '';
@@ -174,7 +168,6 @@
 		uploadProgress = 0;
 		uploadName = file.name;
 
-		const token = getToken();
 		const form = new FormData();
 		form.append('file', file);
 
@@ -182,7 +175,7 @@
 			await new Promise<void>((resolve, reject) => {
 				const xhr = new XMLHttpRequest();
 				xhr.open('POST', `/api/files/upload?path=${encodeURIComponent(currentPath)}`);
-				xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+				// Cookie auth — XHR sends same-origin cookies automatically.
 				xhr.upload.onprogress = (e) => {
 					if (e.lengthComputable) uploadProgress = Math.round((e.loaded / e.total) * 100);
 				};
@@ -206,10 +199,8 @@
 	async function createDir() {
 		if (!newDirName.trim()) return;
 		const path = currentPath ? `${currentPath}/${newDirName.trim()}` : newDirName.trim();
-		const token = getToken();
 		const res = await fetch(`/api/files/mkdir?path=${encodeURIComponent(path)}`, {
 			method: 'POST',
-			headers: { 'Authorization': `Bearer ${token}` },
 		});
 		if (!res.ok) {
 			const data = await res.json();
@@ -224,10 +215,8 @@
 	async function confirmDelete() {
 		if (!deleteTarget) return;
 		const path = currentPath ? `${currentPath}/${deleteTarget.name}` : deleteTarget.name;
-		const token = getToken();
 		const res = await fetch(`/api/files?path=${encodeURIComponent(path)}`, {
 			method: 'DELETE',
-			headers: { 'Authorization': `Bearer ${token}` },
 		});
 		if (!res.ok) {
 			const data = await res.json();
