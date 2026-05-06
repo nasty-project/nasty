@@ -16,6 +16,10 @@
 pkgs.testers.runNixOSTest {
   name = "appliance-smoke";
 
+  # websocket-client lets the testScript drive the JSON-RPC dispatch over
+  # the same /ws endpoint the WebUI uses.
+  extraPythonPackages = ps: [ ps.websocket-client ];
+
   nodes.machine = { lib, ... }: {
     imports = [
       ../modules/bcachefs.nix
@@ -98,5 +102,63 @@ pkgs.testers.runNixOSTest {
 
     # Same endpoint without a cookie should be rejected.
     machine.fail("curl -fsS http://127.0.0.1:2137/api/auth/check")
+
+    # ── JSON-RPC over /ws ──────────────────────────────────────────
+    # Drive the same dispatch path the WebUI uses: open a WebSocket,
+    # auth with the token from /api/login, send a few requests, and
+    # check the responses come back correlated by id. This exercises
+    # router.rs end-to-end — the part the unit tests deliberately
+    # don't reach.
+    import shlex
+    rpc_script = '''
+import json
+import sys
+import websocket
+
+token = sys.argv[1]
+
+ws = websocket.create_connection("ws://127.0.0.1:2137/ws", timeout=10)
+try:
+    ws.send(json.dumps({"token": token}))
+    auth = json.loads(ws.recv())
+    assert auth.get("authenticated") is True, f"WS auth failed: {auth!r}"
+    assert auth.get("username") == "admin", f"unexpected user: {auth!r}"
+
+    def call(method, request_id, params=None):
+        req = {"jsonrpc": "2.0", "method": method, "id": request_id}
+        if params is not None:
+            req["params"] = params
+        ws.send(json.dumps(req))
+        resp = json.loads(ws.recv())
+        assert resp.get("id") == request_id, (
+            f"id mismatch: req={request_id} resp={resp!r}"
+        )
+        assert "error" not in resp, f"{method} returned error: {resp!r}"
+        return resp["result"]
+
+    me = call("auth.me", 1)
+    assert me["username"] == "admin", f"auth.me wrong: {me!r}"
+
+    health = call("system.health", 2)
+    print("system.health:", health, file=sys.stderr)
+
+    fs_list = call("fs.list", 3)
+    assert isinstance(fs_list, list), f"fs.list not a list: {fs_list!r}"
+    # Fresh appliance with no virtual disks => empty list.
+    assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
+
+    # Unknown method must come back as a JSON-RPC error envelope, not a
+    # silent drop.
+    ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 4}))
+    bad = json.loads(ws.recv())
+    assert bad.get("id") == 4, f"id mismatch: {bad!r}"
+    assert bad.get("error"), f"unknown method should error: {bad!r}"
+    print("unknown method error:", bad["error"], file=sys.stderr)
+finally:
+    ws.close()
+'''
+    machine.succeed(
+        f"python3 -c {shlex.quote(rpc_script)} {shlex.quote(login_obj['token'])}"
+    )
   '';
 }
