@@ -36,5 +36,17 @@ jobs:
         with:
           name: nasty
 
-      - name: Run bcachefs smoke test
-        run: nix build .#checks.x86_64-linux.bcachefs-smoke -L --print-build-logs
+      - name: Compute npm deps hash
+        # appliance-smoke builds the webui via Nix, which hardcodes
+        # npmDepsHash in flake.nix. Recompute here to match the current
+        # package-lock.json — same trick build-iso.yml uses.
+        run: |
+          HASH=$(nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json 2>/dev/null)
+          sed -i "s|npmDepsHash = \".*\"|npmDepsHash = \"$HASH\"|" flake.nix
+
+      - name: Run integration tests
+        run: |
+          nix build \
+            .#checks.x86_64-linux.bcachefs-smoke \
+            .#checks.x86_64-linux.appliance-smoke \
+            -L --print-build-logs

@@ -280,10 +280,15 @@
     # Run by .github/workflows/integration.yml on push to main + manual dispatch.
     checks.x86_64-linux = let
       pkgs = mkPkgs "x86_64-linux";
+      nasty-engine = mkEngine "x86_64-linux";
+      nasty-webui = mkWebui "x86_64-linux";
       nasty-bcachefs-tools = mkBcachefsTools "x86_64-linux";
     in {
       bcachefs-smoke = import ./nixos/tests/bcachefs-smoke.nix {
         inherit pkgs nasty-bcachefs-tools;
+      };
+      appliance-smoke = import ./nixos/tests/appliance-smoke.nix {
+        inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
       };
     };
   };
