@@ -169,11 +169,7 @@ impl OidcClient {
     /// Look up a pending flow by the state value the IdP echoed back, exchange
     /// the code, validate the ID token (signature, audience, nonce, expiry),
     /// and return the resolved identity.
-    pub async fn exchange_code(
-        &self,
-        state: &str,
-        code: &str,
-    ) -> Result<OidcIdentity, OidcError> {
+    pub async fn exchange_code(&self, state: &str, code: &str) -> Result<OidcIdentity, OidcError> {
         let pending = {
             let mut p = self.pending.write().await;
             p.remove(state).ok_or(OidcError::StateMismatch)?
@@ -190,9 +186,7 @@ impl OidcClient {
             .await
             .map_err(|e| OidcError::TokenExchange(e.to_string()))?;
 
-        let id_token = token_response
-            .id_token()
-            .ok_or(OidcError::MissingIdToken)?;
+        let id_token = token_response.id_token().ok_or(OidcError::MissingIdToken)?;
         let verifier = self.inner.id_token_verifier();
         let claims = id_token
             .claims(&verifier, &pending.nonce)
@@ -306,24 +300,22 @@ pub fn dry_run_role(
 /// hostnames. Private-network RFC1918 hosts are allowed because a
 /// self-hosted Keycloak on the same LAN is a legitimate setup.
 pub fn validate_issuer_url(s: &str) -> Result<(), OidcError> {
-    let u = url::Url::parse(s)
-        .map_err(|e| OidcError::Config(format!("issuer URL: {e}")))?;
+    let u = url::Url::parse(s).map_err(|e| OidcError::Config(format!("issuer URL: {e}")))?;
 
     if u.scheme() != "https" {
         return Err(OidcError::Config(format!(
-            "issuer URL must use https (got '{}')", u.scheme()
+            "issuer URL must use https (got '{}')",
+            u.scheme()
         )));
     }
 
-    let host_str = u.host_str()
+    let host_str = u
+        .host_str()
         .ok_or_else(|| OidcError::Config("issuer URL missing host".to_string()))?;
 
     // Match well-known metadata hostnames regardless of how DNS resolves them.
     let lower = host_str.to_ascii_lowercase();
-    let metadata_hosts = [
-        "metadata.google.internal",
-        "metadata.goog",
-    ];
+    let metadata_hosts = ["metadata.google.internal", "metadata.goog"];
     if metadata_hosts.iter().any(|h| lower == *h) {
         return Err(OidcError::Config(format!(
             "issuer URL host '{host_str}' is a cloud metadata service"

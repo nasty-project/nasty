@@ -38,6 +38,12 @@ pub struct FirmwareUpdateResult {
 
 pub struct FirmwareService;
 
+impl Default for FirmwareService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FirmwareService {
     pub fn new() -> Self {
         Self
@@ -46,9 +52,7 @@ impl FirmwareService {
     /// Check if firmware management is available.
     /// Disabled on VMs (no real firmware) — detected via systemd-detect-virt.
     pub async fn is_available(&self) -> bool {
-        let output = Command::new("systemd-detect-virt")
-            .output()
-            .await;
+        let output = Command::new("systemd-detect-virt").output().await;
         match output {
             Ok(o) => {
                 // Exit code 0 = virtualized, non-zero = bare metal (or container)
@@ -87,12 +91,11 @@ impl FirmwareService {
             }
         };
 
-        let devices = json["Devices"].as_array()
-            .cloned()
-            .unwrap_or_default();
+        let devices = json["Devices"].as_array().cloned().unwrap_or_default();
 
-        devices.iter().map(|d| {
-            FirmwareDevice {
+        devices
+            .iter()
+            .map(|d| FirmwareDevice {
                 name: d["Name"].as_str().unwrap_or("Unknown").to_string(),
                 device_id: d["DeviceId"].as_str().unwrap_or("").to_string(),
                 version: d["Version"].as_str().unwrap_or("unknown").to_string(),
@@ -100,8 +103,8 @@ impl FirmwareService {
                 update_available: false,
                 update_version: None,
                 update_description: None,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Check for available firmware updates.
@@ -129,20 +132,18 @@ impl FirmwareService {
         };
 
         if let Some(json) = updates_json {
-            let updates = json["Devices"].as_array()
-                .cloned()
-                .unwrap_or_default();
+            let updates = json["Devices"].as_array().cloned().unwrap_or_default();
 
             for update in &updates {
                 let device_id = update["DeviceId"].as_str().unwrap_or("");
                 if let Some(dev) = devices.iter_mut().find(|d| d.device_id == device_id) {
                     dev.update_available = true;
                     // Releases array — take the first (latest)
-                    if let Some(releases) = update["Releases"].as_array() {
-                        if let Some(release) = releases.first() {
-                            dev.update_version = release["Version"].as_str().map(|s| s.to_string());
-                            dev.update_description = release["Summary"].as_str().map(|s| s.to_string());
-                        }
+                    if let Some(releases) = update["Releases"].as_array()
+                        && let Some(release) = releases.first()
+                    {
+                        dev.update_version = release["Version"].as_str().map(|s| s.to_string());
+                        dev.update_description = release["Summary"].as_str().map(|s| s.to_string());
                     }
                 }
             }
@@ -185,14 +186,12 @@ impl FirmwareService {
                     }
                 }
             }
-            Err(e) => {
-                FirmwareUpdateResult {
-                    device_name: device_id.to_string(),
-                    success: false,
-                    message: format!("fwupdmgr not available: {e}"),
-                    reboot_required: false,
-                }
-            }
+            Err(e) => FirmwareUpdateResult {
+                device_name: device_id.to_string(),
+                success: false,
+                message: format!("fwupdmgr not available: {e}"),
+                reboot_required: false,
+            },
         }
     }
 }

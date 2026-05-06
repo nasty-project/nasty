@@ -18,8 +18,8 @@ pub struct MetricsDb {
 
 impl MetricsDb {
     pub fn open() -> Result<Self, String> {
-        let conn = Connection::open(DB_PATH)
-            .map_err(|e| format!("failed to open metrics db: {e}"))?;
+        let conn =
+            Connection::open(DB_PATH).map_err(|e| format!("failed to open metrics db: {e}"))?;
 
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -98,7 +98,9 @@ impl MetricsDb {
         let names: Vec<String> = if let Some(n) = name {
             vec![n.to_string()]
         } else {
-            match conn.prepare("SELECT DISTINCT name FROM io_samples WHERE kind = ?1 AND ts >= ?2 AND ts <= ?3") {
+            match conn.prepare(
+                "SELECT DISTINCT name FROM io_samples WHERE kind = ?1 AND ts >= ?2 AND ts <= ?3",
+            ) {
                 Ok(mut stmt) => stmt
                     .query_map(rusqlite::params![kind, since, until], |row| row.get(0))
                     .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -137,7 +139,10 @@ impl MetricsDb {
                     .map(|rows| rows.filter_map(|r| r.ok()).collect())
                     .unwrap_or_default();
 
-                results.push(ResourceHistory { name: n.clone(), samples });
+                results.push(ResourceHistory {
+                    name: n.clone(),
+                    samples,
+                });
             }
         } else {
             let mut stmt = match conn.prepare(
@@ -167,7 +172,10 @@ impl MetricsDb {
                     .map(|rows| rows.filter_map(|r| r.ok()).collect())
                     .unwrap_or_default();
 
-                results.push(ResourceHistory { name: n.clone(), samples });
+                results.push(ResourceHistory {
+                    name: n.clone(),
+                    samples,
+                });
             }
         }
 
@@ -177,11 +185,11 @@ impl MetricsDb {
 
 fn range_to_params(range: &str) -> (i64, i64) {
     match range {
-        "1h"  => (3_600_000,      60_000),
-        "1d"  => (86_400_000,    300_000),
-        "7d"  => (604_800_000, 1_800_000),
+        "1h" => (3_600_000, 60_000),
+        "1d" => (86_400_000, 300_000),
+        "7d" => (604_800_000, 1_800_000),
         "30d" => (2_592_000_000, 7_200_000),
-        _     => (300_000, 0),
+        _ => (300_000, 0),
     }
 }
 

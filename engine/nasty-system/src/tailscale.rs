@@ -10,22 +10,13 @@ const SYSTEMD_UNIT: &str = "nasty-tailscale";
 const TAILSCALE_SOCKET: &str = "/run/tailscale/tailscaled.sock";
 
 /// Persisted Tailscale configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct TailscaleConfig {
     /// Whether Tailscale should be enabled.
     pub enabled: bool,
     /// Tailscale auth key for `tailscale up --authkey`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_key: Option<String>,
-}
-
-impl Default for TailscaleConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            auth_key: None,
-        }
-    }
 }
 
 /// Connect request — requires an auth key.
@@ -108,7 +99,10 @@ impl TailscaleService {
         let mut config = self.config.write().await;
 
         let key = if req.auth_key.is_empty() {
-            config.auth_key.clone().ok_or_else(|| "Auth key is required".to_string())?
+            config
+                .auth_key
+                .clone()
+                .ok_or_else(|| "Auth key is required".to_string())?
         } else {
             req.auth_key
         };
@@ -117,7 +111,9 @@ impl TailscaleService {
         start_tailscale(Some(key.as_str())).await?;
         config.enabled = true;
         config.auth_key = Some(key);
-        save_config(&config).await.map_err(|e| format!("Failed to save config: {e}"))?;
+        save_config(&config)
+            .await
+            .map_err(|e| format!("Failed to save config: {e}"))?;
         drop(config);
 
         Ok(self.get().await)
@@ -129,7 +125,9 @@ impl TailscaleService {
         info!("Disconnecting from Tailscale");
         stop_tailscale().await?;
         config.enabled = false;
-        save_config(&config).await.map_err(|e| format!("Failed to save config: {e}"))?;
+        save_config(&config)
+            .await
+            .map_err(|e| format!("Failed to save config: {e}"))?;
         drop(config);
 
         Ok(self.get().await)
@@ -170,8 +168,12 @@ async fn start_tailscale(auth_key: Option<&str>) -> Result<(), String> {
     // Use a timeout to prevent hanging if auth key is invalid or network is unreachable
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        run_cmd("tailscale", &[&socket_arg, "up", "--accept-routes", &authkey_arg]),
-    ).await;
+        run_cmd(
+            "tailscale",
+            &[&socket_arg, "up", "--accept-routes", &authkey_arg],
+        ),
+    )
+    .await;
 
     match result {
         Ok(Ok(stdout)) => {
@@ -239,14 +241,10 @@ async fn query_status() -> (bool, Option<String>, Option<String>, Option<String>
         .map(|s| s.to_string());
 
     // Hostname from Self.HostName
-    let hostname = json["Self"]["HostName"]
-        .as_str()
-        .map(|s| s.to_string());
+    let hostname = json["Self"]["HostName"].as_str().map(|s| s.to_string());
 
     // Version from Version
-    let version = json["Version"]
-        .as_str()
-        .map(|s| s.to_string());
+    let version = json["Version"].as_str().map(|s| s.to_string());
 
     (connected, ip, hostname, version)
 }
@@ -264,8 +262,7 @@ async fn save_config(config: &TailscaleConfig) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
     let dir = std::path::Path::new(STATE_PATH).parent().unwrap();
     tokio::fs::create_dir_all(dir).await?;
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
     tokio::fs::write(STATE_PATH, json).await?;
     // Contains the Tailscale auth key (reusable).
     tokio::fs::set_permissions(STATE_PATH, std::fs::Permissions::from_mode(0o600)).await

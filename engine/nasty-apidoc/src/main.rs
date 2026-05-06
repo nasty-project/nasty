@@ -953,7 +953,7 @@ fn methods(generator: &mut SchemaGenerator) -> Vec<(&'static str, Vec<Method>)> 
 
 fn type_str_from_schema(schema: &Value) -> String {
     if let Some(r) = schema.get("$ref").and_then(|v| v.as_str()) {
-        return format!("`{}`", r.split('/').last().unwrap_or(r));
+        return format!("`{}`", r.split('/').next_back().unwrap_or(r));
     }
     if let Some(items) = schema.get("items") {
         let inner = type_str_from_schema(items);
@@ -970,11 +970,11 @@ fn type_str_from_schema(schema: &Value) -> String {
             .collect();
         return parts.join(" | ");
     }
-    if let Some(variants) = schema.get("oneOf").or_else(|| schema.get("anyOf")) {
-        if let Some(arr) = variants.as_array() {
-            let parts: Vec<String> = arr.iter().map(type_str_from_schema).collect();
-            return parts.join(" \\| ");
-        }
+    if let Some(variants) = schema.get("oneOf").or_else(|| schema.get("anyOf"))
+        && let Some(arr) = variants.as_array()
+    {
+        let parts: Vec<String> = arr.iter().map(type_str_from_schema).collect();
+        return parts.join(" \\| ");
     }
     if let Some(vals) = schema.get("enum").and_then(|v| v.as_array()) {
         let parts: Vec<String> = vals
@@ -1039,7 +1039,7 @@ fn render_result_summary(schema: &Value) -> String {
         return "`array`".into();
     }
     if let Some(r) = schema.get("$ref").and_then(|v| v.as_str()) {
-        return format!("`{}`", r.split('/').last().unwrap_or(r));
+        return format!("`{}`", r.split('/').next_back().unwrap_or(r));
     }
     "`object`".into()
 }

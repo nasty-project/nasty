@@ -35,7 +35,11 @@ fn validate_nfs_host(host: &str) -> Result<(), NfsError> {
     if host.is_empty() {
         return Err(NfsError::InvalidClient("host is empty".to_string()));
     }
-    if host.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '(' | ')' | '"' | '\'' | ';' | ',' | '\\')) {
+    if host.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '(' | ')' | '"' | '\'' | ';' | ',' | '\\')
+    }) {
         return Err(NfsError::InvalidClient(format!(
             "host '{host}' contains invalid characters"
         )));
@@ -66,7 +70,10 @@ fn validate_nfs_client(client: &NfsClient) -> Result<(), NfsError> {
 /// Reject any export path containing characters that would let a maliciously-named
 /// directory inject a new line or column into the exports file.
 fn validate_export_path(path: &str) -> Result<(), NfsError> {
-    if path.chars().any(|c| c.is_control() || matches!(c, '\t' | '\n' | '\r' | '"' | '\'' | '\\')) {
+    if path
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\t' | '\n' | '\r' | '"' | '\'' | '\\'))
+    {
         return Err(NfsError::InvalidClient(format!(
             "path '{path}' contains invalid characters for an exports file"
         )));
@@ -137,6 +144,12 @@ fn state_dir() -> StateDir {
 
 pub struct NfsService;
 
+impl Default for NfsService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NfsService {
     pub fn new() -> Self {
         Self
@@ -144,13 +157,11 @@ impl NfsService {
 
     /// List all NFS shares
     pub async fn list(&self) -> Result<Vec<NfsShare>, NfsError> {
-
         Ok(state_dir().load_all().await)
     }
 
     /// Get a single share by ID
     pub async fn get(&self, id: &str) -> Result<NfsShare, NfsError> {
-
         state_dir()
             .load::<NfsShare>(id)
             .await
@@ -177,7 +188,10 @@ impl NfsService {
         let shares: Vec<NfsShare> = state_dir().load_all().await;
 
         if let Some(existing) = shares.into_iter().find(|s| s.path == req.path) {
-            info!("NFS share for {} already exists, returning existing (idempotent)", req.path);
+            info!(
+                "NFS share for {} already exists, returning existing (idempotent)",
+                req.path
+            );
             return Ok(existing);
         }
 
@@ -199,7 +213,6 @@ impl NfsService {
 
     /// Update an existing NFS share
     pub async fn update(&self, req: UpdateNfsShareRequest) -> Result<NfsShare, NfsError> {
-
         let mut share: NfsShare = state_dir()
             .load(&req.id)
             .await
@@ -228,7 +241,6 @@ impl NfsService {
 
     /// Delete an NFS share
     pub async fn delete(&self, req: DeleteNfsShareRequest) -> Result<(), NfsError> {
-
         let _: NfsShare = state_dir()
             .load(&req.id)
             .await
@@ -294,10 +306,10 @@ async fn write_export_file(share: &NfsShare) -> Result<(), NfsError> {
 /// Remove the export file for a share.
 async fn remove_export_file(id: &str) {
     let path = export_file_path(id);
-    if let Err(e) = tokio::fs::remove_file(&path).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            warn!("Failed to remove export file {path}: {e}");
-        }
+    if let Err(e) = tokio::fs::remove_file(&path).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!("Failed to remove export file {path}: {e}");
     }
 }
 

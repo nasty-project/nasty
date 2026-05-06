@@ -187,6 +187,12 @@ fn state_dir() -> StateDir {
 
 pub struct IscsiService;
 
+impl Default for IscsiService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IscsiService {
     pub fn new() -> Self {
         Self
@@ -200,7 +206,9 @@ impl IscsiService {
         let mut targets: Vec<IscsiTarget> = state_dir().load_all().await;
         for target in &mut targets {
             let name = target.iqn.rsplit(':').next().unwrap_or("").to_string();
-            let Some(new_dev) = dev_map.get(&name) else { continue };
+            let Some(new_dev) = dev_map.get(&name) else {
+                continue;
+            };
             let mut changed = false;
             for lun in &mut target.luns {
                 if &lun.backstore_path != new_dev {
@@ -283,26 +291,34 @@ impl IscsiService {
         let mut target = target;
         if let Some(device_path) = req.device_path {
             if target.luns.is_empty() {
-                target = self.add_lun(AddLunRequest {
-                    target_id: target.id.clone(),
-                    backstore_path: device_path,
-                    backstore_type: Some("block".to_string()),
-                    size_bytes: None,
-                }).await?;
+                target = self
+                    .add_lun(AddLunRequest {
+                        target_id: target.id.clone(),
+                        backstore_path: device_path,
+                        backstore_type: Some("block".to_string()),
+                        size_bytes: None,
+                    })
+                    .await?;
             } else {
-                info!("iSCSI target {} already has {} LUN(s), skipping", target.iqn, target.luns.len());
+                info!(
+                    "iSCSI target {} already has {} LUN(s), skipping",
+                    target.iqn,
+                    target.luns.len()
+                );
             }
         }
 
         // Optional: add ACLs if provided
         if let Some(acls) = req.acls {
             for acl_entry in acls {
-                target = self.add_acl(AddAclRequest {
-                    target_id: target.id.clone(),
-                    initiator_iqn: acl_entry.initiator_iqn,
-                    userid: acl_entry.userid,
-                    password: acl_entry.password,
-                }).await?;
+                target = self
+                    .add_acl(AddAclRequest {
+                        target_id: target.id.clone(),
+                        initiator_iqn: acl_entry.initiator_iqn,
+                        userid: acl_entry.userid,
+                        password: acl_entry.password,
+                    })
+                    .await?;
             }
         }
 
@@ -358,7 +374,7 @@ impl IscsiService {
         for lun in &target.luns {
             let hba_type = backstore_hba_type(&lun.backstore_type);
             // Find which HBA index this backstore lives under
-            if let Some(hba_idx) = find_backstore_hba(&hba_type, &lun.backstore_name).await {
+            if let Some(hba_idx) = find_backstore_hba(hba_type, &lun.backstore_name).await {
                 let bs_path = format!("{CORE_BASE}/{hba_type}_{hba_idx}/{}", lun.backstore_name);
                 let _ = configfs_write(&format!("{bs_path}/enable"), "0").await;
                 let _ = configfs_rmdir(&bs_path).await;
@@ -403,12 +419,12 @@ impl IscsiService {
                 }
             }
             "fileio" => {
-                if let Some(parent) = Path::new(&req.backstore_path).parent() {
-                    if !parent.exists() {
-                        return Err(IscsiError::BackstoreNotFound(
-                            parent.to_string_lossy().to_string(),
-                        ));
-                    }
+                if let Some(parent) = Path::new(&req.backstore_path).parent()
+                    && !parent.exists()
+                {
+                    return Err(IscsiError::BackstoreNotFound(
+                        parent.to_string_lossy().to_string(),
+                    ));
                 }
             }
             _ => {
@@ -433,7 +449,7 @@ impl IscsiService {
         );
 
         let hba_type = backstore_hba_type(&backstore_type);
-        let hba_idx = next_hba_index(&hba_type).await;
+        let hba_idx = next_hba_index(hba_type).await;
 
         // Create backstore in configfs
         let bs_path = format!("{CORE_BASE}/{hba_type}_{hba_idx}/{backstore_name}");
@@ -444,14 +460,16 @@ impl IscsiService {
                 configfs_write(
                     &format!("{bs_path}/control"),
                     &format!("udev_path={}", req.backstore_path),
-                ).await?;
+                )
+                .await?;
             }
             "fileio" => {
                 let size = req.size_bytes.unwrap_or(1_073_741_824);
                 configfs_write(
                     &format!("{bs_path}/control"),
                     &format!("fd_dev_name={},fd_dev_size={size}", req.backstore_path),
-                ).await?;
+                )
+                .await?;
             }
             _ => unreachable!(),
         }
@@ -459,10 +477,7 @@ impl IscsiService {
         configfs_write(&format!("{bs_path}/enable"), "1").await?;
 
         // Create LUN in TPG and symlink to backstore
-        let lun_path = format!(
-            "{ISCSI_BASE}/{}/tpgt_1/lun/lun_{lun_id}",
-            target.iqn
-        );
+        let lun_path = format!("{ISCSI_BASE}/{}/tpgt_1/lun/lun_{lun_id}", target.iqn);
         configfs_mkdir(&lun_path).await?;
         configfs_symlink(&bs_path, &format!("{lun_path}/{backstore_name}")).await?;
 
@@ -479,7 +494,11 @@ impl IscsiService {
         state_dir().save(&target.id, &target).await?;
         save_lio_config().await;
 
-        info!("Added LUN {} to target '{}'", target.luns.len() - 1, target.iqn);
+        info!(
+            "Added LUN {} to target '{}'",
+            target.luns.len() - 1,
+            target.iqn
+        );
         Ok(target.redacted())
     }
 
@@ -493,23 +512,18 @@ impl IscsiService {
             .luns
             .iter()
             .position(|l| l.lun_id == req.lun_id)
-            .ok_or_else(|| {
-                IscsiError::NotFound(format!("LUN {} not found", req.lun_id))
-            })?;
+            .ok_or_else(|| IscsiError::NotFound(format!("LUN {} not found", req.lun_id)))?;
 
         let lun = &target.luns[lun_idx];
 
         // Remove symlink and LUN dir
-        let lun_path = format!(
-            "{ISCSI_BASE}/{}/tpgt_1/lun/lun_{}",
-            target.iqn, lun.lun_id
-        );
+        let lun_path = format!("{ISCSI_BASE}/{}/tpgt_1/lun/lun_{}", target.iqn, lun.lun_id);
         let _ = configfs_unlink(&format!("{lun_path}/{}", lun.backstore_name)).await;
         let _ = configfs_rmdir(&lun_path).await;
 
         // Remove backstore
         let hba_type = backstore_hba_type(&lun.backstore_type);
-        if let Some(hba_idx) = find_backstore_hba(&hba_type, &lun.backstore_name).await {
+        if let Some(hba_idx) = find_backstore_hba(hba_type, &lun.backstore_name).await {
             let bs_path = format!("{CORE_BASE}/{hba_type}_{hba_idx}/{}", lun.backstore_name);
             let _ = configfs_write(&format!("{bs_path}/enable"), "0").await;
             let _ = configfs_rmdir(&bs_path).await;
@@ -633,10 +647,10 @@ async fn next_hba_index(hba_type: &str) -> u32 {
         while let Ok(Some(entry)) = entries.next_entry().await {
             if let Some(name) = entry.file_name().to_str() {
                 let prefix = format!("{hba_type}_");
-                if let Some(suffix) = name.strip_prefix(&prefix) {
-                    if let Ok(idx) = suffix.parse::<u32>() {
-                        max_idx = Some(max_idx.map_or(idx, |m: u32| m.max(idx)));
-                    }
+                if let Some(suffix) = name.strip_prefix(&prefix)
+                    && let Ok(idx) = suffix.parse::<u32>()
+                {
+                    max_idx = Some(max_idx.map_or(idx, |m: u32| m.max(idx)));
                 }
             }
         }
@@ -650,12 +664,12 @@ async fn find_backstore_hba(hba_type: &str, bs_name: &str) -> Option<u32> {
         while let Ok(Some(entry)) = entries.next_entry().await {
             if let Some(name) = entry.file_name().to_str() {
                 let prefix = format!("{hba_type}_");
-                if let Some(suffix) = name.strip_prefix(&prefix) {
-                    if let Ok(idx) = suffix.parse::<u32>() {
-                        let bs_path = format!("{CORE_BASE}/{name}/{bs_name}");
-                        if Path::new(&bs_path).exists() {
-                            return Some(idx);
-                        }
+                if let Some(suffix) = name.strip_prefix(&prefix)
+                    && let Ok(idx) = suffix.parse::<u32>()
+                {
+                    let bs_path = format!("{CORE_BASE}/{name}/{bs_name}");
+                    if Path::new(&bs_path).exists() {
+                        return Some(idx);
                     }
                 }
             }
@@ -724,30 +738,44 @@ async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
     };
     let mut json: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
-        Err(e) => { warn!("Failed to parse {SAVECONFIG}: {e}"); return; }
+        Err(e) => {
+            warn!("Failed to parse {SAVECONFIG}: {e}");
+            return;
+        }
     };
-    let Some(objects) = json.get_mut("storage_objects").and_then(|v| v.as_array_mut()) else {
+    let Some(objects) = json
+        .get_mut("storage_objects")
+        .and_then(|v| v.as_array_mut())
+    else {
         return;
     };
     let mut changed = false;
     for obj in objects.iter_mut() {
-        let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         for (subvol_name, new_dev) in dev_map {
             let expected_prefix = format!("nasty_{subvol_name}_");
-            if name.starts_with(&expected_prefix) {
-                if let Some(dev_field) = obj.get("dev").and_then(|v| v.as_str()) {
-                    if dev_field != new_dev {
-                        info!("Patching saveconfig.json backstore '{name}' {} → {new_dev}", dev_field);
-                        obj["dev"] = serde_json::Value::String(new_dev.clone());
-                        changed = true;
-                    }
-                }
+            if name.starts_with(&expected_prefix)
+                && let Some(dev_field) = obj.get("dev").and_then(|v| v.as_str())
+                && dev_field != new_dev
+            {
+                info!(
+                    "Patching saveconfig.json backstore '{name}' {} → {new_dev}",
+                    dev_field
+                );
+                obj["dev"] = serde_json::Value::String(new_dev.clone());
+                changed = true;
             }
         }
     }
     if changed {
         match serde_json::to_string_pretty(&json) {
-            Ok(out) => { let _ = tokio::fs::write(SAVECONFIG, out).await; }
+            Ok(out) => {
+                let _ = tokio::fs::write(SAVECONFIG, out).await;
+            }
             Err(e) => warn!("Failed to serialize patched saveconfig.json: {e}"),
         }
     }

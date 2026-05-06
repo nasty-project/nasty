@@ -36,11 +36,21 @@ pub struct NutConfig {
     pub shutdown_command: String,
 }
 
-fn default_driver() -> String { "usbhid-ups".into() }
-fn default_port() -> String { "auto".into() }
-fn default_ups_name() -> String { "ups".into() }
-fn default_shutdown_percent() -> u32 { 20 }
-fn default_shutdown_seconds() -> u32 { 120 }
+fn default_driver() -> String {
+    "usbhid-ups".into()
+}
+fn default_port() -> String {
+    "auto".into()
+}
+fn default_ups_name() -> String {
+    "ups".into()
+}
+fn default_shutdown_percent() -> u32 {
+    20
+}
+fn default_shutdown_seconds() -> u32 {
+    120
+}
 fn default_shutdown_command() -> String {
     "/run/current-system/sw/bin/systemctl poweroff".into()
 }
@@ -117,21 +127,33 @@ impl NutService {
     pub async fn update_config(&self, update: NutConfigUpdate) -> Result<NutConfig, String> {
         let mut config = self.state.write().await;
 
-        if let Some(v) = update.driver { config.driver = v; }
-        if let Some(v) = update.port { config.port = v; }
+        if let Some(v) = update.driver {
+            config.driver = v;
+        }
+        if let Some(v) = update.port {
+            config.port = v;
+        }
         if let Some(v) = update.ups_name {
-            if v.is_empty() { return Err("ups_name cannot be empty".into()); }
+            if v.is_empty() {
+                return Err("ups_name cannot be empty".into());
+            }
             config.ups_name = v;
         }
-        if let Some(v) = update.description { config.description = v; }
+        if let Some(v) = update.description {
+            config.description = v;
+        }
         if let Some(v) = update.shutdown_on_battery_percent {
-            if v > 100 { return Err("shutdown_on_battery_percent must be 0-100".into()); }
+            if v > 100 {
+                return Err("shutdown_on_battery_percent must be 0-100".into());
+            }
             config.shutdown_on_battery_percent = v;
         }
         if let Some(v) = update.shutdown_on_battery_seconds {
             config.shutdown_on_battery_seconds = v;
         }
-        if let Some(v) = update.shutdown_command { config.shutdown_command = v; }
+        if let Some(v) = update.shutdown_command {
+            config.shutdown_command = v;
+        }
 
         save(&config).await.map_err(|e| e.to_string())?;
 
@@ -165,7 +187,8 @@ impl NutService {
 // ── Config file generation ───────────────────────────────────
 
 pub async fn write_config_files(config: &NutConfig) -> Result<(), String> {
-    tokio::fs::create_dir_all(NUT_CONF_DIR).await
+    tokio::fs::create_dir_all(NUT_CONF_DIR)
+        .await
         .map_err(|e| format!("failed to create {NUT_CONF_DIR}: {e}"))?;
 
     // ups.conf
@@ -212,12 +235,14 @@ async fn write_file(name: &str, content: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
     let path = format!("{NUT_CONF_DIR}/{name}");
-    tokio::fs::write(&path, content).await
+    tokio::fs::write(&path, content)
+        .await
         .map_err(|e| format!("failed to write {path}: {e}"))?;
 
     // upsd.users contains credentials — restrict to owner-only
     if name == "upsd.users" {
-        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).await
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .await
             .map_err(|e| format!("failed to set permissions on {path}: {e}"))?;
     }
 
@@ -261,12 +286,13 @@ async fn read_ups_status(ups_name: &str) -> UpsStatus {
 
     let get_f64 = |key: &str| -> Option<f64> { raw.get(key).and_then(|v| v.parse().ok()) };
     let get_u64 = |key: &str| -> Option<u64> { raw.get(key).and_then(|v| v.parse().ok()) };
-    let get_str = |key: &str| -> Option<String> {
-        raw.get(key).filter(|v| !v.is_empty()).cloned()
-    };
+    let get_str = |key: &str| -> Option<String> { raw.get(key).filter(|v| !v.is_empty()).cloned() };
 
     UpsStatus {
-        status: raw.get("ups.status").cloned().unwrap_or_else(|| "UNKNOWN".into()),
+        status: raw
+            .get("ups.status")
+            .cloned()
+            .unwrap_or_else(|| "UNKNOWN".into()),
         battery_charge: get_f64("battery.charge"),
         battery_runtime: get_u64("battery.runtime"),
         input_voltage: get_f64("input.voltage"),
@@ -292,7 +318,11 @@ async fn is_nut_running() -> bool {
 
 async fn restart_nut_services() {
     info!("Restarting NUT services after config change");
-    for svc in &["nut-monitor.service", "nut-server.service", "nut-driver.service"] {
+    for svc in &[
+        "nut-monitor.service",
+        "nut-server.service",
+        "nut-driver.service",
+    ] {
         let _ = tokio::process::Command::new("systemctl")
             .args(["restart", svc])
             .output()

@@ -59,7 +59,12 @@ struct ControlMessage {
     rows: u16,
 }
 
-async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>, client_ip: String, pre_auth_token: Option<String>) {
+async fn handle_terminal(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    client_ip: String,
+    pre_auth_token: Option<String>,
+) {
     // Phase 1: authenticate and get terminal size
     let auth = match wait_for_terminal_auth(&mut socket, &state, &client_ip, pre_auth_token).await {
         Some(a) => a,
@@ -167,8 +172,8 @@ async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>, client_ip:
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         // Check if it's a control message (resize)
-                        if let Ok(ctrl) = serde_json::from_str::<ControlMessage>(&text) {
-                            if ctrl.msg_type == "resize" {
+                        if let Ok(ctrl) = serde_json::from_str::<ControlMessage>(&text)
+                            && ctrl.msg_type == "resize" {
                                 let _ = master.resize(PtySize {
                                     rows: ctrl.rows,
                                     cols: ctrl.cols,
@@ -177,7 +182,6 @@ async fn handle_terminal(mut socket: WebSocket, state: Arc<AppState>, client_ip:
                                 });
                                 continue;
                             }
-                        }
                         // Regular input — write to PTY
                         let writer = writer.clone();
                         let data: Vec<u8> = text.bytes().collect();
@@ -274,10 +278,20 @@ async fn wait_for_terminal_auth(
             })
         }
         Ok(session) => {
-            warn!("Terminal access denied for '{}': role={:?}", session.username, session.role);
-            crate::auth::audit("terminal_denied", &session.username, client_ip, &format!("role={:?}", session.role));
+            warn!(
+                "Terminal access denied for '{}': role={:?}",
+                session.username, session.role
+            );
+            crate::auth::audit(
+                "terminal_denied",
+                &session.username,
+                client_ip,
+                &format!("role={:?}", session.role),
+            );
             let _ = socket
-                .send(Message::Text(r#"{"error":"forbidden: admin role required"}"#.into()))
+                .send(Message::Text(
+                    r#"{"error":"forbidden: admin role required"}"#.into(),
+                ))
                 .await;
             let _ = socket.send(Message::Close(None)).await;
             None

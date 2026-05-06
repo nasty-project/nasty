@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use bollard::Docker;
 use bollard::models::{
     ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
@@ -20,7 +21,6 @@ use bollard::query_parameters::{
     CreateContainerOptions, CreateImageOptions, ListContainersOptions, LogsOptions,
     RemoveContainerOptions, StopContainerOptions,
 };
-use bollard::Docker;
 use futures_util::TryStreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -103,19 +103,19 @@ pub fn validate_simple_volumes(
         let src = &v.host_path;
 
         if src.contains("..") {
-            return Err(AppsError::ForbiddenBind(format!("'{src}' escapes via '..'")));
+            return Err(AppsError::ForbiddenBind(format!(
+                "'{src}' escapes via '..'"
+            )));
         }
         if src == "/" {
             return Err(AppsError::ForbiddenBind(
-                "host root '/' is never allowed as a bind mount".to_string()
+                "host root '/' is never allowed as a bind mount".to_string(),
             ));
         }
-        let in_app_dir = src == &app_data_dir
-            || src.starts_with(&format!("{app_data_dir}/"));
+        let in_app_dir = src == &app_data_dir || src.starts_with(&format!("{app_data_dir}/"));
         // Engine state dir is off-limits even with allow_unsafe — that's where
         // auth.json, settings.json, audit.log, OIDC client secrets live.
-        let in_engine_state = src == "/var/lib/nasty"
-            || src.starts_with("/var/lib/nasty/");
+        let in_engine_state = src == "/var/lib/nasty" || src.starts_with("/var/lib/nasty/");
         if in_engine_state && !in_app_dir {
             return Err(AppsError::ForbiddenBind(format!(
                 "'{src}' targets engine state — not allowed even with allow_unsafe"
@@ -123,9 +123,7 @@ pub fn validate_simple_volumes(
         }
 
         if !allow_unsafe {
-            let allowed = in_app_dir
-                || src == "/fs"
-                || src.starts_with("/fs/");
+            let allowed = in_app_dir || src == "/fs" || src.starts_with("/fs/");
             if !allowed {
                 return Err(AppsError::ForbiddenBind(format!(
                     "'{src}' is outside '{app_data_dir}/' and '/fs/'. Set allow_unsafe to override."
@@ -366,15 +364,25 @@ pub struct AppsService {
     docker: std::sync::Mutex<Option<Docker>>,
 }
 
+impl Default for AppsService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppsService {
     pub fn new() -> Self {
         let docker = Docker::connect_with_unix_defaults()
-            .or_else(|_| Docker::connect_with_unix("/var/run/docker.sock", 120, &bollard::API_DEFAULT_VERSION))
+            .or_else(|_| {
+                Docker::connect_with_unix("/var/run/docker.sock", 120, bollard::API_DEFAULT_VERSION)
+            })
             .ok();
         if docker.is_none() {
             info!("Docker not available at startup — will connect on demand");
         }
-        Self { docker: std::sync::Mutex::new(docker) }
+        Self {
+            docker: std::sync::Mutex::new(docker),
+        }
     }
 
     /// Get a reference to the bollard Docker client (for use by deploy streaming).
@@ -390,7 +398,9 @@ impl AppsService {
         drop(guard);
         // Try to connect (Docker may have started after engine)
         let d = Docker::connect_with_unix_defaults()
-            .or_else(|_| Docker::connect_with_unix("/var/run/docker.sock", 120, &bollard::API_DEFAULT_VERSION))
+            .or_else(|_| {
+                Docker::connect_with_unix("/var/run/docker.sock", 120, bollard::API_DEFAULT_VERSION)
+            })
             .map_err(|_| AppsError::NotReady("Docker socket not available".into()))?;
         *self.docker.lock().unwrap() = Some(d.clone());
         info!("Connected to Docker socket");
@@ -451,11 +461,11 @@ impl AppsService {
             let mut ready = false;
             for _ in 0..15 {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                if let Ok(docker) = Docker::connect_with_unix_defaults() {
-                    if docker.ping().await.is_ok() {
-                        ready = true;
-                        break;
-                    }
+                if let Ok(docker) = Docker::connect_with_unix_defaults()
+                    && docker.ping().await.is_ok()
+                {
+                    ready = true;
+                    break;
                 }
             }
 
@@ -493,13 +503,18 @@ impl AppsService {
         // Stop all managed containers
         if let Ok(apps) = self.list().await {
             for app in &apps {
-                if app.status == "running" {
-                    if let Ok(docker) = self.docker() {
-                        let _ = docker.stop_container(
+                if app.status == "running"
+                    && let Ok(docker) = self.docker()
+                {
+                    let _ = docker
+                        .stop_container(
                             &container_name(&app.name),
-                            Some(StopContainerOptions { t: Some(10), signal: None }),
-                        ).await;
-                    }
+                            Some(StopContainerOptions {
+                                t: Some(10),
+                                signal: None,
+                            }),
+                        )
+                        .await;
                 }
             }
         }
@@ -639,11 +654,18 @@ impl AppsService {
         }
 
         // Build env
-        let env: Vec<String> = req.env.iter().map(|e| format!("{}={}", e.name, e.value)).collect();
+        let env: Vec<String> = req
+            .env
+            .iter()
+            .map(|e| format!("{}={}", e.name, e.value))
+            .collect();
 
         // Resource limits
         let nano_cpus = req.cpu_limit.as_ref().and_then(|c| parse_cpu_limit(c));
-        let memory = req.memory_limit.as_ref().and_then(|m| parse_memory_limit(m));
+        let memory = req
+            .memory_limit
+            .as_ref()
+            .and_then(|m| parse_memory_limit(m));
 
         // Build labels
         let mut labels = HashMap::new();
@@ -693,7 +715,12 @@ impl AppsService {
             )
             .await?;
 
-        self.docker()?.start_container(&cname, None::<bollard::query_parameters::StartContainerOptions>).await?;
+        self.docker()?
+            .start_container(
+                &cname,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await?;
 
         info!("Installed app '{}' (image: {})", req.name, req.image);
 
@@ -706,7 +733,12 @@ impl AppsService {
         });
         let manifest_path = format!("{}/{}.json", COMPOSE_DIR, req.name);
         let _ = tokio::fs::create_dir_all(COMPOSE_DIR).await;
-        if let Err(e) = tokio::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).await {
+        if let Err(e) = tokio::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .await
+        {
             warn!("Failed to save app manifest: {e}");
         }
 
@@ -747,7 +779,13 @@ impl AppsService {
         // Stop and remove the old container
         let _ = self
             .docker()?
-            .stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None }))
+            .stop_container(
+                &cname,
+                Some(StopContainerOptions {
+                    t: Some(10),
+                    signal: None,
+                }),
+            )
             .await;
         let _ = self
             .docker()?
@@ -782,7 +820,13 @@ impl AppsService {
         // Stop and remove
         let _ = self
             .docker()?
-            .stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None }))
+            .stop_container(
+                &cname,
+                Some(StopContainerOptions {
+                    t: Some(10),
+                    signal: None,
+                }),
+            )
             .await;
         self.docker()?
             .remove_container(
@@ -821,7 +865,8 @@ impl AppsService {
             return Ok(Vec::new());
         }
         let mut apps = Vec::new();
-        let mut entries = tokio::fs::read_dir(apps_dir).await
+        let mut entries = tokio::fs::read_dir(apps_dir)
+            .await
             .map_err(|e| AppsError::CommandFailed(format!("read apps dir: {e}")))?;
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
@@ -835,12 +880,18 @@ impl AppsService {
                         .await
                         .ok()
                         .and_then(|content| {
-                            let parsed: serde_json::Value = serde_yaml_ng::from_str(&content).ok()?;
-                            Some(parsed.get("services")?
-                                .as_object()?
-                                .values()
-                                .filter_map(|svc| svc.get("image")?.as_str().map(|s| s.to_string()))
-                                .collect())
+                            let parsed: serde_json::Value =
+                                serde_yaml_ng::from_str(&content).ok()?;
+                            Some(
+                                parsed
+                                    .get("services")?
+                                    .as_object()?
+                                    .values()
+                                    .filter_map(|svc| {
+                                        svc.get("image")?.as_str().map(|s| s.to_string())
+                                    })
+                                    .collect(),
+                            )
                         })
                         .unwrap_or_default();
                     let image = if images.len() == 1 {
@@ -867,23 +918,34 @@ impl AppsService {
                 }
             } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 // Simple app: manifest JSON
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let app_name = manifest.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                        let image = manifest.get("image").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                        let unsafe_mode = manifest.get("allow_unsafe").and_then(|b| b.as_bool()).unwrap_or(false);
-                        if !app_name.is_empty() {
-                            apps.push(App {
-                                name: app_name,
-                                image,
-                                status: "stopped".to_string(),
-                                created: String::new(),
-                                kind: "simple".to_string(),
-                                containers: Vec::new(),
-                                ports: Vec::new(),
-                                unsafe_mode,
-                            });
-                        }
+                if let Ok(content) = tokio::fs::read_to_string(&path).await
+                    && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
+                {
+                    let app_name = manifest
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let image = manifest
+                        .get("image")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let unsafe_mode = manifest
+                        .get("allow_unsafe")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    if !app_name.is_empty() {
+                        apps.push(App {
+                            name: app_name,
+                            image,
+                            status: "stopped".to_string(),
+                            created: String::new(),
+                            kind: "simple".to_string(),
+                            containers: Vec::new(),
+                            ports: Vec::new(),
+                            unsafe_mode,
+                        });
                     }
                 }
             }
@@ -978,7 +1040,9 @@ impl AppsService {
                 let mut created = String::new();
 
                 for c in &compose_containers {
-                    let svc_name = c.labels.as_ref()
+                    let svc_name = c
+                        .labels
+                        .as_ref()
                         .and_then(|l| l.get("com.docker.compose.service"))
                         .cloned()
                         .unwrap_or_default();
@@ -993,7 +1057,12 @@ impl AppsService {
                         any_running = true;
                     }
 
-                    let container_id = c.id.as_deref().unwrap_or("").chars().take(12).collect::<String>();
+                    let container_id =
+                        c.id.as_deref()
+                            .unwrap_or("")
+                            .chars()
+                            .take(12)
+                            .collect::<String>();
                     all_ports.extend(extract_ports(c));
                     containers.push(AppContainer {
                         name: svc_name,
@@ -1085,8 +1154,7 @@ impl AppsService {
         } else {
             host_config.port_bindings.as_ref().unwrap_or(&network_ports)
         };
-        let mut idx = 0;
-        for (key, bindings) in port_source {
+        for (idx, (key, bindings)) in port_source.iter().enumerate() {
             let parts: Vec<&str> = key.split('/').collect();
             let container_port: u16 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             let protocol = parts
@@ -1109,7 +1177,6 @@ impl AppsService {
                 host_port,
                 protocol,
             });
-            idx += 1;
         }
         ports.sort_by_key(|p| p.container_port);
 
@@ -1150,7 +1217,9 @@ impl AppsService {
         }
 
         // Resource limits
-        let cpu_limit = host_config.nano_cpus.map(|n| format!("{:.1}", n as f64 / 1_000_000_000.0));
+        let cpu_limit = host_config
+            .nano_cpus
+            .map(|n| format!("{:.1}", n as f64 / 1_000_000_000.0));
         let memory_limit = host_config.memory.and_then(|m| {
             if m <= 0 {
                 None
@@ -1199,12 +1268,20 @@ impl AppsService {
             .await
             .map_err(|_| AppsError::AppNotFound(name.to_string()))?;
 
-        let output: String = logs.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("");
+        let output: String = logs
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("");
         Ok(output)
     }
 
     /// Get logs for a specific container by ID or name (no nasty- prefix).
-    pub async fn container_logs(&self, container_id: &str, tail: Option<u32>) -> Result<String, AppsError> {
+    pub async fn container_logs(
+        &self,
+        container_id: &str,
+        tail: Option<u32>,
+    ) -> Result<String, AppsError> {
         self.require_ready().await?;
 
         let tail_str = tail.unwrap_or(100).to_string();
@@ -1223,7 +1300,11 @@ impl AppsService {
             .await
             .map_err(|_| AppsError::AppNotFound(container_id.to_string()))?;
 
-        let output: String = logs.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("");
+        let output: String = logs
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("");
         Ok(output)
     }
 
@@ -1236,7 +1317,14 @@ impl AppsService {
         let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
         if Path::new(&compose_file).exists() {
             let output = Command::new("docker")
-                .args(["compose", "-f", &compose_file, "--project-name", name, "stop"])
+                .args([
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "--project-name",
+                    name,
+                    "stop",
+                ])
                 .output()
                 .await
                 .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
@@ -1250,7 +1338,13 @@ impl AppsService {
                 return Err(AppsError::AppNotFound(name.to_string()));
             }
             self.docker()?
-                .stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None }))
+                .stop_container(
+                    &cname,
+                    Some(StopContainerOptions {
+                        t: Some(10),
+                        signal: None,
+                    }),
+                )
                 .await?;
         }
 
@@ -1265,7 +1359,14 @@ impl AppsService {
         let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
         if Path::new(&compose_file).exists() {
             let output = Command::new("docker")
-                .args(["compose", "-f", &compose_file, "--project-name", name, "start"])
+                .args([
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "--project-name",
+                    name,
+                    "start",
+                ])
                 .output()
                 .await
                 .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
@@ -1279,7 +1380,10 @@ impl AppsService {
                 return Err(AppsError::AppNotFound(name.to_string()));
             }
             self.docker()?
-                .start_container(&cname, None::<bollard::query_parameters::StartContainerOptions>)
+                .start_container(
+                    &cname,
+                    None::<bollard::query_parameters::StartContainerOptions>,
+                )
                 .await?;
         }
 
@@ -1308,10 +1412,7 @@ impl AppsService {
         .await?;
 
         // Write a .env file with project name
-        let env_content = format!(
-            "COMPOSE_PROJECT_NAME={name}\n",
-            name = req.name,
-        );
+        let env_content = format!("COMPOSE_PROJECT_NAME={name}\n", name = req.name,);
         tokio::fs::write(format!("{}/.env", project_dir), &env_content).await?;
 
         // Validate compose file before deploying
@@ -1334,7 +1435,8 @@ impl AppsService {
                     "up",
                     "-d",
                     "--no-build",
-                    "--pull", "missing",
+                    "--pull",
+                    "missing",
                 ])
                 .output(),
         )
@@ -1344,7 +1446,16 @@ impl AppsService {
         let cleanup = |project_dir: String, name: String, compose_path: String| async move {
             // Tear down any partially created containers before removing the dir
             let _ = Command::new("docker")
-                .args(["compose", "-f", &compose_path, "--project-name", &name, "down", "-v", "--remove-orphans"])
+                .args([
+                    "compose",
+                    "-f",
+                    &compose_path,
+                    "--project-name",
+                    &name,
+                    "down",
+                    "-v",
+                    "--remove-orphans",
+                ])
                 .output()
                 .await;
             let _ = tokio::fs::remove_dir_all(&project_dir).await;
@@ -1371,13 +1482,15 @@ impl AppsService {
         }
 
         // Auto-create ingress for the first exposed port
-        if let Ok(app) = self.get(&req.name).await {
-            if let Some(first_port) = app.ports.first() {
-                let _ = self.ingress_set(SetIngressRequest {
+        if let Ok(app) = self.get(&req.name).await
+            && let Some(first_port) = app.ports.first()
+        {
+            let _ = self
+                .ingress_set(SetIngressRequest {
                     name: req.name.clone(),
                     host_port: first_port.host_port,
-                }).await;
-            }
+                })
+                .await;
         }
 
         info!("Installed compose app '{}'", req.name);
@@ -1412,7 +1525,8 @@ impl AppsService {
                     "up",
                     "-d",
                     "--no-build",
-                    "--pull", "missing",
+                    "--pull",
+                    "missing",
                     "--remove-orphans",
                 ])
                 .output(),
@@ -1525,14 +1639,14 @@ impl AppsService {
                 let parts: Vec<&str> = comment.split_whitespace().collect();
                 if parts.len() >= 2 {
                     let name = parts[0].to_string();
-                    if let Some(port_str) = parts[1].strip_prefix("port:") {
-                        if let Ok(port) = port_str.parse::<u16>() {
-                            rules.push(AppIngress {
-                                path: format!("/apps/{name}/"),
-                                name,
-                                host_port: port,
-                            });
-                        }
+                    if let Some(port_str) = parts[1].strip_prefix("port:")
+                        && let Ok(port) = port_str.parse::<u16>()
+                    {
+                        rules.push(AppIngress {
+                            path: format!("/apps/{name}/"),
+                            name,
+                            host_port: port,
+                        });
                     }
                 }
             }
@@ -1617,9 +1731,9 @@ impl AppsService {
     // ── Image inspection ────────────────────────────────────
 
     pub async fn inspect_image(&self, image: &str) -> Result<ImageInspectResult, AppsError> {
-        let ports = inspect_image_ports(image).await.map_err(|e| {
-            AppsError::CommandFailed(format!("image inspect failed: {e}"))
-        })?;
+        let ports = inspect_image_ports(image)
+            .await
+            .map_err(|e| AppsError::CommandFailed(format!("image inspect failed: {e}")))?;
         Ok(ImageInspectResult { ports })
     }
 
@@ -1646,7 +1760,16 @@ impl AppsService {
                 let path = compose_file.to_string_lossy().to_string();
                 info!("Restoring compose app '{name}'");
                 let _ = Command::new("docker")
-                    .args(["compose", "-f", &path, "--project-name", &name, "up", "-d", "--no-build"])
+                    .args([
+                        "compose",
+                        "-f",
+                        &path,
+                        "--project-name",
+                        &name,
+                        "up",
+                        "-d",
+                        "--no-build",
+                    ])
                     .output()
                     .await;
             }
@@ -1720,16 +1843,16 @@ impl AppsService {
 
     /// Look up the host port Docker actually assigned for a given container port.
     async fn get_mapped_port(&self, container: &str, container_port: u16) -> Option<u16> {
-        let info = self.docker().ok()?.inspect_container(container, None).await.ok()?;
+        let info = self
+            .docker()
+            .ok()?
+            .inspect_container(container, None)
+            .await
+            .ok()?;
         let ports = info.network_settings?.ports?;
         let key = format!("{container_port}/tcp");
         let bindings = ports.get(&key)?.as_ref()?;
-        bindings
-            .first()?
-            .host_port
-            .as_ref()?
-            .parse::<u16>()
-            .ok()
+        bindings.first()?.host_port.as_ref()?.parse::<u16>().ok()
     }
 
     /// Total memory usage of Docker (daemon + containers), excluding page cache.
@@ -1756,7 +1879,12 @@ impl AppsService {
 
     /// Total Docker disk usage (images + containers + volumes).
     async fn docker_disk_usage(&self) -> Option<u64> {
-        let df = self.docker().ok()?.df(None::<bollard::query_parameters::DataUsageOptions>).await.ok()?;
+        let df = self
+            .docker()
+            .ok()?
+            .df(None::<bollard::query_parameters::DataUsageOptions>)
+            .await
+            .ok()?;
         let mut total: u64 = 0;
         if let Some(ref images) = df.images_disk_usage {
             total += images.total_size.unwrap_or(0) as u64;
@@ -1775,7 +1903,14 @@ impl AppsService {
         let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
         if Path::new(&compose_file).exists() {
             let output = Command::new("docker")
-                .args(["compose", "-f", &compose_file, "--project-name", name, "restart"])
+                .args([
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "--project-name",
+                    name,
+                    "restart",
+                ])
                 .output()
                 .await
                 .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
@@ -1788,7 +1923,15 @@ impl AppsService {
             if !self.container_exists(&cname).await {
                 return Err(AppsError::AppNotFound(name.to_string()));
             }
-            self.docker()?.restart_container(&cname, Some(bollard::query_parameters::RestartContainerOptions { t: Some(10), signal: None })).await?;
+            self.docker()?
+                .restart_container(
+                    &cname,
+                    Some(bollard::query_parameters::RestartContainerOptions {
+                        t: Some(10),
+                        signal: None,
+                    }),
+                )
+                .await?;
         }
 
         info!("Restarted app '{name}'");
@@ -1804,7 +1947,14 @@ impl AppsService {
         if Path::new(&compose_file).exists() {
             // docker compose pull + up -d (recreates with new images)
             let pull = Command::new("docker")
-                .args(["compose", "-f", &compose_file, "--project-name", name, "pull"])
+                .args([
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "--project-name",
+                    name,
+                    "pull",
+                ])
                 .output()
                 .await
                 .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
@@ -1814,8 +1964,17 @@ impl AppsService {
             }
 
             let up = Command::new("docker")
-                .args(["compose", "-f", &compose_file, "--project-name", name,
-                       "up", "-d", "--no-build", "--remove-orphans"])
+                .args([
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "--project-name",
+                    name,
+                    "up",
+                    "-d",
+                    "--no-build",
+                    "--remove-orphans",
+                ])
                 .output()
                 .await
                 .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
@@ -1827,11 +1986,16 @@ impl AppsService {
             info!("Pulled latest images for compose app '{name}'");
         } else {
             let cname = container_name(name);
-            let info = self.docker()?.inspect_container(&cname, None).await
+            let info = self
+                .docker()?
+                .inspect_container(&cname, None)
+                .await
                 .map_err(|_| AppsError::AppNotFound(name.to_string()))?;
             let image = info.config.and_then(|c| c.image).unwrap_or_default();
             if image.is_empty() {
-                return Err(AppsError::DockerFailed("container has no image".to_string()));
+                return Err(AppsError::DockerFailed(
+                    "container has no image".to_string(),
+                ));
             }
 
             // Pull latest
@@ -1839,13 +2003,28 @@ impl AppsService {
 
             // Recreate container with same config but new image
             // Stop + remove + start from the pulled image
-            let _ = self.docker()?.stop_container(&cname, Some(StopContainerOptions { t: Some(10), signal: None })).await;
+            let _ = self
+                .docker()?
+                .stop_container(
+                    &cname,
+                    Some(StopContainerOptions {
+                        t: Some(10),
+                        signal: None,
+                    }),
+                )
+                .await;
             // We need the full config to recreate — get_config then re-install
             let config = self.get_config(name).await?;
-            let _ = self.docker()?.remove_container(&cname, Some(RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            })).await;
+            let _ = self
+                .docker()?
+                .remove_container(
+                    &cname,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
 
             let req = InstallAppRequest {
                 name: name.to_string(),
@@ -1868,14 +2047,23 @@ impl AppsService {
     pub async fn prune(&self) -> Result<PruneResult, AppsError> {
         self.require_ready().await?;
 
-        let result = self.docker()?.prune_images(None::<bollard::query_parameters::PruneImagesOptions>).await?;
+        let result = self
+            .docker()?
+            .prune_images(None::<bollard::query_parameters::PruneImagesOptions>)
+            .await?;
         let images_removed = result.images_deleted.map(|v| v.len()).unwrap_or(0);
         let space_reclaimed = result.space_reclaimed.unwrap_or(0) as u64;
 
         // Also prune volumes
-        let _ = self.docker()?.prune_volumes(None::<bollard::query_parameters::PruneVolumesOptions>).await;
+        let _ = self
+            .docker()?
+            .prune_volumes(None::<bollard::query_parameters::PruneVolumesOptions>)
+            .await;
 
-        info!("Pruned {images_removed} images, reclaimed {} bytes", space_reclaimed);
+        info!(
+            "Pruned {images_removed} images, reclaimed {} bytes",
+            space_reclaimed
+        );
         Ok(PruneResult {
             images_removed,
             space_reclaimed_bytes: space_reclaimed,
@@ -1893,7 +2081,9 @@ impl AppsService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AppsError::DockerFailed(format!("invalid compose file: {stderr}")));
+            return Err(AppsError::DockerFailed(format!(
+                "invalid compose file: {stderr}"
+            )));
         }
         Ok(())
     }
@@ -1907,7 +2097,15 @@ impl AppsService {
         let container = if Path::new(&compose_file).exists() {
             // Look up the first running container in the compose project
             let output = Command::new("docker")
-                .args(["compose", "-f", &compose_file, "--project-name", name, "ps", "-q"])
+                .args([
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "--project-name",
+                    name,
+                    "ps",
+                    "-q",
+                ])
                 .output()
                 .await
                 .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
@@ -1918,7 +2116,9 @@ impl AppsService {
                 .trim()
                 .to_string();
             if id.is_empty() {
-                return Err(AppsError::DockerFailed("no running containers in this app".to_string()));
+                return Err(AppsError::DockerFailed(
+                    "no running containers in this app".to_string(),
+                ));
             }
             id
         } else {
@@ -1985,14 +2185,14 @@ async fn find_container_shell(container: &str) -> Option<&'static str> {
             .args(["exec", container, "test", "-x", shell])
             .output()
             .await;
-        if let Ok(output) = result {
-            if output.status.success() {
-                return Some(match shell {
-                    "/bin/bash" => "/bin/bash",
-                    "/bin/ash" => "/bin/ash",
-                    _ => "/bin/sh",
-                });
-            }
+        if let Ok(output) = result
+            && output.status.success()
+        {
+            return Some(match shell {
+                "/bin/bash" => "/bin/bash",
+                "/bin/ash" => "/bin/ash",
+                _ => "/bin/sh",
+            });
         }
     }
     None
@@ -2032,11 +2232,7 @@ async fn system_listeners() -> Result<Vec<(u16, String)>, AppsError> {
 
         // Extract process name from users:(("name",...))
         let process = if let Some(users) = fields.get(5) {
-            users
-                .split('"')
-                .nth(1)
-                .unwrap_or("unknown")
-                .to_string()
+            users.split('"').nth(1).unwrap_or("unknown").to_string()
         } else {
             "unknown".to_string()
         };
@@ -2085,7 +2281,7 @@ fn parse_memory_limit(s: &str) -> Option<i64> {
 
 /// Format bytes as a human-readable memory limit.
 fn format_memory_limit(bytes: u64) -> String {
-    if bytes >= 1024 * 1024 * 1024 && bytes % (1024 * 1024 * 1024) == 0 {
+    if bytes >= 1024 * 1024 * 1024 && bytes.is_multiple_of(1024 * 1024 * 1024) {
         format!("{}g", bytes / (1024 * 1024 * 1024))
     } else if bytes >= 1024 * 1024 {
         format!("{}m", bytes / (1024 * 1024))
@@ -2102,9 +2298,13 @@ fn extract_ports(c: &bollard::models::ContainerSummary) -> Vec<MappedPort> {
         for port in p {
             if let (Some(public), Some(_)) = (port.public_port, Some(port.private_port)) {
                 ports.push(MappedPort {
-                    host_port: public as u16,
-                    container_port: port.private_port as u16,
-                    protocol: port.typ.as_ref().map(|t| format!("{:?}", t).to_lowercase()).unwrap_or_else(|| "tcp".to_string()),
+                    host_port: public,
+                    container_port: port.private_port,
+                    protocol: port
+                        .typ
+                        .as_ref()
+                        .map(|t| format!("{:?}", t).to_lowercase())
+                        .unwrap_or_else(|| "tcp".to_string()),
                 });
             }
         }
@@ -2150,12 +2350,7 @@ async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
 
         let mut found = None;
         while let Ok(Some(entry)) = entries.next_entry().await {
-            if entry
-                .file_type()
-                .await
-                .map(|t| t.is_dir())
-                .unwrap_or(false)
-            {
+            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
                 found = Some(entry.file_name().to_string_lossy().to_string());
                 break;
             }
@@ -2197,7 +2392,8 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
         name.to_string()
     } else {
         let fs_base = Path::new("/fs");
-        let mut entries = tokio::fs::read_dir(fs_base).await
+        let mut entries = tokio::fs::read_dir(fs_base)
+            .await
             .map_err(|e| AppsError::CommandFailed(format!("cannot read /fs: {e}")))?;
         let mut found = None;
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -2212,23 +2408,25 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
     // Ensure the apps subvolume exists first
     let apps_path = format!("/fs/{fs_name}/apps");
     if !Path::new(&apps_path).exists() {
-        run_cmd("bcachefs", &["subvolume", "create", &apps_path]).await
+        run_cmd("bcachefs", &["subvolume", "create", &apps_path])
+            .await
             .map_err(|e| AppsError::CommandFailed(format!("create apps subvolume: {e}")))?;
         info!("Created apps subvolume at {apps_path}");
     }
 
     let docker_data = format!("{apps_path}/docker");
-    tokio::fs::create_dir_all(&docker_data).await
+    tokio::fs::create_dir_all(&docker_data)
+        .await
         .map_err(|e| AppsError::CommandFailed(format!("create {docker_data}: {e}")))?;
 
     let docker_lib = Path::new("/var/lib/docker");
 
     // If /var/lib/docker is already a symlink to the right place, nothing to do
-    if let Ok(target) = tokio::fs::read_link(docker_lib).await {
-        if target.to_string_lossy() == docker_data {
-            info!("Docker data symlink already points to {docker_data}");
-            return Ok(());
-        }
+    if let Ok(target) = tokio::fs::read_link(docker_lib).await
+        && target.to_string_lossy() == docker_data
+    {
+        info!("Docker data symlink already points to {docker_data}");
+        return Ok(());
     }
 
     // Stop Docker if running (we need to move/replace its data dir)
@@ -2237,17 +2435,22 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
     // Remove existing /var/lib/docker (empty default dir or old data)
     if docker_lib.exists() {
         if docker_lib.is_symlink() {
-            tokio::fs::remove_file(docker_lib).await
+            tokio::fs::remove_file(docker_lib)
+                .await
                 .map_err(|e| AppsError::CommandFailed(format!("remove old symlink: {e}")))?;
         } else {
-            tokio::fs::remove_dir_all(docker_lib).await
+            tokio::fs::remove_dir_all(docker_lib)
+                .await
                 .map_err(|e| AppsError::CommandFailed(format!("remove /var/lib/docker: {e}")))?;
         }
     }
 
     // Create symlink
-    tokio::fs::symlink(&docker_data, docker_lib).await
-        .map_err(|e| AppsError::CommandFailed(format!("symlink {docker_data} -> /var/lib/docker: {e}")))?;
+    tokio::fs::symlink(&docker_data, docker_lib)
+        .await
+        .map_err(|e| {
+            AppsError::CommandFailed(format!("symlink {docker_data} -> /var/lib/docker: {e}"))
+        })?;
 
     info!("Symlinked /var/lib/docker -> {docker_data}");
     Ok(())
@@ -2349,24 +2552,24 @@ async fn inspect_image_ports(image: &str) -> Result<Vec<AppPort>, String> {
     if let Some(exposed_ports) = exposed {
         for (key, _) in exposed_ports {
             let parts: Vec<&str> = key.split('/').collect();
-            if let Some(port_str) = parts.first() {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    let protocol = parts
-                        .get(1)
-                        .map(|p| p.to_uppercase())
-                        .unwrap_or_else(|| "TCP".to_string());
-                    let name = if ports.is_empty() {
-                        "http".to_string()
-                    } else {
-                        format!("port-{}", ports.len())
-                    };
-                    ports.push(AppPort {
-                        name,
-                        container_port: port,
-                        host_port: None,
-                        protocol,
-                    });
-                }
+            if let Some(port_str) = parts.first()
+                && let Ok(port) = port_str.parse::<u16>()
+            {
+                let protocol = parts
+                    .get(1)
+                    .map(|p| p.to_uppercase())
+                    .unwrap_or_else(|| "TCP".to_string());
+                let name = if ports.is_empty() {
+                    "http".to_string()
+                } else {
+                    format!("port-{}", ports.len())
+                };
+                ports.push(AppPort {
+                    name,
+                    container_port: port,
+                    host_port: None,
+                    protocol,
+                });
             }
         }
     }
@@ -2377,7 +2580,7 @@ async fn inspect_image_ports(image: &str) -> Result<Vec<AppPort>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_simple_volumes, AppVolume};
+    use super::{AppVolume, validate_simple_volumes};
 
     fn vol(host_path: &str) -> AppVolume {
         AppVolume {
@@ -2395,32 +2598,43 @@ mod tests {
 
     #[test]
     fn strict_allows_app_data_dir_and_fs() {
-        validate_simple_volumes("myapp", "/var/lib/nasty/apps-data", &[
-            vol("/var/lib/nasty/apps-data/myapp/cfg"),
-            vol("/fs/photos"),
-        ], false).unwrap();
+        validate_simple_volumes(
+            "myapp",
+            "/var/lib/nasty/apps-data",
+            &[vol("/var/lib/nasty/apps-data/myapp/cfg"), vol("/fs/photos")],
+            false,
+        )
+        .unwrap();
     }
 
     #[test]
     fn strict_rejects_outside_allowlist() {
-        let e = validate_simple_volumes("myapp", "/var/lib/nasty/apps-data", &[vol("/home/user/data")], false)
-            .unwrap_err()
-            .to_string();
+        let e = validate_simple_volumes(
+            "myapp",
+            "/var/lib/nasty/apps-data",
+            &[vol("/home/user/data")],
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("/home/user/data"), "{e}");
     }
 
     #[test]
     fn strict_rejects_etc() {
-        validate_simple_volumes("myapp", "/var/lib/nasty/apps-data", &[vol("/etc")], false).unwrap_err();
+        validate_simple_volumes("myapp", "/var/lib/nasty/apps-data", &[vol("/etc")], false)
+            .unwrap_err();
     }
 
     #[test]
     fn unsafe_allows_arbitrary_paths() {
-        validate_simple_volumes("myapp", "/var/lib/nasty/apps-data", &[
-            vol("/etc"),
-            vol("/home/user/data"),
-            vol("/dev/shm"),
-        ], true).unwrap();
+        validate_simple_volumes(
+            "myapp",
+            "/var/lib/nasty/apps-data",
+            &[vol("/etc"), vol("/home/user/data"), vol("/dev/shm")],
+            true,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2433,25 +2647,39 @@ mod tests {
 
     #[test]
     fn unsafe_still_rejects_dotdot() {
-        let e = validate_simple_volumes("myapp", "/var/lib/nasty/apps-data", &[vol("/var/lib/nasty/apps-data/myapp/../auth.json")], true)
-            .unwrap_err()
-            .to_string();
+        let e = validate_simple_volumes(
+            "myapp",
+            "/var/lib/nasty/apps-data",
+            &[vol("/var/lib/nasty/apps-data/myapp/../auth.json")],
+            true,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains(".."), "{e}");
     }
 
     #[test]
     fn unsafe_still_rejects_engine_state() {
-        let e = validate_simple_volumes("myapp", "/var/lib/nasty/apps-data", &[vol("/var/lib/nasty/auth.json")], true)
-            .unwrap_err()
-            .to_string();
+        let e = validate_simple_volumes(
+            "myapp",
+            "/var/lib/nasty/apps-data",
+            &[vol("/var/lib/nasty/auth.json")],
+            true,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("engine state"), "{e}");
     }
 
     #[test]
     fn unsafe_still_allows_app_data_under_engine_state() {
         // app-data dir is /var/lib/nasty/apps-data/<name> and is the deliberate exception.
-        validate_simple_volumes("myapp", "/var/lib/nasty/apps-data", &[
-            vol("/var/lib/nasty/apps-data/myapp/foo"),
-        ], true).unwrap();
+        validate_simple_volumes(
+            "myapp",
+            "/var/lib/nasty/apps-data",
+            &[vol("/var/lib/nasty/apps-data/myapp/foo")],
+            true,
+        )
+        .unwrap();
     }
 }

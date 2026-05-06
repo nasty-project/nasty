@@ -34,9 +34,9 @@ impl FirewallRestrictions {
     }
 
     pub async fn save(&self) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("serialize: {e}"))?;
-        tokio::fs::write(RESTRICTIONS_PATH, json).await
+        let json = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        tokio::fs::write(RESTRICTIONS_PATH, json)
+            .await
             .map_err(|e| format!("write {RESTRICTIONS_PATH}: {e}"))
     }
 }
@@ -88,11 +88,21 @@ pub struct FirewallStatus {
 // ── Port mapping ───────────────────────────────────────────────
 
 fn tcp(port: u16) -> PortSpec {
-    PortSpec { port, transport: Transport::Tcp, source: None, iface: None }
+    PortSpec {
+        port,
+        transport: Transport::Tcp,
+        source: None,
+        iface: None,
+    }
 }
 
 fn udp(port: u16) -> PortSpec {
-    PortSpec { port, transport: Transport::Udp, source: None, iface: None }
+    PortSpec {
+        port,
+        transport: Transport::Udp,
+        source: None,
+        iface: None,
+    }
 }
 
 /// Return the ports that should be open for a given protocol.
@@ -122,6 +132,12 @@ pub struct FirewallService {
     restrictions: tokio::sync::Mutex<FirewallRestrictions>,
 }
 
+impl Default for FirewallService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FirewallService {
     pub fn new() -> Self {
         Self {
@@ -137,8 +153,16 @@ impl FirewallService {
         let restrictions = self.restrictions.lock().await;
 
         // WebUI is always open
-        let webui_sources = restrictions.services.get("webui").cloned().unwrap_or_default();
-        let webui_ifaces = restrictions.interfaces.get("webui").cloned().unwrap_or_default();
+        let webui_sources = restrictions
+            .services
+            .get("webui")
+            .cloned()
+            .unwrap_or_default();
+        let webui_ifaces = restrictions
+            .interfaces
+            .get("webui")
+            .cloned()
+            .unwrap_or_default();
         state.rules.push(FirewallRule {
             service: "webui".to_string(),
             ports: apply_restrictions(webui_ports(), &webui_sources, &webui_ifaces),
@@ -151,8 +175,16 @@ impl FirewallService {
             if ports.is_empty() {
                 continue;
             }
-            let sources = restrictions.services.get(proto.name()).cloned().unwrap_or_default();
-            let ifaces = restrictions.interfaces.get(proto.name()).cloned().unwrap_or_default();
+            let sources = restrictions
+                .services
+                .get(proto.name())
+                .cloned()
+                .unwrap_or_default();
+            let ifaces = restrictions
+                .interfaces
+                .get(proto.name())
+                .cloned()
+                .unwrap_or_default();
             ports = apply_restrictions(ports, &sources, &ifaces);
             state.rules.push(FirewallRule {
                 service: proto.name().to_string(),
@@ -226,17 +258,28 @@ impl FirewallService {
 
     /// Set source IP and/or interface restrictions for a service and rebuild firewall.
     pub async fn set_restriction(
-        &self, service: &str,
+        &self,
+        service: &str,
         sources: Vec<String>,
         ifaces: Vec<String>,
     ) -> Result<(), String> {
         // Update persisted restrictions
         {
             let mut restrictions = self.restrictions.lock().await;
-            if sources.is_empty() { restrictions.services.remove(service); }
-            else { restrictions.services.insert(service.to_string(), sources.clone()); }
-            if ifaces.is_empty() { restrictions.interfaces.remove(service); }
-            else { restrictions.interfaces.insert(service.to_string(), ifaces.clone()); }
+            if sources.is_empty() {
+                restrictions.services.remove(service);
+            } else {
+                restrictions
+                    .services
+                    .insert(service.to_string(), sources.clone());
+            }
+            if ifaces.is_empty() {
+                restrictions.interfaces.remove(service);
+            } else {
+                restrictions
+                    .interfaces
+                    .insert(service.to_string(), ifaces.clone());
+            }
             restrictions.save().await?;
         }
 
@@ -265,7 +308,11 @@ impl FirewallService {
 }
 
 /// Apply source and interface restrictions to a set of ports.
-fn apply_restrictions(ports: Vec<PortSpec>, sources: &[String], ifaces: &[String]) -> Vec<PortSpec> {
+fn apply_restrictions(
+    ports: Vec<PortSpec>,
+    sources: &[String],
+    ifaces: &[String],
+) -> Vec<PortSpec> {
     if sources.is_empty() && ifaces.is_empty() {
         return ports;
     }
@@ -343,7 +390,8 @@ async fn apply_nftables(state: &FirewallState) -> Result<(), String> {
             conditions.push(format!("{proto} dport {}", port.port));
             rules.push_str(&format!(
                 "        {} accept # {}\n",
-                conditions.join(" "), rule.service
+                conditions.join(" "),
+                rule.service
             ));
         }
     }
@@ -357,12 +405,12 @@ async fn apply_nftables(state: &FirewallState) -> Result<(), String> {
         .output()
         .await;
     // Ignore flush errors (table may not exist yet)
-    if let Ok(o) = &flush {
-        if !o.status.success() {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if !stderr.contains("No such file") && !stderr.contains("does not exist") {
-                warn!("nft delete table warning: {stderr}");
-            }
+    if let Ok(o) = &flush
+        && !o.status.success()
+    {
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        if !stderr.contains("No such file") && !stderr.contains("does not exist") {
+            warn!("nft delete table warning: {stderr}");
         }
     }
 
@@ -370,7 +418,8 @@ async fn apply_nftables(state: &FirewallState) -> Result<(), String> {
     // An earlier version tried `nft -f -` with piped stdin but never wrote to
     // the pipe, so nft hung waiting for EOF until the spawn went out of scope.
     let tmp = "/tmp/nasty-firewall.nft";
-    tokio::fs::write(tmp, &rules).await
+    tokio::fs::write(tmp, &rules)
+        .await
         .map_err(|e| format!("write {tmp}: {e}"))?;
 
     let output = Command::new("nft")

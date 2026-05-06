@@ -7,5 +7,5 @@ pub mod cmd;
 pub mod filesystem;
 pub mod subvolume;
 
-pub use filesystem::{FilesystemService, FilesystemError};
+pub use filesystem::{FilesystemError, FilesystemService};
 pub use subvolume::SubvolumeService;

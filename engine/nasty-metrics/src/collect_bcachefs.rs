@@ -367,7 +367,7 @@ pub fn read_space(mount_point: &str) -> SpaceUsage {
     unsafe {
         let mut stat: libc::statvfs = std::mem::zeroed();
         if libc::statvfs(path.as_ptr(), &mut stat) == 0 {
-            let block_size = stat.f_frsize as u64;
+            let block_size = stat.f_frsize;
             let total = stat.f_blocks as u64 * block_size;
             let available = stat.f_bavail as u64 * block_size;
             let used = total.saturating_sub(stat.f_bfree as u64 * block_size);

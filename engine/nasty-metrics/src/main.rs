@@ -2,11 +2,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::{StatusCode, header},
     response::IntoResponse,
     routing::get,
-    Json, Router,
 };
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -42,8 +42,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let metrics_db = db::MetricsDb::open()
-        .expect("failed to open metrics database");
+    let metrics_db = db::MetricsDb::open().expect("failed to open metrics database");
 
     let state = Arc::new(AppState {
         db: metrics_db,
@@ -91,7 +90,10 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }

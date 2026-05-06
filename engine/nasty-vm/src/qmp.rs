@@ -4,34 +4,40 @@
 //! machine control. Every QMP session starts with a greeting from QEMU,
 //! after which the client must send `qmp_capabilities` to enter command mode.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 /// Perform the QMP handshake (read greeting, send qmp_capabilities).
 pub async fn negotiate(socket_path: &str) -> Result<(), String> {
-    let stream = UnixStream::connect(socket_path).await
+    let stream = UnixStream::connect(socket_path)
+        .await
         .map_err(|e| format!("connect {socket_path}: {e}"))?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
     // Read greeting
     let mut line = String::new();
-    reader.read_line(&mut line).await
+    reader
+        .read_line(&mut line)
+        .await
         .map_err(|e| format!("read greeting: {e}"))?;
 
     // Send qmp_capabilities
     let cmd = json!({"execute": "qmp_capabilities"}).to_string() + "\n";
-    writer.write_all(cmd.as_bytes()).await
+    writer
+        .write_all(cmd.as_bytes())
+        .await
         .map_err(|e| format!("write qmp_capabilities: {e}"))?;
 
     // Read response
     line.clear();
-    reader.read_line(&mut line).await
+    reader
+        .read_line(&mut line)
+        .await
         .map_err(|e| format!("read capabilities response: {e}"))?;
 
-    let resp: Value = serde_json::from_str(&line)
-        .map_err(|e| format!("parse response: {e}"))?;
+    let resp: Value = serde_json::from_str(&line).map_err(|e| format!("parse response: {e}"))?;
 
     if resp.get("return").is_some() {
         Ok(())
@@ -41,25 +47,36 @@ pub async fn negotiate(socket_path: &str) -> Result<(), String> {
 }
 
 /// Execute a QMP command and return the result.
-pub async fn execute(socket_path: &str, command: &str, arguments: Option<Value>) -> Result<Value, String> {
-    let stream = UnixStream::connect(socket_path).await
+pub async fn execute(
+    socket_path: &str,
+    command: &str,
+    arguments: Option<Value>,
+) -> Result<Value, String> {
+    let stream = UnixStream::connect(socket_path)
+        .await
         .map_err(|e| format!("connect {socket_path}: {e}"))?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
     // Read greeting
     let mut line = String::new();
-    reader.read_line(&mut line).await
+    reader
+        .read_line(&mut line)
+        .await
         .map_err(|e| format!("read greeting: {e}"))?;
 
     // Send qmp_capabilities
     let cap_cmd = json!({"execute": "qmp_capabilities"}).to_string() + "\n";
-    writer.write_all(cap_cmd.as_bytes()).await
+    writer
+        .write_all(cap_cmd.as_bytes())
+        .await
         .map_err(|e| format!("write qmp_capabilities: {e}"))?;
 
     // Read capabilities response
     line.clear();
-    reader.read_line(&mut line).await
+    reader
+        .read_line(&mut line)
+        .await
         .map_err(|e| format!("read cap response: {e}"))?;
 
     // Send the actual command
@@ -68,21 +85,24 @@ pub async fn execute(socket_path: &str, command: &str, arguments: Option<Value>)
         cmd_obj["arguments"] = args;
     }
     let cmd_str = cmd_obj.to_string() + "\n";
-    writer.write_all(cmd_str.as_bytes()).await
+    writer
+        .write_all(cmd_str.as_bytes())
+        .await
         .map_err(|e| format!("write command: {e}"))?;
 
     // Read response — skip any async events (they have "event" key)
     loop {
         line.clear();
-        reader.read_line(&mut line).await
+        reader
+            .read_line(&mut line)
+            .await
             .map_err(|e| format!("read response: {e}"))?;
 
         if line.trim().is_empty() {
             return Err("connection closed".to_string());
         }
 
-        let resp: Value = serde_json::from_str(&line)
-            .map_err(|e| format!("parse: {e}"))?;
+        let resp: Value = serde_json::from_str(&line).map_err(|e| format!("parse: {e}"))?;
 
         if resp.get("event").is_some() {
             continue; // Skip async events
@@ -102,7 +122,8 @@ pub async fn execute(socket_path: &str, command: &str, arguments: Option<Value>)
 
 /// Ping the QMP socket — just connect and read greeting.
 pub async fn ping(socket_path: &str) -> Result<(), String> {
-    let stream = UnixStream::connect(socket_path).await
+    let stream = UnixStream::connect(socket_path)
+        .await
         .map_err(|e| format!("connect: {e}"))?;
     let (reader, _) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -111,9 +132,10 @@ pub async fn ping(socket_path: &str) -> Result<(), String> {
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         reader.read_line(&mut line),
-    ).await
-        .map_err(|_| "timeout".to_string())?
-        .map_err(|e| format!("read: {e}"))?;
+    )
+    .await
+    .map_err(|_| "timeout".to_string())?
+    .map_err(|e| format!("read: {e}"))?;
 
     if line.contains("QMP") {
         Ok(())

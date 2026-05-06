@@ -414,10 +414,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                             );
                             match rebuild {
                                 Ok(()) => ok(req, saved),
-                                Err(e) => err(
-                                    req,
-                                    format!("config saved but client rebuild failed: {e}"),
-                                ),
+                                Err(e) => {
+                                    err(req, format!("config saved but client rebuild failed: {e}"))
+                                }
                             }
                         }
                         Err(e) => err(req, e),
@@ -445,7 +444,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
 
         // ── Audit ──────────────────────────────────────────────
         "audit.list" => {
-            let limit = req.params.as_ref()
+            let limit = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("limit"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(200) as usize;
@@ -466,21 +467,28 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "system.logs" => {
             let unit = str_param(req, "unit").unwrap_or("nasty-engine");
-            let lines: u32 = req.params.as_ref()
+            let lines: u32 = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("lines"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as u32;
-            let grep = req.params.as_ref()
+            let grep = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("grep"))
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
             let lines_str = lines.to_string();
             let mut args = vec![
-                "-u", unit,
-                "-n", lines_str.as_str(),
+                "-u",
+                unit,
+                "-n",
+                lines_str.as_str(),
                 "--no-pager",
-                "--output", "short-iso",
+                "--output",
+                "short-iso",
             ];
             if let Some(ref g) = grep {
                 args.push("--grep");
@@ -498,10 +506,19 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "system.logs.units" => {
             // Return list of interesting systemd units
             let units = vec![
-                "nasty-engine", "nasty-metrics", "nginx",
-                "nfs-server", "samba-smbd", "samba-nmbd",
-                "docker", "sshd", "avahi-daemon",
-                "smartd", "nut-driver", "nut-server", "nut-monitor",
+                "nasty-engine",
+                "nasty-metrics",
+                "nginx",
+                "nfs-server",
+                "samba-smbd",
+                "samba-nmbd",
+                "docker",
+                "sshd",
+                "avahi-daemon",
+                "smartd",
+                "nut-driver",
+                "nut-server",
+                "nut-monitor",
             ];
             let mut available = Vec::new();
             for unit in units {
@@ -529,10 +546,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
                 .map(|l| l.to_string())
                 .collect::<Vec<_>>();
-            ok(req, serde_json::json!({
-                "password_auth": password_auth,
-                "keys": keys,
-            }))
+            ok(
+                req,
+                serde_json::json!({
+                    "password_auth": password_auth,
+                    "keys": keys,
+                }),
+            )
         }
         "system.ssh.add_key" => {
             let key = match require_str(req, "key") {
@@ -540,20 +560,33 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(r) => return r,
             };
             if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") {
-                return err(req, "Invalid SSH public key — must start with ssh-rsa, ssh-ed25519, etc.");
+                return err(
+                    req,
+                    "Invalid SSH public key — must start with ssh-rsa, ssh-ed25519, etc.",
+                );
             }
             let _ = tokio::fs::create_dir_all("/root/.ssh").await;
-            let mut existing = tokio::fs::read_to_string("/root/.ssh/authorized_keys").await.unwrap_or_default();
+            let mut existing = tokio::fs::read_to_string("/root/.ssh/authorized_keys")
+                .await
+                .unwrap_or_default();
             if !existing.contains(&key) {
-                if !existing.ends_with('\n') && !existing.is_empty() { existing.push('\n'); }
+                if !existing.ends_with('\n') && !existing.is_empty() {
+                    existing.push('\n');
+                }
                 existing.push_str(&key);
                 existing.push('\n');
                 if let Err(e) = tokio::fs::write("/root/.ssh/authorized_keys", &existing).await {
                     return err(req, format!("write authorized_keys: {e}"));
                 }
                 // Set permissions
-                let _ = tokio::process::Command::new("chmod").args(["600", "/root/.ssh/authorized_keys"]).status().await;
-                let _ = tokio::process::Command::new("chmod").args(["700", "/root/.ssh"]).status().await;
+                let _ = tokio::process::Command::new("chmod")
+                    .args(["600", "/root/.ssh/authorized_keys"])
+                    .status()
+                    .await;
+                let _ = tokio::process::Command::new("chmod")
+                    .args(["700", "/root/.ssh"])
+                    .status()
+                    .await;
             }
             ok(req, "Key added")
         }
@@ -562,8 +595,11 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Ok(k) => k.trim().to_string(),
                 Err(r) => return r,
             };
-            let content = tokio::fs::read_to_string("/root/.ssh/authorized_keys").await.unwrap_or_default();
-            let filtered: String = content.lines()
+            let content = tokio::fs::read_to_string("/root/.ssh/authorized_keys")
+                .await
+                .unwrap_or_default();
+            let filtered: String = content
+                .lines()
                 .filter(|l| l.trim() != key)
                 .map(|l| format!("{l}\n"))
                 .collect();
@@ -573,16 +609,26 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             ok(req, "Key removed")
         }
         "system.ssh.set_password_auth" => {
-            let enabled = req.params.as_ref()
+            let enabled = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("enabled"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             // Check that at least one key exists before disabling password auth
             if !enabled {
-                let keys = tokio::fs::read_to_string("/root/.ssh/authorized_keys").await.unwrap_or_default();
-                let key_count = keys.lines().filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#')).count();
+                let keys = tokio::fs::read_to_string("/root/.ssh/authorized_keys")
+                    .await
+                    .unwrap_or_default();
+                let key_count = keys
+                    .lines()
+                    .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+                    .count();
                 if key_count == 0 {
-                    return err(req, "Cannot disable password authentication without at least one SSH key — you would be locked out");
+                    return err(
+                        req,
+                        "Cannot disable password authentication without at least one SSH key — you would be locked out",
+                    );
                 }
             }
             // Write sshd override file and reload — takes effect immediately
@@ -591,13 +637,22 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             if let Err(e) = tokio::fs::write(
                 "/var/lib/nasty/sshd_override.conf",
                 format!("PasswordAuthentication {val}\n"),
-            ).await {
+            )
+            .await
+            {
                 tracing::warn!("Failed to write sshd override: {e}");
             }
             let _ = tokio::process::Command::new("systemctl")
                 .args(["reload", "sshd"])
-                .status().await;
-            ok(req, format!("Password authentication {}", if enabled { "enabled" } else { "disabled" }))
+                .status()
+                .await;
+            ok(
+                req,
+                format!(
+                    "Password authentication {}",
+                    if enabled { "enabled" } else { "disabled" }
+                ),
+            )
         }
         "system.network.get" => ok(req, state.network.get().await),
         "system.network.update" => {
@@ -623,7 +678,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             let kind = str_param(req, "kind").unwrap_or("net");
             let name = str_param(req, "name");
             let range = str_param(req, "range").unwrap_or("5m");
-            let offset = req.params.as_ref()
+            let offset = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("offset"))
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
@@ -640,7 +697,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 .get(&url)
                 .send()
                 .await
-                .and_then(|r| Ok(r.error_for_status()?))
+                .and_then(|r| r.error_for_status())
             {
                 Ok(resp) => match resp
                     .json::<Vec<nasty_common::metrics_types::ResourceHistory>>()
@@ -691,12 +748,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             nasty_system::settings::reset_acme_status();
             ok(req, "ok")
         }
-        "system.acme.retry" => {
-            match nasty_system::settings::retry_acme().await {
-                Ok(()) => ok(req, "ok"),
-                Err(e) => err(req, e),
-            }
-        }
+        "system.acme.retry" => match nasty_system::settings::retry_acme().await {
+            Ok(()) => ok(req, "ok"),
+            Err(e) => err(req, e),
+        },
 
         // ── Tuning ───────────────────────────────────────────────
         "system.tuning.get" => ok(req, state.tuning.get().await),
@@ -924,7 +979,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                         state.firewall.open(proto).await;
                     }
                     ok(req, v)
-                },
+                }
                 Err(e) => err(req, e),
             },
             Err(r) => r,
@@ -936,56 +991,75 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                         state.firewall.close(proto).await;
                     }
                     ok(req, v)
-                },
+                }
                 Err(e) => err(req, e),
             },
             Err(r) => r,
         },
         "service.base_names.get" => {
-            let iqn = tokio::fs::read_to_string("/var/lib/nasty/iscsi-base-iqn").await
+            let iqn = tokio::fs::read_to_string("/var/lib/nasty/iscsi-base-iqn")
+                .await
                 .unwrap_or_else(|_| "iqn.2137-04.storage.nasty".into());
-            let nqn = tokio::fs::read_to_string("/var/lib/nasty/nvmeof-base-nqn").await
+            let nqn = tokio::fs::read_to_string("/var/lib/nasty/nvmeof-base-nqn")
+                .await
                 .unwrap_or_else(|_| "nqn.2137-04.storage.nasty".into());
-            ok(req, serde_json::json!({ "iqn_prefix": iqn.trim(), "nqn_prefix": nqn.trim() }))
+            ok(
+                req,
+                serde_json::json!({ "iqn_prefix": iqn.trim(), "nqn_prefix": nqn.trim() }),
+            )
         }
         "service.base_names.update" => {
-            if let Some(iqn) = req.params.as_ref().and_then(|p| p.get("iqn_prefix")).and_then(|v| v.as_str()) {
+            if let Some(iqn) = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("iqn_prefix"))
+                .and_then(|v| v.as_str())
+            {
                 let _ = tokio::fs::write("/var/lib/nasty/iscsi-base-iqn", iqn.trim()).await;
             }
-            if let Some(nqn) = req.params.as_ref().and_then(|p| p.get("nqn_prefix")).and_then(|v| v.as_str()) {
+            if let Some(nqn) = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("nqn_prefix"))
+                .and_then(|v| v.as_str())
+            {
                 let _ = tokio::fs::write("/var/lib/nasty/nvmeof-base-nqn", nqn.trim()).await;
             }
             ok(req, "ok")
         }
         "service.rest_server.config" => {
-            let path = tokio::fs::read_to_string("/var/lib/nasty/rest-server-path").await
+            let path = tokio::fs::read_to_string("/var/lib/nasty/rest-server-path")
+                .await
                 .unwrap_or_else(|_| "/var/lib/nasty/rest-server".into());
             ok(req, serde_json::json!({ "path": path.trim() }))
         }
         "service.rest_server.configure" => {
-            let path = match require_str(req, "path") { Ok(s) => s.to_string(), Err(r) => return r };
+            let path = match require_str(req, "path") {
+                Ok(s) => s.to_string(),
+                Err(r) => return r,
+            };
 
             // Create subvolume if path is under /fs/ and doesn't exist
-            if path.starts_with("/fs/") && !std::path::Path::new(&path).exists() {
-                if let Some(rest) = path.strip_prefix("/fs/") {
-                    if let Some((fs_name, subvol_name)) = rest.split_once('/') {
-                        let create_req = nasty_storage::subvolume::CreateSubvolumeRequest {
-                            filesystem: fs_name.to_string(),
-                            name: subvol_name.to_string(),
-                            subvolume_type: nasty_storage::subvolume::SubvolumeType::Filesystem,
-                            volsize_bytes: None,
-                            compression: None,
-                            comments: Some("Backup Server storage".to_string()),
-                            direct_io: None,
-                            foreground_target: None,
-                            background_target: None,
-                            promote_target: None,
-                            metadata_target: None,
-                            data_replicas: None,
-                        };
-                        let _ = state.subvolumes.create(create_req, None).await;
-                    }
-                }
+            if path.starts_with("/fs/")
+                && !std::path::Path::new(&path).exists()
+                && let Some(rest) = path.strip_prefix("/fs/")
+                && let Some((fs_name, subvol_name)) = rest.split_once('/')
+            {
+                let create_req = nasty_storage::subvolume::CreateSubvolumeRequest {
+                    filesystem: fs_name.to_string(),
+                    name: subvol_name.to_string(),
+                    subvolume_type: nasty_storage::subvolume::SubvolumeType::Filesystem,
+                    volsize_bytes: None,
+                    compression: None,
+                    comments: Some("Backup Server storage".to_string()),
+                    direct_io: None,
+                    foreground_target: None,
+                    background_target: None,
+                    promote_target: None,
+                    metadata_target: None,
+                    data_replicas: None,
+                };
+                let _ = state.subvolumes.create(create_req, None).await;
             }
 
             if let Err(e) = tokio::fs::write("/var/lib/nasty/rest-server-path", &path).await {
@@ -995,7 +1069,8 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             // Restart rest-server to pick up new path
             let _ = tokio::process::Command::new("systemctl")
                 .args(["restart", "nasty-rest-server"])
-                .output().await;
+                .output()
+                .await;
 
             ok(req, "ok")
         }
@@ -1005,23 +1080,31 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Ok(s) => s.to_string(),
                 Err(r) => return r,
             };
-            let sources: Vec<String> = req.params.as_ref()
+            let sources: Vec<String> = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("sources"))
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
-            let interfaces: Vec<String> = req.params.as_ref()
+            let interfaces: Vec<String> = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("interfaces"))
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
-            match state.firewall.set_restriction(&service, sources, interfaces).await {
+            match state
+                .firewall
+                .set_restriction(&service, sources, interfaces)
+                .await
+            {
                 Ok(()) => ok(req, "ok"),
                 Err(e) => err(req, e),
             }
-        },
+        }
 
         // ── Alerts ───────────────────────────────────────────────
         "telemetry.send" => {
-            let sent = crate::telemetry::send_report(&state).await;
+            let sent = crate::telemetry::send_report(state).await;
             ok(req, serde_json::json!({ "sent": sent }))
         }
 
@@ -1032,14 +1115,14 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             // open the first WebUI poll after a minute returns instantly.
             {
                 let cache = state.alerts_cache.lock().await;
-                if let Some((ts, ref cached)) = *cache {
-                    if ts.elapsed() < std::time::Duration::from_secs(20) {
-                        return ok(req, cached.clone());
-                    }
+                if let Some((ts, ref cached)) = *cache
+                    && ts.elapsed() < std::time::Duration::from_secs(20)
+                {
+                    return ok(req, cached.clone());
                 }
             }
 
-            let alerts = evaluate_active_alerts(&state).await;
+            let alerts = evaluate_active_alerts(state).await;
             let value = serde_json::to_value(&alerts).unwrap_or_default();
             *state.alerts_cache.lock().await = Some((std::time::Instant::now(), value));
 
@@ -1072,14 +1155,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "notifications.config.get" => {
             ok(req, nasty_system::notifications::NotificationConfig::load())
         }
-        "notifications.config.update" => match parse_params::<nasty_system::notifications::NotificationConfig>(req) {
-            Ok(config) => match config.save().await {
-                Ok(()) => ok(req, "ok"),
+        "notifications.config.update" => {
+            match parse_params::<nasty_system::notifications::NotificationConfig>(req) {
+                Ok(config) => match config.save().await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
                 Err(e) => err(req, e),
-            },
-            Err(e) => err(req, e),
-        },
-        "notifications.test" => match parse_params::<nasty_system::notifications::ChannelType>(req) {
+            }
+        }
+        "notifications.test" => match parse_params::<nasty_system::notifications::ChannelType>(req)
+        {
             Ok(channel) => match nasty_system::notifications::test_channel(&channel).await {
                 Ok(msg) => ok(req, msg),
                 Err(e) => err(req, e),
@@ -1104,7 +1190,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => err(req, e),
         },
         "backup.profile.update" => {
-            let id = match require_str(req, "id") { Ok(s) => s.to_string(), Err(r) => return r };
+            let id = match require_str(req, "id") {
+                Ok(s) => s.to_string(),
+                Err(r) => return r,
+            };
             match parse_params::<nasty_backup::BackupProfile>(req) {
                 Ok(p) => match state.backups.update_profile(&id, p).await {
                     Ok(v) => ok(req, v),
@@ -1129,7 +1218,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(r) => r,
         },
         "backup.run" => {
-            let id = match require_str(req, "id") { Ok(s) => s.to_string(), Err(r) => return r };
+            let id = match require_str(req, "id") {
+                Ok(s) => s.to_string(),
+                Err(r) => return r,
+            };
             // Run in background, return immediately
             let backups = state.backups.clone_for_task();
             tokio::spawn(async move {
@@ -1164,7 +1256,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "fs.get" => match require_str(req, "name") {
             Ok(name) => {
-                if session.filesystem.as_deref().map_or(false, |p| p != name) {
+                if session.filesystem.as_deref().is_some_and(|p| p != name) {
                     err(req, "access denied")
                 } else {
                     match state.filesystems.get(name).await {
@@ -1422,11 +1514,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "subvolume.list" => match require_str(req, "filesystem") {
             Ok(fs_name) => {
-                if session
-                    .filesystem
-                    .as_deref()
-                    .map_or(false, |p| p != fs_name)
-                {
+                if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
                     err(req, "access denied")
                 } else {
                     match state
@@ -1443,11 +1531,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "subvolume.get" => match (require_str(req, "filesystem"), require_str(req, "name")) {
             (Ok(fs_name), Ok(name)) => {
-                if session
-                    .filesystem
-                    .as_deref()
-                    .map_or(false, |p| p != fs_name)
-                {
+                if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
                     err(req, "access denied")
                 } else {
                     match state
@@ -1475,7 +1559,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     if session
                         .filesystem
                         .as_deref()
-                        .map_or(false, |f| f != p.filesystem)
+                        .is_some_and(|f| f != p.filesystem)
                     {
                         err(req, "access denied")
                     } else {
@@ -1495,7 +1579,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     if session
                         .filesystem
                         .as_deref()
-                        .map_or(false, |f| f != p.filesystem)
+                        .is_some_and(|f| f != p.filesystem)
                     {
                         err(req, "access denied")
                     } else if let Some(conflict) =
@@ -1514,11 +1598,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "subvolume.attach" => match (require_str(req, "filesystem"), require_str(req, "name")) {
             (Ok(fs_name), Ok(name)) => {
-                if session
-                    .filesystem
-                    .as_deref()
-                    .map_or(false, |p| p != fs_name)
-                {
+                if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
                     err(req, "access denied")
                 } else {
                     match state
@@ -1535,11 +1615,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "subvolume.detach" => match (require_str(req, "filesystem"), require_str(req, "name")) {
             (Ok(fs_name), Ok(name)) => {
-                if session
-                    .filesystem
-                    .as_deref()
-                    .map_or(false, |p| p != fs_name)
-                {
+                if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
                     err(req, "access denied")
                 } else {
                     match state
@@ -1561,7 +1637,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     if session
                         .filesystem
                         .as_deref()
-                        .map_or(false, |f| f != p.filesystem)
+                        .is_some_and(|f| f != p.filesystem)
                     {
                         err(req, "access denied")
                     } else {
@@ -1581,7 +1657,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     if session
                         .filesystem
                         .as_deref()
-                        .map_or(false, |f| f != p.filesystem)
+                        .is_some_and(|f| f != p.filesystem)
                     {
                         err(req, "access denied")
                     } else {
@@ -1601,7 +1677,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     if session
                         .filesystem
                         .as_deref()
-                        .map_or(false, |f| f != p.filesystem)
+                        .is_some_and(|f| f != p.filesystem)
                     {
                         err(req, "access denied")
                     } else {
@@ -1625,7 +1701,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     if session
                         .filesystem
                         .as_deref()
-                        .map_or(false, |sp| sp != p.filesystem)
+                        .is_some_and(|sp| sp != p.filesystem)
                     {
                         err(req, "access denied")
                     } else {
@@ -1648,7 +1724,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                     if session
                         .filesystem
                         .as_deref()
-                        .map_or(false, |sp| sp != p.filesystem)
+                        .is_some_and(|sp| sp != p.filesystem)
                     {
                         err(req, "access denied")
                     } else {
@@ -1697,11 +1773,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         // ── Snapshots ───────────────────────────────────────────
         "snapshot.list" => match require_str(req, "filesystem") {
             Ok(fs_name) => {
-                if session
-                    .filesystem
-                    .as_deref()
-                    .map_or(false, |p| p != fs_name)
-                {
+                if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
                     err(req, "access denied")
                 } else {
                     match state
@@ -1754,7 +1826,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(r) => r,
         },
         "share.nfs.create" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nfs).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nfs).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -1766,7 +1840,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nfs.update" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nfs).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nfs).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -1778,7 +1854,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nfs.delete" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nfs).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nfs).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -1803,7 +1881,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(r) => r,
         },
         "share.smb.create" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -1815,7 +1895,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.smb.update" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -1827,7 +1909,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.smb.delete" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -1845,7 +1929,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => err(req, e),
         },
         "smb.user.create" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await
+            {
                 return r;
             }
             match parse_params::<nasty_sharing::smb::CreateSmbUserRequest>(req) {
@@ -1857,7 +1943,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "smb.user.delete" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await
+            {
                 return r;
             }
             match require_str(req, "username") {
@@ -1869,7 +1957,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "smb.user.set_password" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Smb).await
+            {
                 return r;
             }
             #[derive(Deserialize)]
@@ -1891,27 +1981,26 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
         },
-        "smb.group.create" => {
-            match require_str(req, "name") {
-                Ok(name) => match state.smb.create_group(name).await {
-                    Ok(g) => ok(req, g),
-                    Err(e) => err(req, e),
-                },
-                Err(r) => r,
-            }
-        }
-        "smb.group.delete" => {
-            match require_str(req, "name") {
-                Ok(name) => match state.smb.delete_group(name).await {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
-                },
-                Err(r) => r,
-            }
-        }
+        "smb.group.create" => match require_str(req, "name") {
+            Ok(name) => match state.smb.create_group(name).await {
+                Ok(g) => ok(req, g),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "smb.group.delete" => match require_str(req, "name") {
+            Ok(name) => match state.smb.delete_group(name).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         "smb.group.add_member" => {
             #[derive(Deserialize)]
-            struct P { group: String, user: String }
+            struct P {
+                group: String,
+                user: String,
+            }
             match parse_params::<P>(req) {
                 Ok(p) => match state.smb.add_group_member(&p.group, &p.user).await {
                     Ok(()) => ok(req, "ok"),
@@ -1922,7 +2011,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "smb.group.remove_member" => {
             #[derive(Deserialize)]
-            struct P { group: String, user: String }
+            struct P {
+                group: String,
+                user: String,
+            }
             match parse_params::<P>(req) {
                 Ok(p) => match state.smb.remove_group_member(&p.group, &p.user).await {
                     Ok(()) => ok(req, "ok"),
@@ -1945,17 +2037,18 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(r) => r,
         },
         "share.iscsi.create" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
                 return r;
             }
             match parse_params::<nasty_sharing::iscsi::CreateTargetRequest>(req) {
                 Ok(p) => {
-                    if let Some(ref dp) = p.device_path {
-                        if let Some(conflict) =
+                    if let Some(ref dp) = p.device_path
+                        && let Some(conflict) =
                             check_block_device_conflict(state, dp, "iscsi").await
-                        {
-                            return err(req, conflict);
-                        }
+                    {
+                        return err(req, conflict);
                     }
                     match state.iscsi.create(p).await {
                         Ok(v) => ok(req, v),
@@ -1966,7 +2059,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.iscsi.delete" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -1978,7 +2073,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.iscsi.add_lun" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
                 return r;
             }
             match parse_params::<nasty_sharing::iscsi::AddLunRequest>(req) {
@@ -1998,7 +2095,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.iscsi.remove_lun" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2010,7 +2109,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.iscsi.add_acl" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2022,7 +2123,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.iscsi.remove_acl" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2047,38 +2150,41 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(r) => r,
         },
         "share.nvmeof.create" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await
+            {
                 return r;
             }
             match parse_params::<nasty_sharing::nvmeof::CreateSubsystemRequest>(req) {
                 Ok(p) => {
-                    if let Some(ref device_path) = p.device_path {
-                        if let Some(conflict) =
+                    if let Some(ref device_path) = p.device_path
+                        && let Some(conflict) =
                             check_block_device_conflict(state, device_path, "nvmeof").await
-                        {
-                            return err(req, conflict);
-                        }
+                    {
+                        return err(req, conflict);
                     }
                     match state.nvmeof.create(p).await {
                         Ok(v) => {
                             // If Tailscale is connected, add a port for its IP too
                             if !v.ports.is_empty() {
                                 let ts = state.tailscale.get().await;
-                                if ts.connected {
-                                    if let Some(ref ip) = ts.ip {
-                                        let nvmeof = state.nvmeof.clone();
-                                        let id = v.id.clone();
-                                        let ip = ip.clone();
-                                        tokio::spawn(async move {
-                                            let _ = nvmeof.add_port(nasty_sharing::nvmeof::AddPortRequest {
+                                if ts.connected
+                                    && let Some(ref ip) = ts.ip
+                                {
+                                    let nvmeof = state.nvmeof.clone();
+                                    let id = v.id.clone();
+                                    let ip = ip.clone();
+                                    tokio::spawn(async move {
+                                        let _ = nvmeof
+                                            .add_port(nasty_sharing::nvmeof::AddPortRequest {
                                                 subsystem_id: id,
                                                 transport: Some("tcp".to_string()),
                                                 addr: Some(ip),
                                                 service_id: Some(4420),
                                                 addr_family: Some("ipv4".to_string()),
-                                            }).await;
-                                        });
-                                    }
+                                            })
+                                            .await;
+                                    });
                                 }
                             }
                             ok(req, v)
@@ -2090,7 +2196,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nvmeof.delete" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2102,7 +2210,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nvmeof.add_namespace" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await
+            {
                 return r;
             }
             match parse_params::<nasty_sharing::nvmeof::AddNamespaceRequest>(req) {
@@ -2122,7 +2232,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nvmeof.remove_namespace" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2134,7 +2246,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nvmeof.add_port" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2146,7 +2260,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nvmeof.remove_port" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2158,7 +2274,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nvmeof.add_host" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2170,7 +2288,9 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
         }
         "share.nvmeof.remove_host" => {
-            if let Some(r) = require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Nvmeof).await
+            {
                 return r;
             }
             match parse_params(req) {
@@ -2183,9 +2303,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
 
         // ── Virtual Machines ───────────────────────────────────
-        "vm.capabilities" => match state.vms.capabilities().await {
-            c => ok(req, c),
-        },
+        "vm.capabilities" => ok(req, state.vms.capabilities().await),
         "vm.list" => match state.vms.list().await {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
@@ -2517,6 +2635,7 @@ async fn require_protocol(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn require_str<'a>(req: &'a Request, key: &str) -> Result<&'a str, Response> {
     str_param(req, key).ok_or_else(|| {
         Response::error(
@@ -2552,31 +2671,31 @@ async fn check_block_device_conflict(
     device_path: &str,
     exclude_protocol: &str,
 ) -> Option<String> {
-    if exclude_protocol != "iscsi" {
-        if let Ok(targets) = state.iscsi.list().await {
-            for target in &targets {
-                for lun in &target.luns {
-                    if lun.backstore_path == device_path {
-                        return Some(format!(
-                            "device {} is already exported via iSCSI (target '{}')",
-                            device_path, target.iqn
-                        ));
-                    }
+    if exclude_protocol != "iscsi"
+        && let Ok(targets) = state.iscsi.list().await
+    {
+        for target in &targets {
+            for lun in &target.luns {
+                if lun.backstore_path == device_path {
+                    return Some(format!(
+                        "device {} is already exported via iSCSI (target '{}')",
+                        device_path, target.iqn
+                    ));
                 }
             }
         }
     }
 
-    if exclude_protocol != "nvmeof" {
-        if let Ok(subsystems) = state.nvmeof.list().await {
-            for sub in &subsystems {
-                for ns in &sub.namespaces {
-                    if ns.device_path == device_path {
-                        return Some(format!(
-                            "device {} is already exported via NVMe-oF (subsystem '{}')",
-                            device_path, sub.nqn
-                        ));
-                    }
+    if exclude_protocol != "nvmeof"
+        && let Ok(subsystems) = state.nvmeof.list().await
+    {
+        for sub in &subsystems {
+            for ns in &sub.namespaces {
+                if ns.device_path == device_path {
+                    return Some(format!(
+                        "device {} is already exported via NVMe-oF (subsystem '{}')",
+                        device_path, sub.nqn
+                    ));
                 }
             }
         }
@@ -2669,10 +2788,13 @@ async fn ensure_images_subvolume(state: &AppState, filesystem: &str) -> Result<S
 
     // Migrate legacy path
     if !std::path::Path::new(&images_path).exists() && std::path::Path::new(&legacy_path).exists() {
-        tokio::fs::create_dir_all(format!("{mount_point}/vms")).await
+        tokio::fs::create_dir_all(format!("{mount_point}/vms"))
+            .await
             .map_err(|e| format!("failed to create vms dir: {e}"))?;
         if let Err(e) = tokio::fs::rename(&legacy_path, &images_path).await {
-            tracing::warn!("Failed to migrate VM images from {legacy_path}: {e}, using legacy path");
+            tracing::warn!(
+                "Failed to migrate VM images from {legacy_path}: {e}, using legacy path"
+            );
             return Ok(legacy_path);
         }
         tracing::info!("Migrated VM images from {legacy_path} to {images_path}");
@@ -2797,13 +2919,13 @@ async fn check_filesystem_in_use(state: &AppState, name: &str) -> Option<String>
     // Check if apps runtime uses this filesystem
     if state.apps.is_enabled() {
         let config = nasty_apps::AppsService::load_config();
-        if let Some(ref path) = config.storage_path {
-            if path.starts_with(&format!("/fs/{name}/")) {
-                return Some(format!(
-                    "filesystem '{}' cannot be destroyed: apps runtime storage is on this filesystem. Disable Apps first.",
-                    name
-                ));
-            }
+        if let Some(ref path) = config.storage_path
+            && path.starts_with(&format!("/fs/{name}/"))
+        {
+            return Some(format!(
+                "filesystem '{}' cannot be destroyed: apps runtime storage is on this filesystem. Disable Apps first.",
+                name
+            ));
         }
     }
 
@@ -2826,15 +2948,15 @@ async fn resolve_vm_disks(
     let mut resolved = Vec::new();
     for disk in &vm.disks {
         for sv in &all_subvols {
-            if let Some(ref bd) = sv.block_device {
-                if bd == &disk.path {
-                    resolved.push(nasty_vm::VmDiskSubvolume {
-                        filesystem: sv.filesystem.clone(),
-                        subvolume: sv.name.clone(),
-                        device: disk.path.clone(),
-                    });
-                    break;
-                }
+            if let Some(ref bd) = sv.block_device
+                && bd == &disk.path
+            {
+                resolved.push(nasty_vm::VmDiskSubvolume {
+                    filesystem: sv.filesystem.clone(),
+                    subvolume: sv.name.clone(),
+                    device: disk.path.clone(),
+                });
+                break;
             }
         }
     }
@@ -2974,24 +3096,24 @@ async fn vm_clone(
 /// Errors fetching individual signals are swallowed and the corresponding
 /// alert family is treated as "no data" so a metrics-service blip doesn't
 /// silence everything else.
-pub(crate) async fn evaluate_active_alerts(state: &AppState) -> Vec<nasty_system::alerts::ActiveAlert> {
+pub(crate) async fn evaluate_active_alerts(
+    state: &AppState,
+) -> Vec<nasty_system::alerts::ActiveAlert> {
     use nasty_system::alerts;
 
     // System stats — required for CPU/memory/temp rules. If the metrics
     // service is down, evaluating those rules without data is meaningless;
     // return an empty alert set rather than fabricating false positives.
-    let stats = match fetch_metrics_json::<nasty_system::SystemStats>(
-        &state.metrics_client,
-        "/api/stats",
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("alert evaluation: stats fetch failed: {e}");
-            return Vec::new();
-        }
-    };
+    let stats =
+        match fetch_metrics_json::<nasty_system::SystemStats>(&state.metrics_client, "/api/stats")
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("alert evaluation: stats fetch failed: {e}");
+                return Vec::new();
+            }
+        };
 
     let filesystems = state.filesystems.list().await.unwrap_or_default();
     let disk_health: Vec<nasty_system::DiskHealth> = if state
@@ -3037,10 +3159,7 @@ pub(crate) async fn evaluate_active_alerts(state: &AppState) -> Vec<nasty_system
                 .map(|d| alerts::BcachefsDeviceHealth {
                     path: d.path.clone(),
                     state: d.state.clone().unwrap_or_else(|| "rw".into()),
-                    has_errors: d
-                        .has_data
-                        .as_deref()
-                        .map_or(false, |s| s.contains("error")),
+                    has_errors: d.has_data.as_deref().is_some_and(|s| s.contains("error")),
                 })
                 .collect();
 
@@ -3141,10 +3260,10 @@ async fn read_bcachefs_error_count(uuid: &str) -> u64 {
     let mut total = 0u64;
     for name in ["io_read_errors", "io_write_errors", "io_checksum_errors"] {
         let path = format!("{counters_dir}/{name}");
-        if let Ok(val) = tokio::fs::read_to_string(&path).await {
-            if let Ok(n) = val.trim().parse::<u64>() {
-                total += n;
-            }
+        if let Ok(val) = tokio::fs::read_to_string(&path).await
+            && let Ok(n) = val.trim().parse::<u64>()
+        {
+            total += n;
         }
     }
     total

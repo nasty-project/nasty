@@ -142,7 +142,10 @@ impl KernelErrorCollector {
         let lines = match output {
             Ok(o) if o.status.success() => {
                 let reader = BufReader::new(&o.stdout[..]);
-                reader.lines().collect::<Result<Vec<_>, _>>().unwrap_or_default()
+                reader
+                    .lines()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap_or_default()
             }
             _ => return self.build_summary(),
         };

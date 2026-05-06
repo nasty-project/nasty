@@ -158,14 +158,24 @@ impl RateLimitState {
     }
 
     fn user_failures(&self, username: &str, now: u64) -> usize {
-        self.by_user.get(username)
-            .map(|v| v.iter().filter(|&&t| now.saturating_sub(t) < LOCKOUT_WINDOW_SECS).count())
+        self.by_user
+            .get(username)
+            .map(|v| {
+                v.iter()
+                    .filter(|&&t| now.saturating_sub(t) < LOCKOUT_WINDOW_SECS)
+                    .count()
+            })
             .unwrap_or(0)
     }
 
     fn ip_failures(&self, ip: &str, now: u64) -> usize {
-        self.by_ip.get(ip)
-            .map(|v| v.iter().filter(|&&t| now.saturating_sub(t) < IP_LOCKOUT_WINDOW_SECS).count())
+        self.by_ip
+            .get(ip)
+            .map(|v| {
+                v.iter()
+                    .filter(|&&t| now.saturating_sub(t) < IP_LOCKOUT_WINDOW_SECS)
+                    .count()
+            })
             .unwrap_or(0)
     }
 }
@@ -214,7 +224,12 @@ impl AuthService {
     }
 
     /// Authenticate with username/password, returns a session token
-    pub async fn login(&self, username: &str, password: &str, client_ip: &str) -> Result<String, AuthError> {
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+        client_ip: &str,
+    ) -> Result<String, AuthError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -232,7 +247,12 @@ impl AuthService {
                 tracing::warn!(
                     "Login blocked from {client_ip}: {ip_fails} failed attempts in the last hour"
                 );
-                audit("login_ip_locked", username, client_ip, &format!("{ip_fails} failed attempts"));
+                audit(
+                    "login_ip_locked",
+                    username,
+                    client_ip,
+                    &format!("{ip_fails} failed attempts"),
+                );
                 return Err(AuthError::AccountLocked);
             }
         }
@@ -259,9 +279,16 @@ impl AuthService {
                 } else {
                     tracing::warn!(
                         "Login blocked for '{}': {} failed attempts in last {} minutes",
-                        username, user_fails, LOCKOUT_WINDOW_SECS / 60
+                        username,
+                        user_fails,
+                        LOCKOUT_WINDOW_SECS / 60
                     );
-                    audit("login_locked", username, client_ip, &format!("{user_fails} failed attempts"));
+                    audit(
+                        "login_locked",
+                        username,
+                        client_ip,
+                        &format!("{user_fails} failed attempts"),
+                    );
                     return Err(AuthError::AccountLocked);
                 }
             }
@@ -287,7 +314,12 @@ impl AuthService {
         let hash = match user.password_hash.as_deref() {
             Some(h) => h,
             None => {
-                audit("login_failed", username, client_ip, "no local password (OIDC-only user)");
+                audit(
+                    "login_failed",
+                    username,
+                    client_ip,
+                    "no local password (OIDC-only user)",
+                );
                 self.record_failed_attempt(username, client_ip, now).await;
                 return Err(AuthError::InvalidCredentials);
             }
@@ -319,7 +351,9 @@ impl AuthService {
         };
 
         // Prune expired sessions while we hold the write lock
-        state.sessions.retain(|s| now - s.created_at <= SESSION_TTL_SECS);
+        state
+            .sessions
+            .retain(|s| now - s.created_at <= SESSION_TTL_SECS);
 
         state.sessions.push(session);
         save_state(&state).await?;
@@ -354,7 +388,10 @@ impl AuthService {
             None => {
                 audit(
                     "oidc_login_denied_no_role",
-                    identity.preferred_username.as_deref().unwrap_or(&identity.subject),
+                    identity
+                        .preferred_username
+                        .as_deref()
+                        .unwrap_or(&identity.subject),
                     client_ip,
                     &format!("issuer={} sub={}", identity.issuer, identity.subject),
                 );
@@ -373,7 +410,10 @@ impl AuthService {
             if !auto_provision {
                 audit(
                     "oidc_login_failed",
-                    identity.preferred_username.as_deref().unwrap_or(&identity.subject),
+                    identity
+                        .preferred_username
+                        .as_deref()
+                        .unwrap_or(&identity.subject),
                     client_ip,
                     "user not provisioned and auto_provision disabled",
                 );
@@ -393,7 +433,10 @@ impl AuthService {
                 "oidc_user_provisioned",
                 &username,
                 client_ip,
-                &format!("issuer={} sub={} role={:?}", identity.issuer, identity.subject, role),
+                &format!(
+                    "issuer={} sub={} role={:?}",
+                    identity.issuer, identity.subject, role
+                ),
             );
         }
 
@@ -422,7 +465,9 @@ impl AuthService {
             client_ip: Some(client_ip.to_string()),
         };
 
-        state.sessions.retain(|s| now - s.created_at <= SESSION_TTL_SECS);
+        state
+            .sessions
+            .retain(|s| now - s.created_at <= SESSION_TTL_SECS);
         state.sessions.push(session);
         save_state(&state).await?;
 
@@ -451,38 +496,54 @@ impl AuthService {
                 return Err(AuthError::TokenExpired);
             }
             // Verify client IP matches the one that created this session
-            if let Some(ref bound_ip) = session.client_ip {
-                if bound_ip != client_ip {
-                    tracing::warn!(
-                        "Session for '{}' rejected: IP mismatch (bound={}, request={})",
-                        session.username, bound_ip, client_ip
-                    );
-                    audit("session_ip_mismatch", &session.username, client_ip, &format!("bound={bound_ip}"));
-                    return Err(AuthError::InvalidToken);
-                }
+            if let Some(ref bound_ip) = session.client_ip
+                && bound_ip != client_ip
+            {
+                tracing::warn!(
+                    "Session for '{}' rejected: IP mismatch (bound={}, request={})",
+                    session.username,
+                    bound_ip,
+                    client_ip
+                );
+                audit(
+                    "session_ip_mismatch",
+                    &session.username,
+                    client_ip,
+                    &format!("bound={bound_ip}"),
+                );
+                return Err(AuthError::InvalidToken);
             }
             return Ok(session.clone());
         }
         // Check long-lived API tokens — SHA-256 comparison (tokens are high-entropy,
         // don't need Argon2's brute-force resistance, and Argon2 is too slow for O(n) scan)
         let incoming_hash = hash_token(token);
-        let t = state.api_tokens.iter()
+        let t = state
+            .api_tokens
+            .iter()
             .find(|t| ct_eq_str(&t.token, &incoming_hash))
             .ok_or(AuthError::InvalidToken)?;
 
-        if let Some(exp) = t.expires_at {
-            if now >= exp {
-                return Err(AuthError::TokenExpired);
-            }
+        if let Some(exp) = t.expires_at
+            && now >= exp
+        {
+            return Err(AuthError::TokenExpired);
         }
 
         // Check IP allowlist if configured
         if !t.allowed_ips.is_empty() && !t.allowed_ips.iter().any(|ip| ip == client_ip) {
             tracing::warn!(
                 "API token '{}' rejected: IP {} not in allowed list {:?}",
-                t.name, client_ip, t.allowed_ips
+                t.name,
+                client_ip,
+                t.allowed_ips
             );
-            audit("token_ip_rejected", &t.name, client_ip, &format!("allowed={:?}", t.allowed_ips));
+            audit(
+                "token_ip_rejected",
+                &t.name,
+                client_ip,
+                &format!("allowed={:?}", t.allowed_ips),
+            );
             return Err(AuthError::InvalidToken);
         }
 
@@ -491,7 +552,11 @@ impl AuthService {
             username: t.name.clone(),
             role: t.role.clone(),
             filesystem: t.filesystem.clone(),
-            owner: if t.role == Role::Operator { Some(t.name.clone()) } else { None },
+            owner: if t.role == Role::Operator {
+                Some(t.name.clone())
+            } else {
+                None
+            },
             created_at: t.created_at,
             must_change_password: false,
             client_ip: None,
@@ -541,7 +606,12 @@ impl AuthService {
         state.api_tokens.push(stored);
         save_state(&state).await?;
 
-        audit("token_created", &session.username, session.client_ip.as_deref().unwrap_or(""), &format!("name={name}"));
+        audit(
+            "token_created",
+            &session.username,
+            session.client_ip.as_deref().unwrap_or(""),
+            &format!("name={name}"),
+        );
         info!("Created API token '{name}'");
 
         // Return the raw token to the caller — shown only once, never stored
@@ -579,11 +649,7 @@ impl AuthService {
     }
 
     /// Delete an API token by ID (admin only)
-    pub async fn delete_api_token(
-        &self,
-        session: &Session,
-        id: &str,
-    ) -> Result<(), AuthError> {
+    pub async fn delete_api_token(&self, session: &Session, id: &str) -> Result<(), AuthError> {
         if session.role != Role::Admin {
             return Err(AuthError::Forbidden);
         }
@@ -596,7 +662,12 @@ impl AuthService {
         }
         save_state(&state).await?;
 
-        audit("token_deleted", &session.username, session.client_ip.as_deref().unwrap_or(""), &format!("id={id}"));
+        audit(
+            "token_deleted",
+            &session.username,
+            session.client_ip.as_deref().unwrap_or(""),
+            &format!("id={id}"),
+        );
         info!("Deleted API token '{id}'");
         Ok(())
     }
@@ -645,7 +716,12 @@ impl AuthService {
 
         save_state(&state).await?;
 
-        audit("password_changed", &session.username, session.client_ip.as_deref().unwrap_or(""), &format!("target={username}"));
+        audit(
+            "password_changed",
+            &session.username,
+            session.client_ip.as_deref().unwrap_or(""),
+            &format!("target={username}"),
+        );
         info!("Password changed for user '{username}'");
         Ok(())
     }
@@ -671,7 +747,12 @@ impl AuthService {
             return Err(AuthError::UserExists);
         }
 
-        audit("user_created", &session.username, session.client_ip.as_deref().unwrap_or(""), &format!("target={username}, role={role:?}"));
+        audit(
+            "user_created",
+            &session.username,
+            session.client_ip.as_deref().unwrap_or(""),
+            &format!("target={username}, role={role:?}"),
+        );
         state.users.push(User {
             username: username.to_string(),
             password_hash: Some(hash_password(password)?),
@@ -687,11 +768,7 @@ impl AuthService {
     }
 
     /// Delete a user (admin only, cannot delete self)
-    pub async fn delete_user(
-        &self,
-        session: &Session,
-        username: &str,
-    ) -> Result<(), AuthError> {
+    pub async fn delete_user(&self, session: &Session, username: &str) -> Result<(), AuthError> {
         if session.role != Role::Admin {
             return Err(AuthError::Forbidden);
         }
@@ -710,7 +787,12 @@ impl AuthService {
         state.sessions.retain(|s| s.username != username);
         save_state(&state).await?;
 
-        audit("user_deleted", &session.username, session.client_ip.as_deref().unwrap_or(""), &format!("target={username}"));
+        audit(
+            "user_deleted",
+            &session.username,
+            session.client_ip.as_deref().unwrap_or(""),
+            &format!("target={username}"),
+        );
         info!("Deleted user '{username}'");
         Ok(())
     }
@@ -850,7 +932,9 @@ pub fn audit(event: &str, user: &str, ip: &str, detail: &str) {
 
 /// Read audit log entries, most recent first.
 pub async fn read_audit_log(limit: usize) -> Vec<serde_json::Value> {
-    let content = tokio::fs::read_to_string(AUDIT_LOG_PATH).await.unwrap_or_default();
+    let content = tokio::fs::read_to_string(AUDIT_LOG_PATH)
+        .await
+        .unwrap_or_default();
     let mut entries: Vec<serde_json::Value> = content
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
@@ -864,8 +948,8 @@ fn hash_password(password: &str) -> Result<String, AuthError> {
     // Generate 16 random bytes for salt, encode as base64ct for SaltString
     let mut salt_bytes = [0u8; 16];
     rand::fill(&mut salt_bytes);
-    let salt = SaltString::encode_b64(&salt_bytes)
-        .map_err(|e| AuthError::HashError(e.to_string()))?;
+    let salt =
+        SaltString::encode_b64(&salt_bytes).map_err(|e| AuthError::HashError(e.to_string()))?;
     let argon2 = Argon2::default();
     let hash = argon2
         .hash_password(password.as_bytes(), &salt)
@@ -897,7 +981,7 @@ fn ct_eq_str(a: &str, b: &str) -> bool {
 /// SHA-256 hash for API tokens. Tokens are 32 random bytes — high entropy,
 /// no need for Argon2's brute-force resistance. Instant O(1) comparison.
 fn hash_token(token: &str) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     format!("sha256:{:x}", hasher.finalize())
@@ -918,7 +1002,11 @@ fn pick_username(existing: &[User], identity: &crate::auth_oidc::OidcIdentity) -
         })
         .unwrap_or_else(|| identity.subject.clone());
     let base = base.trim().to_string();
-    let base = if base.is_empty() { identity.subject.clone() } else { base };
+    let base = if base.is_empty() {
+        identity.subject.clone()
+    } else {
+        base
+    };
     if !existing.iter().any(|u| u.username == base) {
         return base;
     }
@@ -1060,10 +1148,8 @@ mod tests {
             "alice".to_string(),
             vec![now - LOCKOUT_WINDOW_SECS - 100, now - 5],
         );
-        rl.by_user.insert(
-            "bob".to_string(),
-            vec![now - LOCKOUT_WINDOW_SECS - 100],
-        );
+        rl.by_user
+            .insert("bob".to_string(), vec![now - LOCKOUT_WINDOW_SECS - 100]);
         rl.by_ip.insert(
             "1.2.3.4".to_string(),
             vec![now - IP_LOCKOUT_WINDOW_SECS - 1],

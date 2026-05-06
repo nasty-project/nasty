@@ -14,15 +14,13 @@ const NIX_PATH: &str = "/etc/nixos/networking.nix";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum IpMethod {
     Dhcp,
     Static,
     Slaac,
+    #[default]
     Disabled,
-}
-
-impl Default for IpMethod {
-    fn default() -> Self { Self::Disabled }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -48,7 +46,9 @@ pub struct InterfaceConfig {
     pub mtu: Option<u16>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -133,8 +133,16 @@ pub struct NetworkState {
 
 pub struct NetworkService;
 
+impl Default for NetworkService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkService {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     pub async fn get(&self) -> NetworkState {
         let config = load_config().await;
@@ -166,7 +174,8 @@ impl NetworkService {
         // Persist JSON
         let json = serde_json::to_string_pretty(&config)
             .map_err(|e| format!("serialization error: {e}"))?;
-        tokio::fs::write(JSON_PATH, &json).await
+        tokio::fs::write(JSON_PATH, &json)
+            .await
             .map_err(|e| format!("failed to write {JSON_PATH}: {e}"))?;
 
         // Generate networking.nix
@@ -178,8 +187,12 @@ impl NetworkService {
         // Apply immediately
         apply_config(&config).await?;
 
-        info!("Network config updated ({} interfaces, {} bonds, {} VLANs)",
-            config.interfaces.len(), config.bonds.len(), config.vlans.len());
+        info!(
+            "Network config updated ({} interfaces, {} bonds, {} VLANs)",
+            config.interfaces.len(),
+            config.bonds.len(),
+            config.vlans.len()
+        );
         Ok(())
     }
 
@@ -190,13 +203,10 @@ impl NetworkService {
 }
 
 fn validate_ip_config(ip: &IpConfig, label: &str) -> Result<(), String> {
-    match ip.method {
-        IpMethod::Static => {
-            if ip.addresses.is_empty() {
-                return Err(format!("{label} static mode requires at least one address"));
-            }
-        }
-        _ => {}
+    if let IpMethod::Static = ip.method
+        && ip.addresses.is_empty()
+    {
+        return Err(format!("{label} static mode requires at least one address"));
     }
     Ok(())
 }
@@ -218,19 +228,28 @@ async fn load_config() -> NetworkConfig {
 async fn enumerate_interfaces() -> Vec<LiveInterface> {
     let mut result = Vec::new();
     let sys_net = std::path::Path::new("/sys/class/net");
-    let Ok(entries) = std::fs::read_dir(sys_net) else { return result };
+    let Ok(entries) = std::fs::read_dir(sys_net) else {
+        return result;
+    };
 
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         // Skip loopback and Docker/container interfaces
-        if name == "lo" || name.starts_with("docker") || name.starts_with("veth")
-            || name.starts_with("br-") || name.starts_with("cni") {
+        if name == "lo"
+            || name.starts_with("docker")
+            || name.starts_with("veth")
+            || name.starts_with("br-")
+            || name.starts_with("cni")
+        {
             continue;
         }
 
         let path = entry.path();
         let read_file = |f: &str| -> String {
-            std::fs::read_to_string(path.join(f)).unwrap_or_default().trim().to_string()
+            std::fs::read_to_string(path.join(f))
+                .unwrap_or_default()
+                .trim()
+                .to_string()
         };
 
         let mac = read_file("address");
@@ -239,7 +258,10 @@ async fn enumerate_interfaces() -> Vec<LiveInterface> {
         let up = operstate == "up" || operstate == "unknown";
         let carrier = read_file("carrier") == "1";
         let mtu: u32 = read_file("mtu").parse().unwrap_or(1500);
-        let speed: Option<u32> = read_file("speed").parse().ok().filter(|&s: &u32| s > 0 && s < 100_000);
+        let speed: Option<u32> = read_file("speed")
+            .parse()
+            .ok()
+            .filter(|&s: &u32| s > 0 && s < 100_000);
 
         // Detect interface type from sysfs
         let tun_flags = read_file("tun_flags");
@@ -247,7 +269,12 @@ async fn enumerate_interfaces() -> Vec<LiveInterface> {
 
         let kind = if path.join("bonding").is_dir() {
             "bond"
-        } else if !tun_flags.is_empty() || name.starts_with("tun") || name.starts_with("tap") || name.starts_with("tailscale") || name.starts_with("wg") {
+        } else if !tun_flags.is_empty()
+            || name.starts_with("tun")
+            || name.starts_with("tap")
+            || name.starts_with("tailscale")
+            || name.starts_with("wg")
+        {
             "tunnel"
         } else if dev_type == "772" {
             "vlan"
@@ -312,15 +339,25 @@ async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
     for bond in &config.bonds {
         // Create bond if it doesn't exist
         if !std::path::Path::new(&format!("/sys/class/net/{}", bond.name)).exists() {
-            run_ip(&["link", "add", &bond.name, "type", "bond", "mode", bond.mode.to_kernel()]).await
-                .map_err(|e| format!("create bond {}: {e}", bond.name))?;
+            run_ip(&[
+                "link",
+                "add",
+                &bond.name,
+                "type",
+                "bond",
+                "mode",
+                bond.mode.to_kernel(),
+            ])
+            .await
+            .map_err(|e| format!("create bond {}: {e}", bond.name))?;
         }
         // Enslave members
         for member in &bond.members {
             let _ = run_ip(&["link", "set", member, "down"]).await;
             let _ = run_ip(&["link", "set", member, "master", &bond.name]).await;
         }
-        run_ip(&["link", "set", &bond.name, "up"]).await
+        run_ip(&["link", "set", &bond.name, "up"])
+            .await
             .map_err(|e| format!("bring up bond {}: {e}", bond.name))?;
         apply_ip_config(&bond.name, &bond.ipv4, false).await?;
         apply_ip_config(&bond.name, &bond.ipv6, true).await?;
@@ -330,11 +367,23 @@ async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
     for vlan in &config.vlans {
         let vlan_name = format!("{}.{}", vlan.parent, vlan.vlan_id);
         if !std::path::Path::new(&format!("/sys/class/net/{vlan_name}")).exists() {
-            run_ip(&["link", "add", "link", &vlan.parent, "name", &vlan_name,
-                     "type", "vlan", "id", &vlan.vlan_id.to_string()]).await
-                .map_err(|e| format!("create vlan {vlan_name}: {e}"))?;
+            run_ip(&[
+                "link",
+                "add",
+                "link",
+                &vlan.parent,
+                "name",
+                &vlan_name,
+                "type",
+                "vlan",
+                "id",
+                &vlan.vlan_id.to_string(),
+            ])
+            .await
+            .map_err(|e| format!("create vlan {vlan_name}: {e}"))?;
         }
-        run_ip(&["link", "set", &vlan_name, "up"]).await
+        run_ip(&["link", "set", &vlan_name, "up"])
+            .await
             .map_err(|e| format!("bring up vlan {vlan_name}: {e}"))?;
         apply_ip_config(&vlan_name, &vlan.ipv4, false).await?;
         apply_ip_config(&vlan_name, &vlan.ipv6, true).await?;
@@ -346,7 +395,8 @@ async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
             let _ = run_ip(&["link", "set", &iface.name, "down"]).await;
             continue;
         }
-        run_ip(&["link", "set", &iface.name, "up"]).await
+        run_ip(&["link", "set", &iface.name, "up"])
+            .await
             .map_err(|e| format!("bring up {}: {e}", iface.name))?;
         if let Some(mtu) = iface.mtu {
             let _ = run_ip(&["link", "set", &iface.name, "mtu", &mtu.to_string()]).await;
@@ -358,7 +408,9 @@ async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
     // Apply DNS via resolvconf (NixOS manages /etc/resolv.conf — writing it
     // directly causes "signature mismatch" errors on the next rebuild).
     if !config.dns.is_empty() {
-        let resolv: String = config.dns.iter()
+        let resolv: String = config
+            .dns
+            .iter()
             .map(|ns| format!("nameserver {ns}\n"))
             .collect();
         use tokio::io::AsyncWriteExt;
@@ -370,10 +422,14 @@ async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("resolvconf: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(resolv.as_bytes()).await
+            stdin
+                .write_all(resolv.as_bytes())
+                .await
                 .map_err(|e| format!("resolvconf stdin: {e}"))?;
         }
-        let output = child.wait_with_output().await
+        let output = child
+            .wait_with_output()
+            .await
             .map_err(|e| format!("resolvconf wait: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -392,7 +448,8 @@ async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), Str
                 // Restart DHCP for this interface
                 let _ = tokio::process::Command::new("systemctl")
                     .args(["restart", "dhcpcd"])
-                    .status().await;
+                    .status()
+                    .await;
             }
             // DHCPv6 is typically handled by dhcpcd or systemd-networkd
         }
@@ -401,12 +458,14 @@ async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), Str
             let _ = run_ip(&[flag, "addr", "flush", "dev", iface]).await;
             // Add configured addresses
             for addr in &ip.addresses {
-                run_ip(&[flag, "addr", "add", addr, "dev", iface]).await
+                run_ip(&[flag, "addr", "add", addr, "dev", iface])
+                    .await
                     .map_err(|e| format!("ip addr add {addr} on {iface}: {e}"))?;
             }
             // Set gateway
             if let Some(ref gw) = ip.gateway {
-                let _ = run_ip(&[flag, "route", "replace", "default", "via", gw, "dev", iface]).await;
+                let _ =
+                    run_ip(&[flag, "route", "replace", "default", "via", gw, "dev", iface]).await;
             }
         }
         IpMethod::Slaac => {
@@ -433,9 +492,8 @@ async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), Str
 // ── NixOS config generation ────────────────────────────────────
 
 fn generate_nix(config: &NetworkConfig) -> String {
-    let mut out = String::from(
-        "# Managed by NASty — edit via WebUI Settings > Network\n{ ... }:\n{\n",
-    );
+    let mut out =
+        String::from("# Managed by NASty — edit via WebUI Settings > Network\n{ ... }:\n{\n");
 
     out.push_str("  networking.useDHCP = false;\n\n");
 
@@ -471,25 +529,38 @@ fn generate_nix(config: &NetworkConfig) -> String {
     // DNS
     if !config.dns.is_empty() {
         let items: Vec<String> = config.dns.iter().map(|ns| format!("\"{ns}\"")).collect();
-        out.push_str(&format!("  networking.nameservers = [ {} ];\n", items.join(" ")));
+        out.push_str(&format!(
+            "  networking.nameservers = [ {} ];\n",
+            items.join(" ")
+        ));
     }
 
     out.push_str("}\n");
     out
 }
 
-fn generate_iface_nix(out: &mut String, name: &str, ipv4: &IpConfig, ipv6: &IpConfig, mtu: Option<u16>) {
+fn generate_iface_nix(
+    out: &mut String,
+    name: &str,
+    ipv4: &IpConfig,
+    ipv6: &IpConfig,
+    mtu: Option<u16>,
+) {
     match ipv4.method {
         IpMethod::Dhcp => {
             out.push_str(&format!("  networking.interfaces.{name}.useDHCP = true;\n"));
         }
         IpMethod::Static => {
-            let addrs: Vec<String> = ipv4.addresses.iter().map(|a| {
-                let parts: Vec<&str> = a.split('/').collect();
-                let addr = parts[0];
-                let prefix: u8 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(24);
-                format!("{{ address = \"{addr}\"; prefixLength = {prefix}; }}")
-            }).collect();
+            let addrs: Vec<String> = ipv4
+                .addresses
+                .iter()
+                .map(|a| {
+                    let parts: Vec<&str> = a.split('/').collect();
+                    let addr = parts[0];
+                    let prefix: u8 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(24);
+                    format!("{{ address = \"{addr}\"; prefixLength = {prefix}; }}")
+                })
+                .collect();
             out.push_str(&format!(
                 "  networking.interfaces.{name}.ipv4.addresses = [ {} ];\n",
                 addrs.join(" ")
@@ -506,12 +577,16 @@ fn generate_iface_nix(out: &mut String, name: &str, ipv4: &IpConfig, ipv6: &IpCo
             // NixOS enables SLAAC by default when IPv6 is not disabled
         }
         IpMethod::Static => {
-            let addrs: Vec<String> = ipv6.addresses.iter().map(|a| {
-                let parts: Vec<&str> = a.split('/').collect();
-                let addr = parts[0];
-                let prefix: u8 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(64);
-                format!("{{ address = \"{addr}\"; prefixLength = {prefix}; }}")
-            }).collect();
+            let addrs: Vec<String> = ipv6
+                .addresses
+                .iter()
+                .map(|a| {
+                    let parts: Vec<&str> = a.split('/').collect();
+                    let addr = parts[0];
+                    let prefix: u8 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(64);
+                    format!("{{ address = \"{addr}\"; prefixLength = {prefix}; }}")
+                })
+                .collect();
             out.push_str(&format!(
                 "  networking.interfaces.{name}.ipv6.addresses = [ {} ];\n",
                 addrs.join(" ")
@@ -521,7 +596,9 @@ fn generate_iface_nix(out: &mut String, name: &str, ipv4: &IpConfig, ipv6: &IpCo
             }
         }
         IpMethod::Disabled => {
-            out.push_str(&format!("  networking.interfaces.{name}.ipv6.addresses = [];\n"));
+            out.push_str(&format!(
+                "  networking.interfaces.{name}.ipv6.addresses = [];\n"
+            ));
         }
         _ => {}
     }
@@ -536,7 +613,11 @@ fn generate_iface_nix(out: &mut String, name: &str, ipv4: &IpConfig, ipv6: &IpCo
 pub async fn detect_primary_interface() -> Option<String> {
     // Try IPv4 first, then IPv6
     for flag in &["-4", "-6"] {
-        let target = if *flag == "-4" { "1.1.1.1" } else { "2001:4860:4860::8888" };
+        let target = if *flag == "-4" {
+            "1.1.1.1"
+        } else {
+            "2001:4860:4860::8888"
+        };
         let output = tokio::process::Command::new("ip")
             .args([flag, "route", "get", target])
             .output()

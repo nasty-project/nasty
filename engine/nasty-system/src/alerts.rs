@@ -140,7 +140,11 @@ impl AlertService {
         Ok(rule)
     }
 
-    pub async fn update_rule(&self, id: &str, update: AlertRuleUpdate) -> Result<AlertRule, String> {
+    pub async fn update_rule(
+        &self,
+        id: &str,
+        update: AlertRuleUpdate,
+    ) -> Result<AlertRule, String> {
         let mut state = self.state.write().await;
         let rule = state
             .rules
@@ -311,10 +315,7 @@ impl AlertService {
                                 rule_name: rule.name.clone(),
                                 severity: rule.severity.clone(),
                                 metric: rule.metric.clone(),
-                                message: format!(
-                                    "Disk {} SMART health check FAILED",
-                                    disk.device
-                                ),
+                                message: format!("Disk {} SMART health check FAILED", disk.device),
                                 current_value: 0.0,
                                 threshold: rule.threshold,
                                 source: disk.device.clone(),
@@ -465,22 +466,22 @@ impl AlertService {
                     }
                 }
                 AlertMetric::RootDiskFreeGb => {
-                    if let Some(free_gb) = root_free_gb() {
-                        if check_condition(free_gb, &rule.condition, rule.threshold) {
-                            alerts.push(ActiveAlert {
-                                rule_id: rule.id.clone(),
-                                rule_name: rule.name.clone(),
-                                severity: rule.severity.clone(),
-                                metric: rule.metric.clone(),
-                                message: format!(
-                                    "Root partition has {:.1} GB free (threshold: {:.0} GB)",
-                                    free_gb, rule.threshold
-                                ),
-                                current_value: free_gb,
-                                threshold: rule.threshold,
-                                source: "/".into(),
-                            });
-                        }
+                    if let Some(free_gb) = root_free_gb()
+                        && check_condition(free_gb, &rule.condition, rule.threshold)
+                    {
+                        alerts.push(ActiveAlert {
+                            rule_id: rule.id.clone(),
+                            rule_name: rule.name.clone(),
+                            severity: rule.severity.clone(),
+                            metric: rule.metric.clone(),
+                            message: format!(
+                                "Root partition has {:.1} GB free (threshold: {:.0} GB)",
+                                free_gb, rule.threshold
+                            ),
+                            current_value: free_gb,
+                            threshold: rule.threshold,
+                            source: "/".into(),
+                        });
                     }
                 }
             }
@@ -564,7 +565,9 @@ fn root_free_gb() -> Option<f64> {
     let path = CString::new("/").ok()?;
     let mut buf = MaybeUninit::<libc::statvfs>::uninit();
     let ret = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
-    if ret != 0 { return None; }
+    if ret != 0 {
+        return None;
+    }
     let stat = unsafe { buf.assume_init() };
     Some(stat.f_bavail as f64 * stat.f_frsize as f64 / 1_073_741_824.0)
 }
@@ -742,11 +745,22 @@ fn uuid_v4() -> String {
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     )
 }
 

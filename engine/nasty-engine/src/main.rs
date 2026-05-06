@@ -16,9 +16,9 @@ use tracing::{error, info};
 use tracing_subscriber::{prelude::*, reload};
 
 mod app_deploy;
-mod log_stream;
 mod auth;
 mod auth_oidc;
+mod log_stream;
 mod router;
 mod telemetry;
 mod terminal;
@@ -146,7 +146,11 @@ async fn main() -> anyhow::Result<()> {
     // 4. Restore NVMe-oF configfs (volatile, needs modules from step 3)
     let mount_failures = state.filesystems.restore_mounts().await;
     if !mount_failures.is_empty() {
-        error!("CRITICAL: {} filesystem(s) failed to mount: {}", mount_failures.len(), mount_failures.join(", "));
+        error!(
+            "CRITICAL: {} filesystem(s) failed to mount: {}",
+            mount_failures.len(),
+            mount_failures.join(", ")
+        );
         *state.mount_failures.lock().await = mount_failures;
     }
     // Re-attach loop devices and get the current name→device mapping.
@@ -181,10 +185,10 @@ async fn main() -> anyhow::Result<()> {
     // Sync NVMe-oF ports with Tailscale IP (if Tailscale reconnected on boot)
     {
         let ts_status = state.tailscale.get().await;
-        if ts_status.connected {
-            if let Some(ref ip) = ts_status.ip {
-                state.nvmeof.ensure_tailscale_ports(ip).await;
-            }
+        if ts_status.connected
+            && let Some(ref ip) = ts_status.ip
+        {
+            state.nvmeof.ensure_tailscale_ports(ip).await;
         }
     }
 
@@ -215,7 +219,10 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = state.oidc.rebuild(&oidc_settings).await {
                 tracing::warn!("OIDC client init failed at startup: {e}");
             } else {
-                info!("OIDC client initialized (issuer={:?})", oidc_settings.issuer_url);
+                info!(
+                    "OIDC client initialized (issuer={:?})",
+                    oidc_settings.issuer_url
+                );
             }
         }
     }
@@ -1038,7 +1045,7 @@ async fn files_mkdir_handler(
         Some((p, _)) => p,
         None => "",
     };
-    if safe_path(parent.is_empty().then_some("").unwrap_or(parent)).is_err() && !parent.is_empty() {
+    if safe_path(if parent.is_empty() { "" } else { parent }).is_err() && !parent.is_empty() {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "Invalid path"})),
@@ -1179,10 +1186,10 @@ async fn files_content_handler(
             // Documents
             "pdf" => "application/pdf",
             // Text
-            "txt" | "log" | "md" | "csv" | "conf" | "cfg" | "ini" | "yml" | "yaml"
-            | "toml" | "json" | "xml" | "html" | "htm" | "css" | "js" | "ts"
-            | "rs" | "py" | "sh" | "bash" | "nix" | "c" | "h" | "cpp" | "go"
-            | "java" | "rb" | "php" | "sql" | "dockerfile" => "text/plain; charset=utf-8",
+            "txt" | "log" | "md" | "csv" | "conf" | "cfg" | "ini" | "yml" | "yaml" | "toml"
+            | "json" | "xml" | "html" | "htm" | "css" | "js" | "ts" | "rs" | "py" | "sh"
+            | "bash" | "nix" | "c" | "h" | "cpp" | "go" | "java" | "rb" | "php" | "sql"
+            | "dockerfile" => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         })
         .unwrap_or("application/octet-stream");
@@ -1309,7 +1316,12 @@ async fn logout_handler(
         // the browser to drop the cookie below.
         let _ = state.auth.logout(&token).await;
     }
-    (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
+    (
+        StatusCode::OK,
+        resp_headers,
+        Json(serde_json::json!({"ok": true})),
+    )
+        .into_response()
 }
 
 /// 8h, matches SESSION_TTL_SECS in auth.rs (kept in sync by hand).
@@ -1322,9 +1334,7 @@ fn build_session_cookie(token: &str) -> String {
 }
 
 fn build_session_clear_cookie() -> String {
-    format!(
-        "{SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
-    )
+    format!("{SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0")
 }
 
 // ── OIDC SSO ─────────────────────────────────────────────────────
@@ -1333,7 +1343,6 @@ fn build_session_clear_cookie() -> String {
 fn url_encode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
-
 
 /// Tells the WebUI whether to render the "Sign in with SSO" button.
 /// No auth required — the response only exposes booleans / public config.
@@ -1383,7 +1392,12 @@ async fn oidc_callback_handler(
 
     if let Some(err) = q.error {
         let detail = q.error_description.unwrap_or_default();
-        crate::auth::audit("oidc_login_failed", "anonymous", &client_ip, &format!("{err}: {detail}"));
+        crate::auth::audit(
+            "oidc_login_failed",
+            "anonymous",
+            &client_ip,
+            &format!("{err}: {detail}"),
+        );
         return bounce(format!(
             "oidc_error={}",
             url_encode(&format!("{err}: {detail}"))
@@ -1391,7 +1405,12 @@ async fn oidc_callback_handler(
     }
 
     let (Some(code), Some(state_param)) = (q.code, q.state) else {
-        crate::auth::audit("oidc_login_failed", "anonymous", &client_ip, "missing code or state");
+        crate::auth::audit(
+            "oidc_login_failed",
+            "anonymous",
+            &client_ip,
+            "missing code or state",
+        );
         return bounce("oidc_error=missing+code+or+state".into());
     };
 
@@ -1404,10 +1423,7 @@ async fn oidc_callback_handler(
         Err(e) => {
             tracing::warn!("OIDC token exchange failed: {e}");
             crate::auth::audit("oidc_login_failed", "anonymous", &client_ip, &e.to_string());
-            return bounce(format!(
-                "oidc_error={}",
-                url_encode(&e.to_string())
-            ));
+            return bounce(format!("oidc_error={}", url_encode(&e.to_string())));
         }
     };
 
@@ -1436,16 +1452,9 @@ async fn oidc_callback_handler(
                 axum::http::header::SET_COOKIE,
                 build_session_cookie(&token).parse().unwrap(),
             );
-            (
-                resp_headers,
-                axum::response::Redirect::to("/#oidc=1"),
-            )
-                .into_response()
+            (resp_headers, axum::response::Redirect::to("/#oidc=1")).into_response()
         }
-        Err(e) => bounce(format!(
-            "oidc_error={}",
-            url_encode(&e.to_string())
-        )),
+        Err(e) => bounce(format!("oidc_error={}", url_encode(&e.to_string()))),
     }
 }
 
@@ -1508,7 +1517,12 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip, pre_auth_token))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, client_ip: String, pre_auth_token: Option<String>) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    client_ip: String,
+    pre_auth_token: Option<String>,
+) {
     use futures_util::{SinkExt, StreamExt};
     use nasty_common::Notification;
 
@@ -1585,9 +1599,7 @@ async fn resolve_session(
             }
             Err(_) => {
                 let _ = socket
-                    .send(Message::Text(
-                        r#"{"error":"invalid session"}"#.into(),
-                    ))
+                    .send(Message::Text(r#"{"error":"invalid session"}"#.into()))
                     .await;
                 let _ = socket.send(Message::Close(None)).await;
                 None
@@ -1669,8 +1681,8 @@ async fn wait_for_auth(
 
 fn spawn_alert_notifier(state: Arc<AppState>) {
     tokio::spawn(async move {
-        use std::collections::HashSet;
         use nasty_system::notifications;
+        use std::collections::HashSet;
 
         let mut previously_active: HashSet<(String, String)> = HashSet::new();
 
@@ -1695,11 +1707,13 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
             }
 
             // Find newly fired alerts (not previously active)
-            let current_keys: HashSet<(String, String)> = active.iter()
+            let current_keys: HashSet<(String, String)> = active
+                .iter()
                 .map(|a| (a.rule_id.clone(), a.source.clone()))
                 .collect();
 
-            let new_alerts: Vec<_> = active.iter()
+            let new_alerts: Vec<_> = active
+                .iter()
                 .filter(|a| !previously_active.contains(&(a.rule_id.clone(), a.source.clone())))
                 .collect();
 
@@ -1712,8 +1726,10 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
                             nasty_system::alerts::AlertSeverity::Critical => "CRITICAL",
                         };
                         let subject = format!("[NASty {sev}] {}", alert.rule_name);
-                        let body = format!("{}\n\nSource: {}\nValue: {:.1}\nThreshold: {:.1}",
-                            alert.message, alert.source, alert.current_value, alert.threshold);
+                        let body = format!(
+                            "{}\n\nSource: {}\nValue: {:.1}\nThreshold: {:.1}",
+                            alert.message, alert.source, alert.current_value, alert.threshold
+                        );
                         notifications::send(&config, &subject, &body).await;
                     }
                 }

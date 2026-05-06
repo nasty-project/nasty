@@ -25,12 +25,12 @@ fn snap_path(mount_point: &str, subvol: &str, snap: &str) -> String {
 const XATTR_NS: &str = "user.";
 
 /// Reserved xattr keys for NASty-internal subvolume metadata.
-const XATTR_NASTY_TYPE:        &str = "user.nasty.type";
-const XATTR_NASTY_VOLSIZE:     &str = "user.nasty.volsize";
+const XATTR_NASTY_TYPE: &str = "user.nasty.type";
+const XATTR_NASTY_VOLSIZE: &str = "user.nasty.volsize";
 const XATTR_NASTY_COMPRESSION: &str = "user.nasty.compression";
-const XATTR_NASTY_COMMENT:     &str = "user.nasty.comment";
-const XATTR_NASTY_OWNER:       &str = "user.nasty.owner";
-const XATTR_NASTY_DIRECT_IO:   &str = "user.nasty.direct_io";
+const XATTR_NASTY_COMMENT: &str = "user.nasty.comment";
+const XATTR_NASTY_OWNER: &str = "user.nasty.owner";
+const XATTR_NASTY_DIRECT_IO: &str = "user.nasty.direct_io";
 
 /// Logical key prefix that maps to the reserved nasty.* xattrs.
 /// Excluded from the user-visible `properties` map.
@@ -195,7 +195,10 @@ fn read_all_xattrs(path: &Path) -> SubvolumeAttrs {
             compression: meta_raw.remove("nasty.compression"),
             comments: meta_raw.remove("nasty.comment"),
             owner: meta_raw.remove("nasty.owner"),
-            direct_io: meta_raw.get("nasty.direct_io").map(|s| s == "true").unwrap_or(false),
+            direct_io: meta_raw
+                .get("nasty.direct_io")
+                .map(|s| s == "true")
+                .unwrap_or(false),
         },
         properties,
         bcachefs_options,
@@ -458,13 +461,19 @@ impl SubvolumeService {
         for subvol in block_subvols {
             let img_path = format!("{}/{BLOCK_FILE_NAME}", subvol.path);
             if !Path::new(&img_path).exists() {
-                warn!("Block image {img_path} not found for {}/{}", subvol.filesystem, subvol.name);
+                warn!(
+                    "Block image {img_path} not found for {}/{}",
+                    subvol.filesystem, subvol.name
+                );
                 continue;
             }
 
             // Use existing loop device if already attached (engine restart, not reboot)
             let loop_dev = if let Some(existing) = find_loop_device(&img_path).await {
-                info!("Loop device already attached for {}/{}", subvol.filesystem, subvol.name);
+                info!(
+                    "Loop device already attached for {}/{}",
+                    subvol.filesystem, subvol.name
+                );
                 existing
             } else {
                 let mut args = vec!["--find", "--show"];
@@ -475,11 +484,17 @@ impl SubvolumeService {
                 match cmd::run_ok("losetup", &args).await {
                     Ok(dev) => {
                         let dev = dev.trim().to_string();
-                        info!("Attached {} for block subvolume {}/{}", dev, subvol.filesystem, subvol.name);
+                        info!(
+                            "Attached {} for block subvolume {}/{}",
+                            dev, subvol.filesystem, subvol.name
+                        );
                         dev
                     }
                     Err(e) => {
-                        warn!("Failed to attach loop device for {}/{}: {e}", subvol.filesystem, subvol.name);
+                        warn!(
+                            "Failed to attach loop device for {}/{}: {e}",
+                            subvol.filesystem, subvol.name
+                        );
                         continue;
                     }
                 }
@@ -505,7 +520,11 @@ impl SubvolumeService {
 
     /// List subvolumes in a filesystem.
     /// `owner_filter`: if Some, only return subvolumes owned by that token.
-    pub async fn list(&self, fs_name: &str, owner_filter: Option<&str>) -> Result<Vec<Subvolume>, SubvolumeError> {
+    pub async fn list(
+        &self,
+        fs_name: &str,
+        owner_filter: Option<&str>,
+    ) -> Result<Vec<Subvolume>, SubvolumeError> {
         let mount_point = self.fs_mount_point(fs_name).await?;
         let mut subvolumes = Vec::new();
 
@@ -513,13 +532,13 @@ impl SubvolumeService {
         let info = bcachefs_list_all(&mount_point).await;
 
         // Batch queries: run repquota + losetup once instead of du/losetup per subvolume
-        let (project_usages, losetup_map) = tokio::join!(
-            query_project_usages(&mount_point),
-            build_losetup_map()
-        );
+        let (project_usages, losetup_map) =
+            tokio::join!(query_project_usages(&mount_point), build_losetup_map());
 
         // List all subvolumes except snapshots (@) and internal .nasty/* ones.
-        for name in info.subvol_paths.iter().filter(|p| !p.is_empty() && !p.contains('@') && !p.starts_with(".nasty/") && *p != ".nasty") {
+        for name in info.subvol_paths.iter().filter(|p| {
+            !p.is_empty() && !p.contains('@') && !p.starts_with(".nasty/") && *p != ".nasty"
+        }) {
             let path_str = subvol_path(&mount_point, name);
             let path = Path::new(&path_str);
 
@@ -527,10 +546,10 @@ impl SubvolumeService {
             let attrs = read_all_xattrs(path);
 
             // Apply owner filter: operators only see their own subvolumes
-            if let Some(filter) = owner_filter {
-                if attrs.meta.owner.as_deref() != Some(filter) {
-                    continue;
-                }
+            if let Some(filter) = owner_filter
+                && attrs.meta.owner.as_deref() != Some(filter)
+            {
+                continue;
             }
 
             // Build snapshot list from the already-fetched bcachefs data
@@ -598,8 +617,15 @@ impl SubvolumeService {
     /// List subvolumes across all mounted filesystems.
     /// `fs_filter`: if Some, only include that filesystem.
     /// `owner_filter`: if Some, only include subvolumes owned by that token.
-    pub async fn list_all(&self, fs_filter: Option<&str>, owner_filter: Option<&str>) -> Result<Vec<Subvolume>, SubvolumeError> {
-        let all_fs = self.filesystems.list().await
+    pub async fn list_all(
+        &self,
+        fs_filter: Option<&str>,
+        owner_filter: Option<&str>,
+    ) -> Result<Vec<Subvolume>, SubvolumeError> {
+        let all_fs = self
+            .filesystems
+            .list()
+            .await
             .map_err(|e| SubvolumeError::CommandFailed(e.to_string()))?;
 
         let mut all = Vec::new();
@@ -607,10 +633,10 @@ impl SubvolumeService {
             if !fs.mounted {
                 continue;
             }
-            if let Some(filter) = fs_filter {
-                if fs.name != filter {
-                    continue;
-                }
+            if let Some(filter) = fs_filter
+                && fs.name != filter
+            {
+                continue;
             }
             match self.list(&fs.name, owner_filter).await {
                 Ok(mut subvols) => all.append(&mut subvols),
@@ -641,7 +667,11 @@ impl SubvolumeService {
 
     /// Create a new subvolume.
     /// `owner`: if Some, records this token name as the subvolume owner.
-    pub async fn create(&self, req: CreateSubvolumeRequest, owner: Option<String>) -> Result<Subvolume, SubvolumeError> {
+    pub async fn create(
+        &self,
+        req: CreateSubvolumeRequest,
+        owner: Option<String>,
+    ) -> Result<Subvolume, SubvolumeError> {
         if req.name.contains('@') {
             return Err(SubvolumeError::CommandFailed(
                 "subvolume name may not contain '@'".to_string(),
@@ -652,7 +682,10 @@ impl SubvolumeService {
         let subvol_path = subvol_path(&mount_point, &req.name);
 
         if Path::new(&subvol_path).exists() {
-            info!("Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)", req.name, req.filesystem);
+            info!(
+                "Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)",
+                req.name, req.filesystem
+            );
             return self.get(&req.filesystem, &req.name, None).await;
         }
 
@@ -661,14 +694,17 @@ impl SubvolumeService {
         }
 
         // Ensure parent directories exist for nested subvolumes (e.g. "projects/web")
-        if let Some(parent) = Path::new(&subvol_path).parent() {
-            if !parent.exists() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
+        if let Some(parent) = Path::new(&subvol_path).parent()
+            && !parent.exists()
+        {
+            tokio::fs::create_dir_all(parent).await?;
         }
 
         // Create the bcachefs subvolume
-        info!("Creating subvolume '{}' in filesystem '{}'", req.name, req.filesystem);
+        info!(
+            "Creating subvolume '{}' in filesystem '{}'",
+            req.name, req.filesystem
+        );
         cmd::run_ok("bcachefs", &["subvolume", "create", &subvol_path])
             .await
             .map_err(SubvolumeError::CommandFailed)?;
@@ -706,7 +742,10 @@ impl SubvolumeService {
 
         // Set data replicas if specified
         if let Some(replicas) = req.data_replicas {
-            info!("Setting data_replicas={} on subvolume '{}'", replicas, req.name);
+            info!(
+                "Setting data_replicas={} on subvolume '{}'",
+                replicas, req.name
+            );
             let _ = cmd::run_ok(
                 "bcachefs",
                 &[
@@ -719,11 +758,11 @@ impl SubvolumeService {
         }
 
         // For filesystem subvolumes: enforce size via bcachefs project quota
-        if req.subvolume_type == SubvolumeType::Filesystem {
-            if let Some(size) = req.volsize_bytes {
-                let projid = project_id_for(&req.filesystem, &req.name);
-                set_project_quota(&mount_point, &subvol_path, projid, size).await;
-            }
+        if req.subvolume_type == SubvolumeType::Filesystem
+            && let Some(size) = req.volsize_bytes
+        {
+            let projid = project_id_for(&req.filesystem, &req.name);
+            set_project_quota(&mount_point, &subvol_path, projid, size).await;
         }
 
         // For block subvolumes: create sparse file and attach loop device
@@ -747,12 +786,17 @@ impl SubvolumeService {
             // at the extent level. On encrypted filesystems this causes reconcile errors
             // (extent_io_opts_not_set) because the checker finds unencrypted extents.
             // See: https://github.com/koverstreet/bcachefs/issues/1112
-            let fs_encrypted = self.filesystems.get(&req.filesystem).await
+            let fs_encrypted = self
+                .filesystems
+                .get(&req.filesystem)
+                .await
                 .map(|fs| fs.options.encrypted == Some(true))
                 .unwrap_or(false);
 
             if fs_encrypted {
-                info!("Skipping nocow on {img_path} — filesystem is encrypted (nocow disables encryption)");
+                info!(
+                    "Skipping nocow on {img_path} — filesystem is encrypted (nocow disables encryption)"
+                );
             } else {
                 match cmd::run_ok("bcachefs", &["set-file-option", "--nocow", &img_path]).await {
                     Ok(_) => info!("Set nocow on {img_path}"),
@@ -786,23 +830,31 @@ impl SubvolumeService {
     }
 
     /// List child subvolumes nested under a given parent.
-    pub async fn list_children(&self, filesystem: &str, name: &str) -> Result<Vec<String>, SubvolumeError> {
+    pub async fn list_children(
+        &self,
+        filesystem: &str,
+        name: &str,
+    ) -> Result<Vec<String>, SubvolumeError> {
         let mount_point = self.fs_mount_point(filesystem).await?;
         Ok(find_child_subvolumes(&mount_point, name).await)
     }
 
     /// Delete a subvolume.
     /// `owner_filter`: if Some, returns `AccessDenied` if the subvolume has a different owner.
-    pub async fn delete(&self, req: DeleteSubvolumeRequest, owner_filter: Option<&str>) -> Result<(), SubvolumeError> {
+    pub async fn delete(
+        &self,
+        req: DeleteSubvolumeRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<(), SubvolumeError> {
         let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         // For block subvolumes: detach loop device first
-        if subvol.subvolume_type == SubvolumeType::Block {
-            if let Some(ref loop_dev) = subvol.block_device {
-                info!("Detaching loop device {} for '{}'", loop_dev, req.name);
-                if let Err(e) = cmd::run_ok("losetup", &["-d", loop_dev]).await {
-                    warn!("Failed to detach loop device {loop_dev}: {e}");
-                }
+        if subvol.subvolume_type == SubvolumeType::Block
+            && let Some(ref loop_dev) = subvol.block_device
+        {
+            info!("Detaching loop device {} for '{}'", loop_dev, req.name);
+            if let Err(e) = cmd::run_ok("losetup", &["-d", loop_dev]).await {
+                warn!("Failed to detach loop device {loop_dev}: {e}");
             }
         }
 
@@ -818,13 +870,19 @@ impl SubvolumeService {
         let children = find_child_subvolumes(&mount_point, &req.name).await;
         for child in children.iter().rev() {
             let child_path = format!("{mount_point}/{child}");
-            info!("Deleting child subvolume '{child}' before parent '{}'", req.name);
+            info!(
+                "Deleting child subvolume '{child}' before parent '{}'",
+                req.name
+            );
             if let Err(e) = cmd::run_ok("bcachefs", &["subvolume", "delete", &child_path]).await {
                 warn!("Failed to delete child subvolume '{child}': {e}");
             }
         }
 
-        info!("Deleting subvolume '{}' from filesystem '{}'", req.name, req.filesystem);
+        info!(
+            "Deleting subvolume '{}' from filesystem '{}'",
+            req.name, req.filesystem
+        );
         cmd::run_ok("bcachefs", &["subvolume", "delete", &subvol_path])
             .await
             .map_err(SubvolumeError::CommandFailed)?;
@@ -908,13 +966,19 @@ impl SubvolumeService {
                     "Resizing block subvolume '{}' to {} bytes",
                     req.name, req.volsize_bytes
                 );
-                cmd::run_ok("truncate", &["-s", &req.volsize_bytes.to_string(), &img_path])
-                    .await
-                    .map_err(SubvolumeError::CommandFailed)?;
+                cmd::run_ok(
+                    "truncate",
+                    &["-s", &req.volsize_bytes.to_string(), &img_path],
+                )
+                .await
+                .map_err(SubvolumeError::CommandFailed)?;
 
                 // If loop device is attached, inform the kernel of the new size
                 if let Some(ref loop_dev) = subvol.block_device {
-                    info!("Updating loop device {} capacity for '{}'", loop_dev, req.name);
+                    info!(
+                        "Updating loop device {} capacity for '{}'",
+                        loop_dev, req.name
+                    );
                     cmd::run_ok("losetup", &["--set-capacity", loop_dev])
                         .await
                         .map_err(SubvolumeError::CommandFailed)?;
@@ -931,8 +995,18 @@ impl SubvolumeService {
                 let bytes_str = req.volsize_bytes.to_string();
                 if let Err(e) = cmd::run_ok(
                     "setquota",
-                    &["-P", &proj_name, &bytes_str, &bytes_str, "0", "0", &mount_point],
-                ).await {
+                    &[
+                        "-P",
+                        &proj_name,
+                        &bytes_str,
+                        &bytes_str,
+                        "0",
+                        "0",
+                        &mount_point,
+                    ],
+                )
+                .await
+                {
                     warn!("setquota failed for project {proj_name} on {mount_point}: {e}");
                 }
             }
@@ -940,8 +1014,12 @@ impl SubvolumeService {
 
         // Update volsize xattr
         let path = subvol_path(&self.fs_mount_point(&req.filesystem).await?, &req.name);
-        xattr::set(&path, XATTR_NASTY_VOLSIZE, req.volsize_bytes.to_string().as_bytes())
-            .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr volsize: {e}")))?;
+        xattr::set(
+            &path,
+            XATTR_NASTY_VOLSIZE,
+            req.volsize_bytes.to_string().as_bytes(),
+        )
+        .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr volsize: {e}")))?;
 
         self.get(&req.filesystem, &req.name, owner_filter).await
     }
@@ -961,10 +1039,17 @@ impl SubvolumeService {
             } else {
                 comp.as_str()
             };
-            info!("Setting compression={} on subvolume '{}'", comp_value, req.name);
+            info!(
+                "Setting compression={} on subvolume '{}'",
+                comp_value, req.name
+            );
             cmd::run_ok(
                 "bcachefs",
-                &["set-file-option", &format!("--compression={comp_value}"), path],
+                &[
+                    "set-file-option",
+                    &format!("--compression={comp_value}"),
+                    path,
+                ],
             )
             .await
             .map_err(SubvolumeError::CommandFailed)?;
@@ -972,8 +1057,9 @@ impl SubvolumeService {
             if comp_value == "none" {
                 let _ = xattr::remove(path, XATTR_NASTY_COMPRESSION);
             } else {
-                xattr::set(path, XATTR_NASTY_COMPRESSION, comp_value.as_bytes())
-                    .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr compression: {e}")))?;
+                xattr::set(path, XATTR_NASTY_COMPRESSION, comp_value.as_bytes()).map_err(|e| {
+                    SubvolumeError::CommandFailed(format!("setxattr compression: {e}"))
+                })?;
             }
         }
 
@@ -1006,7 +1092,10 @@ impl SubvolumeService {
 
         // Update data replicas if specified (use 0 to reset to filesystem default)
         if let Some(replicas) = req.data_replicas {
-            info!("Setting data_replicas={} on subvolume '{}'", replicas, req.name);
+            info!(
+                "Setting data_replicas={} on subvolume '{}'",
+                replicas, req.name
+            );
             let flag = if replicas == 0 {
                 "--data_replicas=-".to_string()
             } else {
@@ -1028,7 +1117,8 @@ impl SubvolumeService {
         owner_filter: Option<&str>,
     ) -> Result<Snapshot, SubvolumeError> {
         // Verify ownership of the parent subvolume
-        self.get(&req.filesystem, &req.subvolume, owner_filter).await?;
+        self.get(&req.filesystem, &req.subvolume, owner_filter)
+            .await?;
 
         let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let source_path = subvol_path(&mount_point, &req.subvolume);
@@ -1046,13 +1136,15 @@ impl SubvolumeService {
         // Initiators (iSCSI, NVMe-oF) may have dirty data in their page cache
         // that hasn't been written to the backing loop device yet. A sync ensures
         // the snapshot captures a consistent state.
-        let subvol = self.get(&req.filesystem, &req.subvolume, owner_filter).await?;
-        if subvol.subvolume_type == SubvolumeType::Block {
-            if let Some(ref loop_dev) = subvol.block_device {
-                info!("Flushing block device {} before snapshot", loop_dev);
-                if let Err(e) = cmd::run_ok("blockdev", &["--flushbufs", loop_dev]).await {
-                    warn!("Failed to flush {loop_dev} before snapshot, proceeding anyway: {e}");
-                }
+        let subvol = self
+            .get(&req.filesystem, &req.subvolume, owner_filter)
+            .await?;
+        if subvol.subvolume_type == SubvolumeType::Block
+            && let Some(ref loop_dev) = subvol.block_device
+        {
+            info!("Flushing block device {} before snapshot", loop_dev);
+            if let Err(e) = cmd::run_ok("blockdev", &["--flushbufs", loop_dev]).await {
+                warn!("Failed to flush {loop_dev} before snapshot, proceeding anyway: {e}");
             }
         }
 
@@ -1061,9 +1153,12 @@ impl SubvolumeService {
             req.name, req.filesystem, req.subvolume
         );
         // Snapshots are always read-only; use snapshot.clone for writable copies
-        cmd::run_ok("bcachefs", &["subvolume", "snapshot", "-r", &source_path, &snap_path])
-            .await
-            .map_err(SubvolumeError::CommandFailed)?;
+        cmd::run_ok(
+            "bcachefs",
+            &["subvolume", "snapshot", "-r", &source_path, &snap_path],
+        )
+        .await
+        .map_err(SubvolumeError::CommandFailed)?;
 
         Ok(Snapshot {
             name: req.name,
@@ -1086,7 +1181,10 @@ impl SubvolumeService {
         // Verify ownership if the parent subvolume still exists.
         // The parent may have been deleted (DR scenario) — orphaned snapshots
         // should still be deletable.
-        if let Ok(_parent) = self.get(&req.filesystem, &req.subvolume, owner_filter).await {
+        if let Ok(_parent) = self
+            .get(&req.filesystem, &req.subvolume, owner_filter)
+            .await
+        {
             // Parent exists and ownership verified
         }
 
@@ -1170,13 +1268,15 @@ impl SubvolumeService {
             if rel_path.contains('/') {
                 continue;
             }
-            let Some(at_pos) = rel_path.find('@') else { continue };
+            let Some(at_pos) = rel_path.find('@') else {
+                continue;
+            };
             let subvol_name = rel_path[..at_pos].to_string();
             let snap_name = rel_path[at_pos + 1..].to_string();
-            if let Some(ref set) = owned {
-                if !set.contains(&subvol_name) {
-                    continue;
-                }
+            if let Some(ref set) = owned
+                && !set.contains(&subvol_name)
+            {
+                continue;
             }
             let parent = info.snapshot_parents.get(&rel_path).cloned();
             all_snapshots.push(Snapshot {
@@ -1212,11 +1312,15 @@ impl SubvolumeService {
 
         if !Path::new(&snap_path).exists() {
             return Err(SubvolumeError::NotFound(format!(
-                "snapshot {}@{}", req.subvolume, req.snapshot
+                "snapshot {}@{}",
+                req.subvolume, req.snapshot
             )));
         }
         if Path::new(&new_subvol_path).exists() {
-            info!("Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)", req.new_name, req.filesystem);
+            info!(
+                "Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)",
+                req.new_name, req.filesystem
+            );
             return self.get(&req.filesystem, &req.new_name, None).await;
         }
 
@@ -1225,9 +1329,12 @@ impl SubvolumeService {
             req.filesystem, req.subvolume, req.snapshot, req.new_name
         );
         // bcachefs subvolume snapshot without -r creates a writable subvolume from snapshot
-        cmd::run_ok("bcachefs", &["subvolume", "snapshot", &snap_path, &new_subvol_path])
-            .await
-            .map_err(SubvolumeError::CommandFailed)?;
+        cmd::run_ok(
+            "bcachefs",
+            &["subvolume", "snapshot", &snap_path, &new_subvol_path],
+        )
+        .await
+        .map_err(SubvolumeError::CommandFailed)?;
 
         // Read metadata from the snapshot itself — it inherits xattrs from the source.
         // This works even when the parent subvolume has been deleted (DR scenario).
@@ -1243,7 +1350,10 @@ impl SubvolumeService {
         if snap_meta.subvolume_type == SubvolumeType::Block {
             let img_path = format!("{new_subvol_path}/{BLOCK_FILE_NAME}");
             if Path::new(&img_path).exists() {
-                info!("Attaching loop device for restored block subvolume '{}'", req.new_name);
+                info!(
+                    "Attaching loop device for restored block subvolume '{}'",
+                    req.new_name
+                );
                 let mut args = vec!["--find", "--show"];
                 if snap_meta.direct_io {
                     args.push("--direct-io=on");
@@ -1287,12 +1397,12 @@ impl SubvolumeService {
         }
 
         // For block subvolumes, flush pending I/O before cloning
-        if parent.subvolume_type == SubvolumeType::Block {
-            if let Some(ref loop_dev) = parent.block_device {
-                info!("Flushing block device {} before clone", loop_dev);
-                if let Err(e) = cmd::run_ok("blockdev", &["--flushbufs", loop_dev]).await {
-                    warn!("Failed to flush {loop_dev} before clone, proceeding anyway: {e}");
-                }
+        if parent.subvolume_type == SubvolumeType::Block
+            && let Some(ref loop_dev) = parent.block_device
+        {
+            info!("Flushing block device {} before clone", loop_dev);
+            if let Err(e) = cmd::run_ok("blockdev", &["--flushbufs", loop_dev]).await {
+                warn!("Failed to flush {loop_dev} before clone, proceeding anyway: {e}");
             }
         }
 
@@ -1301,9 +1411,12 @@ impl SubvolumeService {
             req.filesystem, req.name, req.new_name
         );
         // Writable snapshot = COW clone
-        cmd::run_ok("bcachefs", &["subvolume", "snapshot", &source_path, &new_subvol_path])
-            .await
-            .map_err(SubvolumeError::CommandFailed)?;
+        cmd::run_ok(
+            "bcachefs",
+            &["subvolume", "snapshot", &source_path, &new_subvol_path],
+        )
+        .await
+        .map_err(SubvolumeError::CommandFailed)?;
 
         write_meta_xattrs(
             &new_subvol_path,
@@ -1320,7 +1433,10 @@ impl SubvolumeService {
         if parent.subvolume_type == SubvolumeType::Block {
             let img_path = format!("{new_subvol_path}/{BLOCK_FILE_NAME}");
             if Path::new(&img_path).exists() {
-                info!("Attaching loop device for cloned block subvolume '{}'", req.new_name);
+                info!(
+                    "Attaching loop device for cloned block subvolume '{}'",
+                    req.new_name
+                );
                 let mut args = vec!["--find", "--show"];
                 if parent.direct_io {
                     args.push("--direct-io=on");
@@ -1345,10 +1461,9 @@ impl SubvolumeService {
 
         for (key, value) in &req.properties {
             let xattr_name = format!("{XATTR_NS}{key}");
-            xattr::set(&subvol.path, &xattr_name, value.as_bytes())
-                .map_err(|e| SubvolumeError::CommandFailed(
-                    format!("setxattr {xattr_name}: {e}")
-                ))?;
+            xattr::set(&subvol.path, &xattr_name, value.as_bytes()).map_err(|e| {
+                SubvolumeError::CommandFailed(format!("setxattr {xattr_name}: {e}"))
+            })?;
         }
 
         self.get(&req.filesystem, &req.name, owner_filter).await
@@ -1367,9 +1482,11 @@ impl SubvolumeService {
             match xattr::remove(&subvol.path, &xattr_name) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(SubvolumeError::CommandFailed(
-                    format!("removexattr {xattr_name}: {e}")
-                )),
+                Err(e) => {
+                    return Err(SubvolumeError::CommandFailed(format!(
+                        "removexattr {xattr_name}: {e}"
+                    )));
+                }
             }
         }
 
@@ -1383,10 +1500,17 @@ impl SubvolumeService {
         req: FindByPropertyRequest,
         owner_filter: Option<&str>,
     ) -> Result<Vec<Subvolume>, SubvolumeError> {
-        let all = self.list_all(req.filesystem.as_deref(), owner_filter).await?;
+        let all = self
+            .list_all(req.filesystem.as_deref(), owner_filter)
+            .await?;
         Ok(all
             .into_iter()
-            .filter(|s| s.properties.get(&req.key).map(|v| v == &req.value).unwrap_or(false))
+            .filter(|s| {
+                s.properties
+                    .get(&req.key)
+                    .map(|v| v == &req.value)
+                    .unwrap_or(false)
+            })
             .collect())
     }
 }
@@ -1445,7 +1569,11 @@ async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
         }
     }
 
-    BcachefsInfo { subvol_paths, snapshot_flags, snapshot_parents }
+    BcachefsInfo {
+        subvol_paths,
+        snapshot_flags,
+        snapshot_parents,
+    }
 }
 
 /// Derive a stable 32-bit project ID from filesystem + subvolume name.
@@ -1486,7 +1614,20 @@ async fn set_project_quota(mount_point: &str, dir_path: &str, projid: u32, bytes
     // setquota -P <name> <soft> <hard> <isoft> <ihard> <mountpoint>
     // soft == hard (no grace period), no inode limits
     let bytes_str = bytes.to_string();
-    match cmd::run_ok("setquota", &["-P", &proj_name, &bytes_str, &bytes_str, "0", "0", mount_point]).await {
+    match cmd::run_ok(
+        "setquota",
+        &[
+            "-P",
+            &proj_name,
+            &bytes_str,
+            &bytes_str,
+            "0",
+            "0",
+            mount_point,
+        ],
+    )
+    .await
+    {
         Ok(_) => info!("set quota {bytes} bytes for project {proj_name} on {mount_point}"),
         Err(e) => warn!("setquota failed for project {proj_name} on {mount_point}: {e}"),
     }
@@ -1502,11 +1643,20 @@ fn register_project(name: &str, projid: u32) {
     // Check by both name and ID to avoid duplicates
     let name_prefix = format!("{name}:");
     let id_suffix = format!(":{projid}");
-    if existing.lines().any(|l| l.starts_with(&name_prefix) || l.ends_with(&id_suffix)) {
+    if existing
+        .lines()
+        .any(|l| l.starts_with(&name_prefix) || l.ends_with(&id_suffix))
+    {
         return;
     }
-    if let Err(e) = std::fs::OpenOptions::new().append(true).create(true).open(path)
-        .and_then(|mut f| { use std::io::Write; f.write_all(entry.as_bytes()) })
+    if let Err(e) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(entry.as_bytes())
+        })
     {
         warn!("register_project: could not write to {path}: {e}");
     }
@@ -1516,7 +1666,9 @@ fn register_project(name: &str, projid: u32) {
 fn unregister_project(projid: u32) {
     let path = "/etc/projid";
     let id_suffix = format!(":{projid}");
-    let Ok(existing) = std::fs::read_to_string(path) else { return };
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return;
+    };
     let filtered: String = existing
         .lines()
         .filter(|l| !l.ends_with(&id_suffix))
@@ -1608,7 +1760,10 @@ async fn find_loop_device(file_path: &str) -> Option<String> {
 }
 
 /// Look up the loop device for a given file path using a pre-built map.
-fn find_loop_device_from_map(losetup_map: &HashMap<String, String>, file_path: &str) -> Option<String> {
+fn find_loop_device_from_map(
+    losetup_map: &HashMap<String, String>,
+    file_path: &str,
+) -> Option<String> {
     // Canonicalize the target path so symlinks / relative paths don't matter
     let canonical = std::fs::canonicalize(file_path).ok()?;
     let canonical_str = canonical.to_string_lossy().to_string();
@@ -1638,4 +1793,3 @@ async fn find_child_subvolumes(mount_point: &str, parent_name: &str) -> Vec<Stri
     children.sort();
     children
 }
-

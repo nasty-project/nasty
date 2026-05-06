@@ -192,8 +192,12 @@ pub struct CreateFilesystemRequest {
     pub io_scheduler: Option<String>,
 }
 
-fn default_replicas() -> u32 { 1 }
-fn default_store_key() -> Option<bool> { Some(true) }
+fn default_replicas() -> u32 {
+    1
+}
+fn default_store_key() -> Option<bool> {
+    Some(true)
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DestroyFilesystemRequest {
@@ -342,9 +346,17 @@ pub struct ReconcileStatus {
 /// How long a cached `list()` result stays valid.
 const FS_LIST_CACHE_TTL: Duration = Duration::from_secs(3);
 
+type ListCache = Arc<Mutex<Option<(Instant, Vec<Filesystem>)>>>;
+
 #[derive(Clone)]
 pub struct FilesystemService {
-    list_cache: Arc<Mutex<Option<(Instant, Vec<Filesystem>)>>>,
+    list_cache: ListCache,
+}
+
+impl Default for FilesystemService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FilesystemService {
@@ -375,7 +387,8 @@ impl FilesystemService {
         info!("Waiting for block devices to settle...");
         let _ = tokio::process::Command::new("udevadm")
             .args(["settle", "--timeout=30"])
-            .status().await;
+            .status()
+            .await;
 
         let mut failed_names = Vec::new();
 
@@ -391,7 +404,9 @@ impl FilesystemService {
             if !opts.devices.is_empty() {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                 loop {
-                    let missing: Vec<&String> = opts.devices.iter()
+                    let missing: Vec<&String> = opts
+                        .devices
+                        .iter()
                         .filter(|d| !std::path::Path::new(d).exists())
                         .collect();
                     if missing.is_empty() {
@@ -400,21 +415,30 @@ impl FilesystemService {
                     if std::time::Instant::now() >= deadline {
                         error!(
                             "Filesystem '{name}': devices still missing after 60s: {}",
-                            missing.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")
+                            missing
+                                .iter()
+                                .map(|d| d.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         );
                         break;
                     }
                     info!(
                         "Filesystem '{name}': waiting for {} device(s): {}",
                         missing.len(),
-                        missing.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")
+                        missing
+                            .iter()
+                            .map(|d| d.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
                 // Refresh blkid cache after devices appear
                 let _ = tokio::process::Command::new("blkid")
                     .arg("-g")
-                    .output().await;
+                    .output()
+                    .await;
             }
 
             info!("Mounting filesystem '{name}'...");
@@ -434,10 +458,10 @@ impl FilesystemService {
     pub async fn list(&self) -> Result<Vec<Filesystem>, FilesystemError> {
         {
             let cache = self.list_cache.lock().await;
-            if let Some((ts, ref data)) = *cache {
-                if ts.elapsed() < FS_LIST_CACHE_TTL {
-                    return Ok(data.clone());
-                }
+            if let Some((ts, ref data)) = *cache
+                && ts.elapsed() < FS_LIST_CACHE_TTL
+            {
+                return Ok(data.clone());
             }
         }
 
@@ -547,7 +571,11 @@ impl FilesystemService {
                 name,
                 uuid,
                 devices: fs_devices,
-                mount_point: if has_mount_dir { Some(mount_point) } else { None },
+                mount_point: if has_mount_dir {
+                    Some(mount_point)
+                } else {
+                    None
+                },
                 mounted: false,
                 total_bytes: 0,
                 used_bytes: 0,
@@ -560,15 +588,27 @@ impl FilesystemService {
         let state = load_fs_state().await;
         for fs in &mut filesystems {
             if let Some(opts) = state.get(&fs.name) {
-                if fs.options.version_upgrade.is_none() { fs.options.version_upgrade = opts.version_upgrade.clone(); }
-                if fs.options.degraded.is_none() { fs.options.degraded = opts.degraded; }
-                if fs.options.verbose.is_none() { fs.options.verbose = opts.verbose; }
-                if fs.options.fsck.is_none() { fs.options.fsck = opts.fsck; }
-                if fs.options.journal_flush_disabled.is_none() { fs.options.journal_flush_disabled = opts.journal_flush_disabled; }
+                if fs.options.version_upgrade.is_none() {
+                    fs.options.version_upgrade = opts.version_upgrade.clone();
+                }
+                if fs.options.degraded.is_none() {
+                    fs.options.degraded = opts.degraded;
+                }
+                if fs.options.verbose.is_none() {
+                    fs.options.verbose = opts.verbose;
+                }
+                if fs.options.fsck.is_none() {
+                    fs.options.fsck = opts.fsck;
+                }
+                if fs.options.journal_flush_disabled.is_none() {
+                    fs.options.journal_flush_disabled = opts.journal_flush_disabled;
+                }
 
                 // Encryption state
                 if opts.encrypted == Some(true) {
-                    if fs.options.encrypted.is_none() { fs.options.encrypted = Some(true); }
+                    if fs.options.encrypted.is_none() {
+                        fs.options.encrypted = Some(true);
+                    }
                     let key_path = format!("{KEYS_DIR}/{}.key", fs.name);
                     fs.options.key_stored = Some(Path::new(&key_path).exists());
                     // Locked = encrypted + not mounted
@@ -590,7 +630,10 @@ impl FilesystemService {
     }
 
     /// Create a new bcachefs filesystem: format devices, create mount point, mount
-    pub async fn create(&self, mut req: CreateFilesystemRequest) -> Result<Filesystem, FilesystemError> {
+    pub async fn create(
+        &self,
+        mut req: CreateFilesystemRequest,
+    ) -> Result<Filesystem, FilesystemError> {
         if req.devices.is_empty() {
             return Err(FilesystemError::NoDevices);
         }
@@ -662,14 +705,12 @@ impl FilesystemService {
                 ));
             }
             if req.devices.len() < (req.replicas as usize) + 1 {
-                return Err(FilesystemError::InvalidInput(
-                    format!(
-                        "Erasure coding with {} replicas requires at least {} devices (got {})",
-                        req.replicas,
-                        req.replicas + 1,
-                        req.devices.len(),
-                    ),
-                ));
+                return Err(FilesystemError::InvalidInput(format!(
+                    "Erasure coding with {} replicas requires at least {} devices (got {})",
+                    req.replicas,
+                    req.replicas + 1,
+                    req.devices.len(),
+                )));
             }
             args.push("--erasure_code".to_string());
         }
@@ -714,17 +755,26 @@ impl FilesystemService {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let dev_paths: Vec<&str> = req.devices.iter().map(|d| d.path.as_str()).collect();
         let is_encrypted = req.encryption == Some(true);
-        info!("Formatting bcachefs filesystem '{}' on {:?}{}", req.name, dev_paths, if is_encrypted { " (encrypted)" } else { "" });
+        info!(
+            "Formatting bcachefs filesystem '{}' on {:?}{}",
+            req.name,
+            dev_paths,
+            if is_encrypted { " (encrypted)" } else { "" }
+        );
 
         if is_encrypted {
             let passphrase = req.passphrase.as_deref().ok_or_else(|| {
-                FilesystemError::CommandFailed("passphrase required for encrypted filesystem".to_string())
+                FilesystemError::CommandFailed(
+                    "passphrase required for encrypted filesystem".to_string(),
+                )
             })?;
             // bcachefs format --encrypted reads passphrase twice from stdin (passphrase + confirm)
             let stdin = format!("{passphrase}\n{passphrase}\n");
             let output = cmd::run_stdin("bcachefs", &arg_refs, stdin.as_bytes())
                 .await
-                .map_err(|e| FilesystemError::CommandFailed(format!("failed to execute bcachefs: {e}")))?;
+                .map_err(|e| {
+                    FilesystemError::CommandFailed(format!("failed to execute bcachefs: {e}"))
+                })?;
 
             if !output.status.success() {
                 // bcachefs format writes superblocks then does a trial open that
@@ -732,11 +782,15 @@ impl FilesystemService {
                 // succeeded.  Check if superblocks were actually written.
                 if !is_device_bcachefs(&req.devices[0].path).await {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(FilesystemError::CommandFailed(
-                        format!("bcachefs exited with {}: {stderr}", output.status),
-                    ));
+                    return Err(FilesystemError::CommandFailed(format!(
+                        "bcachefs exited with {}: {stderr}",
+                        output.status
+                    )));
                 }
-                warn!("bcachefs format exited with {} but superblocks are present, continuing", output.status);
+                warn!(
+                    "bcachefs format exited with {} but superblocks are present, continuing",
+                    output.status
+                );
             }
 
             // Store key for auto-unlock (default: yes)
@@ -747,18 +801,22 @@ impl FilesystemService {
                 info!("Encryption key stored at {key_path}");
             }
         } else {
-            let output = cmd::run("bcachefs", &arg_refs)
-                .await
-                .map_err(|e| FilesystemError::CommandFailed(format!("failed to execute bcachefs: {e}")))?;
+            let output = cmd::run("bcachefs", &arg_refs).await.map_err(|e| {
+                FilesystemError::CommandFailed(format!("failed to execute bcachefs: {e}"))
+            })?;
 
             if !output.status.success() {
                 if !is_device_bcachefs(&req.devices[0].path).await {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(FilesystemError::CommandFailed(
-                        format!("bcachefs exited with {}: {stderr}", output.status),
-                    ));
+                    return Err(FilesystemError::CommandFailed(format!(
+                        "bcachefs exited with {}: {stderr}",
+                        output.status
+                    )));
                 }
-                warn!("bcachefs format exited with {} but superblocks are present, continuing", output.status);
+                warn!(
+                    "bcachefs format exited with {} but superblocks are present, continuing",
+                    output.status
+                );
             }
         }
 
@@ -776,14 +834,28 @@ impl FilesystemService {
         if is_encrypted {
             let key_path = format!("{KEYS_DIR}/{}.key", req.name);
             if Path::new(&key_path).exists() {
-                cmd::run_ok("bcachefs", &["unlock", "-k", "session", "-f", &key_path, &req.devices[0].path])
-                    .await
-                    .map_err(FilesystemError::CommandFailed)?;
+                cmd::run_ok(
+                    "bcachefs",
+                    &[
+                        "unlock",
+                        "-k",
+                        "session",
+                        "-f",
+                        &key_path,
+                        &req.devices[0].path,
+                    ],
+                )
+                .await
+                .map_err(FilesystemError::CommandFailed)?;
             } else if let Some(ref passphrase) = req.passphrase {
                 let stdin = format!("{passphrase}\n");
-                cmd::run_ok_stdin("bcachefs", &["unlock", "-k", "session", &req.devices[0].path], stdin.as_bytes())
-                    .await
-                    .map_err(FilesystemError::CommandFailed)?;
+                cmd::run_ok_stdin(
+                    "bcachefs",
+                    &["unlock", "-k", "session", &req.devices[0].path],
+                    stdin.as_bytes(),
+                )
+                .await
+                .map_err(FilesystemError::CommandFailed)?;
             }
         }
 
@@ -796,20 +868,35 @@ impl FilesystemService {
             ..FsMountOptions::default()
         };
         let mount_opt_str = build_mount_opts(&mount_opts);
-        info!("Mounting filesystem '{}' at {} with options: {}", req.name, mount_point, mount_opt_str);
-        cmd::run_ok("bcachefs", &["mount", "-o", &mount_opt_str, &device_arg, &mount_point])
-            .await
-            .map_err(FilesystemError::CommandFailed)?;
+        info!(
+            "Mounting filesystem '{}' at {} with options: {}",
+            req.name, mount_point, mount_opt_str
+        );
+        cmd::run_ok(
+            "bcachefs",
+            &["mount", "-o", &mount_opt_str, &device_arg, &mount_point],
+        )
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
 
         // Apply I/O scheduler to member block devices
-        let dev_list: Vec<FilesystemDevice> = req.devices.iter().map(|d| FilesystemDevice {
-            path: d.path.clone(), label: d.label.clone(), durability: d.durability,
-            state: None, data_allowed: None, has_data: None, discard: None,
-        }).collect();
-        if let Some(ref sched) = req.io_scheduler {
-            if let Err(e) = apply_io_scheduler(&dev_list, sched).await {
-                warn!("Failed to set I/O scheduler: {e}");
-            }
+        let dev_list: Vec<FilesystemDevice> = req
+            .devices
+            .iter()
+            .map(|d| FilesystemDevice {
+                path: d.path.clone(),
+                label: d.label.clone(),
+                durability: d.durability,
+                state: None,
+                data_allowed: None,
+                has_data: None,
+                discard: None,
+            })
+            .collect();
+        if let Some(ref sched) = req.io_scheduler
+            && let Err(e) = apply_io_scheduler(&dev_list, sched).await
+        {
+            warn!("Failed to set I/O scheduler: {e}");
         }
 
         // Read back the filesystem info
@@ -862,13 +949,13 @@ impl FilesystemService {
         let fs = self.get(&req.name).await?;
 
         // Unmount if mounted
-        if fs.mounted {
-            if let Some(ref mp) = fs.mount_point {
-                info!("Unmounting filesystem '{}' from {}", req.name, mp);
-                cmd::run_ok("umount", &[mp.as_str()])
-                    .await
-                    .map_err(FilesystemError::CommandFailed)?;
-            }
+        if fs.mounted
+            && let Some(ref mp) = fs.mount_point
+        {
+            info!("Unmounting filesystem '{}' from {}", req.name, mp);
+            cmd::run_ok("umount", &[mp.as_str()])
+                .await
+                .map_err(FilesystemError::CommandFailed)?;
         }
 
         // Also try unmounting by UUID — catches kernel-auto-assembled filesystems
@@ -888,9 +975,9 @@ impl FilesystemService {
             info!("Wiping bcachefs superblock on {}", dev.path);
             cmd::run_ok("wipefs", &["-a", &dev.path])
                 .await
-                .map_err(|e| FilesystemError::CommandFailed(
-                    format!("failed to wipe {}: {e}", dev.path),
-                ))?;
+                .map_err(|e| {
+                    FilesystemError::CommandFailed(format!("failed to wipe {}: {e}", dev.path))
+                })?;
         }
 
         // Flush the kernel's blkid cache so the ghost filesystem disappears
@@ -909,7 +996,11 @@ impl FilesystemService {
     }
 
     /// Mount with explicit mount options
-    async fn mount_with_opts(&self, name: &str, opts: &FsMountOptions) -> Result<Filesystem, FilesystemError> {
+    async fn mount_with_opts(
+        &self,
+        name: &str,
+        opts: &FsMountOptions,
+    ) -> Result<Filesystem, FilesystemError> {
         info!("Mounting filesystem '{}'", name);
         let fs = self.get(name).await?;
         if fs.mounted {
@@ -926,13 +1017,16 @@ impl FilesystemService {
         if opts.encrypted == Some(true) {
             let key_path = format!("{KEYS_DIR}/{name}.key");
             if Path::new(&key_path).exists() {
-                cmd::run_ok("bcachefs", &["unlock", "-k", "session", "-f", &key_path, first_device])
-                    .await
-                    .map_err(FilesystemError::CommandFailed)?;
+                cmd::run_ok(
+                    "bcachefs",
+                    &["unlock", "-k", "session", "-f", &key_path, first_device],
+                )
+                .await
+                .map_err(FilesystemError::CommandFailed)?;
             } else {
-                return Err(FilesystemError::CommandFailed(
-                    format!("encrypted filesystem '{name}' is locked — unlock it first, then mount.")
-                ));
+                return Err(FilesystemError::CommandFailed(format!(
+                    "encrypted filesystem '{name}' is locked — unlock it first, then mount."
+                )));
             }
         }
 
@@ -943,15 +1037,18 @@ impl FilesystemService {
             .collect::<Vec<_>>()
             .join(":");
         let mount_opt_str = build_mount_opts(opts);
-        cmd::run_ok("bcachefs", &["mount", "-o", &mount_opt_str, &device_arg, &mount_point])
-            .await
-            .map_err(FilesystemError::CommandFailed)?;
+        cmd::run_ok(
+            "bcachefs",
+            &["mount", "-o", &mount_opt_str, &device_arg, &mount_point],
+        )
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
 
         // Apply I/O scheduler to member block devices
-        if let Some(ref sched) = opts.io_scheduler {
-            if let Err(e) = apply_io_scheduler(&fs.devices, sched).await {
-                warn!("Failed to set I/O scheduler: {e}");
-            }
+        if let Some(ref sched) = opts.io_scheduler
+            && let Err(e) = apply_io_scheduler(&fs.devices, sched).await
+        {
+            warn!("Failed to set I/O scheduler: {e}");
         }
 
         // Track mount state with identity info for boot reconciliation
@@ -965,17 +1062,27 @@ impl FilesystemService {
     }
 
     /// Unlock an encrypted filesystem with a passphrase (does not mount).
-    pub async fn unlock(&self, name: &str, passphrase: &str) -> Result<Filesystem, FilesystemError> {
+    pub async fn unlock(
+        &self,
+        name: &str,
+        passphrase: &str,
+    ) -> Result<Filesystem, FilesystemError> {
         let fs = self.get(name).await?;
 
-        let first_device = fs.devices.first()
+        let first_device = fs
+            .devices
+            .first()
             .map(|d| d.path.clone())
             .ok_or_else(|| FilesystemError::CommandFailed("no devices".to_string()))?;
 
         let stdin = format!("{passphrase}\n");
-        cmd::run_ok_stdin("bcachefs", &["unlock", "-k", "session", &first_device], stdin.as_bytes())
-            .await
-            .map_err(FilesystemError::CommandFailed)?;
+        cmd::run_ok_stdin(
+            "bcachefs",
+            &["unlock", "-k", "session", &first_device],
+            stdin.as_bytes(),
+        )
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
 
         info!("Filesystem '{name}' unlocked");
         self.invalidate_list_cache().await;
@@ -985,21 +1092,24 @@ impl FilesystemService {
     /// Export the stored encryption key for a filesystem.
     pub async fn export_key(&self, name: &str) -> Result<String, FilesystemError> {
         let key_path = format!("{KEYS_DIR}/{name}.key");
-        tokio::fs::read_to_string(&key_path)
-            .await
-            .map_err(|_| FilesystemError::CommandFailed(format!("no stored key for filesystem '{name}'")))
+        tokio::fs::read_to_string(&key_path).await.map_err(|_| {
+            FilesystemError::CommandFailed(format!("no stored key for filesystem '{name}'"))
+        })
     }
 
     /// Delete the stored encryption key (switch to passphrase-only mode).
     pub async fn delete_key(&self, name: &str) -> Result<(), FilesystemError> {
         let key_path = format!("{KEYS_DIR}/{name}.key");
-        tokio::fs::remove_file(&key_path)
-            .await
-            .map_err(|_| FilesystemError::CommandFailed(format!("no stored key for filesystem '{name}'")))
+        tokio::fs::remove_file(&key_path).await.map_err(|_| {
+            FilesystemError::CommandFailed(format!("no stored key for filesystem '{name}'"))
+        })
     }
 
     /// Update runtime-mutable options on a mounted filesystem via sysfs.
-    pub async fn update_options(&self, req: UpdateFilesystemOptionsRequest) -> Result<Filesystem, FilesystemError> {
+    pub async fn update_options(
+        &self,
+        req: UpdateFilesystemOptionsRequest,
+    ) -> Result<Filesystem, FilesystemError> {
         let fs = self.get(&req.name).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
@@ -1012,9 +1122,9 @@ impl FilesystemService {
         async fn write_opt(base: &str, name: &str, value: &str) -> Result<(), FilesystemError> {
             let path = format!("{base}/{name}");
             let v = if value.is_empty() { "none" } else { value };
-            tokio::fs::write(&path, v).await.map_err(|e| {
-                FilesystemError::CommandFailed(format!("failed to set {name}: {e}"))
-            })
+            tokio::fs::write(&path, v)
+                .await
+                .map_err(|e| FilesystemError::CommandFailed(format!("failed to set {name}: {e}")))
         }
 
         if let Some(ref v) = req.compression {
@@ -1071,13 +1181,15 @@ impl FilesystemService {
         // Mount options require a remount to take effect — but only if they actually changed.
         let state = load_fs_state().await;
         let current = state.get(&req.name).cloned().unwrap_or_default();
-        let mount_changed =
-            (req.version_upgrade.is_some() && req.version_upgrade != current.version_upgrade)
+        let mount_changed = (req.version_upgrade.is_some()
+            && req.version_upgrade != current.version_upgrade)
             || (req.degraded.is_some() && req.degraded != current.degraded)
             || (req.verbose.is_some() && req.verbose != current.verbose)
             || (req.fsck.is_some() && req.fsck != current.fsck)
-            || (req.journal_flush_disabled.is_some() && req.journal_flush_disabled != current.journal_flush_disabled)
-            || (req.journal_flush_delay.is_some() && req.journal_flush_delay != current.journal_flush_delay);
+            || (req.journal_flush_disabled.is_some()
+                && req.journal_flush_disabled != current.journal_flush_disabled)
+            || (req.journal_flush_delay.is_some()
+                && req.journal_flush_delay != current.journal_flush_delay);
         drop(state);
 
         // Persist state changes (mount opts + io_scheduler)
@@ -1088,13 +1200,27 @@ impl FilesystemService {
             let mut state = load_fs_state().await;
             {
                 let opts = state.entry(req.name.clone()).or_default();
-                if let Some(ref v) = req.version_upgrade { opts.version_upgrade = Some(v.clone()); }
-                if let Some(v) = req.degraded { opts.degraded = Some(v); }
-                if let Some(v) = req.verbose { opts.verbose = Some(v); }
-                if let Some(v) = req.fsck { opts.fsck = Some(v); }
-                if let Some(v) = req.journal_flush_disabled { opts.journal_flush_disabled = Some(v); }
-                if let Some(v) = req.journal_flush_delay { opts.journal_flush_delay = Some(v); }
-                if let Some(ref v) = req.io_scheduler { opts.io_scheduler = Some(v.clone()); }
+                if let Some(ref v) = req.version_upgrade {
+                    opts.version_upgrade = Some(v.clone());
+                }
+                if let Some(v) = req.degraded {
+                    opts.degraded = Some(v);
+                }
+                if let Some(v) = req.verbose {
+                    opts.verbose = Some(v);
+                }
+                if let Some(v) = req.fsck {
+                    opts.fsck = Some(v);
+                }
+                if let Some(v) = req.journal_flush_disabled {
+                    opts.journal_flush_disabled = Some(v);
+                }
+                if let Some(v) = req.journal_flush_delay {
+                    opts.journal_flush_delay = Some(v);
+                }
+                if let Some(ref v) = req.io_scheduler {
+                    opts.io_scheduler = Some(v.clone());
+                }
             }
             let _ = save_fs_state(&state).await;
         }
@@ -1103,10 +1229,14 @@ impl FilesystemService {
             // Remount in-place (no unmount needed, works even when busy)
             let mount_point = format!("{NASTY_MOUNT_BASE}/{}", req.name);
             let state = load_fs_state().await;
-            let mount_opt_str = build_mount_opts(state.get(&req.name).unwrap_or(&FsMountOptions::default()));
-            cmd::run_ok("mount", &["-o", &format!("remount,{mount_opt_str}"), &mount_point])
-                .await
-                .map_err(FilesystemError::CommandFailed)?;
+            let mount_opt_str =
+                build_mount_opts(state.get(&req.name).unwrap_or(&FsMountOptions::default()));
+            cmd::run_ok(
+                "mount",
+                &["-o", &format!("remount,{mount_opt_str}"), &mount_point],
+            )
+            .await
+            .map_err(FilesystemError::CommandFailed)?;
             self.invalidate_list_cache().await;
             return self.get(&req.name).await;
         }
@@ -1170,17 +1300,18 @@ impl FilesystemService {
 
             // Read /proc/mounts to know which devices are *actually* mounted.
             // lsblk's mountpoint field can be stale after bcachefs device removal/wipe.
-            let mounted_devices: std::collections::HashSet<String> = tokio::fs::read_to_string("/proc/mounts")
-                .await
-                .unwrap_or_default()
-                .lines()
-                .flat_map(|line| {
-                    // Each line: "device mountpoint fstype options ..."
-                    // bcachefs uses colon-separated multi-device: "/dev/sdb:/dev/sdc /fs/first ..."
-                    let dev_field = line.split_whitespace().next().unwrap_or("");
-                    dev_field.split(':').map(String::from).collect::<Vec<_>>()
-                })
-                .collect();
+            let mounted_devices: std::collections::HashSet<String> =
+                tokio::fs::read_to_string("/proc/mounts")
+                    .await
+                    .unwrap_or_default()
+                    .lines()
+                    .flat_map(|line| {
+                        // Each line: "device mountpoint fstype options ..."
+                        // bcachefs uses colon-separated multi-device: "/dev/sdb:/dev/sdc /fs/first ..."
+                        let dev_field = line.split_whitespace().next().unwrap_or("");
+                        dev_field.split(':').map(String::from).collect::<Vec<_>>()
+                    })
+                    .collect();
 
             fn collect_devices(
                 devs: &[serde_json::Value],
@@ -1193,11 +1324,18 @@ impl FilesystemService {
                     let dev_type = dev.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     let size = dev
                         .get("size")
-                        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                        .and_then(|v| {
+                            v.as_u64()
+                                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                        })
                         .unwrap_or(0);
-                    let mountpoint = dev.get("mountpoint").and_then(|v| v.as_str()).map(String::from);
+                    let mountpoint = dev
+                        .get("mountpoint")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     let fstype = dev.get("fstype").and_then(|v| v.as_str()).map(String::from);
-                    let rota = dev.get("rota")
+                    let rota = dev
+                        .get("rota")
                         .and_then(|v| {
                             v.as_bool()
                                 .or_else(|| v.as_str().map(|s| s == "1"))
@@ -1231,22 +1369,25 @@ impl FilesystemService {
         }
 
         // Mark parent disks as in_use if any of their partitions are in_use.
-        let in_use_paths: std::collections::HashSet<String> = devices.iter()
+        let in_use_paths: std::collections::HashSet<String> = devices
+            .iter()
             .filter(|d| d.in_use && d.dev_type == "part")
             .map(|d| d.path.clone())
             .collect();
         for dev in &mut devices {
-            if dev.dev_type == "disk" && !dev.in_use {
-                if in_use_paths.iter().any(|p| p.starts_with(&dev.path)) {
-                    dev.in_use = true;
-                }
+            if dev.dev_type == "disk"
+                && !dev.in_use
+                && in_use_paths.iter().any(|p| p.starts_with(&dev.path))
+            {
+                dev.in_use = true;
             }
         }
 
         // Detect unpartitioned free space on disks with existing partitions.
         // Use sgdisk to find the largest free gap; if > 1 GiB, add a virtual "free" entry.
         // Skip boot devices (mmcblk/eMMC) — they should never be offered as storage.
-        let partitioned_disks: Vec<String> = devices.iter()
+        let partitioned_disks: Vec<String> = devices
+            .iter()
             .filter(|d| d.dev_type == "part")
             .filter(|d| !d.path.contains("mmcblk"))
             .filter_map(|d| {
@@ -1254,7 +1395,8 @@ impl FilesystemService {
                 let name = d.path.trim_start_matches("/dev/");
                 // Strip trailing partition number
                 if name.contains("nvme") || name.contains("loop") || name.contains("mmcblk") {
-                    name.rsplit_once('p').map(|(base, _)| format!("/dev/{base}"))
+                    name.rsplit_once('p')
+                        .map(|(base, _)| format!("/dev/{base}"))
                 } else {
                     let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
                     Some(format!("/dev/{base}"))
@@ -1264,7 +1406,11 @@ impl FilesystemService {
             .into_iter()
             .collect();
 
-        info!("Free-space detection: found {} partitioned disks: {:?}", partitioned_disks.len(), partitioned_disks);
+        info!(
+            "Free-space detection: found {} partitioned disks: {:?}",
+            partitioned_disks.len(),
+            partitioned_disks
+        );
         const MIN_FREE_BYTES: u64 = 1_073_741_824; // 1 GiB
         for disk_path in &partitioned_disks {
             match get_disk_free_space(disk_path).await {
@@ -1298,9 +1444,10 @@ impl FilesystemService {
     /// Only allowed if the device is not currently in use by any filesystem.
     pub async fn device_wipe(&self, path: &str) -> Result<(), FilesystemError> {
         let devices = self.list_devices().await?;
-        let dev = devices.iter().find(|d| d.path == path).ok_or_else(|| {
-            FilesystemError::CommandFailed(format!("device not found: {path}"))
-        })?;
+        let dev = devices
+            .iter()
+            .find(|d| d.path == path)
+            .ok_or_else(|| FilesystemError::CommandFailed(format!("device not found: {path}")))?;
         if dev.in_use {
             return Err(FilesystemError::CommandFailed(format!(
                 "device {path} is currently in use"
@@ -1331,7 +1478,10 @@ impl FilesystemService {
 
         // Reject if the device is actively in use (mounted or member of a live filesystem).
         let known_devices = self.list_devices().await?;
-        if known_devices.iter().any(|d| d.path == req.device.path && d.in_use) {
+        if known_devices
+            .iter()
+            .any(|d| d.path == req.device.path && d.in_use)
+        {
             return Err(FilesystemError::DeviceInUse(req.device.path.clone()));
         }
         // Reject if the device has a filesystem signature (including stale bcachefs superblocks
@@ -1354,7 +1504,10 @@ impl FilesystemService {
         args.push(req.device.path.clone());
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        info!("Adding device {} to filesystem '{}'", req.device.path, req.filesystem);
+        info!(
+            "Adding device {} to filesystem '{}'",
+            req.device.path, req.filesystem
+        );
         cmd::run_ok("bcachefs", &arg_refs)
             .await
             .map_err(FilesystemError::CommandFailed)?;
@@ -1366,7 +1519,10 @@ impl FilesystemService {
     /// Remove a device from a mounted filesystem.
     /// This evacuates data first, then removes the device.
     /// bcachefs device remove <device> <mountpoint>
-    pub async fn device_remove(&self, req: DeviceActionRequest) -> Result<Filesystem, FilesystemError> {
+    pub async fn device_remove(
+        &self,
+        req: DeviceActionRequest,
+    ) -> Result<Filesystem, FilesystemError> {
         let fs = self.get(&req.filesystem).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
@@ -1375,7 +1531,10 @@ impl FilesystemService {
         }
         let mount_point = fs.mount_point.as_ref().unwrap();
 
-        info!("Removing device {} from filesystem '{}'", req.device, req.filesystem);
+        info!(
+            "Removing device {} from filesystem '{}'",
+            req.device, req.filesystem
+        );
         cmd::run_ok("bcachefs", &["device", "remove", &req.device, mount_point])
             .await
             .map_err(FilesystemError::CommandFailed)?;
@@ -1397,7 +1556,10 @@ impl FilesystemService {
 
         let device = req.device.clone();
         let fs_name = req.filesystem.clone();
-        info!("Starting evacuation of device {} in filesystem '{}'", device, fs_name);
+        info!(
+            "Starting evacuation of device {} in filesystem '{}'",
+            device, fs_name
+        );
 
         // Spawn evacuation in background — this can take hours for large devices.
         // bcachefs sets the device state to "evacuating" automatically.
@@ -1414,7 +1576,10 @@ impl FilesystemService {
 
     /// Change the persistent state of a device (rw, ro, failed, spare).
     /// bcachefs device set-state <new_state> <device> [path]
-    pub async fn device_set_state(&self, req: DeviceSetStateRequest) -> Result<Filesystem, FilesystemError> {
+    pub async fn device_set_state(
+        &self,
+        req: DeviceSetStateRequest,
+    ) -> Result<Filesystem, FilesystemError> {
         let valid_states = ["rw", "ro", "failed", "spare"];
         if !valid_states.contains(&req.state.as_str()) {
             return Err(FilesystemError::CommandFailed(format!(
@@ -1447,7 +1612,10 @@ impl FilesystemService {
 
     /// Bring a device online (temporary, no membership change).
     /// bcachefs device online <device>
-    pub async fn device_online(&self, req: DeviceActionRequest) -> Result<Filesystem, FilesystemError> {
+    pub async fn device_online(
+        &self,
+        req: DeviceActionRequest,
+    ) -> Result<Filesystem, FilesystemError> {
         let fs = self.get(&req.filesystem).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
@@ -1455,7 +1623,10 @@ impl FilesystemService {
             ));
         }
 
-        info!("Onlining device {} in filesystem '{}'", req.device, req.filesystem);
+        info!(
+            "Onlining device {} in filesystem '{}'",
+            req.device, req.filesystem
+        );
         cmd::run_ok("bcachefs", &["device", "online", &req.device])
             .await
             .map_err(FilesystemError::CommandFailed)?;
@@ -1466,14 +1637,20 @@ impl FilesystemService {
 
     /// Take a device offline (temporary, no membership change).
     /// bcachefs device offline <device>
-    pub async fn device_offline(&self, req: DeviceActionRequest) -> Result<Filesystem, FilesystemError> {
+    pub async fn device_offline(
+        &self,
+        req: DeviceActionRequest,
+    ) -> Result<Filesystem, FilesystemError> {
         let fs = self.get(&req.filesystem).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
                 "filesystem must be mounted to offline a device".to_string(),
             ));
         }
-        info!("Offlining device {} in filesystem '{}'", req.device, req.filesystem);
+        info!(
+            "Offlining device {} in filesystem '{}'",
+            req.device, req.filesystem
+        );
         cmd::run_ok("bcachefs", &["device", "offline", &req.device])
             .await
             .map_err(FilesystemError::CommandFailed)?;
@@ -1487,7 +1664,10 @@ impl FilesystemService {
     /// Labels drive tiering target selection (e.g. "ssd.fast", "hdd.archive").
     /// The sysfs entry `/sys/fs/bcachefs/<uuid>/dev-<N>/label` is writable on a
     /// live filesystem; we find the right dev-N by matching the `block` symlink.
-    pub async fn device_set_label(&self, req: DeviceSetLabelRequest) -> Result<Filesystem, FilesystemError> {
+    pub async fn device_set_label(
+        &self,
+        req: DeviceSetLabelRequest,
+    ) -> Result<Filesystem, FilesystemError> {
         let fs = self.get(&req.filesystem).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
@@ -1498,7 +1678,8 @@ impl FilesystemService {
         // Validate: device must be a member of the filesystem
         if !fs.devices.iter().any(|d| d.path == req.device) {
             return Err(FilesystemError::CommandFailed(format!(
-                "{} is not a member of filesystem '{}'", req.device, req.filesystem
+                "{} is not a member of filesystem '{}'",
+                req.device, req.filesystem
             )));
         }
 
@@ -1517,24 +1698,30 @@ impl FilesystemService {
                 continue;
             }
             let block_link = entry.path().join("block");
-            if let Ok(target) = tokio::fs::read_link(&block_link).await {
-                if target.file_name().map(|n| n == dev_name).unwrap_or(false) {
-                    label_path = Some(entry.path().join("label"));
-                    break;
-                }
+            if let Ok(target) = tokio::fs::read_link(&block_link).await
+                && target.file_name().map(|n| n == dev_name).unwrap_or(false)
+            {
+                label_path = Some(entry.path().join("label"));
+                break;
             }
         }
 
         let label_path = label_path.ok_or_else(|| {
             FilesystemError::CommandFailed(format!(
-                "could not find sysfs entry for {} in filesystem '{}'", req.device, req.filesystem
+                "could not find sysfs entry for {} in filesystem '{}'",
+                req.device, req.filesystem
             ))
         })?;
 
-        info!("Setting label '{}' on {} in filesystem '{}'", req.label, req.device, req.filesystem);
-        tokio::fs::write(&label_path, &req.label).await.map_err(|e| {
-            FilesystemError::CommandFailed(format!("failed to write sysfs label: {e}"))
-        })?;
+        info!(
+            "Setting label '{}' on {} in filesystem '{}'",
+            req.label, req.device, req.filesystem
+        );
+        tokio::fs::write(&label_path, &req.label)
+            .await
+            .map_err(|e| {
+                FilesystemError::CommandFailed(format!("failed to write sysfs label: {e}"))
+            })?;
 
         self.invalidate_list_cache().await;
         self.get(&req.filesystem).await
@@ -1576,17 +1763,18 @@ impl FilesystemService {
                 if let Some(bytes) = extract_first_bytes(trimmed) {
                     data_bytes = bytes; // "Used" is total used (data + metadata)
                 }
-            } else if lower.starts_with("online reserved:") {
-                if let Some(bytes) = extract_first_bytes(trimmed) {
-                    reserved_bytes = bytes;
-                }
+            } else if lower.starts_with("online reserved:")
+                && let Some(bytes) = extract_first_bytes(trimmed)
+            {
+                reserved_bytes = bytes;
             }
 
             // Device table row: "label (device N):  sdb  rw  53264510976  8912896  0%"
-            if trimmed.contains("(device") && trimmed.contains("):") {
-                if let Some(du) = parse_device_table_line(trimmed) {
-                    dev_usages.push(du);
-                }
+            if trimmed.contains("(device")
+                && trimmed.contains("):")
+                && let Some(du) = parse_device_table_line(trimmed)
+            {
+                dev_usages.push(du);
             }
         }
 
@@ -1603,10 +1791,10 @@ impl FilesystemService {
                 if let Some(bytes) = extract_first_bytes(trimmed) {
                     total_btree += bytes;
                 }
-            } else if trimmed.starts_with("user:") {
-                if let Some(bytes) = extract_first_bytes(trimmed) {
-                    total_user += bytes;
-                }
+            } else if trimmed.starts_with("user:")
+                && let Some(bytes) = extract_first_bytes(trimmed)
+            {
+                total_user += bytes;
             }
         }
 
@@ -1659,7 +1847,7 @@ impl FilesystemService {
         }
 
         // Check if a bcachefs scrub process is running for this filesystem
-        let running = cmd::run_ok("pgrep", &["-f", &format!("bcachefs scrub")])
+        let running = cmd::run_ok("pgrep", &["-f", "bcachefs scrub"])
             .await
             .is_ok();
 
@@ -1702,7 +1890,11 @@ impl FilesystemService {
     }
 
     /// Enable or disable reconcile on a mounted filesystem via sysfs.
-    pub async fn set_reconcile_enabled(&self, name: &str, enabled: bool) -> Result<(), FilesystemError> {
+    pub async fn set_reconcile_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(), FilesystemError> {
         let fs = self.get(name).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
@@ -1712,9 +1904,9 @@ impl FilesystemService {
         let path = format!("/sys/fs/bcachefs/{}/options/reconcile_enabled", fs.uuid);
         let val = if enabled { "1" } else { "0" };
         info!("Setting reconcile_enabled={val} on filesystem '{name}'");
-        tokio::fs::write(&path, val).await.map_err(|e| {
-            FilesystemError::CommandFailed(format!("failed to write {path}: {e}"))
-        })
+        tokio::fs::write(&path, val)
+            .await
+            .map_err(|e| FilesystemError::CommandFailed(format!("failed to write {path}: {e}")))
     }
 
     /// Raw output of `bcachefs fs usage <mount>` — space breakdown by data type and device.
@@ -1744,7 +1936,11 @@ impl FilesystemService {
         // Capture 2 seconds of output to get at least one full frame
         let raw = cmd::run_ok(
             "script",
-            &["-qc", &format!("timeout 2 bcachefs fs top -h {mount_point}"), "/dev/null"],
+            &[
+                "-qc",
+                &format!("timeout 2 bcachefs fs top -h {mount_point}"),
+                "/dev/null",
+            ],
         )
         .await
         .map_err(FilesystemError::CommandFailed)?;
@@ -1767,7 +1963,10 @@ impl FilesystemService {
         Ok(lines.join("\n"))
     }
 
-    pub async fn bcachefs_timestats(&self, name: &str) -> Result<serde_json::Value, FilesystemError> {
+    pub async fn bcachefs_timestats(
+        &self,
+        name: &str,
+    ) -> Result<serde_json::Value, FilesystemError> {
         let fs = self.get(name).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
@@ -1775,12 +1974,16 @@ impl FilesystemService {
             ));
         }
         let mount_point = fs.mount_point.as_ref().unwrap();
-        let raw = cmd::run_ok("bcachefs", &["fs", "timestats", "--json", "--once", mount_point])
-            .await
-            .map_err(FilesystemError::CommandFailed)?;
-        serde_json::from_str(&raw).map_err(|e| FilesystemError::CommandFailed(format!("failed to parse timestats JSON: {e}")))
+        let raw = cmd::run_ok(
+            "bcachefs",
+            &["fs", "timestats", "--json", "--once", mount_point],
+        )
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
+        serde_json::from_str(&raw).map_err(|e| {
+            FilesystemError::CommandFailed(format!("failed to parse timestats JSON: {e}"))
+        })
     }
-
 }
 
 /// Strip ANSI escape sequences (used for bcachefs raw text output).
@@ -1793,7 +1996,9 @@ fn strip_ansi(s: &str) -> String {
             if chars.peek() == Some(&'[') {
                 chars.next();
                 for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() { break; }
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
             }
         } else {
@@ -1903,16 +2108,21 @@ async fn get_disk_free_space(disk_path: &str) -> Result<u64, String> {
             let sectors_str = trimmed
                 .strip_prefix("total free space is ")
                 .and_then(|s| s.split_whitespace().next());
-            if let Some(s) = sectors_str {
-                if let Ok(sectors) = s.parse::<u64>() {
-                    // Sectors are typically 512 bytes; sgdisk uses logical sector size.
-                    // Parse sector size from sgdisk output: "Sector size (logical): NNN bytes"
-                    let sector_size = output.lines()
-                        .find(|l| l.to_lowercase().contains("sector size (logical)"))
-                        .and_then(|l| l.split_whitespace().filter_map(|w| w.parse::<u64>().ok()).last())
-                        .unwrap_or(512);
-                    return Ok(sectors * sector_size);
-                }
+            if let Some(s) = sectors_str
+                && let Ok(sectors) = s.parse::<u64>()
+            {
+                // Sectors are typically 512 bytes; sgdisk uses logical sector size.
+                // Parse sector size from sgdisk output: "Sector size (logical): NNN bytes"
+                let sector_size = output
+                    .lines()
+                    .find(|l| l.to_lowercase().contains("sector size (logical)"))
+                    .and_then(|l| {
+                        l.split_whitespace()
+                            .filter_map(|w| w.parse::<u64>().ok())
+                            .next_back()
+                    })
+                    .unwrap_or(512);
+                return Ok(sectors * sector_size);
             }
         }
     }
@@ -1942,10 +2152,10 @@ pub async fn create_partition_on_free_space(disk_path: &str) -> Result<String, F
         for dev in devs {
             if let Some(children) = dev.get("children").and_then(|v| v.as_array()) {
                 for child in children {
-                    if child.get("type").and_then(|v| v.as_str()) == Some("part") {
-                        if let Some(name) = child.get("name").and_then(|v| v.as_str()) {
-                            last_part = format!("/dev/{name}");
-                        }
+                    if child.get("type").and_then(|v| v.as_str()) == Some("part")
+                        && let Some(name) = child.get("name").and_then(|v| v.as_str())
+                    {
+                        last_part = format!("/dev/{name}");
                     }
                 }
             }
@@ -1953,7 +2163,9 @@ pub async fn create_partition_on_free_space(disk_path: &str) -> Result<String, F
     }
 
     if last_part.is_empty() {
-        return Err(FilesystemError::CommandFailed("failed to find new partition after creation".to_string()));
+        return Err(FilesystemError::CommandFailed(
+            "failed to find new partition after creation".to_string(),
+        ));
     }
 
     // Wipe any stale filesystem signatures inherited from the disk's
@@ -1998,12 +2210,11 @@ async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<Filesystem
         let trimmed = line.trim();
         // A new device block starts when a line begins with "Device " followed by a digit.
         if trimmed.starts_with("Device ")
-            && trimmed.chars().nth(7).map_or(false, |c| c.is_ascii_digit())
+            && trimmed.chars().nth(7).is_some_and(|c| c.is_ascii_digit())
+            && !current.is_empty()
         {
-            if !current.is_empty() {
-                blocks.push(current.clone());
-                current.clear();
-            }
+            blocks.push(current.clone());
+            current.clear();
         }
         current.push(line);
     }
@@ -2016,10 +2227,11 @@ async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<Filesystem
             let lower = line.to_lowercase();
             if let Some(pos) = lower.find(key) {
                 let rest = &line[pos + key.len()..];
-                let rest = rest.trim_start_matches(|c: char| c == ':' || c == ' ' || c == '\t');
+                let rest = rest.trim_start_matches([':', ' ', '\t']);
                 // Take first token, strip surrounding punctuation
                 if let Some(tok) = rest.split_whitespace().next() {
-                    let tok = tok.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c == ';');
+                    let tok =
+                        tok.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c == ';');
                     if !tok.is_empty() && tok != "none" {
                         return Some(tok.to_string());
                     }
@@ -2036,22 +2248,22 @@ async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<Filesystem
 
         // Find the block that mentions this device path
         let block = blocks.iter().find(|b| {
-            b.iter().any(|l| l.contains(dev_path.as_str()) || l.contains(dev_short))
+            b.iter()
+                .any(|l| l.contains(dev_path.as_str()) || l.contains(dev_short))
         });
 
-        let (label, durability, state, data_allowed, has_data, discard) =
-            if let Some(block) = block {
-                let label = extract_value(block, "label");
-                let durability =
-                    extract_value(block, "durability").and_then(|s| s.parse().ok());
-                let state = extract_value(block, "state");
-                let data_allowed = extract_value(block, "data allowed");
-                let has_data = extract_value(block, "has data");
-                let discard = extract_value(block, "discard").map(|s| s == "1" || s == "true");
-                (label, durability, state, data_allowed, has_data, discard)
-            } else {
-                (None, None, None, None, None, None)
-            };
+        let (label, durability, state, data_allowed, has_data, discard) = if let Some(block) = block
+        {
+            let label = extract_value(block, "label");
+            let durability = extract_value(block, "durability").and_then(|s| s.parse().ok());
+            let state = extract_value(block, "state");
+            let data_allowed = extract_value(block, "data allowed");
+            let has_data = extract_value(block, "has data");
+            let discard = extract_value(block, "discard").map(|s| s == "1" || s == "true");
+            (label, durability, state, data_allowed, has_data, discard)
+        } else {
+            (None, None, None, None, None, None)
+        };
 
         devices.push(FilesystemDevice {
             path: dev_path.clone(),
@@ -2242,7 +2454,10 @@ async fn get_mount_usage(mount_point: &str) -> Option<(u64, u64, u64)> {
 
     // Skip header line, parse second line
     let line = output.lines().nth(1)?;
-    let nums: Vec<u64> = line.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    let nums: Vec<u64> = line
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect();
     if nums.len() == 3 {
         Some((nums[0], nums[1], nums[2]))
     } else {
@@ -2301,7 +2516,9 @@ async fn discover_unmounted_bcachefs(
             continue;
         }
 
-        let entry = results.entry(uuid.clone()).or_insert_with(|| (label.clone(), Vec::new()));
+        let entry = results
+            .entry(uuid.clone())
+            .or_insert_with(|| (label.clone(), Vec::new()));
         if !label.is_empty() && entry.0.is_empty() {
             entry.0 = label;
         }
@@ -2380,15 +2597,24 @@ fn get_fs_mount_options(state: &FsState, name: &str) -> FsMountOptions {
 
 fn build_mount_opts(opts: &FsMountOptions) -> String {
     let mut parts = vec!["prjquota".to_string()];
-    if let Some(ref vu) = opts.version_upgrade {
-        if !vu.is_empty() && vu != "none" {
-            parts.push(format!("version_upgrade={vu}"));
-        }
+    if let Some(ref vu) = opts.version_upgrade
+        && !vu.is_empty()
+        && vu != "none"
+    {
+        parts.push(format!("version_upgrade={vu}"));
     }
-    if opts.degraded == Some(true) { parts.push("degraded".to_string()); }
-    if opts.verbose == Some(true) { parts.push("verbose".to_string()); }
-    if opts.fsck == Some(true) { parts.push("fsck".to_string()); }
-    if opts.journal_flush_disabled == Some(true) { parts.push("journal_flush_disabled".to_string()); }
+    if opts.degraded == Some(true) {
+        parts.push("degraded".to_string());
+    }
+    if opts.verbose == Some(true) {
+        parts.push("verbose".to_string());
+    }
+    if opts.fsck == Some(true) {
+        parts.push("fsck".to_string());
+    }
+    if opts.journal_flush_disabled == Some(true) {
+        parts.push("journal_flush_disabled".to_string());
+    }
     if let Some(delay) = opts.journal_flush_delay {
         parts.push(format!("journal_flush_delay={delay}"));
     }
@@ -2401,9 +2627,14 @@ fn block_dev_name(path: &str) -> Option<&str> {
 }
 
 /// Apply an I/O scheduler to all member block devices of a filesystem.
-async fn apply_io_scheduler(devices: &[FilesystemDevice], scheduler: &str) -> Result<(), FilesystemError> {
+async fn apply_io_scheduler(
+    devices: &[FilesystemDevice],
+    scheduler: &str,
+) -> Result<(), FilesystemError> {
     for dev in devices {
-        let Some(name) = block_dev_name(&dev.path) else { continue };
+        let Some(name) = block_dev_name(&dev.path) else {
+            continue;
+        };
         let sysfs_path = format!("/sys/block/{name}/queue/scheduler");
         if let Err(e) = tokio::fs::write(&sysfs_path, scheduler).await {
             // Not fatal — device may be a partition or missing sysfs entry
@@ -2423,7 +2654,8 @@ async fn read_io_scheduler(devices: &[FilesystemDevice]) -> Option<String> {
     let sysfs_path = format!("/sys/block/{name}/queue/scheduler");
     let content = tokio::fs::read_to_string(&sysfs_path).await.ok()?;
     // Format: "none [mq-deadline] kyber" — extract the bracketed one
-    content.split_whitespace()
+    content
+        .split_whitespace()
         .find(|s| s.starts_with('['))
         .map(|s| s.trim_matches(|c| c == '[' || c == ']').to_string())
 }
@@ -2432,9 +2664,15 @@ async fn is_mountpoint(path: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
     // A path is a mount point when its device ID differs from its parent's,
     // or when it is the filesystem root (path == parent, same inode).
-    let Ok(meta) = tokio::fs::metadata(path).await else { return false; };
-    let parent = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("/"));
-    let Ok(parent_meta) = tokio::fs::metadata(parent).await else { return false; };
+    let Ok(meta) = tokio::fs::metadata(path).await else {
+        return false;
+    };
+    let parent = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("/"));
+    let Ok(parent_meta) = tokio::fs::metadata(parent).await else {
+        return false;
+    };
     meta.dev() != parent_meta.dev() || meta.ino() == parent_meta.ino()
 }
 

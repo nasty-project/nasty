@@ -91,8 +91,12 @@ impl DeployMessage {
     }
 }
 
-async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: String, pre_auth_token: Option<String>) {
-
+async fn handle_deploy(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    client_ip: String,
+    pre_auth_token: Option<String>,
+) {
     // Wait for deploy request (first message must contain params; token is
     // optional now that the upgrade may have carried a session cookie).
     let req: DeployRequest = match socket.recv().await {
@@ -100,7 +104,9 @@ async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
             Ok(r) => r,
             Err(e) => {
                 let _ = socket
-                    .send(Message::Text(DeployMessage::error(&format!("invalid request: {e}")).into()))
+                    .send(Message::Text(
+                        DeployMessage::error(&format!("invalid request: {e}")).into(),
+                    ))
                     .await;
                 return;
             }
@@ -112,7 +118,9 @@ async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
         Some(t) => t,
         None => {
             let _ = socket
-                .send(Message::Text(DeployMessage::error("missing session").into()))
+                .send(Message::Text(
+                    DeployMessage::error("missing session").into(),
+                ))
                 .await;
             return;
         }
@@ -123,9 +131,16 @@ async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
     match state.auth.validate(&token, &client_ip).await {
         Ok(s) if s.role == crate::auth::Role::Admin => {}
         Ok(s) => {
-            crate::auth::audit("app_deploy_denied", &s.username, &client_ip, &format!("role={:?}", s.role));
+            crate::auth::audit(
+                "app_deploy_denied",
+                &s.username,
+                &client_ip,
+                &format!("role={:?}", s.role),
+            );
             let _ = socket
-                .send(Message::Text(DeployMessage::error("forbidden: admin role required").into()))
+                .send(Message::Text(
+                    DeployMessage::error("forbidden: admin role required").into(),
+                ))
                 .await;
             return;
         }
@@ -137,7 +152,10 @@ async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
         }
     }
 
-    info!("Deploy stream started for '{}' (kind: {})", req.name, req.kind);
+    info!(
+        "Deploy stream started for '{}' (kind: {})",
+        req.name, req.kind
+    );
 
     match req.kind.as_str() {
         "simple" => deploy_simple(&mut socket, &state, &req).await,
@@ -145,40 +163,63 @@ async fn handle_deploy(mut socket: WebSocket, state: Arc<AppState>, client_ip: S
         "pull" => deploy_pull(&mut socket, &state, &req).await,
         _ => {
             let _ = socket
-                .send(Message::Text(DeployMessage::error("unknown deploy kind").into()))
+                .send(Message::Text(
+                    DeployMessage::error("unknown deploy kind").into(),
+                ))
                 .await;
         }
     }
 }
 
 async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployRequest) {
-
     let image = match &req.image {
         Some(img) => img.clone(),
         None => {
-            let _ = socket.send(Message::Text(DeployMessage::error("missing image").into())).await;
+            let _ = socket
+                .send(Message::Text(DeployMessage::error("missing image").into()))
+                .await;
             return;
         }
     };
 
     // Step 1: Pull image via bollard with structured progress
-    let _ = socket.send(Message::Text(DeployMessage::log(&format!("Pulling image: {image}")).into())).await;
+    let _ = socket
+        .send(Message::Text(
+            DeployMessage::log(&format!("Pulling image: {image}")).into(),
+        ))
+        .await;
 
-    if let Err(e) = pull_image_with_progress(socket, &state, &image).await {
-        let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed: {e}")).into())).await;
+    if let Err(e) = pull_image_with_progress(socket, state, &image).await {
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::error(&format!("pull failed: {e}")).into(),
+            ))
+            .await;
         return;
     }
 
-    let _ = socket.send(Message::Text(DeployMessage::log("Image pulled successfully").into())).await;
+    let _ = socket
+        .send(Message::Text(
+            DeployMessage::log("Image pulled successfully").into(),
+        ))
+        .await;
 
     // Step 2: Install via the engine's install method
-    let _ = socket.send(Message::Text(DeployMessage::log("Creating container...").into())).await;
+    let _ = socket
+        .send(Message::Text(
+            DeployMessage::log("Creating container...").into(),
+        ))
+        .await;
 
     let install_params = req.install_params.clone().unwrap_or(serde_json::json!({}));
     let mut params: nasty_apps::InstallAppRequest = match serde_json::from_value(install_params) {
         Ok(p) => p,
         Err(e) => {
-            let _ = socket.send(Message::Text(DeployMessage::error(&format!("invalid params: {e}")).into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    DeployMessage::error(&format!("invalid params: {e}")).into(),
+                ))
+                .await;
             return;
         }
     };
@@ -204,21 +245,32 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
 
     match state.apps.install(params).await {
         Ok(app) => {
-            let _ = socket.send(Message::Text(DeployMessage::log(&format!("Container '{}' started", app.name)).into())).await;
-            let _ = socket.send(Message::Text(DeployMessage::done("ok").into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    DeployMessage::log(&format!("Container '{}' started", app.name)).into(),
+                ))
+                .await;
+            let _ = socket
+                .send(Message::Text(DeployMessage::done("ok").into()))
+                .await;
         }
         Err(e) => {
-            let _ = socket.send(Message::Text(DeployMessage::error(&e.to_string()).into())).await;
+            let _ = socket
+                .send(Message::Text(DeployMessage::error(&e.to_string()).into()))
+                .await;
         }
     }
 }
 
 async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRequest) {
-
     let compose_content = match &req.compose_file {
         Some(c) => c.clone(),
         None => {
-            let _ = socket.send(Message::Text(DeployMessage::error("missing compose_file").into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    DeployMessage::error("missing compose_file").into(),
+                ))
+                .await;
             return;
         }
     };
@@ -229,7 +281,11 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
     // secret on the host. allow_unsafe relaxes most checks but never permits
     // bind-mounting the engine's state dir or the host root.
     if let Err(e) = validate_compose(&compose_content, &req.name, req.allow_unsafe) {
-        let _ = socket.send(Message::Text(DeployMessage::error(&format!("compose rejected: {e}")).into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::error(&format!("compose rejected: {e}")).into(),
+            ))
+            .await;
         return;
     }
 
@@ -241,9 +297,12 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
             &format!("app={}", req.name),
         );
         let _ = socket
-            .send(Message::Text(DeployMessage::log(
-                "WARNING: deploying with allow_unsafe — container has elevated privileges",
-            ).into()))
+            .send(Message::Text(
+                DeployMessage::log(
+                    "WARNING: deploying with allow_unsafe — container has elevated privileges",
+                )
+                .into(),
+            ))
             .await;
     }
 
@@ -255,17 +314,29 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
 
     // Write compose file
     if let Err(e) = tokio::fs::create_dir_all(&compose_dir).await {
-        let _ = socket.send(Message::Text(DeployMessage::error(&format!("failed to create dir: {e}")).into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::error(&format!("failed to create dir: {e}")).into(),
+            ))
+            .await;
         return;
     }
     if let Err(e) = tokio::fs::write(&compose_path, &compose_content).await {
-        let _ = socket.send(Message::Text(DeployMessage::error(&format!("failed to write compose file: {e}")).into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::error(&format!("failed to write compose file: {e}")).into(),
+            ))
+            .await;
         return;
     }
     // Persist the unsafe flag next to the compose file so list/get can surface
     // it. Marker is the presence of `allow_unsafe: true` in the JSON file.
     if let Err(e) = write_app_meta(&compose_dir, req.allow_unsafe).await {
-        let _ = socket.send(Message::Text(DeployMessage::error(&format!("failed to write app meta: {e}")).into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::error(&format!("failed to write app meta: {e}")).into(),
+            ))
+            .await;
         return;
     }
 
@@ -274,104 +345,201 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
     let _ = tokio::fs::write(format!("{}/.env", compose_dir), &env_content).await;
 
     // Validate
-    let _ = socket.send(Message::Text(DeployMessage::log("Validating compose file...").into())).await;
+    let _ = socket
+        .send(Message::Text(
+            DeployMessage::log("Validating compose file...").into(),
+        ))
+        .await;
     if let Err(e) = stream_command(
         socket,
         "docker",
         &["compose", "-f", &compose_path, "config", "--quiet"],
-    ).await {
+    )
+    .await
+    {
         if !is_update {
             let _ = tokio::fs::remove_dir_all(&compose_dir).await;
         }
-        let _ = socket.send(Message::Text(DeployMessage::error(&format!("invalid compose file: {e}")).into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::error(&format!("invalid compose file: {e}")).into(),
+            ))
+            .await;
         return;
     }
 
     // Pull images via bollard (parse compose YAML for image refs)
-    let _ = socket.send(Message::Text(DeployMessage::log("Pulling images...").into())).await;
+    let _ = socket
+        .send(Message::Text(
+            DeployMessage::log("Pulling images...").into(),
+        ))
+        .await;
     let images = extract_compose_images(&compose_content);
     if images.is_empty() {
-        let _ = socket.send(Message::Text(DeployMessage::log("No images to pull (all built locally?)").into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::log("No images to pull (all built locally?)").into(),
+            ))
+            .await;
     } else {
         for image in &images {
-            let _ = socket.send(Message::Text(DeployMessage::log(&format!("Pulling: {image}")).into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    DeployMessage::log(&format!("Pulling: {image}")).into(),
+                ))
+                .await;
             if let Err(e) = pull_image_with_progress(socket, state, image).await {
                 if !is_update {
                     let _ = tokio::fs::remove_dir_all(&compose_dir).await;
                 }
-                let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed for {image}: {e}")).into())).await;
+                let _ = socket
+                    .send(Message::Text(
+                        DeployMessage::error(&format!("pull failed for {image}: {e}")).into(),
+                    ))
+                    .await;
                 return;
             }
         }
     }
 
     // Start containers
-    let _ = socket.send(Message::Text(DeployMessage::log("Starting containers...").into())).await;
+    let _ = socket
+        .send(Message::Text(
+            DeployMessage::log("Starting containers...").into(),
+        ))
+        .await;
     let mut args = vec![
-        "compose", "-f", &compose_path, "--project-name", &req.name,
-        "up", "-d", "--no-build",
+        "compose",
+        "-f",
+        &compose_path,
+        "--project-name",
+        &req.name,
+        "up",
+        "-d",
+        "--no-build",
     ];
     if is_update {
         args.push("--remove-orphans");
     }
     if let Err(e) = stream_command(socket, "docker", &args).await {
         // Clean up partially created containers before removing the compose dir
-        let _ = socket.send(Message::Text(DeployMessage::log("Cleaning up failed deployment...").into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::log("Cleaning up failed deployment...").into(),
+            ))
+            .await;
         let _ = Command::new("docker")
-            .args(["compose", "-f", &compose_path, "--project-name", &req.name, "down", "-v", "--remove-orphans"])
+            .args([
+                "compose",
+                "-f",
+                &compose_path,
+                "--project-name",
+                &req.name,
+                "down",
+                "-v",
+                "--remove-orphans",
+            ])
             .output()
             .await;
         if !is_update {
             let _ = tokio::fs::remove_dir_all(&compose_dir).await;
         }
-        let _ = socket.send(Message::Text(DeployMessage::error(&format!("deploy failed: {e}")).into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::error(&format!("deploy failed: {e}")).into(),
+            ))
+            .await;
         return;
     }
 
     // Auto-ingress for first exposed port
-    if let Ok(app) = state.apps.get(&req.name).await {
-        if let Some(first_port) = app.ports.first() {
-            let _ = state.apps.ingress_set(nasty_apps::SetIngressRequest {
+    if let Ok(app) = state.apps.get(&req.name).await
+        && let Some(first_port) = app.ports.first()
+    {
+        let _ = state
+            .apps
+            .ingress_set(nasty_apps::SetIngressRequest {
                 name: req.name.clone(),
                 host_port: first_port.host_port,
-            }).await;
-        }
+            })
+            .await;
     }
 
     let action = if is_update { "updated" } else { "deployed" };
-    let _ = socket.send(Message::Text(DeployMessage::log(&format!("Compose app '{}' {action} successfully", req.name)).into())).await;
-    let _ = socket.send(Message::Text(DeployMessage::done("ok").into())).await;
+    let _ = socket
+        .send(Message::Text(
+            DeployMessage::log(&format!("Compose app '{}' {action} successfully", req.name)).into(),
+        ))
+        .await;
+    let _ = socket
+        .send(Message::Text(DeployMessage::done("ok").into()))
+        .await;
 }
 
 async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployRequest) {
-
     let compose_path = format!("/var/lib/nasty/apps/{}/docker-compose.yml", req.name);
 
     if std::path::Path::new(&compose_path).exists() {
         // Compose app: pull via bollard + recreate
-        let _ = socket.send(Message::Text(DeployMessage::log("Pulling latest images...").into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::log("Pulling latest images...").into(),
+            ))
+            .await;
         let compose_content = match tokio::fs::read_to_string(&compose_path).await {
             Ok(c) => c,
             Err(e) => {
-                let _ = socket.send(Message::Text(DeployMessage::error(&format!("read compose file: {e}")).into())).await;
+                let _ = socket
+                    .send(Message::Text(
+                        DeployMessage::error(&format!("read compose file: {e}")).into(),
+                    ))
+                    .await;
                 return;
             }
         };
         for image in extract_compose_images(&compose_content) {
-            let _ = socket.send(Message::Text(DeployMessage::log(&format!("Pulling: {image}")).into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    DeployMessage::log(&format!("Pulling: {image}")).into(),
+                ))
+                .await;
             if let Err(e) = pull_image_with_progress(socket, state, &image).await {
-                let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed for {image}: {e}")).into())).await;
+                let _ = socket
+                    .send(Message::Text(
+                        DeployMessage::error(&format!("pull failed for {image}: {e}")).into(),
+                    ))
+                    .await;
                 return;
             }
         }
 
-        let _ = socket.send(Message::Text(DeployMessage::log("Recreating containers...").into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::log("Recreating containers...").into(),
+            ))
+            .await;
         if let Err(e) = stream_command(
-            socket, "docker",
-            &["compose", "-f", &compose_path, "--project-name", &req.name,
-              "up", "-d", "--no-build", "--remove-orphans"],
-        ).await {
-            let _ = socket.send(Message::Text(DeployMessage::error(&format!("recreate failed: {e}")).into())).await;
+            socket,
+            "docker",
+            &[
+                "compose",
+                "-f",
+                &compose_path,
+                "--project-name",
+                &req.name,
+                "up",
+                "-d",
+                "--no-build",
+                "--remove-orphans",
+            ],
+        )
+        .await
+        {
+            let _ = socket
+                .send(Message::Text(
+                    DeployMessage::error(&format!("recreate failed: {e}")).into(),
+                ))
+                .await;
             return;
         }
     } else {
@@ -383,42 +551,59 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
                 match state.apps.get_config(&req.name).await {
                     Ok(config) => config.image,
                     Err(e) => {
-                        let _ = socket.send(Message::Text(DeployMessage::error(&e.to_string()).into())).await;
+                        let _ = socket
+                            .send(Message::Text(DeployMessage::error(&e.to_string()).into()))
+                            .await;
                         return;
                     }
                 }
             }
         };
 
-        let _ = socket.send(Message::Text(DeployMessage::log(&format!("Pulling image: {image}")).into())).await;
-        if let Err(e) = pull_image_with_progress(socket, &state, &image).await {
-            let _ = socket.send(Message::Text(DeployMessage::error(&format!("pull failed: {e}")).into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::log(&format!("Pulling image: {image}")).into(),
+            ))
+            .await;
+        if let Err(e) = pull_image_with_progress(socket, state, &image).await {
+            let _ = socket
+                .send(Message::Text(
+                    DeployMessage::error(&format!("pull failed: {e}")).into(),
+                ))
+                .await;
             return;
         }
 
         // Recreate container
-        let _ = socket.send(Message::Text(DeployMessage::log("Recreating container...").into())).await;
+        let _ = socket
+            .send(Message::Text(
+                DeployMessage::log("Recreating container...").into(),
+            ))
+            .await;
         match state.apps.pull(&req.name).await {
             Ok(_) => {}
             Err(e) => {
-                let _ = socket.send(Message::Text(DeployMessage::error(&e.to_string()).into())).await;
+                let _ = socket
+                    .send(Message::Text(DeployMessage::error(&e.to_string()).into()))
+                    .await;
                 return;
             }
         }
     }
 
-    let _ = socket.send(Message::Text(DeployMessage::log(&format!("Image update complete for '{}'", req.name)).into())).await;
-    let _ = socket.send(Message::Text(DeployMessage::done("ok").into())).await;
+    let _ = socket
+        .send(Message::Text(
+            DeployMessage::log(&format!("Image update complete for '{}'", req.name)).into(),
+        ))
+        .await;
+    let _ = socket
+        .send(Message::Text(DeployMessage::done("ok").into()))
+        .await;
 }
 
 /// Run a command and stream its combined stdout+stderr line by line over the WebSocket.
 /// Returns Ok(()) if the command exits successfully, Err(message) otherwise.
-async fn stream_command(
-    socket: &mut WebSocket,
-    cmd: &str,
-    args: &[&str],
-) -> Result<(), String> {
-
+async fn stream_command(socket: &mut WebSocket, cmd: &str, args: &[&str]) -> Result<(), String> {
     let mut child = Command::new(cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -472,12 +657,16 @@ async fn stream_command(
     let status = child.wait().await.map_err(|e| e.to_string())?;
 
     if !status.success() {
-        let err_lines: Vec<_> = all_lines.iter()
+        let err_lines: Vec<_> = all_lines
+            .iter()
             .filter(|l| l.contains("Error") || l.contains("error") || l.contains("failed"))
             .cloned()
             .collect();
         return Err(if err_lines.is_empty() {
-            all_lines.last().cloned().unwrap_or_else(|| "command failed".to_string())
+            all_lines
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "command failed".to_string())
         } else {
             err_lines.join("\n")
         });
@@ -505,7 +694,9 @@ async fn write_app_meta(app_dir: &str, allow_unsafe: bool) -> Result<(), String>
     }
     let meta = AppMeta { allow_unsafe };
     let json = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
-    tokio::fs::write(&path, json).await.map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, json)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -517,19 +708,36 @@ async fn write_app_meta(app_dir: &str, allow_unsafe: bool) -> Result<(), String>
 /// CAP_DAC_READ_SEARCH/CAP_DAC_OVERRIDE bypass host filesystem permissions.
 /// CAP_MAC_ADMIN/_OVERRIDE bypass MAC (SELinux/AppArmor).
 const FORBIDDEN_CAPS: &[&str] = &[
-    "ALL", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT",
-    "SYS_TIME", "NET_ADMIN", "DAC_READ_SEARCH", "DAC_OVERRIDE",
-    "MAC_ADMIN", "MAC_OVERRIDE", "AUDIT_CONTROL", "AUDIT_WRITE",
+    "ALL",
+    "SYS_ADMIN",
+    "SYS_PTRACE",
+    "SYS_MODULE",
+    "SYS_RAWIO",
+    "SYS_BOOT",
+    "SYS_TIME",
+    "NET_ADMIN",
+    "DAC_READ_SEARCH",
+    "DAC_OVERRIDE",
+    "MAC_ADMIN",
+    "MAC_OVERRIDE",
+    "AUDIT_CONTROL",
+    "AUDIT_WRITE",
 ];
 
 /// security_opt values that disable the default container sandbox layers.
 const FORBIDDEN_SECURITY_OPTS: &[&str] = &[
-    "seccomp=unconfined", "seccomp:unconfined",
-    "apparmor=unconfined", "apparmor:unconfined",
-    "label=disable", "label:disable",
-    "label=type:spc_t", "label:type:spc_t",
-    "no-new-privileges=false", "no-new-privileges:false",
-    "systempaths=unconfined", "systempaths:unconfined",
+    "seccomp=unconfined",
+    "seccomp:unconfined",
+    "apparmor=unconfined",
+    "apparmor:unconfined",
+    "label=disable",
+    "label:disable",
+    "label=type:spc_t",
+    "label:type:spc_t",
+    "no-new-privileges=false",
+    "no-new-privileges:false",
+    "systempaths=unconfined",
+    "systempaths:unconfined",
 ];
 
 /// Reasons a bind-mount source must be rejected outright, regardless of
@@ -548,10 +756,14 @@ enum BindReject {
 
 fn always_forbidden_bind(source: &str) -> Option<BindReject> {
     if source.contains("..") {
-        return Some(BindReject::Hard("'..' traversal is never allowed in bind sources"));
+        return Some(BindReject::Hard(
+            "'..' traversal is never allowed in bind sources",
+        ));
     }
     if source == "/" {
-        return Some(BindReject::Hard("'/' (host root) is never allowed as a bind source"));
+        return Some(BindReject::Hard(
+            "'/' (host root) is never allowed as a bind source",
+        ));
     }
     if source == "/var/lib/nasty" || source.starts_with("/var/lib/nasty/") {
         return Some(BindReject::EngineState);
@@ -573,8 +785,8 @@ fn always_forbidden_bind(source: &str) -> Option<BindReject> {
 /// stays on either way: nothing may bind-mount the engine's state dir, the
 /// root filesystem, or use `..` to escape.
 fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<(), String> {
-    let parsed: serde_json::Value = serde_yaml_ng::from_str(yaml)
-        .map_err(|e| format!("compose YAML failed to parse: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_yaml_ng::from_str(yaml).map_err(|e| format!("compose YAML failed to parse: {e}"))?;
 
     let services = parsed
         .get("services")
@@ -588,7 +800,10 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
 
         if !allow_unsafe {
             if svc.get("privileged").and_then(|v| v.as_bool()) == Some(true) {
-                return Err(format!("{} sets privileged: true (host-root equivalent). Set allow_unsafe to override.", scope("privileged")));
+                return Err(format!(
+                    "{} sets privileged: true (host-root equivalent). Set allow_unsafe to override.",
+                    scope("privileged")
+                ));
             }
 
             for field in ["pid", "ipc", "uts", "userns_mode", "cgroup", "network_mode"] {
@@ -597,15 +812,19 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                     if v_lower == "host" || v_lower.starts_with("host:") {
                         return Err(format!(
                             "{} = '{}' shares the host namespace. Set allow_unsafe to override.",
-                            scope(field), v
+                            scope(field),
+                            v
                         ));
                     }
                 }
             }
-            if let Some(v) = svc.get("ipc").and_then(|v| v.as_str()) {
-                if v.eq_ignore_ascii_case("shareable") {
-                    return Err(format!("{} = 'shareable' lets other containers attach. Set allow_unsafe to override.", scope("ipc")));
-                }
+            if let Some(v) = svc.get("ipc").and_then(|v| v.as_str())
+                && v.eq_ignore_ascii_case("shareable")
+            {
+                return Err(format!(
+                    "{} = 'shareable' lets other containers attach. Set allow_unsafe to override.",
+                    scope("ipc")
+                ));
             }
 
             if let Some(caps) = svc.get("cap_add").and_then(|v| v.as_array()) {
@@ -613,7 +832,11 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                     if let Some(s) = c.as_str() {
                         let bare = s.strip_prefix("CAP_").unwrap_or(s).to_ascii_uppercase();
                         if FORBIDDEN_CAPS.contains(&bare.as_str()) {
-                            return Err(format!("{} includes '{}' — grants host-equivalent privilege. Set allow_unsafe to override.", scope("cap_add"), s));
+                            return Err(format!(
+                                "{} includes '{}' — grants host-equivalent privilege. Set allow_unsafe to override.",
+                                scope("cap_add"),
+                                s
+                            ));
                         }
                     }
                 }
@@ -624,20 +847,30 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                     if let Some(s) = o.as_str() {
                         let normalized = s.replace(' ', "").to_ascii_lowercase();
                         if FORBIDDEN_SECURITY_OPTS.iter().any(|f| normalized == *f) {
-                            return Err(format!("{} includes '{}' — disables container sandbox. Set allow_unsafe to override.", scope("security_opt"), s));
+                            return Err(format!(
+                                "{} includes '{}' — disables container sandbox. Set allow_unsafe to override.",
+                                scope("security_opt"),
+                                s
+                            ));
                         }
                     }
                 }
             }
 
-            if let Some(devices) = svc.get("devices").and_then(|v| v.as_array()) {
-                if !devices.is_empty() {
-                    return Err(format!("{} maps host devices. Set allow_unsafe to override.", scope("devices")));
-                }
+            if let Some(devices) = svc.get("devices").and_then(|v| v.as_array())
+                && !devices.is_empty()
+            {
+                return Err(format!(
+                    "{} maps host devices. Set allow_unsafe to override.",
+                    scope("devices")
+                ));
             }
 
             if svc.get("device_cgroup_rules").is_some() {
-                return Err(format!("{} bypasses the device cgroup. Set allow_unsafe to override.", scope("device_cgroup_rules")));
+                return Err(format!(
+                    "{} bypasses the device cgroup. Set allow_unsafe to override.",
+                    scope("device_cgroup_rules")
+                ));
             }
         }
 
@@ -667,12 +900,13 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                 }
 
                 // Named volume short-form ("data:/var/lib/foo") — no host path.
-                if !source.starts_with('/') && !source.starts_with('.') && !source.starts_with('~') {
+                if !source.starts_with('/') && !source.starts_with('.') && !source.starts_with('~')
+                {
                     continue;
                 }
 
-                let in_app_dir = source.starts_with(&format!("{allowed_app_dir}/"))
-                    || source == allowed_app_dir;
+                let in_app_dir =
+                    source.starts_with(&format!("{allowed_app_dir}/")) || source == allowed_app_dir;
 
                 match always_forbidden_bind(&source) {
                     Some(BindReject::Hard(why)) => {
@@ -694,9 +928,7 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                 }
 
                 if !allow_unsafe {
-                    let allowed = in_app_dir
-                        || source.starts_with("/fs/")
-                        || source == "/fs";
+                    let allowed = in_app_dir || source.starts_with("/fs/") || source == "/fs";
                     if !allowed {
                         return Err(format!(
                             "{} bind-mounts '{}' — only paths under '{}/' or '/fs/' are allowed. Set allow_unsafe to override.",
@@ -719,7 +951,11 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                 None => continue,
             };
             let is_bind = opts.get("type").and_then(|v| v.as_str()) == Some("none")
-                || opts.get("o").and_then(|v| v.as_str()).map(|s| s.contains("bind")).unwrap_or(false);
+                || opts
+                    .get("o")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.contains("bind"))
+                    .unwrap_or(false);
             if !is_bind {
                 continue;
             }
@@ -728,8 +964,8 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                 continue;
             }
 
-            let in_app_dir = device.starts_with(&format!("{allowed_app_dir}/"))
-                || device == allowed_app_dir;
+            let in_app_dir =
+                device.starts_with(&format!("{allowed_app_dir}/")) || device == allowed_app_dir;
 
             match always_forbidden_bind(device) {
                 Some(BindReject::Hard(why)) => {
@@ -746,9 +982,7 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
             }
 
             if !allow_unsafe {
-                let allowed = in_app_dir
-                    || device.starts_with("/fs/")
-                    || device == "/fs";
+                let allowed = in_app_dir || device.starts_with("/fs/") || device == "/fs";
                 if !allowed {
                     return Err(format!(
                         "volumes.{vol_name} bind-mounts '{device}' — only paths under '{allowed_app_dir}/' or '/fs/' are allowed. Set allow_unsafe to override."
@@ -773,10 +1007,11 @@ fn extract_compose_images(yaml: &str) -> Vec<String> {
     let mut images = Vec::new();
     if let Some(services) = parsed.get("services").and_then(|s| s.as_object()) {
         for (_name, svc) in services {
-            if let Some(image) = svc.get("image").and_then(|i| i.as_str()) {
-                if !image.is_empty() && svc.get("build").is_none() {
-                    images.push(image.to_string());
-                }
+            if let Some(image) = svc.get("image").and_then(|i| i.as_str())
+                && !image.is_empty()
+                && svc.get("build").is_none()
+            {
+                images.push(image.to_string());
             }
         }
     }
@@ -793,7 +1028,9 @@ async fn pull_image_with_progress(
     state: &AppState,
     image: &str,
 ) -> Result<(), String> {
-    let docker = state.apps.docker_client()
+    let docker = state
+        .apps
+        .docker_client()
         .map_err(|e| format!("Docker not ready: {e}"))?;
 
     let (from_image, tag) = if let Some((img, tag)) = image.rsplit_once(':') {
@@ -858,20 +1095,28 @@ mod tests {
     use super::validate_compose;
 
     fn ok_strict(yaml: &str) {
-        assert!(validate_compose(yaml, "myapp", false).is_ok(), "expected strict ok: {yaml}");
+        assert!(
+            validate_compose(yaml, "myapp", false).is_ok(),
+            "expected strict ok: {yaml}"
+        );
     }
 
     fn err_strict(yaml: &str, needle: &str) {
-        let e = validate_compose(yaml, "myapp", false).expect_err(&format!("expected strict err: {yaml}"));
+        let e = validate_compose(yaml, "myapp", false)
+            .expect_err(&format!("expected strict err: {yaml}"));
         assert!(e.contains(needle), "error '{e}' did not contain '{needle}'");
     }
 
     fn ok_unsafe(yaml: &str) {
-        assert!(validate_compose(yaml, "myapp", true).is_ok(), "expected unsafe ok: {yaml}");
+        assert!(
+            validate_compose(yaml, "myapp", true).is_ok(),
+            "expected unsafe ok: {yaml}"
+        );
     }
 
     fn err_unsafe(yaml: &str, needle: &str) {
-        let e = validate_compose(yaml, "myapp", true).expect_err(&format!("expected unsafe err: {yaml}"));
+        let e = validate_compose(yaml, "myapp", true)
+            .expect_err(&format!("expected unsafe err: {yaml}"));
         assert!(e.contains(needle), "error '{e}' did not contain '{needle}'");
     }
 
@@ -884,22 +1129,46 @@ mod tests {
 
     #[test]
     fn strict_rejects_privileged() {
-        err_strict("services:\n  bad:\n    image: alpine\n    privileged: true\n", "privileged");
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    privileged: true\n",
+            "privileged",
+        );
     }
 
     #[test]
     fn strict_rejects_host_namespaces() {
-        err_strict("services:\n  bad:\n    image: alpine\n    pid: host\n", "host");
-        err_strict("services:\n  bad:\n    image: alpine\n    network_mode: host\n", "host");
-        err_strict("services:\n  bad:\n    image: alpine\n    ipc: host\n", "host");
-        err_strict("services:\n  bad:\n    image: alpine\n    userns_mode: host\n", "host");
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    pid: host\n",
+            "host",
+        );
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    network_mode: host\n",
+            "host",
+        );
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    ipc: host\n",
+            "host",
+        );
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    userns_mode: host\n",
+            "host",
+        );
     }
 
     #[test]
     fn strict_rejects_dangerous_caps() {
-        err_strict("services:\n  bad:\n    image: alpine\n    cap_add: [SYS_ADMIN]\n", "SYS_ADMIN");
-        err_strict("services:\n  bad:\n    image: alpine\n    cap_add: [\"CAP_SYS_PTRACE\"]\n", "PTRACE");
-        err_strict("services:\n  bad:\n    image: alpine\n    cap_add: [ALL]\n", "ALL");
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    cap_add: [SYS_ADMIN]\n",
+            "SYS_ADMIN",
+        );
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    cap_add: [\"CAP_SYS_PTRACE\"]\n",
+            "PTRACE",
+        );
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    cap_add: [ALL]\n",
+            "ALL",
+        );
     }
 
     #[test]
@@ -909,24 +1178,41 @@ mod tests {
 
     #[test]
     fn strict_rejects_security_opt_unconfined() {
-        err_strict("services:\n  bad:\n    image: alpine\n    security_opt: [\"seccomp=unconfined\"]\n", "seccomp");
-        err_strict("services:\n  bad:\n    image: alpine\n    security_opt: [\"apparmor=unconfined\"]\n", "apparmor");
-        err_strict("services:\n  bad:\n    image: alpine\n    security_opt: [\"no-new-privileges=false\"]\n", "no-new-privileges");
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    security_opt: [\"seccomp=unconfined\"]\n",
+            "seccomp",
+        );
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    security_opt: [\"apparmor=unconfined\"]\n",
+            "apparmor",
+        );
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    security_opt: [\"no-new-privileges=false\"]\n",
+            "no-new-privileges",
+        );
     }
 
     #[test]
     fn strict_rejects_devices() {
-        err_strict("services:\n  bad:\n    image: alpine\n    devices: [\"/dev/sda:/dev/sda\"]\n", "devices");
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    devices: [\"/dev/sda:/dev/sda\"]\n",
+            "devices",
+        );
     }
 
     #[test]
     fn strict_rejects_etc_bind() {
-        err_strict("services:\n  bad:\n    image: alpine\n    volumes: [\"/etc:/etc\"]\n", "/etc");
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    volumes: [\"/etc:/etc\"]\n",
+            "/etc",
+        );
     }
 
     #[test]
     fn strict_allows_app_dir_and_share_root_binds() {
-        ok_strict("services:\n  ok:\n    image: alpine\n    volumes:\n      - \"/var/lib/nasty/apps/myapp/data:/data\"\n      - \"/fs/photos:/photos:ro\"\n      - \"named-vol:/x\"\n");
+        ok_strict(
+            "services:\n  ok:\n    image: alpine\n    volumes:\n      - \"/var/lib/nasty/apps/myapp/data:/data\"\n      - \"/fs/photos:/photos:ro\"\n      - \"named-vol:/x\"\n",
+        );
     }
 
     #[test]
@@ -966,7 +1252,9 @@ mod tests {
 
     #[test]
     fn unsafe_accepts_arbitrary_bind() {
-        ok_unsafe("services:\n  agent:\n    image: monitor\n    volumes: [\"/etc:/host-etc:ro\"]\n");
+        ok_unsafe(
+            "services:\n  agent:\n    image: monitor\n    volumes: [\"/etc:/host-etc:ro\"]\n",
+        );
         ok_unsafe("services:\n  s:\n    image: x\n    volumes: [\"/home/user/data:/data\"]\n");
     }
 
@@ -974,7 +1262,10 @@ mod tests {
 
     #[test]
     fn unsafe_still_rejects_root_bind() {
-        err_unsafe("services:\n  bad:\n    image: alpine\n    volumes: [\"/:/host\"]\n", "off-limits");
+        err_unsafe(
+            "services:\n  bad:\n    image: alpine\n    volumes: [\"/:/host\"]\n",
+            "off-limits",
+        );
     }
 
     #[test]
@@ -993,7 +1284,9 @@ mod tests {
     fn unsafe_still_allows_app_dir_under_engine_state() {
         // /var/lib/nasty/apps/<name>/ is a deliberate exception — the app
         // owns its own subtree of engine state.
-        ok_unsafe("services:\n  ok:\n    image: alpine\n    volumes: [\"/var/lib/nasty/apps/myapp/data:/data\"]\n");
+        ok_unsafe(
+            "services:\n  ok:\n    image: alpine\n    volumes: [\"/var/lib/nasty/apps/myapp/data:/data\"]\n",
+        );
     }
 
     #[test]

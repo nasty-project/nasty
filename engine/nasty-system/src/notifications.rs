@@ -67,8 +67,7 @@ impl NotificationConfig {
 
     pub async fn save(&self) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("serialize: {e}"))?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
         tokio::fs::write(CONFIG_PATH, json)
             .await
             .map_err(|e| format!("write {CONFIG_PATH}: {e}"))?;
@@ -97,47 +96,65 @@ pub async fn send(config: &NotificationConfig, subject: &str, body: &str) {
 
 /// Test a specific channel by sending a test message.
 pub async fn test_channel(channel: &ChannelType) -> Result<String, String> {
-    send_to_channel(channel, "NASty Test", "This is a test notification from NASty.").await?;
+    send_to_channel(
+        channel,
+        "NASty Test",
+        "This is a test notification from NASty.",
+    )
+    .await?;
     Ok("Test notification sent successfully".to_string())
 }
 
 async fn send_to_channel(channel: &ChannelType, subject: &str, body: &str) -> Result<(), String> {
     match channel {
-        ChannelType::Smtp { host, port, username, password, from, to } => {
-            send_smtp(host, *port, username, password, from, to, subject, body).await
-        }
+        ChannelType::Smtp {
+            host,
+            port,
+            username,
+            password,
+            from,
+            to,
+        } => send_smtp(host, *port, username, password, from, to, subject, body).await,
         ChannelType::Telegram { bot_token, chat_id } => {
             send_telegram(bot_token, chat_id, subject, body).await
         }
-        ChannelType::Webhook { url, headers } => {
-            send_webhook(url, headers, subject, body).await
-        }
-        ChannelType::Ntfy { server_url, topic, token } => {
-            send_ntfy(server_url, topic, token.as_deref(), subject, body).await
-        }
-        ChannelType::Signal { api_url, from_number, to_number } => {
-            send_signal(api_url, from_number, to_number, subject, body).await
-        }
+        ChannelType::Webhook { url, headers } => send_webhook(url, headers, subject, body).await,
+        ChannelType::Ntfy {
+            server_url,
+            topic,
+            token,
+        } => send_ntfy(server_url, topic, token.as_deref(), subject, body).await,
+        ChannelType::Signal {
+            api_url,
+            from_number,
+            to_number,
+        } => send_signal(api_url, from_number, to_number, subject, body).await,
     }
 }
 
 // ── SMTP ───────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn send_smtp(
-    host: &str, port: u16, username: &str, password: &str,
-    from: &str, to: &str,
-    subject: &str, body: &str,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
 ) -> Result<(), String> {
     use lettre::{
         AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
-        message::{header::ContentType, Mailbox},
+        message::{Mailbox, header::ContentType},
         transport::smtp::authentication::Credentials,
     };
 
-    let from_mbox: Mailbox = from.parse()
+    let from_mbox: Mailbox = from
+        .parse()
         .map_err(|e| format!("invalid from address: {e}"))?;
-    let to_mbox: Mailbox = to.parse()
-        .map_err(|e| format!("invalid to address: {e}"))?;
+    let to_mbox: Mailbox = to.parse().map_err(|e| format!("invalid to address: {e}"))?;
 
     let email = lettre::Message::builder()
         .from(from_mbox)
@@ -161,7 +178,9 @@ async fn send_smtp(
     .credentials(creds)
     .build();
 
-    transport.send(email).await
+    transport
+        .send(email)
+        .await
         .map_err(|e| format!("smtp send: {e}"))?;
 
     Ok(())
@@ -169,12 +188,18 @@ async fn send_smtp(
 
 // ── Telegram ───────────────────────────────────────────────────
 
-async fn send_telegram(bot_token: &str, chat_id: &str, subject: &str, body: &str) -> Result<(), String> {
+async fn send_telegram(
+    bot_token: &str,
+    chat_id: &str,
+    subject: &str,
+    body: &str,
+) -> Result<(), String> {
     let text = format!("*{subject}*\n\n{body}");
     let url = format!("https://api.telegram.org/bot{bot_token}/sendMessage");
 
     let client = reqwest::Client::new();
-    let resp = client.post(&url)
+    let resp = client
+        .post(&url)
         .json(&serde_json::json!({
             "chat_id": chat_id,
             "text": text,
@@ -201,19 +226,20 @@ async fn send_webhook(
     body: &str,
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let mut req = client.post(url)
-        .json(&serde_json::json!({
-            "subject": subject,
-            "body": body,
-            "source": "nasty",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        }));
+    let mut req = client.post(url).json(&serde_json::json!({
+        "subject": subject,
+        "body": body,
+        "source": "nasty",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }));
 
     for (k, v) in headers {
         req = req.header(k, v);
     }
 
-    let resp = req.send().await
+    let resp = req
+        .send()
+        .await
         .map_err(|e| format!("webhook request: {e}"))?;
 
     if !resp.status().is_success() {
@@ -228,13 +254,16 @@ async fn send_webhook(
 // ── ntfy ───────────────────────────────────────────────────────
 
 async fn send_ntfy(
-    server_url: &str, topic: &str,
+    server_url: &str,
+    topic: &str,
     token: Option<&str>,
-    subject: &str, body: &str,
+    subject: &str,
+    body: &str,
 ) -> Result<(), String> {
     let url = format!("{}/{}", server_url.trim_end_matches('/'), topic);
     let client = reqwest::Client::new();
-    let mut req = client.post(&url)
+    let mut req = client
+        .post(&url)
         .header("Title", subject)
         .header("Priority", "high")
         .header("Tags", "warning")
@@ -244,8 +273,7 @@ async fn send_ntfy(
         req = req.header("Authorization", format!("Bearer {t}"));
     }
 
-    let resp = req.send().await
-        .map_err(|e| format!("ntfy request: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("ntfy request: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -259,14 +287,18 @@ async fn send_ntfy(
 // ── Signal ─────────────────────────────────────────────────────
 
 async fn send_signal(
-    api_url: &str, from_number: &str, to_number: &str,
-    subject: &str, body: &str,
+    api_url: &str,
+    from_number: &str,
+    to_number: &str,
+    subject: &str,
+    body: &str,
 ) -> Result<(), String> {
     let message = format!("{subject}\n\n{body}");
     let url = format!("{}/v2/send", api_url.trim_end_matches('/'));
 
     let client = reqwest::Client::new();
-    let resp = client.post(&url)
+    let resp = client
+        .post(&url)
         .json(&serde_json::json!({
             "message": message,
             "number": from_number,

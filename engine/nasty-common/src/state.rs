@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// A directory-based state store where each item is a separate JSON file.
 pub struct StateDir {
@@ -59,8 +59,7 @@ impl StateDir {
     pub async fn save<T: Serialize>(&self, id: &str, item: &T) -> std::io::Result<()> {
         tokio::fs::create_dir_all(&self.dir).await?;
 
-        let json = serde_json::to_string_pretty(item)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(item).map_err(std::io::Error::other)?;
 
         let final_path = self.item_path(id);
         let tmp_path = self.dir.join(format!(".{id}.tmp"));

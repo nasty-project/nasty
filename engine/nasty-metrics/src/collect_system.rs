@@ -24,7 +24,15 @@ pub fn cpu_stats() -> CpuStats {
     let temp_c = read_cpu_temperature();
     let (freq_mhz, governor) = read_cpu_frequency();
 
-    CpuStats { count, load_1, load_5, load_15, temp_c, freq_mhz, governor }
+    CpuStats {
+        count,
+        load_1,
+        load_5,
+        load_15,
+        temp_c,
+        freq_mhz,
+        governor,
+    }
 }
 
 /// Read CPU package temperature from hwmon sysfs (coretemp / k10temp).
@@ -37,18 +45,18 @@ fn read_cpu_temperature() -> Option<i32> {
         // coretemp (Intel), k10temp (AMD), zenpower (AMD alt)
         if matches!(name, "coretemp" | "k10temp" | "zenpower") {
             // temp1_input is typically the package/Tdie temperature
-            if let Ok(val) = std::fs::read_to_string(path.join("temp1_input")) {
-                if let Ok(millideg) = val.trim().parse::<i64>() {
-                    return Some((millideg / 1000) as i32);
-                }
+            if let Ok(val) = std::fs::read_to_string(path.join("temp1_input"))
+                && let Ok(millideg) = val.trim().parse::<i64>()
+            {
+                return Some((millideg / 1000) as i32);
             }
         }
     }
     // Fallback: first thermal zone
-    if let Ok(val) = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp") {
-        if let Ok(millideg) = val.trim().parse::<i64>() {
-            return Some((millideg / 1000) as i32);
-        }
+    if let Ok(val) = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp")
+        && let Ok(millideg) = val.trim().parse::<i64>()
+    {
+        return Some((millideg / 1000) as i32);
     }
     None
 }
@@ -67,22 +75,23 @@ fn read_cpu_frequency() -> (Option<u32>, Option<String>) {
     for entry in cpus.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("cpu") || !name[3..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        if !name.starts_with("cpu") || !name[3..].chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
             continue;
         }
         let cpufreq = entry.path().join("cpufreq");
-        if let Ok(val) = std::fs::read_to_string(cpufreq.join("scaling_cur_freq")) {
-            if let Ok(khz) = val.trim().parse::<u64>() {
-                total_khz += khz;
-                count += 1;
-            }
+        if let Ok(val) = std::fs::read_to_string(cpufreq.join("scaling_cur_freq"))
+            && let Ok(khz) = val.trim().parse::<u64>()
+        {
+            total_khz += khz;
+            count += 1;
         }
-        if governor.is_none() {
-            if let Ok(val) = std::fs::read_to_string(cpufreq.join("scaling_governor")) {
-                let g = val.trim().to_string();
-                if !g.is_empty() {
-                    governor = Some(g);
-                }
+        if governor.is_none()
+            && let Ok(val) = std::fs::read_to_string(cpufreq.join("scaling_governor"))
+        {
+            let g = val.trim().to_string();
+            if !g.is_empty() {
+                governor = Some(g);
             }
         }
     }
@@ -132,14 +141,19 @@ pub fn memory_stats() -> MemoryStats {
 
 fn interface_addresses() -> std::collections::HashMap<String, Vec<String>> {
     let mut map = std::collections::HashMap::new();
-    let Ok(output) = std::process::Command::new("ip").args(["-j", "addr", "show"]).output() else {
+    let Ok(output) = std::process::Command::new("ip")
+        .args(["-j", "addr", "show"])
+        .output()
+    else {
         return map;
     };
     let Ok(json): Result<Vec<serde_json::Value>, _> = serde_json::from_slice(&output.stdout) else {
         return map;
     };
     for iface in json {
-        let Some(name) = iface["ifname"].as_str() else { continue };
+        let Some(name) = iface["ifname"].as_str() else {
+            continue;
+        };
         let mut addrs = Vec::new();
         if let Some(addr_info) = iface["addr_info"].as_array() {
             for ai in addr_info {
@@ -161,7 +175,9 @@ pub fn network_stats() -> Vec<NetIfStats> {
 
     for line in content.lines().skip(2) {
         let line = line.trim();
-        let Some((name, rest)) = line.split_once(':') else { continue };
+        let Some((name, rest)) = line.split_once(':') else {
+            continue;
+        };
         let name = name.trim();
 
         if name == "lo" {
@@ -379,7 +395,11 @@ async fn query_smartctl(device: &str) -> Option<DiskHealth> {
 
     let json: SmartctlJson = serde_json::from_slice(&output.stdout).ok()?;
 
-    let health_passed = json.smart_status.as_ref().map(|s| s.passed).unwrap_or(false);
+    let health_passed = json
+        .smart_status
+        .as_ref()
+        .map(|s| s.passed)
+        .unwrap_or(false);
 
     let attributes: Vec<SmartAttribute> = json
         .ata_smart_attributes
@@ -452,7 +472,11 @@ fn resolve_device_path(dev_name: &str) -> (Option<String>, Option<String>) {
         if component.contains(':') && component.contains('.') {
             if let Some(short) = component.strip_prefix("0000:") {
                 pci_addr = Some(short.to_string());
-            } else if component.len() <= 8 && component.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') {
+            } else if component.len() <= 8
+                && component
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+            {
                 pci_addr = Some(component.to_string());
             }
         }

@@ -38,7 +38,14 @@ impl Protocol {
     ];
 
     pub fn is_system_service(&self) -> bool {
-        matches!(self, Protocol::Nut | Protocol::Ssh | Protocol::Avahi | Protocol::Smart | Protocol::RestServer)
+        matches!(
+            self,
+            Protocol::Nut
+                | Protocol::Ssh
+                | Protocol::Avahi
+                | Protocol::Smart
+                | Protocol::RestServer
+        )
     }
 
     pub fn name(&self) -> &'static str {
@@ -76,7 +83,11 @@ impl Protocol {
             Protocol::Smb => &["samba-smbd.service", "samba-nmbd.service"],
             Protocol::Iscsi => &["target.service"],
             Protocol::Nvmeof => &[], // configfs-based, no daemon
-            Protocol::Nut => &["nut-driver.service", "nut-server.service", "nut-monitor.service"],
+            Protocol::Nut => &[
+                "nut-driver.service",
+                "nut-server.service",
+                "nut-monitor.service",
+            ],
             Protocol::Ssh => &["sshd.service"],
             Protocol::Avahi => &["avahi-daemon.service"],
             Protocol::Smart => &["smartd.service"],
@@ -136,7 +147,9 @@ struct ProtocolState {
     rest_server: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for ProtocolState {
     fn default() -> Self {
@@ -186,6 +199,12 @@ impl ProtocolState {
 
 pub struct ProtocolService;
 
+impl Default for ProtocolService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProtocolService {
     pub fn new() -> Self {
         Self
@@ -232,7 +251,10 @@ impl ProtocolService {
                 }
             }
             if failed {
-                warn!("Auto-disabling {} — service units not available", proto.display_name());
+                warn!(
+                    "Auto-disabling {} — service units not available",
+                    proto.display_name()
+                );
                 let mut state = load_state().await;
                 state.set(proto, false);
                 let _ = save_state(&state).await;
@@ -265,8 +287,7 @@ impl ProtocolService {
 
     /// Enable a protocol: start its services and persist state
     pub async fn enable(&self, name: &str) -> Result<ProtocolStatus, String> {
-        let proto = Protocol::from_name(name)
-            .ok_or_else(|| format!("unknown protocol: {name}"))?;
+        let proto = Protocol::from_name(name).ok_or_else(|| format!("unknown protocol: {name}"))?;
 
         let mut state = load_state().await;
         state.set(proto, true);
@@ -294,7 +315,10 @@ impl ProtocolService {
         let services = proto.services();
         let mut started: Vec<&str> = Vec::new();
         for svc in services {
-            info!("Starting service {svc} for protocol {}", proto.display_name());
+            info!(
+                "Starting service {svc} for protocol {}",
+                proto.display_name()
+            );
             if let Err(e) = systemctl("start", svc).await {
                 warn!("Failed to start {svc}: {e}");
                 // Roll back: stop any services we already started
@@ -321,8 +345,7 @@ impl ProtocolService {
 
     /// Disable a protocol: stop its services and persist state
     pub async fn disable(&self, name: &str) -> Result<ProtocolStatus, String> {
-        let proto = Protocol::from_name(name)
-            .ok_or_else(|| format!("unknown protocol: {name}"))?;
+        let proto = Protocol::from_name(name).ok_or_else(|| format!("unknown protocol: {name}"))?;
 
         let mut state = load_state().await;
         state.set(proto, false);
@@ -330,7 +353,10 @@ impl ProtocolService {
 
         // Stop associated services
         for svc in proto.services() {
-            info!("Stopping service {svc} for protocol {}", proto.display_name());
+            info!(
+                "Stopping service {svc} for protocol {}",
+                proto.display_name()
+            );
             if let Err(e) = systemctl("stop", svc).await {
                 warn!("Failed to stop {svc}: {e}");
             }

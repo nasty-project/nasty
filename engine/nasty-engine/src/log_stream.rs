@@ -39,7 +39,9 @@ struct LogRequest {
     grep: Option<String>,
 }
 
-fn default_lines() -> u32 { 100 }
+fn default_lines() -> u32 {
+    100
+}
 
 #[derive(Serialize)]
 struct LogMessage {
@@ -50,20 +52,37 @@ struct LogMessage {
 
 impl LogMessage {
     fn line(s: &str) -> String {
-        serde_json::to_string(&Self { msg_type: "line".into(), data: s.to_string() }).unwrap()
+        serde_json::to_string(&Self {
+            msg_type: "line".into(),
+            data: s.to_string(),
+        })
+        .unwrap()
     }
     fn error(s: &str) -> String {
-        serde_json::to_string(&Self { msg_type: "error".into(), data: s.to_string() }).unwrap()
+        serde_json::to_string(&Self {
+            msg_type: "error".into(),
+            data: s.to_string(),
+        })
+        .unwrap()
     }
 }
 
-async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: String, pre_auth_token: Option<String>) {
+async fn handle_logs(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    client_ip: String,
+    pre_auth_token: Option<String>,
+) {
     // First message: params (token optional now — cookie may have provided it)
     let req: LogRequest = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
             Ok(r) => r,
             Err(e) => {
-                let _ = socket.send(Message::Text(LogMessage::error(&format!("invalid request: {e}")).into())).await;
+                let _ = socket
+                    .send(Message::Text(
+                        LogMessage::error(&format!("invalid request: {e}")).into(),
+                    ))
+                    .await;
                 return;
             }
         },
@@ -73,7 +92,9 @@ async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: Str
     let token = match pre_auth_token.or_else(|| req.token.clone()) {
         Some(t) => t,
         None => {
-            let _ = socket.send(Message::Text(LogMessage::error("missing session").into())).await;
+            let _ = socket
+                .send(Message::Text(LogMessage::error("missing session").into()))
+                .await;
             return;
         }
     };
@@ -82,12 +103,23 @@ async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: Str
     match state.auth.validate(&token, &client_ip).await {
         Ok(s) if s.role == crate::auth::Role::Admin => {}
         Ok(s) => {
-            crate::auth::audit("log_stream_denied", &s.username, &client_ip, &format!("role={:?}", s.role));
-            let _ = socket.send(Message::Text(LogMessage::error("forbidden: admin role required").into())).await;
+            crate::auth::audit(
+                "log_stream_denied",
+                &s.username,
+                &client_ip,
+                &format!("role={:?}", s.role),
+            );
+            let _ = socket
+                .send(Message::Text(
+                    LogMessage::error("forbidden: admin role required").into(),
+                ))
+                .await;
             return;
         }
         Err(_) => {
-            let _ = socket.send(Message::Text(LogMessage::error("invalid token").into())).await;
+            let _ = socket
+                .send(Message::Text(LogMessage::error("invalid token").into()))
+                .await;
             return;
         }
     }
@@ -96,17 +128,20 @@ async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: Str
 
     // Build journalctl command
     let mut args = vec![
-        "-u".to_string(), req.unit.clone(),
-        "-n".to_string(), req.lines.to_string(),
+        "-u".to_string(),
+        req.unit.clone(),
+        "-n".to_string(),
+        req.lines.to_string(),
         "-f".to_string(),
         "--no-pager".to_string(),
-        "--output".to_string(), "short-iso".to_string(),
+        "--output".to_string(),
+        "short-iso".to_string(),
     ];
-    if let Some(ref grep) = req.grep {
-        if !grep.is_empty() {
-            args.push("--grep".to_string());
-            args.push(grep.clone());
-        }
+    if let Some(ref grep) = req.grep
+        && !grep.is_empty()
+    {
+        args.push("--grep".to_string());
+        args.push(grep.clone());
     }
 
     let mut child = match tokio::process::Command::new("journalctl")
@@ -117,7 +152,11 @@ async fn handle_logs(mut socket: WebSocket, state: Arc<AppState>, client_ip: Str
     {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket.send(Message::Text(LogMessage::error(&format!("spawn journalctl: {e}")).into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    LogMessage::error(&format!("spawn journalctl: {e}")).into(),
+                ))
+                .await;
             return;
         }
     };

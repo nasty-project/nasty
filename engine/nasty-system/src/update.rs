@@ -113,7 +113,6 @@ async fn write_channel(channel: ReleaseChannel) -> Result<(), std::io::Error> {
     tokio::fs::write(RELEASE_CHANNEL_PATH, channel.to_string()).await
 }
 
-
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct VersionInputInfo {
     /// Flake input name (e.g. `nixpkgs`).
@@ -265,6 +264,12 @@ struct NixosGeneration {
 
 pub struct UpdateService;
 
+impl Default for UpdateService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UpdateService {
     pub fn new() -> Self {
         Self
@@ -331,7 +336,6 @@ impl UpdateService {
             return Err(UpdateError::AlreadyRunning);
         }
 
-
         let release_status = self.version_tagged_release_status().await?;
         if release_status.current_is_latest_standard_url {
             return Err(UpdateError::CommandFailed(
@@ -350,9 +354,9 @@ impl UpdateService {
         )
         .await?;
         let current_flake_path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
-        let current_flake = tokio::fs::read_to_string(&current_flake_path).await.map_err(|e| {
-            UpdateError::CommandFailed(format!("read {current_flake_path}: {e}"))
-        })?;
+        let current_flake = tokio::fs::read_to_string(&current_flake_path)
+            .await
+            .map_err(|e| UpdateError::CommandFailed(format!("read {current_flake_path}: {e}")))?;
         let next_flake = if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
             render_system_flake_template(&template, &release_status.latest_tag, &local_system)?
         } else {
@@ -696,7 +700,6 @@ echo "==> Update complete!"
             return Err(UpdateError::AlreadyRunning);
         }
 
-
         let current_urls = read_flake_input_urls().await?;
         let mut seen = HashSet::new();
         let mut requested = HashMap::new();
@@ -766,64 +769,63 @@ echo "==> Update complete!"
             .get("nasty")
             .map(|input| input.url.clone())
             .ok_or_else(|| UpdateError::CommandFailed("missing request entry for nasty".into()))?;
-        let rewritten_flake = if let Some(target_tag) =
-            parse_official_nasty_release_tag(&requested_nasty_url)
-        {
-            let token = read_github_token().await;
-            let template = fetch_github_text_file(
-                token.as_deref(),
-                DEFAULT_NASTY_OWNER,
-                DEFAULT_NASTY_REPO,
-                SYSTEM_FLAKE_TEMPLATE_PATH,
-                &target_tag,
-            )
-            .await?;
+        let rewritten_flake =
+            if let Some(target_tag) = parse_official_nasty_release_tag(&requested_nasty_url) {
+                let token = read_github_token().await;
+                let template = fetch_github_text_file(
+                    token.as_deref(),
+                    DEFAULT_NASTY_OWNER,
+                    DEFAULT_NASTY_REPO,
+                    SYSTEM_FLAKE_TEMPLATE_PATH,
+                    &target_tag,
+                )
+                .await?;
 
-            if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
-                let local_system = detect_local_system().await?;
-                let bootstrapped_flake =
-                    render_system_flake_template(&template, &target_tag, &local_system)?;
-                let preserved_urls = HashMap::from([
-                    (
-                        String::from("nixpkgs"),
-                        requested
-                            .get("nixpkgs")
-                            .ok_or_else(|| {
-                                UpdateError::CommandFailed(
-                                    "missing request entry for nixpkgs".into(),
-                                )
-                            })?
-                            .url
-                            .clone(),
-                    ),
-                    (
-                        String::from("bcachefs-tools"),
-                        requested
-                            .get("bcachefs-tools")
-                            .ok_or_else(|| {
-                                UpdateError::CommandFailed(
-                                    "missing request entry for bcachefs-tools".into(),
-                                )
-                            })?
-                            .url
-                            .clone(),
-                    ),
-                ]);
-                rewrite_flake_input_urls(&bootstrapped_flake, &preserved_urls)?
+                if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
+                    let local_system = detect_local_system().await?;
+                    let bootstrapped_flake =
+                        render_system_flake_template(&template, &target_tag, &local_system)?;
+                    let preserved_urls = HashMap::from([
+                        (
+                            String::from("nixpkgs"),
+                            requested
+                                .get("nixpkgs")
+                                .ok_or_else(|| {
+                                    UpdateError::CommandFailed(
+                                        "missing request entry for nixpkgs".into(),
+                                    )
+                                })?
+                                .url
+                                .clone(),
+                        ),
+                        (
+                            String::from("bcachefs-tools"),
+                            requested
+                                .get("bcachefs-tools")
+                                .ok_or_else(|| {
+                                    UpdateError::CommandFailed(
+                                        "missing request entry for bcachefs-tools".into(),
+                                    )
+                                })?
+                                .url
+                                .clone(),
+                        ),
+                    ]);
+                    rewrite_flake_input_urls(&bootstrapped_flake, &preserved_urls)?
+                } else {
+                    let flake_replacements = url_changes
+                        .iter()
+                        .map(|(name, url)| (name.clone(), url.clone()))
+                        .collect::<HashMap<_, _>>();
+                    rewrite_flake_input_urls(&current_flake, &flake_replacements)?
+                }
             } else {
                 let flake_replacements = url_changes
                     .iter()
                     .map(|(name, url)| (name.clone(), url.clone()))
                     .collect::<HashMap<_, _>>();
                 rewrite_flake_input_urls(&current_flake, &flake_replacements)?
-            }
-        } else {
-            let flake_replacements = url_changes
-                .iter()
-                .map(|(name, url)| (name.clone(), url.clone()))
-                .collect::<HashMap<_, _>>();
-            rewrite_flake_input_urls(&current_flake, &flake_replacements)?
-        };
+            };
         let flake_temp_path = "/tmp/nasty-version-flake.nix";
         tokio::fs::write(flake_temp_path, &rewritten_flake)
             .await
@@ -1190,12 +1192,12 @@ echo "==> Switch to generation {gen_id} complete!"
         }
 
         // Check if it's the booted generation
-        if let Ok(booted) = tokio::fs::read_link("/run/booted-system").await {
-            if gen_target == booted {
-                return Err(UpdateError::CommandFailed(
-                    "cannot delete the booted generation".into(),
-                ));
-            }
+        if let Ok(booted) = tokio::fs::read_link("/run/booted-system").await
+            && gen_target == booted
+        {
+            return Err(UpdateError::CommandFailed(
+                "cannot delete the booted generation".into(),
+            ));
         }
 
         // Remove the profile link
@@ -1304,7 +1306,6 @@ echo "==> Switch to generation {gen_id} complete!"
             webui_changed,
         }
     }
-
 }
 
 ///
@@ -1636,10 +1637,10 @@ async fn is_reboot_required() -> bool {
     for (booted_path, current_path) in paths {
         let booted = tokio::fs::read_link(booted_path).await;
         let current = tokio::fs::read_link(current_path).await;
-        if let (Ok(b), Ok(c)) = (booted, current) {
-            if b != c {
-                return true;
-            }
+        if let (Ok(b), Ok(c)) = (booted, current)
+            && b != c
+        {
+            return true;
         }
     }
     false
@@ -1819,7 +1820,7 @@ fn rewrite_flake_input_urls(
         ));
     }
 
-    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    edits.sort_by_key(|b| std::cmp::Reverse(b.0));
     let mut rewritten = content.to_string();
     for (start, end, replacement) in edits {
         rewritten.replace_range(start..end, &replacement);
@@ -2042,9 +2043,7 @@ mod tests {
   };
 }
 "#;
-        assert!(read_wrapper_flake_version(flake)
-            .expect("parsed")
-            .is_some());
+        assert!(read_wrapper_flake_version(flake).expect("parsed").is_some());
     }
 
     #[test]
@@ -2083,8 +2082,10 @@ mod tests {
   };
 }
 "#;
-        assert!(should_rebootstrap_wrapper_flake(local_without_version, upstream_new)
-            .expect("comparison"));
+        assert!(
+            should_rebootstrap_wrapper_flake(local_without_version, upstream_new)
+                .expect("comparison")
+        );
         assert!(should_rebootstrap_wrapper_flake(local_old, upstream_new).expect("comparison"));
         assert!(!should_rebootstrap_wrapper_flake(upstream_new, local_old).expect("comparison"));
         assert!(
@@ -2104,12 +2105,8 @@ outputs = { nixpkgs, nasty, ... }: {
   nixosConfigurations.nasty = nixpkgs.lib.nixosSystem { system = "@LOCAL_SYSTEM@"; };
 };
 "#;
-        let rendered = super::render_system_flake_template(
-            &template,
-            "0.0.3",
-            "x86_64-linux",
-        )
-        .expect("rendered");
+        let rendered = super::render_system_flake_template(&template, "0.0.3", "x86_64-linux")
+            .expect("rendered");
         assert!(rendered.contains("github:nasty-project/nasty/v0.0.3"));
         assert!(rendered.contains("\"x86_64-linux\""));
     }

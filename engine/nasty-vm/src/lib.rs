@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::process::Command;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const STATE_DIR: &str = "/var/lib/nasty/vms";
@@ -103,8 +103,12 @@ pub struct VmConfig {
     pub extra_args: Option<Vec<String>>,
 }
 
-fn default_boot_order() -> String { "disk".to_string() }
-fn default_true() -> bool { true }
+fn default_boot_order() -> String {
+    "disk".to_string()
+}
+fn default_true() -> bool {
+    true
+}
 
 impl HasId for VmConfig {
     fn id(&self) -> &str {
@@ -139,7 +143,9 @@ pub struct VmDisk {
     pub iops_wr: Option<u64>,
 }
 
-fn default_disk_interface() -> String { "virtio".to_string() }
+fn default_disk_interface() -> String {
+    "virtio".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VmNetwork {
@@ -154,7 +160,9 @@ pub struct VmNetwork {
     pub mac: Option<String>,
 }
 
-fn default_net_mode() -> String { "user".to_string() }
+fn default_net_mode() -> String {
+    "user".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PassthroughDevice {
@@ -313,12 +321,14 @@ fn state_dir() -> StateDir {
 /// Validate that a VM disk/ISO path resolves to an allowed location.
 /// After symlink resolution, the path must be under `/fs/` or be a `/dev/` block device.
 fn validate_vm_path(path: &str) -> Result<(), VmError> {
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|_| VmError::InvalidDiskPath(format!("{} does not exist or cannot be resolved", path)))?;
+    let canonical = std::fs::canonicalize(path).map_err(|_| {
+        VmError::InvalidDiskPath(format!("{} does not exist or cannot be resolved", path))
+    })?;
     let canonical_str = canonical.to_string_lossy();
     if !canonical_str.starts_with("/fs/") && !canonical_str.starts_with("/dev/") {
         return Err(VmError::InvalidDiskPath(format!(
-            "{} resolves to {} which is not under /fs/ or /dev/", path, canonical_str
+            "{} resolves to {} which is not under /fs/ or /dev/",
+            path, canonical_str
         )));
     }
     Ok(())
@@ -345,6 +355,12 @@ fn ovmf_vars_path(vm_id: &str) -> String {
 }
 
 pub struct VmService;
+
+impl Default for VmService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl VmService {
     pub fn new() -> Self {
@@ -380,7 +396,11 @@ impl VmService {
         let mut result = Vec::with_capacity(configs.len());
         for config in configs {
             let running = self.is_running(&config.id).await;
-            let pid = if running { self.get_pid(&config.id).await } else { None };
+            let pid = if running {
+                self.get_pid(&config.id).await
+            } else {
+                None
+            };
             result.push(VmStatus {
                 config,
                 running,
@@ -398,7 +418,11 @@ impl VmService {
             .ok_or_else(|| VmError::NotFound(id.to_string()))?;
 
         let running = self.is_running(id).await;
-        let pid = if running { self.get_pid(id).await } else { None };
+        let pid = if running {
+            self.get_pid(id).await
+        } else {
+            None
+        };
 
         Ok(VmStatus {
             config,
@@ -424,7 +448,8 @@ impl VmService {
             for disk in disks {
                 if !Path::new(&disk.path).exists() {
                     return Err(VmError::InvalidDiskPath(format!(
-                        "disk path {} does not exist", disk.path
+                        "disk path {} does not exist",
+                        disk.path
                     )));
                 }
                 validate_vm_path(&disk.path)?;
@@ -433,7 +458,8 @@ impl VmService {
         if let Some(ref iso) = req.boot_iso {
             if !Path::new(iso).exists() {
                 return Err(VmError::InvalidDiskPath(format!(
-                    "boot ISO {} does not exist", iso
+                    "boot ISO {} does not exist",
+                    iso
                 )));
             }
             validate_vm_path(iso)?;
@@ -447,11 +473,13 @@ impl VmService {
             cpus: req.cpus.unwrap_or(1),
             memory_mib: req.memory_mib.unwrap_or(1024),
             disks: req.disks.unwrap_or_default(),
-            networks: req.networks.unwrap_or_else(|| vec![VmNetwork {
-                mode: "user".to_string(),
-                bridge: None,
-                mac: None,
-            }]),
+            networks: req.networks.unwrap_or_else(|| {
+                vec![VmNetwork {
+                    mode: "user".to_string(),
+                    bridge: None,
+                    mac: None,
+                }]
+            }),
             passthrough_devices: req.passthrough_devices.unwrap_or_default(),
             boot_iso: req.boot_iso,
             boot_order: req.boot_order.unwrap_or_else(|| "disk".to_string()),
@@ -479,37 +507,76 @@ impl VmService {
         // Don't allow updates while running (except autostart/description)
         let running = self.is_running(&req.id).await;
 
-        if let Some(name) = req.name { config.name = name; }
-        if let Some(desc) = req.description { config.description = Some(desc); }
-        if let Some(auto) = req.autostart { config.autostart = auto; }
+        if let Some(name) = req.name {
+            config.name = name;
+        }
+        if let Some(desc) = req.description {
+            config.description = Some(desc);
+        }
+        if let Some(auto) = req.autostart {
+            config.autostart = auto;
+        }
 
         // Hardware changes require VM to be stopped
         if running {
-            if req.cpus.is_some() || req.memory_mib.is_some() || req.disks.is_some()
-                || req.networks.is_some() || req.passthrough_devices.is_some()
-                || req.boot_iso.is_some() || req.boot_order.is_some() || req.uefi.is_some()
-                || req.cpu_model.is_some() || req.machine_type.is_some()
-                || req.vga.is_some() || req.extra_args.is_some()
+            if req.cpus.is_some()
+                || req.memory_mib.is_some()
+                || req.disks.is_some()
+                || req.networks.is_some()
+                || req.passthrough_devices.is_some()
+                || req.boot_iso.is_some()
+                || req.boot_order.is_some()
+                || req.uefi.is_some()
+                || req.cpu_model.is_some()
+                || req.machine_type.is_some()
+                || req.vga.is_some()
+                || req.extra_args.is_some()
             {
                 return Err(VmError::AlreadyRunning(
                     "stop the VM before changing hardware settings".to_string(),
                 ));
             }
         } else {
-            if let Some(cpus) = req.cpus { config.cpus = cpus; }
-            if let Some(mem) = req.memory_mib { config.memory_mib = mem; }
-            if let Some(disks) = req.disks { config.disks = disks; }
-            if let Some(nets) = req.networks { config.networks = nets; }
-            if let Some(pt) = req.passthrough_devices { config.passthrough_devices = pt; }
-            if let Some(ref iso) = req.boot_iso {
-                config.boot_iso = if iso.is_empty() { None } else { Some(iso.clone()) };
+            if let Some(cpus) = req.cpus {
+                config.cpus = cpus;
             }
-            if let Some(bo) = req.boot_order { config.boot_order = bo; }
-            if let Some(uefi) = req.uefi { config.uefi = uefi; }
-            if req.cpu_model.is_some() { config.cpu_model = req.cpu_model; }
-            if req.machine_type.is_some() { config.machine_type = req.machine_type; }
-            if req.vga.is_some() { config.vga = req.vga; }
-            if req.extra_args.is_some() { config.extra_args = req.extra_args; }
+            if let Some(mem) = req.memory_mib {
+                config.memory_mib = mem;
+            }
+            if let Some(disks) = req.disks {
+                config.disks = disks;
+            }
+            if let Some(nets) = req.networks {
+                config.networks = nets;
+            }
+            if let Some(pt) = req.passthrough_devices {
+                config.passthrough_devices = pt;
+            }
+            if let Some(ref iso) = req.boot_iso {
+                config.boot_iso = if iso.is_empty() {
+                    None
+                } else {
+                    Some(iso.clone())
+                };
+            }
+            if let Some(bo) = req.boot_order {
+                config.boot_order = bo;
+            }
+            if let Some(uefi) = req.uefi {
+                config.uefi = uefi;
+            }
+            if req.cpu_model.is_some() {
+                config.cpu_model = req.cpu_model;
+            }
+            if req.machine_type.is_some() {
+                config.machine_type = req.machine_type;
+            }
+            if req.vga.is_some() {
+                config.vga = req.vga;
+            }
+            if req.extra_args.is_some() {
+                config.extra_args = req.extra_args;
+            }
         }
 
         state_dir().save(&config.id, &config).await?;
@@ -558,7 +625,8 @@ impl VmService {
         for disk in &config.disks {
             if !Path::new(&disk.path).exists() {
                 return Err(VmError::InvalidDiskPath(format!(
-                    "disk path {} does not exist", disk.path
+                    "disk path {} does not exist",
+                    disk.path
                 )));
             }
             validate_vm_path(&disk.path)?;
@@ -566,7 +634,8 @@ impl VmService {
         if let Some(ref iso) = config.boot_iso {
             if !Path::new(iso).exists() {
                 return Err(VmError::InvalidDiskPath(format!(
-                    "boot ISO {} does not exist", iso
+                    "boot ISO {} does not exist",
+                    iso
                 )));
             }
             validate_vm_path(iso)?;
@@ -577,16 +646,17 @@ impl VmService {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = tokio::fs::set_permissions(QMP_DIR, std::fs::Permissions::from_mode(0o700)).await;
+            let _ =
+                tokio::fs::set_permissions(QMP_DIR, std::fs::Permissions::from_mode(0o700)).await;
         }
 
         // Copy OVMF_VARS template for this VM if it doesn't exist yet
         if config.uefi {
             let vars = ovmf_vars_path(id);
             if !Path::new(&vars).exists() {
-                tokio::fs::copy(OVMF_VARS_TEMPLATE, &vars).await.map_err(|e| {
-                    VmError::QemuFailed(format!("failed to copy OVMF_VARS: {e}"))
-                })?;
+                tokio::fs::copy(OVMF_VARS_TEMPLATE, &vars)
+                    .await
+                    .map_err(|e| VmError::QemuFailed(format!("failed to copy OVMF_VARS: {e}")))?;
             }
         }
 
@@ -598,8 +668,12 @@ impl VmService {
         }
 
         let args = build_qemu_args(&config);
-        info!("Starting VM '{}': qemu-system-{} {}", config.name, std::env::consts::ARCH,
-              args.join(" "));
+        info!(
+            "Starting VM '{}': qemu-system-{} {}",
+            config.name,
+            std::env::consts::ARCH,
+            args.join(" ")
+        );
 
         let qemu_bin = format!("qemu-system-{}", std::env::consts::ARCH);
         let child = Command::new(&qemu_bin)
@@ -620,7 +694,10 @@ impl VmService {
         // Negotiate QMP handshake
         let qmp_path = qmp_socket_path(id);
         if let Err(e) = qmp::negotiate(&qmp_path).await {
-            warn!("QMP handshake failed for '{}': {e} (VM may still be starting)", config.name);
+            warn!(
+                "QMP handshake failed for '{}': {e} (VM may still be starting)",
+                config.name
+            );
         }
 
         Ok(VmStatus {
@@ -643,7 +720,8 @@ impl VmService {
         }
 
         let qmp_path = qmp_socket_path(id);
-        qmp::execute(&qmp_path, "system_powerdown", None).await
+        qmp::execute(&qmp_path, "system_powerdown", None)
+            .await
             .map_err(|e| VmError::Qmp(format!("system_powerdown: {e}")))?;
 
         info!("Sent shutdown signal to VM '{}'", config.name);
@@ -730,8 +808,10 @@ fn build_qemu_args(config: &VmConfig) -> Vec<String> {
 
     // CPU and memory
     args.extend_from_slice(&[
-        "-smp".to_string(), config.cpus.to_string(),
-        "-m".to_string(), format!("{}M", config.memory_mib),
+        "-smp".to_string(),
+        config.cpus.to_string(),
+        "-m".to_string(),
+        format!("{}M", config.memory_mib),
     ]);
 
     // UEFI firmware
@@ -752,15 +832,38 @@ fn build_qemu_args(config: &VmConfig) -> Vec<String> {
             _ => "none", // virtio uses -device virtio-blk-pci
         };
         let ro = if disk.readonly { ",readonly=on" } else { "" };
-        let cache = disk.cache.as_deref().map(|c| format!(",cache={c}")).unwrap_or_default();
-        let aio = disk.aio.as_deref().map(|a| format!(",aio={a}")).unwrap_or_default();
-        let discard = disk.discard.as_deref().map(|d| format!(",discard={d}")).unwrap_or_default();
+        let cache = disk
+            .cache
+            .as_deref()
+            .map(|c| format!(",cache={c}"))
+            .unwrap_or_default();
+        let aio = disk
+            .aio
+            .as_deref()
+            .map(|a| format!(",aio={a}"))
+            .unwrap_or_default();
+        let discard = disk
+            .discard
+            .as_deref()
+            .map(|d| format!(",discard={d}"))
+            .unwrap_or_default();
         let mut throttle = String::new();
-        if let Some(v) = disk.iops_rd { if v > 0 { throttle.push_str(&format!(",throttling.iops-read={v}")); } }
-        if let Some(v) = disk.iops_wr { if v > 0 { throttle.push_str(&format!(",throttling.iops-write={v}")); } }
+        if let Some(v) = disk.iops_rd
+            && v > 0
+        {
+            throttle.push_str(&format!(",throttling.iops-read={v}"));
+        }
+        if let Some(v) = disk.iops_wr
+            && v > 0
+        {
+            throttle.push_str(&format!(",throttling.iops-write={v}"));
+        }
         args.extend_from_slice(&[
             "-drive".to_string(),
-            format!("file={},format=raw,if={iface},id=drive{i}{ro}{cache}{aio}{discard}{throttle}", disk.path),
+            format!(
+                "file={},format=raw,if={iface},id=drive{i}{ro}{cache}{aio}{discard}{throttle}",
+                disk.path
+            ),
         ]);
         // Add virtio-blk-pci device for virtio disks
         if disk.interface == "virtio" || disk.interface.is_empty() {
@@ -773,10 +876,7 @@ fn build_qemu_args(config: &VmConfig) -> Vec<String> {
 
     // Boot ISO (as a CDROM)
     if let Some(ref iso) = config.boot_iso {
-        args.extend_from_slice(&[
-            "-cdrom".to_string(),
-            iso.clone(),
-        ]);
+        args.extend_from_slice(&["-cdrom".to_string(), iso.clone()]);
     }
 
     // Boot order
@@ -789,7 +889,9 @@ fn build_qemu_args(config: &VmConfig) -> Vec<String> {
 
     // Network interfaces
     for (i, net) in config.networks.iter().enumerate() {
-        let mac_opt = net.mac.as_deref()
+        let mac_opt = net
+            .mac
+            .as_deref()
             .map(|m| format!(",mac={m}"))
             .unwrap_or_default();
 
@@ -866,15 +968,18 @@ async fn bind_vfio(pci_addr: &str) -> Result<(), String> {
     // Unbind from current driver
     let driver_path = format!("/sys/bus/pci/devices/{pci_addr}/driver/unbind");
     if Path::new(&driver_path).exists() {
-        tokio::fs::write(&driver_path, pci_addr).await
+        tokio::fs::write(&driver_path, pci_addr)
+            .await
             .map_err(|e| format!("unbind {pci_addr}: {e}"))?;
     }
 
     // Get vendor:device ID
     let vendor = tokio::fs::read_to_string(format!("/sys/bus/pci/devices/{pci_addr}/vendor"))
-        .await.map_err(|e| format!("read vendor: {e}"))?;
+        .await
+        .map_err(|e| format!("read vendor: {e}"))?;
     let device = tokio::fs::read_to_string(format!("/sys/bus/pci/devices/{pci_addr}/device"))
-        .await.map_err(|e| format!("read device: {e}"))?;
+        .await
+        .map_err(|e| format!("read device: {e}"))?;
 
     let vendor_device = format!("{} {}", vendor.trim(), device.trim());
 
@@ -888,10 +993,7 @@ async fn bind_vfio(pci_addr: &str) -> Result<(), String> {
 
 /// List PCI devices available for passthrough.
 async fn list_pci_devices() -> Vec<PciDevice> {
-    let output = Command::new("lspci")
-        .args(["-Dnn"])
-        .output()
-        .await;
+    let output = Command::new("lspci").args(["-Dnn"]).output().await;
 
     let output = match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
@@ -902,27 +1004,29 @@ async fn list_pci_devices() -> Vec<PciDevice> {
     for line in output.lines() {
         // Format: "0000:03:00.0 VGA compatible controller [0300]: NVIDIA ... [10de:2206] (rev a1)"
         let parts: Vec<&str> = line.splitn(2, ' ').collect();
-        if parts.len() < 2 { continue; }
+        if parts.len() < 2 {
+            continue;
+        }
         let address = parts[0].to_string();
         let description = parts[1].to_string();
 
         // Extract vendor:device from brackets
-        let vendor_device = line.rfind('[')
-            .and_then(|start| line.rfind(']').map(|end| &line[start+1..end]))
+        let vendor_device = line
+            .rfind('[')
+            .and_then(|start| line.rfind(']').map(|end| &line[start + 1..end]))
             .unwrap_or("")
             .to_string();
 
         // Find IOMMU group
-        let iommu_group = tokio::fs::read_link(
-            format!("/sys/bus/pci/devices/{address}/iommu_group")
-        ).await
-            .ok()
-            .and_then(|p| p.file_name()?.to_str()?.parse::<u32>().ok())
-            .unwrap_or(0);
+        let iommu_group =
+            tokio::fs::read_link(format!("/sys/bus/pci/devices/{address}/iommu_group"))
+                .await
+                .ok()
+                .and_then(|p| p.file_name()?.to_str()?.parse::<u32>().ok())
+                .unwrap_or(0);
 
-        let bound_to_vfio = tokio::fs::read_link(
-            format!("/sys/bus/pci/devices/{address}/driver")
-        ).await
+        let bound_to_vfio = tokio::fs::read_link(format!("/sys/bus/pci/devices/{address}/driver"))
+            .await
             .ok()
             .and_then(|p| Some(p.file_name()?.to_str()? == "vfio-pci"))
             .unwrap_or(false);

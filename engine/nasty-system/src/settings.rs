@@ -29,7 +29,15 @@ pub struct AcmeStatus {
 
 impl Default for AcmeStatus {
     fn default() -> Self {
-        Self { state: "idle".into(), message: String::new(), domain: None, expires: None, issued: None, issuer: None, last_attempt: None }
+        Self {
+            state: "idle".into(),
+            message: String::new(),
+            domain: None,
+            expires: None,
+            issued: None,
+            issuer: None,
+            last_attempt: None,
+        }
     }
 }
 
@@ -42,7 +50,9 @@ fn set_acme_status(state: &str, message: &str, domain: Option<&str>) {
     if let Ok(mut s) = status.lock() {
         s.state = state.to_string();
         s.message = message.to_string();
-        if let Some(d) = domain { s.domain = Some(d.to_string()); }
+        if let Some(d) = domain {
+            s.domain = Some(d.to_string());
+        }
         s.last_attempt = Some(now);
     }
 }
@@ -200,7 +210,12 @@ pub fn redact_oidc_secret(mut s: OidcSettings) -> OidcSettings {
 }
 
 fn default_oidc_scopes() -> Vec<String> {
-    vec!["openid".into(), "profile".into(), "email".into(), "groups".into()]
+    vec![
+        "openid".into(),
+        "profile".into(),
+        "email".into(),
+        "groups".into(),
+    ]
 }
 
 fn default_oidc_groups_claim() -> String {
@@ -288,13 +303,13 @@ impl SettingsService {
         // Seed hostname from the running system if not yet persisted.
         // This picks up whatever the installer configured (networking.hostName)
         // so the settings page shows the real hostname from day one.
-        if settings.hostname.is_none() {
-            if let Ok(name) = tokio::fs::read_to_string("/proc/sys/kernel/hostname").await {
-                let name = name.trim().to_string();
-                if !name.is_empty() {
-                    settings.hostname = Some(name);
-                    let _ = save(&settings).await;
-                }
+        if settings.hostname.is_none()
+            && let Ok(name) = tokio::fs::read_to_string("/proc/sys/kernel/hostname").await
+        {
+            let name = name.trim().to_string();
+            if !name.is_empty() {
+                settings.hostname = Some(name);
+                let _ = save(&settings).await;
             }
         }
         Self {
@@ -336,81 +351,99 @@ impl SettingsService {
         }
         let mut tls_changed = false;
         if let Some(domain) = update.tls_domain {
-            let domain = if domain.trim().is_empty() { None } else { Some(domain.trim().to_string()) };
+            let domain = if domain.trim().is_empty() {
+                None
+            } else {
+                Some(domain.trim().to_string())
+            };
             if settings.tls_domain != domain {
                 settings.tls_domain = domain;
                 tls_changed = true;
             }
         }
         if let Some(email) = update.tls_acme_email {
-            let email = if email.trim().is_empty() { None } else { Some(email.trim().to_string()) };
+            let email = if email.trim().is_empty() {
+                None
+            } else {
+                Some(email.trim().to_string())
+            };
             if settings.tls_acme_email != email {
                 settings.tls_acme_email = email;
                 tls_changed = true;
             }
         }
-        if let Some(enabled) = update.tls_acme_enabled {
-            if settings.tls_acme_enabled != enabled {
-                settings.tls_acme_enabled = enabled;
-                tls_changed = true;
-            }
+        if let Some(enabled) = update.tls_acme_enabled
+            && settings.tls_acme_enabled != enabled
+        {
+            settings.tls_acme_enabled = enabled;
+            tls_changed = true;
         }
-        if let Some(ct) = update.tls_challenge_type {
-            if settings.tls_challenge_type != ct {
-                settings.tls_challenge_type = ct;
-                tls_changed = true;
-            }
+        if let Some(ct) = update.tls_challenge_type
+            && settings.tls_challenge_type != ct
+        {
+            settings.tls_challenge_type = ct;
+            tls_changed = true;
         }
         if let Some(provider) = update.tls_dns_provider {
-            let provider = if provider.trim().is_empty() { None } else { Some(provider.trim().to_string()) };
+            let provider = if provider.trim().is_empty() {
+                None
+            } else {
+                Some(provider.trim().to_string())
+            };
             if settings.tls_dns_provider != provider {
                 settings.tls_dns_provider = provider;
                 tls_changed = true;
             }
         }
         if let Some(creds) = update.tls_dns_credentials {
-            let creds = if creds.trim().is_empty() { None } else { Some(creds.trim().to_string()) };
+            let creds = if creds.trim().is_empty() {
+                None
+            } else {
+                Some(creds.trim().to_string())
+            };
             if settings.tls_dns_credentials != creds {
                 settings.tls_dns_credentials = creds;
                 tls_changed = true;
             }
         }
-        if let Some(staging) = update.tls_acme_staging {
-            if settings.tls_acme_staging != staging {
-                settings.tls_acme_staging = staging;
-                tls_changed = true;
-            }
+        if let Some(staging) = update.tls_acme_staging
+            && settings.tls_acme_staging != staging
+        {
+            settings.tls_acme_staging = staging;
+            tls_changed = true;
         }
-        if let Some(resolver) = update.tls_dns_resolver {
-            if settings.tls_dns_resolver != Some(resolver.clone()) {
-                settings.tls_dns_resolver = if resolver.is_empty() { None } else { Some(resolver) };
-                tls_changed = true;
-            }
+        if let Some(resolver) = update.tls_dns_resolver
+            && settings.tls_dns_resolver != Some(resolver.clone())
+        {
+            settings.tls_dns_resolver = if resolver.is_empty() {
+                None
+            } else {
+                Some(resolver)
+            };
+            tls_changed = true;
         }
-        if let Some(wait) = update.tls_dns_propagation_wait {
-            if settings.tls_dns_propagation_wait != Some(wait) {
-                settings.tls_dns_propagation_wait = Some(wait);
-                tls_changed = true;
-            }
+        if let Some(wait) = update.tls_dns_propagation_wait
+            && settings.tls_dns_propagation_wait != Some(wait)
+        {
+            settings.tls_dns_propagation_wait = Some(wait);
+            tls_changed = true;
         }
         if let Some(telemetry) = update.telemetry_enabled {
             settings.telemetry_enabled = telemetry;
         }
         save(&settings).await.map_err(|e| e.to_string())?;
-        if tls_changed {
-            if settings.tls_acme_enabled {
-                if settings.tls_challenge_type == "dns" {
-                    write_dns_credentials(&settings).await;
-                }
-                // Run ACME cert provisioning in the background
-                let s = settings.clone();
-                tokio::spawn(async move {
-                    match run_lego(&s).await {
-                        Ok(()) => info!("ACME certificate provisioned successfully"),
-                        Err(e) => warn!("ACME certificate provisioning failed: {e}"),
-                    }
-                });
+        if tls_changed && settings.tls_acme_enabled {
+            if settings.tls_challenge_type == "dns" {
+                write_dns_credentials(&settings).await;
             }
+            // Run ACME cert provisioning in the background
+            let s = settings.clone();
+            tokio::spawn(async move {
+                match run_lego(&s).await {
+                    Ok(()) => info!("ACME certificate provisioned successfully"),
+                    Err(e) => warn!("ACME certificate provisioning failed: {e}"),
+                }
+            });
         }
         Ok(settings.clone())
     }
@@ -469,12 +502,17 @@ const DNS_CREDS_PATH: &str = "/var/lib/nasty/acme-dns-credentials";
 /// Run lego ACME client to obtain or renew a certificate.
 /// Writes cert and key to /var/lib/nasty/tls/ and reloads nginx.
 async fn run_lego(settings: &Settings) -> Result<(), String> {
-    let domain = settings.tls_domain.as_deref()
-        .ok_or("TLS domain not set")?;
-    let email = settings.tls_acme_email.as_deref()
+    let domain = settings.tls_domain.as_deref().ok_or("TLS domain not set")?;
+    let email = settings
+        .tls_acme_email
+        .as_deref()
         .ok_or("ACME email not set")?;
 
-    set_acme_status("running", &format!("Preparing certificate for {domain}..."), Some(domain));
+    set_acme_status(
+        "running",
+        &format!("Preparing certificate for {domain}..."),
+        Some(domain),
+    );
 
     // Create lego data directory
     // Use separate lego directories per ACME server so staging/production data coexist
@@ -495,9 +533,12 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
 
     let mut args = vec![
         "--accept-tos".to_string(),
-        "--email".to_string(), email.to_string(),
-        "--domains".to_string(), domain.to_string(),
-        "--path".to_string(), lego_dir.clone(),
+        "--email".to_string(),
+        email.to_string(),
+        "--domains".to_string(),
+        domain.to_string(),
+        "--path".to_string(),
+        lego_dir.clone(),
     ];
 
     if settings.tls_acme_staging {
@@ -512,7 +553,9 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             args.push(provider.clone());
             // Custom resolver for propagation checks (default: 1.1.1.1 to avoid
             // issues with local DNS not seeing public ACME TXT records).
-            let resolver = settings.tls_dns_resolver.as_deref()
+            let resolver = settings
+                .tls_dns_resolver
+                .as_deref()
                 .filter(|s| !s.is_empty())
                 .unwrap_or("1.1.1.1:53");
             args.push("--dns.resolvers".to_string());
@@ -536,21 +579,39 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
 
     args.push(action.to_string());
 
-    info!("Running lego {action} for {domain} (challenge: {})", settings.tls_challenge_type);
+    info!(
+        "Running lego {action} for {domain} (challenge: {})",
+        settings.tls_challenge_type
+    );
 
     // For TLS-ALPN challenge, stop nginx briefly so lego can bind to :443
     let need_nginx_stop = settings.tls_challenge_type != "dns";
     if need_nginx_stop {
-        set_acme_status("running", "Stopping web server for TLS challenge...", Some(domain));
+        set_acme_status(
+            "running",
+            "Stopping web server for TLS challenge...",
+            Some(domain),
+        );
         let _ = tokio::process::Command::new("systemctl")
             .args(["stop", "nginx"])
-            .output().await;
+            .output()
+            .await;
     }
 
     if settings.tls_challenge_type == "dns" {
-        set_acme_status("running", &format!("Running ACME {action} — creating DNS records and waiting for propagation (this can take 1-2 minutes)..."), Some(domain));
+        set_acme_status(
+            "running",
+            &format!(
+                "Running ACME {action} — creating DNS records and waiting for propagation (this can take 1-2 minutes)..."
+            ),
+            Some(domain),
+        );
     } else {
-        set_acme_status("running", &format!("Running ACME {action} — waiting for Let's Encrypt verification..."), Some(domain));
+        set_acme_status(
+            "running",
+            &format!("Running ACME {action} — waiting for Let's Encrypt verification..."),
+            Some(domain),
+        );
     }
 
     // Run lego — stream stderr to status updates, ensure nginx is ALWAYS restarted
@@ -574,7 +635,8 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             }
         }
 
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .map_err(|e| format!("failed to run lego: {e}"))?;
 
         // Stream stderr lines to ACME status so the UI shows real-time progress
@@ -598,8 +660,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             None
         };
 
-        let status = child.wait().await
-            .map_err(|e| format!("lego wait: {e}"))?;
+        let status = child.wait().await.map_err(|e| format!("lego wait: {e}"))?;
 
         let stderr_lines = if let Some(h) = stderr_handle {
             h.await.unwrap_or_default()
@@ -608,14 +669,16 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
         };
 
         Ok::<_, String>((status, stderr_lines))
-    }.await;
+    }
+    .await;
 
     // ALWAYS restart nginx, regardless of lego success/failure
     if need_nginx_stop {
         set_acme_status("running", "Restarting web server...", Some(domain));
         let _ = tokio::process::Command::new("systemctl")
             .args(["start", "nginx"])
-            .output().await;
+            .output()
+            .await;
     }
 
     let (exit_status, stderr_lines) = lego_result?;
@@ -633,10 +696,20 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     let lego_cert = format!("{lego_dir}/certificates/{domain}.crt");
     let lego_key = format!("{lego_dir}/certificates/{domain}.key");
 
-    tokio::fs::copy(&lego_cert, TLS_CERT_PATH).await
-        .map_err(|e| { let m = format!("failed to copy cert: {e}"); set_acme_status("error", &m, Some(domain)); m })?;
-    tokio::fs::copy(&lego_key, TLS_KEY_PATH).await
-        .map_err(|e| { let m = format!("failed to copy key: {e}"); set_acme_status("error", &m, Some(domain)); m })?;
+    tokio::fs::copy(&lego_cert, TLS_CERT_PATH)
+        .await
+        .map_err(|e| {
+            let m = format!("failed to copy cert: {e}");
+            set_acme_status("error", &m, Some(domain));
+            m
+        })?;
+    tokio::fs::copy(&lego_key, TLS_KEY_PATH)
+        .await
+        .map_err(|e| {
+            let m = format!("failed to copy key: {e}");
+            set_acme_status("error", &m, Some(domain));
+            m
+        })?;
 
     // Set permissions so nginx (running as nginx user) can read the cert
     let _ = tokio::fs::set_permissions(TLS_CERT_PATH, std::fs::Permissions::from_mode(0o644)).await;
@@ -644,12 +717,14 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     // Set key group to nginx so it can read it
     let _ = tokio::process::Command::new("chown")
         .args(["root:nginx", TLS_KEY_PATH])
-        .output().await;
+        .output()
+        .await;
 
     // Reload nginx to pick up the new certificate
     let reload = tokio::process::Command::new("systemctl")
         .args(["reload", "nginx"])
-        .output().await;
+        .output()
+        .await;
     match reload {
         Ok(r) if r.status.success() => info!("nginx reloaded with new certificate"),
         Ok(r) => {
@@ -674,7 +749,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs().to_string())
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
             );
         }
     }
@@ -690,7 +765,11 @@ struct CertInfo {
 
 /// Read certificate details from a PEM file.
 async fn read_cert_info(cert_path: &str) -> CertInfo {
-    let mut info = CertInfo { expires: None, issued: None, issuer: None };
+    let mut info = CertInfo {
+        expires: None,
+        issued: None,
+        issuer: None,
+    };
     let pem_data = match tokio::fs::read(cert_path).await {
         Ok(d) => d,
         Err(_) => return info,
@@ -704,8 +783,18 @@ async fn read_cert_info(cert_path: &str) -> CertInfo {
         Err(_) => return info,
     };
     let validity = cert.validity();
-    info.issued = Some(validity.not_before.to_rfc2822().unwrap_or_else(|_| validity.not_before.to_string()));
-    info.expires = Some(validity.not_after.to_rfc2822().unwrap_or_else(|_| validity.not_after.to_string()));
+    info.issued = Some(
+        validity
+            .not_before
+            .to_rfc2822()
+            .unwrap_or_else(|_| validity.not_before.to_string()),
+    );
+    info.expires = Some(
+        validity
+            .not_after
+            .to_rfc2822()
+            .unwrap_or_else(|_| validity.not_after.to_string()),
+    );
     // Extract CN or O from issuer
     for rdn in cert.issuer().iter() {
         for attr in rdn.iter() {
@@ -715,7 +804,9 @@ async fn read_cert_info(cert_path: &str) -> CertInfo {
             if *oid == x509_parser::oid_registry::OID_X509_COMMON_NAME {
                 info.issuer = Some(val.to_string());
                 break;
-            } else if *oid == x509_parser::oid_registry::OID_X509_ORGANIZATION_NAME && info.issuer.is_none() {
+            } else if *oid == x509_parser::oid_registry::OID_X509_ORGANIZATION_NAME
+                && info.issuer.is_none()
+            {
                 info.issuer = Some(val.to_string());
             }
         }
@@ -730,10 +821,8 @@ async fn write_dns_credentials(settings: &Settings) {
             warn!("Failed to write DNS credentials: {e}");
             return;
         }
-        let _ = tokio::fs::set_permissions(
-            DNS_CREDS_PATH,
-            std::fs::Permissions::from_mode(0o600),
-        ).await;
+        let _ = tokio::fs::set_permissions(DNS_CREDS_PATH, std::fs::Permissions::from_mode(0o600))
+            .await;
     }
 }
 
@@ -763,9 +852,15 @@ pub async fn check_acme_renewal() {
     }
 
     // Check if cert exists and is near expiry (within 30 days)
-    let lego_subdir = if settings.tls_acme_staging { "staging" } else { "production" };
-    let cert_path = format!("{LEGO_DATA_DIR}/{lego_subdir}/certificates/{}.crt",
-        settings.tls_domain.as_deref().unwrap_or(""));
+    let lego_subdir = if settings.tls_acme_staging {
+        "staging"
+    } else {
+        "production"
+    };
+    let cert_path = format!(
+        "{LEGO_DATA_DIR}/{lego_subdir}/certificates/{}.crt",
+        settings.tls_domain.as_deref().unwrap_or("")
+    );
     if !std::path::Path::new(&cert_path).exists() {
         info!("No ACME cert found, running initial provisioning...");
         if let Err(e) = run_lego(&settings).await {

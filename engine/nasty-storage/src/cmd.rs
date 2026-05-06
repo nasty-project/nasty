@@ -29,7 +29,11 @@ pub async fn run_stdin(program: &str, args: &[&str], stdin_data: &[u8]) -> std::
 }
 
 /// Execute a command with stdin, returning stdout on success or stderr on failure.
-pub async fn run_ok_stdin(program: &str, args: &[&str], stdin_data: &[u8]) -> Result<String, String> {
+pub async fn run_ok_stdin(
+    program: &str,
+    args: &[&str],
+    stdin_data: &[u8],
+) -> Result<String, String> {
     let output = run_stdin(program, args, stdin_data)
         .await
         .map_err(|e| format!("failed to execute {program}: {e}"))?;
@@ -52,9 +56,6 @@ pub async fn run_ok(program: &str, args: &[&str]) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "{program} exited with {}: {stderr}",
-            output.status
-        ))
+        Err(format!("{program} exited with {}: {stderr}", output.status))
     }
 }

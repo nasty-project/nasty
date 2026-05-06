@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{
-    Path,
-    State,
+    Path, State,
     ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use axum::response::IntoResponse;
@@ -27,7 +26,17 @@ pub async fn vnc_handler(
 ) -> impl IntoResponse {
     let client_ip = extract_client_ip(&headers);
     let pre_auth_token = crate::token_from_headers(&headers);
-    ws.on_upgrade(move |socket| proxy_unix_socket(socket, format!("{QMP_DIR}/{vm_id}.vnc"), "vnc", vm_id, state, client_ip, pre_auth_token))
+    ws.on_upgrade(move |socket| {
+        proxy_unix_socket(
+            socket,
+            format!("{QMP_DIR}/{vm_id}.vnc"),
+            "vnc",
+            vm_id,
+            state,
+            client_ip,
+            pre_auth_token,
+        )
+    })
 }
 
 /// WebSocket handler for serial console (text frames → serial unix socket).
@@ -39,7 +48,17 @@ pub async fn serial_handler(
 ) -> impl IntoResponse {
     let client_ip = extract_client_ip(&headers);
     let pre_auth_token = crate::token_from_headers(&headers);
-    ws.on_upgrade(move |socket| proxy_unix_socket(socket, format!("{QMP_DIR}/{vm_id}.serial"), "serial", vm_id, state, client_ip, pre_auth_token))
+    ws.on_upgrade(move |socket| {
+        proxy_unix_socket(
+            socket,
+            format!("{QMP_DIR}/{vm_id}.serial"),
+            "serial",
+            vm_id,
+            state,
+            client_ip,
+            pre_auth_token,
+        )
+    })
 }
 
 fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
@@ -54,6 +73,8 @@ fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
 ///
 /// For VNC: binary frames are forwarded as-is (noVNC speaks raw RFB).
 /// For serial: text frames are forwarded as bytes.
+// Suggested guards use `.await`, which isn't stable in match guards.
+#[allow(clippy::collapsible_match)]
 async fn proxy_unix_socket(
     mut ws: WebSocket,
     socket_path: String,
@@ -71,7 +92,11 @@ async fn proxy_unix_socket(
             Some(Ok(Message::Text(text))) => {
                 let parsed: Result<serde_json::Value, _> = serde_json::from_str(&text);
                 match parsed {
-                    Ok(v) => v.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                    Ok(v) => v
+                        .get("token")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     Err(_) => text.to_string(),
                 }
             }
@@ -83,7 +108,12 @@ async fn proxy_unix_socket(
     match state.auth.validate(&token, &client_ip).await {
         Ok(s) if s.role == crate::auth::Role::Admin || s.role == crate::auth::Role::Operator => {}
         Ok(s) => {
-            crate::auth::audit("vm_console_denied", &s.username, &client_ip, &format!("role={:?} vm={}", s.role, vm_id));
+            crate::auth::audit(
+                "vm_console_denied",
+                &s.username,
+                &client_ip,
+                &format!("role={:?} vm={}", s.role, vm_id),
+            );
             let _ = ws.send(Message::Text("forbidden".into())).await;
             return;
         }

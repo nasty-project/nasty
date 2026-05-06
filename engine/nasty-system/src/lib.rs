@@ -3,8 +3,8 @@ pub mod firewall;
 pub mod firmware;
 pub mod network;
 pub mod notifications;
-pub mod protocol;
 pub mod nut;
+pub mod protocol;
 pub mod settings;
 pub mod tailscale;
 pub mod tuning;
@@ -110,7 +110,11 @@ pub struct ServiceStatus {
 
 impl SystemService {
     pub fn new(engine_commit: Option<String>, engine_built: Option<String>) -> Self {
-        Self { cached: Arc::new(RwLock::new(None)), engine_commit, engine_built }
+        Self {
+            cached: Arc::new(RwLock::new(None)),
+            engine_commit,
+            engine_built,
+        }
     }
 
     /// Invalidate cached bcachefs info — call after rebuild or reboot.
@@ -126,7 +130,14 @@ impl SystemService {
             }
         }
         // Compute — run subprocess calls in parallel.
-        let (bcachefs_version, bcachefs_commit, (pinned_ref, _), debug_symbols, debug_checks, default_ref) = tokio::join!(
+        let (
+            bcachefs_version,
+            bcachefs_commit,
+            (pinned_ref, _),
+            debug_symbols,
+            debug_checks,
+            default_ref,
+        ) = tokio::join!(
             bcachefs_version(),
             read_bcachefs_commit(),
             crate::update::read_flake_lock_bcachefs_pub(),
@@ -137,7 +148,8 @@ impl SystemService {
         // Running state: compare actual loaded module against default.
         // Strip leading 'v' from default ref for comparison (e.g. "v1.37.2" vs "1.37.2").
         let default_bare = default_ref.strip_prefix('v').unwrap_or(&default_ref);
-        let bcachefs_is_custom_running = bcachefs_version != default_bare && bcachefs_version != "unknown";
+        let bcachefs_is_custom_running =
+            bcachefs_version != default_bare && bcachefs_version != "unknown";
         let info = CachedInfo {
             bcachefs_version,
             bcachefs_commit,
@@ -180,7 +192,8 @@ impl SystemService {
 
     pub async fn health(&self) -> SystemHealth {
         let engine = self_service_status("Engine").await;
-        let metrics = remote_service_status("Metrics", "nasty-metrics", "http://127.0.0.1:2138/health").await;
+        let metrics =
+            remote_service_status("Metrics", "nasty-metrics", "http://127.0.0.1:2138/health").await;
 
         let all_ok = engine.running && metrics.running;
         SystemHealth {
@@ -188,7 +201,6 @@ impl SystemService {
             services: vec![engine, metrics],
         }
     }
-
 }
 
 fn hostname() -> String {
@@ -201,12 +213,7 @@ fn hostname() -> String {
 
 fn kernel_version() -> String {
     std::fs::read_to_string("/proc/version")
-        .map(|s| {
-            s.split_whitespace()
-                .nth(2)
-                .unwrap_or("unknown")
-                .to_string()
-        })
+        .map(|s| s.split_whitespace().nth(2).unwrap_or("unknown").to_string())
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
@@ -220,7 +227,11 @@ async fn bcachefs_version() -> String {
     match output {
         Ok(o) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if v.is_empty() { "unknown".to_string() } else { v }
+            if v.is_empty() {
+                "unknown".to_string()
+            } else {
+                v
+            }
         }
         _ => "unknown".to_string(),
     }
@@ -371,11 +382,19 @@ async fn remote_service_status(name: &str, unit: &str, health_url: &str) -> Serv
 /// Get the MainPID of a systemd unit.
 async fn systemd_main_pid(unit: &str) -> Option<u32> {
     let output = tokio::process::Command::new("systemctl")
-        .args(["show", &format!("{unit}.service"), "--property=MainPID", "--value"])
+        .args([
+            "show",
+            &format!("{unit}.service"),
+            "--property=MainPID",
+            "--value",
+        ])
         .output()
         .await
         .ok()?;
-    let pid: u32 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+    let pid: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
     if pid > 0 { Some(pid) } else { None }
 }
 
@@ -423,7 +442,9 @@ async fn read_proc_stats(pid: u32) -> (u64, f64, u64) {
 
 /// Read the pinned bcachefs-tools commit SHA from flake.lock (12-char short form).
 async fn read_bcachefs_commit() -> Option<String> {
-    let content = tokio::fs::read_to_string("/etc/nixos/flake.lock").await.ok()?;
+    let content = tokio::fs::read_to_string("/etc/nixos/flake.lock")
+        .await
+        .ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let rev = v["nodes"]["bcachefs-tools"]["locked"]["rev"].as_str()?;
     Some(rev[..rev.len().min(12)].to_string())

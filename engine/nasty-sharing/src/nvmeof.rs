@@ -169,10 +169,10 @@ async fn next_port_id() -> u16 {
     let mut max_id: u16 = 0;
     if let Ok(mut entries) = tokio::fs::read_dir(&ports_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(id) = name.parse::<u16>() {
-                    max_id = max_id.max(id);
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(id) = name.parse::<u16>()
+            {
+                max_id = max_id.max(id);
             }
         }
     }
@@ -183,6 +183,12 @@ async fn next_port_id() -> u16 {
 
 pub struct NvmeofService;
 
+impl Default for NvmeofService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NvmeofService {
     pub fn new() -> Self {
         Self
@@ -192,11 +198,12 @@ impl NvmeofService {
     /// Called at startup — configfs is volatile and lost on reboot.
     pub async fn restore(&self) {
         // Only restore if the nvmeof protocol is enabled
-        let proto_state: serde_json::Value = tokio::fs::read_to_string("/var/lib/nasty/protocols.json")
-            .await
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let proto_state: serde_json::Value =
+            tokio::fs::read_to_string("/var/lib/nasty/protocols.json")
+                .await
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
 
         if proto_state.get("nvmeof").and_then(|v| v.as_bool()) != Some(true) {
             info!("NVMe-oF protocol disabled, skipping restore");
@@ -221,12 +228,16 @@ impl NvmeofService {
             let _ = configfs_write(
                 &format!("{subsys_path}/attr_allow_any_host"),
                 if subsys.allow_any_host { "1" } else { "0" },
-            ).await;
+            )
+            .await;
 
             // Restore namespaces
             for ns in &subsys.namespaces {
                 if !Path::new(&ns.device_path).exists() {
-                    warn!("  Device {} not found, skipping namespace {}", ns.device_path, ns.nsid);
+                    warn!(
+                        "  Device {} not found, skipping namespace {}",
+                        ns.device_path, ns.nsid
+                    );
                     continue;
                 }
                 let ns_path = format!("{subsys_path}/namespaces/{}", ns.nsid);
@@ -253,9 +264,9 @@ impl NvmeofService {
             // Restore ports — reuse existing port if one already binds to the same address
             for port in &subsys.ports {
                 let svc_id: u16 = port.service_id.parse().unwrap_or(4420);
-                let actual_port_id = if let Some(existing) = find_existing_port(
-                    &port.transport, &port.addr, svc_id, &port.addr_family,
-                ).await {
+                let actual_port_id = if let Some(existing) =
+                    find_existing_port(&port.transport, &port.addr, svc_id, &port.addr_family).await
+                {
                     existing
                 } else {
                     let port_path = format!("{NVMET_BASE}/ports/{}", port.port_id);
@@ -263,20 +274,24 @@ impl NvmeofService {
                         warn!("  Failed to create port {}: {e}", port.port_id);
                         continue;
                     }
-                    let _ = configfs_write(&format!("{port_path}/addr_trtype"), &port.transport).await;
+                    let _ =
+                        configfs_write(&format!("{port_path}/addr_trtype"), &port.transport).await;
                     let _ = configfs_write(&format!("{port_path}/addr_traddr"), &port.addr).await;
-                    let _ = configfs_write(&format!("{port_path}/addr_trsvcid"), &port.service_id).await;
-                    let _ = configfs_write(&format!("{port_path}/addr_adrfam"), &port.addr_family).await;
+                    let _ = configfs_write(&format!("{port_path}/addr_trsvcid"), &port.service_id)
+                        .await;
+                    let _ = configfs_write(&format!("{port_path}/addr_adrfam"), &port.addr_family)
+                        .await;
                     port.port_id
                 };
 
                 let port_path = format!("{NVMET_BASE}/ports/{actual_port_id}");
                 let link = format!("{port_path}/subsystems/{}", subsys.nqn);
-                let _ = configfs_symlink(
-                    &format!("{NVMET_BASE}/subsystems/{}", subsys.nqn),
-                    &link,
-                ).await;
-                info!("  Restored port {} ({}:{})", actual_port_id, port.addr, port.service_id);
+                let _ = configfs_symlink(&format!("{NVMET_BASE}/subsystems/{}", subsys.nqn), &link)
+                    .await;
+                info!(
+                    "  Restored port {} ({}:{})",
+                    actual_port_id, port.addr, port.service_id
+                );
             }
         }
 
@@ -290,7 +305,9 @@ impl NvmeofService {
         let mut subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
         for subsys in &mut subsystems {
             let name = subsys.nqn.rsplit(':').next().unwrap_or("").to_string();
-            let Some(new_dev) = dev_map.get(&name) else { continue };
+            let Some(new_dev) = dev_map.get(&name) else {
+                continue;
+            };
             let mut changed = false;
             for ns in &mut subsys.namespaces {
                 if &ns.device_path != new_dev {
@@ -309,12 +326,10 @@ impl NvmeofService {
     }
 
     pub async fn list(&self) -> Result<Vec<NvmeofSubsystem>, NvmeofError> {
-
         Ok(state_dir().load_all().await)
     }
 
     pub async fn get(&self, id: &str) -> Result<NvmeofSubsystem, NvmeofError> {
-
         state_dir()
             .load::<NvmeofSubsystem>(id)
             .await
@@ -325,7 +340,6 @@ impl NvmeofService {
         &self,
         req: CreateSubsystemRequest,
     ) -> Result<NvmeofSubsystem, NvmeofError> {
-
         let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
         let nqn = format!("{DEFAULT_NQN_PREFIX}:{}", req.name);
 
@@ -338,7 +352,11 @@ impl NvmeofService {
 
         let subsys_path = format!("{NVMET_BASE}/subsystems/{nqn}");
         configfs_mkdir(&subsys_path).await?;
-        configfs_write(&format!("{subsys_path}/attr_allow_any_host"), if allow_any { "1" } else { "0" }).await?;
+        configfs_write(
+            &format!("{subsys_path}/attr_allow_any_host"),
+            if allow_any { "1" } else { "0" },
+        )
+        .await?;
 
         let subsystem = NvmeofSubsystem {
             id: Uuid::new_v4().to_string(),
@@ -350,42 +368,58 @@ impl NvmeofService {
             enabled: true,
         };
 
-        state_dir().save(&subsystem.id, &subsystem).await
+        state_dir()
+            .save(&subsystem.id, &subsystem)
+            .await
             .map_err(NvmeofError::Io)?;
 
         // Optional: add namespace if device_path was provided
         let mut subsystem = subsystem;
         if let Some(device_path) = req.device_path {
             if subsystem.namespaces.is_empty() {
-                subsystem = self.add_namespace(AddNamespaceRequest {
-                    subsystem_id: subsystem.id.clone(),
-                    device_path,
-                }).await?;
+                subsystem = self
+                    .add_namespace(AddNamespaceRequest {
+                        subsystem_id: subsystem.id.clone(),
+                        device_path,
+                    })
+                    .await?;
             } else {
-                info!("Subsystem {} already has {} namespace(s), skipping", subsystem.nqn, subsystem.namespaces.len());
+                info!(
+                    "Subsystem {} already has {} namespace(s), skipping",
+                    subsystem.nqn,
+                    subsystem.namespaces.len()
+                );
             }
 
             // Add a port when a namespace was created
             if subsystem.ports.is_empty() {
-                subsystem = self.add_port(AddPortRequest {
-                    subsystem_id: subsystem.id.clone(),
-                    transport: Some("tcp".to_string()),
-                    addr: Some(req.addr.unwrap_or_else(|| "0.0.0.0".to_string())),
-                    service_id: Some(req.port.unwrap_or(4420)),
-                    addr_family: Some("ipv4".to_string()),
-                }).await?;
+                subsystem = self
+                    .add_port(AddPortRequest {
+                        subsystem_id: subsystem.id.clone(),
+                        transport: Some("tcp".to_string()),
+                        addr: Some(req.addr.unwrap_or_else(|| "0.0.0.0".to_string())),
+                        service_id: Some(req.port.unwrap_or(4420)),
+                        addr_family: Some("ipv4".to_string()),
+                    })
+                    .await?;
             } else {
-                info!("Subsystem {} already has {} port(s), skipping", subsystem.nqn, subsystem.ports.len());
+                info!(
+                    "Subsystem {} already has {} port(s), skipping",
+                    subsystem.nqn,
+                    subsystem.ports.len()
+                );
             }
         }
 
         // Optional: add allowed hosts if provided
         if let Some(hosts) = req.allowed_hosts {
             for host_nqn in hosts {
-                subsystem = self.add_host(AddHostRequest {
-                    subsystem_id: subsystem.id.clone(),
-                    host_nqn,
-                }).await?;
+                subsystem = self
+                    .add_host(AddHostRequest {
+                        subsystem_id: subsystem.id.clone(),
+                        host_nqn,
+                    })
+                    .await?;
             }
         }
 
@@ -399,7 +433,6 @@ impl NvmeofService {
     }
 
     pub async fn delete(&self, req: DeleteSubsystemRequest) -> Result<(), NvmeofError> {
-
         let subsys: NvmeofSubsystem = state_dir()
             .load(&req.id)
             .await
@@ -456,8 +489,7 @@ impl NvmeofService {
         let subsys_path = format!("{NVMET_BASE}/subsystems/{}", subsys.nqn);
         configfs_rmdir(&subsys_path).await?;
 
-        state_dir().remove(&req.id).await
-            .map_err(NvmeofError::Io)?;
+        state_dir().remove(&req.id).await.map_err(NvmeofError::Io)?;
 
         info!("Deleted NVMe-oF subsystem '{}'", req.id);
         Ok(())
@@ -470,7 +502,6 @@ impl NvmeofService {
         if !Path::new(&req.device_path).exists() {
             return Err(NvmeofError::DeviceNotFound(req.device_path));
         }
-
 
         let mut subsys: NvmeofSubsystem = state_dir()
             .load(&req.subsystem_id)
@@ -501,7 +532,9 @@ impl NvmeofService {
             enabled: true,
         });
 
-        state_dir().save(&subsys.id, &subsys).await
+        state_dir()
+            .save(&subsys.id, &subsys)
+            .await
             .map_err(NvmeofError::Io)?;
 
         info!("Added namespace {nsid} to subsystem '{}'", subsys.nqn);
@@ -512,7 +545,6 @@ impl NvmeofService {
         &self,
         req: RemoveNamespaceRequest,
     ) -> Result<NvmeofSubsystem, NvmeofError> {
-
         let mut subsys: NvmeofSubsystem = state_dir()
             .load(&req.subsystem_id)
             .await
@@ -532,18 +564,19 @@ impl NvmeofService {
 
         subsys.namespaces.remove(ns_idx);
 
-        state_dir().save(&subsys.id, &subsys).await
+        state_dir()
+            .save(&subsys.id, &subsys)
+            .await
             .map_err(NvmeofError::Io)?;
 
-        info!("Removed namespace {} from subsystem '{}'", req.nsid, subsys.nqn);
+        info!(
+            "Removed namespace {} from subsystem '{}'",
+            req.nsid, subsys.nqn
+        );
         Ok(subsys)
     }
 
-    pub async fn add_port(
-        &self,
-        req: AddPortRequest,
-    ) -> Result<NvmeofSubsystem, NvmeofError> {
-
+    pub async fn add_port(&self, req: AddPortRequest) -> Result<NvmeofSubsystem, NvmeofError> {
         let mut subsys: NvmeofSubsystem = state_dir()
             .load(&req.subsystem_id)
             .await
@@ -555,7 +588,9 @@ impl NvmeofService {
             _ => {
                 // NVMe-oF configfs requires a real IP — 0.0.0.0 causes EINVAL
                 // when linking subsystems to ports. Detect the primary IP.
-                detect_primary_ip().await.unwrap_or_else(|| "0.0.0.0".to_string())
+                detect_primary_ip()
+                    .await
+                    .unwrap_or_else(|| "0.0.0.0".to_string())
             }
         };
         let svc_id = req.service_id.unwrap_or(4420);
@@ -563,7 +598,9 @@ impl NvmeofService {
 
         // Check if an existing port already binds to the same address —
         // multiple subsystems can share a single NVMe-oF port.
-        let port_id = if let Some(existing) = find_existing_port(&transport, &addr, svc_id, &addr_family).await {
+        let port_id = if let Some(existing) =
+            find_existing_port(&transport, &addr, svc_id, &addr_family).await
+        {
             info!("Reusing existing port {existing} for {}:{svc_id}", addr);
             existing
         } else {
@@ -597,7 +634,9 @@ impl NvmeofService {
 
         subsys.ports.push(port);
 
-        state_dir().save(&subsys.id, &subsys).await
+        state_dir()
+            .save(&subsys.id, &subsys)
+            .await
             .map_err(NvmeofError::Io)?;
 
         info!("Added port {port_id} to subsystem '{}'", subsys.nqn);
@@ -608,7 +647,6 @@ impl NvmeofService {
         &self,
         req: RemovePortRequest,
     ) -> Result<NvmeofSubsystem, NvmeofError> {
-
         let mut subsys: NvmeofSubsystem = state_dir()
             .load(&req.subsystem_id)
             .await
@@ -636,10 +674,15 @@ impl NvmeofService {
 
         subsys.ports.remove(port_idx);
 
-        state_dir().save(&subsys.id, &subsys).await
+        state_dir()
+            .save(&subsys.id, &subsys)
+            .await
             .map_err(NvmeofError::Io)?;
 
-        info!("Removed port {} from subsystem '{}'", req.port_id, subsys.nqn);
+        info!(
+            "Removed port {} from subsystem '{}'",
+            req.port_id, subsys.nqn
+        );
         Ok(subsys)
     }
 
@@ -662,19 +705,24 @@ impl NvmeofService {
             }
 
             // Pick transport/service_id from existing port, or use defaults
-            let (transport, svc_id) = subsys.ports.first()
+            let (transport, svc_id) = subsys
+                .ports
+                .first()
                 .map(|p| (p.transport.clone(), p.service_id.clone()))
                 .unwrap_or_else(|| ("tcp".to_string(), "4420".to_string()));
 
             let svc_port = svc_id.parse::<u16>().unwrap_or(4420);
 
-            match self.add_port(AddPortRequest {
-                subsystem_id: subsys.id.clone(),
-                transport: Some(transport),
-                addr: Some(tailscale_ip.to_string()),
-                service_id: Some(svc_port),
-                addr_family: Some("ipv4".to_string()),
-            }).await {
+            match self
+                .add_port(AddPortRequest {
+                    subsystem_id: subsys.id.clone(),
+                    transport: Some(transport),
+                    addr: Some(tailscale_ip.to_string()),
+                    service_id: Some(svc_port),
+                    addr_family: Some("ipv4".to_string()),
+                })
+                .await
+            {
                 Ok(_) => info!("Added Tailscale port for subsystem '{}'", subsys.nqn),
                 Err(e) => warn!("Failed to add Tailscale port for '{}': {e}", subsys.nqn),
             }
@@ -686,16 +734,21 @@ impl NvmeofService {
         let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
 
         for subsys in &subsystems {
-            let tailscale_ports: Vec<u16> = subsys.ports.iter()
+            let tailscale_ports: Vec<u16> = subsys
+                .ports
+                .iter()
                 .filter(|p| p.addr == ip)
                 .map(|p| p.port_id)
                 .collect();
 
             for port_id in tailscale_ports {
-                match self.remove_port(RemovePortRequest {
-                    subsystem_id: subsys.id.clone(),
-                    port_id,
-                }).await {
+                match self
+                    .remove_port(RemovePortRequest {
+                        subsystem_id: subsys.id.clone(),
+                        port_id,
+                    })
+                    .await
+                {
                     Ok(_) => info!("Removed port {port_id} (IP {ip}) from '{}'", subsys.nqn),
                     Err(e) => warn!("Failed to remove port {port_id} from '{}': {e}", subsys.nqn),
                 }
@@ -703,11 +756,7 @@ impl NvmeofService {
         }
     }
 
-    pub async fn add_host(
-        &self,
-        req: AddHostRequest,
-    ) -> Result<NvmeofSubsystem, NvmeofError> {
-
+    pub async fn add_host(&self, req: AddHostRequest) -> Result<NvmeofSubsystem, NvmeofError> {
         let mut subsys: NvmeofSubsystem = state_dir()
             .load(&req.subsystem_id)
             .await
@@ -735,7 +784,9 @@ impl NvmeofService {
             subsys.allowed_hosts.push(req.host_nqn);
         }
 
-        state_dir().save(&subsys.id, &subsys).await
+        state_dir()
+            .save(&subsys.id, &subsys)
+            .await
             .map_err(NvmeofError::Io)?;
 
         info!("Added allowed host to subsystem '{}'", subsys.nqn);
@@ -746,7 +797,6 @@ impl NvmeofService {
         &self,
         req: RemoveHostRequest,
     ) -> Result<NvmeofSubsystem, NvmeofError> {
-
         let mut subsys: NvmeofSubsystem = state_dir()
             .load(&req.subsystem_id)
             .await
@@ -760,7 +810,9 @@ impl NvmeofService {
 
         subsys.allowed_hosts.retain(|h| h != &req.host_nqn);
 
-        state_dir().save(&subsys.id, &subsys).await
+        state_dir()
+            .save(&subsys.id, &subsys)
+            .await
             .map_err(NvmeofError::Io)?;
 
         info!("Removed allowed host from subsystem '{}'", subsys.nqn);
@@ -772,8 +824,15 @@ impl NvmeofService {
 
 /// Scan all existing configfs ports for one matching the given transport/addr/service_id.
 /// Returns the port_id if found, so multiple subsystems can share a single listener.
-async fn find_existing_port(transport: &str, addr: &str, svc_id: u16, addr_family: &str) -> Option<u16> {
-    let mut entries = tokio::fs::read_dir(format!("{NVMET_BASE}/ports")).await.ok()?;
+async fn find_existing_port(
+    transport: &str,
+    addr: &str,
+    svc_id: u16,
+    addr_family: &str,
+) -> Option<u16> {
+    let mut entries = tokio::fs::read_dir(format!("{NVMET_BASE}/ports"))
+        .await
+        .ok()?;
     let svc_str = svc_id.to_string();
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
@@ -882,4 +941,3 @@ async fn detect_primary_ip() -> Option<String> {
     }
     None
 }
-
