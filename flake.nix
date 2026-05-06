@@ -275,5 +275,16 @@
         "nasty-cloud-aarch64" = configs.nasty-cloud;
       }
     );
+
+    # Integration tests built via `nix build .#checks.x86_64-linux.<name>`.
+    # Run by .github/workflows/integration.yml on push to main + manual dispatch.
+    checks.x86_64-linux = let
+      pkgs = mkPkgs "x86_64-linux";
+      nasty-bcachefs-tools = mkBcachefsTools "x86_64-linux";
+    in {
+      bcachefs-smoke = import ./nixos/tests/bcachefs-smoke.nix {
+        inherit pkgs nasty-bcachefs-tools;
+      };
+    };
   };
 }

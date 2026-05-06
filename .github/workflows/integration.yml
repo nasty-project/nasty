@@ -1,0 +1,40 @@
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/integration.yml'
+      - 'nixos/tests/**'
+      - 'nixos/modules/bcachefs.nix'
+      - 'flake.nix'
+      - 'flake.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bcachefs-smoke:
+    name: bcachefs smoke (NixOS test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Read-only — cache.yml owns pushes to the binary cache.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: nasty
+
+      - name: Run bcachefs smoke test
+        run: nix build .#checks.x86_64-linux.bcachefs-smoke -L --print-build-logs
