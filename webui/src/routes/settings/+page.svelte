@@ -46,6 +46,10 @@
 	let showVlanForm = $state(false);
 	let vlanParent = $state('');
 	let vlanId = $state(100);
+	// Bridge form
+	let showBridgeForm = $state(false);
+	let bridgeName = $state('br0');
+	let bridgeMembers: string[] = $state([]);
 	// ── General tab state ───────────────────────────────────
 	let settings: Settings | null = $state(null);
 	let info: SystemInfo | null = $state(null);
@@ -271,6 +275,7 @@
 			dns: nameservers,
 			bonds: network?.bonds ?? [],
 			vlans: network?.vlans ?? [],
+			bridges: network?.bridges ?? [],
 		};
 
 		await withToast(
@@ -366,7 +371,7 @@
 		const entry = { name: selectedIface, enabled: true, ipv4, ipv6, mtu: null };
 		if (idx >= 0) ifaces[idx] = entry; else ifaces.push(entry);
 
-		const payload = { interfaces: ifaces, dns: nameservers, bonds: network.bonds || [], vlans: network.vlans || [] };
+		const payload = { interfaces: ifaces, dns: nameservers, bonds: network.bonds || [], vlans: network.vlans || [], bridges: network.bridges || [] };
 		await withToast(() => client.call('system.network.update', payload), 'Network configuration applied');
 		networkState = await client.call<NetworkState>('system.network.get');
 		netChanged = false;
@@ -380,6 +385,7 @@
 			dns: network.dns || [],
 			bonds: [...(network.bonds || []), { name: bondName, members: bondMembers, mode: bondMode, ipv4: { method: 'dhcp', addresses: [], gateway: null }, ipv6: { method: 'slaac', addresses: [], gateway: null } }],
 			vlans: network.vlans || [],
+			bridges: network.bridges || [],
 		};
 		await withToast(() => client.call('system.network.update', payload), `Bond ${bondName} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
@@ -393,10 +399,25 @@
 			dns: network.dns || [],
 			bonds: network.bonds || [],
 			vlans: [...(network.vlans || []), { parent: vlanParent, vlan_id: vlanId, ipv4: { method: 'dhcp', addresses: [], gateway: null }, ipv6: { method: 'slaac', addresses: [], gateway: null } }],
+			bridges: network.bridges || [],
 		};
 		await withToast(() => client.call('system.network.update', payload), `VLAN ${vlanParent}.${vlanId} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
 		showVlanForm = false; vlanParent = ''; vlanId = 100;
+	}
+
+	async function createBridge() {
+		if (!bridgeName || !network) return;
+		const payload = {
+			interfaces: network.interfaces || [],
+			dns: network.dns || [],
+			bonds: network.bonds || [],
+			vlans: network.vlans || [],
+			bridges: [...(network.bridges || []), { name: bridgeName, members: bridgeMembers, ipv4: { method: 'dhcp' as const, addresses: [], gateway: null }, ipv6: { method: 'slaac' as const, addresses: [], gateway: null } }],
+		};
+		await withToast(() => client.call('system.network.update', payload), `Bridge ${bridgeName} created`);
+		networkState = await client.call<NetworkState>('system.network.get');
+		showBridgeForm = false; bridgeName = 'br0'; bridgeMembers = [];
 	}
 
 	async function loadNotifications() {
@@ -825,12 +846,13 @@
 			{/if}
 		</section>
 
-		<!-- Bond / VLAN creation -->
+		<!-- Bond / Bridge / VLAN creation -->
 		<section class="rounded-lg border border-border p-5">
 			<div class="flex items-center gap-3 mb-4">
 				<h2 class="text-base font-semibold">Advanced</h2>
-				<Button size="xs" variant="secondary" onclick={() => { showBondForm = !showBondForm; showVlanForm = false; }}>{showBondForm ? 'Cancel' : '+ Bond'}</Button>
-				<Button size="xs" variant="secondary" onclick={() => { showVlanForm = !showVlanForm; showBondForm = false; }}>{showVlanForm ? 'Cancel' : '+ VLAN'}</Button>
+				<Button size="xs" variant="secondary" onclick={() => { showBondForm = !showBondForm; showVlanForm = false; showBridgeForm = false; }}>{showBondForm ? 'Cancel' : '+ Bond'}</Button>
+				<Button size="xs" variant="secondary" onclick={() => { showBridgeForm = !showBridgeForm; showBondForm = false; showVlanForm = false; }}>{showBridgeForm ? 'Cancel' : '+ Bridge'}</Button>
+				<Button size="xs" variant="secondary" onclick={() => { showVlanForm = !showVlanForm; showBondForm = false; showBridgeForm = false; }}>{showVlanForm ? 'Cancel' : '+ VLAN'}</Button>
 			</div>
 
 			{#if showBondForm}
@@ -870,6 +892,32 @@
 				</div>
 			{/if}
 
+			{#if showBridgeForm}
+				<div class="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
+					<div class="text-sm font-medium">Create Bridge Interface</div>
+					<p class="text-xs text-muted-foreground">A virtual switch for VMs to share the host's network. Members are optional — leave empty for a host-internal bridge that VMs attach to via veth pairs, or add a physical interface to bridge VMs onto the LAN.</p>
+					<div>
+						<label for="bridge-name" class="text-xs text-muted-foreground">Name</label>
+						<input id="bridge-name" bind:value={bridgeName} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
+					</div>
+					<div>
+						<div class="text-xs text-muted-foreground mb-1">Members (optional)</div>
+						{#if networkState}
+							<div class="flex flex-wrap gap-2">
+								{#each networkState.interfaces.filter(i => i.kind === 'physical' || i.kind === 'bond') as iface}
+									<label class="flex items-center gap-1.5 text-sm">
+										<input type="checkbox" checked={bridgeMembers.includes(iface.name)}
+											onchange={() => { bridgeMembers = bridgeMembers.includes(iface.name) ? bridgeMembers.filter(m => m !== iface.name) : [...bridgeMembers, iface.name]; }} />
+										{iface.name}
+									</label>
+								{/each}
+							</div>
+						{/if}
+					</div>
+					<Button size="sm" onclick={createBridge} disabled={!bridgeName}>Create Bridge</Button>
+				</div>
+			{/if}
+
 			{#if showVlanForm}
 				<div class="rounded-lg border border-border bg-secondary/20 p-4 space-y-3">
 					<div class="text-sm font-medium">Create VLAN Interface</div>
@@ -895,14 +943,21 @@
 				</div>
 			{/if}
 
-			{#if !showBondForm && !showVlanForm}
-				{#if network && (network.bonds?.length > 0 || network.vlans?.length > 0)}
+			{#if !showBondForm && !showBridgeForm && !showVlanForm}
+				{#if network && (network.bonds?.length > 0 || network.bridges?.length > 0 || network.vlans?.length > 0)}
 					<div class="space-y-1 text-sm">
 						{#each network.bonds as bond}
 							<div class="flex items-center gap-2 rounded px-2 py-1">
 								<Badge variant="outline" class="text-[0.6rem]">bond</Badge>
 								<span class="font-mono">{bond.name}</span>
 								<span class="text-xs text-muted-foreground">{bond.mode} · {bond.members.join(', ')}</span>
+							</div>
+						{/each}
+						{#each network.bridges ?? [] as bridge}
+							<div class="flex items-center gap-2 rounded px-2 py-1">
+								<Badge variant="outline" class="text-[0.6rem]">bridge</Badge>
+								<span class="font-mono">{bridge.name}</span>
+								<span class="text-xs text-muted-foreground">{bridge.members.length === 0 ? 'no members' : bridge.members.join(', ')}</span>
 							</div>
 						{/each}
 						{#each network.vlans as vlan}
@@ -913,7 +968,7 @@
 						{/each}
 					</div>
 				{:else}
-					<p class="text-xs text-muted-foreground">No bonds or VLANs configured.</p>
+					<p class="text-xs text-muted-foreground">No bonds, bridges, or VLANs configured.</p>
 				{/if}
 			{/if}
 		</section>

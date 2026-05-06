@@ -95,6 +95,21 @@ pub struct VlanConfig {
     pub ipv6: IpConfig,
 }
 
+/// A Linux bridge (e.g. `br0`) used as a virtual switch — typically for VMs
+/// to share the host's network. Members can be empty (a host-internal bridge
+/// that VMs attach to via veth pairs at runtime) or one or more physical /
+/// bond interfaces (bridge to the LAN).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BridgeConfig {
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub ipv4: IpConfig,
+    #[serde(default)]
+    pub ipv6: IpConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct NetworkConfig {
     #[serde(default)]
@@ -105,6 +120,8 @@ pub struct NetworkConfig {
     pub bonds: Vec<BondConfig>,
     #[serde(default)]
     pub vlans: Vec<VlanConfig>,
+    #[serde(default)]
+    pub bridges: Vec<BridgeConfig>,
 }
 
 /// Live interface state — read-only, populated at query time.
@@ -170,6 +187,13 @@ impl NetworkService {
             validate_ip_config(&vlan.ipv4, "IPv4")?;
             validate_ip_config(&vlan.ipv6, "IPv6")?;
         }
+        for bridge in &config.bridges {
+            if bridge.name.is_empty() {
+                return Err("Bridge name is required".to_string());
+            }
+            validate_ip_config(&bridge.ipv4, "IPv4")?;
+            validate_ip_config(&bridge.ipv6, "IPv6")?;
+        }
 
         // Persist JSON
         let json = serde_json::to_string_pretty(&config)
@@ -188,9 +212,10 @@ impl NetworkService {
         apply_config(&config).await?;
 
         info!(
-            "Network config updated ({} interfaces, {} bonds, {} VLANs)",
+            "Network config updated ({} interfaces, {} bonds, {} bridges, {} VLANs)",
             config.interfaces.len(),
             config.bonds.len(),
+            config.bridges.len(),
             config.vlans.len()
         );
         Ok(())
@@ -363,6 +388,26 @@ async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
         apply_ip_config(&bond.name, &bond.ipv6, true).await?;
     }
 
+    // Apply bridges (after bonds so bonds can be members; before VLANs so
+    // VLANs can sit on top of a bridge).
+    for bridge in &config.bridges {
+        if !std::path::Path::new(&format!("/sys/class/net/{}", bridge.name)).exists() {
+            run_ip(&["link", "add", &bridge.name, "type", "bridge"])
+                .await
+                .map_err(|e| format!("create bridge {}: {e}", bridge.name))?;
+        }
+        for member in &bridge.members {
+            let _ = run_ip(&["link", "set", member, "down"]).await;
+            let _ = run_ip(&["link", "set", member, "master", &bridge.name]).await;
+            let _ = run_ip(&["link", "set", member, "up"]).await;
+        }
+        run_ip(&["link", "set", &bridge.name, "up"])
+            .await
+            .map_err(|e| format!("bring up bridge {}: {e}", bridge.name))?;
+        apply_ip_config(&bridge.name, &bridge.ipv4, false).await?;
+        apply_ip_config(&bridge.name, &bridge.ipv6, true).await?;
+    }
+
     // Apply VLANs
     for vlan in &config.vlans {
         let vlan_name = format!("{}.{}", vlan.parent, vlan.vlan_id);
@@ -513,6 +558,17 @@ fn generate_nix(config: &NetworkConfig) -> String {
             bond.name, members.join(" "), bond.mode.to_nix()
         ));
         generate_iface_nix(&mut out, &bond.name, &bond.ipv4, &bond.ipv6, None);
+    }
+
+    // Bridges
+    for bridge in &config.bridges {
+        let members: Vec<String> = bridge.members.iter().map(|m| format!("\"{m}\"")).collect();
+        out.push_str(&format!(
+            "  networking.bridges.{} = {{ interfaces = [ {} ]; }};\n",
+            bridge.name,
+            members.join(" ")
+        ));
+        generate_iface_nix(&mut out, &bridge.name, &bridge.ipv4, &bridge.ipv6, None);
     }
 
     // VLANs

@@ -222,6 +222,22 @@ in {
     environment.etc."nasty/ovmf/OVMF_CODE.fd".source = "${pkgs.OVMF.fd}/FV/OVMF_CODE.fd";
     environment.etc."nasty/ovmf/OVMF_VARS.fd".source = "${pkgs.OVMF.fd}/FV/OVMF_VARS.fd";
 
+    # qemu-bridge-helper attaches a VM's tap to a bridge (e.g. br0) — needs
+    # CAP_NET_ADMIN, which NixOS does not give it by default. Without this
+    # wrapper, `qemu-system-* -netdev bridge,br=...` fails for VMs configured
+    # in bridge mode. The allow-list is `allow all` because the only user
+    # that ever invokes the helper on a NASty appliance is nasty-engine
+    # itself (running as root via the systemd unit) — so a static config
+    # avoids having the engine rewrite /etc/qemu/bridge.conf on every
+    # bridge change in the WebUI.
+    security.wrappers.qemu-bridge-helper = {
+      source = "${pkgs.qemu}/libexec/qemu-bridge-helper";
+      capabilities = "cap_net_admin+ep";
+      owner = "root";
+      group = "root";
+    };
+    environment.etc."qemu/bridge.conf".text = "allow all\n";
+
     # Keep a generation-owned copy of the managed wrapper flake in /etc so the
     # exact flake used to build the active generation is readable from
     # /run/current-system/etc/nasty-system-flake and can be restored on boot.
