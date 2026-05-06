@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/integration.yml'
+      - 'nixos/tests/**'
+      - 'nixos/modules/bcachefs.nix'
+      - 'flake.nix'
+      - 'flake.lock'
 
 permissions:
   contents: read
