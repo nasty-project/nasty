@@ -16,7 +16,7 @@
 pkgs.testers.runNixOSTest {
   name = "appliance-smoke";
 
-  nodes.machine = {
+  nodes.machine = { lib, ... }: {
     imports = [
       ../modules/bcachefs.nix
       ../modules/linuxquota.nix
@@ -36,6 +36,11 @@ pkgs.testers.runNixOSTest {
       iscsi.enable = false;
       nvmeof.enable = false;
     };
+
+    # qemu-vm.nix forces timesyncd off; nasty.nix turns it on. Defer to the
+    # VM-test infrastructure since clock sync is irrelevant inside a
+    # transient test VM.
+    services.timesyncd.enable = lib.mkForce false;
 
     virtualisation.memorySize = 2048;
   };
