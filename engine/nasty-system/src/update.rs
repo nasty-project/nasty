@@ -1059,10 +1059,8 @@ echo "==> Update complete!"
             .await
             .ok();
 
-            let booted = match (&booted_store_path, &gen_store_path) {
-                (Some(b), Some(g)) => b == g,
-                _ => false,
-            };
+            let booted =
+                is_booted_generation(booted_store_path.as_deref(), gen_store_path.as_deref());
 
             let label = labels.get(&g.generation).cloned();
 
@@ -1242,19 +1240,7 @@ echo "==> Switch to generation {gen_id} complete!"
                     }
                 }
 
-                match active_state {
-                    "active" | "activating" | "reloading" => "running".to_string(),
-                    "inactive" | "deactivating" => {
-                        if result == "success" {
-                            "success".to_string()
-                        } else {
-                            // Unit never ran or was cleaned up
-                            "idle".to_string()
-                        }
-                    }
-                    "failed" => "failed".to_string(),
-                    _ => "idle".to_string(),
-                }
+                map_systemd_state(active_state, result).to_string()
             }
             Err(_) => "idle".to_string(),
         };
@@ -1832,6 +1818,34 @@ fn unquote_nix_string(raw: &str) -> Option<String> {
     serde_json::from_str::<String>(raw).ok()
 }
 
+/// Classify the systemd unit state into one of the four states the WebUI
+/// understands: `running`, `idle`, `success`, `failed`. Pure: takes the raw
+/// `ActiveState` and `Result` properties from `systemctl show`.
+fn map_systemd_state(active_state: &str, result: &str) -> &'static str {
+    match active_state {
+        "active" | "activating" | "reloading" => "running",
+        "inactive" | "deactivating" if result == "success" => "success",
+        // Unit never ran or was cleaned up.
+        "inactive" | "deactivating" => "idle",
+        "failed" => "failed",
+        _ => "idle",
+    }
+}
+
+/// Whether a generation's store path matches the currently-booted system.
+/// Used to (a) flag generations in the listing UI and (b) refuse to delete
+/// the booted one. A missing path on either side counts as "not the booted
+/// generation" — the safe default.
+fn is_booted_generation(
+    booted_path: Option<&std::path::Path>,
+    gen_path: Option<&std::path::Path>,
+) -> bool {
+    match (booted_path, gen_path) {
+        (Some(b), Some(g)) => b == g,
+        _ => false,
+    }
+}
+
 async fn read_flake_input_urls() -> Result<HashMap<String, String>, UpdateError> {
     let path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
     let content = tokio::fs::read_to_string(&path)
@@ -1989,9 +2003,13 @@ async fn read_flake_lock_bcachefs() -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_git_tag_ref, parse_official_nasty_release_tag, parse_release_tag_version,
-        parse_wrapper_flake_version, read_wrapper_flake_version, should_rebootstrap_wrapper_flake,
+        is_booted_generation, map_systemd_state, normalize_git_tag_ref, parse_flake_input_urls,
+        parse_official_nasty_release_tag, parse_release_tag_version, parse_wrapper_flake_version,
+        read_wrapper_flake_version, rewrite_flake_input_urls, should_rebootstrap_wrapper_flake,
+        unquote_nix_string,
     };
+    use std::collections::HashMap;
+    use std::path::Path;
 
     #[test]
     fn normalizes_annotated_git_tag_refs() {
@@ -2109,5 +2127,176 @@ outputs = { nixpkgs, nasty, ... }: {
             .expect("rendered");
         assert!(rendered.contains("github:nasty-project/nasty/v0.0.3"));
         assert!(rendered.contains("\"x86_64-linux\""));
+    }
+
+    // ── systemd state mapping ──────────────────────────────────────
+
+    #[test]
+    fn map_systemd_state_running_active_states() {
+        for active in ["active", "activating", "reloading"] {
+            assert_eq!(map_systemd_state(active, ""), "running", "{active}");
+        }
+    }
+
+    #[test]
+    fn map_systemd_state_inactive_with_success_is_success() {
+        assert_eq!(map_systemd_state("inactive", "success"), "success");
+        assert_eq!(map_systemd_state("deactivating", "success"), "success");
+    }
+
+    #[test]
+    fn map_systemd_state_inactive_without_success_is_idle() {
+        // Unit never ran or was cleaned up — not a failure, just nothing to report.
+        assert_eq!(map_systemd_state("inactive", ""), "idle");
+        assert_eq!(map_systemd_state("inactive", "exit-code"), "idle");
+    }
+
+    #[test]
+    fn map_systemd_state_failed_is_failed() {
+        assert_eq!(map_systemd_state("failed", "exit-code"), "failed");
+        assert_eq!(map_systemd_state("failed", ""), "failed");
+    }
+
+    #[test]
+    fn map_systemd_state_unknown_states_default_to_idle() {
+        assert_eq!(map_systemd_state("", ""), "idle");
+        assert_eq!(map_systemd_state("maintenance", ""), "idle");
+    }
+
+    // ── booted-generation comparison ───────────────────────────────
+
+    #[test]
+    fn is_booted_generation_matches_only_when_paths_equal() {
+        let a = Path::new("/nix/store/xyz-nixos-system");
+        let b = Path::new("/nix/store/abc-nixos-system");
+        assert!(is_booted_generation(Some(a), Some(a)));
+        assert!(!is_booted_generation(Some(a), Some(b)));
+    }
+
+    #[test]
+    fn is_booted_generation_returns_false_when_either_path_missing() {
+        let a = Path::new("/nix/store/xyz");
+        // A missing path is the safe default — treat as "not the booted one".
+        // (delete_generation relies on this so it never wrongly blocks deletion.)
+        assert!(!is_booted_generation(None, None));
+        assert!(!is_booted_generation(Some(a), None));
+        assert!(!is_booted_generation(None, Some(a)));
+    }
+
+    // ── flake.nix input URL parsing / rewriting ────────────────────
+
+    fn sample_flake() -> &'static str {
+        r#"{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.2";
+    nasty.url = "github:nasty-project/nasty/v0.0.5";
+  };
+  outputs = { self, nixpkgs, ... }: {};
+}"#
+    }
+
+    #[test]
+    fn parse_flake_input_urls_extracts_all_three_inputs() {
+        let parsed = parse_flake_input_urls(sample_flake()).expect("parses");
+        assert_eq!(
+            parsed.get("nixpkgs").map(|p| p.url.as_str()),
+            Some("github:NixOS/nixpkgs/nixos-unstable")
+        );
+        assert_eq!(
+            parsed.get("bcachefs-tools").map(|p| p.url.as_str()),
+            Some("github:koverstreet/bcachefs-tools/v1.38.2")
+        );
+        assert_eq!(
+            parsed.get("nasty").map(|p| p.url.as_str()),
+            Some("github:nasty-project/nasty/v0.0.5")
+        );
+    }
+
+    #[test]
+    fn parse_flake_input_urls_errors_when_a_required_input_is_missing() {
+        let missing_nasty = r#"{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.2";
+  };
+}"#;
+        let err = parse_flake_input_urls(missing_nasty).unwrap_err();
+        assert!(format!("{err:?}").contains("nasty"));
+    }
+
+    #[test]
+    fn rewrite_flake_input_urls_replaces_only_the_targeted_input() {
+        let mut replacements = HashMap::new();
+        replacements.insert(
+            "nasty".to_string(),
+            "github:nasty-project/nasty/v0.0.6".to_string(),
+        );
+        let rewritten = rewrite_flake_input_urls(sample_flake(), &replacements).expect("rewrite");
+        // Target replaced.
+        assert!(rewritten.contains("github:nasty-project/nasty/v0.0.6"));
+        assert!(!rewritten.contains("github:nasty-project/nasty/v0.0.5"));
+        // Other inputs untouched.
+        assert!(rewritten.contains("github:NixOS/nixpkgs/nixos-unstable"));
+        assert!(rewritten.contains("github:koverstreet/bcachefs-tools/v1.38.2"));
+        // File still parses with the same three inputs.
+        let reparsed = parse_flake_input_urls(&rewritten).expect("still parses");
+        assert_eq!(reparsed.len(), 3);
+    }
+
+    #[test]
+    fn rewrite_flake_input_urls_with_no_replacements_is_identity() {
+        let rewritten = rewrite_flake_input_urls(sample_flake(), &HashMap::new()).unwrap();
+        assert_eq!(rewritten, sample_flake());
+    }
+
+    #[test]
+    fn rewrite_flake_input_urls_errors_when_target_input_is_missing() {
+        let mut replacements = HashMap::new();
+        replacements.insert("does-not-exist".to_string(), "github:x/y/z".to_string());
+        // Validation happens via parse_flake_input_urls which only knows about
+        // nixpkgs/bcachefs-tools/nasty — but it succeeds for our well-formed
+        // sample. The lookup against the replacements map then finds nothing.
+        // Either way: an unknown input must not silently no-op.
+        let err = rewrite_flake_input_urls(sample_flake(), &replacements).unwrap_err();
+        assert!(format!("{err:?}").contains("does-not-exist"));
+    }
+
+    // ── unquote_nix_string ─────────────────────────────────────────
+
+    #[test]
+    fn unquote_nix_string_unwraps_quoted_strings() {
+        assert_eq!(unquote_nix_string("\"hello\""), Some("hello".to_string()));
+        assert_eq!(
+            unquote_nix_string("\"with\\nescape\""),
+            Some("with\nescape".to_string())
+        );
+    }
+
+    #[test]
+    fn unquote_nix_string_returns_none_for_non_strings() {
+        assert_eq!(unquote_nix_string("hello"), None);
+        assert_eq!(unquote_nix_string("42"), None);
+        assert_eq!(unquote_nix_string(""), None);
+    }
+
+    // ── NixosGeneration JSON shape ─────────────────────────────────
+
+    #[test]
+    fn nixos_generation_parses_real_nixos_rebuild_output() {
+        // Shape lifted from `nixos-rebuild list-generations --json`.
+        // Pinning camelCase field names protects against silent breakage if
+        // `serde(rename = ...)` is dropped during a refactor.
+        let json = r#"[
+          {"generation":42,"date":"2026-04-12T10:30:00Z","nixosVersion":"24.11","kernelVersion":"6.12.0","current":true},
+          {"generation":41,"date":"2026-04-10T08:15:00Z","nixosVersion":"24.11","kernelVersion":"6.11.5","current":false}
+        ]"#;
+        let gens: Vec<super::NixosGeneration> = serde_json::from_str(json).expect("parses");
+        assert_eq!(gens.len(), 2);
+        assert_eq!(gens[0].generation, 42);
+        assert_eq!(gens[0].nixos_version, "24.11");
+        assert_eq!(gens[0].kernel_version, "6.12.0");
+        assert!(gens[0].current);
+        assert!(!gens[1].current);
     }
 }
