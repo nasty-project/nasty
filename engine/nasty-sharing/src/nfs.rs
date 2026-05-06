@@ -256,20 +256,11 @@ impl NfsService {
 }
 
 /// Write a single export file for one share: /etc/exports.d/nasty-{id}.exports
-async fn write_export_file(share: &NfsShare) -> Result<(), NfsError> {
-    tokio::fs::create_dir_all(NASTY_EXPORTS_DIR).await?;
-
-    let path = export_file_path(&share.id);
-
-    if !share.enabled || !Path::new(&share.path).exists() {
-        // Disabled or stale — remove the file if it exists
-        let _ = tokio::fs::remove_file(&path).await;
-        return Ok(());
-    }
-
-    // Belt-and-braces: every value that lands in /etc/exports.d gets re-validated
-    // here, regardless of which RPC produced the share. Anything containing a
-    // newline or unbalanced quoting could otherwise inject a new export line.
+/// Render the contents of an `/etc/exports.d/nasty-<id>.exports` file for
+/// a single share. Pure: no I/O. Re-validates path and clients so anything
+/// landing on disk has gone through the same belt-and-braces checks
+/// regardless of which RPC produced the share.
+fn render_export_file(share: &NfsShare) -> Result<String, NfsError> {
     validate_export_path(&share.path)?;
     for client in &share.clients {
         validate_nfs_client(client)?;
@@ -292,13 +283,26 @@ async fn write_export_file(share: &NfsShare) -> Result<(), NfsError> {
         })
         .collect();
 
-    let content = format!(
+    Ok(format!(
         "# NASty share {}\n{}\t{}\n",
         share.id,
         share.path,
         clients.join(" ")
-    );
+    ))
+}
 
+async fn write_export_file(share: &NfsShare) -> Result<(), NfsError> {
+    tokio::fs::create_dir_all(NASTY_EXPORTS_DIR).await?;
+
+    let path = export_file_path(&share.id);
+
+    if !share.enabled || !Path::new(&share.path).exists() {
+        // Disabled or stale — remove the file if it exists
+        let _ = tokio::fs::remove_file(&path).await;
+        return Ok(());
+    }
+
+    let content = render_export_file(share)?;
     tokio::fs::write(&path, &content).await?;
     Ok(())
 }
@@ -349,4 +353,129 @@ async fn reload_exports() -> Result<(), NfsError> {
 
     info!("NFS exports reloaded");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn share_with(clients: Vec<NfsClient>) -> NfsShare {
+        NfsShare {
+            id: "abc".to_string(),
+            path: "/fs/p/data".to_string(),
+            comment: None,
+            clients,
+            enabled: true,
+        }
+    }
+
+    fn client(host: &str, options: &str) -> NfsClient {
+        NfsClient {
+            host: host.to_string(),
+            options: options.to_string(),
+        }
+    }
+
+    // ── validators ─────────────────────────────────────────────────
+
+    #[test]
+    fn validate_nfs_host_accepts_valid_forms() {
+        assert!(validate_nfs_host("192.168.1.5").is_ok());
+        assert!(validate_nfs_host("192.168.1.0/24").is_ok());
+        assert!(validate_nfs_host("fd00::1/64").is_ok());
+        assert!(validate_nfs_host("client.example.com").is_ok());
+        assert!(validate_nfs_host("*").is_ok());
+    }
+
+    #[test]
+    fn validate_nfs_host_rejects_injection() {
+        assert!(validate_nfs_host("").is_err());
+        assert!(validate_nfs_host("host with space").is_err());
+        assert!(validate_nfs_host("host\nnewline").is_err());
+        assert!(validate_nfs_host("host(opts)").is_err());
+        assert!(validate_nfs_host("host;evil").is_err());
+        assert!(validate_nfs_host("host\"quoted").is_err());
+    }
+
+    #[test]
+    fn validate_nfs_options_accepts_standard_grammar() {
+        assert!(validate_nfs_options("rw,sync,no_subtree_check,no_root_squash").is_ok());
+        assert!(validate_nfs_options("ro,fsid=42,sec=sys:krb5").is_ok());
+        assert!(validate_nfs_options("").is_ok());
+    }
+
+    #[test]
+    fn validate_nfs_options_rejects_injection() {
+        assert!(validate_nfs_options("rw\nsync").is_err());
+        assert!(validate_nfs_options("rw sync").is_err());
+        assert!(validate_nfs_options("rw;evil").is_err());
+        assert!(validate_nfs_options("rw,(opts)").is_err());
+    }
+
+    #[test]
+    fn validate_export_path_rejects_dangerous_chars() {
+        assert!(validate_export_path("/fs/p/data").is_ok());
+        assert!(validate_export_path("/fs/p/data with spaces").is_ok()); // spaces allowed
+        assert!(validate_export_path("/fs/p\nlinejection").is_err());
+        assert!(validate_export_path("/fs/p\"quoted").is_err());
+        assert!(validate_export_path("/fs/p\\back").is_err());
+    }
+
+    // ── render_export_file ─────────────────────────────────────────
+
+    #[test]
+    fn render_export_file_single_client_auto_injects_fsid_and_insecure() {
+        let share = share_with(vec![client("192.168.1.0/24", "rw,sync")]);
+        let out = render_export_file(&share).unwrap();
+        let fsid = stable_fsid("abc");
+        assert_eq!(
+            out,
+            format!(
+                "# NASty share abc\n/fs/p/data\t192.168.1.0/24(rw,sync,fsid={fsid},insecure)\n"
+            )
+        );
+    }
+
+    #[test]
+    fn render_export_file_multiple_clients_space_separated() {
+        let share = share_with(vec![client("10.0.0.1", "rw"), client("10.0.0.2", "ro")]);
+        let out = render_export_file(&share).unwrap();
+        let fsid = stable_fsid("abc");
+        assert_eq!(
+            out,
+            format!(
+                "# NASty share abc\n/fs/p/data\t10.0.0.1(rw,fsid={fsid},insecure) 10.0.0.2(ro,fsid={fsid},insecure)\n"
+            )
+        );
+    }
+
+    #[test]
+    fn render_export_file_preserves_explicit_fsid() {
+        let share = share_with(vec![client("10.0.0.1", "rw,fsid=0")]);
+        let out = render_export_file(&share).unwrap();
+        // Caller-supplied fsid wins; we don't append a second one.
+        assert!(out.contains("fsid=0"));
+        assert_eq!(out.matches("fsid=").count(), 1);
+    }
+
+    #[test]
+    fn render_export_file_preserves_explicit_secure_skips_insecure_default() {
+        let share = share_with(vec![client("10.0.0.1", "rw,secure")]);
+        let out = render_export_file(&share).unwrap();
+        // Caller asked for secure — don't add the insecure default.
+        assert!(!out.contains("insecure"));
+    }
+
+    #[test]
+    fn render_export_file_rejects_bad_path() {
+        let mut share = share_with(vec![client("10.0.0.1", "rw")]);
+        share.path = "/fs/p\ninjection".to_string();
+        assert!(render_export_file(&share).is_err());
+    }
+
+    #[test]
+    fn render_export_file_rejects_bad_client_options() {
+        let share = share_with(vec![client("10.0.0.1", "rw;evil")]);
+        assert!(render_export_file(&share).is_err());
+    }
 }

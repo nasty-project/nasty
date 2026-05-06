@@ -272,17 +272,8 @@ fn validate_share_name(name: &str) -> Result<(), SmbError> {
     Ok(())
 }
 
-/// Write a single share config file: /etc/samba/nasty.d/{id}.conf
-async fn write_share_conf(share: &SmbShare) -> Result<(), SmbError> {
-    tokio::fs::create_dir_all(NASTY_SMB_SHARE_DIR).await?;
-
-    let path = share_conf_path(&share.id);
-
-    if !share.enabled {
-        let _ = tokio::fs::remove_file(&path).await;
-        return Ok(());
-    }
-
+/// Render a single share config section. Pure: no I/O.
+fn render_share_conf(share: &SmbShare) -> String {
     let mut conf = format!("[{}]\n", sanitize_smb_value(&share.name));
     conf.push_str(&format!("    path = {}\n", share.path));
 
@@ -344,6 +335,21 @@ async fn write_share_conf(share: &SmbShare) -> Result<(), SmbError> {
         ));
     }
 
+    conf
+}
+
+/// Write a single share config file: /etc/samba/nasty.d/{id}.conf
+async fn write_share_conf(share: &SmbShare) -> Result<(), SmbError> {
+    tokio::fs::create_dir_all(NASTY_SMB_SHARE_DIR).await?;
+
+    let path = share_conf_path(&share.id);
+
+    if !share.enabled {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Ok(());
+    }
+
+    let conf = render_share_conf(share);
     tokio::fs::write(&path, &conf).await?;
 
     // Make the directory writable by any authenticated user.
@@ -783,4 +789,132 @@ async fn next_available_uid() -> u32 {
         }
     }
     SMB_USER_UID_MIN // fallback
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_share() -> SmbShare {
+        SmbShare {
+            id: "id-1".to_string(),
+            name: "share1".to_string(),
+            path: "/fs/p/data".to_string(),
+            comment: None,
+            read_only: false,
+            browseable: true,
+            guest_ok: false,
+            valid_users: vec![],
+            extra_params: HashMap::new(),
+            enabled: true,
+        }
+    }
+
+    // ── validators / sanitizers ────────────────────────────────────
+
+    #[test]
+    fn sanitize_smb_value_strips_injection_chars() {
+        assert_eq!(sanitize_smb_value("hello"), "hello");
+        assert_eq!(sanitize_smb_value("a;b\nc\rd"), "abcd");
+        assert_eq!(
+            sanitize_smb_value("name\twith\x01control"),
+            "namewithcontrol"
+        );
+    }
+
+    #[test]
+    fn validate_share_name_accepts_normal_names() {
+        assert!(validate_share_name("docs").is_ok());
+        assert!(validate_share_name("My Share 2024").is_ok());
+    }
+
+    #[test]
+    fn validate_share_name_rejects_invalid() {
+        assert!(validate_share_name("").is_err());
+        assert!(validate_share_name(&"x".repeat(81)).is_err());
+        for bad in ["a/b", "a\\b", "a[b", "a]b", "a:b", "a|b", "a;b"] {
+            assert!(validate_share_name(bad).is_err(), "should reject '{bad}'");
+        }
+    }
+
+    // ── render_share_conf ──────────────────────────────────────────
+
+    #[test]
+    fn render_share_conf_minimal() {
+        let out = render_share_conf(&minimal_share());
+        assert_eq!(
+            out,
+            "[share1]\n    \
+             path = /fs/p/data\n    \
+             read only = no\n    \
+             browseable = yes\n    \
+             guest ok = no\n"
+        );
+    }
+
+    #[test]
+    fn render_share_conf_with_comment() {
+        let mut share = minimal_share();
+        share.comment = Some("Family photos".to_string());
+        let out = render_share_conf(&share);
+        assert!(out.contains("    comment = Family photos\n"));
+    }
+
+    #[test]
+    fn render_share_conf_guest_ok_emits_nobody_block() {
+        let mut share = minimal_share();
+        share.guest_ok = true;
+        let out = render_share_conf(&share);
+        assert!(out.contains("    guest ok = yes\n"));
+        assert!(out.contains("    force user = nobody\n"));
+        assert!(out.contains("    force group = nogroup\n"));
+        assert!(out.contains("    create mask = 0666\n"));
+        assert!(out.contains("    directory mask = 0777\n"));
+    }
+
+    #[test]
+    fn render_share_conf_authenticated_force_user_picks_first_non_group() {
+        let mut share = minimal_share();
+        share.valid_users = vec![
+            "@admins".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+        ];
+        let out = render_share_conf(&share);
+        assert!(out.contains("    force user = alice\n"));
+        assert!(out.contains("    valid users = @admins alice bob\n"));
+        assert!(out.contains("    create mask = 0664\n"));
+        assert!(out.contains("    directory mask = 0775\n"));
+    }
+
+    #[test]
+    fn render_share_conf_authenticated_all_groups_omits_force_user() {
+        let mut share = minimal_share();
+        share.valid_users = vec!["@admins".to_string(), "@users".to_string()];
+        let out = render_share_conf(&share);
+        assert!(!out.contains("force user"));
+        assert!(out.contains("    valid users = @admins @users\n"));
+    }
+
+    #[test]
+    fn render_share_conf_extra_params_sorted_and_sanitized() {
+        let mut share = minimal_share();
+        share
+            .extra_params
+            .insert("zeta".to_string(), "1".to_string());
+        share
+            .extra_params
+            .insert("alpha".to_string(), "two".to_string());
+        share
+            .extra_params
+            .insert("middle".to_string(), "v;injected\nx".to_string());
+        let out = render_share_conf(&share);
+        // Sorted by key: alpha, middle, zeta.
+        let alpha_pos = out.find("alpha = two").unwrap();
+        let middle_pos = out.find("middle = ").unwrap();
+        let zeta_pos = out.find("zeta = 1").unwrap();
+        assert!(alpha_pos < middle_pos && middle_pos < zeta_pos);
+        // Injection chars in the value got stripped.
+        assert!(out.contains("    middle = vinjectedx\n"));
+    }
 }
