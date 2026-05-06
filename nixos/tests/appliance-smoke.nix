@@ -17,53 +17,77 @@ let
   rpcSmoke = pkgs.writeText "rpc-smoke.py" ''
     import json
     import sys
+    import urllib.request
     import websocket
 
-    token = sys.argv[1]
+    initial_token = sys.argv[1]
+    NEW_PW = "password-changed-by-smoke-test"
 
-    ws = websocket.create_connection("ws://127.0.0.1:2137/ws", timeout=10)
-    try:
+
+    def ws_auth(token):
+        ws = websocket.create_connection("ws://127.0.0.1:2137/ws", timeout=10)
         ws.send(json.dumps({"token": token}))
         auth = json.loads(ws.recv())
         assert auth.get("authenticated") is True, f"WS auth failed: {auth!r}"
         assert auth.get("username") == "admin", f"unexpected user: {auth!r}"
+        return ws
 
-        def call(method, request_id, params=None):
-            req = {"jsonrpc": "2.0", "method": method, "id": request_id}
-            if params is not None:
-                req["params"] = params
-            ws.send(json.dumps(req))
-            resp = json.loads(ws.recv())
-            assert resp.get("id") == request_id, (
-                f"id mismatch: req={request_id} resp={resp!r}"
-            )
-            assert "error" not in resp, f"{method} returned error: {resp!r}"
-            return resp["result"]
 
-        me = call("auth.me", 1)
+    def call(ws, method, request_id, params=None):
+        req = {"jsonrpc": "2.0", "method": method, "id": request_id}
+        if params is not None:
+            req["params"] = params
+        ws.send(json.dumps(req))
+        resp = json.loads(ws.recv())
+        assert resp.get("id") == request_id, (
+            f"id mismatch: req={request_id} resp={resp!r}"
+        )
+        assert "error" not in resp, f"{method} returned error: {resp!r}"
+        return resp["result"]
+
+
+    def http_login(password):
+        req = urllib.request.Request(
+            "http://127.0.0.1:2137/api/login",
+            data=json.dumps({"username": "admin", "password": password}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())["token"]
+
+
+    # ── Session 1: change the default admin password ──────────────
+    # Default admin/admin has must_change_password set, which gates
+    # most RPC methods. Change it, then re-login so subsequent calls
+    # hit a session that doesn't carry the gate.
+    ws = ws_auth(initial_token)
+    try:
+        me = call(ws, "auth.me", 1)
         assert me["username"] == "admin", f"auth.me wrong: {me!r}"
-
-        # First login of the default admin/admin sets must_change_password,
-        # which gates most RPC methods until cleared. Change it so the rest
-        # of the smoke can call system.health / fs.list.
-        call("auth.change_password", 2, {
+        call(ws, "auth.change_password", 2, {
             "username": "admin",
-            "new_password": "password-changed-by-smoke-test",
+            "new_password": NEW_PW,
         })
+    finally:
+        ws.close()
 
-        health = call("system.health", 3)
+    # ── Session 2: drive a few representative RPCs ────────────────
+    new_token = http_login(NEW_PW)
+    ws = ws_auth(new_token)
+    try:
+        health = call(ws, "system.health", 1)
         print("system.health:", health, file=sys.stderr)
 
-        fs_list = call("fs.list", 4)
+        fs_list = call(ws, "fs.list", 2)
         assert isinstance(fs_list, list), f"fs.list not a list: {fs_list!r}"
         # Fresh appliance with no virtual disks => empty list.
         assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
 
-        # Unknown method must come back as a JSON-RPC error envelope, not a
-        # silent drop.
-        ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 5}))
+        # Unknown method must come back as a JSON-RPC error envelope,
+        # not a silent drop.
+        ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 3}))
         bad = json.loads(ws.recv())
-        assert bad.get("id") == 5, f"id mismatch: {bad!r}"
+        assert bad.get("id") == 3, f"id mismatch: {bad!r}"
         assert bad.get("error"), f"unknown method should error: {bad!r}"
         print("unknown method error:", bad["error"], file=sys.stderr)
     finally:
