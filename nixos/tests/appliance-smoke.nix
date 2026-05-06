@@ -22,7 +22,10 @@ pkgs.testers.runNixOSTest {
       ../modules/linuxquota.nix
       ../modules/nasty.nix
     ];
-    _module.args = { inherit nasty-engine nasty-webui nasty-bcachefs-tools; };
+    _module.args = {
+      inherit nasty-engine nasty-webui nasty-bcachefs-tools;
+      nasty-version = "test";
+    };
 
     services.nasty = {
       enable = true;
