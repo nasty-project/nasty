@@ -2689,3 +2689,115 @@ fn find_fs_name_by_devices(_devices: &[String]) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_human_bytes ──────────────────────────────────────────
+
+    #[test]
+    fn parse_human_bytes_plain_integer() {
+        assert_eq!(parse_human_bytes("0"), Some(0));
+        assert_eq!(parse_human_bytes("123"), Some(123));
+        // From `bcachefs fs usage` "Size:" line captured in the smoke test.
+        assert_eq!(parse_human_bytes("975783936"), Some(975_783_936));
+    }
+
+    #[test]
+    fn parse_human_bytes_with_units() {
+        // Values lifted from `bcachefs show-super` Options and per-device blocks.
+        assert_eq!(parse_human_bytes("4.00k"), Some(4096));
+        assert_eq!(parse_human_bytes("256k"), Some(256 * 1024));
+        assert_eq!(parse_human_bytes("512k"), Some(512 * 1024));
+        assert_eq!(parse_human_bytes("2.00M"), Some(2 * 1024 * 1024));
+        assert_eq!(parse_human_bytes("1.00G"), Some(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_human_bytes_unit_aliases_are_case_insensitive() {
+        assert_eq!(parse_human_bytes("1024B"), Some(1024));
+        assert_eq!(parse_human_bytes("1k"), Some(1024));
+        assert_eq!(parse_human_bytes("1KB"), Some(1024));
+        assert_eq!(parse_human_bytes("1KiB"), Some(1024));
+        assert_eq!(parse_human_bytes("1MiB"), Some(1024 * 1024));
+        assert_eq!(parse_human_bytes("1TB"), Some(1024u64.pow(4)));
+    }
+
+    #[test]
+    fn parse_human_bytes_invalid_returns_none() {
+        assert_eq!(parse_human_bytes(""), None);
+        assert_eq!(parse_human_bytes("abc"), None);
+        assert_eq!(parse_human_bytes("1.5XYZ"), None);
+        // `bcachefs show-super` prints "Superblock size: 7.85k/1.00M" — the
+        // slash form isn't a unit and shouldn't parse.
+        assert_eq!(parse_human_bytes("7.85k/1.00M"), None);
+    }
+
+    // ── parse_device_table_line ────────────────────────────────────
+
+    #[test]
+    fn parse_device_table_line_real_fixture() {
+        // Real row captured from `bcachefs fs usage /mnt/test` in the smoke test.
+        let line = "(no label) (device 0):  vdb     rw     1062203392  2883584    0%";
+        let dev = parse_device_table_line(line).expect("should parse");
+        assert_eq!(dev.path, "/dev/vdb");
+        assert_eq!(dev.total_bytes, 1_062_203_392);
+        assert_eq!(dev.used_bytes, 2_883_584);
+        assert_eq!(dev.free_bytes, 1_062_203_392 - 2_883_584);
+    }
+
+    #[test]
+    fn parse_device_table_line_human_readable() {
+        let line = "label (device 0):  sdb     rw     49.6G         8.50M      0%";
+        let dev = parse_device_table_line(line).expect("should parse");
+        assert_eq!(dev.path, "/dev/sdb");
+        assert_eq!(dev.total_bytes, (49.6 * 1024.0 * 1024.0 * 1024.0) as u64);
+        assert_eq!(dev.used_bytes, (8.50 * 1024.0 * 1024.0) as u64);
+    }
+
+    #[test]
+    fn parse_device_table_line_keeps_absolute_path() {
+        let line = "(no label) (device 0):  /dev/sda     rw     100G  10G  10%";
+        let dev = parse_device_table_line(line).expect("should parse");
+        assert_eq!(dev.path, "/dev/sda");
+    }
+
+    #[test]
+    fn parse_device_table_line_skips_header_and_garbage() {
+        assert!(
+            parse_device_table_line("Device label  Device  State  Size     Used  Use%").is_none()
+        );
+        assert!(parse_device_table_line("").is_none());
+        assert!(parse_device_table_line("nonsense without colon-paren").is_none());
+    }
+
+    // ── parse_bcachefs_opt ─────────────────────────────────────────
+
+    #[test]
+    fn parse_bcachefs_opt_extracts_bracketed_default() {
+        // All values lifted from the Options block of `bcachefs show-super`
+        // captured in the smoke test.
+        assert_eq!(
+            parse_bcachefs_opt("continue [fix_safe] panic ro"),
+            "fix_safe"
+        );
+        assert_eq!(parse_bcachefs_opt("none [crc32c] crc64 xxhash"), "crc32c");
+        assert_eq!(parse_bcachefs_opt("crc32c crc64 [siphash]"), "siphash");
+        assert_eq!(parse_bcachefs_opt("[ask] yes very no"), "ask");
+        assert_eq!(parse_bcachefs_opt("[unclean] no always"), "unclean");
+        assert_eq!(
+            parse_bcachefs_opt("[compatible] incompatible none"),
+            "compatible"
+        );
+    }
+
+    #[test]
+    fn parse_bcachefs_opt_returns_plain_value_unchanged() {
+        // Non-enum options in the same Options block are scalar values.
+        assert_eq!(parse_bcachefs_opt("none"), "none");
+        assert_eq!(parse_bcachefs_opt("zstd"), "zstd");
+        assert_eq!(parse_bcachefs_opt("4.00k"), "4.00k");
+        assert_eq!(parse_bcachefs_opt(""), "");
+    }
+}
