@@ -1,24 +1,72 @@
 # Boots the full NASty appliance (engine + nginx + supporting services) in a
-# QEMU VM, waits for the engine to come up, and exercises the HTTP surface:
-#   - /health responds before any auth
-#   - /api/login with admin/admin succeeds and returns a session token
-#   - /api/login with a bad password returns 401
-#   - /api/auth/check with the cookie reports authenticated=true
+# QEMU VM, waits for the engine to come up, and exercises both halves of the
+# WebUI ↔ engine boundary that unit tests can't reach:
+#   - HTTP: /health, /api/login (good + bad creds), /api/auth/check
+#   - JSON-RPC over /ws: auth.me, system.health, fs.list, unknown-method
 #
-# This is the engine ↔ WebUI boundary that unit tests can't reach: real
-# systemd unit start, real auth manager (argon2 + lockout DB), real HTTP
-# routing, real cookie handshake. Pairs with the JSON-RPC framing tests
-# (#29) and the WebSocket client tests (#32) which cover the wire shape on
-# either side of this boundary.
+# Pairs with the JSON-RPC framing tests (#29) and the WebSocket client tests
+# (#32) which cover the wire shape on either side of this boundary; this
+# proves the engine actually wires up to honour both.
 
 { pkgs, nasty-engine, nasty-webui, nasty-bcachefs-tools }:
 
+let
+  # Self-contained Python script run inside the guest. Putting it in its own
+  # file avoids nesting a triple-quoted Python string inside a Nix `''`
+  # string, which mangles indentation under the testScript type-checker.
+  rpcSmoke = pkgs.writeText "rpc-smoke.py" ''
+    import json
+    import sys
+    import websocket
+
+    token = sys.argv[1]
+
+    ws = websocket.create_connection("ws://127.0.0.1:2137/ws", timeout=10)
+    try:
+        ws.send(json.dumps({"token": token}))
+        auth = json.loads(ws.recv())
+        assert auth.get("authenticated") is True, f"WS auth failed: {auth!r}"
+        assert auth.get("username") == "admin", f"unexpected user: {auth!r}"
+
+        def call(method, request_id, params=None):
+            req = {"jsonrpc": "2.0", "method": method, "id": request_id}
+            if params is not None:
+                req["params"] = params
+            ws.send(json.dumps(req))
+            resp = json.loads(ws.recv())
+            assert resp.get("id") == request_id, (
+                f"id mismatch: req={request_id} resp={resp!r}"
+            )
+            assert "error" not in resp, f"{method} returned error: {resp!r}"
+            return resp["result"]
+
+        me = call("auth.me", 1)
+        assert me["username"] == "admin", f"auth.me wrong: {me!r}"
+
+        health = call("system.health", 2)
+        print("system.health:", health, file=sys.stderr)
+
+        fs_list = call("fs.list", 3)
+        assert isinstance(fs_list, list), f"fs.list not a list: {fs_list!r}"
+        # Fresh appliance with no virtual disks => empty list.
+        assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
+
+        # Unknown method must come back as a JSON-RPC error envelope, not a
+        # silent drop.
+        ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 4}))
+        bad = json.loads(ws.recv())
+        assert bad.get("id") == 4, f"id mismatch: {bad!r}"
+        assert bad.get("error"), f"unknown method should error: {bad!r}"
+        print("unknown method error:", bad["error"], file=sys.stderr)
+    finally:
+        ws.close()
+  '';
+
+  pythonWithWs = pkgs.python3.withPackages (ps: [ ps.websocket-client ]);
+in
+
 pkgs.testers.runNixOSTest {
   name = "appliance-smoke";
-
-  # websocket-client lets the testScript drive the JSON-RPC dispatch over
-  # the same /ws endpoint the WebUI uses.
-  extraPythonPackages = ps: [ ps.websocket-client ];
 
   nodes.machine = { lib, ... }: {
     imports = [
@@ -49,11 +97,15 @@ pkgs.testers.runNixOSTest {
     # transient test VM.
     services.timesyncd.enable = lib.mkForce false;
 
+    # The rpc-smoke script needs websocket-client at runtime in the guest.
+    environment.systemPackages = [ pythonWithWs ];
+
     virtualisation.memorySize = 2048;
   };
 
   testScript = ''
     import json
+    import shlex
 
     machine.start()
     machine.wait_for_unit("nasty-engine.service")
@@ -105,60 +157,11 @@ pkgs.testers.runNixOSTest {
 
     # ── JSON-RPC over /ws ──────────────────────────────────────────
     # Drive the same dispatch path the WebUI uses: open a WebSocket,
-    # auth with the token from /api/login, send a few requests, and
-    # check the responses come back correlated by id. This exercises
-    # router.rs end-to-end — the part the unit tests deliberately
-    # don't reach.
-    import shlex
-    rpc_script = '''
-import json
-import sys
-import websocket
-
-token = sys.argv[1]
-
-ws = websocket.create_connection("ws://127.0.0.1:2137/ws", timeout=10)
-try:
-    ws.send(json.dumps({"token": token}))
-    auth = json.loads(ws.recv())
-    assert auth.get("authenticated") is True, f"WS auth failed: {auth!r}"
-    assert auth.get("username") == "admin", f"unexpected user: {auth!r}"
-
-    def call(method, request_id, params=None):
-        req = {"jsonrpc": "2.0", "method": method, "id": request_id}
-        if params is not None:
-            req["params"] = params
-        ws.send(json.dumps(req))
-        resp = json.loads(ws.recv())
-        assert resp.get("id") == request_id, (
-            f"id mismatch: req={request_id} resp={resp!r}"
-        )
-        assert "error" not in resp, f"{method} returned error: {resp!r}"
-        return resp["result"]
-
-    me = call("auth.me", 1)
-    assert me["username"] == "admin", f"auth.me wrong: {me!r}"
-
-    health = call("system.health", 2)
-    print("system.health:", health, file=sys.stderr)
-
-    fs_list = call("fs.list", 3)
-    assert isinstance(fs_list, list), f"fs.list not a list: {fs_list!r}"
-    # Fresh appliance with no virtual disks => empty list.
-    assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
-
-    # Unknown method must come back as a JSON-RPC error envelope, not a
-    # silent drop.
-    ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 4}))
-    bad = json.loads(ws.recv())
-    assert bad.get("id") == 4, f"id mismatch: {bad!r}"
-    assert bad.get("error"), f"unknown method should error: {bad!r}"
-    print("unknown method error:", bad["error"], file=sys.stderr)
-finally:
-    ws.close()
-'''
+    # auth with the token from /api/login, send a few requests, check
+    # responses come back correlated by id. Exercises router.rs
+    # end-to-end — the part unit tests deliberately don't reach.
     machine.succeed(
-        f"python3 -c {shlex.quote(rpc_script)} {shlex.quote(login_obj['token'])}"
+        f"${pythonWithWs}/bin/python3 ${rpcSmoke} {shlex.quote(login_obj['token'])}"
     )
   '';
 }
