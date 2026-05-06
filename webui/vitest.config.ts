@@ -4,6 +4,7 @@ import { defineConfig } from 'vitest/config';
 // clash with the SvelteKit plugin's plugin types under svelte-check.
 export default defineConfig({
 	test: {
-		include: ['src/**/*.{test,spec}.ts']
+		include: ['src/**/*.{test,spec}.ts'],
+		setupFiles: ['./vitest.setup.ts']
 	}
 });
