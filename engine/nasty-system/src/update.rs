@@ -1820,7 +1820,7 @@ fn rewrite_flake_input_urls(
         ));
     }
 
-    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    edits.sort_by_key(|b| std::cmp::Reverse(b.0));
     let mut rewritten = content.to_string();
     for (start, end, replacement) in edits {
         rewritten.replace_range(start..end, &replacement);
