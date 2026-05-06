@@ -66,3 +66,35 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  npm-deps-hash:
+    # Verifies the npmDepsHash hardcoded in flake.nix matches the current
+    # webui/package-lock.json. Without this gate, adding an npm dep silently
+    # breaks every NASty appliance pulling main: CI jobs that build the
+    # webui auto-recompute the hash before building (see build-iso.yml,
+    # cache.yml), but end users build with the value committed in flake.nix.
+    name: npmDepsHash freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Verify hash
+        run: |
+          EXPECTED=$(nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json 2>/dev/null)
+          ACTUAL=$(grep -oE 'npmDepsHash = "[^"]*"' flake.nix | sed 's/.*"\(.*\)"/\1/')
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::npmDepsHash in flake.nix is stale"
+            echo "  expected: $EXPECTED"
+            echo "  in tree:  $ACTUAL"
+            echo
+            echo "Run:"
+            echo "  nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json"
+            echo "and replace the npmDepsHash value in flake.nix."
+            exit 1
+          fi
+          echo "npmDepsHash matches package-lock.json: $ACTUAL"
