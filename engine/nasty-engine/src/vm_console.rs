@@ -73,6 +73,8 @@ fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
 ///
 /// For VNC: binary frames are forwarded as-is (noVNC speaks raw RFB).
 /// For serial: text frames are forwarded as bytes.
+// Suggested guards use `.await`, which isn't stable in match guards.
+#[allow(clippy::collapsible_match)]
 async fn proxy_unix_socket(
     mut ws: WebSocket,
     socket_path: String,
