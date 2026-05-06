@@ -43,19 +43,27 @@ let
         me = call("auth.me", 1)
         assert me["username"] == "admin", f"auth.me wrong: {me!r}"
 
-        health = call("system.health", 2)
+        # First login of the default admin/admin sets must_change_password,
+        # which gates most RPC methods until cleared. Change it so the rest
+        # of the smoke can call system.health / fs.list.
+        call("auth.change_password", 2, {
+            "username": "admin",
+            "new_password": "password-changed-by-smoke-test",
+        })
+
+        health = call("system.health", 3)
         print("system.health:", health, file=sys.stderr)
 
-        fs_list = call("fs.list", 3)
+        fs_list = call("fs.list", 4)
         assert isinstance(fs_list, list), f"fs.list not a list: {fs_list!r}"
         # Fresh appliance with no virtual disks => empty list.
         assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
 
         # Unknown method must come back as a JSON-RPC error envelope, not a
         # silent drop.
-        ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 4}))
+        ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 5}))
         bad = json.loads(ws.recv())
-        assert bad.get("id") == 4, f"id mismatch: {bad!r}"
+        assert bad.get("id") == 5, f"id mismatch: {bad!r}"
         assert bad.get("error"), f"unknown method should error: {bad!r}"
         print("unknown method error:", bad["error"], file=sys.stderr)
     finally:
