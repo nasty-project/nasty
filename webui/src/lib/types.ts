@@ -511,11 +511,19 @@ export interface VlanConfig {
 	ipv6: IpConfig;
 }
 
+export interface BridgeConfig {
+	name: string;
+	members: string[];
+	ipv4: IpConfig;
+	ipv6: IpConfig;
+}
+
 export interface NetworkConfig {
 	interfaces: InterfaceConfig[];
 	dns: string[];
 	bonds: BondConfig[];
 	vlans: VlanConfig[];
+	bridges: BridgeConfig[];
 }
 
 export interface LiveInterface {

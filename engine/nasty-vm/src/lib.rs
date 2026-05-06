@@ -898,9 +898,12 @@ fn build_qemu_args(config: &VmConfig) -> Vec<String> {
         match net.mode.as_str() {
             "bridge" => {
                 let br = net.bridge.as_deref().unwrap_or("br0");
+                // QEMU's default helper path is the package's libexec, which
+                // doesn't have CAP_NET_ADMIN. Point at the NixOS wrapper that
+                // does (configured in nasty.nix: security.wrappers.qemu-bridge-helper).
                 args.extend_from_slice(&[
                     "-netdev".to_string(),
-                    format!("bridge,id=net{i},br={br}"),
+                    format!("bridge,id=net{i},br={br},helper=/run/wrappers/bin/qemu-bridge-helper"),
                     "-device".to_string(),
                     format!("virtio-net-pci,netdev=net{i}{mac_opt}"),
                 ]);

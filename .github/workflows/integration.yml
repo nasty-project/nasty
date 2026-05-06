@@ -8,7 +8,7 @@ on:
     paths:
       - '.github/workflows/integration.yml'
       - 'nixos/tests/**'
-      - 'nixos/modules/bcachefs.nix'
+      - 'nixos/modules/**'
       - 'flake.nix'
       - 'flake.lock'
 
