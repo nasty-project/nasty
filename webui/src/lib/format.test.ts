@@ -1,0 +1,83 @@
+import { describe, expect, test } from 'vitest';
+import { formatBytes, formatPercent, formatUptime, makeBytesFormatter } from './format';
+
+describe('formatBytes', () => {
+	test('zero is the literal "0 B" — not "0.0 B" or "0 KiB"', () => {
+		expect(formatBytes(0)).toBe('0 B');
+	});
+
+	test('values below 1 KiB use B with no decimal', () => {
+		expect(formatBytes(512)).toBe('512 B');
+		expect(formatBytes(1023)).toBe('1023 B');
+	});
+
+	test('values above 1 KiB use one decimal place', () => {
+		expect(formatBytes(1024)).toBe('1.0 KiB');
+		expect(formatBytes(1536)).toBe('1.5 KiB');
+		expect(formatBytes(1024 * 1024)).toBe('1.0 MiB');
+		expect(formatBytes(1024 * 1024 * 1024)).toBe('1.0 GiB');
+		expect(formatBytes(1024 ** 4)).toBe('1.0 TiB');
+		expect(formatBytes(1024 ** 5)).toBe('1.0 PiB');
+	});
+
+	test('uses binary (1024) units, not SI (1000)', () => {
+		// 1500 bytes → 1.5 KiB, not 1.5 KB.
+		expect(formatBytes(1500)).toBe('1.5 KiB');
+	});
+});
+
+describe('makeBytesFormatter', () => {
+	test('locks the unit so all axis ticks render in the same unit', () => {
+		const fmt = makeBytesFormatter(1024 * 1024 * 100); // 100 MiB
+		// Every tick is in MiB, even small ones — the chart axis stays consistent.
+		expect(fmt(0)).toBe('0.0 MiB');
+		expect(fmt(1024)).toBe('0.0 MiB');
+		expect(fmt(1024 * 1024)).toBe('1.0 MiB');
+		expect(fmt(1024 * 1024 * 50)).toBe('50.0 MiB');
+	});
+
+	test('zero maxBytes falls back to bytes (no NaN unit)', () => {
+		const fmt = makeBytesFormatter(0);
+		expect(fmt(0)).toBe('0 B');
+		expect(fmt(42)).toBe('42 B');
+	});
+});
+
+describe('formatUptime', () => {
+	test('under an hour shows minutes only', () => {
+		expect(formatUptime(0)).toBe('0m');
+		expect(formatUptime(59)).toBe('0m');
+		expect(formatUptime(60)).toBe('1m');
+		expect(formatUptime(59 * 60)).toBe('59m');
+	});
+
+	test('under a day shows hours and minutes', () => {
+		expect(formatUptime(3600)).toBe('1h 0m');
+		expect(formatUptime(3600 + 90)).toBe('1h 1m');
+		expect(formatUptime(23 * 3600 + 59 * 60)).toBe('23h 59m');
+	});
+
+	test('one day or more shows days, hours, minutes', () => {
+		expect(formatUptime(86400)).toBe('1d 0h 0m');
+		expect(formatUptime(86400 + 3600 + 60)).toBe('1d 1h 1m');
+		expect(formatUptime(7 * 86400 + 12 * 3600 + 30 * 60)).toBe('7d 12h 30m');
+	});
+});
+
+describe('formatPercent', () => {
+	test('zero total is "0%" — not NaN, not Infinity', () => {
+		expect(formatPercent(0, 0)).toBe('0%');
+		expect(formatPercent(5, 0)).toBe('0%');
+	});
+
+	test('non-zero ratios render with one decimal', () => {
+		expect(formatPercent(50, 100)).toBe('50.0%');
+		expect(formatPercent(33, 100)).toBe('33.0%');
+		expect(formatPercent(1, 3)).toBe('33.3%');
+	});
+
+	test('full and over-full ratios render correctly', () => {
+		expect(formatPercent(100, 100)).toBe('100.0%');
+		expect(formatPercent(150, 100)).toBe('150.0%');
+	});
+});
