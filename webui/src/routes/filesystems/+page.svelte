@@ -1305,6 +1305,7 @@
 					{@const fsUsable = showUsable
 						? estimateUsableBytes(fs.total_bytes, fs.devices.length, fsReplicas, fsEc)
 						: fs.total_bytes}
+					{@const deviceCount = fs.devices.length}
 					<div class="mt-3">
 						<div class="mb-1 h-1.5 overflow-hidden rounded-full bg-secondary">
 							<div class="h-full rounded-full bg-primary" style="width: {(fs.used_bytes / fs.total_bytes) * 100}%"></div>
@@ -1312,7 +1313,10 @@
 						<span class="text-xs text-muted-foreground">
 							{formatBytes(fs.used_bytes)} / {formatBytes(fs.total_bytes)} ({formatPercent(fs.used_bytes, fs.total_bytes)})
 							{#if showUsable} · <span title="Estimate. bcachefs reports raw capacity; this is total ÷ replicas (or × (n-parity)/n with EC). Subvolumes can override replica counts.">~{formatBytes(fsUsable)} usable</span>{/if}
+							· {deviceCount} {deviceCount === 1 ? 'device' : 'devices'}
 							{#if fsReplicas > 1} · {fsReplicas} replicas{/if}
+							{#if fsEc} · <span title="Erasure coding (Reed-Solomon parity). At {fsReplicas} replicas this is a {fsReplicas === 2 ? 'RAID-5' : 'RAID-6'}-style layout.">erasure code</span>{/if}
+							{#if fs.options.encrypted} · <span title={fs.options.locked ? 'Encrypted, currently locked — unlock to mount.' : 'Encrypted.'}>encrypted{fs.options.locked ? ' · locked' : ''}</span>{/if}
 							{#if fs.options.compression} · {fs.options.compression}{/if}
 						</span>
 					</div>
