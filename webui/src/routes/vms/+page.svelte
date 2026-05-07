@@ -226,7 +226,7 @@
 			const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 			const url = `${proto}//${window.location.host}/ws/vm/${consoleVm.id}/vnc`;
 
-			import('@novnc/novnc/lib/rfb.js').then(({ default: RFB }) => {
+			import('@novnc/novnc').then(({ default: RFB }) => {
 				const rfb = new RFB(vncEl!, url, {
 					wsProtocols: [],
 				});
