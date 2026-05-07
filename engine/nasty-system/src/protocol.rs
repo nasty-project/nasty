@@ -470,10 +470,17 @@ async fn load_state() -> ProtocolState {
         Err(_) => {
             // Fresh install: disable SMART by default on VMs since smartd
             // cannot find SMART-capable drives in virtual environments.
+            // Persist immediately — this function is called on every
+            // protocol-status refresh, so without persistence the file
+            // never appears, and the VM detection (plus its info!) runs
+            // forever every minute.
             let mut state = ProtocolState::default();
             if is_virtual_machine().await {
                 info!("Virtual machine detected — disabling SMART by default");
                 state.smart = false;
+            }
+            if let Err(e) = save_state(&state).await {
+                warn!("Failed to persist initial protocol state: {e}");
             }
             state
         }
