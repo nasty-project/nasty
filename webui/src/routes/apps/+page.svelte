@@ -389,18 +389,6 @@
 		if (status?.enabled && !status?.running) startStartupPolling();
 	}
 
-	async function disableApps() {
-		if (!await confirm(
-			'Disable apps runtime?',
-			'All running apps will be stopped. Docker will be shut down. App data on the filesystem is preserved.'
-		)) return;
-		await withToast(
-			() => client.call('apps.disable'),
-			'Apps runtime disabled'
-		);
-		await refresh();
-	}
-
 	function addPort() {
 		newPorts = [...newPorts, { name: newPorts.length === 0 ? 'http' : `port-${newPorts.length}`, container_port: 80, host_port: '', protocol: 'TCP' }];
 	}
@@ -423,14 +411,6 @@
 
 	function removeVolume(i: number) {
 		newVolumes = newVolumes.filter((_, idx) => idx !== i);
-	}
-
-	/** Start Docker in background if not running. Returns true if already ready. */
-	async function ensureAppsEnabled(): Promise<boolean> {
-		if (status?.enabled && status?.running) return true;
-		// Redirect to Services page to enable Docker
-		goto('/services');
-		return false;
 	}
 
 	/** Wait until Docker is actually ready before submitting. */
@@ -743,6 +723,22 @@
 			<p class="mt-1 text-sm text-muted-foreground">Docker is starting up. This should only take a few seconds.</p>
 		</CardContent>
 	</Card>
+{:else if status && !status.enabled}
+	<div class="mb-4 flex items-center gap-4 rounded-lg border border-border px-4 py-2.5 text-sm">
+		<div class="flex items-center gap-2">
+			<span class="h-2 w-2 rounded-full bg-red-400"></span>
+			<span class="text-muted-foreground">Docker {status.docker_version ?? ''}</span>
+		</div>
+	</div>
+	<Card class="max-w-xl">
+		<CardContent class="py-8 text-center">
+			<p class="mb-1 font-medium">Apps are disabled</p>
+			<p class="mb-4 text-sm text-muted-foreground">
+				Container apps run on a Docker daemon NASty manages as a service. Enable the Apps service to install and manage them.
+			</p>
+			<Button onclick={() => goto('/services')}>Manage in Services →</Button>
+		</CardContent>
+	</Card>
 {:else}
 	<!-- Docker status bar -->
 	{#if status}
@@ -783,12 +779,8 @@
 					<CardContent class="py-4">
 						<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Maintenance</h4>
 						<div class="flex flex-col gap-2">
-							{#if status?.running}
-								<Button size="sm" variant="outline" onclick={pruneDocker}>Cleanup Unused Images</Button>
-								<Button size="sm" variant="destructive" onclick={disableApps}>Disable Apps</Button>
-							{:else}
-								<a href="/services" class="text-sm text-blue-400 no-underline hover:text-blue-300">Enable in Services →</a>
-							{/if}
+							<Button size="sm" variant="outline" onclick={pruneDocker}>Cleanup Unused Images</Button>
+							<a href="/services" class="text-xs text-muted-foreground hover:text-foreground">On/off is managed in Services →</a>
 						</div>
 					</CardContent>
 				</Card>
@@ -798,7 +790,7 @@
 
 	<!-- Action bar -->
 	<div class="mb-4 flex items-center gap-3">
-		<Button size="sm" onclick={async () => { if (showInstall || showCompose) { cancelEdit(); cancelCompose(); } else { if (!status?.enabled && !await ensureAppsEnabled()) return; editingApp = null; newPorts = [{ name: 'http', container_port: 80, host_port: '', protocol: 'TCP' }]; showInstall = true; installMode = 'simple'; } }}>
+		<Button size="sm" onclick={() => { if (showInstall || showCompose) { cancelEdit(); cancelCompose(); } else { editingApp = null; newPorts = [{ name: 'http', container_port: 80, host_port: '', protocol: 'TCP' }]; showInstall = true; installMode = 'simple'; } }}>
 			{showInstall || showCompose ? 'Cancel' : 'Install App'}
 		</Button>
 		{#if apps.length > 3}
