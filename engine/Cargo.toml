@@ -30,12 +30,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 argon2 = { version = "0.5", features = ["rand"] }
-rand = "0.9"
+rand = "0.10"
 base64 = "0.22"
 tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 portable-pty = "0.9"
 rusqlite = { version = "0.34", features = ["bundled"] }
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 schemars = "1"

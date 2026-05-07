@@ -982,9 +982,15 @@ fn ct_eq_str(a: &str, b: &str) -> bool {
 /// no need for Argon2's brute-force resistance. Instant O(1) comparison.
 fn hash_token(token: &str) -> String {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write;
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    let mut out = String::with_capacity(7 + 64);
+    out.push_str("sha256:");
+    for byte in hasher.finalize() {
+        write!(&mut out, "{byte:02x}").unwrap();
+    }
+    out
 }
 
 /// Pick a unique username for a freshly-provisioned OIDC user. Prefers
