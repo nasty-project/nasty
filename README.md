@@ -23,6 +23,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **Subvolumes** — filesystem and block subvolumes with quotas, compression, and tiering per subvolume
 - **Snapshots** — instant, space-efficient point-in-time copies
 - **File browser** — browse, upload, and manage files from the web UI
+- **Backups** — encrypted, deduplicated, incremental backups to local, S3, SFTP, REST, or Backblaze B2 with per-profile schedules and retention
 
 ### Monitoring & Alerts
 - **Dashboard** — CPU, memory, storage, temperature, frequency — with scrollable history charts (30-day retention)
@@ -32,8 +33,9 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **[nasty-top](https://github.com/nasty-project/nasty-top)** — standalone TUI for live per-device IO, latency, and tuning
 
 ### Apps & VMs
-- **Apps** — Docker containers and Compose stacks with auto-enable, image pull progress, and container inspect
+- **Apps** — Docker containers and Compose stacks with image pull progress, container inspect, and an `allow_unsafe` escape hatch for stacks that need privileged options
 - **Virtual machines** — QEMU/KVM with VNC console, disk snapshots, and VM cloning (experimental)
+- **Network bridges** — Linux bridges for attaching VMs (and apps) to L2 networks alongside the host
 
 ### System
 - **Web UI** — manage filesystems, subvolumes, snapshots, shares, disks, services, and more
@@ -41,7 +43,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **Glossary** — built-in help page with storage terms, protocol guidance, and FAQ
 - **Let's Encrypt** — automatic TLS certificates via ACME (TLS-ALPN and DNS challenges)
 - **Tailscale** — built-in VPN with one-click setup
-- **Access control** — local user accounts with role-based permissions and API tokens
+- **Access control** — local user accounts with role-based permissions, API tokens, and OIDC single sign-on
 - **UPS monitoring** — NUT integration for graceful shutdown on power loss (opt-in)
 - **Atomic updates** — NixOS-based, with one-click rollback to any previous generation
 - **Binary cache** — fast updates via cachix (bcachefs-tools, engine, webui pre-built)

@@ -88,6 +88,16 @@
 					summary: 'Background rebalancing of data across devices.',
 					detail: 'Reconcile moves data between devices to maintain the desired layout — for example, after adding or removing a disk, or after changing tiering targets. It runs automatically when enabled.',
 				},
+				{
+					term: 'Erasure Coding',
+					summary: 'Parity-based redundancy that uses less space than mirroring.',
+					detail: 'Instead of storing N full copies, erasure coding stores data plus parity blocks across multiple devices. Roughly: with replicas=2 and EC on, the layout is RAID-5-like (one parity); replicas=3 with EC is RAID-6-like (two parity). Usable capacity scales with (devices − parity) / devices, which is much better than 1/replicas mirroring once you have several disks. Trade-off: rebuilds and small writes are more expensive. Toggle when creating the filesystem.',
+				},
+				{
+					term: 'Encryption',
+					summary: 'At-rest encryption of every block written to the filesystem.',
+					detail: 'bcachefs encrypts data and metadata with a key derived from a passphrase you provide at filesystem creation. The passphrase is required to unlock the filesystem at boot. Encryption is set at filesystem creation and cannot be added or removed later — pick it up front if you need it.',
+				},
 			],
 		},
 		{
@@ -158,6 +168,16 @@
 					summary: 'A tool for defining multi-container applications.',
 					detail: 'Some apps need multiple containers working together (e.g., a web app + database). Docker Compose defines these in a single YAML file, managing networking and dependencies between containers automatically.',
 				},
+				{
+					term: 'allow_unsafe',
+					summary: 'Per-app opt-in for privileged or host-impacting container options.',
+					detail: 'NASty sandboxes app deploys by default — capabilities, host-path mounts, and other "escape hatch" options are stripped from compose files and rejected on simple installs. Set allow_unsafe on an app when you genuinely need things like privileged mode, host networking, or mounting /var. This is logged and visible on the app list so you remember which apps are running with extra trust.',
+				},
+				{
+					term: 'Network Bridge',
+					summary: 'A virtual L2 switch that lets VMs (and apps) share the host LAN.',
+					detail: 'A bridge ties one or more host interfaces together so guests attached to it appear as ordinary devices on your physical network — they can pull DHCP from your router and be reached directly by IP. Configured under Network → Bridges; VMs select a bridge as their NIC backing instead of the default user-mode networking.',
+				},
 			],
 		},
 		{
@@ -183,6 +203,21 @@
 					summary: 'A command-line shell running directly on NASty.',
 					detail: 'The built-in terminal gives you a bash shell on the NAS, accessible from the web UI. Useful for running bcachefs commands, inspecting logs, or anything the web UI doesn\'t cover. Commands like nasty-top are available here.',
 				},
+				{
+					term: 'ACME / Let\'s Encrypt',
+					summary: 'Automatic TLS certificates for the web UI.',
+					detail: 'NASty can request a free, trusted TLS certificate for your hostname from Let\'s Encrypt and renew it automatically. Two challenge types are supported: TLS-ALPN (works when NASty is reachable on port 443 from the internet) and DNS-01 (works behind a NAT / on a private network, but needs API credentials for your DNS provider). Configure under Settings → TLS.',
+				},
+				{
+					term: 'Tailscale',
+					summary: 'Mesh VPN for reaching NASty from anywhere.',
+					detail: 'Tailscale builds a private network between your devices over WireGuard. Once you log in from NASty\'s Settings page, your NAS gets a stable Tailscale IP and a *.ts.net hostname reachable from any of your other Tailscale-enabled machines — phone, laptop, server — without exposing it to the public internet. Useful for offsite backups and remote access.',
+				},
+				{
+					term: 'UPS / NUT',
+					summary: 'Talks to a battery backup so NASty can shut down cleanly on power loss.',
+					detail: 'NUT (Network UPS Tools) lets NASty read state from a USB- or network-attached UPS. When the UPS reports low battery, NASty shuts down gracefully so you don\'t lose data to a hard power-off. Optional — enable it under Services if you have a UPS connected.',
+				},
 			],
 		},
 		{
@@ -202,6 +237,26 @@
 					term: 'API',
 					summary: 'Application Programming Interface — how software talks to NASty.',
 					detail: 'NASty\'s engine exposes a JSON-RPC 2.0 API over WebSocket. Everything the web UI does goes through this API, and you can use it directly for scripting and automation. Connect to ws://<nasty-ip>/ws/api with a valid token.',
+				},
+				{
+					term: 'SSO / OIDC',
+					summary: 'Sign in to NASty with an external identity provider.',
+					detail: 'OpenID Connect lets you delegate web UI login to a provider like Authentik, Keycloak, Google, or any OIDC-compliant IdP. Users log in once at the provider and are redirected back. Configure under Access Control → Identity Provider; existing local accounts keep working alongside SSO.',
+				},
+			],
+		},
+		{
+			title: 'Backup',
+			entries: [
+				{
+					term: 'Backup Profile',
+					summary: 'A reusable definition of what to back up, where, and how often.',
+					detail: 'A profile bundles a set of source paths (subvolumes or filesystem dirs), a target (local, S3, SFTP, REST, or Backblaze B2), an encryption password, a schedule, and a retention policy. Backups are deduplicated and incremental — only changed blocks travel over the network.',
+				},
+				{
+					term: 'Retention',
+					summary: 'How many snapshots to keep, by age class.',
+					detail: 'A retention policy says e.g. "keep the last 7 snapshots, plus 7 daily, 4 weekly, 6 monthly." After every backup, snapshots that don\'t match any class are pruned. Tune this per profile based on how much history you want versus storage cost at the target.',
 				},
 			],
 		},
