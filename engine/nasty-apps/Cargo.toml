@@ -12,6 +12,6 @@ thiserror.workspace = true
 tracing.workspace = true
 schemars.workspace = true
 reqwest.workspace = true
-bollard = "0.20"
+bollard = "0.21"
 serde_yaml_ng = "0.10"
 futures-util.workspace = true

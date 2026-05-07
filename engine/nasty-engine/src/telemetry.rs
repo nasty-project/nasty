@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rand::Rng;
+use rand::RngExt;
 use serde::Serialize;
 use tokio::time::{Duration, interval};
 use tracing::{debug, info, warn};

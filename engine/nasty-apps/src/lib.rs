@@ -1886,10 +1886,10 @@ impl AppsService {
             .await
             .ok()?;
         let mut total: u64 = 0;
-        if let Some(ref images) = df.images_disk_usage {
+        if let Some(ref images) = df.image_usage {
             total += images.total_size.unwrap_or(0) as u64;
         }
-        if let Some(ref volumes) = df.volumes_disk_usage {
+        if let Some(ref volumes) = df.volume_usage {
             total += volumes.total_size.unwrap_or(0) as u64;
         }
         Some(total)
