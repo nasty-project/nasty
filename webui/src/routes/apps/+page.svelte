@@ -780,7 +780,7 @@
 						<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Maintenance</h4>
 						<div class="flex flex-col gap-2">
 							<Button size="sm" variant="outline" onclick={pruneDocker}>Cleanup Unused Images</Button>
-							<a href="/services" class="text-xs text-muted-foreground hover:text-foreground">On/off is managed in Services →</a>
+							<Button size="sm" variant="outline" onclick={() => goto('/services')}>Manage in Services →</Button>
 						</div>
 					</CardContent>
 				</Card>
