@@ -119,6 +119,14 @@ export interface BlockDevice {
 	rotational: boolean;
 	/** "nvme" | "ssd" | "hdd" */
 	device_class: string;
+	/** Drive model from lsblk; missing on partitions and many virtual disks. */
+	model?: string;
+	/** Drive serial from lsblk; same caveat. */
+	serial?: string;
+	/** Drive vendor from lsblk (e.g. "ATA", "NVMe"). */
+	vendor?: string;
+	/** Transport bus from lsblk (e.g. "sata", "nvme", "usb"). */
+	transport?: string;
 }
 
 export type TieringProfileId = 'single' | 'write_cache' | 'full_tiering' | 'none' | 'manual';

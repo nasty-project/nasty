@@ -1275,9 +1275,15 @@ impl FilesystemService {
             .flat_map(|f| f.devices.iter().map(|d| d.path.clone()))
             .collect();
 
-        let output = cmd::run_ok("lsblk", &["-Jbno", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,ROTA"])
-            .await
-            .map_err(FilesystemError::CommandFailed)?;
+        let output = cmd::run_ok(
+            "lsblk",
+            &[
+                "-Jbno",
+                "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,ROTA,MODEL,SERIAL,VENDOR,TRAN",
+            ],
+        )
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
 
         let parsed: serde_json::Value =
             serde_json::from_str(&output).unwrap_or(serde_json::Value::Null);
@@ -1344,6 +1350,21 @@ impl FilesystemService {
                         .unwrap_or(false);
                     let (rotational, device_class) = classify(name, rota);
 
+                    // lsblk surfaces these only on whole disks; on partitions
+                    // they're empty/null. Treat empty-after-trim as None so
+                    // the WebUI can hide the field entirely instead of
+                    // rendering blanks.
+                    let pick = |key: &str| -> Option<String> {
+                        dev.get(key)
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                    };
+                    let model = pick("model");
+                    let serial = pick("serial");
+                    let vendor = pick("vendor");
+                    let transport = pick("tran");
+
                     if dev_type == "disk" || dev_type == "part" {
                         let path = format!("/dev/{name}");
                         let in_fs = fs_devices.contains(&path);
@@ -1357,6 +1378,10 @@ impl FilesystemService {
                             in_use: in_fs || actually_mounted,
                             rotational,
                             device_class,
+                            model,
+                            serial,
+                            vendor,
+                            transport,
                         });
                     }
 
@@ -1418,9 +1443,18 @@ impl FilesystemService {
                     info!("Free space on {disk_path}: {free_bytes} bytes");
                     if free_bytes >= MIN_FREE_BYTES {
                         let disk = devices.iter().find(|d| &d.path == disk_path);
-                        let (rotational, device_class) = disk
-                            .map(|d| (d.rotational, d.device_class.clone()))
-                            .unwrap_or((false, "ssd".to_string()));
+                        let (rotational, device_class, model, serial, vendor, transport) = disk
+                            .map(|d| {
+                                (
+                                    d.rotational,
+                                    d.device_class.clone(),
+                                    d.model.clone(),
+                                    d.serial.clone(),
+                                    d.vendor.clone(),
+                                    d.transport.clone(),
+                                )
+                            })
+                            .unwrap_or((false, "ssd".to_string(), None, None, None, None));
                         devices.push(BlockDevice {
                             path: format!("{disk_path}:free"),
                             size_bytes: free_bytes,
@@ -1430,6 +1464,10 @@ impl FilesystemService {
                             in_use: false,
                             rotational,
                             device_class,
+                            model,
+                            serial,
+                            vendor,
+                            transport,
                         });
                     }
                 }
@@ -2089,6 +2127,19 @@ pub struct BlockDevice {
     pub rotational: bool,
     /// Device speed class: "nvme", "ssd", or "hdd".
     pub device_class: String,
+    /// Drive model from lsblk (e.g. "Samsung SSD 970 EVO Plus 1TB"). None
+    /// for partitions and for virtual disks that don't expose a model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Drive serial from lsblk. None for partitions and virtual disks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    /// Drive vendor from lsblk (e.g. "ATA", "NVMe").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// Transport bus from lsblk (e.g. "sata", "nvme", "usb").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 /// Get the largest contiguous free space on a partitioned disk using sgdisk.
