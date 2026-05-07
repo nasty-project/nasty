@@ -98,3 +98,35 @@ jobs:
             exit 1
           fi
           echo "npmDepsHash matches package-lock.json: $ACTUAL"
+
+  installer-flake-template:
+    # The installer's system-flake template must reference the same
+    # bcachefs-tools input as the project's flake.nix. The ISO build copies
+    # all transitive nodes from flake.lock into the system flake's lock; if
+    # the template's bcachefs-tools.url drifts from flake.nix, the lock will
+    # hold a different ref than the rendered flake.nix asks for and
+    # nixos-install will bail out with a NAR hash mismatch on first boot.
+    name: Installer template bcachefs-tools URL matches flake.nix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compare URLs
+        run: |
+          PROJECT=$(grep -oE 'bcachefs-tools\.url = "[^"]+"' flake.nix | head -1)
+          TEMPLATE=$(grep -oE 'bcachefs-tools\.url = "[^"]+"' nixos/system-flake/flake.nix.template | head -1)
+          if [ -z "$PROJECT" ] || [ -z "$TEMPLATE" ]; then
+            echo "::error::could not extract bcachefs-tools.url from one of the files"
+            echo "  flake.nix:                             $PROJECT"
+            echo "  nixos/system-flake/flake.nix.template: $TEMPLATE"
+            exit 1
+          fi
+          if [ "$PROJECT" != "$TEMPLATE" ]; then
+            echo "::error::installer template bcachefs-tools URL is stale"
+            echo "  flake.nix:                             $PROJECT"
+            echo "  nixos/system-flake/flake.nix.template: $TEMPLATE"
+            echo
+            echo "When bumping bcachefs-tools, update both files together."
+            exit 1
+          fi
+          echo "Installer template matches flake.nix: $PROJECT"
