@@ -11,10 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
-use openidconnect::reqwest::async_http_client;
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, HttpRequest, HttpResponse, IssuerUrl,
+    Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 use tokio::sync::RwLock;
 
@@ -56,6 +55,70 @@ pub struct OidcIdentity {
     pub groups: Vec<String>,
 }
 
+/// CoreClient with the redirect URI set (`EndpointSet` for redirect),
+/// auth URL set from discovery (`EndpointSet`), and token URL discovered
+/// via `from_provider_metadata` (`EndpointMaybeSet`). The type-state generics
+/// have to be spelled out here because `clippy::type_complexity` complains
+/// when this appears as a return type, and `from_provider_metadata` can't
+/// be stored in a struct field with a default-typed `CoreClient`.
+type ConfiguredCoreClient = openidconnect::Client<
+    openidconnect::EmptyAdditionalClaims,
+    openidconnect::core::CoreAuthDisplay,
+    openidconnect::core::CoreGenderClaim,
+    openidconnect::core::CoreJweContentEncryptionAlgorithm,
+    openidconnect::core::CoreJsonWebKey,
+    openidconnect::core::CoreAuthPrompt,
+    openidconnect::StandardErrorResponse<openidconnect::core::CoreErrorResponseType>,
+    openidconnect::core::CoreTokenResponse,
+    openidconnect::core::CoreTokenIntrospectionResponse,
+    openidconnect::core::CoreRevocableToken,
+    openidconnect::core::CoreRevocationErrorResponse,
+    openidconnect::EndpointSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointMaybeSet,
+    openidconnect::EndpointMaybeSet,
+>;
+
+/// Error type for the closure-bridge HTTP client we hand to openidconnect.
+/// `oauth2::AsyncHttpClient` requires the error type to be
+/// `Error + 'static`; thiserror gives us that for free.
+#[derive(Debug, thiserror::Error)]
+enum OidcHttpError {
+    #[error("OIDC HTTP request failed: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("OIDC HTTP response build failed: {0}")]
+    Build(#[from] http::Error),
+}
+
+/// Bridge between openidconnect's `http::Request<Vec<u8>>` and our
+/// reqwest 0.13 client. openidconnect 4 / oauth2 5 ship an
+/// `AsyncHttpClient` impl for `reqwest::Client`, but they pin reqwest at
+/// 0.12, so the impl is for a *different* `reqwest::Client` type than
+/// ours. oauth2 also has a blanket impl for any
+/// `Fn(HttpRequest) -> Future<Result<HttpResponse, _>>`, which is what
+/// the call sites use via `move |req| async move { http_call(...).await }`.
+async fn http_call(
+    client: &reqwest::Client,
+    req: HttpRequest,
+) -> Result<HttpResponse, OidcHttpError> {
+    let (parts, body) = req.into_parts();
+    let mut builder = client.request(parts.method, parts.uri.to_string());
+    for (name, value) in parts.headers.iter() {
+        builder = builder.header(name, value);
+    }
+    let resp = builder.body(body).send().await?;
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp.bytes().await?.to_vec();
+    let mut http_resp = http::Response::builder().status(status);
+    for (name, value) in headers.iter() {
+        http_resp = http_resp.header(name, value);
+    }
+    Ok(http_resp.body(body)?)
+}
+
 struct Pending {
     pkce_verifier_secret: String,
     nonce: Nonce,
@@ -63,7 +126,16 @@ struct Pending {
 }
 
 pub struct OidcClient {
-    inner: CoreClient,
+    // openidconnect 4 puts a type-state on Client's endpoint generics, so
+    // storing a configured client as a field would mean writing out
+    // `ConfiguredCoreClient` everywhere. Cheaper to keep the building
+    // blocks and reconstruct per-call via build_client() — construction
+    // is a few clones, no I/O.
+    metadata: CoreProviderMetadata,
+    client_id: ClientId,
+    client_secret: Option<ClientSecret>,
+    redirect_url: RedirectUrl,
+    http_client: reqwest::Client,
     settings: OidcSettings,
     pending: Arc<RwLock<HashMap<String, Pending>>>,
 }
@@ -98,7 +170,7 @@ impl OidcClient {
             .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or(OidcError::NotConfigured("issuer_url"))?;
-        let client_id = settings
+        let client_id_str = settings
             .client_id
             .as_deref()
             .filter(|s| !s.is_empty())
@@ -112,9 +184,22 @@ impl OidcClient {
         validate_issuer_url(issuer)?;
         let issuer_url =
             IssuerUrl::new(issuer.to_string()).map_err(|e| OidcError::Config(e.to_string()))?;
-        let metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client)
-            .await
-            .map_err(|e| OidcError::Discovery(e.to_string()))?;
+
+        // Don't follow redirects on the OIDC backchannel — per the openidconnect
+        // crate's recommendation: a compromised IdP could otherwise 302 us
+        // into hitting an internal URL during discovery or token exchange.
+        let http_client = reqwest::ClientBuilder::new()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| OidcError::Config(format!("reqwest client: {e}")))?;
+
+        let discover_client = http_client.clone();
+        let metadata = CoreProviderMetadata::discover_async(issuer_url, &move |req| {
+            let c = discover_client.clone();
+            async move { http_call(&c, req).await }
+        })
+        .await
+        .map_err(|e| OidcError::Discovery(e.to_string()))?;
 
         let client_secret = settings
             .client_secret
@@ -122,27 +207,35 @@ impl OidcClient {
             .filter(|s| !s.is_empty())
             .map(|s| ClientSecret::new(s.to_string()));
 
-        let inner = CoreClient::from_provider_metadata(
-            metadata,
-            ClientId::new(client_id.to_string()),
-            client_secret,
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(redirect.to_string()).map_err(|e| OidcError::Config(e.to_string()))?,
-        );
+        let redirect_url =
+            RedirectUrl::new(redirect.to_string()).map_err(|e| OidcError::Config(e.to_string()))?;
 
         Ok(Self {
-            inner,
+            metadata,
+            client_id: ClientId::new(client_id_str.to_string()),
+            client_secret,
+            redirect_url,
+            http_client,
             settings: settings.clone(),
             pending: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
+    fn build_client(&self) -> ConfiguredCoreClient {
+        CoreClient::from_provider_metadata(
+            self.metadata.clone(),
+            self.client_id.clone(),
+            self.client_secret.clone(),
+        )
+        .set_redirect_uri(self.redirect_url.clone())
+    }
+
     /// Build an authorization URL and stash the PKCE verifier + nonce keyed by
     /// the CSRF state value. Returns the URL to redirect the browser to.
     pub async fn authorize_url(&self) -> url::Url {
+        let client = self.build_client();
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        let mut builder = self.inner.authorize_url(
+        let mut builder = client.authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
             Nonce::new_random,
@@ -178,16 +271,21 @@ impl OidcClient {
             return Err(OidcError::StateMismatch);
         }
 
-        let token_response = self
-            .inner
+        let client = self.build_client();
+        let exchange_client = self.http_client.clone();
+        let token_response = client
             .exchange_code(AuthorizationCode::new(code.to_string()))
+            .map_err(|e| OidcError::TokenExchange(format!("token endpoint not configured: {e}")))?
             .set_pkce_verifier(PkceCodeVerifier::new(pending.pkce_verifier_secret))
-            .request_async(async_http_client)
+            .request_async(&move |req| {
+                let c = exchange_client.clone();
+                async move { http_call(&c, req).await }
+            })
             .await
             .map_err(|e| OidcError::TokenExchange(e.to_string()))?;
 
         let id_token = token_response.id_token().ok_or(OidcError::MissingIdToken)?;
-        let verifier = self.inner.id_token_verifier();
+        let verifier = client.id_token_verifier();
         let claims = id_token
             .claims(&verifier, &pending.nonce)
             .map_err(|e| OidcError::TokenVerification(e.to_string()))?;
