@@ -31,6 +31,17 @@ export function formatPercent(used: number, total: number): string {
 }
 
 /**
+ * Fraction of the sum of physical disk sizes that bcachefs actually reports
+ * as filesystem capacity after format. The rest is reserved for metadata,
+ * journal, btree, and gc_reserve_percent (which defaults to 8). 0.91 is
+ * what we observe for fresh single-tier mirrors against bcachefs 1.38 — it
+ * varies a couple of points up or down depending on filesystem size and
+ * bcachefs version, so anything that uses it is labelled "approximate" in
+ * the UI.
+ */
+export const BCACHEFS_FS_OVERHEAD = 0.91;
+
+/**
  * Estimate user-facing usable bytes given a raw byte total, a device count,
  * a replica count, and whether erasure coding is on. The math:
  *

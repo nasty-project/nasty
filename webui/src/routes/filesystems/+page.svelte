@@ -2,7 +2,12 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getClient } from '$lib/client';
-	import { estimateUsableBytes, formatBytes, formatPercent } from '$lib/format';
+	import {
+		BCACHEFS_FS_OVERHEAD,
+		estimateUsableBytes,
+		formatBytes,
+		formatPercent
+	} from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 
 	let pageTab = $state<'manage' | 'diagnostics'>(
@@ -1056,8 +1061,9 @@
 						(sum, d) => sum + d.size_bytes,
 						0
 					)}
+					{@const fsCapacity = Math.floor(rawTotal * BCACHEFS_FS_OVERHEAD)}
 					{@const usable = estimateUsableBytes(
-						rawTotal,
+						fsCapacity,
 						selectedPaths.length,
 						replicas,
 						erasureCode
@@ -1070,6 +1076,8 @@
 						<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
 							<span class="text-muted-foreground">Raw selected</span>
 							<span class="font-mono">{formatBytes(rawTotal)} across {selectedPaths.length} device{selectedPaths.length === 1 ? '' : 's'}</span>
+							<span class="text-muted-foreground">After bcachefs overhead</span>
+							<span class="font-mono">~{formatBytes(fsCapacity)} <span class="text-muted-foreground">(metadata, journal, gc reserve)</span></span>
 							<span class="text-muted-foreground">Layout</span>
 							<span>
 								{#if erasureCode}
@@ -1084,7 +1092,7 @@
 							<span class="font-mono font-semibold">~{formatBytes(usable)}</span>
 						</div>
 						<p class="mt-2 text-[11px] text-muted-foreground/80">
-							bcachefs lets subvolumes override replica counts and apply different durability per file, so this is a rough number for the simple-case configuration.
+							Overhead varies a couple of points by filesystem size and bcachefs version. Subvolumes can also override replica counts per file, so this is a rough number for the simple-case configuration.
 						</p>
 					</div>
 				{/if}
