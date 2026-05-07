@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'vitest';
-import { formatBytes, formatPercent, formatUptime, makeBytesFormatter } from './format';
+import {
+	estimateUsableBytes,
+	formatBytes,
+	formatPercent,
+	formatUptime,
+	makeBytesFormatter
+} from './format';
+
+const GIB = 1024 ** 3;
 
 describe('formatBytes', () => {
 	test('zero is the literal "0 B" — not "0.0 B" or "0 KiB"', () => {
@@ -61,6 +69,53 @@ describe('formatUptime', () => {
 		expect(formatUptime(86400)).toBe('1d 0h 0m');
 		expect(formatUptime(86400 + 3600 + 60)).toBe('1d 1h 1m');
 		expect(formatUptime(7 * 86400 + 12 * 3600 + 30 * 60)).toBe('7d 12h 30m');
+	});
+});
+
+describe('estimateUsableBytes', () => {
+	test('mirror divides raw by replicas — the issue #16 case', () => {
+		// 2 × 480 GiB mirror should report ~480 GiB usable (raw is 960).
+		const usable = estimateUsableBytes(960 * GIB, 2, 2, false);
+		expect(usable).toBe(480 * GIB);
+	});
+
+	test('replicas=1 with no EC is identity', () => {
+		expect(estimateUsableBytes(500 * GIB, 1, 1, false)).toBe(500 * GIB);
+	});
+
+	test('mirror with replicas=3 is rawTotal / 3', () => {
+		const usable = estimateUsableBytes(900 * GIB, 3, 3, false);
+		expect(usable).toBe(300 * GIB);
+	});
+
+	test('erasure code RAID-5 (replicas=2) keeps (n-1)/n of raw', () => {
+		// 4 × 480 GiB with RAID-5 → 3/4 × 1920 = 1440 GiB usable.
+		const raw = 4 * 480 * GIB;
+		expect(estimateUsableBytes(raw, 4, 2, true)).toBe(1440 * GIB);
+	});
+
+	test('erasure code RAID-6 (replicas=3) keeps (n-2)/n of raw', () => {
+		// 5 × 480 GiB with RAID-6 → 3/5 × 2400 = 1440 GiB usable.
+		const raw = 5 * 480 * GIB;
+		expect(estimateUsableBytes(raw, 5, 3, true)).toBe(1440 * GIB);
+	});
+
+	test('zero / negative inputs return 0 (no NaN, no surprises)', () => {
+		expect(estimateUsableBytes(0, 2, 2, false)).toBe(0);
+		expect(estimateUsableBytes(-1, 2, 2, false)).toBe(0);
+		expect(estimateUsableBytes(100, 0, 2, false)).toBe(0);
+		expect(estimateUsableBytes(100, 2, 0, false)).toBe(0);
+	});
+
+	test('EC with too few devices to satisfy parity returns 0', () => {
+		// RAID-5 needs at least 2 devices (1 data + 1 parity); 1 device → 0.
+		expect(estimateUsableBytes(100, 1, 2, true)).toBe(0);
+		// RAID-6 needs 3+ (1 data + 2 parity); 2 devices → 0.
+		expect(estimateUsableBytes(100, 2, 3, true)).toBe(0);
+	});
+
+	test('EC with replicas=1 returns 0 (no parity, EC nonsense)', () => {
+		expect(estimateUsableBytes(100, 5, 1, true)).toBe(0);
 	});
 });
 

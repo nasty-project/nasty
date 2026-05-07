@@ -29,3 +29,36 @@ export function formatPercent(used: number, total: number): string {
 	if (total === 0) return '0%';
 	return `${((used / total) * 100).toFixed(1)}%`;
 }
+
+/**
+ * Estimate user-facing usable bytes given a raw byte total, a device count,
+ * a replica count, and whether erasure coding is on. The math:
+ *
+ *   - Mirror (no EC): usable ≈ rawTotal / replicas
+ *   - Erasure code (RAID-5 if replicas=2, RAID-6 if replicas=3):
+ *       parity = replicas - 1
+ *       usable ≈ rawTotal × (deviceCount - parity) / deviceCount
+ *
+ * Returns 0 for nonsensical inputs (no devices, EC with too few devices, etc.).
+ *
+ * Caveat baked into the doc and the UI tooltip: bcachefs lets subvolumes
+ * override replica counts and apply different durability per file, so this
+ * is an approximation for the simple-case configuration.
+ */
+export function estimateUsableBytes(
+	rawTotal: number,
+	deviceCount: number,
+	replicas: number,
+	erasureCode: boolean
+): number {
+	if (rawTotal <= 0 || deviceCount <= 0 || replicas <= 0) return 0;
+	let factor: number;
+	if (erasureCode) {
+		const parity = replicas - 1;
+		if (parity <= 0 || deviceCount <= parity) return 0;
+		factor = (deviceCount - parity) / deviceCount;
+	} else {
+		factor = 1 / replicas;
+	}
+	return Math.floor(rawTotal * factor);
+}

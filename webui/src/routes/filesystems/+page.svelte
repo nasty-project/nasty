@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getClient } from '$lib/client';
-	import { formatBytes, formatPercent } from '$lib/format';
+	import { estimateUsableBytes, formatBytes, formatPercent } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 
 	let pageTab = $state<'manage' | 'diagnostics'>(
@@ -1051,6 +1051,44 @@
 				</div>
 				{/if}
 
+				{#if selectedPaths.length > 0}
+					{@const rawTotal = selectedDeviceObjects().reduce(
+						(sum, d) => sum + d.size_bytes,
+						0
+					)}
+					{@const usable = estimateUsableBytes(
+						rawTotal,
+						selectedPaths.length,
+						replicas,
+						erasureCode
+					)}
+					<div class="mb-5 rounded-lg border border-border bg-secondary/20 p-4 text-sm">
+						<div class="mb-2 flex items-center gap-2">
+							<span class="font-medium">Storage estimate</span>
+							<span class="text-xs text-muted-foreground">approximate</span>
+						</div>
+						<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+							<span class="text-muted-foreground">Raw selected</span>
+							<span class="font-mono">{formatBytes(rawTotal)} across {selectedPaths.length} device{selectedPaths.length === 1 ? '' : 's'}</span>
+							<span class="text-muted-foreground">Layout</span>
+							<span>
+								{#if erasureCode}
+									Erasure code · {replicas === 2 ? 'RAID-5' : 'RAID-6'} ({replicas - 1} parity per stripe)
+								{:else if replicas === 1}
+									No redundancy
+								{:else}
+									{replicas}× mirror
+								{/if}
+							</span>
+							<span class="text-muted-foreground">Estimated usable</span>
+							<span class="font-mono font-semibold">~{formatBytes(usable)}</span>
+						</div>
+						<p class="mt-2 text-[11px] text-muted-foreground/80">
+							bcachefs lets subvolumes override replica counts and apply different durability per file, so this is a rough number for the simple-case configuration.
+						</p>
+					</div>
+				{/if}
+
 				<!-- Encryption -->
 				<div class="mb-5 rounded-lg border border-border p-4">
 					<label class="flex cursor-pointer items-center gap-2 text-sm font-medium">
@@ -1261,13 +1299,20 @@
 				</div>
 
 				{#if fs.total_bytes > 0}
+					{@const fsReplicas = fs.options.data_replicas ?? 1}
+					{@const fsEc = fs.options.erasure_code ?? false}
+					{@const showUsable = fsReplicas > 1 || fsEc}
+					{@const fsUsable = showUsable
+						? estimateUsableBytes(fs.total_bytes, fs.devices.length, fsReplicas, fsEc)
+						: fs.total_bytes}
 					<div class="mt-3">
 						<div class="mb-1 h-1.5 overflow-hidden rounded-full bg-secondary">
 							<div class="h-full rounded-full bg-primary" style="width: {(fs.used_bytes / fs.total_bytes) * 100}%"></div>
 						</div>
 						<span class="text-xs text-muted-foreground">
 							{formatBytes(fs.used_bytes)} / {formatBytes(fs.total_bytes)} ({formatPercent(fs.used_bytes, fs.total_bytes)})
-							{#if fs.options.data_replicas && fs.options.data_replicas > 1} · {fs.options.data_replicas} replicas{/if}
+							{#if showUsable} · <span title="Estimate. bcachefs reports raw capacity; this is total ÷ replicas (or × (n-parity)/n with EC). Subvolumes can override replica counts.">~{formatBytes(fsUsable)} usable</span>{/if}
+							{#if fsReplicas > 1} · {fsReplicas} replicas{/if}
 							{#if fs.options.compression} · {fs.options.compression}{/if}
 						</span>
 					</div>
