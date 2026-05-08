@@ -182,6 +182,13 @@ async fn main() -> anyhow::Result<()> {
     state.apps.restore().await;
     state.tailscale.restore().await;
 
+    // If the engine was killed mid-apply (or restarted before the user
+    // confirmed a risky network change), restore the prior config from
+    // /var/lib/nasty/networking.json.pending-revert. No-op if the file
+    // doesn't exist. Runs before the HTTP server starts accepting calls
+    // so a confirm can't race the rollback.
+    state.network.restore_pending_revert().await;
+
     // Sync NVMe-oF ports with Tailscale IP (if Tailscale reconnected on boot)
     {
         let ts_status = state.tailscale.get().await;

@@ -656,8 +656,26 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         }
         "system.network.get" => ok(req, state.network.get().await),
         "system.network.update" => {
-            match parse_params::<nasty_system::network::NetworkConfig>(req) {
-                Ok(p) => match state.network.update(p).await {
+            match parse_params::<nasty_system::network::UpdateRequest>(req) {
+                Ok(p) => {
+                    // Resolve the management iface from the calling client's
+                    // socket so the risk classifier knows what would
+                    // disconnect the user.
+                    let mgmt = match session.client_ip.as_deref() {
+                        Some(peer) => nasty_system::network::mgmt_iface_for_peer(peer).await,
+                        None => None,
+                    };
+                    match state.network.update(p, mgmt).await {
+                        Ok(resp) => ok(req, resp),
+                        Err(e) => err(req, e),
+                    }
+                }
+                Err(e) => invalid(req, e),
+            }
+        }
+        "system.network.confirm" => {
+            match parse_params::<nasty_system::network::ConfirmRequest>(req) {
+                Ok(p) => match state.network.confirm(&p.txn_id).await {
                     Ok(()) => ok(req, "ok"),
                     Err(e) => err(req, e),
                 },

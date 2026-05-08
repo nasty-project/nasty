@@ -11,6 +11,10 @@ const JSON_PATH: &str = "/var/lib/nasty/networking.json";
 const NIX_PATH: &str = "/etc/nixos/networking.nix";
 const HISTORY_DIR: &str = "/var/lib/nasty/networking.history";
 const HISTORY_KEEP: usize = 10;
+/// Snapshot of the prior config, written before applying a risky change.
+/// Removed when the user confirms the change. If still present at engine
+/// startup, the engine was killed mid-apply and we restore from it.
+const PENDING_REVERT_PATH: &str = "/var/lib/nasty/networking.json.pending-revert";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -39,7 +43,7 @@ pub struct IpConfig {
     pub gateway: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InterfaceConfig {
     pub name: String,
     #[serde(default = "default_true")]
@@ -80,7 +84,7 @@ impl BondMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BondConfig {
     pub name: String,
     pub members: Vec<String>,
@@ -93,7 +97,7 @@ pub struct BondConfig {
     pub mtu: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VlanConfig {
     pub parent: String,
     pub vlan_id: u16,
@@ -112,7 +116,7 @@ pub struct VlanConfig {
 ///
 /// `ipv4`/`ipv6` default to `Inherit` so a bridge created over the management
 /// iface adopts that iface's L3 instead of dropping connectivity (issue #74).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BridgeConfig {
     pub name: String,
     #[serde(default)]
@@ -141,7 +145,7 @@ fn inherit_ip() -> IpConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct NetworkConfig {
     #[serde(default)]
     pub interfaces: Vec<InterfaceConfig>,
@@ -177,9 +181,65 @@ pub struct NetworkState {
     pub interfaces: Vec<LiveInterface>,
 }
 
+/// Request shape for `system.network.update`. The `NetworkConfig` fields
+/// are flattened in for backwards compatibility — old clients posting a
+/// bare `NetworkConfig` still parse — and `confirm_within_secs` is the
+/// optional opt-in to the confirm-or-rollback safety net.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+pub struct UpdateRequest {
+    #[serde(flatten)]
+    pub config: NetworkConfig,
+    /// If set, schedule a rollback to the previous config after this many
+    /// seconds unless `system.network.confirm` is called with the returned
+    /// `txn_id`. If unset, the server picks: 0 for safe changes, 30s for
+    /// changes the risk classifier flags as touching the management iface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_within_secs: Option<u64>,
+}
+
+/// Response shape for `system.network.update`. All fields are `None` when
+/// no rollback was scheduled (safe change applied directly). When a
+/// rollback is pending, the caller must hit `system.network.confirm` with
+/// `txn_id` before `revert_at_unix` to keep the change.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct UpdateResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revert_at_unix: Option<u64>,
+    /// Human-readable reason the server scheduled a rollback (e.g. "bridges
+    /// the management iface eth0"). Surfaced in the WebUI banner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ConfirmRequest {
+    pub txn_id: String,
+}
+
 // ── Service ────────────────────────────────────────────────────
 
-pub struct NetworkService;
+pub struct NetworkService {
+    /// In-memory transaction table. Each `update` call that schedules a
+    /// rollback inserts an entry here, keyed by `txn_id`. `confirm` removes
+    /// it (and cancels the rollback timer); a timeout removes it (and
+    /// performs the rollback). Wrapped in `Arc` so spawned tasks can
+    /// remove their own entry on completion.
+    transactions: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, PendingTxn>>>,
+}
+
+struct PendingTxn {
+    /// When the rollback will fire if not confirmed. Currently unread but
+    /// kept so a future `system.network.transactions` RPC can surface it.
+    #[allow(dead_code)]
+    revert_at_unix: u64,
+    /// Why the server scheduled this rollback (human-readable). Same
+    /// rationale as `revert_at_unix`.
+    #[allow(dead_code)]
+    risk_reason: String,
+    cancel: tokio::sync::oneshot::Sender<()>,
+}
 
 impl Default for NetworkService {
     fn default() -> Self {
@@ -189,7 +249,11 @@ impl Default for NetworkService {
 
 impl NetworkService {
     pub fn new() -> Self {
-        Self
+        Self {
+            transactions: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        }
     }
 
     pub async fn get(&self) -> NetworkState {
@@ -198,7 +262,13 @@ impl NetworkService {
         NetworkState { config, interfaces }
     }
 
-    pub async fn update(&self, config: NetworkConfig) -> Result<(), String> {
+    pub async fn update(
+        &self,
+        request: UpdateRequest,
+        mgmt_iface: Option<String>,
+    ) -> Result<UpdateResponse, String> {
+        let config = request.config;
+
         // Validate input. `Inherit` is allowed here — `resolve_inherit`
         // turns it into a concrete `Static` / `Dhcp` below.
         for iface in &config.interfaces {
@@ -235,26 +305,211 @@ impl NetworkService {
         let live = LiveTopology::snapshot().await;
         let config = resolve_inherit(config, &prev, &live);
 
-        // Persist (atomic write + history snapshot of prior config)
-        persist_config(&config).await?;
+        // Decide whether this change needs a rollback timer. The classifier
+        // looks for changes that touch the management iface — anything that
+        // could plausibly disconnect the user mid-apply. The caller can
+        // override the default 30s window via `confirm_within_secs`; passing
+        // 0 explicitly opts out of the safety net (use with care).
+        let risk_reason = classify_risk(&prev, &config, mgmt_iface.as_deref());
+        let rollback_secs = match (request.confirm_within_secs, &risk_reason) {
+            (Some(0), _) => None,        // explicit opt-out
+            (Some(n), _) => Some(n),     // explicit opt-in
+            (None, Some(_)) => Some(30), // server-default rollback for risky changes
+            (None, None) => None,        // safe change, no rollback
+        };
 
-        // Apply immediately
-        apply_config(&config).await?;
+        if let Some(secs) = rollback_secs {
+            // Snapshot the prior config as the rollback source *before*
+            // touching anything else. Atomic write so we can't end up with
+            // a half-written revert source if the engine is killed here.
+            let prev_json = serde_json::to_string_pretty(&prev)
+                .map_err(|e| format!("snapshot prior config: {e}"))?;
+            atomic_write(PENDING_REVERT_PATH, prev_json.as_bytes())
+                .await
+                .map_err(|e| format!("write {PENDING_REVERT_PATH}: {e}"))?;
 
-        info!(
-            "Network config updated ({} interfaces, {} bonds, {} bridges, {} VLANs)",
-            config.interfaces.len(),
-            config.bonds.len(),
-            config.bridges.len(),
-            config.vlans.len()
+            persist_config(&config).await?;
+            apply_config(&config).await?;
+
+            let txn_id = new_txn_id();
+            let revert_at_unix = unix_now() + secs;
+            let reason = risk_reason.unwrap_or_else(|| "explicit confirm requested".to_string());
+            self.schedule_rollback(txn_id.clone(), secs, revert_at_unix, reason.clone())
+                .await;
+
+            info!(
+                "Network config updated with {secs}s rollback window (txn {txn_id}, {} interfaces, {} bonds, {} bridges, {} VLANs)",
+                config.interfaces.len(),
+                config.bonds.len(),
+                config.bridges.len(),
+                config.vlans.len()
+            );
+
+            Ok(UpdateResponse {
+                txn_id: Some(txn_id),
+                revert_at_unix: Some(revert_at_unix),
+                risk_reason: Some(reason),
+            })
+        } else {
+            persist_config(&config).await?;
+            apply_config(&config).await?;
+
+            info!(
+                "Network config updated ({} interfaces, {} bonds, {} bridges, {} VLANs)",
+                config.interfaces.len(),
+                config.bonds.len(),
+                config.bridges.len(),
+                config.vlans.len()
+            );
+
+            Ok(UpdateResponse::default())
+        }
+    }
+
+    /// Confirm a pending rollback transaction — cancel its timer and remove
+    /// the pending-revert file. Returns an error if the txn_id is unknown
+    /// (already confirmed, already reverted, or never existed).
+    pub async fn confirm(&self, txn_id: &str) -> Result<(), String> {
+        let removed = self.transactions.lock().await.remove(txn_id);
+        match removed {
+            Some(txn) => {
+                // Best-effort cancel: if the rollback task already started
+                // executing, the receive end is gone — that's OK, we just
+                // race to clean up below.
+                let _ = txn.cancel.send(());
+                let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
+                info!("Network txn {txn_id} confirmed");
+                Ok(())
+            }
+            None => Err(format!("unknown or already-completed txn_id {txn_id}")),
+        }
+    }
+
+    /// Called once at engine startup. If a `pending-revert` file exists, the
+    /// engine was killed mid-apply (or after applying but before the user
+    /// confirmed) — restore the prior config so the box doesn't come back
+    /// up with an unconfirmed change. No-op if the file doesn't exist.
+    pub async fn restore_pending_revert(&self) {
+        let Ok(contents) = tokio::fs::read(PENDING_REVERT_PATH).await else {
+            return;
+        };
+        let prev: NetworkConfig = match serde_json::from_slice(&contents) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("pending-revert file is unparseable, removing: {e}");
+                let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
+                return;
+            }
+        };
+        warn!(
+            "Found pending-revert at startup — engine likely crashed mid-apply or shut down before the user confirmed. Restoring prior network config."
         );
-        Ok(())
+        if let Err(e) = persist_config(&prev).await {
+            warn!("restore: persist failed: {e}");
+            return;
+        }
+        if let Err(e) = apply_config(&prev).await {
+            warn!("restore: apply failed: {e}");
+            return;
+        }
+        let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
+        info!("Pending-revert restored cleanly");
+    }
+
+    /// Spawn a tokio task that performs the rollback after `secs` unless
+    /// `confirm()` cancels it first. The task removes its own entry from
+    /// `transactions` on completion (either path), so the table never
+    /// accumulates stale records.
+    async fn schedule_rollback(
+        &self,
+        txn_id: String,
+        secs: u64,
+        revert_at_unix: u64,
+        risk_reason: String,
+    ) {
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let transactions = std::sync::Arc::clone(&self.transactions);
+        let txn_id_for_task = txn_id.clone();
+        tokio::spawn(async move {
+            let timer = tokio::time::sleep(std::time::Duration::from_secs(secs));
+            tokio::pin!(timer);
+            tokio::select! {
+                _ = &mut timer => {
+                    warn!("Network txn {txn_id_for_task} not confirmed in {secs}s — rolling back");
+                    perform_rollback(&txn_id_for_task).await;
+                }
+                _ = cancel_rx => {
+                    // Confirmed; nothing to do, confirm() already cleaned up.
+                }
+            }
+            transactions.lock().await.remove(&txn_id_for_task);
+        });
+        self.transactions.lock().await.insert(
+            txn_id,
+            PendingTxn {
+                revert_at_unix,
+                risk_reason,
+                cancel: cancel_tx,
+            },
+        );
     }
 
     /// List physical interfaces (for UI to show available interfaces).
     pub async fn list_interfaces(&self) -> Vec<LiveInterface> {
         enumerate_interfaces().await
     }
+}
+
+/// Top-level helper for the rollback timer. Reads the pending-revert file,
+/// applies it, and removes it. Best-effort — failures are logged but don't
+/// panic the spawned task.
+async fn perform_rollback(txn_id: &str) {
+    let contents = match tokio::fs::read(PENDING_REVERT_PATH).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("rollback {txn_id}: pending-revert file disappeared: {e}");
+            return;
+        }
+    };
+    let prev: NetworkConfig = match serde_json::from_slice(&contents) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("rollback {txn_id}: unparseable pending-revert: {e}");
+            return;
+        }
+    };
+    if let Err(e) = persist_config(&prev).await {
+        warn!("rollback {txn_id}: persist failed: {e}");
+        return;
+    }
+    if let Err(e) = apply_config(&prev).await {
+        warn!("rollback {txn_id}: apply failed: {e}");
+        return;
+    }
+    let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
+    warn!("rollback {txn_id}: completed; previous config restored");
+}
+
+fn new_txn_id() -> String {
+    // Process-local monotonic counter mixed with start time. Distinct
+    // within a session without an external RNG dep, and stable enough to
+    // copy/paste into curl. Not security-relevant — txns are short-lived
+    // and only meaningful to the client that submitted them.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs:x}-{n:x}")
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn validate_ip_config(ip: &IpConfig, label: &str) -> Result<(), String> {
@@ -459,6 +714,141 @@ async fn get_addresses(iface: &str, ipv6: bool) -> Vec<String> {
             }
         })
         .collect()
+}
+
+// ── Risk classification + mgmt-iface detection ─────────────────
+//
+// "Risky" = could plausibly disconnect the user mid-apply. The classifier
+// looks at the diff between the prior and next config in light of the
+// management iface (the one carrying the calling client's HTTP/SSH session).
+// Any change that touches that iface — enslaving it into a new bridge,
+// changing its IP, changing its MTU — gets flagged so the safety net kicks
+// in. Non-mgmt changes are safe.
+//
+// Returns Some(reason) when risky, None when safe. The reason string is
+// surfaced verbatim to the WebUI banner, so it should read sensibly to a
+// user looking at the screen.
+
+fn classify_risk(
+    prev: &NetworkConfig,
+    next: &NetworkConfig,
+    mgmt_iface: Option<&str>,
+) -> Option<String> {
+    let Some(mgmt) = mgmt_iface else {
+        // We don't know which iface the user is connected through, so we
+        // can't reason about whether the change touches it. Fail safe: any
+        // structural change (bonds / bridges / vlans) gets a rollback. DNS
+        // and Disabled-only changes are still considered safe.
+        if prev.bonds != next.bonds || prev.bridges != next.bridges || prev.vlans != next.vlans {
+            return Some(
+                "management iface unknown — applying topology change with rollback safety net"
+                    .to_string(),
+            );
+        }
+        return None;
+    };
+
+    // mgmt iface (or any of its masters in the prev topology) being
+    // enslaved into a *new* bridge member list is the headline #74 case.
+    let prev_bridges_by_name: std::collections::HashMap<&str, &BridgeConfig> =
+        prev.bridges.iter().map(|b| (b.name.as_str(), b)).collect();
+    for next_br in &next.bridges {
+        let was_member = prev_bridges_by_name
+            .get(next_br.name.as_str())
+            .is_some_and(|prev_br| prev_br.members.iter().any(|m| m == mgmt));
+        let is_member = next_br.members.iter().any(|m| m == mgmt);
+        if is_member && !was_member {
+            return Some(format!(
+                "management iface {mgmt} is being enslaved into bridge {}",
+                next_br.name
+            ));
+        }
+    }
+
+    // Same check for bonds.
+    let prev_bonds_by_name: std::collections::HashMap<&str, &BondConfig> =
+        prev.bonds.iter().map(|b| (b.name.as_str(), b)).collect();
+    for next_bond in &next.bonds {
+        let was_member = prev_bonds_by_name
+            .get(next_bond.name.as_str())
+            .is_some_and(|prev_bond| prev_bond.members.iter().any(|m| m == mgmt));
+        let is_member = next_bond.members.iter().any(|m| m == mgmt);
+        if is_member && !was_member {
+            return Some(format!(
+                "management iface {mgmt} is being enslaved into bond {}",
+                next_bond.name
+            ));
+        }
+    }
+
+    // mgmt iface IP / MTU change.
+    let prev_iface = prev.interfaces.iter().find(|i| i.name == mgmt);
+    let next_iface = next.interfaces.iter().find(|i| i.name == mgmt);
+    match (prev_iface, next_iface) {
+        (Some(p), Some(n)) => {
+            if p.ipv4 != n.ipv4 || p.ipv6 != n.ipv6 {
+                return Some(format!("IP config of management iface {mgmt} is changing"));
+            }
+            if p.mtu != n.mtu {
+                return Some(format!("MTU of management iface {mgmt} is changing"));
+            }
+            if p.enabled && !n.enabled {
+                return Some(format!("management iface {mgmt} is being disabled"));
+            }
+        }
+        (Some(_), None) => {
+            return Some(format!(
+                "management iface {mgmt} is being removed from config"
+            ));
+        }
+        _ => {}
+    }
+
+    // mgmt iface is the parent of a VLAN — VLAN changes don't disconnect,
+    // skipped. Bridge/bond IP changes on a master that mgmt is enslaved
+    // into would be risky too, but that requires walking the master chain
+    // which lives in the live state — out of scope for the diff classifier.
+    None
+}
+
+/// Resolve the network interface the calling client is currently reaching
+/// the engine through. Returns the *topmost* master if the egress link is
+/// enslaved, so the right answer for an SSH session over `eth0` enslaved
+/// into `br0` is `br0` (that's the iface a topology change would actually
+/// disconnect on). `None` if we can't tell — caller should treat that as
+/// risky.
+pub async fn mgmt_iface_for_peer(peer_addr: &str) -> Option<String> {
+    if peer_addr.is_empty() || peer_addr == "unknown" {
+        return None;
+    }
+    // Strip a port suffix if the caller passed `1.2.3.4:55432`. `ip route
+    // get` doesn't accept ports.
+    let host = peer_addr.rsplit_once(':').map_or(peer_addr, |(h, _)| h);
+    let json = run_ip_json(&["-j", "route", "get", host]).await;
+    let parsed: Vec<IpRouteLine> = serde_json::from_str(&json).ok()?;
+    let dev = parsed.into_iter().find_map(|r| r.dev)?;
+    Some(walk_to_topmost_master(&dev).await)
+}
+
+async fn walk_to_topmost_master(start: &str) -> String {
+    let mut current = start.to_string();
+    // Defensive cap so a malformed sysfs can't loop us.
+    for _ in 0..8 {
+        let master_path = format!("/sys/class/net/{current}/master");
+        match tokio::fs::read_link(&master_path).await {
+            Ok(target) => {
+                // Symlink target is e.g. "../../../br0"; we want the
+                // basename.
+                if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
+                    current = name.to_string();
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break, // not enslaved
+        }
+    }
+    current
 }
 
 // ── Inherit resolution ─────────────────────────────────────────
@@ -1913,5 +2303,217 @@ mod tests {
         let parsed: BridgeConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.ipv4.method, IpMethod::Inherit);
         assert_eq!(parsed.ipv6.method, IpMethod::Inherit);
+    }
+
+    // ── classify_risk ──────────────────────────────────────────
+
+    #[test]
+    fn risk_flags_mgmt_iface_being_bridged() {
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bridges: vec![bridge("br0", &["eth0"])],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("eth0"));
+        assert!(
+            reason.is_some(),
+            "bridging the mgmt iface must be flagged risky"
+        );
+        let reason = reason.unwrap();
+        assert!(reason.contains("eth0"));
+        assert!(reason.contains("br0"));
+    }
+
+    #[test]
+    fn risk_flags_mgmt_iface_being_bonded() {
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bonds: vec![bond("bond0", &["eth0"])],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("eth0"));
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("bond0"));
+    }
+
+    #[test]
+    fn risk_flags_mgmt_ip_change() {
+        let mut prev_eth0 = iface("eth0");
+        prev_eth0.ipv4 = IpConfig {
+            method: IpMethod::Static,
+            addresses: vec!["192.168.1.10/24".into()],
+            gateway: Some("192.168.1.1".into()),
+        };
+        let mut next_eth0 = iface("eth0");
+        next_eth0.ipv4 = IpConfig {
+            method: IpMethod::Static,
+            addresses: vec!["192.168.2.10/24".into()],
+            gateway: Some("192.168.2.1".into()),
+        };
+        let prev = NetworkConfig {
+            interfaces: vec![prev_eth0],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![next_eth0],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("eth0"));
+        assert!(
+            reason.is_some_and(|r| r.contains("IP config")),
+            "changing mgmt iface IP must be flagged"
+        );
+    }
+
+    #[test]
+    fn risk_flags_mgmt_mtu_change() {
+        let prev_eth0 = iface("eth0");
+        let mut next_eth0 = iface("eth0");
+        next_eth0.mtu = Some(9000);
+        let prev = NetworkConfig {
+            interfaces: vec![prev_eth0],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![next_eth0],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("eth0"));
+        assert!(reason.is_some_and(|r| r.contains("MTU")));
+    }
+
+    #[test]
+    fn risk_flags_mgmt_iface_disable() {
+        let prev_eth0 = iface("eth0");
+        let mut next_eth0 = iface("eth0");
+        next_eth0.enabled = false;
+        let prev = NetworkConfig {
+            interfaces: vec![prev_eth0],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![next_eth0],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("eth0"));
+        assert!(reason.is_some_and(|r| r.contains("disabled")));
+    }
+
+    #[test]
+    fn risk_safe_when_only_non_mgmt_iface_changes() {
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0"), iface("eth1")],
+            ..Default::default()
+        };
+        let mut next_eth1 = iface("eth1");
+        next_eth1.mtu = Some(9000);
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0"), next_eth1],
+            ..Default::default()
+        };
+        // mgmt is eth0; the change is on eth1 only.
+        assert!(classify_risk(&prev, &next, Some("eth0")).is_none());
+    }
+
+    #[test]
+    fn risk_safe_when_only_dns_changes() {
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            dns: vec!["1.1.1.1".into()],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            dns: vec!["8.8.8.8".into()],
+            ..Default::default()
+        };
+        assert!(classify_risk(&prev, &next, Some("eth0")).is_none());
+    }
+
+    #[test]
+    fn risk_safe_when_existing_bridge_member_list_unchanged() {
+        // The bridge already had eth0 as a member (from a prior apply).
+        // A no-op re-apply shouldn't flag it as risky just because eth0 is
+        // listed as a bridge member.
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bridges: vec![bridge("br0", &["eth0"])],
+            ..Default::default()
+        };
+        let next = prev.clone();
+        assert!(classify_risk(&prev, &next, Some("eth0")).is_none());
+    }
+
+    #[test]
+    fn risk_unknown_mgmt_falls_back_to_topology_check() {
+        // Without mgmt info, the classifier can't pinpoint risk — but it
+        // should still flag any topology change so the rollback safety net
+        // engages. DNS-only changes stay safe.
+        let prev = NetworkConfig::default();
+        let next_topology = NetworkConfig {
+            bridges: vec![bridge("br0", &["eth0"])],
+            ..Default::default()
+        };
+        assert!(classify_risk(&prev, &next_topology, None).is_some());
+
+        let prev_dns = NetworkConfig {
+            dns: vec!["1.1.1.1".into()],
+            ..Default::default()
+        };
+        let next_dns = NetworkConfig {
+            dns: vec!["8.8.8.8".into()],
+            ..Default::default()
+        };
+        assert!(classify_risk(&prev_dns, &next_dns, None).is_none());
+    }
+
+    // ── transaction store ──────────────────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn confirm_cancels_rollback_timer() {
+        let svc = NetworkService::new();
+        svc.schedule_rollback("txn-test".into(), 30, unix_now() + 30, "test".into())
+            .await;
+        // Confirm before the timer would fire.
+        assert!(svc.confirm("txn-test").await.is_ok());
+        // Advancing past the original deadline must not re-fire — the
+        // task already exited via the cancel path.
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        // The transactions table is empty either way; the assertion is
+        // mainly that confirm twice errors (entry was removed cleanly).
+        assert!(svc.confirm("txn-test").await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_txn_id_errors() {
+        let svc = NetworkService::new();
+        let res = svc.confirm("does-not-exist").await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("does-not-exist"));
+    }
+
+    // The timeout-fires-rollback path isn't unit-tested here — exercising
+    // it deterministically would mean stubbing perform_rollback / the
+    // pending-revert file, and the mechanism (a tokio::select! racing a
+    // sleep against a oneshot) is straightforward enough that the cancel
+    // test above covers the interesting half. The rollback path is best
+    // verified end-to-end on a real box.
+
+    #[test]
+    fn new_txn_ids_are_distinct() {
+        // Sanity — collision-resistant enough for in-memory use.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let id = new_txn_id();
+            assert!(seen.insert(id), "duplicate txn_id");
+        }
     }
 }
