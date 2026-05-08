@@ -583,7 +583,13 @@ fn generate_nix(config: &NetworkConfig) -> String {
             bridge.name,
             members.join(" ")
         ));
-        generate_iface_nix(&mut out, &bridge.name, &bridge.ipv4, &bridge.ipv6, bridge.mtu);
+        generate_iface_nix(
+            &mut out,
+            &bridge.name,
+            &bridge.ipv4,
+            &bridge.ipv6,
+            bridge.mtu,
+        );
     }
 
     // VLANs
