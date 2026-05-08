@@ -58,10 +58,12 @@
 		Wrench,
 		ScrollText,
 		Search,
+		AlertTriangle,
 	} from '@lucide/svelte';
 	import { goto } from '$app/navigation';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
+	import { rollbackState, confirmRollback } from '$lib/rollbackState.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import { theme } from '$lib/theme.svelte';
 	import { terminalStatus } from '$lib/terminalStatus.svelte';
@@ -186,6 +188,26 @@
 	// Version info (loaded once after connect)
 	let sysInfo: { hostname: string; version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_is_custom: boolean; bcachefs_debug_checks: boolean; kvm_available: boolean; is_virtual: boolean } | null = $state(null);
 	let clock24h = $state(true);
+
+	// Network rollback countdown — ticks once per second while a rollback is
+	// pending so the banner can show "Xs left to keep changes". Auto-clears
+	// the local store at deadline; the engine has already reverted by then.
+	let nowSec = $state(Math.floor(Date.now() / 1000));
+	$effect(() => {
+		if (!rollbackState.pending) return;
+		const handle = setInterval(() => {
+			nowSec = Math.floor(Date.now() / 1000);
+			if (rollbackState.pending && nowSec >= rollbackState.pending.revertAtUnix) {
+				rollbackState.clear();
+			}
+		}, 1000);
+		return () => clearInterval(handle);
+	});
+	let rollbackSecondsLeft = $derived(
+		rollbackState.pending
+			? Math.max(0, rollbackState.pending.revertAtUnix - nowSec)
+			: 0,
+	);
 
 	$effect(() => {
 		const _r = sysInfoRefresh.count; // track refresh triggers
@@ -759,6 +781,28 @@
 								<span title="Debug checks"><Bug size={14} class={sysInfo.bcachefs_debug_checks ? 'text-blue-400' : 'text-muted-foreground/30'} /></span>
 							</span>
 						</a>
+					{/if}
+					{#if rollbackState.pending}
+						<!-- Pending network rollback. Sticky on every page so the
+						     user can confirm even after navigating away from
+						     /settings. The engine reverts at revertAtUnix; this
+						     banner auto-clears when the countdown hits zero. -->
+						<div
+							class="flex items-center gap-3 rounded-md border-2 border-amber-500/70 px-3 py-1.5 text-sm text-amber-400 animate-pulse hover:animate-none"
+							role="status"
+							title={rollbackState.pending.riskReason ?? ''}
+						>
+							<AlertTriangle size={15} />
+							<span class="font-medium">
+								{rollbackSecondsLeft}s to keep network change
+							</span>
+							<button
+								onclick={() => confirmRollback()}
+								class="rounded border border-amber-400/50 px-2 py-0.5 text-xs hover:bg-amber-500/10 hover:border-amber-400 active:bg-amber-500/20"
+							>
+								Keep changes
+							</button>
+						</div>
 					{/if}
 				</div>
 

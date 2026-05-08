@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
+	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import type { Settings, SystemInfo, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NetIfStats, IpConfig, InterfaceConfig } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
@@ -283,10 +284,7 @@
 			bridges: network?.bridges ?? [],
 		};
 
-		await withToast(
-			() => client.call('system.network.update', payload),
-			'Network configuration applied'
-		);
+		await applyNetworkUpdate(payload, 'Network configuration applied');
 		networkState = await client.call<NetworkState>('system.network.get');
 		syncNetworkForm();
 		savingNetwork = false;
@@ -420,7 +418,7 @@
 			if (idx >= 0) payload.interfaces[idx] = entry; else payload.interfaces.push(entry);
 		}
 
-		await withToast(() => client.call('system.network.update', payload), 'Network configuration applied');
+		await applyNetworkUpdate(payload, 'Network configuration applied');
 		networkState = await client.call<NetworkState>('system.network.get');
 		netChanged = false;
 		savingNetwork = false;
@@ -436,7 +434,7 @@
 			vlans: network.vlans || [],
 			bridges: network.bridges || [],
 		};
-		await withToast(() => client.call('system.network.update', payload), `Bond ${bondName} created`);
+		await applyNetworkUpdate(payload, `Bond ${bondName} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
 		showBondForm = false; bondName = 'bond0'; bondMembers = []; bondMtu = '';
 	}
@@ -451,7 +449,7 @@
 			vlans: [...(network.vlans || []), { parent: vlanParent, vlan_id: vlanId, ipv4: { method: 'dhcp', addresses: [], gateway: null }, ipv6: { method: 'slaac', addresses: [], gateway: null }, mtu }],
 			bridges: network.bridges || [],
 		};
-		await withToast(() => client.call('system.network.update', payload), `VLAN ${vlanParent}.${vlanId} created`);
+		await applyNetworkUpdate(payload, `VLAN ${vlanParent}.${vlanId} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
 		showVlanForm = false; vlanParent = ''; vlanId = 100; vlanMtu = '';
 	}
@@ -464,9 +462,14 @@
 			dns: network.dns || [],
 			bonds: network.bonds || [],
 			vlans: network.vlans || [],
-			bridges: [...(network.bridges || []), { name: bridgeName, members: bridgeMembers, ipv4: { method: 'dhcp', addresses: [], gateway: null }, ipv6: { method: 'slaac', addresses: [], gateway: null }, mtu }],
+			// `inherit` = adopt the primary member's L3 (DHCP lease, static
+			// addrs, default route). The server resolves it to a concrete
+			// Static/Dhcp before persisting so reboot reapplies the same L3.
+			// For host-internal bridges (no members), inherit resolves to
+			// Disabled — the bridge is L2-only, which is what VMs want.
+			bridges: [...(network.bridges || []), { name: bridgeName, members: bridgeMembers, ipv4: { method: 'inherit', addresses: [], gateway: null }, ipv6: { method: 'inherit', addresses: [], gateway: null }, mtu }],
 		};
-		await withToast(() => client.call('system.network.update', payload), `Bridge ${bridgeName} created`);
+		await applyNetworkUpdate(payload, `Bridge ${bridgeName} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
 		showBridgeForm = false; bridgeName = 'br0'; bridgeMembers = []; bridgeMtu = '';
 	}
@@ -980,6 +983,12 @@
 						<label for="bridge-mtu" class="text-xs text-muted-foreground">MTU (optional)</label>
 						<input id="bridge-mtu" type="number" min="68" max="65535" bind:value={bridgeMtu} placeholder="default (1500), 9000 for jumbo frames" class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
 					</div>
+					{#if networkState?.mgmt_iface && bridgeMembers.includes(networkState.mgmt_iface)}
+						<div class="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-300">
+							<div class="font-medium mb-1">Heads up — this bridges your management interface</div>
+							<p>You're connected through <span class="font-mono">{networkState.mgmt_iface}</span>. The bridge will adopt its IP and route, but you may briefly see the page reconnect. After applying, you'll have 30 seconds to keep the change before it auto-rolls back.</p>
+						</div>
+					{/if}
 					<Button size="sm" onclick={createBridge} disabled={!bridgeName}>Create Bridge</Button>
 				</div>
 			{/if}
