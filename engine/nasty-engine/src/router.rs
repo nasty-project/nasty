@@ -654,7 +654,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 ),
             )
         }
-        "system.network.get" => ok(req, state.network.get().await),
+        "system.network.get" => {
+            let mgmt = match session.client_ip.as_deref() {
+                Some(peer) => nasty_system::network::mgmt_iface_for_peer(peer).await,
+                None => None,
+            };
+            ok(req, state.network.get(mgmt).await)
+        }
         "system.network.update" => {
             match parse_params::<nasty_system::network::UpdateRequest>(req) {
                 Ok(p) => {

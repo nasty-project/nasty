@@ -486,7 +486,7 @@ export interface TuningConfig {
 
 // ── Networking ─────────────────────────────────────────────
 
-export type IpMethod = 'dhcp' | 'static' | 'slaac' | 'disabled';
+export type IpMethod = 'dhcp' | 'static' | 'slaac' | 'inherit' | 'disabled';
 
 export interface IpConfig {
 	method: IpMethod;
@@ -527,6 +527,8 @@ export interface BridgeConfig {
 	ipv4: IpConfig;
 	ipv6: IpConfig;
 	mtu: number | null;
+	stp?: boolean;
+	forward_delay_s?: number | null;
 }
 
 export interface NetworkConfig {
@@ -552,6 +554,25 @@ export interface LiveInterface {
 export interface NetworkState {
 	config: NetworkConfig;
 	interfaces: LiveInterface[];
+	/** Iface the WebUI is currently reaching the engine through. Used to
+	 * warn before submitting a change that would disconnect the user. */
+	mgmt_iface?: string | null;
+}
+
+/** Optional fields the WebUI can include when submitting a network update.
+ * Server-side flatten means a bare NetworkConfig is also accepted. */
+export interface NetworkUpdateRequest extends NetworkConfig {
+	/** Seconds the user has to confirm the change before it auto-rolls back.
+	 * Omit to let the server pick (30s for risky changes, none for safe). */
+	confirm_within_secs?: number;
+}
+
+/** Returned by `system.network.update`. Fields are populated only when the
+ * server scheduled a rollback. */
+export interface NetworkUpdateResponse {
+	txn_id?: string | null;
+	revert_at_unix?: number | null;
+	risk_reason?: string | null;
 }
 
 export interface FirewallRule {

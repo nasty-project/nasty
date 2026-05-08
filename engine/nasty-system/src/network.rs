@@ -179,6 +179,13 @@ pub struct LiveInterface {
 pub struct NetworkState {
     pub config: NetworkConfig,
     pub interfaces: Vec<LiveInterface>,
+    /// The interface the calling client is currently reaching the engine
+    /// through (resolved by `mgmt_iface_for_peer` from `session.client_ip`).
+    /// Surfaced so the WebUI can warn before submitting a change that would
+    /// disconnect the user — e.g. enslaving this iface into a new bridge.
+    /// `None` if we couldn't resolve it (no peer info, route lookup failed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mgmt_iface: Option<String>,
 }
 
 /// Request shape for `system.network.update`. The `NetworkConfig` fields
@@ -256,10 +263,14 @@ impl NetworkService {
         }
     }
 
-    pub async fn get(&self) -> NetworkState {
+    pub async fn get(&self, mgmt_iface: Option<String>) -> NetworkState {
         let config = load_config().await;
         let interfaces = enumerate_interfaces().await;
-        NetworkState { config, interfaces }
+        NetworkState {
+            config,
+            interfaces,
+            mgmt_iface,
+        }
     }
 
     pub async fn update(
