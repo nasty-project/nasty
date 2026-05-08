@@ -14,6 +14,31 @@ use crate::cmd;
 const NASTY_MOUNT_BASE: &str = "/fs";
 const FS_STATE_PATH: &str = "/var/lib/nasty/fs-state.json";
 const KEYS_DIR: &str = "/var/lib/nasty/keys";
+const PROC_KEYS_PATH: &str = "/proc/keys";
+
+/// Parse /proc/keys output and return true if the session keyring (or any
+/// keyring visible to this process) holds a `bcachefs:<uuid>` logon key.
+/// `bcachefs unlock -k session` lands the FS encryption key here; the kernel
+/// reads it from there at mount time. So "key present" === "FS unlocked",
+/// regardless of whether it's currently mounted.
+fn proc_keys_has_bcachefs_uuid(contents: &str, uuid: &str) -> bool {
+    let needle = format!("bcachefs:{uuid}");
+    contents.lines().any(|line| {
+        // Each /proc/keys line ends with `<type>  <description>`. We only care
+        // about logon-type entries whose description is exactly our needle —
+        // belt-and-braces against future bcachefs key naming changes by also
+        // accepting the description as a token anywhere on the line.
+        line.split_whitespace().any(|tok| tok == needle)
+    })
+}
+
+async fn is_bcachefs_key_loaded(uuid: &str) -> bool {
+    let contents = match tokio::fs::read_to_string(PROC_KEYS_PATH).await {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    proc_keys_has_bcachefs_uuid(&contents, uuid)
+}
 
 #[derive(Debug, Error)]
 pub enum FilesystemError {
@@ -611,8 +636,12 @@ impl FilesystemService {
                     }
                     let key_path = format!("{KEYS_DIR}/{}.key", fs.name);
                     fs.options.key_stored = Some(Path::new(&key_path).exists());
-                    // Locked = encrypted + not mounted
-                    fs.options.locked = Some(!fs.mounted);
+                    // Locked = encrypted, not mounted, AND no key in the keyring.
+                    // After `bcachefs unlock -k session` the key is available
+                    // but the FS isn't mounted yet — it's "unlocked, ready to
+                    // mount", not "locked".
+                    let unlocked_in_keyring = is_bcachefs_key_loaded(&fs.uuid).await;
+                    fs.options.locked = Some(!fs.mounted && !unlocked_in_keyring);
                 }
             }
         }
@@ -2850,5 +2879,47 @@ mod tests {
         assert_eq!(parse_bcachefs_opt("zstd"), "zstd");
         assert_eq!(parse_bcachefs_opt("4.00k"), "4.00k");
         assert_eq!(parse_bcachefs_opt(""), "");
+    }
+
+    // ── proc_keys_has_bcachefs_uuid ────────────────────────────────
+
+    #[test]
+    fn proc_keys_finds_bcachefs_logon_key() {
+        // Lines lifted from a real /proc/keys after `bcachefs unlock -k session`.
+        let contents = "\
+2c93e9b4 I--Q---     1 perm 3f010000     0     0 keyring   _ses: 1
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-1111-2222-3333-444455556666
+";
+        assert!(proc_keys_has_bcachefs_uuid(
+            contents,
+            "abcd1234-1111-2222-3333-444455556666",
+        ));
+    }
+
+    #[test]
+    fn proc_keys_misses_when_uuid_absent() {
+        let contents = "\
+2c93e9b4 I--Q---     1 perm 3f010000     0     0 keyring   _ses: 1
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:other-uuid-here
+";
+        assert!(!proc_keys_has_bcachefs_uuid(
+            contents,
+            "abcd1234-1111-2222-3333-444455556666",
+        ));
+    }
+
+    #[test]
+    fn proc_keys_misses_on_empty_keyring() {
+        assert!(!proc_keys_has_bcachefs_uuid("", "abcd1234"));
+    }
+
+    #[test]
+    fn proc_keys_does_not_substring_match_other_uuids() {
+        // A UUID that's a *prefix* of an entry must not match — bcachefs UUIDs
+        // are full strings, not prefixes.
+        let contents = "\
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-extra-suffix
+";
+        assert!(!proc_keys_has_bcachefs_uuid(contents, "abcd1234"));
     }
 }
