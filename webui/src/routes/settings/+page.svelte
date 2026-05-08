@@ -372,10 +372,11 @@
 		netChanged = false;
 	}
 
-	function parseMtu(v: string): number | null {
-		const t = v.trim();
-		if (!t) return null;
-		const n = parseInt(t, 10);
+	// Svelte coerces bind:value on <input type="number"> to a number (or '' / null
+	// when the field is empty), so accept anything and normalise.
+	function parseMtu(v: unknown): number | null {
+		if (v === null || v === undefined || v === '') return null;
+		const n = typeof v === 'number' ? v : parseInt(String(v), 10);
 		return Number.isFinite(n) && n > 0 ? n : null;
 	}
 
