@@ -21,6 +21,10 @@ pub enum IpMethod {
     Dhcp,
     Static,
     Slaac,
+    /// For bridges/bonds: adopt the primary member's L3 (addresses, default
+    /// route, or DHCP lease) so creating a bridge over the management iface
+    /// doesn't drop connectivity. No-op for top-level interfaces.
+    Inherit,
     #[default]
     Disabled,
 }
@@ -105,17 +109,36 @@ pub struct VlanConfig {
 /// to share the host's network. Members can be empty (a host-internal bridge
 /// that VMs attach to via veth pairs at runtime) or one or more physical /
 /// bond interfaces (bridge to the LAN).
+///
+/// `ipv4`/`ipv6` default to `Inherit` so a bridge created over the management
+/// iface adopts that iface's L3 instead of dropping connectivity (issue #74).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BridgeConfig {
     pub name: String,
     #[serde(default)]
     pub members: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "inherit_ip")]
     pub ipv4: IpConfig,
-    #[serde(default)]
+    #[serde(default = "inherit_ip")]
     pub ipv6: IpConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+    /// Enable Spanning Tree Protocol on the bridge.
+    #[serde(default)]
+    pub stp: bool,
+    /// Bridge forward delay in seconds. `None` leaves the kernel default
+    /// (15s with STP on, irrelevant with STP off). Set to 0 to skip the
+    /// 15-second blackhole when STP is off but forward-delay still applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_delay_s: Option<u8>,
+}
+
+fn inherit_ip() -> IpConfig {
+    IpConfig {
+        method: IpMethod::Inherit,
+        addresses: Vec::new(),
+        gateway: None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -176,7 +199,8 @@ impl NetworkService {
     }
 
     pub async fn update(&self, config: NetworkConfig) -> Result<(), String> {
-        // Validate
+        // Validate input. `Inherit` is allowed here — `resolve_inherit`
+        // turns it into a concrete `Static` / `Dhcp` below.
         for iface in &config.interfaces {
             validate_ip_config(&iface.ipv4, "IPv4")?;
             validate_ip_config(&iface.ipv6, "IPv6")?;
@@ -202,6 +226,14 @@ impl NetworkService {
             validate_ip_config(&bridge.ipv4, "IPv4")?;
             validate_ip_config(&bridge.ipv6, "IPv6")?;
         }
+
+        // Resolve `IpMethod::Inherit` against the prior config and live
+        // kernel state, turning each Inherit-mode bridge into a concrete
+        // Static-or-Dhcp config. The persisted config is the resolved
+        // form, so reboot reapplies the same L3 we just applied at runtime.
+        let prev = load_config().await;
+        let live = LiveTopology::snapshot().await;
+        let config = resolve_inherit(config, &prev, &live);
 
         // Persist (atomic write + history snapshot of prior config)
         persist_config(&config).await?;
@@ -429,6 +461,83 @@ async fn get_addresses(iface: &str, ipv6: bool) -> Vec<String> {
         .collect()
 }
 
+// ── Inherit resolution ─────────────────────────────────────────
+//
+// An `IpMethod::Inherit` bridge should adopt the L3 of its primary member
+// so creating a bridge over the management iface doesn't drop connectivity
+// (issue #74). Done at update-time, not apply-time: we substitute Inherit
+// with a concrete Static-or-Dhcp config and persist that. Reboot then
+// reapplies the same L3 we just applied at runtime — no special boot path.
+//
+// Primary-member selection: walk `bridge.members` in order; the first one
+// that has either a previous top-level config (Dhcp or Static-with-addrs)
+// or live addrs in the kernel wins. This is deterministic and matches the
+// user's mental model ("the first member is the carrier").
+
+fn resolve_inherit(
+    mut config: NetworkConfig,
+    prev: &NetworkConfig,
+    live: &LiveTopology,
+) -> NetworkConfig {
+    for bridge in &mut config.bridges {
+        if bridge.ipv4.method == IpMethod::Inherit {
+            bridge.ipv4 = resolve_inherit_one(&bridge.members, prev, live, false);
+        }
+        if bridge.ipv6.method == IpMethod::Inherit {
+            bridge.ipv6 = resolve_inherit_one(&bridge.members, prev, live, true);
+        }
+    }
+    config
+}
+
+fn resolve_inherit_one(
+    members: &[String],
+    prev: &NetworkConfig,
+    live: &LiveTopology,
+    v6: bool,
+) -> IpConfig {
+    for member in members {
+        if let Some(prev_iface) = prev.interfaces.iter().find(|i| &i.name == member) {
+            let prev_ip = if v6 {
+                &prev_iface.ipv6
+            } else {
+                &prev_iface.ipv4
+            };
+            match prev_ip.method {
+                IpMethod::Dhcp => {
+                    return IpConfig {
+                        method: IpMethod::Dhcp,
+                        addresses: Vec::new(),
+                        gateway: None,
+                    };
+                }
+                IpMethod::Static if !prev_ip.addresses.is_empty() => {
+                    return prev_ip.clone();
+                }
+                IpMethod::Slaac if v6 => {
+                    return IpConfig {
+                        method: IpMethod::Slaac,
+                        addresses: Vec::new(),
+                        gateway: None,
+                    };
+                }
+                _ => {}
+            }
+        }
+        // Fall back to whatever the kernel currently shows for this member.
+        let live_addrs = live.addrs(member, v6);
+        if !live_addrs.is_empty() {
+            return IpConfig {
+                method: IpMethod::Static,
+                addresses: live_addrs.to_vec(),
+                gateway: live.default_via(member, v6).map(str::to_string),
+            };
+        }
+    }
+    // No member has any L3 to inherit from — leave the bridge bare.
+    IpConfig::default()
+}
+
 // ── Apply config ───────────────────────────────────────────────
 //
 // Two-phase model:
@@ -444,12 +553,21 @@ async fn get_addresses(iface: &str, ipv6: bool) -> Vec<String> {
 // variants (MAC inheritance, L3 migration on enslave/un-enslave) and grow
 // `LiveTopology` with addrs / routes / masters.
 
-/// Snapshot of the kernel's view of the network. Currently only carries the
-/// set of existing link names — enough to decide create-vs-skip. Extended
-/// in future PRs to carry addrs, routes, masters, MAC.
+/// Snapshot of the kernel's view of the network at apply time. Used by
+/// `Plan::compute` (link existence → create vs. skip) and by
+/// `resolve_inherit` (live addrs/routes → L3 a bridge adopts from its
+/// primary member when no prior config gives a clearer answer).
 #[derive(Debug, Default, Clone)]
 struct LiveTopology {
     links: std::collections::HashSet<String>,
+    /// Per-iface IPv4 addresses (CIDR strings).
+    addrs_v4: std::collections::HashMap<String, Vec<String>>,
+    /// Per-iface IPv6 addresses (CIDR strings, link-local filtered out).
+    addrs_v6: std::collections::HashMap<String, Vec<String>>,
+    /// Egress iface → IPv4 default gateway.
+    default_via_v4: std::collections::HashMap<String, String>,
+    /// Egress iface → IPv6 default gateway.
+    default_via_v6: std::collections::HashMap<String, String>,
 }
 
 impl LiveTopology {
@@ -462,12 +580,105 @@ impl LiveTopology {
                 }
             }
         }
-        Self { links }
+        let addrs_v4 = parse_ip_addrs(&run_ip_json(&["-j", "-4", "addr", "show"]).await, false)
+            .unwrap_or_default();
+        let addrs_v6 = parse_ip_addrs(&run_ip_json(&["-j", "-6", "addr", "show"]).await, true)
+            .unwrap_or_default();
+        let default_via_v4 =
+            parse_default_via(&run_ip_json(&["-j", "-4", "route", "show", "default"]).await)
+                .unwrap_or_default();
+        let default_via_v6 =
+            parse_default_via(&run_ip_json(&["-j", "-6", "route", "show", "default"]).await)
+                .unwrap_or_default();
+        Self {
+            links,
+            addrs_v4,
+            addrs_v6,
+            default_via_v4,
+            default_via_v6,
+        }
     }
 
     fn has(&self, name: &str) -> bool {
         self.links.contains(name)
     }
+
+    fn addrs(&self, iface: &str, v6: bool) -> &[String] {
+        let map = if v6 { &self.addrs_v6 } else { &self.addrs_v4 };
+        map.get(iface).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    fn default_via(&self, iface: &str, v6: bool) -> Option<&str> {
+        let map = if v6 {
+            &self.default_via_v6
+        } else {
+            &self.default_via_v4
+        };
+        map.get(iface).map(|s| s.as_str())
+    }
+}
+
+async fn run_ip_json(args: &[&str]) -> String {
+    match tokio::process::Command::new("ip").args(args).output().await {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => "[]".to_string(),
+    }
+}
+
+#[derive(Deserialize)]
+struct IpAddrLine {
+    ifname: String,
+    #[serde(default)]
+    addr_info: Vec<IpAddrInfo>,
+}
+
+#[derive(Deserialize)]
+struct IpAddrInfo {
+    local: String,
+    prefixlen: u8,
+    #[serde(default)]
+    scope: String,
+}
+
+fn parse_ip_addrs(json: &str, v6: bool) -> Option<std::collections::HashMap<String, Vec<String>>> {
+    let parsed: Vec<IpAddrLine> = serde_json::from_str(json).ok()?;
+    Some(
+        parsed
+            .into_iter()
+            .map(|line| {
+                let cidrs = line
+                    .addr_info
+                    .into_iter()
+                    // For IPv6, skip link-local (fe80::/10) — it's not
+                    // something a bridge should "inherit" from a member.
+                    .filter(|a| !(v6 && a.scope == "link"))
+                    .map(|a| format!("{}/{}", a.local, a.prefixlen))
+                    .collect();
+                (line.ifname, cidrs)
+            })
+            .collect(),
+    )
+}
+
+#[derive(Deserialize)]
+struct IpRouteLine {
+    dst: String,
+    gateway: Option<String>,
+    dev: Option<String>,
+}
+
+fn parse_default_via(json: &str) -> Option<std::collections::HashMap<String, String>> {
+    let parsed: Vec<IpRouteLine> = serde_json::from_str(json).ok()?;
+    Some(
+        parsed
+            .into_iter()
+            .filter(|r| r.dst == "default")
+            .filter_map(|r| match (r.dev, r.gateway) {
+                (Some(dev), Some(gw)) => Some((dev, gw)),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// One imperative step. Variants are split by failure semantics: anything
@@ -496,7 +707,21 @@ enum Op {
     EnslaveMember { member: String, master: String },
     /// `ip link set <iface> mtu <mtu>`. Best-effort.
     SetMtu { iface: String, mtu: u16 },
+    /// `ip [-4|-6] addr flush dev <iface>`. Best-effort. Used after
+    /// enslaving a member into a bridge — the kernel doesn't auto-flush
+    /// addresses from a slave, so they linger and confuse some apps.
+    FlushAddrs { iface: String, v6: bool },
+    /// `dhcpcd -k <iface>`. Best-effort (no-op if no lease).
+    DhcpStop { iface: String },
+    /// Write `0|1` to `/sys/class/net/<bridge>/bridge/stp_state`. Best-effort.
+    SetBridgeStp { bridge: String, enabled: bool },
+    /// Write `seconds*100` to `/sys/class/net/<bridge>/bridge/forward_delay`
+    /// (sysfs unit is centiseconds). Best-effort.
+    SetBridgeForwardDelay { bridge: String, seconds: u8 },
     /// Apply IPv4 or IPv6 config (delegates to `apply_ip_config`). Required.
+    /// Plan::compute never emits this with `IpMethod::Inherit` — Inherit is
+    /// resolved to a concrete `Static` / `Dhcp` config in `resolve_inherit`
+    /// before persistence, so apply and reboot agree on the L3.
     ApplyIp {
         iface: String,
         config: IpConfig,
@@ -514,8 +739,22 @@ struct Plan {
 impl Plan {
     /// Pure: turns a desired `NetworkConfig` plus a snapshot of `live` state
     /// into an ordered list of imperative ops. No IO.
+    ///
+    /// Callers must pass a config that has been resolved by `resolve_inherit`
+    /// — `Plan::compute` does not handle `IpMethod::Inherit`. The resolved
+    /// config is what gets persisted and reapplied on reboot.
     fn compute(config: &NetworkConfig, live: &LiveTopology) -> Self {
         let mut ops = Vec::new();
+
+        // Set of iface names that will be enslaved (bond or bridge member).
+        // Used to suppress conflicting top-level ops on those ifaces.
+        let enslaved: std::collections::HashSet<&str> = config
+            .bonds
+            .iter()
+            .flat_map(|b| b.members.iter())
+            .chain(config.bridges.iter().flat_map(|b| b.members.iter()))
+            .map(String::as_str)
+            .collect();
 
         // Bonds first — they may be enslaved into bridges later.
         for bond in &config.bonds {
@@ -526,6 +765,9 @@ impl Plan {
                 });
             }
             for member in &bond.members {
+                ops.push(Op::DhcpStop {
+                    iface: member.clone(),
+                });
                 ops.push(Op::SetDown(member.clone()));
                 ops.push(Op::EnslaveMember {
                     member: member.clone(),
@@ -560,14 +802,44 @@ impl Plan {
                 });
             }
             for member in &bridge.members {
+                // Release any DHCP lease the member is holding so dhcpcd
+                // can't fight us over the address it's about to lose.
+                ops.push(Op::DhcpStop {
+                    iface: member.clone(),
+                });
                 ops.push(Op::SetDown(member.clone()));
                 ops.push(Op::EnslaveMember {
                     member: member.clone(),
                     master: bridge.name.clone(),
                 });
                 ops.push(Op::BringUpBestEffort(member.clone()));
+                // Kernel doesn't auto-flush addrs when a link becomes a
+                // slave — they linger and confuse some apps. Belt-and-
+                // braces; the bridge has the L3 now.
+                ops.push(Op::FlushAddrs {
+                    iface: member.clone(),
+                    v6: false,
+                });
+                ops.push(Op::FlushAddrs {
+                    iface: member.clone(),
+                    v6: true,
+                });
             }
             ops.push(Op::BringUp(bridge.name.clone()));
+            // STP and forward-delay only when the bridge actually has
+            // members — host-internal bridges (VM-only) don't need them.
+            if !bridge.members.is_empty() {
+                ops.push(Op::SetBridgeStp {
+                    bridge: bridge.name.clone(),
+                    enabled: bridge.stp,
+                });
+                if let Some(seconds) = bridge.forward_delay_s {
+                    ops.push(Op::SetBridgeForwardDelay {
+                        bridge: bridge.name.clone(),
+                        seconds,
+                    });
+                }
+            }
             if let Some(mtu) = bridge.mtu {
                 ops.push(Op::SetMtu {
                     iface: bridge.name.clone(),
@@ -615,6 +887,12 @@ impl Plan {
         }
 
         for iface in &config.interfaces {
+            // Top-level config for an enslaved iface would fight the bridge
+            // (re-add an address, restart DHCP). Skip it; member ops above
+            // already handled flush + DHCP release.
+            if enslaved.contains(iface.name.as_str()) {
+                continue;
+            }
             if !iface.enabled {
                 ops.push(Op::SetDown(iface.name.clone()));
                 continue;
@@ -698,6 +976,28 @@ async fn execute_op(op: &Op) -> Result<(), String> {
         }
         Op::SetMtu { iface, mtu } => {
             let _ = run_ip(&["link", "set", iface, "mtu", &mtu.to_string()]).await;
+            Ok(())
+        }
+        Op::FlushAddrs { iface, v6 } => {
+            let flag = if *v6 { "-6" } else { "-4" };
+            let _ = run_ip(&[flag, "addr", "flush", "dev", iface]).await;
+            Ok(())
+        }
+        Op::DhcpStop { iface } => {
+            dhcp::stop(iface).await;
+            Ok(())
+        }
+        Op::SetBridgeStp { bridge, enabled } => {
+            let path = format!("/sys/class/net/{bridge}/bridge/stp_state");
+            let value = if *enabled { "1" } else { "0" };
+            let _ = tokio::fs::write(&path, value).await;
+            Ok(())
+        }
+        Op::SetBridgeForwardDelay { bridge, seconds } => {
+            // sysfs takes centiseconds.
+            let path = format!("/sys/class/net/{bridge}/bridge/forward_delay");
+            let value = (u32::from(*seconds) * 100).to_string();
+            let _ = tokio::fs::write(&path, value).await;
             Ok(())
         }
         Op::ApplyIp { iface, config, v6 } => apply_ip_config(iface, config, *v6).await,
@@ -789,6 +1089,11 @@ async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), Str
                 let _ = tokio::fs::write(&sysctl_path, "1").await;
             }
         }
+        IpMethod::Inherit => {
+            // Inherit is orchestrated by `Plan::compute` via explicit
+            // SetMac / AddAddr / ReplaceDefaultRoute / DhcpStart ops on
+            // the master, not through this per-iface helper.
+        }
     }
     Ok(())
 }
@@ -860,10 +1165,12 @@ fn generate_nix(config: &NetworkConfig) -> String {
     // Bridges
     for bridge in &config.bridges {
         let members: Vec<String> = bridge.members.iter().map(|m| format!("\"{m}\"")).collect();
+        let rstp = if bridge.stp { " rstp = true; " } else { " " };
         out.push_str(&format!(
-            "  networking.bridges.{} = {{ interfaces = [ {} ]; }};\n",
+            "  networking.bridges.{} = {{ interfaces = [ {} ];{}}};\n",
             bridge.name,
-            members.join(" ")
+            members.join(" "),
+            rstp
         ));
         generate_iface_nix(
             &mut out,
@@ -1014,9 +1321,10 @@ mod tests {
         LiveTopology::default()
     }
 
-    fn live_with(names: &[&str]) -> LiveTopology {
+    fn live_with_links(names: &[&str]) -> LiveTopology {
         LiveTopology {
             links: names.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
         }
     }
 
@@ -1030,6 +1338,31 @@ mod tests {
         }
     }
 
+    fn bridge(name: &str, members: &[&str]) -> BridgeConfig {
+        BridgeConfig {
+            name: name.to_string(),
+            members: members.iter().map(|s| (*s).to_string()).collect(),
+            // Tests use the *resolved* form by default — explicit Disabled
+            // means "no L3 on this bridge", which is unambiguous.
+            ipv4: IpConfig::default(),
+            ipv6: IpConfig::default(),
+            mtu: None,
+            stp: false,
+            forward_delay_s: None,
+        }
+    }
+
+    fn bond(name: &str, members: &[&str]) -> BondConfig {
+        BondConfig {
+            name: name.to_string(),
+            members: members.iter().map(|s| (*s).to_string()).collect(),
+            mode: BondMode::Lacp,
+            ipv4: IpConfig::default(),
+            ipv6: IpConfig::default(),
+            mtu: None,
+        }
+    }
+
     #[test]
     fn empty_config_produces_empty_plan() {
         let plan = Plan::compute(&NetworkConfig::default(), &empty_live());
@@ -1037,16 +1370,9 @@ mod tests {
     }
 
     #[test]
-    fn bond_creation_when_not_live_emits_create_then_enslave_then_up_then_apply() {
+    fn bond_member_release_then_enslave_then_up() {
         let config = NetworkConfig {
-            bonds: vec![BondConfig {
-                name: "bond0".into(),
-                members: vec!["eth0".into(), "eth1".into()],
-                mode: BondMode::Lacp,
-                ipv4: IpConfig::default(),
-                ipv6: IpConfig::default(),
-                mtu: None,
-            }],
+            bonds: vec![bond("bond0", &["eth0", "eth1"])],
             ..Default::default()
         };
         let plan = Plan::compute(&config, &empty_live());
@@ -1057,10 +1383,16 @@ mod tests {
                     name: "bond0".into(),
                     mode_kernel: "802.3ad".into(),
                 },
+                Op::DhcpStop {
+                    iface: "eth0".into()
+                },
                 Op::SetDown("eth0".into()),
                 Op::EnslaveMember {
                     member: "eth0".into(),
                     master: "bond0".into(),
+                },
+                Op::DhcpStop {
+                    iface: "eth1".into()
                 },
                 Op::SetDown("eth1".into()),
                 Op::EnslaveMember {
@@ -1085,17 +1417,10 @@ mod tests {
     #[test]
     fn bond_skips_create_when_already_live() {
         let config = NetworkConfig {
-            bonds: vec![BondConfig {
-                name: "bond0".into(),
-                members: vec![],
-                mode: BondMode::Lacp,
-                ipv4: IpConfig::default(),
-                ipv6: IpConfig::default(),
-                mtu: None,
-            }],
+            bonds: vec![bond("bond0", &[])],
             ..Default::default()
         };
-        let plan = Plan::compute(&config, &live_with(&["bond0"]));
+        let plan = Plan::compute(&config, &live_with_links(&["bond0"]));
         assert!(
             !plan
                 .ops
@@ -1106,15 +1431,9 @@ mod tests {
     }
 
     #[test]
-    fn bridge_member_is_brought_up_after_enslave() {
+    fn bridge_member_is_released_flushed_and_brought_up() {
         let config = NetworkConfig {
-            bridges: vec![BridgeConfig {
-                name: "br0".into(),
-                members: vec!["eth0".into()],
-                ipv4: IpConfig::default(),
-                ipv6: IpConfig::default(),
-                mtu: None,
-            }],
+            bridges: vec![bridge("br0", &["eth0"])],
             ..Default::default()
         };
         let plan = Plan::compute(&config, &empty_live());
@@ -1122,13 +1441,28 @@ mod tests {
             plan.ops,
             vec![
                 Op::CreateBridge { name: "br0".into() },
+                Op::DhcpStop {
+                    iface: "eth0".into()
+                },
                 Op::SetDown("eth0".into()),
                 Op::EnslaveMember {
                     member: "eth0".into(),
                     master: "br0".into(),
                 },
                 Op::BringUpBestEffort("eth0".into()),
+                Op::FlushAddrs {
+                    iface: "eth0".into(),
+                    v6: false,
+                },
+                Op::FlushAddrs {
+                    iface: "eth0".into(),
+                    v6: true,
+                },
                 Op::BringUp("br0".into()),
+                Op::SetBridgeStp {
+                    bridge: "br0".into(),
+                    enabled: false,
+                },
                 Op::ApplyIp {
                     iface: "br0".into(),
                     config: IpConfig::default(),
@@ -1140,6 +1474,74 @@ mod tests {
                     v6: true,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn host_internal_bridge_skips_stp_and_forward_delay() {
+        // Bridge with no members (e.g. host-internal for VMs to attach to).
+        // STP / forward-delay are member-of-LAN concepts; not relevant.
+        let config = NetworkConfig {
+            bridges: vec![bridge("vmbr0", &[])],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::SetBridgeStp { .. }))
+        );
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::SetBridgeForwardDelay { .. }))
+        );
+    }
+
+    #[test]
+    fn bridge_emits_stp_and_forward_delay_when_configured() {
+        let mut br = bridge("br0", &["eth0"]);
+        br.stp = true;
+        br.forward_delay_s = Some(0);
+        let config = NetworkConfig {
+            bridges: vec![br],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        assert!(plan.ops.contains(&Op::SetBridgeStp {
+            bridge: "br0".into(),
+            enabled: true,
+        }));
+        assert!(plan.ops.contains(&Op::SetBridgeForwardDelay {
+            bridge: "br0".into(),
+            seconds: 0,
+        }));
+    }
+
+    #[test]
+    fn enslaved_iface_skips_top_level_apply_ip() {
+        // eth0 is a bridge member AND also listed in `interfaces` (the
+        // pre-PR3 wire format the WebUI may still emit). The bridge owns
+        // the L3; the top-level entry must not fight it.
+        let config = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bridges: vec![bridge("br0", &["eth0"])],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        // No BringUp("eth0") (handled implicitly via the bridge member ops),
+        // and crucially no ApplyIp on eth0.
+        assert!(!plan.ops.iter().any(|op| matches!(
+            op,
+            Op::ApplyIp { iface, .. } if iface == "eth0"
+        )));
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::BringUp(name) if name == "eth0"))
         );
     }
 
@@ -1237,21 +1639,8 @@ mod tests {
     fn ordering_is_bonds_bridges_vlans_interfaces_dns() {
         let config = NetworkConfig {
             interfaces: vec![iface("eth0")],
-            bonds: vec![BondConfig {
-                name: "bond0".into(),
-                members: vec![],
-                mode: BondMode::Lacp,
-                ipv4: IpConfig::default(),
-                ipv6: IpConfig::default(),
-                mtu: None,
-            }],
-            bridges: vec![BridgeConfig {
-                name: "br0".into(),
-                members: vec![],
-                ipv4: IpConfig::default(),
-                ipv6: IpConfig::default(),
-                mtu: None,
-            }],
+            bonds: vec![bond("bond0", &[])],
+            bridges: vec![bridge("br0", &[])],
             vlans: vec![VlanConfig {
                 parent: "eth0".into(),
                 vlan_id: 10,
@@ -1303,15 +1692,10 @@ mod tests {
             (BondMode::BalanceRr, "balance-rr"),
             (BondMode::BalanceXor, "balance-xor"),
         ] {
+            let mut b = bond("bond0", &[]);
+            b.mode = mode;
             let config = NetworkConfig {
-                bonds: vec![BondConfig {
-                    name: "bond0".into(),
-                    members: vec![],
-                    mode,
-                    ipv4: IpConfig::default(),
-                    ipv6: IpConfig::default(),
-                    mtu: None,
-                }],
+                bonds: vec![b],
                 ..Default::default()
             };
             let plan = Plan::compute(&config, &empty_live());
@@ -1320,5 +1704,214 @@ mod tests {
                 other => panic!("expected CreateBond, got {other:?}"),
             }
         }
+    }
+
+    // ── resolve_inherit ────────────────────────────────────────
+
+    fn live_for(iface: &str, addrs: &[&str], default_via: Option<&str>) -> LiveTopology {
+        let mut t = LiveTopology::default();
+        t.links.insert(iface.to_string());
+        t.addrs_v4.insert(
+            iface.to_string(),
+            addrs.iter().map(|s| (*s).to_string()).collect(),
+        );
+        if let Some(gw) = default_via {
+            t.default_via_v4.insert(iface.to_string(), gw.to_string());
+        }
+        t
+    }
+
+    #[test]
+    fn inherit_resolves_to_dhcp_when_member_was_dhcp() {
+        let mut prev_eth0 = iface("eth0");
+        prev_eth0.ipv4 = IpConfig {
+            method: IpMethod::Dhcp,
+            ..Default::default()
+        };
+        let prev = NetworkConfig {
+            interfaces: vec![prev_eth0],
+            ..Default::default()
+        };
+        let mut br = bridge("br0", &["eth0"]);
+        br.ipv4 = inherit_ip();
+        let next = NetworkConfig {
+            bridges: vec![br],
+            ..Default::default()
+        };
+        let resolved = resolve_inherit(next, &prev, &empty_live());
+        assert_eq!(resolved.bridges[0].ipv4.method, IpMethod::Dhcp);
+        assert!(resolved.bridges[0].ipv4.addresses.is_empty());
+    }
+
+    #[test]
+    fn inherit_resolves_to_static_when_member_had_static() {
+        let mut prev_eth0 = iface("eth0");
+        prev_eth0.ipv4 = IpConfig {
+            method: IpMethod::Static,
+            addresses: vec!["192.168.1.10/24".into()],
+            gateway: Some("192.168.1.1".into()),
+        };
+        let prev = NetworkConfig {
+            interfaces: vec![prev_eth0],
+            ..Default::default()
+        };
+        let mut br = bridge("br0", &["eth0"]);
+        br.ipv4 = inherit_ip();
+        let next = NetworkConfig {
+            bridges: vec![br],
+            ..Default::default()
+        };
+        let resolved = resolve_inherit(next, &prev, &empty_live());
+        assert_eq!(resolved.bridges[0].ipv4.method, IpMethod::Static);
+        assert_eq!(
+            resolved.bridges[0].ipv4.addresses,
+            vec!["192.168.1.10/24".to_string()]
+        );
+        assert_eq!(
+            resolved.bridges[0].ipv4.gateway,
+            Some("192.168.1.1".to_string())
+        );
+    }
+
+    #[test]
+    fn inherit_falls_back_to_live_addrs() {
+        // No prior config for eth0, but the kernel currently shows a lease
+        // address — adopt it as static so the bridge keeps connectivity.
+        let prev = NetworkConfig::default();
+        let mut br = bridge("br0", &["eth0"]);
+        br.ipv4 = inherit_ip();
+        let next = NetworkConfig {
+            bridges: vec![br],
+            ..Default::default()
+        };
+        let live = live_for("eth0", &["10.0.0.5/24"], Some("10.0.0.1"));
+        let resolved = resolve_inherit(next, &prev, &live);
+        assert_eq!(resolved.bridges[0].ipv4.method, IpMethod::Static);
+        assert_eq!(
+            resolved.bridges[0].ipv4.addresses,
+            vec!["10.0.0.5/24".to_string()]
+        );
+        assert_eq!(
+            resolved.bridges[0].ipv4.gateway,
+            Some("10.0.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn inherit_with_no_inheritable_member_resolves_to_disabled() {
+        let prev = NetworkConfig::default();
+        let mut br = bridge("br0", &["eth0"]);
+        br.ipv4 = inherit_ip();
+        let next = NetworkConfig {
+            bridges: vec![br],
+            ..Default::default()
+        };
+        let resolved = resolve_inherit(next, &prev, &empty_live());
+        assert_eq!(resolved.bridges[0].ipv4.method, IpMethod::Disabled);
+    }
+
+    #[test]
+    fn inherit_picks_first_inheritable_member() {
+        // eth0 has nothing; eth1 was DHCP. The bridge should pick eth1.
+        let mut prev_eth1 = iface("eth1");
+        prev_eth1.ipv4 = IpConfig {
+            method: IpMethod::Dhcp,
+            ..Default::default()
+        };
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0"), prev_eth1],
+            ..Default::default()
+        };
+        let mut br = bridge("br0", &["eth0", "eth1"]);
+        br.ipv4 = inherit_ip();
+        let next = NetworkConfig {
+            bridges: vec![br],
+            ..Default::default()
+        };
+        let resolved = resolve_inherit(next, &prev, &empty_live());
+        assert_eq!(resolved.bridges[0].ipv4.method, IpMethod::Dhcp);
+    }
+
+    #[test]
+    fn explicit_bridge_config_passes_through_unchanged() {
+        let prev = NetworkConfig::default();
+        let mut br = bridge("br0", &["eth0"]);
+        br.ipv4 = IpConfig {
+            method: IpMethod::Static,
+            addresses: vec!["192.168.99.1/24".into()],
+            gateway: None,
+        };
+        let next = NetworkConfig {
+            bridges: vec![br.clone()],
+            ..Default::default()
+        };
+        let resolved = resolve_inherit(next, &prev, &empty_live());
+        assert_eq!(resolved.bridges[0].ipv4, br.ipv4);
+    }
+
+    // ── ip -j parsers ──────────────────────────────────────────
+
+    #[test]
+    fn parse_ip_addrs_extracts_cidrs() {
+        let json = r#"[
+          {"ifname": "eth0", "addr_info": [
+            {"local": "192.168.1.10", "prefixlen": 24, "scope": "global"},
+            {"local": "192.168.1.11", "prefixlen": 24, "scope": "global"}
+          ]},
+          {"ifname": "lo", "addr_info": [
+            {"local": "127.0.0.1", "prefixlen": 8, "scope": "host"}
+          ]}
+        ]"#;
+        let parsed = parse_ip_addrs(json, false).unwrap();
+        assert_eq!(
+            parsed.get("eth0").unwrap(),
+            &vec!["192.168.1.10/24".to_string(), "192.168.1.11/24".to_string()]
+        );
+        assert_eq!(parsed.get("lo").unwrap(), &vec!["127.0.0.1/8".to_string()]);
+    }
+
+    #[test]
+    fn parse_ip_addrs_v6_skips_link_local() {
+        let json = r#"[
+          {"ifname": "eth0", "addr_info": [
+            {"local": "2001:db8::1", "prefixlen": 64, "scope": "global"},
+            {"local": "fe80::1", "prefixlen": 64, "scope": "link"}
+          ]}
+        ]"#;
+        let parsed = parse_ip_addrs(json, true).unwrap();
+        assert_eq!(
+            parsed.get("eth0").unwrap(),
+            &vec!["2001:db8::1/64".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_default_via_extracts_dev_gateway() {
+        let json = r#"[
+          {"dst": "default", "gateway": "192.168.1.1", "dev": "eth0"}
+        ]"#;
+        let parsed = parse_default_via(json).unwrap();
+        assert_eq!(parsed.get("eth0").unwrap(), "192.168.1.1");
+    }
+
+    #[test]
+    fn parse_handles_empty_or_malformed_json() {
+        assert!(parse_ip_addrs("[]", false).unwrap().is_empty());
+        assert!(parse_default_via("[]").unwrap().is_empty());
+        assert!(parse_ip_addrs("not json", false).is_none());
+    }
+
+    // ── BridgeConfig deserialization defaults ──────────────────
+
+    #[test]
+    fn bridge_default_ipv4_and_ipv6_methods_are_inherit() {
+        // A bridge sent without explicit IP config from the WebUI
+        // (or in a legacy JSON written by an earlier nasty version
+        // that didn't include the field at all) should default to
+        // Inherit so #74 doesn't recur.
+        let json = r#"{ "name": "br0", "members": ["eth0"] }"#;
+        let parsed: BridgeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.ipv4.method, IpMethod::Inherit);
+        assert_eq!(parsed.ipv6.method, IpMethod::Inherit);
     }
 }
