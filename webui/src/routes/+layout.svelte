@@ -126,13 +126,22 @@
 	let helpOpen = $state(false);
 
 	// SSH password auth warning
+	const SSH_DISMISSED_KEY = 'nasty:ssh_password_auth_dismissed';
 	let sshPasswordAuth = $state(false);
+	let sshPasswordAuthDismissed = $state(
+		typeof localStorage !== 'undefined' && localStorage.getItem(SSH_DISMISSED_KEY) === '1'
+	);
 	async function checkSshStatus() {
-		if (!connected) return;
+		if (!connected || sshPasswordAuthDismissed) return;
 		try {
 			const result = await getClient().call<{ password_auth: boolean; keys: string[] }>('system.ssh.status');
 			sshPasswordAuth = result.password_auth;
 		} catch { /* ignore */ }
+	}
+	function dismissSshPasswordAuth() {
+		sshPasswordAuthDismissed = true;
+		sshPasswordAuth = false;
+		localStorage.setItem(SSH_DISMISSED_KEY, '1');
 	}
 
 	// Config backup warning
@@ -891,7 +900,8 @@
 				{#if sshPasswordAuth}
 					<div class="mb-4 flex items-center gap-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
 						<span class="flex-1">SSH password authentication is enabled — disable it for better security.</span>
-						<Button size="sm" onclick={() => goto('/services?configure=ssh')}>Manage SSH</Button>
+						<Button size="sm" onclick={() => goto('/services?configure=ssh')}>Configure SSH</Button>
+						<button onclick={dismissSshPasswordAuth} class="text-xs text-amber-400/60 hover:text-amber-400 shrink-0">dismiss</button>
 					</div>
 				{/if}
 				{#if configBackupMissing}
