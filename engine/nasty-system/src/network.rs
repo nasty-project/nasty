@@ -14,7 +14,7 @@ const HISTORY_KEEP: usize = 10;
 
 // ── Types ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum IpMethod {
@@ -25,7 +25,7 @@ pub enum IpMethod {
     Disabled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct IpConfig {
     pub method: IpMethod,
     /// Addresses in CIDR notation, e.g. "192.168.1.100/24" or "fd00::1/64".
@@ -52,7 +52,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BondMode {
     Lacp,
@@ -430,139 +430,316 @@ async fn get_addresses(iface: &str, ipv6: bool) -> Vec<String> {
 }
 
 // ── Apply config ───────────────────────────────────────────────
+//
+// Two-phase model:
+//
+//   apply_config = LiveTopology::snapshot()  (read kernel state)
+//                → Plan::compute(config, live)  (pure: produce an ordered
+//                                                list of `Op`s)
+//                → Plan::execute()  (run each Op via `ip` / helpers)
+//
+// `Plan::compute` is sync and side-effect-free, which lets us unit-test the
+// full set of imperative steps for any config without touching the kernel.
+// Future work (#74 follow-ups) will extend `Op` with topology-change
+// variants (MAC inheritance, L3 migration on enslave/un-enslave) and grow
+// `LiveTopology` with addrs / routes / masters.
+
+/// Snapshot of the kernel's view of the network. Currently only carries the
+/// set of existing link names — enough to decide create-vs-skip. Extended
+/// in future PRs to carry addrs, routes, masters, MAC.
+#[derive(Debug, Default, Clone)]
+struct LiveTopology {
+    links: std::collections::HashSet<String>,
+}
+
+impl LiveTopology {
+    async fn snapshot() -> Self {
+        let mut links = std::collections::HashSet::new();
+        if let Ok(mut entries) = tokio::fs::read_dir("/sys/class/net").await {
+            while let Ok(Some(e)) = entries.next_entry().await {
+                if let Some(name) = e.file_name().to_str() {
+                    links.insert(name.to_string());
+                }
+            }
+        }
+        Self { links }
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.links.contains(name)
+    }
+}
+
+/// One imperative step. Variants are split by failure semantics: anything
+/// named `*BestEffort` or `Set*` swallows errors silently (matches the
+/// pre-refactor `let _ = run_ip(...)` behavior); the rest abort the apply
+/// on failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Op {
+    /// `ip link add <name> type bond mode <mode_kernel>`. Required.
+    CreateBond { name: String, mode_kernel: String },
+    /// `ip link add <name> type bridge`. Required.
+    CreateBridge { name: String },
+    /// `ip link add link <parent> name <name> type vlan id <vlan_id>`. Required.
+    CreateVlan {
+        parent: String,
+        vlan_id: u16,
+        name: String,
+    },
+    /// `ip link set <iface> up`. Required (failure aborts the apply).
+    BringUp(String),
+    /// `ip link set <iface> up`. Best-effort.
+    BringUpBestEffort(String),
+    /// `ip link set <iface> down`. Best-effort.
+    SetDown(String),
+    /// `ip link set <member> master <master>`. Best-effort.
+    EnslaveMember { member: String, master: String },
+    /// `ip link set <iface> mtu <mtu>`. Best-effort.
+    SetMtu { iface: String, mtu: u16 },
+    /// Apply IPv4 or IPv6 config (delegates to `apply_ip_config`). Required.
+    ApplyIp {
+        iface: String,
+        config: IpConfig,
+        v6: bool,
+    },
+    /// Push DNS servers via resolvconf. Required.
+    ApplyDns(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Plan {
+    ops: Vec<Op>,
+}
+
+impl Plan {
+    /// Pure: turns a desired `NetworkConfig` plus a snapshot of `live` state
+    /// into an ordered list of imperative ops. No IO.
+    fn compute(config: &NetworkConfig, live: &LiveTopology) -> Self {
+        let mut ops = Vec::new();
+
+        // Bonds first — they may be enslaved into bridges later.
+        for bond in &config.bonds {
+            if !live.has(&bond.name) {
+                ops.push(Op::CreateBond {
+                    name: bond.name.clone(),
+                    mode_kernel: bond.mode.to_kernel().to_string(),
+                });
+            }
+            for member in &bond.members {
+                ops.push(Op::SetDown(member.clone()));
+                ops.push(Op::EnslaveMember {
+                    member: member.clone(),
+                    master: bond.name.clone(),
+                });
+            }
+            ops.push(Op::BringUp(bond.name.clone()));
+            if let Some(mtu) = bond.mtu {
+                ops.push(Op::SetMtu {
+                    iface: bond.name.clone(),
+                    mtu,
+                });
+            }
+            ops.push(Op::ApplyIp {
+                iface: bond.name.clone(),
+                config: bond.ipv4.clone(),
+                v6: false,
+            });
+            ops.push(Op::ApplyIp {
+                iface: bond.name.clone(),
+                config: bond.ipv6.clone(),
+                v6: true,
+            });
+        }
+
+        // Bridges after bonds (bonds can be bridge members), before VLANs
+        // (VLANs can sit on top of a bridge).
+        for bridge in &config.bridges {
+            if !live.has(&bridge.name) {
+                ops.push(Op::CreateBridge {
+                    name: bridge.name.clone(),
+                });
+            }
+            for member in &bridge.members {
+                ops.push(Op::SetDown(member.clone()));
+                ops.push(Op::EnslaveMember {
+                    member: member.clone(),
+                    master: bridge.name.clone(),
+                });
+                ops.push(Op::BringUpBestEffort(member.clone()));
+            }
+            ops.push(Op::BringUp(bridge.name.clone()));
+            if let Some(mtu) = bridge.mtu {
+                ops.push(Op::SetMtu {
+                    iface: bridge.name.clone(),
+                    mtu,
+                });
+            }
+            ops.push(Op::ApplyIp {
+                iface: bridge.name.clone(),
+                config: bridge.ipv4.clone(),
+                v6: false,
+            });
+            ops.push(Op::ApplyIp {
+                iface: bridge.name.clone(),
+                config: bridge.ipv6.clone(),
+                v6: true,
+            });
+        }
+
+        for vlan in &config.vlans {
+            let name = format!("{}.{}", vlan.parent, vlan.vlan_id);
+            if !live.has(&name) {
+                ops.push(Op::CreateVlan {
+                    parent: vlan.parent.clone(),
+                    vlan_id: vlan.vlan_id,
+                    name: name.clone(),
+                });
+            }
+            ops.push(Op::BringUp(name.clone()));
+            if let Some(mtu) = vlan.mtu {
+                ops.push(Op::SetMtu {
+                    iface: name.clone(),
+                    mtu,
+                });
+            }
+            ops.push(Op::ApplyIp {
+                iface: name.clone(),
+                config: vlan.ipv4.clone(),
+                v6: false,
+            });
+            ops.push(Op::ApplyIp {
+                iface: name,
+                config: vlan.ipv6.clone(),
+                v6: true,
+            });
+        }
+
+        for iface in &config.interfaces {
+            if !iface.enabled {
+                ops.push(Op::SetDown(iface.name.clone()));
+                continue;
+            }
+            ops.push(Op::BringUp(iface.name.clone()));
+            if let Some(mtu) = iface.mtu {
+                ops.push(Op::SetMtu {
+                    iface: iface.name.clone(),
+                    mtu,
+                });
+            }
+            ops.push(Op::ApplyIp {
+                iface: iface.name.clone(),
+                config: iface.ipv4.clone(),
+                v6: false,
+            });
+            ops.push(Op::ApplyIp {
+                iface: iface.name.clone(),
+                config: iface.ipv6.clone(),
+                v6: true,
+            });
+        }
+
+        if !config.dns.is_empty() {
+            ops.push(Op::ApplyDns(config.dns.clone()));
+        }
+
+        Self { ops }
+    }
+
+    async fn execute(&self) -> Result<(), String> {
+        for op in &self.ops {
+            execute_op(op).await?;
+        }
+        Ok(())
+    }
+}
+
+async fn execute_op(op: &Op) -> Result<(), String> {
+    match op {
+        Op::CreateBond { name, mode_kernel } => {
+            run_ip(&["link", "add", name, "type", "bond", "mode", mode_kernel])
+                .await
+                .map_err(|e| format!("create bond {name}: {e}"))
+        }
+        Op::CreateBridge { name } => run_ip(&["link", "add", name, "type", "bridge"])
+            .await
+            .map_err(|e| format!("create bridge {name}: {e}")),
+        Op::CreateVlan {
+            parent,
+            vlan_id,
+            name,
+        } => run_ip(&[
+            "link",
+            "add",
+            "link",
+            parent,
+            "name",
+            name,
+            "type",
+            "vlan",
+            "id",
+            &vlan_id.to_string(),
+        ])
+        .await
+        .map_err(|e| format!("create vlan {name}: {e}")),
+        Op::BringUp(iface) => run_ip(&["link", "set", iface, "up"])
+            .await
+            .map_err(|e| format!("bring up {iface}: {e}")),
+        Op::BringUpBestEffort(iface) => {
+            let _ = run_ip(&["link", "set", iface, "up"]).await;
+            Ok(())
+        }
+        Op::SetDown(iface) => {
+            let _ = run_ip(&["link", "set", iface, "down"]).await;
+            Ok(())
+        }
+        Op::EnslaveMember { member, master } => {
+            let _ = run_ip(&["link", "set", member, "master", master]).await;
+            Ok(())
+        }
+        Op::SetMtu { iface, mtu } => {
+            let _ = run_ip(&["link", "set", iface, "mtu", &mtu.to_string()]).await;
+            Ok(())
+        }
+        Op::ApplyIp { iface, config, v6 } => apply_ip_config(iface, config, *v6).await,
+        Op::ApplyDns(servers) => apply_dns(servers).await,
+    }
+}
 
 async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
-    // Apply bonds first (they need to exist before members are enslaved)
-    for bond in &config.bonds {
-        // Create bond if it doesn't exist
-        if !std::path::Path::new(&format!("/sys/class/net/{}", bond.name)).exists() {
-            run_ip(&[
-                "link",
-                "add",
-                &bond.name,
-                "type",
-                "bond",
-                "mode",
-                bond.mode.to_kernel(),
-            ])
-            .await
-            .map_err(|e| format!("create bond {}: {e}", bond.name))?;
-        }
-        // Enslave members
-        for member in &bond.members {
-            let _ = run_ip(&["link", "set", member, "down"]).await;
-            let _ = run_ip(&["link", "set", member, "master", &bond.name]).await;
-        }
-        run_ip(&["link", "set", &bond.name, "up"])
-            .await
-            .map_err(|e| format!("bring up bond {}: {e}", bond.name))?;
-        if let Some(mtu) = bond.mtu {
-            let _ = run_ip(&["link", "set", &bond.name, "mtu", &mtu.to_string()]).await;
-        }
-        apply_ip_config(&bond.name, &bond.ipv4, false).await?;
-        apply_ip_config(&bond.name, &bond.ipv6, true).await?;
-    }
+    let live = LiveTopology::snapshot().await;
+    let plan = Plan::compute(config, &live);
+    plan.execute().await
+}
 
-    // Apply bridges (after bonds so bonds can be members; before VLANs so
-    // VLANs can sit on top of a bridge).
-    for bridge in &config.bridges {
-        if !std::path::Path::new(&format!("/sys/class/net/{}", bridge.name)).exists() {
-            run_ip(&["link", "add", &bridge.name, "type", "bridge"])
-                .await
-                .map_err(|e| format!("create bridge {}: {e}", bridge.name))?;
-        }
-        for member in &bridge.members {
-            let _ = run_ip(&["link", "set", member, "down"]).await;
-            let _ = run_ip(&["link", "set", member, "master", &bridge.name]).await;
-            let _ = run_ip(&["link", "set", member, "up"]).await;
-        }
-        run_ip(&["link", "set", &bridge.name, "up"])
+/// Push DNS servers via resolvconf. NixOS manages /etc/resolv.conf — writing
+/// it directly causes "signature mismatch" errors on the next rebuild.
+async fn apply_dns(servers: &[String]) -> Result<(), String> {
+    let resolv: String = servers
+        .iter()
+        .map(|ns| format!("nameserver {ns}\n"))
+        .collect();
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("resolvconf")
+        .args(["-a", "nasty", "-m", "0"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("resolvconf: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(resolv.as_bytes())
             .await
-            .map_err(|e| format!("bring up bridge {}: {e}", bridge.name))?;
-        if let Some(mtu) = bridge.mtu {
-            let _ = run_ip(&["link", "set", &bridge.name, "mtu", &mtu.to_string()]).await;
-        }
-        apply_ip_config(&bridge.name, &bridge.ipv4, false).await?;
-        apply_ip_config(&bridge.name, &bridge.ipv6, true).await?;
+            .map_err(|e| format!("resolvconf stdin: {e}"))?;
     }
-
-    // Apply VLANs
-    for vlan in &config.vlans {
-        let vlan_name = format!("{}.{}", vlan.parent, vlan.vlan_id);
-        if !std::path::Path::new(&format!("/sys/class/net/{vlan_name}")).exists() {
-            run_ip(&[
-                "link",
-                "add",
-                "link",
-                &vlan.parent,
-                "name",
-                &vlan_name,
-                "type",
-                "vlan",
-                "id",
-                &vlan.vlan_id.to_string(),
-            ])
-            .await
-            .map_err(|e| format!("create vlan {vlan_name}: {e}"))?;
-        }
-        run_ip(&["link", "set", &vlan_name, "up"])
-            .await
-            .map_err(|e| format!("bring up vlan {vlan_name}: {e}"))?;
-        if let Some(mtu) = vlan.mtu {
-            let _ = run_ip(&["link", "set", &vlan_name, "mtu", &mtu.to_string()]).await;
-        }
-        apply_ip_config(&vlan_name, &vlan.ipv4, false).await?;
-        apply_ip_config(&vlan_name, &vlan.ipv6, true).await?;
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("resolvconf wait: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("resolvconf failed: {stderr}");
     }
-
-    // Apply interface configs
-    for iface in &config.interfaces {
-        if !iface.enabled {
-            let _ = run_ip(&["link", "set", &iface.name, "down"]).await;
-            continue;
-        }
-        run_ip(&["link", "set", &iface.name, "up"])
-            .await
-            .map_err(|e| format!("bring up {}: {e}", iface.name))?;
-        if let Some(mtu) = iface.mtu {
-            let _ = run_ip(&["link", "set", &iface.name, "mtu", &mtu.to_string()]).await;
-        }
-        apply_ip_config(&iface.name, &iface.ipv4, false).await?;
-        apply_ip_config(&iface.name, &iface.ipv6, true).await?;
-    }
-
-    // Apply DNS via resolvconf (NixOS manages /etc/resolv.conf — writing it
-    // directly causes "signature mismatch" errors on the next rebuild).
-    if !config.dns.is_empty() {
-        let resolv: String = config
-            .dns
-            .iter()
-            .map(|ns| format!("nameserver {ns}\n"))
-            .collect();
-        use tokio::io::AsyncWriteExt;
-        let mut child = tokio::process::Command::new("resolvconf")
-            .args(["-a", "nasty", "-m", "0"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("resolvconf: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(resolv.as_bytes())
-                .await
-                .map_err(|e| format!("resolvconf stdin: {e}"))?;
-        }
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| format!("resolvconf wait: {e}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("resolvconf failed: {stderr}");
-        }
-    }
-
     Ok(())
 }
 
@@ -826,5 +1003,322 @@ async fn run_ip(args: &[&str]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("ip {} exited with non-zero status", args.join(" ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_live() -> LiveTopology {
+        LiveTopology::default()
+    }
+
+    fn live_with(names: &[&str]) -> LiveTopology {
+        LiveTopology {
+            links: names.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    fn iface(name: &str) -> InterfaceConfig {
+        InterfaceConfig {
+            name: name.to_string(),
+            enabled: true,
+            ipv4: IpConfig::default(),
+            ipv6: IpConfig::default(),
+            mtu: None,
+        }
+    }
+
+    #[test]
+    fn empty_config_produces_empty_plan() {
+        let plan = Plan::compute(&NetworkConfig::default(), &empty_live());
+        assert!(plan.ops.is_empty());
+    }
+
+    #[test]
+    fn bond_creation_when_not_live_emits_create_then_enslave_then_up_then_apply() {
+        let config = NetworkConfig {
+            bonds: vec![BondConfig {
+                name: "bond0".into(),
+                members: vec!["eth0".into(), "eth1".into()],
+                mode: BondMode::Lacp,
+                ipv4: IpConfig::default(),
+                ipv6: IpConfig::default(),
+                mtu: None,
+            }],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        assert_eq!(
+            plan.ops,
+            vec![
+                Op::CreateBond {
+                    name: "bond0".into(),
+                    mode_kernel: "802.3ad".into(),
+                },
+                Op::SetDown("eth0".into()),
+                Op::EnslaveMember {
+                    member: "eth0".into(),
+                    master: "bond0".into(),
+                },
+                Op::SetDown("eth1".into()),
+                Op::EnslaveMember {
+                    member: "eth1".into(),
+                    master: "bond0".into(),
+                },
+                Op::BringUp("bond0".into()),
+                Op::ApplyIp {
+                    iface: "bond0".into(),
+                    config: IpConfig::default(),
+                    v6: false,
+                },
+                Op::ApplyIp {
+                    iface: "bond0".into(),
+                    config: IpConfig::default(),
+                    v6: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn bond_skips_create_when_already_live() {
+        let config = NetworkConfig {
+            bonds: vec![BondConfig {
+                name: "bond0".into(),
+                members: vec![],
+                mode: BondMode::Lacp,
+                ipv4: IpConfig::default(),
+                ipv6: IpConfig::default(),
+                mtu: None,
+            }],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &live_with(&["bond0"]));
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::CreateBond { .. })),
+            "should not re-create an existing bond"
+        );
+    }
+
+    #[test]
+    fn bridge_member_is_brought_up_after_enslave() {
+        let config = NetworkConfig {
+            bridges: vec![BridgeConfig {
+                name: "br0".into(),
+                members: vec!["eth0".into()],
+                ipv4: IpConfig::default(),
+                ipv6: IpConfig::default(),
+                mtu: None,
+            }],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        assert_eq!(
+            plan.ops,
+            vec![
+                Op::CreateBridge { name: "br0".into() },
+                Op::SetDown("eth0".into()),
+                Op::EnslaveMember {
+                    member: "eth0".into(),
+                    master: "br0".into(),
+                },
+                Op::BringUpBestEffort("eth0".into()),
+                Op::BringUp("br0".into()),
+                Op::ApplyIp {
+                    iface: "br0".into(),
+                    config: IpConfig::default(),
+                    v6: false,
+                },
+                Op::ApplyIp {
+                    iface: "br0".into(),
+                    config: IpConfig::default(),
+                    v6: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn vlan_name_is_parent_dot_id() {
+        let config = NetworkConfig {
+            vlans: vec![VlanConfig {
+                parent: "eth0".into(),
+                vlan_id: 100,
+                ipv4: IpConfig::default(),
+                ipv6: IpConfig::default(),
+                mtu: None,
+            }],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        match &plan.ops[0] {
+            Op::CreateVlan {
+                parent,
+                vlan_id,
+                name,
+            } => {
+                assert_eq!(parent, "eth0");
+                assert_eq!(*vlan_id, 100);
+                assert_eq!(name, "eth0.100");
+            }
+            other => panic!("expected CreateVlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disabled_interface_is_only_set_down() {
+        let mut eth0 = iface("eth0");
+        eth0.enabled = false;
+        let config = NetworkConfig {
+            interfaces: vec![eth0],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        assert_eq!(plan.ops, vec![Op::SetDown("eth0".into())]);
+    }
+
+    #[test]
+    fn mtu_op_is_emitted_only_when_configured() {
+        let mut eth0 = iface("eth0");
+        eth0.mtu = Some(9000);
+        let config = NetworkConfig {
+            interfaces: vec![eth0],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        assert!(plan.ops.contains(&Op::SetMtu {
+            iface: "eth0".into(),
+            mtu: 9000,
+        }));
+
+        let config_no_mtu = NetworkConfig {
+            interfaces: vec![iface("eth1")],
+            ..Default::default()
+        };
+        let plan_no_mtu = Plan::compute(&config_no_mtu, &empty_live());
+        assert!(
+            !plan_no_mtu
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::SetMtu { .. }))
+        );
+    }
+
+    #[test]
+    fn dns_is_appended_last_when_non_empty() {
+        let config = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        assert_eq!(
+            plan.ops.last(),
+            Some(&Op::ApplyDns(vec!["1.1.1.1".into(), "8.8.8.8".into()]))
+        );
+    }
+
+    #[test]
+    fn empty_dns_emits_no_dns_op() {
+        let config = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        let plan = Plan::compute(&config, &empty_live());
+        assert!(!plan.ops.iter().any(|op| matches!(op, Op::ApplyDns(_))));
+    }
+
+    #[test]
+    fn ordering_is_bonds_bridges_vlans_interfaces_dns() {
+        let config = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bonds: vec![BondConfig {
+                name: "bond0".into(),
+                members: vec![],
+                mode: BondMode::Lacp,
+                ipv4: IpConfig::default(),
+                ipv6: IpConfig::default(),
+                mtu: None,
+            }],
+            bridges: vec![BridgeConfig {
+                name: "br0".into(),
+                members: vec![],
+                ipv4: IpConfig::default(),
+                ipv6: IpConfig::default(),
+                mtu: None,
+            }],
+            vlans: vec![VlanConfig {
+                parent: "eth0".into(),
+                vlan_id: 10,
+                ipv4: IpConfig::default(),
+                ipv6: IpConfig::default(),
+                mtu: None,
+            }],
+            dns: vec!["1.1.1.1".into()],
+        };
+        let plan = Plan::compute(&config, &empty_live());
+
+        let bond_pos = plan
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::CreateBond { .. }))
+            .expect("bond create");
+        let bridge_pos = plan
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::CreateBridge { .. }))
+            .expect("bridge create");
+        let vlan_pos = plan
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::CreateVlan { .. }))
+            .expect("vlan create");
+        let iface_pos = plan
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::BringUp(name) if name == "eth0"))
+            .expect("iface up");
+        let dns_pos = plan
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::ApplyDns(_)))
+            .expect("dns");
+
+        assert!(bond_pos < bridge_pos);
+        assert!(bridge_pos < vlan_pos);
+        assert!(vlan_pos < iface_pos);
+        assert!(iface_pos < dns_pos);
+    }
+
+    #[test]
+    fn bond_modes_serialize_to_kernel_strings() {
+        for (mode, expected) in [
+            (BondMode::Lacp, "802.3ad"),
+            (BondMode::ActiveBackup, "active-backup"),
+            (BondMode::BalanceRr, "balance-rr"),
+            (BondMode::BalanceXor, "balance-xor"),
+        ] {
+            let config = NetworkConfig {
+                bonds: vec![BondConfig {
+                    name: "bond0".into(),
+                    members: vec![],
+                    mode,
+                    ipv4: IpConfig::default(),
+                    ipv6: IpConfig::default(),
+                    mtu: None,
+                }],
+                ..Default::default()
+            };
+            let plan = Plan::compute(&config, &empty_live());
+            match &plan.ops[0] {
+                Op::CreateBond { mode_kernel, .. } => assert_eq!(mode_kernel, expected),
+                other => panic!("expected CreateBond, got {other:?}"),
+            }
+        }
     }
 }
