@@ -9,6 +9,8 @@ use tracing::{info, warn};
 
 const JSON_PATH: &str = "/var/lib/nasty/networking.json";
 const NIX_PATH: &str = "/etc/nixos/networking.nix";
+const HISTORY_DIR: &str = "/var/lib/nasty/networking.history";
+const HISTORY_KEEP: usize = 10;
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -201,18 +203,8 @@ impl NetworkService {
             validate_ip_config(&bridge.ipv6, "IPv6")?;
         }
 
-        // Persist JSON
-        let json = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("serialization error: {e}"))?;
-        tokio::fs::write(JSON_PATH, &json)
-            .await
-            .map_err(|e| format!("failed to write {JSON_PATH}: {e}"))?;
-
-        // Generate networking.nix
-        let nix = generate_nix(&config);
-        if let Err(e) = tokio::fs::write(NIX_PATH, &nix).await {
-            warn!("Failed to write {NIX_PATH}: {e}");
-        }
+        // Persist (atomic write + history snapshot of prior config)
+        persist_config(&config).await?;
 
         // Apply immediately
         apply_config(&config).await?;
@@ -243,6 +235,80 @@ fn validate_ip_config(ip: &IpConfig, label: &str) -> Result<(), String> {
 }
 
 // ── Config persistence ─────────────────────────────────────────
+
+async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
+    let json =
+        serde_json::to_string_pretty(config).map_err(|e| format!("serialization error: {e}"))?;
+
+    // Snapshot the existing config to history before overwriting, so a bad
+    // apply can be rolled back. Best-effort: a missing/unreadable prior file
+    // is fine (first-run case).
+    if let Ok(prev) = tokio::fs::read(JSON_PATH).await
+        && let Err(e) = snapshot_history(&prev).await
+    {
+        warn!("failed to snapshot prior network config: {e}");
+    }
+
+    atomic_write(JSON_PATH, json.as_bytes())
+        .await
+        .map_err(|e| format!("failed to write {JSON_PATH}: {e}"))?;
+
+    let nix = generate_nix(config);
+    if let Err(e) = atomic_write(NIX_PATH, nix.as_bytes()).await {
+        warn!("failed to write {NIX_PATH}: {e}");
+    }
+
+    Ok(())
+}
+
+/// Write `contents` to `path` atomically: write to `path.tmp`, fsync, rename.
+/// Eliminates the half-written-config window if the engine is killed mid-write.
+async fn atomic_write(path: &str, contents: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = format!("{path}.tmp");
+    let mut f = tokio::fs::File::create(&tmp).await?;
+    f.write_all(contents).await?;
+    f.sync_all().await?;
+    drop(f);
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+async fn snapshot_history(prev: &[u8]) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(HISTORY_DIR).await?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = format!("{HISTORY_DIR}/{ts}.json");
+    tokio::fs::write(&path, prev).await?;
+    prune_history().await;
+    Ok(())
+}
+
+async fn prune_history() {
+    let Ok(mut entries) = tokio::fs::read_dir(HISTORY_DIR).await else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let mtime = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        files.push((mtime, path));
+    }
+    files.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime)); // newest first
+    for (_, path) in files.into_iter().skip(HISTORY_KEEP) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
 
 async fn load_config() -> NetworkConfig {
     match tokio::fs::read_to_string(JSON_PATH).await {
@@ -505,24 +571,24 @@ async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), Str
     match ip.method {
         IpMethod::Dhcp => {
             if !v6 {
-                // Restart DHCP for this interface
-                let _ = tokio::process::Command::new("systemctl")
-                    .args(["restart", "dhcpcd"])
-                    .status()
-                    .await;
+                // Per-iface rebind. Replaces the previous global `systemctl
+                // restart dhcpcd`, which dropped leases on every other iface.
+                dhcp::start(iface).await;
             }
-            // DHCPv6 is typically handled by dhcpcd or systemd-networkd
+            // DHCPv6 is typically handled by dhcpcd or systemd-networkd.
         }
         IpMethod::Static => {
-            // Flush existing addresses
+            if !v6 {
+                // Release any prior dhcpcd lease so it can't fight the static
+                // config (re-add a leased address, replace our default route).
+                dhcp::stop(iface).await;
+            }
             let _ = run_ip(&[flag, "addr", "flush", "dev", iface]).await;
-            // Add configured addresses
             for addr in &ip.addresses {
                 run_ip(&[flag, "addr", "add", addr, "dev", iface])
                     .await
                     .map_err(|e| format!("ip addr add {addr} on {iface}: {e}"))?;
             }
-            // Set gateway
             if let Some(ref gw) = ip.gateway {
                 let _ =
                     run_ip(&[flag, "route", "replace", "default", "via", gw, "dev", iface]).await;
@@ -530,7 +596,6 @@ async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), Str
         }
         IpMethod::Slaac => {
             if v6 {
-                // Enable SLAAC
                 let sysctl_path = format!("/proc/sys/net/ipv6/conf/{iface}/autoconf");
                 let _ = tokio::fs::write(&sysctl_path, "1").await;
                 let accept_ra = format!("/proc/sys/net/ipv6/conf/{iface}/accept_ra");
@@ -538,7 +603,9 @@ async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), Str
             }
         }
         IpMethod::Disabled => {
-            // Flush addresses for this protocol
+            if !v6 {
+                dhcp::stop(iface).await;
+            }
             let _ = run_ip(&[flag, "addr", "flush", "dev", iface]).await;
             if v6 {
                 let sysctl_path = format!("/proc/sys/net/ipv6/conf/{iface}/disable_ipv6");
@@ -547,6 +614,44 @@ async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+/// Per-interface DHCP control. Behind a small module seam so the underlying
+/// client (currently dhcpcd) can be swapped — e.g. for systemd-networkd —
+/// without touching call sites.
+mod dhcp {
+    use tracing::warn;
+
+    /// Start or rebind dhcpcd for `iface`.
+    pub async fn start(iface: &str) {
+        run(&["-n", iface], "rebind", iface).await;
+    }
+
+    /// Release the lease and stop dhcpcd for `iface`. No-op if not running
+    /// — that's the common case when switching from Static to Static.
+    pub async fn stop(iface: &str) {
+        run(&["-k", iface], "release", iface).await;
+    }
+
+    async fn run(args: &[&str], action: &str, iface: &str) {
+        match tokio::process::Command::new("dhcpcd")
+            .args(args)
+            .output()
+            .await
+        {
+            Ok(out) if !out.status.success() => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stderr = stderr.trim();
+                if stderr.is_empty() {
+                    warn!("dhcpcd {action} {iface} exited with non-zero status");
+                } else {
+                    warn!("dhcpcd {action} {iface} failed: {stderr}");
+                }
+            }
+            Err(e) => warn!("dhcpcd {action} {iface}: spawn failed: {e}"),
+            _ => {}
+        }
+    }
 }
 
 // ── NixOS config generation ────────────────────────────────────
