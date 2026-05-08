@@ -731,12 +731,18 @@
 					<Input id="fs-name" bind:value={newName} class="mt-1 max-w-xs" />
 				</div>
 				<div class="mb-4">
-					<div class="mb-2 flex items-center justify-between">
+					<div class="mb-2 flex items-center justify-between gap-3">
 						<Label>Select Devices</Label>
-						<label class="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-							<input type="checkbox" bind:checked={showPartitions} class="h-3.5 w-3.5" />
-							Show partitions
-						</label>
+						<div class="flex items-center gap-4">
+							<div class="flex items-center gap-2 text-xs text-muted-foreground">
+								<span>Need more devices?</span>
+								<Button size="xs" onclick={() => goto('/disks')}>Disks</Button>
+							</div>
+							<label class="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+								<input type="checkbox" bind:checked={showPartitions} class="h-3.5 w-3.5" />
+								Show partitions
+							</label>
+						</div>
 					</div>
 					{#if availableDevices().length === 0}
 						<p class="text-sm text-muted-foreground">No available devices. You may need to wipe or prepare disks first.</p>
@@ -807,10 +813,6 @@
 									</label>
 								{/if}
 							{/each}
-						</div>
-						<div class="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-							<span>Need more devices?</span>
-							<Button size="xs" onclick={() => goto('/disks')}>Disks</Button>
 						</div>
 					{/if}
 				</div>
