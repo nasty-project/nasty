@@ -780,7 +780,10 @@
 						<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Maintenance</h4>
 						<div class="flex flex-col gap-2">
 							<Button size="sm" variant="outline" onclick={pruneDocker}>Cleanup Unused Images</Button>
-							<Button size="sm" variant="outline" onclick={() => goto('/services')}>Manage in Services →</Button>
+							<div class="flex items-center gap-2 text-sm text-muted-foreground">
+								<span>Manage in</span>
+								<Button size="sm" onclick={() => goto('/services')}>Services</Button>
+							</div>
 						</div>
 					</CardContent>
 				</Card>

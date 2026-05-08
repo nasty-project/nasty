@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { page } from '$app/stores';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import type { ProtocolStatus, AppsStatus, Filesystem, TuningConfig, NutConfig, UpsStatus } from '$lib/types';
@@ -203,6 +204,10 @@
 		client.onEvent(handleEvent);
 		await refresh();
 		loading = false;
+		// Deep-link: /services?configure=<name> opens that service's config panel.
+		// Used by the SSH "Manage SSH" banner button (and any future banners).
+		const target = $page.url.searchParams.get('configure');
+		if (target) toggleConfig(target);
 	});
 
 	onDestroy(() => client.offEvent(handleEvent));

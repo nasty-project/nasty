@@ -889,25 +889,15 @@
 					</div>
 				{/if}
 				{#if sshPasswordAuth}
-					<div class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
-						<a href="/services" class="flex-1 no-underline text-amber-400 hover:text-amber-300">
-							SSH password authentication is enabled — disable it for better security.
-						</a>
-						<button onclick={async () => {
-							try {
-								await getClient().call('system.ssh.set_password_auth', { enabled: false });
-								sshPasswordAuth = false;
-							} catch (e) {
-								// Likely no keys — need to add one first
-							}
-						}} class="text-xs font-medium text-amber-400 hover:text-amber-300 shrink-0">Disable now</button>
+					<div class="mb-4 flex items-center gap-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
+						<span class="flex-1">SSH password authentication is enabled — disable it for better security.</span>
+						<Button size="sm" onclick={() => goto('/services?configure=ssh')}>Manage SSH</Button>
 					</div>
 				{/if}
 				{#if configBackupMissing}
-					<div class="mb-4 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
+					<div class="mb-4 flex items-center gap-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
 						<span class="flex-1">NASty configuration is not backed up.</span>
-						<a href="/backups?create=config" class="text-xs font-medium text-amber-400 hover:text-amber-300 shrink-0 no-underline">Create backup</a>
-						<span class="text-amber-400/30">|</span>
+						<Button size="sm" onclick={() => goto('/backups?create=config')}>Create Backup</Button>
 						<button onclick={dismissConfigBackup} class="text-xs text-amber-400/60 hover:text-amber-400 shrink-0">dismiss</button>
 					</div>
 				{/if}
