@@ -30,7 +30,20 @@ let
         auth = json.loads(ws.recv())
         assert auth.get("authenticated") is True, f"WS auth failed: {auth!r}"
         assert auth.get("username") == "admin", f"unexpected user: {auth!r}"
-        return ws
+        return ws, auth
+
+
+    def ws_auth_cookie(token):
+        # Browser path: session cookie on the upgrade request, no auth message.
+        ws = websocket.create_connection(
+            "ws://127.0.0.1:2137/ws",
+            timeout=10,
+            cookie=f"nasty_session={token}",
+        )
+        auth = json.loads(ws.recv())
+        assert auth.get("authenticated") is True, f"WS auth failed: {auth!r}"
+        assert auth.get("username") == "admin", f"unexpected user: {auth!r}"
+        return ws, auth
 
 
     def call(ws, method, request_id, params=None):
@@ -60,7 +73,20 @@ let
     # Default admin/admin has must_change_password set, which gates
     # most RPC methods. Change it, then re-login so subsequent calls
     # hit a session that doesn't carry the gate.
-    ws = ws_auth(initial_token)
+    #
+    # Both auth paths (token-in-message for non-browsers, cookie-on-upgrade
+    # for browsers) must surface must_change_password on the auth response —
+    # otherwise the WebUI lands on the dashboard instead of the change-
+    # password screen and just silently fails every subsequent RPC.
+    ws, auth = ws_auth(initial_token)
+    assert auth.get("must_change_password") is True, (
+        f"token-path auth missing must_change_password: {auth!r}"
+    )
+    cookie_ws, cookie_auth = ws_auth_cookie(initial_token)
+    cookie_ws.close()
+    assert cookie_auth.get("must_change_password") is True, (
+        f"cookie-path auth missing must_change_password: {cookie_auth!r}"
+    )
     try:
         me = call(ws, "auth.me", 1)
         assert me["username"] == "admin", f"auth.me wrong: {me!r}"
@@ -73,7 +99,10 @@ let
 
     # ── Session 2: drive a few representative RPCs ────────────────
     new_token = http_login(NEW_PW)
-    ws = ws_auth(new_token)
+    ws, auth = ws_auth(new_token)
+    assert auth.get("must_change_password") is False, (
+        f"after change_password, flag should be cleared: {auth!r}"
+    )
     try:
         health = call(ws, "system.health", 1)
         print("system.health:", health, file=sys.stderr)

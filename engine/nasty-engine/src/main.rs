@@ -1590,6 +1590,7 @@ async fn resolve_session(
                             "authenticated": true,
                             "username": session.username,
                             "role": session.role,
+                            "must_change_password": session.must_change_password,
                         })
                         .to_string()
                         .into(),
