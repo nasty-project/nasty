@@ -80,7 +80,16 @@ impl Protocol {
     fn services(&self) -> &[&str] {
         match self {
             Protocol::Nfs => &["nfs-server.service"],
-            Protocol::Smb => &["samba-smbd.service", "samba-nmbd.service"],
+            Protocol::Smb => &[
+                "samba-smbd.service",
+                "samba-nmbd.service",
+                // wsdd advertises SMB shares to Windows 10/11 file
+                // managers via WS-Discovery (Win dropped NetBIOS
+                // browsing). Started/stopped alongside Samba so
+                // toggling the SMB protocol consistently affects all
+                // discovery surfaces.
+                "samba-wsdd.service",
+            ],
             Protocol::Iscsi => &["target.service"],
             Protocol::Nvmeof => &[], // configfs-based, no daemon
             Protocol::Nut => &[
@@ -493,4 +502,22 @@ async fn save_state(state: &ProtocolState) -> Result<(), String> {
     tokio::fs::write(STATE_PATH, json)
         .await
         .map_err(|e| format!("failed to write protocol state: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smb_protocol_includes_wsdd_in_its_service_set() {
+        // Toggling SMB in the WebUI must start/stop the WSDD daemon
+        // alongside Samba — otherwise the host stays invisible to
+        // Windows 10/11 Explorer (issue #70). Pin the membership so
+        // a future refactor of `services()` doesn't silently break
+        // discovery.
+        let svcs = Protocol::Smb.services();
+        assert!(svcs.contains(&"samba-smbd.service"));
+        assert!(svcs.contains(&"samba-nmbd.service"));
+        assert!(svcs.contains(&"samba-wsdd.service"));
+    }
 }

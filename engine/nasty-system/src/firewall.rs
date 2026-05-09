@@ -109,7 +109,9 @@ fn udp(port: u16) -> PortSpec {
 pub fn ports_for_protocol(proto: Protocol) -> Vec<PortSpec> {
     match proto {
         Protocol::Nfs => vec![tcp(2049)],
-        Protocol::Smb => vec![tcp(445), tcp(139)],
+        // 445/139: Samba serving. 3702/udp: WSDD announcements for
+        // Windows 10/11 Explorer discovery (samba-wsdd.service).
+        Protocol::Smb => vec![tcp(445), tcp(139), udp(3702)],
         Protocol::Iscsi => vec![tcp(3260)],
         Protocol::Nvmeof => vec![tcp(4420)],
         Protocol::Nut => vec![tcp(3493)],
@@ -436,4 +438,34 @@ async fn apply_nftables(state: &FirewallState) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smb_opens_serving_and_wsdd_discovery_ports() {
+        // 445 + 139 are Samba's serving ports; 3702/udp is WSDD's
+        // multicast WS-Discovery port — without it Windows 10/11
+        // Explorer can't browse the host. Pin them so a refactor
+        // doesn't silently drop discovery and turn NASty invisible
+        // to Windows file managers again (issue #70).
+        let ports = ports_for_protocol(Protocol::Smb);
+        assert!(
+            ports
+                .iter()
+                .any(|p| p.port == 445 && p.transport == Transport::Tcp)
+        );
+        assert!(
+            ports
+                .iter()
+                .any(|p| p.port == 139 && p.transport == Transport::Tcp)
+        );
+        assert!(
+            ports
+                .iter()
+                .any(|p| p.port == 3702 && p.transport == Transport::Udp)
+        );
+    }
 }

@@ -1044,6 +1044,55 @@ in {
     # on demand when the user enables the protocol.
     systemd.targets.samba.wantedBy = mkIf cfg.smb.enable (lib.mkForce []);
 
+    # ── SMB network discovery ──────────────────────────────────
+    # NASty was invisible to file-manager network browsers — TrueNAS,
+    # Synology et al. show up because they advertise SMB over multiple
+    # discovery surfaces. Cover the three that matter for modern OSes:
+    #
+    # - mDNS `_smb._tcp` via Avahi  → macOS Finder, GNOME Files, KDE
+    # - mDNS `_device-info._tcp`    → Finder shows the rack-server icon
+    # - WS-Discovery (UDP 3702)     → Windows 10/11 Explorer
+    #
+    # All gated on the build-time SMB switch. The engine starts/stops
+    # samba-wsdd alongside samba-smbd/nmbd via the protocol service
+    # list (see engine/nasty-system/src/protocol.rs::Protocol::Smb).
+    services.avahi.extraServiceFiles = mkIf cfg.smb.enable {
+      smb = ''
+        <?xml version="1.0" standalone='no'?>
+        <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+        <service-group>
+          <name replace-wildcards="yes">%h</name>
+          <service>
+            <type>_smb._tcp</type>
+            <port>445</port>
+          </service>
+        </service-group>
+      '';
+      # `model=Xserve` is the rack-mount NAS icon Finder uses for
+      # TrueNAS, Synology, etc. `port=0` because this entry is just
+      # metadata — there's no service on the other end.
+      device-info = ''
+        <?xml version="1.0" standalone='no'?>
+        <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+        <service-group>
+          <name replace-wildcards="yes">%h</name>
+          <service>
+            <type>_device-info._tcp</type>
+            <port>0</port>
+            <txt-record>model=Xserve</txt-record>
+          </service>
+        </service-group>
+      '';
+    };
+
+    # WSDD daemon (Web Services Dynamic Discovery) for Windows 10/11
+    # Explorer browsing — Win dropped NetBIOS/SMB1 browse master in
+    # favour of WS-Discovery, which TrueNAS et al. ship by default.
+    # NixOS upstream enables the unit at boot via `wantedBy`; override
+    # so it follows the SMB protocol toggle managed by the engine.
+    services.samba-wsdd.enable = mkIf cfg.smb.enable true;
+    systemd.services.samba-wsdd.wantedBy = mkIf cfg.smb.enable (lib.mkForce []);
+
     # ── iSCSI / LIO ───────────────────────────────────────────
     # target.service: restore LIO config from /etc/target/saveconfig.json.
     # Not started at boot — the nasty-engine starts it on demand after
