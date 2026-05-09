@@ -481,12 +481,62 @@ pub async fn list_timezones() -> Result<Vec<String>, String> {
 }
 
 async fn apply_hostname(name: &str) -> Result<(), String> {
-    // NixOS has /etc as read-only — set hostname via kernel proc only.
-    // Persistence is via /var/lib/nasty/settings.json, read at boot.
+    // NixOS has /etc as read-only — set the kernel hostname via /proc.
+    // Persistence is via /var/lib/nasty/settings.json, read at boot by
+    // nasty-apply-hostname.service.
     tokio::fs::write("/proc/sys/kernel/hostname", name.as_bytes())
         .await
         .map_err(|e| format!("failed to set kernel hostname: {e}"))?;
+
+    // Also expose the name to the wrapper flake so `nixos-rebuild
+    // switch` (which defaults to looking up `nixosConfigurations.<kernel-hostname>`)
+    // resolves to our system. The flake at /etc/nixos/flake.nix imports
+    // ./hostname.nix when present and falls back to "nasty" otherwise,
+    // so writing this file is best-effort — failures are logged but
+    // don't fail the apply (e.g. fresh installs before rebootstrap, or
+    // if /etc/nixos isn't writable for some reason).
+    write_hostname_nix(name).await;
+
     Ok(())
+}
+
+/// Write `/etc/nixos/hostname.nix` with the current hostname as a Nix
+/// string literal. Read by the wrapper flake to alias
+/// `nixosConfigurations.<hostname>` to the same system attr as `nasty`.
+async fn write_hostname_nix(name: &str) {
+    let nixos_dir = std::path::Path::new("/etc/nixos");
+    if !nixos_dir.exists() {
+        // Fresh install before rebootstrap, or running outside a normal
+        // NixOS layout (tests). Nothing to do.
+        return;
+    }
+    let path = nixos_dir.join("hostname.nix");
+    let content = format!("{}\n", to_nix_string(name));
+    if let Err(e) = tokio::fs::write(&path, content).await {
+        warn!("could not write {}: {e}", path.display());
+    }
+}
+
+/// Render a Rust string as a Nix double-quoted string literal, escaping
+/// the characters that have special meaning inside `"..."`. The hostname
+/// has been validated upstream (RFC1123-ish), but escape defensively so
+/// any future relaxation can't smuggle Nix syntax into the flake.
+fn to_nix_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '$' => out.push_str("\\$"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 async fn apply_timezone(tz: &str) -> Result<(), String> {
@@ -894,5 +944,42 @@ pub async fn check_acme_renewal() {
     info!("Checking ACME certificate renewal...");
     if let Err(e) = run_lego(&settings).await {
         warn!("ACME renewal check failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_nix_string;
+
+    #[test]
+    fn nix_string_renders_a_plain_hostname_unchanged() {
+        // The common case: a normal hostname has no special characters,
+        // so the output is just `"name"`.
+        assert_eq!(to_nix_string("nasty"), "\"nasty\"");
+    }
+
+    #[test]
+    fn nix_string_renders_an_fqdn_unchanged() {
+        // The motivating case from issue #95: user set hostname to
+        // a dot-separated FQDN. Dots have no Nix-string semantics so
+        // they just pass through.
+        assert_eq!(to_nix_string("nasty.domain.xyz"), "\"nasty.domain.xyz\"",);
+    }
+
+    #[test]
+    fn nix_string_escapes_quotes_backslashes_and_dollar() {
+        // Defensive — hostnames have been validated upstream, but if
+        // anything ever sneaks past validation we don't want it
+        // smuggling Nix syntax into the flake. `${...}` interpolation
+        // is the most dangerous: escaping the leading `$` is enough.
+        assert_eq!(to_nix_string("a\"b"), r#""a\"b""#);
+        assert_eq!(to_nix_string("a\\b"), r#""a\\b""#);
+        assert_eq!(to_nix_string("a${x}b"), r#""a\${x}b""#);
+    }
+
+    #[test]
+    fn nix_string_escapes_whitespace_control_chars() {
+        assert_eq!(to_nix_string("a\nb"), r#""a\nb""#);
+        assert_eq!(to_nix_string("a\tb"), r#""a\tb""#);
     }
 }
