@@ -50,9 +50,29 @@
           ];
         };
     in {
-      wrapperFlakeVersion = "v0.1";
-      nixosConfigurations = {
-        nasty = mkSystem "@LOCAL_SYSTEM@";
-      };
+      wrapperFlakeVersion = "v0.2";
+      nixosConfigurations =
+        let
+          sys = mkSystem "@LOCAL_SYSTEM@";
+          # `nixos-rebuild switch` defaults to looking up
+          # `nixosConfigurations.<kernel-hostname>`. The engine writes the
+          # user's chosen hostname to /proc/sys/kernel/hostname (and
+          # re-applies it on boot via nasty-apply-hostname.service), so
+          # after a WebUI rename the lookup would fail without an alias.
+          # The engine also writes the hostname into a sibling
+          # `hostname.nix` file (alongside this flake.nix) on every
+          # apply — read it here and expose it as an alias of `nasty`.
+          # `nasty` itself stays as a stable fallback so
+          # `nixos-rebuild switch --flake /etc/nixos#nasty` always works.
+          # Pure-eval-safe: relative path inside the flake source tree.
+          hostName =
+            if builtins.pathExists ./hostname.nix
+            then nixpkgs.lib.strings.removeSuffix "\n" (builtins.readFile ./hostname.nix)
+            else "nasty";
+        in
+        { nasty = sys; }
+        // nixpkgs.lib.optionalAttrs (hostName != "" && hostName != "nasty") {
+          "${hostName}" = sys;
+        };
     };
 }
