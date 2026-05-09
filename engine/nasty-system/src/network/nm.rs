@@ -21,9 +21,12 @@ use std::collections::HashMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use zbus::zvariant::OwnedValue;
 
 use super::IpMethod;
 use super::layered::{Address, AddressMethod, Family, LayeredConfig, Link, LinkKind};
+
+pub mod dbus;
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -303,30 +306,20 @@ fn default_ip_pair() -> (NmIpSettings, NmIpSettings) {
     (NmIpSettings::default(), NmIpSettings::default())
 }
 
-/// Phase 2 placeholder: produce a UUID-shaped string deterministically
-/// from the link name. Phase 3 will replace this with `Uuid::new_v5`
-/// (real UUIDv5) when the `uuid` crate is added as a dep alongside the
-/// chosen NM binding.
+/// Stable namespace UUID for NASty-managed NM connections. Generated
+/// once via `Uuid::new_v4`, then frozen. Same name → same connection
+/// UUID across reboots and across boxes, which keeps NM's connection
+/// identity stable when we re-author profiles.
+const NASTY_UUID_NAMESPACE: uuid::Uuid = uuid::uuid!("8d1f3a4e-4c8b-5e9f-9a1b-7c2e3d4f5a6b");
+
+/// Deterministic UUIDv5 from the link name. Same name → same UUID,
+/// always. Phase 3a (this PR) made this real (was a placeholder hash
+/// in phase 2); phase 3b uses these UUIDs as the connection identity
+/// when calling `Settings.AddConnection` over DBus.
 fn deterministic_uuid_for(name: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    "nasty-network-v2".hash(&mut h);
-    name.hash(&mut h);
-    let h1 = h.finish();
-    let mut h = DefaultHasher::new();
-    h1.hash(&mut h);
-    "split".hash(&mut h);
-    let h2 = h.finish();
-    // Format: 8-4-4-4-12 hex digits, with version (4) and variant (8) bits.
-    format!(
-        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
-        (h1 >> 32) as u32,
-        ((h1 >> 16) & 0xffff) as u16,
-        (h1 & 0xfff) as u16,
-        ((h2 >> 48) & 0xfff) as u16,
-        h2 & 0xffff_ffff_ffff,
-    )
+    uuid::Uuid::new_v5(&NASTY_UUID_NAMESPACE, name.as_bytes())
+        .hyphenated()
+        .to_string()
 }
 
 // ── Keyfile serializer ─────────────────────────────────────────
@@ -447,6 +440,144 @@ fn serialize_ip_section(out: &mut String, ip: &NmIpSettings) {
     if ip.gateway.is_some() && ip.addresses.is_empty() {
         out.push_str("# warning: gateway set but no addresses; NM will ignore\n");
     }
+}
+
+// ── DBus settings dict converter ───────────────────────────────
+//
+// Phase 3a addition: convert a typed `NmConnection` into the dict
+// shape NM expects on DBus (`a{sa{sv}}` — section name → key →
+// variant). This is the `Settings.AddConnection` / `Connection.Update`
+// payload.
+//
+// Why this lives alongside `serialize_keyfile`: the keyfile and the
+// DBus dict are two views of the same connection. Some fields are
+// formatted differently (`address1=10.0.0.5/24,10.0.0.1` in keyfile
+// becomes a `Vec<Vec<u32>>` of `[ip, prefix, gateway]` triples on
+// DBus), but every field is in both. Keeping them next to each other
+// makes drift easy to spot.
+
+/// Build the DBus settings dict for an `NmConnection`. Compatible with
+/// `org.freedesktop.NetworkManager.Settings.AddConnection`.
+pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, OwnedValue>> {
+    let mut out: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+
+    // [connection]
+    let mut conn = HashMap::new();
+    conn.insert("id".into(), into_value(p.id.clone()));
+    conn.insert("uuid".into(), into_value(p.uuid.clone()));
+    conn.insert(
+        "type".into(),
+        into_value(p.conn_type.keyfile_str().to_string()),
+    );
+    conn.insert(
+        "interface-name".into(),
+        into_value(p.interface_name.clone()),
+    );
+    conn.insert("autoconnect".into(), into_value(p.autoconnect));
+    if let Some(c) = &p.controller {
+        conn.insert("controller".into(), into_value(c.clone()));
+    }
+    if let Some(pt) = &p.port_type {
+        conn.insert("port-type".into(), into_value(pt.clone()));
+    }
+    out.insert("connection".into(), conn);
+
+    // type-specific section
+    match &p.type_specific {
+        NmTypeSpecific::None => {}
+        NmTypeSpecific::Bond { mode } => {
+            // NM's [bond] is `options`: a string→string map.
+            let mut options = HashMap::<String, String>::new();
+            options.insert("mode".into(), mode.clone());
+            let mut bond = HashMap::new();
+            bond.insert("options".into(), into_value(options));
+            out.insert("bond".into(), bond);
+        }
+        NmTypeSpecific::Bridge { stp, forward_delay } => {
+            let mut bridge = HashMap::new();
+            bridge.insert("stp".into(), into_value(*stp));
+            if let Some(fd) = forward_delay {
+                // NM expects forward-delay as a u32 in seconds.
+                bridge.insert("forward-delay".into(), into_value(u32::from(*fd)));
+            }
+            out.insert("bridge".into(), bridge);
+        }
+        NmTypeSpecific::Vlan { parent, id } => {
+            let mut vlan = HashMap::new();
+            vlan.insert("parent".into(), into_value(parent.clone()));
+            vlan.insert("id".into(), into_value(u32::from(*id)));
+            out.insert("vlan".into(), vlan);
+        }
+    }
+
+    // [ethernet] for Ethernet type. Carries MTU + cloned-mac.
+    if matches!(p.conn_type, NmConnectionType::Ethernet) {
+        let mut eth = HashMap::new();
+        if let Some(mtu) = p.mtu {
+            eth.insert("mtu".into(), into_value(u32::from(mtu)));
+        }
+        if let Some(mac) = &p.mac {
+            eth.insert("cloned-mac-address".into(), into_value(mac.clone()));
+        }
+        out.insert("802-3-ethernet".into(), eth);
+    }
+
+    // [ipv4]
+    out.insert("ipv4".into(), ip_section_dict(&p.ipv4, Family::V4));
+    // [ipv6]
+    out.insert("ipv6".into(), ip_section_dict(&p.ipv6, Family::V6));
+
+    out
+}
+
+fn ip_section_dict(ip: &NmIpSettings, family: Family) -> HashMap<String, OwnedValue> {
+    let mut s = HashMap::new();
+    s.insert(
+        "method".into(),
+        into_value(ip.method.keyfile_str().to_string()),
+    );
+
+    // NM's `address-data` (since 1.0) is the modern shape:
+    //   aa{sv} — array of dicts with keys "address" (string CIDR base)
+    //   and "prefix" (u32). Optional gateway is on `[ipv4].gateway`.
+    if !ip.addresses.is_empty() {
+        let mut addr_data: Vec<HashMap<String, OwnedValue>> = Vec::new();
+        for cidr in &ip.addresses {
+            if let Some((addr, prefix)) = parse_cidr(cidr, family) {
+                let mut entry = HashMap::new();
+                entry.insert("address".into(), into_value(addr));
+                entry.insert("prefix".into(), into_value(prefix));
+                addr_data.push(entry);
+            }
+        }
+        if !addr_data.is_empty() {
+            s.insert("address-data".into(), into_value(addr_data));
+        }
+    }
+    if let Some(gw) = &ip.gateway {
+        s.insert("gateway".into(), into_value(gw.clone()));
+    }
+    s
+}
+
+/// Parse `"10.0.0.5/24"` → (`"10.0.0.5"`, 24). Returns None on
+/// malformed input (we'd rather drop a bad address row than fail the
+/// whole apply).
+fn parse_cidr(cidr: &str, _family: Family) -> Option<(String, u32)> {
+    let (addr, prefix_str) = cidr.split_once('/')?;
+    let prefix: u32 = prefix_str.parse().ok()?;
+    Some((addr.to_string(), prefix))
+}
+
+/// Wrap a value in `OwnedValue`. Centralized so the unwrap handling is
+/// in one place — these conversions only fail on out-of-memory, which
+/// would fail loudly elsewhere first.
+fn into_value<T>(v: T) -> OwnedValue
+where
+    T: Into<zbus::zvariant::Value<'static>>,
+{
+    let value: zbus::zvariant::Value<'static> = v.into();
+    OwnedValue::try_from(value).expect("OwnedValue conversion")
 }
 
 // ── Tests ──────────────────────────────────────────────────────
@@ -880,5 +1011,223 @@ mod tests {
         };
         let keyfile = serialize_keyfile(&to_nm_profiles(&layered)[0]);
         assert!(keyfile.contains("cloned-mac-address=aa:bb:cc:dd:ee:ff"));
+    }
+
+    // ── DBus settings dict conversion (phase 3a) ───────────────
+
+    fn cidr_addr_data_first(dict: &HashMap<String, OwnedValue>) -> Option<(String, u32)> {
+        // Pull the first {address, prefix} entry out of `address-data`.
+        let addr_data: &OwnedValue = dict.get("address-data")?;
+        let outer = addr_data.try_clone().ok()?;
+        // `address-data` is `aa{sv}` — array of dicts.
+        let arr: zbus::zvariant::Array = outer.try_into().ok()?;
+        let first: zbus::zvariant::Value = arr.iter().next()?.try_clone().ok()?;
+        let entry: zbus::zvariant::Dict = first.try_into().ok()?;
+        let map: HashMap<String, OwnedValue> = entry.try_into().ok()?;
+        let addr: String = map.get("address")?.try_clone().ok()?.try_into().ok()?;
+        let prefix: u32 = map.get("prefix")?.try_clone().ok()?.try_into().ok()?;
+        Some((addr, prefix))
+    }
+
+    #[test]
+    fn dict_has_required_top_level_sections_for_ethernet_dhcp() {
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0")],
+            addresses: vec![Address {
+                link: "eth0".into(),
+                family: Family::V4,
+                method: IpMethod::Dhcp,
+                cidr: vec![],
+                gateway: None,
+            }],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        assert!(dict.contains_key("connection"));
+        assert!(dict.contains_key("802-3-ethernet"));
+        assert!(dict.contains_key("ipv4"));
+        assert!(dict.contains_key("ipv6"));
+    }
+
+    #[test]
+    fn dict_connection_section_carries_id_uuid_type_and_interface() {
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0")],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let conn = &dict["connection"];
+        let id: String = conn["id"].try_clone().unwrap().try_into().unwrap();
+        let uuid: String = conn["uuid"].try_clone().unwrap().try_into().unwrap();
+        let conn_type: String = conn["type"].try_clone().unwrap().try_into().unwrap();
+        let iface: String = conn["interface-name"]
+            .try_clone()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(id, "nasty-eth0");
+        assert_eq!(uuid.len(), 36);
+        assert_eq!(conn_type, "802-3-ethernet");
+        assert_eq!(iface, "eth0");
+    }
+
+    #[test]
+    fn dict_static_ipv4_uses_address_data_with_prefix() {
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0")],
+            addresses: vec![Address {
+                link: "eth0".into(),
+                family: Family::V4,
+                method: IpMethod::Static,
+                cidr: vec!["10.0.0.5/24".into()],
+                gateway: Some("10.0.0.1".into()),
+            }],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let ipv4 = &dict["ipv4"];
+        let method: String = ipv4["method"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(method, "manual");
+
+        let (addr, prefix) = cidr_addr_data_first(ipv4).expect("address-data parse");
+        assert_eq!(addr, "10.0.0.5");
+        assert_eq!(prefix, 24);
+
+        let gateway: String = ipv4["gateway"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(gateway, "10.0.0.1");
+    }
+
+    #[test]
+    fn dict_bridge_member_carries_controller_and_port_type_in_connection_section() {
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), link_bridge("br0", &["eth0"])],
+            ..Default::default()
+        };
+        let profiles = to_nm_profiles(&layered);
+        let eth0 = find(&profiles, "eth0");
+        let dict = to_settings_dict(eth0);
+        let conn = &dict["connection"];
+        let controller: String = conn["controller"].try_clone().unwrap().try_into().unwrap();
+        let port_type: String = conn["port-type"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(controller, "br0");
+        assert_eq!(port_type, "bridge");
+        // Member port should declare disabled IP method explicitly.
+        let ipv4_method: String = dict["ipv4"]["method"]
+            .try_clone()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(ipv4_method, "disabled");
+    }
+
+    #[test]
+    fn dict_bond_emits_options_subdict_with_mode() {
+        let layered = LayeredConfig {
+            links: vec![link_bond("bond0", &[])],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let bond = dict.get("bond").expect("bond section");
+        // `options` is `a{ss}` — string→string dict.
+        let options_value = bond["options"].try_clone().unwrap();
+        let options: HashMap<String, String> = options_value.try_into().unwrap();
+        assert_eq!(options.get("mode").map(|s| s.as_str()), Some("802.3ad"));
+    }
+
+    #[test]
+    fn dict_bridge_emits_stp_and_forward_delay() {
+        let layered = LayeredConfig {
+            links: vec![Link {
+                name: "br0".into(),
+                enabled: true,
+                mtu: None,
+                mac: None,
+                kind: LinkKind::Bridge {
+                    members: vec![],
+                    stp: true,
+                    forward_delay_s: Some(7),
+                },
+            }],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let bridge = dict.get("bridge").expect("bridge section");
+        let stp: bool = bridge["stp"].try_clone().unwrap().try_into().unwrap();
+        let fd: u32 = bridge["forward-delay"]
+            .try_clone()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(stp);
+        assert_eq!(fd, 7);
+    }
+
+    #[test]
+    fn dict_vlan_emits_parent_and_id_as_u32() {
+        let layered = LayeredConfig {
+            links: vec![Link {
+                name: "eth0.10".into(),
+                enabled: true,
+                mtu: None,
+                mac: None,
+                kind: LinkKind::Vlan {
+                    parent: "eth0".into(),
+                    id: 10,
+                },
+            }],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let vlan = dict.get("vlan").expect("vlan section");
+        let parent: String = vlan["parent"].try_clone().unwrap().try_into().unwrap();
+        let id: u32 = vlan["id"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(parent, "eth0");
+        assert_eq!(id, 10);
+    }
+
+    #[test]
+    fn dict_ethernet_section_carries_mtu_and_cloned_mac() {
+        let mut eth0 = link_phys("eth0");
+        eth0.mtu = Some(9000);
+        eth0.mac = Some("aa:bb:cc:dd:ee:ff".into());
+        let layered = LayeredConfig {
+            links: vec![eth0],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let eth = dict.get("802-3-ethernet").expect("ethernet section");
+        let mtu: u32 = eth["mtu"].try_clone().unwrap().try_into().unwrap();
+        let mac: String = eth["cloned-mac-address"]
+            .try_clone()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(mtu, 9000);
+        assert_eq!(mac, "aa:bb:cc:dd:ee:ff");
+    }
+
+    // ── UUIDv5 sanity checks ───────────────────────────────────
+
+    #[test]
+    fn uuid_v5_is_canonical_36_chars() {
+        let u = deterministic_uuid_for("br0");
+        assert_eq!(u.len(), 36);
+        assert_eq!(u.as_bytes()[8], b'-');
+        assert_eq!(u.as_bytes()[13], b'-');
+        assert_eq!(u.as_bytes()[14], b'5'); // version 5
+        assert_eq!(u.as_bytes()[18], b'-');
+        assert_eq!(u.as_bytes()[23], b'-');
+    }
+
+    #[test]
+    fn uuid_v5_is_stable_for_same_name() {
+        assert_eq!(
+            deterministic_uuid_for("eth0"),
+            deterministic_uuid_for("eth0")
+        );
+        assert_ne!(
+            deterministic_uuid_for("eth0"),
+            deterministic_uuid_for("eth1")
+        );
     }
 }
