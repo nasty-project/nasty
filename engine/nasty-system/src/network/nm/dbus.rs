@@ -1,21 +1,11 @@
 //! NetworkManager D-Bus client.
 //!
-//! Talks to NM via zbus. Read methods (`list_connections`,
-//! `get_settings`) plus diff computation arrived in phase 3a; write
-//! methods (`AddConnection` / `Update` / `Delete`) and `apply_profiles`
-//! arrived in phase 3b-alpha. **No activation yet** — `apply_profiles`
-//! persists keyfiles into NM but doesn't bring connections up. That
-//! lets the writes ship before the migration cutover, since persisted
-//! keyfiles don't affect the running system until something explicitly
-//! activates them.
-//!
-//! Phase 3b-beta — which adds activation, runs the
-//! `nixos-rebuild switch` cutover, and switches the active apply path
-//! away from the legacy ip-command flow — ships separately, once the
-//! migration story (idempotent runner with snapshot+rollback) is
-//! built. By then the write code here is already in the field via
-//! the explicit `system.network.nm_apply` RPC; bugs surface as failed
-//! preview/apply on inspection rather than as broken connectivity.
+//! Talks to NM via zbus. Reads (`list_connections`, `get_settings`)
+//! and diff computation arrived in phase 3a; writes (`AddConnection` /
+//! `Update` / `Delete`) and `apply_profiles` in phase 3b-alpha;
+//! activation in phase 3b-beta. After 3b-beta this is the active
+//! apply backend — `apply_config` in `super::super::network` calls
+//! `apply_profiles` directly, the legacy ip-command path is gone.
 
 use std::collections::HashMap;
 
@@ -75,6 +65,16 @@ trait ConnectionSettings {
 )]
 trait NetworkManager {
     fn get_devices(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
+    /// Activate a connection on a device. Pass `/` for `specific_object`
+    /// to let NM pick (the right call for our case — we don't bind to
+    /// a specific access point or VPN secret). Returns the object path
+    /// of the new ActiveConnection.
+    fn activate_connection(
+        &self,
+        connection: &zbus::zvariant::ObjectPath<'_>,
+        device: &zbus::zvariant::ObjectPath<'_>,
+        specific_object: &zbus::zvariant::ObjectPath<'_>,
+    ) -> zbus::Result<OwnedObjectPath>;
 }
 
 #[proxy(
@@ -205,6 +205,58 @@ impl NmDbusClient {
             .delete()
             .await
             .map_err(|e| format!("delete {path}: {e}"))
+    }
+
+    /// Find the NM Device object path matching a kernel interface name
+    /// (`eth0`, `br0`, `bond0`, ...). Returns `None` if no NM-managed
+    /// device with that name exists — typical for an iface that's
+    /// excluded by `unmanaged-devices`.
+    pub async fn find_device_by_name(
+        &self,
+        iface: &str,
+    ) -> Result<Option<OwnedObjectPath>, String> {
+        let nm = NetworkManagerProxy::new(&self.conn)
+            .await
+            .map_err(|e| format!("nm proxy: {e}"))?;
+        let devices = nm
+            .get_devices()
+            .await
+            .map_err(|e| format!("get_devices: {e}"))?;
+        for path in devices {
+            let dev = DeviceProxy::builder(&self.conn)
+                .path(path.clone())
+                .map_err(|e| format!("device path {path}: {e}"))?
+                .build()
+                .await
+                .map_err(|e| format!("device proxy {path}: {e}"))?;
+            match dev.interface().await {
+                Ok(name) if name == iface => return Ok(Some(path)),
+                Ok(_) => {}
+                Err(e) => tracing::debug!("device {path} interface read failed: {e}"),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Activate a connection on a device. Idempotent for NM:
+    /// activating an already-active connection is a no-op (NM returns
+    /// the existing ActiveConnection). Use `find_device_by_name` to
+    /// resolve the device path first.
+    pub async fn activate_connection(
+        &self,
+        connection: &OwnedObjectPath,
+        device: &OwnedObjectPath,
+    ) -> Result<OwnedObjectPath, String> {
+        let nm = NetworkManagerProxy::new(&self.conn)
+            .await
+            .map_err(|e| format!("nm proxy: {e}"))?;
+        let unspecified = zbus::zvariant::ObjectPath::try_from("/")
+            .map_err(|e| format!("unspecified path: {e}"))?;
+        let conn_ref = connection.as_ref();
+        let dev_ref = device.as_ref();
+        nm.activate_connection(&conn_ref, &dev_ref, &unspecified)
+            .await
+            .map_err(|e| format!("activate_connection: {e}"))
     }
 }
 
@@ -365,6 +417,10 @@ pub struct NmApplyOutcome {
     pub updated: Vec<String>,
     pub deleted: Vec<String>,
     pub unchanged: Vec<String>,
+    /// Connection IDs successfully activated this apply. Subset of
+    /// `added ∪ updated ∪ unchanged` — we only activate enabled
+    /// connections that have a matching NM-managed device.
+    pub activated: Vec<String>,
     /// Per-id error map. Empty on full success. The apply is best-
     /// effort — one failed connection doesn't abort the rest.
     pub errors: HashMap<String, String>,
@@ -372,8 +428,15 @@ pub struct NmApplyOutcome {
 
 /// Apply a desired profile set to NM. Computes the diff against the
 /// current `nasty-*` connections, then issues `AddConnection` /
-/// `Update` / `Delete` calls. Persists everything to disk via NM;
-/// does not activate.
+/// `Update` / `Delete` calls. After Add/Update, activates each
+/// enabled connection on its matching device (idempotent — NM no-ops
+/// when the connection is already the active one for the device).
+///
+/// Activation is the right behavior post-cutover (phase 3b-beta): NM
+/// is now authoritative for the running network, so persisted-but-
+/// inactive profiles serve no purpose. Phase 3b-alpha's "no
+/// activation" guarantee was a transitional safety while the legacy
+/// ip-command apply was still authoritative; it no longer applies.
 pub async fn apply_profiles(
     client: &NmDbusClient,
     desired: &[NmConnection],
@@ -385,17 +448,23 @@ pub async fn apply_profiles(
         desired.iter().map(|d| d.id.as_str()).collect();
 
     let mut outcome = NmApplyOutcome::default();
+    // Connection paths for activation step. Tracked in iteration
+    // order so masters get activated before their members would
+    // — though NM tolerates either order via the `controller` field
+    // on the port profile.
+    let mut activate_targets: Vec<(String, OwnedObjectPath, String)> = Vec::new();
 
-    // Adds first: a new bridge profile may be a controller for a port
-    // we're about to add; NM resolves controller-by-name lazily, so
-    // the order doesn't matter for correctness, but adding masters
-    // first matches operator intuition when watching journalctl.
     for d in desired {
         match existing_by_id.get(d.id.as_str()) {
             None => {
                 let dict = super::to_settings_dict(d);
                 match client.add_connection(dict).await {
-                    Ok(_path) => outcome.added.push(d.id.clone()),
+                    Ok(path) => {
+                        outcome.added.push(d.id.clone());
+                        if d.autoconnect {
+                            activate_targets.push((d.id.clone(), path, d.interface_name.clone()));
+                        }
+                    }
                     Err(e) => {
                         outcome.errors.insert(d.id.clone(), e);
                     }
@@ -405,13 +474,29 @@ pub async fn apply_profiles(
                 let dict = super::to_settings_dict(d);
                 if section_changed_any(&dict, &existing_conn.settings) {
                     match client.update_connection(&existing_conn.path, dict).await {
-                        Ok(()) => outcome.updated.push(d.id.clone()),
+                        Ok(()) => {
+                            outcome.updated.push(d.id.clone());
+                            if d.autoconnect {
+                                activate_targets.push((
+                                    d.id.clone(),
+                                    existing_conn.path.clone(),
+                                    d.interface_name.clone(),
+                                ));
+                            }
+                        }
                         Err(e) => {
                             outcome.errors.insert(d.id.clone(), e);
                         }
                     }
                 } else {
                     outcome.unchanged.push(d.id.clone());
+                    if d.autoconnect {
+                        activate_targets.push((
+                            d.id.clone(),
+                            existing_conn.path.clone(),
+                            d.interface_name.clone(),
+                        ));
+                    }
                 }
             }
         }
@@ -425,6 +510,35 @@ pub async fn apply_profiles(
                 Err(err) => {
                     outcome.errors.insert(e.id.clone(), err);
                 }
+            }
+        }
+    }
+
+    // Activate phase. Each activation is independent — failure to
+    // activate one connection doesn't abort the others. A common
+    // benign failure is "no NM-managed device matches this iface
+    // name" (e.g., the iface is in `unmanaged-devices` or hasn't
+    // come up yet); we surface that as an error in the outcome map
+    // so the caller can decide whether to retry.
+    for (id, conn_path, iface_name) in &activate_targets {
+        let device = match client.find_device_by_name(iface_name).await {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                outcome.errors.insert(
+                    id.clone(),
+                    format!("no NM-managed device matches interface '{iface_name}'"),
+                );
+                continue;
+            }
+            Err(e) => {
+                outcome.errors.insert(id.clone(), e);
+                continue;
+            }
+        };
+        match client.activate_connection(conn_path, &device).await {
+            Ok(_active) => outcome.activated.push(id.clone()),
+            Err(e) => {
+                outcome.errors.insert(id.clone(), format!("activate: {e}"));
             }
         }
     }

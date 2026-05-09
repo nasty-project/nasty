@@ -1272,5 +1272,42 @@ in {
     # nftables rules dynamically via `table inet nasty`.
     networking.firewall.enable = false;
     networking.nftables.enable = true;
+
+    # ── Networking backend (NetworkManager) ───────────────────
+    # As of v0.0.7 NASty manages the host network via NetworkManager
+    # rather than scripted networking + dhcpcd. The engine writes NM
+    # connection profiles directly via DBus; nixos-rebuild no longer
+    # plays a role in network changes after the cutover migration.
+    # See docs/network-architecture.md for the rationale.
+    #
+    # The engine still writes /etc/nixos/networking.nix on every apply
+    # (for the `import ./networking.nix` chain in configuration.nix),
+    # but its content is force-overridden here so any leftover legacy
+    # declarations from before the upgrade can't fight NM.
+    networking.networkmanager.enable = true;
+    networking.useDHCP = lib.mkForce false;
+    networking.useNetworkd = lib.mkForce false;
+    networking.bridges = lib.mkForce { };
+    networking.bonds = lib.mkForce { };
+    networking.vlans = lib.mkForce { };
+    networking.interfaces = lib.mkForce { };
+    services.resolved.enable = true;
+
+    # NM ownership boundary: the engine's `nasty-*` connections are
+    # ours; everything else (Docker bridges, libvirt taps, container
+    # veth ends, WireGuard / Tailscale tunnels, k8s CNI) is run by
+    # other services and must not be touched. Glob match is the
+    # discriminator until phase 4 makes it more sophisticated.
+    networking.networkmanager.unmanaged = [
+      "interface-name:docker*"
+      "interface-name:br-*"
+      "interface-name:veth*"
+      "interface-name:vnet*"
+      "interface-name:tap*"
+      "interface-name:wg*"
+      "interface-name:tailscale*"
+      "interface-name:cni*"
+      "interface-name:flannel*"
+    ];
   };
 }
