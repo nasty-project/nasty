@@ -373,6 +373,11 @@ impl NetworkService {
                 config.vlans.len()
             );
 
+            // Safe (non-rollback) change: persist to NixOS now so the next
+            // reboot uses our generated networking.nix instead of the
+            // last-built generation. Risky changes defer this to confirm().
+            spawn_nixos_rebuild_boot("apply");
+
             Ok(UpdateResponse::default())
         }
     }
@@ -390,6 +395,11 @@ impl NetworkService {
                 let _ = txn.cancel.send(());
                 let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
                 info!("Network txn {txn_id} confirmed");
+                // Now that the user has acknowledged the change, persist it
+                // to NixOS so a reboot uses it. Deferred to confirm() (not
+                // run at apply time) so we don't pay the rebuild cost for
+                // changes that get rolled back.
+                spawn_nixos_rebuild_boot(&format!("confirm {txn_id}"));
                 Ok(())
             }
             None => Err(format!("unknown or already-completed txn_id {txn_id}")),
@@ -499,6 +509,46 @@ async fn perform_rollback(txn_id: &str) {
     }
     let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
     warn!("rollback {txn_id}: completed; previous config restored");
+}
+
+/// Spawn `nixos-rebuild boot --flake /etc/nixos` in the background so the
+/// generated `/etc/nixos/networking.nix` is realized into a built system
+/// generation. `boot` (not `switch`) updates the bootloader entry without
+/// disrupting the running system — the runtime change is already in place
+/// via `ip` commands, this just makes it stick across reboot.
+///
+/// Returns immediately; the rebuild runs to completion in the background
+/// and logs success or stderr on failure. Multiple concurrent invocations
+/// serialize on `nixos-rebuild`'s own lock (the Nix store DB lock); cheap
+/// enough that we don't add our own mutex.
+///
+/// `cause` is logged for traceability — typically `"apply"` or
+/// `"confirm <txn_id>"` so journal grep is straightforward.
+fn spawn_nixos_rebuild_boot(cause: &str) {
+    let cause = cause.to_string();
+    tokio::spawn(async move {
+        info!("nixos-rebuild boot starting ({cause})");
+        let output = tokio::process::Command::new("nixos-rebuild")
+            .args(["boot", "--flake", "/etc/nixos"])
+            .output()
+            .await;
+        match output {
+            Ok(out) if out.status.success() => {
+                info!("nixos-rebuild boot completed ({cause}); change persists across reboot");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stderr = stderr.trim();
+                warn!(
+                    "nixos-rebuild boot failed ({cause}, status {}): {stderr}",
+                    out.status
+                );
+            }
+            Err(e) => {
+                warn!("nixos-rebuild boot failed to spawn ({cause}): {e}");
+            }
+        }
+    });
 }
 
 fn new_txn_id() -> String {
@@ -925,7 +975,26 @@ fn resolve_inherit_one(
                 _ => {}
             }
         }
-        // Fall back to whatever the kernel currently shows for this member.
+        // No prior config for this member. The fallback is to look at live
+        // kernel state — but with one important exception: if the member's
+        // address came from dhcpcd (the kernel route table marks the route
+        // `proto: dhcp`), the live address is a *lease*, not a static
+        // configuration. Baking that lease into the bridge as Static would
+        // cause two real bugs:
+        //   1) On reboot, the bridge claims the leased address even though
+        //      the DHCP server may have re-issued it elsewhere.
+        //   2) The bridge stops doing DHCP renewals — when the lease
+        //      expires the address is still claimed but no longer valid.
+        // So treat DHCP-managed members as `Dhcp` (let the bridge get its
+        // own lease), and only bake live addrs as Static when the route
+        // table says they're statically configured.
+        if !v6 && live.is_dhcp_managed_v4(member) {
+            return IpConfig {
+                method: IpMethod::Dhcp,
+                addresses: Vec::new(),
+                gateway: None,
+            };
+        }
         let live_addrs = live.addrs(member, v6);
         if !live_addrs.is_empty() {
             return IpConfig {
@@ -969,6 +1038,11 @@ struct LiveTopology {
     default_via_v4: std::collections::HashMap<String, String>,
     /// Egress iface → IPv6 default gateway.
     default_via_v6: std::collections::HashMap<String, String>,
+    /// Ifaces whose IPv4 addresses were installed by dhcpcd (any route on
+    /// the iface with `proto: dhcp`). Used by `resolve_inherit` so the
+    /// live lease address isn't baked into the bridge config as Static —
+    /// the bridge inherits DHCP semantics, not the specific address.
+    dhcp_managed_v4: std::collections::HashSet<String>,
 }
 
 impl LiveTopology {
@@ -991,12 +1065,16 @@ impl LiveTopology {
         let default_via_v6 =
             parse_default_via(&run_ip_json(&["-j", "-6", "route", "show", "default"]).await)
                 .unwrap_or_default();
+        let dhcp_managed_v4 =
+            parse_dhcp_managed(&run_ip_json(&["-j", "-4", "route", "show"]).await)
+                .unwrap_or_default();
         Self {
             links,
             addrs_v4,
             addrs_v6,
             default_via_v4,
             default_via_v6,
+            dhcp_managed_v4,
         }
     }
 
@@ -1016,6 +1094,10 @@ impl LiveTopology {
             &self.default_via_v4
         };
         map.get(iface).map(|s| s.as_str())
+    }
+
+    fn is_dhcp_managed_v4(&self, iface: &str) -> bool {
+        self.dhcp_managed_v4.contains(iface)
     }
 }
 
@@ -1066,6 +1148,11 @@ struct IpRouteLine {
     dst: String,
     gateway: Option<String>,
     dev: Option<String>,
+    /// Routing protocol id — `"dhcp"` when dhcpcd installed the route.
+    /// Used to distinguish a DHCP lease from a static address that
+    /// happens to be the same value.
+    #[serde(default)]
+    protocol: String,
 }
 
 fn parse_default_via(json: &str) -> Option<std::collections::HashMap<String, String>> {
@@ -1078,6 +1165,19 @@ fn parse_default_via(json: &str) -> Option<std::collections::HashMap<String, Str
                 (Some(dev), Some(gw)) => Some((dev, gw)),
                 _ => None,
             })
+            .collect(),
+    )
+}
+
+/// Set of ifaces with at least one route installed by dhcpcd. Parsed from
+/// `ip -j -4 route show` (no filter — we want default *and* link routes).
+fn parse_dhcp_managed(json: &str) -> Option<std::collections::HashSet<String>> {
+    let parsed: Vec<IpRouteLine> = serde_json::from_str(json).ok()?;
+    Some(
+        parsed
+            .into_iter()
+            .filter(|r| r.protocol == "dhcp")
+            .filter_map(|r| r.dev)
             .collect(),
     )
 }
@@ -2175,9 +2275,10 @@ mod tests {
     }
 
     #[test]
-    fn inherit_falls_back_to_live_addrs() {
-        // No prior config for eth0, but the kernel currently shows a lease
-        // address — adopt it as static so the bridge keeps connectivity.
+    fn inherit_falls_back_to_live_addrs_as_static_when_not_dhcp_managed() {
+        // No prior config for eth0; live shows an address that wasn't
+        // installed by dhcpcd (proto != dhcp). Adopt it as Static — it's
+        // a manually-configured address that should follow the bridge.
         let prev = NetworkConfig::default();
         let mut br = bridge("br0", &["eth0"]);
         br.ipv4 = inherit_ip();
@@ -2196,6 +2297,29 @@ mod tests {
             resolved.bridges[0].ipv4.gateway,
             Some("10.0.0.1".to_string())
         );
+    }
+
+    #[test]
+    fn inherit_resolves_to_dhcp_when_live_route_is_dhcp_managed() {
+        // No prior config, but the kernel route table marks the iface's
+        // route as `proto: dhcp` — the live address is a lease, not a
+        // static configuration. The bridge must inherit DHCP semantics
+        // (so it does its own renewals) rather than baking the leased
+        // address as Static, which would break on reboot if the DHCP
+        // server hands the address to someone else.
+        let prev = NetworkConfig::default();
+        let mut br = bridge("br0", &["eth0"]);
+        br.ipv4 = inherit_ip();
+        let next = NetworkConfig {
+            bridges: vec![br],
+            ..Default::default()
+        };
+        let mut live = live_for("eth0", &["10.0.0.5/24"], Some("10.0.0.1"));
+        live.dhcp_managed_v4.insert("eth0".to_string());
+        let resolved = resolve_inherit(next, &prev, &live);
+        assert_eq!(resolved.bridges[0].ipv4.method, IpMethod::Dhcp);
+        assert!(resolved.bridges[0].ipv4.addresses.is_empty());
+        assert!(resolved.bridges[0].ipv4.gateway.is_none());
     }
 
     #[test]
@@ -2299,7 +2423,32 @@ mod tests {
     fn parse_handles_empty_or_malformed_json() {
         assert!(parse_ip_addrs("[]", false).unwrap().is_empty());
         assert!(parse_default_via("[]").unwrap().is_empty());
+        assert!(parse_dhcp_managed("[]").unwrap().is_empty());
         assert!(parse_ip_addrs("not json", false).is_none());
+    }
+
+    #[test]
+    fn parse_dhcp_managed_picks_up_proto_dhcp_routes() {
+        // Real `ip -j -4 route show` output from a DHCP-managed iface:
+        // both the default route and the link-scope route are tagged
+        // proto: dhcp because dhcpcd installed them.
+        let json = r#"[
+          {"dst":"default","gateway":"10.10.10.1","dev":"ens18","protocol":"dhcp"},
+          {"dst":"10.10.10.0/24","dev":"ens18","protocol":"dhcp"},
+          {"dst":"172.17.0.0/16","dev":"docker0","protocol":"kernel"}
+        ]"#;
+        let parsed = parse_dhcp_managed(json).unwrap();
+        assert!(parsed.contains("ens18"));
+        assert!(!parsed.contains("docker0"));
+    }
+
+    #[test]
+    fn parse_dhcp_managed_ignores_static_routes() {
+        let json = r#"[
+          {"dst":"default","gateway":"10.0.0.1","dev":"eth0","protocol":"static"},
+          {"dst":"10.0.0.0/24","dev":"eth0","protocol":"kernel"}
+        ]"#;
+        assert!(parse_dhcp_managed(json).unwrap().is_empty());
     }
 
     // ── BridgeConfig deserialization defaults ──────────────────
