@@ -734,9 +734,30 @@
 		<CardContent class="py-8 text-center">
 			<p class="mb-1 font-medium">Apps are disabled</p>
 			<p class="mb-4 text-sm text-muted-foreground">
-				Container apps run on a Docker daemon NASty manages as a service. Enable the Apps service to install and manage them.
+				Container apps run on a Docker daemon NASty manages as a service. Pick a filesystem for Docker's data, then enable the runtime — no need to leave this page.
 			</p>
-			<Button onclick={() => goto('/services')}>Manage in Services →</Button>
+			{#if filesystems.length === 0}
+				<p class="mb-4 text-sm text-amber-400">You need at least one mounted filesystem before enabling Apps.</p>
+				<Button variant="secondary" onclick={() => goto('/filesystems')}>Go to Filesystems →</Button>
+			{:else}
+				<div class="mb-4 inline-flex items-center gap-2 text-sm">
+					{#if filesystems.length > 1}
+						<label for="apps-fs" class="text-muted-foreground">Storage filesystem:</label>
+						<select id="apps-fs" bind:value={selectedFs} class="h-8 rounded-md border border-input bg-transparent px-2 text-sm">
+							{#each filesystems as fs}
+								<option value={fs.name}>{fs.name}</option>
+							{/each}
+						</select>
+					{:else}
+						<span class="text-muted-foreground">Storage filesystem: <code class="font-mono">{selectedFs}</code></span>
+					{/if}
+				</div>
+				<div>
+					<Button onclick={enableApps} disabled={enabling || !selectedFs}>
+						{enabling ? 'Enabling…' : 'Enable Apps'}
+					</Button>
+				</div>
+			{/if}
 		</CardContent>
 	</Card>
 {:else}
