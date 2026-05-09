@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 pub mod layered;
+pub mod nm;
 
 const JSON_PATH: &str = "/var/lib/nasty/networking.json";
 const NIX_PATH: &str = "/etc/nixos/networking.nix";
@@ -22,6 +23,11 @@ const PENDING_REVERT_PATH: &str = "/var/lib/nasty/networking.json.pending-revert
 /// successful apply; the legacy file remains the source of truth until
 /// phase 3 cuts over.
 const JSON_PATH_V2: &str = "/var/lib/nasty/networking-v2.json";
+/// Phase 2 shadow output: per-link NM connection-profile previews. One
+/// `<id>.nmconnection.preview` file per managed link, in NM keyfile
+/// format. Phase 3 will swap these for real
+/// `/etc/NetworkManager/system-connections/` files (or DBus calls).
+const NM_PREVIEW_DIR: &str = "/var/lib/nasty/networking-v2-nm-preview";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -624,11 +630,52 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
         Err(e) => warn!("failed to serialize layered config: {e}"),
     }
 
+    // Phase 2 shadow write of NM connection-profile previews. Same
+    // best-effort stance — these are inspectable artifacts, not yet
+    // active. Phase 3 will replace them with real NM keyfiles + DBus.
+    if let Err(e) = write_nm_previews(&layered_cfg).await {
+        warn!("failed to write NM connection previews: {e}");
+    }
+
     let nix = generate_nix(config);
     if let Err(e) = atomic_write(NIX_PATH, nix.as_bytes()).await {
         warn!("failed to write {NIX_PATH}: {e}");
     }
 
+    Ok(())
+}
+
+/// Render the layered config to NM connection profiles and write each
+/// one as a `.nmconnection.preview` file in `NM_PREVIEW_DIR`. Stale
+/// preview files (links that no longer exist) are removed first so
+/// the directory always reflects the current desired state.
+async fn write_nm_previews(layered_cfg: &layered::LayeredConfig) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(NM_PREVIEW_DIR).await?;
+
+    let profiles = nm::to_nm_profiles(layered_cfg);
+    let expected_filenames: std::collections::HashSet<String> = profiles
+        .iter()
+        .map(|p| format!("{}.nmconnection.preview", p.id))
+        .collect();
+
+    // Best-effort cleanup of stale previews. Don't fail the write if
+    // this errors — just log.
+    if let Ok(mut dir) = tokio::fs::read_dir(NM_PREVIEW_DIR).await {
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            if let Some(name) = entry.file_name().to_str()
+                && name.ends_with(".nmconnection.preview")
+                && !expected_filenames.contains(name)
+            {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+
+    for profile in &profiles {
+        let path = format!("{NM_PREVIEW_DIR}/{}.nmconnection.preview", profile.id);
+        let body = nm::serialize_keyfile(profile);
+        atomic_write(&path, body.as_bytes()).await?;
+    }
     Ok(())
 }
 
