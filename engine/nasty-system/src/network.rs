@@ -509,6 +509,25 @@ impl NetworkService {
         let existing = client.list_nasty_connections().await?;
         Ok(nm::dbus::compute_diff(&desired, &existing))
     }
+
+    /// Phase 3b-alpha — push the current desired config into NM via
+    /// DBus. **Persists profiles to disk; does not activate them.**
+    ///
+    /// Intended for explicit invocation (curl + `nm_apply` RPC) on a
+    /// box that has NM installed alongside the legacy stack. Phase
+    /// 3b-beta replaces this with automatic invocation as part of
+    /// the cutover migration.
+    ///
+    /// Calling this on a box without NM installed errors out at the
+    /// DBus connect step; safe.
+    pub async fn nm_apply(&self) -> Result<nm::dbus::NmApplyOutcome, String> {
+        let cfg = load_config().await;
+        let layered_cfg = layered::to_layered(&cfg);
+        let desired = nm::to_nm_profiles(&layered_cfg);
+
+        let client = nm::dbus::NmDbusClient::new().await?;
+        nm::dbus::apply_profiles(&client, &desired).await
+    }
 }
 
 /// Top-level helper for the rollback timer. Reads the pending-revert file,
