@@ -28,6 +28,10 @@ const JSON_PATH_V2: &str = "/var/lib/nasty/networking-v2.json";
 /// format. Phase 3 will swap these for real
 /// `/etc/NetworkManager/system-connections/` files (or DBus calls).
 const NM_PREVIEW_DIR: &str = "/var/lib/nasty/networking-v2-nm-preview";
+/// Phase 3b-beta one-shot migration marker. Set after the migration
+/// from the pre-NM stack completes. Engine skips migration on
+/// subsequent boots once present.
+const NETWORK_MIGRATION_MARKER: &str = "/var/lib/nasty/.network-migrated-v2";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -83,17 +87,15 @@ pub enum BondMode {
 }
 
 impl BondMode {
-    fn to_kernel(&self) -> &'static str {
+    /// String the kernel and NM both understand for the
+    /// `802-3-ethernet` / NM bond `mode` field.
+    pub(crate) fn to_kernel(&self) -> &'static str {
         match self {
             BondMode::Lacp => "802.3ad",
             BondMode::ActiveBackup => "active-backup",
             BondMode::BalanceRr => "balance-rr",
             BondMode::BalanceXor => "balance-xor",
         }
-    }
-
-    fn to_nix(&self) -> &'static str {
-        self.to_kernel()
     }
 }
 
@@ -386,10 +388,10 @@ impl NetworkService {
                 config.vlans.len()
             );
 
-            // Safe (non-rollback) change: persist to NixOS now so the next
-            // reboot uses our generated networking.nix instead of the
-            // last-built generation. Risky changes defer this to confirm().
-            spawn_nixos_rebuild_boot("apply");
+            // Post-cutover (phase 3b-beta): NM persists profiles to
+            // /etc/NetworkManager/system-connections/ as part of
+            // apply_profiles, so reboot picks them up automatically.
+            // No nixos-rebuild needed.
 
             Ok(UpdateResponse::default())
         }
@@ -408,11 +410,9 @@ impl NetworkService {
                 let _ = txn.cancel.send(());
                 let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
                 info!("Network txn {txn_id} confirmed");
-                // Now that the user has acknowledged the change, persist it
-                // to NixOS so a reboot uses it. Deferred to confirm() (not
-                // run at apply time) so we don't pay the rebuild cost for
-                // changes that get rolled back.
-                spawn_nixos_rebuild_boot(&format!("confirm {txn_id}"));
+                // Post-cutover: NM keyfiles already persisted as part
+                // of the apply that scheduled this rollback. No
+                // explicit rebuild step needed on confirm.
                 Ok(())
             }
             None => Err(format!("unknown or already-completed txn_id {txn_id}")),
@@ -448,6 +448,81 @@ impl NetworkService {
         }
         let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
         info!("Pending-revert restored cleanly");
+    }
+
+    /// One-shot migration from the pre-cutover legacy stack to the
+    /// NetworkManager backend. Runs at engine startup. Idempotent:
+    /// gated on `/var/lib/nasty/.network-migrated-v2`, no-op if the
+    /// marker exists.
+    ///
+    /// Called after `restore_pending_revert` so any in-flight rollback
+    /// from before the upgrade is settled before we author NM
+    /// connections from the resulting config.
+    ///
+    /// Best-effort: if NM isn't reachable yet (engine started before
+    /// NetworkManager.service is fully up — unlikely with proper
+    /// systemd ordering, but possible), we log and skip. The marker
+    /// stays unset so the next engine start retries. The user's
+    /// rollback path if migration produces broken connectivity is
+    /// the bootloader: previous NixOS generation still has the
+    /// legacy stack.
+    pub async fn run_migration_if_needed(&self) {
+        if tokio::fs::try_exists(NETWORK_MIGRATION_MARKER)
+            .await
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        info!("Running one-shot network migration to NetworkManager...");
+
+        let cfg = load_config().await;
+        let layered_cfg = layered::to_layered(&cfg);
+        let profiles = nm::to_nm_profiles(&layered_cfg);
+
+        let client = match nm::dbus::NmDbusClient::new().await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    "Network migration deferred: cannot reach NetworkManager ({e}). \
+                     Will retry on next engine start."
+                );
+                return;
+            }
+        };
+
+        match nm::dbus::apply_profiles(&client, &profiles).await {
+            Ok(outcome) => {
+                info!(
+                    "Network migration applied: {} added, {} updated, {} unchanged, {} activated, {} errors",
+                    outcome.added.len(),
+                    outcome.updated.len(),
+                    outcome.unchanged.len(),
+                    outcome.activated.len(),
+                    outcome.errors.len(),
+                );
+                for (id, msg) in &outcome.errors {
+                    warn!("migration: connection '{id}' failed: {msg}");
+                }
+
+                // Touch the marker even if some connections errored —
+                // they're surfaced in the log; retrying the whole
+                // migration would re-attempt the successful ones too.
+                // The user can fix bad ones individually via the
+                // WebUI's normal apply flow.
+                if let Err(e) = tokio::fs::write(NETWORK_MIGRATION_MARKER, b"v2\n").await {
+                    warn!("migration: could not write marker {NETWORK_MIGRATION_MARKER}: {e}");
+                } else {
+                    info!("Network migration complete; marker set");
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Network migration deferred: apply_profiles failed ({e}). \
+                     Will retry on next engine start."
+                );
+            }
+        }
     }
 
     /// Spawn a tokio task that performs the rollback after `secs` unless
@@ -560,46 +635,6 @@ async fn perform_rollback(txn_id: &str) {
     warn!("rollback {txn_id}: completed; previous config restored");
 }
 
-/// Spawn `nixos-rebuild boot --flake /etc/nixos` in the background so the
-/// generated `/etc/nixos/networking.nix` is realized into a built system
-/// generation. `boot` (not `switch`) updates the bootloader entry without
-/// disrupting the running system — the runtime change is already in place
-/// via `ip` commands, this just makes it stick across reboot.
-///
-/// Returns immediately; the rebuild runs to completion in the background
-/// and logs success or stderr on failure. Multiple concurrent invocations
-/// serialize on `nixos-rebuild`'s own lock (the Nix store DB lock); cheap
-/// enough that we don't add our own mutex.
-///
-/// `cause` is logged for traceability — typically `"apply"` or
-/// `"confirm <txn_id>"` so journal grep is straightforward.
-fn spawn_nixos_rebuild_boot(cause: &str) {
-    let cause = cause.to_string();
-    tokio::spawn(async move {
-        info!("nixos-rebuild boot starting ({cause})");
-        let output = tokio::process::Command::new("nixos-rebuild")
-            .args(["boot", "--flake", "/etc/nixos"])
-            .output()
-            .await;
-        match output {
-            Ok(out) if out.status.success() => {
-                info!("nixos-rebuild boot completed ({cause}); change persists across reboot");
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stderr = stderr.trim();
-                warn!(
-                    "nixos-rebuild boot failed ({cause}, status {}): {stderr}",
-                    out.status
-                );
-            }
-            Err(e) => {
-                warn!("nixos-rebuild boot failed to spawn ({cause}): {e}");
-            }
-        }
-    });
-}
-
 fn new_txn_id() -> String {
     // Process-local monotonic counter mixed with start time. Distinct
     // within a session without an external RNG dep, and stable enough to
@@ -650,13 +685,14 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to write {JSON_PATH}: {e}"))?;
 
-    // Phase 1 shadow write of the layered shape. Best-effort: a failure
-    // here doesn't fail the apply (the legacy file is still the source
-    // of truth). See `docs/network-architecture.md`.
+    // Layered validation is now authoritative (post-cutover): a
+    // structurally-broken config (cycle, dangling reference, double
+    // enslavement, ...) is rejected here before NM ever sees it.
+    // Phase 1 shipped this as warn-only while the legacy stack was
+    // still authoritative; phase 3b-beta flips it to error.
     let layered_cfg = layered::to_layered(config);
-    if let Err(e) = layered::validate(&layered_cfg) {
-        warn!("layered validation found an issue (phase 1 warn-only): {e}");
-    }
+    layered::validate(&layered_cfg)
+        .map_err(|e| format!("network config rejected by validator: {e}"))?;
     match serde_json::to_string_pretty(&layered_cfg) {
         Ok(layered_json) => {
             if let Err(e) = atomic_write(JSON_PATH_V2, layered_json.as_bytes()).await {
@@ -673,8 +709,18 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
         warn!("failed to write NM connection previews: {e}");
     }
 
-    let nix = generate_nix(config);
-    if let Err(e) = atomic_write(NIX_PATH, nix.as_bytes()).await {
+    // Post-cutover (phase 3b-beta): /etc/nixos/networking.nix is no
+    // longer the source of truth for networking — NM is. The file is
+    // still imported by configuration.nix (legacy contract we don't
+    // want to break for users on older configuration.nix files), so
+    // we write a stub that makes the import a no-op. The v0.0.7
+    // `nasty.nix` module force-overrides any networking.* values
+    // anyway via `lib.mkForce`, so the stub's content doesn't matter.
+    let stub = "# Managed by NASty — content moved to NetworkManager keyfiles\n\
+                # in /etc/NetworkManager/system-connections/. See\n\
+                # docs/network-architecture.md.\n\
+                { ... }: { }\n";
+    if let Err(e) = atomic_write(NIX_PATH, stub.as_bytes()).await {
         warn!("failed to write {NIX_PATH}: {e}");
     }
 
@@ -1130,12 +1176,12 @@ fn resolve_inherit_one(
 // `LiveTopology` with addrs / routes / masters.
 
 /// Snapshot of the kernel's view of the network at apply time. Used by
-/// `Plan::compute` (link existence → create vs. skip) and by
-/// `resolve_inherit` (live addrs/routes → L3 a bridge adopts from its
-/// primary member when no prior config gives a clearer answer).
+/// `resolve_inherit` to decide what L3 a bridge should adopt from its
+/// primary member when the prior config doesn't give a clearer answer.
+/// Post-cutover (phase 3b-beta): no longer used for create-vs-skip
+/// link decisions — NM handles that internally.
 #[derive(Debug, Default, Clone)]
 struct LiveTopology {
-    links: std::collections::HashSet<String>,
     /// Per-iface IPv4 addresses (CIDR strings).
     addrs_v4: std::collections::HashMap<String, Vec<String>>,
     /// Per-iface IPv6 addresses (CIDR strings, link-local filtered out).
@@ -1144,23 +1190,16 @@ struct LiveTopology {
     default_via_v4: std::collections::HashMap<String, String>,
     /// Egress iface → IPv6 default gateway.
     default_via_v6: std::collections::HashMap<String, String>,
-    /// Ifaces whose IPv4 addresses were installed by dhcpcd (any route on
-    /// the iface with `proto: dhcp`). Used by `resolve_inherit` so the
-    /// live lease address isn't baked into the bridge config as Static —
-    /// the bridge inherits DHCP semantics, not the specific address.
+    /// Ifaces whose IPv4 addresses were installed by dhcpcd or NM via
+    /// DHCP (any route on the iface with `proto: dhcp`). Used by
+    /// `resolve_inherit` so the live lease address isn't baked into
+    /// the bridge config as Static — the bridge inherits DHCP
+    /// semantics, not the specific address.
     dhcp_managed_v4: std::collections::HashSet<String>,
 }
 
 impl LiveTopology {
     async fn snapshot() -> Self {
-        let mut links = std::collections::HashSet::new();
-        if let Ok(mut entries) = tokio::fs::read_dir("/sys/class/net").await {
-            while let Ok(Some(e)) = entries.next_entry().await {
-                if let Some(name) = e.file_name().to_str() {
-                    links.insert(name.to_string());
-                }
-            }
-        }
         let addrs_v4 = parse_ip_addrs(&run_ip_json(&["-j", "-4", "addr", "show"]).await, false)
             .unwrap_or_default();
         let addrs_v6 = parse_ip_addrs(&run_ip_json(&["-j", "-6", "addr", "show"]).await, true)
@@ -1175,17 +1214,12 @@ impl LiveTopology {
             parse_dhcp_managed(&run_ip_json(&["-j", "-4", "route", "show"]).await)
                 .unwrap_or_default();
         Self {
-            links,
             addrs_v4,
             addrs_v6,
             default_via_v4,
             default_via_v6,
             dhcp_managed_v4,
         }
-    }
-
-    fn has(&self, name: &str) -> bool {
-        self.links.contains(name)
     }
 
     fn addrs(&self, iface: &str, v6: bool) -> &[String] {
@@ -1288,651 +1322,44 @@ fn parse_dhcp_managed(json: &str) -> Option<std::collections::HashSet<String>> {
     )
 }
 
-/// One imperative step. Variants are split by failure semantics: anything
-/// named `*BestEffort` or `Set*` swallows errors silently (matches the
-/// pre-refactor `let _ = run_ip(...)` behavior); the rest abort the apply
-/// on failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Op {
-    /// `ip link add <name> type bond mode <mode_kernel>`. Required.
-    CreateBond { name: String, mode_kernel: String },
-    /// `ip link add <name> type bridge`. Required.
-    CreateBridge { name: String },
-    /// `ip link add link <parent> name <name> type vlan id <vlan_id>`. Required.
-    CreateVlan {
-        parent: String,
-        vlan_id: u16,
-        name: String,
-    },
-    /// `ip link set <iface> up`. Required (failure aborts the apply).
-    BringUp(String),
-    /// `ip link set <iface> up`. Best-effort.
-    BringUpBestEffort(String),
-    /// `ip link set <iface> down`. Best-effort.
-    SetDown(String),
-    /// `ip link set <member> master <master>`. Best-effort.
-    EnslaveMember { member: String, master: String },
-    /// `ip link set <iface> mtu <mtu>`. Best-effort.
-    SetMtu { iface: String, mtu: u16 },
-    /// `ip [-4|-6] addr flush dev <iface>`. Best-effort. Used after
-    /// enslaving a member into a bridge — the kernel doesn't auto-flush
-    /// addresses from a slave, so they linger and confuse some apps.
-    FlushAddrs { iface: String, v6: bool },
-    /// `dhcpcd -k <iface>`. Best-effort (no-op if no lease).
-    DhcpStop { iface: String },
-    /// Write `0|1` to `/sys/class/net/<bridge>/bridge/stp_state`. Best-effort.
-    SetBridgeStp { bridge: String, enabled: bool },
-    /// Write `seconds*100` to `/sys/class/net/<bridge>/bridge/forward_delay`
-    /// (sysfs unit is centiseconds). Best-effort.
-    SetBridgeForwardDelay { bridge: String, seconds: u8 },
-    /// Apply IPv4 or IPv6 config (delegates to `apply_ip_config`). Required.
-    /// Plan::compute never emits this with `IpMethod::Inherit` — Inherit is
-    /// resolved to a concrete `Static` / `Dhcp` config in `resolve_inherit`
-    /// before persistence, so apply and reboot agree on the L3.
-    ApplyIp {
-        iface: String,
-        config: IpConfig,
-        v6: bool,
-    },
-    /// Push DNS servers via resolvconf. Required.
-    ApplyDns(Vec<String>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct Plan {
-    ops: Vec<Op>,
-}
-
-impl Plan {
-    /// Pure: turns a desired `NetworkConfig` plus a snapshot of `live` state
-    /// into an ordered list of imperative ops. No IO.
-    ///
-    /// Callers must pass a config that has been resolved by `resolve_inherit`
-    /// — `Plan::compute` does not handle `IpMethod::Inherit`. The resolved
-    /// config is what gets persisted and reapplied on reboot.
-    fn compute(config: &NetworkConfig, live: &LiveTopology) -> Self {
-        let mut ops = Vec::new();
-
-        // Set of iface names that will be enslaved (bond or bridge member).
-        // Used to suppress conflicting top-level ops on those ifaces.
-        let enslaved: std::collections::HashSet<&str> = config
-            .bonds
-            .iter()
-            .flat_map(|b| b.members.iter())
-            .chain(config.bridges.iter().flat_map(|b| b.members.iter()))
-            .map(String::as_str)
-            .collect();
-
-        // Bonds first — they may be enslaved into bridges later.
-        for bond in &config.bonds {
-            if !live.has(&bond.name) {
-                ops.push(Op::CreateBond {
-                    name: bond.name.clone(),
-                    mode_kernel: bond.mode.to_kernel().to_string(),
-                });
-            }
-            for member in &bond.members {
-                ops.push(Op::DhcpStop {
-                    iface: member.clone(),
-                });
-                ops.push(Op::SetDown(member.clone()));
-                ops.push(Op::EnslaveMember {
-                    member: member.clone(),
-                    master: bond.name.clone(),
-                });
-            }
-            ops.push(Op::BringUp(bond.name.clone()));
-            if let Some(mtu) = bond.mtu {
-                ops.push(Op::SetMtu {
-                    iface: bond.name.clone(),
-                    mtu,
-                });
-            }
-            ops.push(Op::ApplyIp {
-                iface: bond.name.clone(),
-                config: bond.ipv4.clone(),
-                v6: false,
-            });
-            ops.push(Op::ApplyIp {
-                iface: bond.name.clone(),
-                config: bond.ipv6.clone(),
-                v6: true,
-            });
-        }
-
-        // Bridges after bonds (bonds can be bridge members), before VLANs
-        // (VLANs can sit on top of a bridge).
-        for bridge in &config.bridges {
-            if !live.has(&bridge.name) {
-                ops.push(Op::CreateBridge {
-                    name: bridge.name.clone(),
-                });
-            }
-            for member in &bridge.members {
-                // Release any DHCP lease the member is holding so dhcpcd
-                // can't fight us over the address it's about to lose.
-                ops.push(Op::DhcpStop {
-                    iface: member.clone(),
-                });
-                ops.push(Op::SetDown(member.clone()));
-                ops.push(Op::EnslaveMember {
-                    member: member.clone(),
-                    master: bridge.name.clone(),
-                });
-                ops.push(Op::BringUpBestEffort(member.clone()));
-                // Kernel doesn't auto-flush addrs when a link becomes a
-                // slave — they linger and confuse some apps. Belt-and-
-                // braces; the bridge has the L3 now.
-                ops.push(Op::FlushAddrs {
-                    iface: member.clone(),
-                    v6: false,
-                });
-                ops.push(Op::FlushAddrs {
-                    iface: member.clone(),
-                    v6: true,
-                });
-            }
-            ops.push(Op::BringUp(bridge.name.clone()));
-            // STP and forward-delay only when the bridge actually has
-            // members — host-internal bridges (VM-only) don't need them.
-            if !bridge.members.is_empty() {
-                ops.push(Op::SetBridgeStp {
-                    bridge: bridge.name.clone(),
-                    enabled: bridge.stp,
-                });
-                if let Some(seconds) = bridge.forward_delay_s {
-                    ops.push(Op::SetBridgeForwardDelay {
-                        bridge: bridge.name.clone(),
-                        seconds,
-                    });
-                }
-            }
-            if let Some(mtu) = bridge.mtu {
-                ops.push(Op::SetMtu {
-                    iface: bridge.name.clone(),
-                    mtu,
-                });
-            }
-            ops.push(Op::ApplyIp {
-                iface: bridge.name.clone(),
-                config: bridge.ipv4.clone(),
-                v6: false,
-            });
-            ops.push(Op::ApplyIp {
-                iface: bridge.name.clone(),
-                config: bridge.ipv6.clone(),
-                v6: true,
-            });
-        }
-
-        for vlan in &config.vlans {
-            let name = format!("{}.{}", vlan.parent, vlan.vlan_id);
-            if !live.has(&name) {
-                ops.push(Op::CreateVlan {
-                    parent: vlan.parent.clone(),
-                    vlan_id: vlan.vlan_id,
-                    name: name.clone(),
-                });
-            }
-            ops.push(Op::BringUp(name.clone()));
-            if let Some(mtu) = vlan.mtu {
-                ops.push(Op::SetMtu {
-                    iface: name.clone(),
-                    mtu,
-                });
-            }
-            ops.push(Op::ApplyIp {
-                iface: name.clone(),
-                config: vlan.ipv4.clone(),
-                v6: false,
-            });
-            ops.push(Op::ApplyIp {
-                iface: name,
-                config: vlan.ipv6.clone(),
-                v6: true,
-            });
-        }
-
-        for iface in &config.interfaces {
-            // Top-level config for an enslaved iface would fight the bridge
-            // (re-add an address, restart DHCP). Skip it; member ops above
-            // already handled flush + DHCP release.
-            if enslaved.contains(iface.name.as_str()) {
-                continue;
-            }
-            if !iface.enabled {
-                ops.push(Op::SetDown(iface.name.clone()));
-                continue;
-            }
-            ops.push(Op::BringUp(iface.name.clone()));
-            if let Some(mtu) = iface.mtu {
-                ops.push(Op::SetMtu {
-                    iface: iface.name.clone(),
-                    mtu,
-                });
-            }
-            ops.push(Op::ApplyIp {
-                iface: iface.name.clone(),
-                config: iface.ipv4.clone(),
-                v6: false,
-            });
-            ops.push(Op::ApplyIp {
-                iface: iface.name.clone(),
-                config: iface.ipv6.clone(),
-                v6: true,
-            });
-        }
-
-        if !config.dns.is_empty() {
-            ops.push(Op::ApplyDns(config.dns.clone()));
-        }
-
-        Self { ops }
-    }
-
-    async fn execute(&self) -> Result<(), String> {
-        for op in &self.ops {
-            execute_op(op).await?;
-        }
-        Ok(())
-    }
-}
-
-async fn execute_op(op: &Op) -> Result<(), String> {
-    match op {
-        Op::CreateBond { name, mode_kernel } => {
-            run_ip(&["link", "add", name, "type", "bond", "mode", mode_kernel])
-                .await
-                .map_err(|e| format!("create bond {name}: {e}"))
-        }
-        Op::CreateBridge { name } => run_ip(&["link", "add", name, "type", "bridge"])
-            .await
-            .map_err(|e| format!("create bridge {name}: {e}")),
-        Op::CreateVlan {
-            parent,
-            vlan_id,
-            name,
-        } => run_ip(&[
-            "link",
-            "add",
-            "link",
-            parent,
-            "name",
-            name,
-            "type",
-            "vlan",
-            "id",
-            &vlan_id.to_string(),
-        ])
-        .await
-        .map_err(|e| format!("create vlan {name}: {e}")),
-        Op::BringUp(iface) => run_ip(&["link", "set", iface, "up"])
-            .await
-            .map_err(|e| format!("bring up {iface}: {e}")),
-        Op::BringUpBestEffort(iface) => {
-            let _ = run_ip(&["link", "set", iface, "up"]).await;
-            Ok(())
-        }
-        Op::SetDown(iface) => {
-            let _ = run_ip(&["link", "set", iface, "down"]).await;
-            Ok(())
-        }
-        Op::EnslaveMember { member, master } => {
-            let _ = run_ip(&["link", "set", member, "master", master]).await;
-            Ok(())
-        }
-        Op::SetMtu { iface, mtu } => {
-            let _ = run_ip(&["link", "set", iface, "mtu", &mtu.to_string()]).await;
-            Ok(())
-        }
-        Op::FlushAddrs { iface, v6 } => {
-            let flag = if *v6 { "-6" } else { "-4" };
-            let _ = run_ip(&[flag, "addr", "flush", "dev", iface]).await;
-            Ok(())
-        }
-        Op::DhcpStop { iface } => {
-            dhcp::stop(iface).await;
-            Ok(())
-        }
-        Op::SetBridgeStp { bridge, enabled } => {
-            let path = format!("/sys/class/net/{bridge}/bridge/stp_state");
-            let value = if *enabled { "1" } else { "0" };
-            let _ = tokio::fs::write(&path, value).await;
-            Ok(())
-        }
-        Op::SetBridgeForwardDelay { bridge, seconds } => {
-            // sysfs takes centiseconds.
-            let path = format!("/sys/class/net/{bridge}/bridge/forward_delay");
-            let value = (u32::from(*seconds) * 100).to_string();
-            let _ = tokio::fs::write(&path, value).await;
-            Ok(())
-        }
-        Op::ApplyIp { iface, config, v6 } => apply_ip_config(iface, config, *v6).await,
-        Op::ApplyDns(servers) => apply_dns(servers).await,
-    }
-}
-
 async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
-    let live = LiveTopology::snapshot().await;
-    let plan = Plan::compute(config, &live);
-    plan.execute().await
-}
-
-/// Push DNS servers via resolvconf. NixOS manages /etc/resolv.conf — writing
-/// it directly causes "signature mismatch" errors on the next rebuild.
-async fn apply_dns(servers: &[String]) -> Result<(), String> {
-    let resolv: String = servers
-        .iter()
-        .map(|ns| format!("nameserver {ns}\n"))
-        .collect();
-    use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new("resolvconf")
-        .args(["-a", "nasty", "-m", "0"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("resolvconf: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(resolv.as_bytes())
-            .await
-            .map_err(|e| format!("resolvconf stdin: {e}"))?;
-    }
-    let output = child
-        .wait_with_output()
+    // Post-cutover (phase 3b-beta): NetworkManager is the active
+    // backend. Convert the resolved config to layered form, then to
+    // NM profiles, then push to NM via DBus. NM owns DHCP, DNS, and
+    // L2 management; the engine just authors the connection profiles.
+    let layered_cfg = layered::to_layered(config);
+    let profiles = nm::to_nm_profiles(&layered_cfg);
+    let client = nm::dbus::NmDbusClient::new()
         .await
-        .map_err(|e| format!("resolvconf wait: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!("resolvconf failed: {stderr}");
-    }
-    Ok(())
-}
+        .map_err(|e| format!("connect to NetworkManager: {e}"))?;
+    let outcome = nm::dbus::apply_profiles(&client, &profiles).await?;
 
-async fn apply_ip_config(iface: &str, ip: &IpConfig, v6: bool) -> Result<(), String> {
-    let flag = if v6 { "-6" } else { "-4" };
-    match ip.method {
-        IpMethod::Dhcp => {
-            if !v6 {
-                // Per-iface rebind. Replaces the previous global `systemctl
-                // restart dhcpcd`, which dropped leases on every other iface.
-                dhcp::start(iface).await;
-            }
-            // DHCPv6 is typically handled by dhcpcd or systemd-networkd.
-        }
-        IpMethod::Static => {
-            if !v6 {
-                // Release any prior dhcpcd lease so it can't fight the static
-                // config (re-add a leased address, replace our default route).
-                dhcp::stop(iface).await;
-            }
-            let _ = run_ip(&[flag, "addr", "flush", "dev", iface]).await;
-            for addr in &ip.addresses {
-                run_ip(&[flag, "addr", "add", addr, "dev", iface])
-                    .await
-                    .map_err(|e| format!("ip addr add {addr} on {iface}: {e}"))?;
-            }
-            if let Some(ref gw) = ip.gateway {
-                let _ =
-                    run_ip(&[flag, "route", "replace", "default", "via", gw, "dev", iface]).await;
-            }
-        }
-        IpMethod::Slaac => {
-            if v6 {
-                let sysctl_path = format!("/proc/sys/net/ipv6/conf/{iface}/autoconf");
-                let _ = tokio::fs::write(&sysctl_path, "1").await;
-                let accept_ra = format!("/proc/sys/net/ipv6/conf/{iface}/accept_ra");
-                let _ = tokio::fs::write(&accept_ra, "1").await;
-            }
-        }
-        IpMethod::Disabled => {
-            if !v6 {
-                dhcp::stop(iface).await;
-            }
-            let _ = run_ip(&[flag, "addr", "flush", "dev", iface]).await;
-            if v6 {
-                let sysctl_path = format!("/proc/sys/net/ipv6/conf/{iface}/disable_ipv6");
-                let _ = tokio::fs::write(&sysctl_path, "1").await;
-            }
-        }
-        IpMethod::Inherit => {
-            // Inherit is orchestrated by `Plan::compute` via explicit
-            // SetMac / AddAddr / ReplaceDefaultRoute / DhcpStart ops on
-            // the master, not through this per-iface helper.
+    info!(
+        "Network config applied via NM: {} added, {} updated, {} deleted, {} unchanged, {} activated, {} errors",
+        outcome.added.len(),
+        outcome.updated.len(),
+        outcome.deleted.len(),
+        outcome.unchanged.len(),
+        outcome.activated.len(),
+        outcome.errors.len(),
+    );
+    if !outcome.errors.is_empty() {
+        // Best-effort apply: report per-connection errors via the
+        // outcome, but don't fail the whole apply unless ALL
+        // connections failed (which would indicate something
+        // genuinely broken — NM not running, DBus permissions, etc.).
+        for (id, msg) in &outcome.errors {
+            warn!("network apply: connection '{id}' failed: {msg}");
         }
     }
     Ok(())
 }
-
-/// Per-interface DHCP control. Behind a small module seam so the underlying
-/// client (currently dhcpcd) can be swapped — e.g. for systemd-networkd —
-/// without touching call sites.
-mod dhcp {
-    use tracing::warn;
-
-    /// Start or rebind dhcpcd for `iface`.
-    pub async fn start(iface: &str) {
-        run(&["-n", iface], "rebind", iface).await;
-    }
-
-    /// Release the lease and stop dhcpcd for `iface`. No-op if not running
-    /// — that's the common case when switching from Static to Static.
-    pub async fn stop(iface: &str) {
-        run(&["-k", iface], "release", iface).await;
-    }
-
-    async fn run(args: &[&str], action: &str, iface: &str) {
-        match tokio::process::Command::new("dhcpcd")
-            .args(args)
-            .output()
-            .await
-        {
-            Ok(out) if !out.status.success() => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stderr = stderr.trim();
-                if stderr.is_empty() {
-                    warn!("dhcpcd {action} {iface} exited with non-zero status");
-                } else {
-                    warn!("dhcpcd {action} {iface} failed: {stderr}");
-                }
-            }
-            Err(e) => warn!("dhcpcd {action} {iface}: spawn failed: {e}"),
-            _ => {}
-        }
-    }
-}
-
-// ── NixOS config generation ────────────────────────────────────
-
-fn generate_nix(config: &NetworkConfig) -> String {
-    let mut out =
-        String::from("# Managed by NASty — edit via WebUI Settings > Network\n{ ... }:\n{\n");
-
-    out.push_str("  networking.useDHCP = false;\n\n");
-
-    // Interfaces
-    for iface in &config.interfaces {
-        if !iface.enabled {
-            continue;
-        }
-        generate_iface_nix(&mut out, &iface.name, &iface.ipv4, &iface.ipv6, iface.mtu);
-    }
-
-    // Bonds
-    for bond in &config.bonds {
-        let members: Vec<String> = bond.members.iter().map(|m| format!("\"{m}\"")).collect();
-        out.push_str(&format!(
-            "  networking.bonds.{} = {{\n    interfaces = [ {} ];\n    driverOptions.mode = \"{}\";\n  }};\n",
-            bond.name, members.join(" "), bond.mode.to_nix()
-        ));
-        generate_iface_nix(&mut out, &bond.name, &bond.ipv4, &bond.ipv6, bond.mtu);
-    }
-
-    // Bridges
-    for bridge in &config.bridges {
-        let members: Vec<String> = bridge.members.iter().map(|m| format!("\"{m}\"")).collect();
-        let rstp = if bridge.stp { " rstp = true; " } else { " " };
-        out.push_str(&format!(
-            "  networking.bridges.{} = {{ interfaces = [ {} ];{}}};\n",
-            bridge.name,
-            members.join(" "),
-            rstp
-        ));
-        generate_iface_nix(
-            &mut out,
-            &bridge.name,
-            &bridge.ipv4,
-            &bridge.ipv6,
-            bridge.mtu,
-        );
-    }
-
-    // VLANs
-    for vlan in &config.vlans {
-        let vlan_name = format!("{}-{}", vlan.parent, vlan.vlan_id);
-        out.push_str(&format!(
-            "  networking.vlans.{vlan_name} = {{ id = {}; interface = \"{}\"; }};\n",
-            vlan.vlan_id, vlan.parent
-        ));
-        let iface_name = format!("{}.{}", vlan.parent, vlan.vlan_id);
-        generate_iface_nix(&mut out, &iface_name, &vlan.ipv4, &vlan.ipv6, vlan.mtu);
-    }
-
-    // DNS
-    if !config.dns.is_empty() {
-        let items: Vec<String> = config.dns.iter().map(|ns| format!("\"{ns}\"")).collect();
-        out.push_str(&format!(
-            "  networking.nameservers = [ {} ];\n",
-            items.join(" ")
-        ));
-    }
-
-    out.push_str("}\n");
-    out
-}
-
-fn generate_iface_nix(
-    out: &mut String,
-    name: &str,
-    ipv4: &IpConfig,
-    ipv6: &IpConfig,
-    mtu: Option<u16>,
-) {
-    match ipv4.method {
-        IpMethod::Dhcp => {
-            out.push_str(&format!("  networking.interfaces.{name}.useDHCP = true;\n"));
-        }
-        IpMethod::Static => {
-            let addrs: Vec<String> = ipv4
-                .addresses
-                .iter()
-                .map(|a| {
-                    let parts: Vec<&str> = a.split('/').collect();
-                    let addr = parts[0];
-                    let prefix: u8 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(24);
-                    format!("{{ address = \"{addr}\"; prefixLength = {prefix}; }}")
-                })
-                .collect();
-            out.push_str(&format!(
-                "  networking.interfaces.{name}.ipv4.addresses = [ {} ];\n",
-                addrs.join(" ")
-            ));
-            if let Some(ref gw) = ipv4.gateway {
-                out.push_str(&format!("  networking.defaultGateway = \"{gw}\";\n"));
-            }
-        }
-        _ => {}
-    }
-
-    match ipv6.method {
-        IpMethod::Slaac => {
-            // NixOS enables SLAAC by default when IPv6 is not disabled
-        }
-        IpMethod::Static => {
-            let addrs: Vec<String> = ipv6
-                .addresses
-                .iter()
-                .map(|a| {
-                    let parts: Vec<&str> = a.split('/').collect();
-                    let addr = parts[0];
-                    let prefix: u8 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(64);
-                    format!("{{ address = \"{addr}\"; prefixLength = {prefix}; }}")
-                })
-                .collect();
-            out.push_str(&format!(
-                "  networking.interfaces.{name}.ipv6.addresses = [ {} ];\n",
-                addrs.join(" ")
-            ));
-            if let Some(ref gw) = ipv6.gateway {
-                out.push_str(&format!("  networking.defaultGateway6 = \"{gw}\";\n"));
-            }
-        }
-        IpMethod::Disabled => {
-            out.push_str(&format!(
-                "  networking.interfaces.{name}.ipv6.addresses = [];\n"
-            ));
-        }
-        _ => {}
-    }
-
-    if let Some(mtu) = mtu {
-        out.push_str(&format!("  networking.interfaces.{name}.mtu = {mtu};\n"));
-    }
-}
-
-// ── Helpers ────────────────────────────────────────────────────
-
-pub async fn detect_primary_interface() -> Option<String> {
-    // Try IPv4 first, then IPv6
-    for flag in &["-4", "-6"] {
-        let target = if *flag == "-4" {
-            "1.1.1.1"
-        } else {
-            "2001:4860:4860::8888"
-        };
-        let output = tokio::process::Command::new("ip")
-            .args([flag, "route", "get", target])
-            .output()
-            .await
-            .ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut iter = text.split_whitespace();
-        while let Some(token) = iter.next() {
-            if token == "dev" {
-                return iter.next().map(|s| s.to_string());
-            }
-        }
-    }
-    None
-}
-
-async fn run_ip(args: &[&str]) -> Result<(), String> {
-    let status = tokio::process::Command::new("ip")
-        .args(args)
-        .status()
-        .await
-        .map_err(|e| format!("failed to run ip: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("ip {} exited with non-zero status", args.join(" ")))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn empty_live() -> LiveTopology {
         LiveTopology::default()
-    }
-
-    fn live_with_links(names: &[&str]) -> LiveTopology {
-        LiveTopology {
-            links: names.iter().map(|s| (*s).to_string()).collect(),
-            ..Default::default()
-        }
     }
 
     fn iface(name: &str) -> InterfaceConfig {
@@ -1970,354 +1397,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_config_produces_empty_plan() {
-        let plan = Plan::compute(&NetworkConfig::default(), &empty_live());
-        assert!(plan.ops.is_empty());
-    }
-
-    #[test]
-    fn bond_member_release_then_enslave_then_up() {
-        let config = NetworkConfig {
-            bonds: vec![bond("bond0", &["eth0", "eth1"])],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        assert_eq!(
-            plan.ops,
-            vec![
-                Op::CreateBond {
-                    name: "bond0".into(),
-                    mode_kernel: "802.3ad".into(),
-                },
-                Op::DhcpStop {
-                    iface: "eth0".into()
-                },
-                Op::SetDown("eth0".into()),
-                Op::EnslaveMember {
-                    member: "eth0".into(),
-                    master: "bond0".into(),
-                },
-                Op::DhcpStop {
-                    iface: "eth1".into()
-                },
-                Op::SetDown("eth1".into()),
-                Op::EnslaveMember {
-                    member: "eth1".into(),
-                    master: "bond0".into(),
-                },
-                Op::BringUp("bond0".into()),
-                Op::ApplyIp {
-                    iface: "bond0".into(),
-                    config: IpConfig::default(),
-                    v6: false,
-                },
-                Op::ApplyIp {
-                    iface: "bond0".into(),
-                    config: IpConfig::default(),
-                    v6: true,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn bond_skips_create_when_already_live() {
-        let config = NetworkConfig {
-            bonds: vec![bond("bond0", &[])],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &live_with_links(&["bond0"]));
-        assert!(
-            !plan
-                .ops
-                .iter()
-                .any(|op| matches!(op, Op::CreateBond { .. })),
-            "should not re-create an existing bond"
-        );
-    }
-
-    #[test]
-    fn bridge_member_is_released_flushed_and_brought_up() {
-        let config = NetworkConfig {
-            bridges: vec![bridge("br0", &["eth0"])],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        assert_eq!(
-            plan.ops,
-            vec![
-                Op::CreateBridge { name: "br0".into() },
-                Op::DhcpStop {
-                    iface: "eth0".into()
-                },
-                Op::SetDown("eth0".into()),
-                Op::EnslaveMember {
-                    member: "eth0".into(),
-                    master: "br0".into(),
-                },
-                Op::BringUpBestEffort("eth0".into()),
-                Op::FlushAddrs {
-                    iface: "eth0".into(),
-                    v6: false,
-                },
-                Op::FlushAddrs {
-                    iface: "eth0".into(),
-                    v6: true,
-                },
-                Op::BringUp("br0".into()),
-                Op::SetBridgeStp {
-                    bridge: "br0".into(),
-                    enabled: false,
-                },
-                Op::ApplyIp {
-                    iface: "br0".into(),
-                    config: IpConfig::default(),
-                    v6: false,
-                },
-                Op::ApplyIp {
-                    iface: "br0".into(),
-                    config: IpConfig::default(),
-                    v6: true,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn host_internal_bridge_skips_stp_and_forward_delay() {
-        // Bridge with no members (e.g. host-internal for VMs to attach to).
-        // STP / forward-delay are member-of-LAN concepts; not relevant.
-        let config = NetworkConfig {
-            bridges: vec![bridge("vmbr0", &[])],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        assert!(
-            !plan
-                .ops
-                .iter()
-                .any(|op| matches!(op, Op::SetBridgeStp { .. }))
-        );
-        assert!(
-            !plan
-                .ops
-                .iter()
-                .any(|op| matches!(op, Op::SetBridgeForwardDelay { .. }))
-        );
-    }
-
-    #[test]
-    fn bridge_emits_stp_and_forward_delay_when_configured() {
-        let mut br = bridge("br0", &["eth0"]);
-        br.stp = true;
-        br.forward_delay_s = Some(0);
-        let config = NetworkConfig {
-            bridges: vec![br],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        assert!(plan.ops.contains(&Op::SetBridgeStp {
-            bridge: "br0".into(),
-            enabled: true,
-        }));
-        assert!(plan.ops.contains(&Op::SetBridgeForwardDelay {
-            bridge: "br0".into(),
-            seconds: 0,
-        }));
-    }
-
-    #[test]
-    fn enslaved_iface_skips_top_level_apply_ip() {
-        // eth0 is a bridge member AND also listed in `interfaces` (the
-        // pre-PR3 wire format the WebUI may still emit). The bridge owns
-        // the L3; the top-level entry must not fight it.
-        let config = NetworkConfig {
-            interfaces: vec![iface("eth0")],
-            bridges: vec![bridge("br0", &["eth0"])],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        // No BringUp("eth0") (handled implicitly via the bridge member ops),
-        // and crucially no ApplyIp on eth0.
-        assert!(!plan.ops.iter().any(|op| matches!(
-            op,
-            Op::ApplyIp { iface, .. } if iface == "eth0"
-        )));
-        assert!(
-            !plan
-                .ops
-                .iter()
-                .any(|op| matches!(op, Op::BringUp(name) if name == "eth0"))
-        );
-    }
-
-    #[test]
-    fn vlan_name_is_parent_dot_id() {
-        let config = NetworkConfig {
-            vlans: vec![VlanConfig {
-                parent: "eth0".into(),
-                vlan_id: 100,
-                ipv4: IpConfig::default(),
-                ipv6: IpConfig::default(),
-                mtu: None,
-            }],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        match &plan.ops[0] {
-            Op::CreateVlan {
-                parent,
-                vlan_id,
-                name,
-            } => {
-                assert_eq!(parent, "eth0");
-                assert_eq!(*vlan_id, 100);
-                assert_eq!(name, "eth0.100");
-            }
-            other => panic!("expected CreateVlan, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn disabled_interface_is_only_set_down() {
-        let mut eth0 = iface("eth0");
-        eth0.enabled = false;
-        let config = NetworkConfig {
-            interfaces: vec![eth0],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        assert_eq!(plan.ops, vec![Op::SetDown("eth0".into())]);
-    }
-
-    #[test]
-    fn mtu_op_is_emitted_only_when_configured() {
-        let mut eth0 = iface("eth0");
-        eth0.mtu = Some(9000);
-        let config = NetworkConfig {
-            interfaces: vec![eth0],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        assert!(plan.ops.contains(&Op::SetMtu {
-            iface: "eth0".into(),
-            mtu: 9000,
-        }));
-
-        let config_no_mtu = NetworkConfig {
-            interfaces: vec![iface("eth1")],
-            ..Default::default()
-        };
-        let plan_no_mtu = Plan::compute(&config_no_mtu, &empty_live());
-        assert!(
-            !plan_no_mtu
-                .ops
-                .iter()
-                .any(|op| matches!(op, Op::SetMtu { .. }))
-        );
-    }
-
-    #[test]
-    fn dns_is_appended_last_when_non_empty() {
-        let config = NetworkConfig {
-            interfaces: vec![iface("eth0")],
-            dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        assert_eq!(
-            plan.ops.last(),
-            Some(&Op::ApplyDns(vec!["1.1.1.1".into(), "8.8.8.8".into()]))
-        );
-    }
-
-    #[test]
-    fn empty_dns_emits_no_dns_op() {
-        let config = NetworkConfig {
-            interfaces: vec![iface("eth0")],
-            ..Default::default()
-        };
-        let plan = Plan::compute(&config, &empty_live());
-        assert!(!plan.ops.iter().any(|op| matches!(op, Op::ApplyDns(_))));
-    }
-
-    #[test]
-    fn ordering_is_bonds_bridges_vlans_interfaces_dns() {
-        let config = NetworkConfig {
-            interfaces: vec![iface("eth0")],
-            bonds: vec![bond("bond0", &[])],
-            bridges: vec![bridge("br0", &[])],
-            vlans: vec![VlanConfig {
-                parent: "eth0".into(),
-                vlan_id: 10,
-                ipv4: IpConfig::default(),
-                ipv6: IpConfig::default(),
-                mtu: None,
-            }],
-            dns: vec!["1.1.1.1".into()],
-        };
-        let plan = Plan::compute(&config, &empty_live());
-
-        let bond_pos = plan
-            .ops
-            .iter()
-            .position(|op| matches!(op, Op::CreateBond { .. }))
-            .expect("bond create");
-        let bridge_pos = plan
-            .ops
-            .iter()
-            .position(|op| matches!(op, Op::CreateBridge { .. }))
-            .expect("bridge create");
-        let vlan_pos = plan
-            .ops
-            .iter()
-            .position(|op| matches!(op, Op::CreateVlan { .. }))
-            .expect("vlan create");
-        let iface_pos = plan
-            .ops
-            .iter()
-            .position(|op| matches!(op, Op::BringUp(name) if name == "eth0"))
-            .expect("iface up");
-        let dns_pos = plan
-            .ops
-            .iter()
-            .position(|op| matches!(op, Op::ApplyDns(_)))
-            .expect("dns");
-
-        assert!(bond_pos < bridge_pos);
-        assert!(bridge_pos < vlan_pos);
-        assert!(vlan_pos < iface_pos);
-        assert!(iface_pos < dns_pos);
-    }
-
-    #[test]
-    fn bond_modes_serialize_to_kernel_strings() {
-        for (mode, expected) in [
-            (BondMode::Lacp, "802.3ad"),
-            (BondMode::ActiveBackup, "active-backup"),
-            (BondMode::BalanceRr, "balance-rr"),
-            (BondMode::BalanceXor, "balance-xor"),
-        ] {
-            let mut b = bond("bond0", &[]);
-            b.mode = mode;
-            let config = NetworkConfig {
-                bonds: vec![b],
-                ..Default::default()
-            };
-            let plan = Plan::compute(&config, &empty_live());
-            match &plan.ops[0] {
-                Op::CreateBond { mode_kernel, .. } => assert_eq!(mode_kernel, expected),
-                other => panic!("expected CreateBond, got {other:?}"),
-            }
-        }
-    }
-
     // ── resolve_inherit ────────────────────────────────────────
 
     fn live_for(iface: &str, addrs: &[&str], default_via: Option<&str>) -> LiveTopology {
         let mut t = LiveTopology::default();
-        t.links.insert(iface.to_string());
         t.addrs_v4.insert(
             iface.to_string(),
             addrs.iter().map(|s| (*s).to_string()).collect(),

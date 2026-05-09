@@ -189,6 +189,13 @@ async fn main() -> anyhow::Result<()> {
     // so a confirm can't race the rollback.
     state.network.restore_pending_revert().await;
 
+    // One-shot migration from the pre-cutover legacy networking stack
+    // to NetworkManager (phase 3b-beta). Idempotent — gated on a
+    // marker file. Runs after restore_pending_revert so any in-flight
+    // rollback from before the upgrade is settled first. Best-effort:
+    // skipped if NM isn't reachable yet, retried next boot.
+    state.network.run_migration_if_needed().await;
+
     // Sync NVMe-oF ports with Tailscale IP (if Tailscale reconnected on boot)
     {
         let ts_status = state.tailscale.get().await;
