@@ -40,6 +40,34 @@ async fn is_bcachefs_key_loaded(uuid: &str) -> bool {
     proc_keys_has_bcachefs_uuid(&contents, uuid)
 }
 
+/// Parse `/proc/keys` and return the decimal key id of the
+/// `bcachefs:<uuid>` logon key, or `None` if it isn't loaded. The id
+/// is what `keyctl unlink <id> @s` expects to revoke the key from
+/// the engine's session keyring.
+///
+/// Pure function — `find_bcachefs_key_id` is the async I/O wrapper.
+fn parse_bcachefs_key_id(contents: &str, uuid: &str) -> Option<String> {
+    let needle = format!("bcachefs:{uuid}");
+    contents.lines().find_map(|line| {
+        let mut toks = line.split_whitespace();
+        let id_hex = toks.next()?;
+        // Same token-equality check as `proc_keys_has_bcachefs_uuid` —
+        // belt-and-braces against partial-uuid matches.
+        if !line.split_whitespace().any(|tok| tok == needle) {
+            return None;
+        }
+        // /proc/keys writes ids as 8-hex-digit zero-padded; keyctl
+        // accepts decimal — stick with decimal so the command line
+        // is unambiguous regardless of leading-zero handling.
+        u32::from_str_radix(id_hex, 16).ok().map(|n| n.to_string())
+    })
+}
+
+async fn find_bcachefs_key_id(uuid: &str) -> Option<String> {
+    let contents = tokio::fs::read_to_string(PROC_KEYS_PATH).await.ok()?;
+    parse_bcachefs_key_id(&contents, uuid)
+}
+
 #[derive(Debug, Error)]
 pub enum FilesystemError {
     #[error("bcachefs command failed: {0}")]
@@ -1114,6 +1142,41 @@ impl FilesystemService {
         .map_err(FilesystemError::CommandFailed)?;
 
         info!("Filesystem '{name}' unlocked");
+        self.invalidate_list_cache().await;
+        self.get(name).await
+    }
+
+    /// Lock an encrypted filesystem: unmount it (if mounted) and revoke
+    /// its key from the kernel keyring. Mirror of `unlock`. After this,
+    /// remounting requires re-entering the passphrase via `unlock`
+    /// (or the stored auto-unlock key, if one is on disk — those two
+    /// concepts are independent; "lock" doesn't delete the stored key,
+    /// `delete_key` does).
+    ///
+    /// No-op (success) if the FS is already locked. Errors out if the
+    /// FS isn't encrypted at all — calling lock on a plain FS is a
+    /// programming bug worth surfacing.
+    pub async fn lock(&self, name: &str) -> Result<Filesystem, FilesystemError> {
+        let fs = self.get(name).await?;
+        if fs.options.encrypted != Some(true) {
+            return Err(FilesystemError::InvalidInput(format!(
+                "filesystem '{name}' is not encrypted"
+            )));
+        }
+        if fs.mounted {
+            self.unmount(name).await?;
+        }
+        match find_bcachefs_key_id(&fs.uuid).await {
+            Some(key_id) => {
+                cmd::run_ok("keyctl", &["unlink", &key_id, "@s"])
+                    .await
+                    .map_err(FilesystemError::CommandFailed)?;
+                info!("Filesystem '{name}' locked (key {key_id} unlinked from session keyring)");
+            }
+            None => {
+                info!("Filesystem '{name}' was already locked (no key in keyring)");
+            }
+        }
         self.invalidate_list_cache().await;
         self.get(name).await
     }
@@ -2921,5 +2984,57 @@ mod tests {
 3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-extra-suffix
 ";
         assert!(!proc_keys_has_bcachefs_uuid(contents, "abcd1234"));
+    }
+
+    // ── parse_bcachefs_key_id ─────────────────────────────────────
+
+    #[test]
+    fn parse_key_id_returns_decimal_id_for_matching_uuid() {
+        // `keyctl unlink` takes a decimal id; /proc/keys writes hex.
+        // 3a821c8e hex == 981605518 decimal.
+        let contents = "\
+2c93e9b4 I--Q---     1 perm 3f010000     0     0 keyring   _ses: 1
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-1111-2222-3333-444455556666
+";
+        let id = parse_bcachefs_key_id(contents, "abcd1234-1111-2222-3333-444455556666");
+        assert_eq!(id.as_deref(), Some("981605518"));
+    }
+
+    #[test]
+    fn parse_key_id_returns_none_when_uuid_absent() {
+        let contents = "\
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:other-uuid
+";
+        assert!(parse_bcachefs_key_id(contents, "abcd1234-1111-2222-3333-444455556666").is_none());
+    }
+
+    #[test]
+    fn parse_key_id_returns_none_for_empty_keyring() {
+        assert!(parse_bcachefs_key_id("", "any-uuid").is_none());
+    }
+
+    #[test]
+    fn parse_key_id_does_not_match_uuid_prefix() {
+        // Same prefix-safety as proc_keys_has_bcachefs_uuid — don't
+        // unlink someone else's key just because the uuids share a
+        // common prefix.
+        let contents = "\
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-extra
+";
+        assert!(parse_bcachefs_key_id(contents, "abcd1234").is_none());
+    }
+
+    #[test]
+    fn parse_key_id_picks_first_matching_line() {
+        // Defensive: a stale revoked key + a fresh one with the same
+        // uuid would be unusual but possible if a previous lock was
+        // interrupted. Take the first id; if unlink fails on it, the
+        // operator can re-run.
+        let contents = "\
+00000010 I------     1 perm 3f010000     0     0 logon     bcachefs:dup-uuid
+00000020 I------     1 perm 3f010000     0     0 logon     bcachefs:dup-uuid
+";
+        let id = parse_bcachefs_key_id(contents, "dup-uuid");
+        assert_eq!(id.as_deref(), Some("16")); // 0x10
     }
 }

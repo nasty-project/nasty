@@ -1368,6 +1368,13 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             }
             Err(e) => invalid(req, e),
         },
+        "fs.lock" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.lock(name).await {
+                Ok(fs) => ok(req, fs),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         "fs.key.export" => match require_str(req, "name") {
             Ok(name) => match state.filesystems.export_key(name).await {
                 Ok(key) => ok(req, key),

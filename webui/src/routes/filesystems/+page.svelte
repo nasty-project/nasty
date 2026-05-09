@@ -554,6 +554,20 @@
 		editIoScheduler = fs.options.io_scheduler ?? '';
 	}
 
+	async function lockFs(fs: Filesystem) {
+		const ok = await confirm(
+			`Lock Filesystem "${fs.name}"`,
+			`This will unmount the filesystem and revoke the encryption key from the kernel. Any NFS, SMB, iSCSI, or NVMe-oF shares, apps, or VMs running on this filesystem will stop immediately and stay broken until you unlock it again with the passphrase.`,
+			{ confirmLabel: 'Lock' },
+		);
+		if (!ok) return;
+		await withToast(
+			() => client.call('fs.lock', { name: fs.name }, 120000),
+			`Filesystem "${fs.name}" locked`,
+		);
+		await refresh();
+	}
+
 	async function doUnlock() {
 		if (!unlockFs || !unlockPassphrase) return;
 		const name = unlockFs;
@@ -1286,6 +1300,10 @@
 						{#if fs.options.encrypted && fs.options.locked}
 							<Button variant="default" size="xs" onclick={() => { unlockFs = fs.name; unlockPassphrase = ''; }}>
 								Unlock
+							</Button>
+						{:else if fs.options.encrypted}
+							<Button variant="secondary" size="xs" onclick={() => lockFs(fs)}>
+								Lock
 							</Button>
 						{/if}
 						<Button variant="secondary" size="xs" onclick={() => toggleMount(fs)}

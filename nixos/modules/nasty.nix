@@ -555,6 +555,7 @@ in {
       hdparm            # HDD spin-down, drive parameters
       lm_sensors        # CPU/drive temperature monitoring
       lsof              # open file debugging ("device busy")
+      keyutils          # keyctl — used by the engine to lock encrypted FSes
       iotop-c           # per-process I/O monitoring
       ethtool           # NIC speed, duplex, ring buffer tuning
       iperf3            # network throughput testing
