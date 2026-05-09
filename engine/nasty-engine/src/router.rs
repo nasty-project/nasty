@@ -3293,19 +3293,47 @@ pub(crate) async fn evaluate_active_alerts(
         )
         .await;
 
-    // Mount failures recorded at boot stay live until the engine is restarted.
+    // Mount failures recorded at boot stay live until the engine is
+    // restarted. Enrich the alert with current state: a locked
+    // encrypted FS gets a "unlock to mount" message instead of the
+    // generic "check disk connectivity" hint, since the user can
+    // recover from this through the WebUI without touching cables
+    // or logs (issue #87). Filesystems that have since been mounted
+    // by the user drop out entirely.
     let mount_failures = state.mount_failures.lock().await;
-    for name in mount_failures.iter() {
-        active.push(alerts::ActiveAlert {
-            rule_id: "mount-failure".into(),
-            rule_name: "Filesystem failed to mount".into(),
-            severity: alerts::AlertSeverity::Critical,
-            metric: alerts::AlertMetric::BcachefsDegraded,
-            message: format!("Filesystem \"{name}\" failed to mount after boot. Check disk connectivity and logs."),
-            current_value: 1.0,
-            threshold: 0.0,
-            source: name.clone(),
-        });
+    if !mount_failures.is_empty() {
+        let current_fses = state.filesystems.list().await.unwrap_or_default();
+        for name in mount_failures.iter() {
+            let fs = current_fses.iter().find(|f| &f.name == name);
+            // Already mounted (user fixed it via UI) — drop the alert.
+            if fs.is_some_and(|f| f.mounted) {
+                continue;
+            }
+            let (rule_name, severity, message) = match fs {
+                Some(f) if f.options.encrypted == Some(true) => (
+                    "Encrypted filesystem locked",
+                    alerts::AlertSeverity::Warning,
+                    format!("Filesystem \"{name}\" is encrypted and locked — unlock it to mount."),
+                ),
+                _ => (
+                    "Filesystem failed to mount",
+                    alerts::AlertSeverity::Critical,
+                    format!(
+                        "Filesystem \"{name}\" failed to mount after boot. Check disk connectivity and logs."
+                    ),
+                ),
+            };
+            active.push(alerts::ActiveAlert {
+                rule_id: "mount-failure".into(),
+                rule_name: rule_name.into(),
+                severity,
+                metric: alerts::AlertMetric::BcachefsDegraded,
+                message,
+                current_value: 1.0,
+                threshold: 0.0,
+                source: name.clone(),
+            });
+        }
     }
 
     active
