@@ -17,18 +17,34 @@ const KEYS_DIR: &str = "/var/lib/nasty/keys";
 const PROC_KEYS_PATH: &str = "/proc/keys";
 
 /// Parse /proc/keys output and return true if the session keyring (or any
-/// keyring visible to this process) holds a `bcachefs:<uuid>` logon key.
+/// keyring visible to this process) holds a `bcachefs:<uuid>` key.
 /// `bcachefs unlock -k session` lands the FS encryption key here; the kernel
 /// reads it from there at mount time. So "key present" === "FS unlocked",
 /// regardless of whether it's currently mounted.
 fn proc_keys_has_bcachefs_uuid(contents: &str, uuid: &str) -> bool {
     let needle = format!("bcachefs:{uuid}");
-    contents.lines().any(|line| {
-        // Each /proc/keys line ends with `<type>  <description>`. We only care
-        // about logon-type entries whose description is exactly our needle —
-        // belt-and-braces against future bcachefs key naming changes by also
-        // accepting the description as a token anywhere on the line.
-        line.split_whitespace().any(|tok| tok == needle)
+    contents
+        .lines()
+        .any(|line| line_has_key_description(line, &needle))
+}
+
+/// Token-level membership check against a `/proc/keys` line.
+///
+/// The format on a real running kernel is:
+///   `<id-hex> <flags> <uses> <perm> <uid> <gid> <type> <description>: <data>`
+///
+/// e.g. `1de1938e I--Q--- 1 perm 3f010000 0 0 user bcachefs:<uuid>: 32`
+///
+/// — the description column ends with `:` followed by a type-specific
+/// data column. A naive `tok == needle` fails because the token in the
+/// real output is `bcachefs:<uuid>:`, not `bcachefs:<uuid>`. Strip the
+/// trailing colon before comparing. (This bug was masked in earlier
+/// tests that hand-wrote /proc/keys content without the trailing colon
+/// — those tests were wrong about the kernel format.)
+fn line_has_key_description(line: &str, needle: &str) -> bool {
+    line.split_whitespace().any(|tok| {
+        let stripped = tok.strip_suffix(':').unwrap_or(tok);
+        stripped == needle
     })
 }
 
@@ -41,7 +57,7 @@ async fn is_bcachefs_key_loaded(uuid: &str) -> bool {
 }
 
 /// Parse `/proc/keys` and return the decimal key id of the
-/// `bcachefs:<uuid>` logon key, or `None` if it isn't loaded. The id
+/// `bcachefs:<uuid>` key, or `None` if it isn't loaded. The id
 /// is what `keyctl unlink <id> @s` expects to revoke the key from
 /// the engine's session keyring.
 ///
@@ -49,13 +65,10 @@ async fn is_bcachefs_key_loaded(uuid: &str) -> bool {
 fn parse_bcachefs_key_id(contents: &str, uuid: &str) -> Option<String> {
     let needle = format!("bcachefs:{uuid}");
     contents.lines().find_map(|line| {
-        let mut toks = line.split_whitespace();
-        let id_hex = toks.next()?;
-        // Same token-equality check as `proc_keys_has_bcachefs_uuid` —
-        // belt-and-braces against partial-uuid matches.
-        if !line.split_whitespace().any(|tok| tok == needle) {
+        if !line_has_key_description(line, &needle) {
             return None;
         }
+        let id_hex = line.split_whitespace().next()?;
         // /proc/keys writes ids as 8-hex-digit zero-padded; keyctl
         // accepts decimal — stick with decimal so the command line
         // is unambiguous regardless of leading-zero handling.
@@ -2946,12 +2959,35 @@ mod tests {
 
     // ── proc_keys_has_bcachefs_uuid ────────────────────────────────
 
+    // Real /proc/keys lines have format:
+    //   `<id-hex> <flags> <uses> perm <perm-hex> <uid> <gid> <type>  <description>: <data>`
+    // i.e. the description column ends with `:` followed by a type-specific
+    // data column (for `user`/`logon` keys: data length in bytes). Earlier
+    // tests handcrafted lines without that trailing `:`, which masked a
+    // real bug in the parser — see `line_has_key_description`.
+
+    #[test]
+    fn proc_keys_finds_bcachefs_user_key() {
+        // Verbatim from a running NASty after `bcachefs unlock -k session`
+        // (issue: filesystem 'first' showed Locked despite successful unlock,
+        // because the parser's `tok == needle` check missed the trailing colon).
+        let contents = "\
+1de1938e I--Q---     1 perm 3f010000     0     0 user      bcachefs:a56458ab-a24c-45b6-9052-299ae1e3da43: 32
+";
+        assert!(proc_keys_has_bcachefs_uuid(
+            contents,
+            "a56458ab-a24c-45b6-9052-299ae1e3da43",
+        ));
+    }
+
     #[test]
     fn proc_keys_finds_bcachefs_logon_key() {
-        // Lines lifted from a real /proc/keys after `bcachefs unlock -k session`.
+        // bcachefs has shipped variants that use the `logon` keytype too —
+        // make sure the parser doesn't over-fit to one keytype. The trailing
+        // `:` and data column are still present.
         let contents = "\
 2c93e9b4 I--Q---     1 perm 3f010000     0     0 keyring   _ses: 1
-3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-1111-2222-3333-444455556666
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-1111-2222-3333-444455556666: 32
 ";
         assert!(proc_keys_has_bcachefs_uuid(
             contents,
@@ -2963,7 +2999,7 @@ mod tests {
     fn proc_keys_misses_when_uuid_absent() {
         let contents = "\
 2c93e9b4 I--Q---     1 perm 3f010000     0     0 keyring   _ses: 1
-3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:other-uuid-here
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:other-uuid-here: 32
 ";
         assert!(!proc_keys_has_bcachefs_uuid(
             contents,
@@ -2981,7 +3017,7 @@ mod tests {
         // A UUID that's a *prefix* of an entry must not match — bcachefs UUIDs
         // are full strings, not prefixes.
         let contents = "\
-3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-extra-suffix
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-extra-suffix: 32
 ";
         assert!(!proc_keys_has_bcachefs_uuid(contents, "abcd1234"));
     }
@@ -2989,12 +3025,23 @@ mod tests {
     // ── parse_bcachefs_key_id ─────────────────────────────────────
 
     #[test]
+    fn parse_key_id_returns_decimal_id_for_real_kernel_format() {
+        // Verbatim live-box format including the trailing `:` and `<data>`
+        // column. 1de1938e hex == 501322638 decimal — that's what
+        // `keyctl unlink` needs to revoke the key.
+        let contents = "\
+1de1938e I--Q---     1 perm 3f010000     0     0 user      bcachefs:a56458ab-a24c-45b6-9052-299ae1e3da43: 32
+";
+        let id = parse_bcachefs_key_id(contents, "a56458ab-a24c-45b6-9052-299ae1e3da43");
+        assert_eq!(id.as_deref(), Some("501322638"));
+    }
+
+    #[test]
     fn parse_key_id_returns_decimal_id_for_matching_uuid() {
-        // `keyctl unlink` takes a decimal id; /proc/keys writes hex.
-        // 3a821c8e hex == 981605518 decimal.
+        // Synthetic but format-faithful: 3a821c8e hex == 981605518 decimal.
         let contents = "\
 2c93e9b4 I--Q---     1 perm 3f010000     0     0 keyring   _ses: 1
-3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-1111-2222-3333-444455556666
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-1111-2222-3333-444455556666: 32
 ";
         let id = parse_bcachefs_key_id(contents, "abcd1234-1111-2222-3333-444455556666");
         assert_eq!(id.as_deref(), Some("981605518"));
@@ -3003,7 +3050,7 @@ mod tests {
     #[test]
     fn parse_key_id_returns_none_when_uuid_absent() {
         let contents = "\
-3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:other-uuid
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:other-uuid: 32
 ";
         assert!(parse_bcachefs_key_id(contents, "abcd1234-1111-2222-3333-444455556666").is_none());
     }
@@ -3019,7 +3066,7 @@ mod tests {
         // unlink someone else's key just because the uuids share a
         // common prefix.
         let contents = "\
-3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-extra
+3a821c8e I------     1 perm 3f010000     0     0 logon     bcachefs:abcd1234-extra: 32
 ";
         assert!(parse_bcachefs_key_id(contents, "abcd1234").is_none());
     }
@@ -3031,8 +3078,8 @@ mod tests {
         // interrupted. Take the first id; if unlink fails on it, the
         // operator can re-run.
         let contents = "\
-00000010 I------     1 perm 3f010000     0     0 logon     bcachefs:dup-uuid
-00000020 I------     1 perm 3f010000     0     0 logon     bcachefs:dup-uuid
+00000010 I------     1 perm 3f010000     0     0 logon     bcachefs:dup-uuid: 32
+00000020 I------     1 perm 3f010000     0     0 logon     bcachefs:dup-uuid: 32
 ";
         let id = parse_bcachefs_key_id(contents, "dup-uuid");
         assert_eq!(id.as_deref(), Some("16")); // 0x10
