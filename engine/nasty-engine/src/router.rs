@@ -688,6 +688,12 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(e) => invalid(req, e),
             }
         }
+        // Snapshot of pending rollback txns. WebUI calls this on
+        // connect so a session that didn't initiate the change can
+        // still recover the Confirm banner — fixes the "can't change
+        // mgmt-iface IP" UX hole where the original session loses
+        // connectivity at apply time.
+        "system.network.pending" => ok(req, state.network.pending().await),
         // Phase 3a: read-only NM preview. Connects to NetworkManager
         // via DBus, diffs the persisted desired config against the
         // current `nasty-*` connections in NM, returns the change set.

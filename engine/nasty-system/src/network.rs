@@ -252,15 +252,26 @@ pub struct NetworkService {
 }
 
 struct PendingTxn {
-    /// When the rollback will fire if not confirmed. Currently unread but
-    /// kept so a future `system.network.transactions` RPC can surface it.
-    #[allow(dead_code)]
+    /// When the rollback will fire if not confirmed. Surfaced via
+    /// `system.network.pending` so a fresh WebUI session (e.g. after
+    /// the user reconnects on a new IP they just configured) can find
+    /// out about pending rollbacks and offer the Confirm button.
     revert_at_unix: u64,
     /// Why the server scheduled this rollback (human-readable). Same
     /// rationale as `revert_at_unix`.
-    #[allow(dead_code)]
     risk_reason: String,
     cancel: tokio::sync::oneshot::Sender<()>,
+}
+
+/// Snapshot of one pending rollback, returned by
+/// `system.network.pending`. Intended for the WebUI to recover the
+/// rollback banner after a reconnect (or first connect from a new IP)
+/// — see `network.rs:PendingTxn` for storage.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct NetworkPendingTxn {
+    pub txn_id: String,
+    pub revert_at_unix: u64,
+    pub risk_reason: String,
 }
 
 impl Default for NetworkService {
@@ -395,6 +406,24 @@ impl NetworkService {
 
             Ok(UpdateResponse::default())
         }
+    }
+
+    /// Snapshot of all currently-pending rollback transactions. The
+    /// WebUI calls this on connect so a session that didn't initiate
+    /// the change (e.g. the user just reconnected on a new IP they
+    /// configured 5 seconds ago) can still see the Confirm banner.
+    /// Order is unspecified; the table rarely has more than one entry.
+    pub async fn pending(&self) -> Vec<NetworkPendingTxn> {
+        self.transactions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, txn)| NetworkPendingTxn {
+                txn_id: id.clone(),
+                revert_at_unix: txn.revert_at_unix,
+                risk_reason: txn.risk_reason.clone(),
+            })
+            .collect()
     }
 
     /// Confirm a pending rollback transaction — cancel its timer and remove
@@ -1998,6 +2027,50 @@ mod tests {
         let res = svc.confirm("does-not-exist").await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("does-not-exist"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_returns_empty_when_no_active_txns() {
+        let svc = NetworkService::new();
+        assert!(svc.pending().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_surfaces_active_txn_metadata() {
+        // Reproduces the IP-change recovery scenario: an apply has
+        // scheduled a rollback, the original WebUI session lost
+        // connectivity, and a fresh session calls `pending()` to
+        // recover the banner. The metadata returned must be enough
+        // for the WebUI to render the banner verbatim — txn_id (for
+        // confirm), revert deadline (for the countdown), risk reason
+        // (for the tooltip).
+        let svc = NetworkService::new();
+        let revert_at = unix_now() + 30;
+        svc.schedule_rollback(
+            "txn-abc".into(),
+            30,
+            revert_at,
+            "IP config of management iface eth0 is changing".into(),
+        )
+        .await;
+        let pending = svc.pending().await;
+        assert_eq!(pending.len(), 1);
+        let p = &pending[0];
+        assert_eq!(p.txn_id, "txn-abc");
+        assert_eq!(p.revert_at_unix, revert_at);
+        assert!(p.risk_reason.contains("IP config"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_drops_confirmed_txn() {
+        // Once a txn is confirmed, it must not appear in pending —
+        // otherwise a fresh WebUI session would re-show a banner for
+        // a change the user already accepted.
+        let svc = NetworkService::new();
+        svc.schedule_rollback("txn-abc".into(), 30, unix_now() + 30, "test".into())
+            .await;
+        svc.confirm("txn-abc").await.unwrap();
+        assert!(svc.pending().await.is_empty());
     }
 
     // The timeout-fires-rollback path isn't unit-tested here — exercising

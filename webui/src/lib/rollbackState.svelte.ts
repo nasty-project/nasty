@@ -10,7 +10,7 @@
 
 import { getClient } from './client';
 import { withToast } from './toast.svelte';
-import type { NetworkUpdateRequest, NetworkUpdateResponse } from './types';
+import type { NetworkPendingTxn, NetworkUpdateRequest, NetworkUpdateResponse } from './types';
 
 export interface PendingRollback {
 	txnId: string;
@@ -58,6 +58,38 @@ export async function applyNetworkUpdate(
 		};
 	}
 	return res;
+}
+
+/** Query the server for any active rollback transactions and populate the
+ * local store. Called on every (re)connect so a fresh session can recover
+ * the banner — important when the user just changed the management iface
+ * IP and reconnected on the new address: the txn is still pending on the
+ * server, but the *original* browser session that initiated it is gone.
+ *
+ * Best-effort: if the RPC fails (older engine, transient error), we leave
+ * the local state alone. Picks the soonest-expiring txn if multiple are
+ * pending — pathological in practice (the in-memory table rarely has more
+ * than one entry) but we want stable behavior. */
+export async function loadPendingRollback(): Promise<void> {
+	const client = getClient();
+	let txns: NetworkPendingTxn[];
+	try {
+		txns = await client.call<NetworkPendingTxn[]>('system.network.pending');
+	} catch {
+		return;
+	}
+	if (txns.length === 0) {
+		// Server says nothing pending — clear local in case we'd been
+		// holding a stale entry from a prior session.
+		_pending = null;
+		return;
+	}
+	const soonest = txns.reduce((a, b) => (a.revert_at_unix <= b.revert_at_unix ? a : b));
+	_pending = {
+		txnId: soonest.txn_id,
+		revertAtUnix: soonest.revert_at_unix,
+		riskReason: soonest.risk_reason || null,
+	};
 }
 
 /** Confirm a pending rollback — keeps the change. Clears the local store
