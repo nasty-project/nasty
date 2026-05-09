@@ -492,6 +492,23 @@ impl NetworkService {
     pub async fn list_interfaces(&self) -> Vec<LiveInterface> {
         enumerate_interfaces().await
     }
+
+    /// Phase 3a — connect to NetworkManager via DBus and report what
+    /// would change if the persisted (resolved) network config were
+    /// applied via NM. **Read-only**; no NM state is touched. Phase 3b
+    /// adds the actual apply.
+    ///
+    /// Returns the diff as data so callers (and the future WebUI) can
+    /// surface it before committing to the cutover.
+    pub async fn nm_preview(&self) -> Result<nm::dbus::NmDiff, String> {
+        let cfg = load_config().await;
+        let layered_cfg = layered::to_layered(&cfg);
+        let desired = nm::to_nm_profiles(&layered_cfg);
+
+        let client = nm::dbus::NmDbusClient::new().await?;
+        let existing = client.list_nasty_connections().await?;
+        Ok(nm::dbus::compute_diff(&desired, &existing))
+    }
 }
 
 /// Top-level helper for the rollback timer. Reads the pending-revert file,

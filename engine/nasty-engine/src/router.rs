@@ -688,6 +688,14 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Err(e) => invalid(req, e),
             }
         }
+        // Phase 3a: read-only NM preview. Connects to NetworkManager
+        // via DBus, diffs the persisted desired config against the
+        // current `nasty-*` connections in NM, returns the change set.
+        // No NM state is touched; safe to call at any time.
+        "system.network.nm_preview" => match state.network.nm_preview().await {
+            Ok(diff) => ok(req, diff),
+            Err(e) => err(req, e),
+        },
         "system.metrics.prometheus" => {
             let url = format!("{}/metrics", crate::METRICS_BASE);
             match state.metrics_client.get(&url).send().await {
