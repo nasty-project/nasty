@@ -474,6 +474,48 @@
 		showBridgeForm = false; bridgeName = 'br0'; bridgeMembers = []; bridgeMtu = '';
 	}
 
+	async function deleteBond(name: string) {
+		if (!network) return;
+		if (!confirm(`Remove bond ${name}? Members will return to standalone interfaces.`)) return;
+		const payload: NetworkConfig = {
+			interfaces: network.interfaces || [],
+			dns: network.dns || [],
+			bonds: (network.bonds || []).filter(b => b.name !== name),
+			vlans: network.vlans || [],
+			bridges: network.bridges || [],
+		};
+		await applyNetworkUpdate(payload, `Bond ${name} removed`);
+		networkState = await client.call<NetworkState>('system.network.get');
+	}
+
+	async function deleteBridge(name: string) {
+		if (!network) return;
+		if (!confirm(`Remove bridge ${name}? Members will return to standalone interfaces.`)) return;
+		const payload: NetworkConfig = {
+			interfaces: network.interfaces || [],
+			dns: network.dns || [],
+			bonds: network.bonds || [],
+			vlans: network.vlans || [],
+			bridges: (network.bridges || []).filter(b => b.name !== name),
+		};
+		await applyNetworkUpdate(payload, `Bridge ${name} removed`);
+		networkState = await client.call<NetworkState>('system.network.get');
+	}
+
+	async function deleteVlan(parent: string, vlan_id: number) {
+		if (!network) return;
+		if (!confirm(`Remove VLAN ${parent}.${vlan_id}?`)) return;
+		const payload: NetworkConfig = {
+			interfaces: network.interfaces || [],
+			dns: network.dns || [],
+			bonds: network.bonds || [],
+			vlans: (network.vlans || []).filter(v => !(v.parent === parent && v.vlan_id === vlan_id)),
+			bridges: network.bridges || [],
+		};
+		await applyNetworkUpdate(payload, `VLAN ${parent}.${vlan_id} removed`);
+		networkState = await client.call<NetworkState>('system.network.get');
+	}
+
 	async function loadNotifications() {
 		try {
 			notifConfig = await client.call<NotificationConfig>('notifications.config.get');
@@ -1030,6 +1072,7 @@
 								<Badge variant="outline" class="text-[0.6rem]">bond</Badge>
 								<span class="font-mono">{bond.name}</span>
 								<span class="text-xs text-muted-foreground">{bond.mode} · {bond.members.join(', ')}{bond.mtu ? ` · MTU ${bond.mtu}` : ''}</span>
+								<Button size="xs" variant="ghost" class="ml-auto text-destructive hover:text-destructive" onclick={() => deleteBond(bond.name)}>Remove</Button>
 							</div>
 						{/each}
 						{#each network.bridges ?? [] as bridge}
@@ -1037,6 +1080,7 @@
 								<Badge variant="outline" class="text-[0.6rem]">bridge</Badge>
 								<span class="font-mono">{bridge.name}</span>
 								<span class="text-xs text-muted-foreground">{bridge.members.length === 0 ? 'no members' : bridge.members.join(', ')}{bridge.mtu ? ` · MTU ${bridge.mtu}` : ''}</span>
+								<Button size="xs" variant="ghost" class="ml-auto text-destructive hover:text-destructive" onclick={() => deleteBridge(bridge.name)}>Remove</Button>
 							</div>
 						{/each}
 						{#each network.vlans as vlan}
@@ -1044,6 +1088,7 @@
 								<Badge variant="outline" class="text-[0.6rem]">vlan</Badge>
 								<span class="font-mono">{vlan.parent}.{vlan.vlan_id}</span>
 								{#if vlan.mtu}<span class="text-xs text-muted-foreground">MTU {vlan.mtu}</span>{/if}
+								<Button size="xs" variant="ghost" class="ml-auto text-destructive hover:text-destructive" onclick={() => deleteVlan(vlan.parent, vlan.vlan_id)}>Remove</Button>
 							</div>
 						{/each}
 					</div>
