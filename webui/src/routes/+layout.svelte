@@ -64,6 +64,7 @@
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
 	import { rollbackState, confirmRollback, loadPendingRollback } from '$lib/rollbackState.svelte';
+	import { tempUnit } from '$lib/temperature.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import { theme } from '$lib/theme.svelte';
 	import { terminalStatus } from '$lib/terminalStatus.svelte';
@@ -223,7 +224,10 @@
 		const _r = sysInfoRefresh.count; // track refresh triggers
 		if (connected) {
 			getClient().call('system.info').then((info: any) => { sysInfo = info; }).catch(() => {});
-			getClient().call('system.settings.get').then((s: any) => { clock24h = s.clock_24h ?? true; }).catch(() => {});
+			getClient().call('system.settings.get').then((s: any) => {
+				clock24h = s.clock_24h ?? true;
+				tempUnit.set(s.temp_unit ?? 'celsius');
+			}).catch(() => {});
 		}
 	});
 

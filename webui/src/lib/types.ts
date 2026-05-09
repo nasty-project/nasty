@@ -433,10 +433,13 @@ export interface ProtocolStatus {
 	system_service: boolean;
 }
 
+export type TempUnit = 'celsius' | 'fahrenheit';
+
 export interface Settings {
 	timezone: string;
 	hostname: string | null;
 	clock_24h: boolean;
+	temp_unit: TempUnit;
 	tls_domain: string | null;
 	tls_acme_email: string | null;
 	tls_acme_enabled: boolean;

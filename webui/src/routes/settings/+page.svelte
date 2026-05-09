@@ -3,6 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
+	import { tempUnit } from '$lib/temperature.svelte';
 	import { promoteOrphanedMembers } from '$lib/network';
 	import { confirm } from '$lib/confirm.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
@@ -228,6 +229,16 @@
 		await withToast(
 			() => client.call('system.settings.update', { clock_24h: val }),
 			val ? '24-hour clock enabled' : '12-hour clock enabled'
+		);
+	}
+
+	async function saveTempUnit(val: 'celsius' | 'fahrenheit') {
+		if (!settings) return;
+		settings.temp_unit = val;
+		tempUnit.set(val);
+		await withToast(
+			() => client.call('system.settings.update', { temp_unit: val }),
+			val === 'fahrenheit' ? 'Temperature unit: Fahrenheit' : 'Temperature unit: Celsius'
 		);
 	}
 
@@ -743,6 +754,20 @@
 								onclick={() => saveClock24h(false)}
 								class="rounded-r-md px-3 py-1 font-medium transition-colors {!settings.clock_24h ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
 							>AM/PM</button>
+						</div>
+					</div>
+
+					<div class="mb-4 flex items-center justify-between">
+						<span class="text-sm text-muted-foreground">Temperature Unit</span>
+						<div class="flex rounded-md border border-border text-xs">
+							<button
+								onclick={() => saveTempUnit('celsius')}
+								class="rounded-l-md px-3 py-1 font-medium transition-colors {settings.temp_unit !== 'fahrenheit' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
+							>°C</button>
+							<button
+								onclick={() => saveTempUnit('fahrenheit')}
+								class="rounded-r-md px-3 py-1 font-medium transition-colors {settings.temp_unit === 'fahrenheit' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
+							>°F</button>
 						</div>
 					</div>
 

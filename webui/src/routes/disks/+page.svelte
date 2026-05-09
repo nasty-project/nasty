@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { formatBytes } from '$lib/format';
+	import { formatTemp } from '$lib/temperature.svelte';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { BlockDevice, DiskHealth, ProtocolStatus } from '$lib/types';
@@ -255,7 +256,7 @@
 								<div class="flex flex-col">
 									<span class="text-[0.7rem] uppercase text-muted-foreground">Temperature</span>
 									<span class="text-sm font-semibold {disk.temperature_c > 55 ? 'text-red-400' : disk.temperature_c > 45 ? 'text-amber-500' : ''}">
-										{disk.temperature_c}°C
+										{formatTemp(disk.temperature_c)}
 									</span>
 								</div>
 							{/if}
@@ -344,7 +345,7 @@
 									<td class="p-3 font-mono text-xs text-muted-foreground">{disk.serial}</td>
 									<td class="p-3 text-sm">{formatBytes(disk.capacity_bytes)}</td>
 									<td class="p-3 text-sm {disk.temperature_c != null && disk.temperature_c > 55 ? 'text-red-400' : disk.temperature_c != null && disk.temperature_c > 45 ? 'text-amber-500' : ''}">
-										{disk.temperature_c != null ? `${disk.temperature_c}°C` : '—'}
+										{formatTemp(disk.temperature_c) ?? '—'}
 									</td>
 									<td class="p-3">
 										<span class="rounded px-2 py-0.5 text-xs font-bold {disk.health_passed ? 'bg-green-950 text-green-400' : 'bg-red-950 text-red-400'}">

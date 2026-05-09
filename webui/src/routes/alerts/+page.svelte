@@ -3,6 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
+	import { tempUnit, cToF, tempUnitLabel } from '$lib/temperature.svelte';
 	import type { AlertRule, ActiveAlert, AlertMetric, AlertCondition, AlertSeverity } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -23,11 +24,15 @@
 
 	const client = getClient();
 
-	const metricLabels: Record<AlertMetric, string> = {
+	// Disk temperature label tracks the user's display-unit preference;
+	// thresholds remain Celsius internally (so an existing rule keeps its
+	// alerting semantics if the user toggles units), but we convert at
+	// the input/display boundary in `createRule` and the rules table.
+	const metricLabels: Record<AlertMetric, string> = $derived({
 		fs_usage_percent: 'Filesystem Usage (%)',
 		cpu_load_percent: 'CPU Load (%)',
 		memory_usage_percent: 'Memory Usage (%)',
-		disk_temperature: 'Disk Temperature (°C)',
+		disk_temperature: `Disk Temperature (${tempUnitLabel(tempUnit.current)})`,
 		smart_health: 'SMART Health Failure',
 		swap_usage_percent: 'Swap Usage (%)',
 		bcachefs_degraded: 'bcachefs Degraded Mode',
@@ -37,7 +42,7 @@
 		bcachefs_scrub_errors: 'bcachefs Scrub Corruption',
 		bcachefs_reconcile_stalled: 'bcachefs Reconcile Stalled',
 		kernel_errors: 'Kernel Errors',
-	};
+	});
 
 	const conditionLabels: Record<AlertCondition, string> = {
 		above: 'Above',
@@ -69,6 +74,13 @@
 
 	async function createRule() {
 		if (!newName) return;
+		// disk_temperature thresholds are stored in Celsius. If the user is
+		// viewing Fahrenheit, the value typed in the input is in °F — convert
+		// before sending so the alert evaluator sees the canonical unit.
+		const stored =
+			newMetric === 'disk_temperature' && tempUnit.current === 'fahrenheit'
+				? Math.round(((newThreshold - 32) * 5) / 9)
+				: newThreshold;
 		const ok = await withToast(
 			() => client.call('alert.rules.create', {
 				id: '',
@@ -76,7 +88,7 @@
 				enabled: true,
 				metric: newMetric,
 				condition: newCondition,
-				threshold: newThreshold,
+				threshold: stored,
 				severity: newSeverity,
 			}),
 			'Alert rule created'
@@ -198,7 +210,12 @@
 				<tr class="border-b border-border {!rule.enabled ? 'opacity-50' : ''}">
 					<td class="p-3"><strong>{rule.name}</strong></td>
 					<td class="p-3">{metricLabels[rule.metric] ?? rule.metric}</td>
-					<td class="p-3">{conditionLabels[rule.condition] ?? rule.condition} {rule.threshold}</td>
+					<td class="p-3">
+						{conditionLabels[rule.condition] ?? rule.condition}
+						{rule.metric === 'disk_temperature' && tempUnit.current === 'fahrenheit'
+							? Math.round(cToF(rule.threshold))
+							: rule.threshold}
+					</td>
 					<td class="p-3">
 						<span class="rounded px-1.5 py-0.5 text-[0.7rem] font-semibold uppercase {
 							rule.severity === 'critical' ? 'bg-red-950 text-red-200' : 'bg-amber-950 text-amber-200'

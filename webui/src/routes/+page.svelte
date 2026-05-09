@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { formatBytes, formatUptime, formatPercent } from '$lib/format';
+	import { formatTemp } from '$lib/temperature.svelte';
 	import { withToast } from '$lib/toast.svelte';
 	import type { SystemInfo, SystemHealth, SystemStats, Filesystem, DiskHealth, DiskIoStats, NetIfStats, ActiveAlert, Settings, ResourceHistory } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
@@ -432,7 +433,7 @@
 			<CardContent class="pt-4 pb-3">
 				<div class="text-xs uppercase tracking-wide text-muted-foreground">CPU Temp</div>
 				<div class="mt-1 flex items-baseline gap-2">
-					<span class="text-2xl font-bold">{stats.cpu.temp_c != null ? stats.cpu.temp_c + '°C' : '—'}</span>
+					<span class="text-2xl font-bold">{formatTemp(stats.cpu.temp_c) ?? '—'}</span>
 				</div>
 				<div class="mt-2 text-xs text-muted-foreground">
 					{#if stats.cpu.freq_mhz != null}

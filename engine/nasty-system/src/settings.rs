@@ -90,6 +90,16 @@ const TLS_CERT_PATH: &str = "/var/lib/nasty/tls/cert.pem";
 const TLS_KEY_PATH: &str = "/var/lib/nasty/tls/key.pem";
 const LEGO_DATA_DIR: &str = "/var/lib/nasty/lego";
 
+/// Display unit for temperatures rendered in the WebUI. Internal storage
+/// and alert thresholds are always in Celsius; this is presentational only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TempUnit {
+    #[default]
+    Celsius,
+    Fahrenheit,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Settings {
     /// IANA timezone string applied to the system (e.g. `UTC`, `America/New_York`).
@@ -100,6 +110,11 @@ pub struct Settings {
     /// Whether to display clocks in 24-hour format.
     #[serde(default = "default_clock_24h")]
     pub clock_24h: bool,
+    /// Unit for displayed temperatures (CPU, disks, alert thresholds).
+    /// Storage and alert evaluation always use Celsius internally — this
+    /// only affects rendering in the WebUI.
+    #[serde(default)]
+    pub temp_unit: TempUnit,
     /// Domain name for Let's Encrypt TLS (e.g. "nasty.example.com"). Empty = self-signed.
     #[serde(default)]
     pub tls_domain: Option<String>,
@@ -248,6 +263,7 @@ impl Default for Settings {
             timezone: default_timezone(),
             hostname: None,
             clock_24h: default_clock_24h(),
+            temp_unit: TempUnit::default(),
             tls_domain: None,
             tls_acme_email: None,
             tls_acme_enabled: false,
@@ -271,6 +287,8 @@ pub struct SettingsUpdate {
     pub hostname: Option<String>,
     /// Whether to use 24-hour clock display (optional).
     pub clock_24h: Option<bool>,
+    /// Display unit for temperatures (optional).
+    pub temp_unit: Option<TempUnit>,
     /// Domain name for Let's Encrypt TLS (set to empty string to disable).
     pub tls_domain: Option<String>,
     /// Email address for ACME notifications.
@@ -348,6 +366,9 @@ impl SettingsService {
         }
         if let Some(h24) = update.clock_24h {
             settings.clock_24h = h24;
+        }
+        if let Some(unit) = update.temp_unit {
+            settings.temp_unit = unit;
         }
         let mut tls_changed = false;
         if let Some(domain) = update.tls_domain {
