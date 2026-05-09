@@ -696,6 +696,18 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Ok(diff) => ok(req, diff),
             Err(e) => err(req, e),
         },
+        // Phase 3b-alpha: write the current desired config into NM
+        // (Settings.AddConnection / Update / Delete). **Persists
+        // profiles to /etc/NetworkManager/system-connections/; does
+        // NOT activate them.** The active apply path is still the
+        // legacy ip+nixos-rebuild flow — this is for explicit
+        // testing on a box that has NM installed alongside.
+        // Phase 3b-beta makes invocation automatic as part of the
+        // cutover migration.
+        "system.network.nm_apply" => match state.network.nm_apply().await {
+            Ok(outcome) => ok(req, outcome),
+            Err(e) => err(req, e),
+        },
         "system.metrics.prometheus" => {
             let url = format!("{}/metrics", crate::METRICS_BASE);
             match state.metrics_client.get(&url).send().await {

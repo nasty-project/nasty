@@ -1,18 +1,21 @@
-//! NetworkManager D-Bus client — phase 3a (read-only).
+//! NetworkManager D-Bus client.
 //!
-//! Talks to NM via zbus. Phase 3a only exposes read methods
-//! (`list_connections`, `get_settings`, `list_devices`,
-//! `find_device_by_name`) plus diff computation against a desired set
-//! of `NmConnection` profiles. Phase 3b adds the write methods
-//! (`AddConnection` / `Update` / `Delete` / `Activate`) and wires the
-//! diff into the apply pipeline.
+//! Talks to NM via zbus. Read methods (`list_connections`,
+//! `get_settings`) plus diff computation arrived in phase 3a; write
+//! methods (`AddConnection` / `Update` / `Delete`) and `apply_profiles`
+//! arrived in phase 3b-alpha. **No activation yet** — `apply_profiles`
+//! persists keyfiles into NM but doesn't bring connections up. That
+//! lets the writes ship before the migration cutover, since persisted
+//! keyfiles don't affect the running system until something explicitly
+//! activates them.
 //!
-//! Why phase 3a is read-only: this is the first PR that talks to NM at
-//! all. Bugs here can only return wrong data, not break the box.
-//! Phase 3b — which actually mutates NM state and runs the
-//! `nixos-rebuild switch` cutover — ships only after we've used
-//! `system.network.nm_preview` on a real NASty box and confirmed the
-//! diff matches expectations.
+//! Phase 3b-beta — which adds activation, runs the
+//! `nixos-rebuild switch` cutover, and switches the active apply path
+//! away from the legacy ip-command flow — ships separately, once the
+//! migration story (idempotent runner with snapshot+rollback) is
+//! built. By then the write code here is already in the field via
+//! the explicit `system.network.nm_apply` RPC; bugs surface as failed
+//! preview/apply on inspection rather than as broken connectivity.
 
 use std::collections::HashMap;
 
@@ -40,6 +43,10 @@ pub type SettingsDict = HashMap<String, HashMap<String, OwnedValue>>;
 trait Settings {
     /// Returns a list of object paths, one per persisted connection.
     fn list_connections(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
+    /// Persist a new connection profile. NM writes the keyfile to
+    /// `/etc/NetworkManager/system-connections/` and returns the
+    /// object path of the new `Connection`. Does not activate.
+    fn add_connection(&self, connection: SettingsDict) -> zbus::Result<OwnedObjectPath>;
 }
 
 #[proxy(
@@ -51,6 +58,14 @@ trait ConnectionSettings {
     /// identify NASty-managed connections (id starting with `nasty-`)
     /// and to diff against the desired profile set.
     fn get_settings(&self) -> zbus::Result<SettingsDict>;
+    /// Replace the connection's settings dict in place. Profile
+    /// identity (UUID, object path) is preserved. Does not re-activate;
+    /// running connections need an explicit `nmcli connection up` to
+    /// reload the new settings.
+    fn update(&self, settings: SettingsDict) -> zbus::Result<()>;
+    /// Remove the connection from NM. Deletes the on-disk keyfile.
+    /// If the connection was active, NM deactivates it first.
+    fn delete(&self) -> zbus::Result<()>;
 }
 
 #[proxy(
@@ -144,6 +159,52 @@ impl NmDbusClient {
             }
         }
         Ok(out)
+    }
+
+    /// Persist a new NASty-managed connection. Returns the object path
+    /// of the new `Connection` for follow-up calls (Update, Delete).
+    /// Does not activate.
+    pub async fn add_connection(&self, settings: SettingsDict) -> Result<OwnedObjectPath, String> {
+        let proxy = SettingsProxy::new(&self.conn)
+            .await
+            .map_err(|e| format!("settings proxy: {e}"))?;
+        proxy
+            .add_connection(settings)
+            .await
+            .map_err(|e| format!("add_connection: {e}"))
+    }
+
+    /// Replace an existing connection's settings dict in place.
+    pub async fn update_connection(
+        &self,
+        path: &OwnedObjectPath,
+        settings: SettingsDict,
+    ) -> Result<(), String> {
+        let proxy = ConnectionSettingsProxy::builder(&self.conn)
+            .path(path.clone())
+            .map_err(|e| format!("connection path {path}: {e}"))?
+            .build()
+            .await
+            .map_err(|e| format!("connection proxy {path}: {e}"))?;
+        proxy
+            .update(settings)
+            .await
+            .map_err(|e| format!("update {path}: {e}"))
+    }
+
+    /// Delete a connection. NM removes the on-disk keyfile and (if
+    /// active) deactivates it.
+    pub async fn delete_connection(&self, path: &OwnedObjectPath) -> Result<(), String> {
+        let proxy = ConnectionSettingsProxy::builder(&self.conn)
+            .path(path.clone())
+            .map_err(|e| format!("connection path {path}: {e}"))?
+            .build()
+            .await
+            .map_err(|e| format!("connection proxy {path}: {e}"))?;
+        proxy
+            .delete()
+            .await
+            .map_err(|e| format!("delete {path}: {e}"))
     }
 }
 
@@ -279,6 +340,104 @@ fn section_changed(
             false
         }
     }
+}
+
+// ── Apply ──────────────────────────────────────────────────────
+//
+// Phase 3b-alpha: writes the diff to NM. **Does not activate**
+// connections — profiles are persisted to
+// `/etc/NetworkManager/system-connections/` but not brought up. A
+// caller wanting to test a profile end-to-end can do
+// `nmcli connection up nasty-<iface>` manually after `apply_profiles`
+// returns. Phase 3b-beta will add automatic activation as part of the
+// cutover.
+//
+// Why no activation here: activation deactivates whatever was holding
+// the iface previously. On a box still running the legacy ip-command
+// apply path, that's the live network config — auto-activating an NM
+// profile would drop connectivity. Keeping `apply_profiles` to
+// "persist only" makes phase 3b-alpha safe to invoke at any time on
+// any box that has NM installed.
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct NmApplyOutcome {
+    pub added: Vec<String>,
+    pub updated: Vec<String>,
+    pub deleted: Vec<String>,
+    pub unchanged: Vec<String>,
+    /// Per-id error map. Empty on full success. The apply is best-
+    /// effort — one failed connection doesn't abort the rest.
+    pub errors: HashMap<String, String>,
+}
+
+/// Apply a desired profile set to NM. Computes the diff against the
+/// current `nasty-*` connections, then issues `AddConnection` /
+/// `Update` / `Delete` calls. Persists everything to disk via NM;
+/// does not activate.
+pub async fn apply_profiles(
+    client: &NmDbusClient,
+    desired: &[NmConnection],
+) -> Result<NmApplyOutcome, String> {
+    let existing = client.list_nasty_connections().await?;
+    let existing_by_id: HashMap<&str, &NmExisting> =
+        existing.iter().map(|e| (e.id.as_str(), e)).collect();
+    let desired_ids: std::collections::HashSet<&str> =
+        desired.iter().map(|d| d.id.as_str()).collect();
+
+    let mut outcome = NmApplyOutcome::default();
+
+    // Adds first: a new bridge profile may be a controller for a port
+    // we're about to add; NM resolves controller-by-name lazily, so
+    // the order doesn't matter for correctness, but adding masters
+    // first matches operator intuition when watching journalctl.
+    for d in desired {
+        match existing_by_id.get(d.id.as_str()) {
+            None => {
+                let dict = super::to_settings_dict(d);
+                match client.add_connection(dict).await {
+                    Ok(_path) => outcome.added.push(d.id.clone()),
+                    Err(e) => {
+                        outcome.errors.insert(d.id.clone(), e);
+                    }
+                }
+            }
+            Some(existing_conn) => {
+                let dict = super::to_settings_dict(d);
+                if section_changed_any(&dict, &existing_conn.settings) {
+                    match client.update_connection(&existing_conn.path, dict).await {
+                        Ok(()) => outcome.updated.push(d.id.clone()),
+                        Err(e) => {
+                            outcome.errors.insert(d.id.clone(), e);
+                        }
+                    }
+                } else {
+                    outcome.unchanged.push(d.id.clone());
+                }
+            }
+        }
+    }
+
+    // Deletes: any existing nasty-* not in desired.
+    for e in &existing {
+        if !desired_ids.contains(e.id.as_str()) {
+            match client.delete_connection(&e.path).await {
+                Ok(()) => outcome.deleted.push(e.id.clone()),
+                Err(err) => {
+                    outcome.errors.insert(e.id.clone(), err);
+                }
+            }
+        }
+    }
+
+    Ok(outcome)
+}
+
+/// Quick "any section differs" check, mirroring `diff_sections`. Returns
+/// true if either dict has a section the other lacks, or any shared
+/// section disagrees on contents (compared via Debug repr — same
+/// caveat as `compute_diff`).
+fn section_changed_any(a: &SettingsDict, b: &SettingsDict) -> bool {
+    !diff_sections(a, b).is_empty()
 }
 
 // ── Tests ──────────────────────────────────────────────────────
