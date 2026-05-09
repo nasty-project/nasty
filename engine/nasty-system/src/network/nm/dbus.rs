@@ -429,10 +429,7 @@ fn should_purge_for_migration(
     // Only the connection types our profiles emit. Wi-Fi, VPN, tun,
     // etc. stay — they're either user-managed or configured outside
     // the WebUI's scope.
-    if !matches!(
-        conn_type,
-        "802-3-ethernet" | "bond" | "bridge" | "vlan"
-    ) {
+    if !matches!(conn_type, "802-3-ethernet" | "bond" | "bridge" | "vlan") {
         return false;
     }
     let Some(iface) = interface_name else {
@@ -840,8 +837,23 @@ mod tests {
         // The race isn't ethernet-only. Any of our managed types,
         // bound to one of our target ifaces, is a candidate.
         let targets = ifset(&["bond0", "br0", "eth0.100"]);
-        assert!(should_purge_for_migration("auto", "bond", Some("bond0"), &targets));
-        assert!(should_purge_for_migration("auto", "bridge", Some("br0"), &targets));
-        assert!(should_purge_for_migration("auto", "vlan", Some("eth0.100"), &targets));
+        assert!(should_purge_for_migration(
+            "auto",
+            "bond",
+            Some("bond0"),
+            &targets
+        ));
+        assert!(should_purge_for_migration(
+            "auto",
+            "bridge",
+            Some("br0"),
+            &targets
+        ));
+        assert!(should_purge_for_migration(
+            "auto",
+            "vlan",
+            Some("eth0.100"),
+            &targets
+        ));
     }
 }
