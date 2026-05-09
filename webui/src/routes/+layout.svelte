@@ -192,22 +192,32 @@
 	// Network rollback countdown — ticks once per second while a rollback is
 	// pending so the banner can show "Xs left to keep changes". Auto-clears
 	// the local store at deadline; the engine has already reverted by then.
-	let nowSec = $state(Math.floor(Date.now() / 1000));
+	//
+	// `tick` is just a re-run trigger for the $derived; the actual time is
+	// read from Date.now() at derivation time so the very first frame after
+	// `pending` appears is correct. (Storing a `nowSec` $state initialized
+	// at layout mount made the first render show seconds-remaining computed
+	// against page-load time — visible as a brief "429s"-style flash before
+	// the first interval tick corrected it.)
+	let tick = $state(0);
 	$effect(() => {
 		if (!rollbackState.pending) return;
 		const handle = setInterval(() => {
-			nowSec = Math.floor(Date.now() / 1000);
-			if (rollbackState.pending && nowSec >= rollbackState.pending.revertAtUnix) {
+			tick++;
+			if (
+				rollbackState.pending &&
+				Math.floor(Date.now() / 1000) >= rollbackState.pending.revertAtUnix
+			) {
 				rollbackState.clear();
 			}
 		}, 1000);
 		return () => clearInterval(handle);
 	});
-	let rollbackSecondsLeft = $derived(
-		rollbackState.pending
-			? Math.max(0, rollbackState.pending.revertAtUnix - nowSec)
-			: 0,
-	);
+	let rollbackSecondsLeft = $derived.by(() => {
+		void tick;
+		if (!rollbackState.pending) return 0;
+		return Math.max(0, rollbackState.pending.revertAtUnix - Math.floor(Date.now() / 1000));
+	});
 
 	$effect(() => {
 		const _r = sysInfoRefresh.count; // track refresh triggers
