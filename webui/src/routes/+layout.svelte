@@ -63,7 +63,7 @@
 	import { goto } from '$app/navigation';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
-	import { rollbackState, confirmRollback } from '$lib/rollbackState.svelte';
+	import { rollbackState, confirmRollback, loadPendingRollback } from '$lib/rollbackState.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import { theme } from '$lib/theme.svelte';
 	import { terminalStatus } from '$lib/terminalStatus.svelte';
@@ -249,6 +249,15 @@
 
 	$effect(() => {
 		if (connected) checkRebootRequired();
+	});
+
+	// Recover any pending rollback the server is tracking — covers the
+	// "user changed mgmt-iface IP and reconnected on the new address"
+	// case, where the original session that initiated the change has
+	// already been torn down. The txn is still alive server-side; this
+	// fetch puts the banner back so the user can confirm.
+	$effect(() => {
+		if (connected) loadPendingRollback();
 	});
 
 	// Clock

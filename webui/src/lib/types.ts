@@ -575,6 +575,16 @@ export interface NetworkUpdateResponse {
 	risk_reason?: string | null;
 }
 
+/** One pending rollback transaction, as returned by `system.network.pending`.
+ * Used by the WebUI to recover the rollback banner after a reconnect — the
+ * original session that initiated the change may have lost connectivity
+ * (e.g. on an IP change), but the new session can pick the txn back up. */
+export interface NetworkPendingTxn {
+	txn_id: string;
+	revert_at_unix: number;
+	risk_reason: string;
+}
+
 export interface FirewallRule {
 	service: string;
 	ports: { port: number; transport: 'tcp' | 'udp'; source: string | null; iface: string | null }[];
