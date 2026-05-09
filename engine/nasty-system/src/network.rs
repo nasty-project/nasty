@@ -7,6 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+pub mod layered;
+
 const JSON_PATH: &str = "/var/lib/nasty/networking.json";
 const NIX_PATH: &str = "/etc/nixos/networking.nix";
 const HISTORY_DIR: &str = "/var/lib/nasty/networking.history";
@@ -15,6 +17,11 @@ const HISTORY_KEEP: usize = 10;
 /// Removed when the user confirms the change. If still present at engine
 /// startup, the engine was killed mid-apply and we restore from it.
 const PENDING_REVERT_PATH: &str = "/var/lib/nasty/networking.json.pending-revert";
+/// Phase 1 shadow output of the layered model (see
+/// `docs/network-architecture.md`). Written alongside `JSON_PATH` on every
+/// successful apply; the legacy file remains the source of truth until
+/// phase 3 cuts over.
+const JSON_PATH_V2: &str = "/var/lib/nasty/networking-v2.json";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -600,6 +607,22 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
     atomic_write(JSON_PATH, json.as_bytes())
         .await
         .map_err(|e| format!("failed to write {JSON_PATH}: {e}"))?;
+
+    // Phase 1 shadow write of the layered shape. Best-effort: a failure
+    // here doesn't fail the apply (the legacy file is still the source
+    // of truth). See `docs/network-architecture.md`.
+    let layered_cfg = layered::to_layered(config);
+    if let Err(e) = layered::validate(&layered_cfg) {
+        warn!("layered validation found an issue (phase 1 warn-only): {e}");
+    }
+    match serde_json::to_string_pretty(&layered_cfg) {
+        Ok(layered_json) => {
+            if let Err(e) = atomic_write(JSON_PATH_V2, layered_json.as_bytes()).await {
+                warn!("failed to write {JSON_PATH_V2}: {e}");
+            }
+        }
+        Err(e) => warn!("failed to serialize layered config: {e}"),
+    }
 
     let nix = generate_nix(config);
     if let Err(e) = atomic_write(NIX_PATH, nix.as_bytes()).await {
