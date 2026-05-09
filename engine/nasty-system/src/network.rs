@@ -1017,6 +1017,44 @@ fn classify_risk(
         _ => {}
     }
 
+    // Removing a bridge/bond that mgmt is enslaved into, or that *is* mgmt
+    // (the L3-inherit case where mgmt_iface resolves to the bridge/bond
+    // name itself). Either way the master goes away and mgmt loses its
+    // path — the symmetric case to enslaving above.
+    let next_bridges_by_name: std::collections::HashMap<&str, &BridgeConfig> =
+        next.bridges.iter().map(|b| (b.name.as_str(), b)).collect();
+    for prev_br in &prev.bridges {
+        if next_bridges_by_name.contains_key(prev_br.name.as_str()) {
+            continue;
+        }
+        if prev_br.name == mgmt {
+            return Some(format!("management bridge {mgmt} is being removed"));
+        }
+        if prev_br.members.iter().any(|m| m == mgmt) {
+            return Some(format!(
+                "management iface {mgmt} is being released from bridge {} that's being removed",
+                prev_br.name
+            ));
+        }
+    }
+
+    let next_bonds_by_name: std::collections::HashMap<&str, &BondConfig> =
+        next.bonds.iter().map(|b| (b.name.as_str(), b)).collect();
+    for prev_bond in &prev.bonds {
+        if next_bonds_by_name.contains_key(prev_bond.name.as_str()) {
+            continue;
+        }
+        if prev_bond.name == mgmt {
+            return Some(format!("management bond {mgmt} is being removed"));
+        }
+        if prev_bond.members.iter().any(|m| m == mgmt) {
+            return Some(format!(
+                "management iface {mgmt} is being released from bond {} that's being removed",
+                prev_bond.name
+            ));
+        }
+    }
+
     // mgmt iface is the parent of a VLAN — VLAN changes don't disconnect,
     // skipped. Bridge/bond IP changes on a master that mgmt is enslaved
     // into would be risky too, but that requires walking the master chain
@@ -1691,6 +1729,98 @@ mod tests {
         let reason = classify_risk(&prev, &next, Some("eth0"));
         assert!(reason.is_some());
         assert!(reason.unwrap().contains("bond0"));
+    }
+
+    #[test]
+    fn risk_flags_removing_bridge_carrying_mgmt() {
+        // Healthy bridged setup: br0 is the mgmt iface (owns the L3 via
+        // inherit). Removing it would disconnect mgmt — must roll back.
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bridges: vec![bridge("br0", &["eth0"])],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("br0"));
+        assert!(
+            reason.is_some(),
+            "removing the mgmt bridge must be flagged risky"
+        );
+        assert!(reason.unwrap().contains("br0"));
+    }
+
+    #[test]
+    fn risk_flags_removing_bridge_holding_mgmt_member() {
+        // Bridge is going away while mgmt iface is one of its members —
+        // NM has to release the slave and re-activate it standalone, which
+        // can interrupt the session.
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bridges: vec![bridge("br0", &["eth0"])],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("eth0"));
+        assert!(reason.is_some());
+        let reason = reason.unwrap();
+        assert!(reason.contains("eth0"));
+        assert!(reason.contains("br0"));
+    }
+
+    #[test]
+    fn risk_flags_removing_bond_carrying_mgmt() {
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bonds: vec![bond("bond0", &["eth0"])],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("bond0"));
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("bond0"));
+    }
+
+    #[test]
+    fn risk_flags_removing_bond_holding_mgmt_member() {
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bonds: vec![bond("bond0", &["eth0"])],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        let reason = classify_risk(&prev, &next, Some("eth0"));
+        assert!(reason.is_some());
+        let reason = reason.unwrap();
+        assert!(reason.contains("eth0"));
+        assert!(reason.contains("bond0"));
+    }
+
+    #[test]
+    fn risk_safe_when_removing_unrelated_bridge() {
+        // mgmt is on eth0 standalone — removing an unrelated bridge that
+        // doesn't touch eth0 should stay safe.
+        let prev = NetworkConfig {
+            interfaces: vec![iface("eth0"), iface("eth1")],
+            bridges: vec![bridge("br0", &["eth1"])],
+            ..Default::default()
+        };
+        let next = NetworkConfig {
+            interfaces: vec![iface("eth0"), iface("eth1")],
+            ..Default::default()
+        };
+        assert!(classify_risk(&prev, &next, Some("eth0")).is_none());
     }
 
     #[test]
