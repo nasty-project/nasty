@@ -491,6 +491,27 @@ impl NetworkService {
             }
         };
 
+        // Preempt NM's auto-default profiles. NM starts before nasty-
+        // engine on cutover boot, sees unmanaged ethernet devices, and
+        // creates "Wired connection 1"-style profiles that grab the
+        // DHCP lease. apply_profiles only diffs `nasty-*` connections,
+        // so those auto-defaults are invisible to it and end up
+        // winning the activation race for the iface. Delete them
+        // before we add ours.
+        match nm::dbus::purge_conflicting_connections(&client, &profiles).await {
+            Ok(deleted) if !deleted.is_empty() => {
+                info!(
+                    "migration: purged {} conflicting NM auto-profile(s): {:?}",
+                    deleted.len(),
+                    deleted
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!("migration: purge step failed ({e}). Continuing with apply.");
+            }
+        }
+
         match nm::dbus::apply_profiles(&client, &profiles).await {
             Ok(outcome) => {
                 info!(
