@@ -98,6 +98,7 @@ fn is_read_only(method: &str) -> bool {
             "system.info"
                 | "system.health"
                 | "system.hardware.iommu"
+                | "system.hardware.summary"
                 | "system.stats"
                 | "system.disks"
                 | "system.network.get"
@@ -461,6 +462,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         // bound driver per device. Backs the /system/hardware page;
         // empty response means IOMMU isn't enabled in BIOS.
         "system.hardware.iommu" => ok(req, nasty_system::hardware::iommu_groups().await),
+        // Hardware overview: motherboard, BIOS, CPU, DIMMs, USB.
+        // Server-side cached for 60s (dmidecode is slow); the data
+        // doesn't change between reboots so this is fine.
+        "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
         "system.stats" => match fetch_metrics_json::<nasty_system::SystemStats>(
             &state.metrics_client,
             "/api/stats",

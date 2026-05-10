@@ -556,6 +556,8 @@ in {
       lm_sensors        # CPU/drive temperature monitoring
       lsof              # open file debugging ("device busy")
       keyutils          # keyctl — used by the engine to lock encrypted FSes
+      dmidecode         # DMI tables — engine reads baseboard/BIOS/memory for /system/hardware
+      usbutils          # lsusb — engine reads USB device tree for /system/hardware
       iotop-c           # per-process I/O monitoring
       ethtool           # NIC speed, duplex, ring buffer tuning
       iperf3            # network throughput testing
