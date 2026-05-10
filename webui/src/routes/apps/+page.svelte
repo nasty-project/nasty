@@ -854,6 +854,36 @@
 		return ingresses.find(r => r.name === appName);
 	}
 
+	/** Pick the port the direct-LAN link and reverse-proxy "Open" button
+	 * should target. Prefers the user's chosen ingress port; falls back
+	 * to the first TCP port (UDP can't serve HTTP). Returns null when
+	 * the app has no TCP-reachable port. */
+	function primaryPort(app: App): MappedPort | null {
+		const ing = getIngress(app.name);
+		if (ing && app.ports) {
+			const match = app.ports.find(p => p.host_port === ing.host_port);
+			if (match) return match;
+		}
+		return (app.ports ?? []).find(p => p.protocol?.toLowerCase() === 'tcp') ?? null;
+	}
+
+	let switchingIngressFor = $state<string | null>(null);
+
+	/** Re-point an app's ingress at the given host port. Used by the
+	 * port chips when the user clicks a non-current TCP port. */
+	async function setIngressPort(appName: string, hostPort: number) {
+		switchingIngressFor = appName;
+		try {
+			await withToast(
+				() => client.call('apps.ingress.set', { name: appName, host_port: hostPort }),
+				`Ingress for ${appName} → :${hostPort}`
+			);
+			await loadIngresses();
+		} finally {
+			switchingIngressFor = null;
+		}
+	}
+
 	let search = $state('');
 	let sortDir = $state<'asc' | 'desc'>('asc');
 
@@ -1349,9 +1379,34 @@
 							</div>
 						</td>
 						<td class="p-3 text-xs text-muted-foreground font-mono max-w-[200px] truncate">{app.kind === 'compose' && (app.containers?.length ?? 0) > 1 ? `${app.containers?.length} images` : app.image}</td>
-						<td class="p-3 text-xs font-mono text-muted-foreground">
+						<td class="p-3 text-xs font-mono">
 							{#if app.ports && app.ports.length > 0}
-								{app.ports.map(p => `${p.host_port}:${p.container_port}`).join(', ')}
+								{@const currentIngress = getIngress(app.name)?.host_port}
+								<div class="flex flex-wrap items-center gap-1">
+									{#each app.ports as p}
+										{@const isTcp = (p.protocol ?? 'tcp').toLowerCase() === 'tcp'}
+										{@const isIngress = isTcp && currentIngress === p.host_port}
+										{#if isTcp}
+											<button
+												type="button"
+												disabled={isIngress || switchingIngressFor === app.name}
+												onclick={() => setIngressPort(app.name, p.host_port)}
+												class="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 transition-colors {isIngress ? 'border-blue-500/40 bg-blue-500/15 text-blue-400 cursor-default' : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground'}"
+												title={isIngress ? 'Current reverse-proxy target' : `Click to make :${p.host_port} the reverse-proxy target`}
+											>
+												{#if isIngress}<span aria-hidden="true">★</span>{/if}
+												{p.host_port}:{p.container_port}
+											</button>
+										{:else}
+											<span
+												class="inline-flex items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 text-muted-foreground/70"
+												title="UDP — reverse proxy doesn't apply"
+											>
+												{p.host_port}:{p.container_port}/udp
+											</span>
+										{/if}
+									{/each}
+								</div>
 							{/if}
 						</td>
 						<td class="p-3">
@@ -1361,12 +1416,13 @@
 						</td>
 						<td class="p-3">
 							<div class="flex items-center gap-1.5">
-								{#if app.ports && app.ports.length > 0}
-									<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20">
+								{#if primaryPort(app)}
+									{@const pp = primaryPort(app)!}
+									<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20" title="Reverse proxy target: {pp.host_port}">
 										Open
 									</a>
-									<a href="http://{window.location.hostname}:{app.ports[0].host_port}" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted" title="Direct port access (LAN)">
-										:{app.ports[0].host_port}
+									<a href="http://{window.location.hostname}:{pp.host_port}" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted" title="Direct port access (LAN)">
+										:{pp.host_port}
 									</a>
 								{/if}
 								{#if status?.running}

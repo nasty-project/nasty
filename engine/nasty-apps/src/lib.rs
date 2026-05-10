@@ -996,8 +996,17 @@ impl AppsService {
             warn!("Failed to save app manifest: {e}");
         }
 
-        // Auto-create ingress for the first port
-        if let Some(first_port) = req.ports.first() {
+        // Auto-create ingress for the first TCP port. UDP can't serve
+        // HTTP (nginx's `proxy_pass` is TCP-only), so a UDP port is
+        // never a valid ingress target — picking it would publish a
+        // dead /apps/<name>/ route. If the app exposes only UDP, no
+        // ingress is created; the user can still reach the container
+        // directly on the LAN.
+        if let Some(first_port) = req
+            .ports
+            .iter()
+            .find(|p| p.protocol.eq_ignore_ascii_case("tcp"))
+        {
             let host_port = if let Some(hp) = first_port.host_port {
                 hp
             } else {
@@ -1740,9 +1749,13 @@ impl AppsService {
             return Err(AppsError::DockerFailed(stderr.to_string()));
         }
 
-        // Auto-create ingress for the first exposed port
+        // Auto-create ingress for the first exposed TCP port. See the
+        // matching comment in `install()` for why UDP is skipped.
         if let Ok(app) = self.get(&req.name).await
-            && let Some(first_port) = app.ports.first()
+            && let Some(first_port) = app
+                .ports
+                .iter()
+                .find(|p| p.protocol.eq_ignore_ascii_case("tcp"))
         {
             let _ = self
                 .ingress_set(SetIngressRequest {
