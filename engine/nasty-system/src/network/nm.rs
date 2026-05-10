@@ -104,6 +104,15 @@ pub struct NmIpSettings {
     pub addresses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<String>,
+    /// DNS servers for this address family. NM merges per-connection
+    /// DNS into systemd-resolved at activation time, so we emit the
+    /// user's globally-configured `legacy.dns` on every connection
+    /// rather than guessing which one is "the gateway-bearing one".
+    /// IPv4 strings go in [ipv4].dns; IPv6 strings in [ipv6].dns; the
+    /// per-family split is decided in `to_nm_profiles` based on the
+    /// presence of a colon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -194,11 +203,44 @@ pub fn to_nm_profiles(layered: &LayeredConfig) -> Vec<NmConnection> {
         }
     }
 
+    // Split user-configured DNS into v4/v6 buckets so we put each
+    // entry in the right [ipv4]/[ipv6] section. NM accepts only
+    // family-matching addresses in each section.
+    let (dns_v4, dns_v6) = split_dns_by_family(&layered.dns);
+
     layered
         .links
         .iter()
-        .map(|link| profile_for_link(link, &addrs_by_link, &master_of))
+        .map(|link| {
+            let mut conn = profile_for_link(link, &addrs_by_link, &master_of);
+            // DNS only meaningful on master/standalone connections —
+            // member ports have ipv4/ipv6 method=disabled and NM
+            // ignores DNS on disabled-method sections anyway, but
+            // skip them explicitly to keep the wire dict tidy.
+            if conn.controller.is_none() {
+                conn.ipv4.dns.clone_from(&dns_v4);
+                conn.ipv6.dns.clone_from(&dns_v6);
+            }
+            conn
+        })
         .collect()
+}
+
+/// Bucket DNS server strings by family. A colon means IPv6; absence
+/// means IPv4. Doesn't validate the addresses — NM will reject
+/// malformed entries at activation time, with a clearer error than
+/// we'd produce here.
+fn split_dns_by_family(dns: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for s in dns {
+        if s.contains(':') {
+            v6.push(s.clone());
+        } else {
+            v4.push(s.clone());
+        }
+    }
+    (v4, v6)
 }
 
 fn profile_for_link(
@@ -213,13 +255,11 @@ fn profile_for_link(
         (
             NmIpSettings {
                 method: NmIpMethod::Disabled,
-                addresses: vec![],
-                gateway: None,
+                ..Default::default()
             },
             NmIpSettings {
                 method: NmIpMethod::Disabled,
-                addresses: vec![],
-                gateway: None,
+                ..Default::default()
             },
         )
     } else {
@@ -283,6 +323,7 @@ fn address_to_nm_settings(addr: &Address) -> NmIpSettings {
         method,
         addresses: addr.cidr.clone(),
         gateway: addr.gateway.clone(),
+        dns: Vec::new(),
     }
 }
 
@@ -427,6 +468,17 @@ fn serialize_ip_section(out: &mut String, ip: &NmIpSettings) {
     if ip.gateway.is_some() && ip.addresses.is_empty() {
         out.push_str("# warning: gateway set but no addresses; NM will ignore\n");
     }
+    // NM keyfile DNS syntax: `dns=8.8.8.8;1.1.1.1;` (semicolon-
+    // separated, with a trailing semicolon). Only emit when set —
+    // an empty `dns=` line is harmless but adds noise.
+    if !ip.dns.is_empty() {
+        out.push_str("dns=");
+        for d in &ip.dns {
+            out.push_str(d);
+            out.push(';');
+        }
+        out.push('\n');
+    }
 }
 
 // ── DBus settings dict converter ───────────────────────────────
@@ -565,6 +617,12 @@ fn ip_section_dict(ip: &NmIpSettings, family: Family) -> HashMap<String, OwnedVa
     }
     if let Some(gw) = &ip.gateway {
         s.insert("gateway".into(), into_value(gw.clone()));
+    }
+    // NM accepts DNS as `as` (array of strings) on `[ipv4]`/`[ipv6]`.
+    // Only emit when populated; an empty array would replace the
+    // DHCP-supplied DNS on auto-method connections with nothing.
+    if !ip.dns.is_empty() {
+        s.insert("dns".into(), into_value(ip.dns.clone()));
     }
     s
 }
@@ -1398,6 +1456,109 @@ mod tests {
             !dict.contains_key("802-3-ethernet"),
             "empty ethernet section should be omitted on bonds"
         );
+    }
+
+    // ── DNS propagation ──────────────────────────────────────────
+
+    #[test]
+    fn split_dns_routes_v4_v6_by_colon() {
+        // Single-character colon-presence test mirrors what we use in
+        // production — IPv4 strings have no `:`, IPv6 strings do.
+        let (v4, v6) = split_dns_by_family(&[
+            "10.0.0.1".into(),
+            "2001:db8::1".into(),
+            "1.1.1.1".into(),
+            "fe80::1".into(),
+        ]);
+        assert_eq!(v4, vec!["10.0.0.1".to_string(), "1.1.1.1".to_string()]);
+        assert_eq!(v6, vec!["2001:db8::1".to_string(), "fe80::1".to_string()]);
+    }
+
+    #[test]
+    fn dict_emits_dns_on_ipv4_section_when_set() {
+        // Headline case from #96 audit: user has dns: ["10.10.11.1"]
+        // in their networking.json. Pre-fix, to_nm_profiles dropped
+        // it; after, every connection's [ipv4].dns carries the
+        // entry so NM/systemd-resolved sees it.
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0")],
+            dns: vec!["10.10.11.1".into()],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let ipv4 = dict.get("ipv4").expect("ipv4 section");
+        let dns: Vec<String> = ipv4["dns"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(dns, vec!["10.10.11.1".to_string()]);
+        // No leakage into ipv6 (no v6 entries in input).
+        let ipv6 = dict.get("ipv6").expect("ipv6 section");
+        assert!(!ipv6.contains_key("dns"), "ipv6 must not carry v4 DNS");
+    }
+
+    #[test]
+    fn dict_routes_dns_to_ipv6_section_for_v6_addresses() {
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0")],
+            dns: vec!["2606:4700:4700::1111".into()],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let ipv6 = dict.get("ipv6").expect("ipv6 section");
+        let dns: Vec<String> = ipv6["dns"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(dns, vec!["2606:4700:4700::1111".to_string()]);
+        let ipv4 = dict.get("ipv4").expect("ipv4 section");
+        assert!(!ipv4.contains_key("dns"), "ipv4 must not carry v6 DNS");
+    }
+
+    #[test]
+    fn dict_does_not_emit_dns_on_member_port_connections() {
+        // Member ports have ipv4/ipv6 method=disabled and don't carry
+        // L3 — putting DNS on them is wasted dict bytes and could
+        // confuse NM. Bond's own connection (the master) gets the
+        // DNS instead.
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), link_bond("bond0", &["eth0"])],
+            dns: vec!["10.0.0.1".into()],
+            ..Default::default()
+        };
+        let profiles = to_nm_profiles(&layered);
+        let eth0_member = profiles.iter().find(|p| p.id == "nasty-eth0").unwrap();
+        let bond_master = profiles.iter().find(|p| p.id == "nasty-bond0").unwrap();
+        // Member: no DNS.
+        let eth_dict = to_settings_dict(eth0_member);
+        assert!(!eth_dict["ipv4"].contains_key("dns"));
+        // Master: DNS present.
+        let bond_dict = to_settings_dict(bond_master);
+        assert!(bond_dict["ipv4"].contains_key("dns"));
+    }
+
+    #[test]
+    fn keyfile_emits_dns_in_semicolon_separated_form() {
+        // NM keyfile uses `dns=A;B;C;` (with trailing `;`). Easy to
+        // get wrong — pin it.
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0")],
+            dns: vec!["10.10.11.1".into(), "1.1.1.1".into()],
+            ..Default::default()
+        };
+        let keyfile = serialize_keyfile(&to_nm_profiles(&layered)[0]);
+        assert!(
+            keyfile.contains("dns=10.10.11.1;1.1.1.1;"),
+            "keyfile missing semi-colon-separated dns: {keyfile}"
+        );
+    }
+
+    #[test]
+    fn dict_omits_dns_when_unset() {
+        // Empty dns must not leak an empty `dns=[]` into the dict —
+        // NM treats that as "explicitly no DNS" which would replace
+        // the DHCP-supplied servers on auto-method connections.
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0")],
+            ..Default::default()
+        };
+        let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
+        let ipv4 = dict.get("ipv4").expect("ipv4 section");
+        assert!(!ipv4.contains_key("dns"));
     }
 
     // ── UUIDv5 sanity checks ───────────────────────────────────

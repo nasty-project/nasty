@@ -672,8 +672,7 @@ mod tests {
             autoconnect: true,
             ipv4: NmIpSettings {
                 method: NmIpMethod::Auto,
-                addresses: vec![],
-                gateway: None,
+                ..Default::default()
             },
             ipv6: NmIpSettings::default(),
             type_specific: NmTypeSpecific::None,
