@@ -261,6 +261,21 @@
 	let composeDeviceErrorLines = $state<number[]>([]);
 	let composeDeviceLineMap = $state<Map<string, number>>(new Map()); // path → line number
 
+	// Reverse-proxy ingress picker — populated from TCP ports parsed
+	// out of the compose YAML. Auto-defaults to the first TCP port,
+	// follows user-picks until the port disappears from the compose,
+	// at which point it falls back to the new first-TCP. UDP ports
+	// are excluded — nginx's proxy_pass is TCP-only.
+	let composeTcpPorts = $state<{ host_port: number; container_port: number; line: number }[]>([]);
+	let newIngressPort = $state<number | null>(null);
+	$effect(() => {
+		if (composeTcpPorts.length === 0) {
+			newIngressPort = null;
+		} else if (newIngressPort == null || !composeTcpPorts.some(p => p.host_port === newIngressPort)) {
+			newIngressPort = composeTcpPorts[0].host_port;
+		}
+	});
+
 	// Volume-permission warnings — bind-mount sources whose owner doesn't
 	// match the service's `user:` field (or PUID/PGID).
 	type VolumeMismatch = {
@@ -386,13 +401,28 @@
 	}
 
 	function checkComposePortConflicts() {
-		// Parse host ports from compose YAML (best-effort), tracking line numbers
-		const portLines: { port: number; line: number }[] = [];
+		// Parse host ports from compose YAML (best-effort), tracking line
+		// numbers + protocol. Compose accepts `8096:8096`, `8096:8096/tcp`,
+		// or `8096:8096/udp`. Missing protocol defaults to TCP per the
+		// docker spec.
+		const portLines: { port: number; container_port: number; proto: string; line: number }[] = [];
 		const lines = composeContent.split('\n');
 		for (let i = 0; i < lines.length; i++) {
-			const m = lines[i].match(/^\s*-\s*"?(\d+):\d+/);
-			if (m) portLines.push({ port: parseInt(m[1]), line: i + 1 });
+			const m = lines[i].match(/^\s*-\s*"?(\d+):(\d+)(?:\/(tcp|udp))?/i);
+			if (m) {
+				portLines.push({
+					port: parseInt(m[1]),
+					container_port: parseInt(m[2]),
+					proto: (m[3] ?? 'tcp').toLowerCase(),
+					line: i + 1,
+				});
+			}
 		}
+		// Refresh the ingress picker's source list — TCP only.
+		composeTcpPorts = portLines
+			.filter(p => p.proto === 'tcp')
+			.map(p => ({ host_port: p.port, container_port: p.container_port, line: p.line }));
+
 		const ports = portLines.map(p => p.port);
 		if (ports.length === 0) {
 			portConflicts = [];
@@ -803,6 +833,7 @@
 			name,
 			compose_file: composeContent,
 			allow_unsafe: composeAllowUnsafe,
+			ingress_host_port: newIngressPort,
 		});
 		if (ok) {
 			showCompose = false;
@@ -839,6 +870,8 @@
 		composeDeviceErrorLines = [];
 		composeDeviceLineMap = new Map();
 		volumeMismatches = [];
+		composeTcpPorts = [];
+		newIngressPort = null;
 		composeName = ''; composeContent = '';
 		composeAllowUnsafe = false;
 	}
@@ -1022,7 +1055,7 @@
 	{/if}
 
 	{#if showInstall || showCompose}
-		<Card class="mb-6 max-w-2xl">
+		<Card class="mb-6 {(showCompose || editingCompose) ? 'max-w-6xl' : 'max-w-2xl'}">
 			<CardContent class="pt-6">
 				<h3 class="mb-4 text-lg font-semibold">{editingApp ? `Edit ${editingApp}` : editingCompose ? `Edit ${editingCompose}` : 'Install App'}</h3>
 
@@ -1202,119 +1235,141 @@
 					<Button variant="secondary" onclick={cancelEdit}>Cancel</Button>
 				</div>
 				{:else if installMode === 'compose' && (showCompose || editingCompose)}
-				<!-- Compose form -->
-				<div class="mb-4">
-					<Label for="compose-name">App Name</Label>
-					<Input id="compose-name" value={composeName} oninput={(e) => { composeName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="my-stack" class="mt-1" disabled={!!editingCompose} />
-					{#if composeName && !isValidAppName(composeName)}
-						<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, dots. Max 53 chars.</span>
-					{/if}
-				</div>
-				<div class="mb-4">
-					<Label for="compose-file">docker-compose.yml</Label>
-					<CodeEditor
-						bind:value={composeContent}
-						lang="yaml"
-						errorLines={composeErrorLines}
-						oninput={checkComposeConflicts}
-						class="mt-1 h-64"
-					/>
-					{#if portConflicts.length > 0}
-						<div class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-							{#each portConflicts as c}
-								{@const alt = c.port < 1000 ? c.port + 8000 : c.port + 1}
-								{@const lineNo = composePortLineMap.get(c.port)}
-							<div><span class="font-semibold">Line {lineNo}:</span> port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span> — change to e.g. <code>{alt}</code></div>
-							{/each}
+				<!-- Compose form: two columns at lg+ — form on the left, warnings + ingress picker on the right. -->
+				<div class="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
+					<div>
+						<div class="mb-4">
+							<Label for="compose-name">App Name</Label>
+							<Input id="compose-name" value={composeName} oninput={(e) => { composeName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="my-stack" class="mt-1" disabled={!!editingCompose} />
+							{#if composeName && !isValidAppName(composeName)}
+								<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, dots. Max 53 chars.</span>
+							{/if}
 						</div>
-					{/if}
-					{#if deviceMissing.length > 0}
-						<div class="mt-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-400">
-							{#each deviceMissing as d}
-								{@const lineNo = composeDeviceLineMap.get(d.path)}
-								<div>
-									<span class="font-semibold">Line {lineNo}:</span> device <code>{d.path}</code> doesn't exist on this host
-									{#if !d.parent_exists}
-										— parent directory missing too, the kernel driver may not be loaded (e.g. <code>i915</code> for Intel GPU)
-									{:else}
-										— check the device name (<code>ls {(d.path.split('/').slice(0, -1).join('/')) || '/'}</code>) or whether the device is physically present
-									{/if}
-								</div>
-							{/each}
+						<div class="mb-4">
+							<Label for="compose-file">docker-compose.yml</Label>
+							<CodeEditor
+								bind:value={composeContent}
+								lang="yaml"
+								errorLines={composeErrorLines}
+								oninput={checkComposeConflicts}
+								class="mt-1 h-96"
+							/>
 						</div>
-					{/if}
-					{#if volumeMismatches.length > 0}
-						<div class="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-							<p class="mb-2">
-								Bind-mount permissions don't match the container's <code>user:</code> — the container will likely fail with <em>Permission denied</em>.
-							</p>
-							{#each volumeMismatches as m}
-								{@const expectedLabel = `${m.expected_uid}:${m.expected_gid ?? m.expected_uid}`}
-								<div class="mb-2 last:mb-0">
+						<!-- Allow unsafe — opt out of strict compose sandbox -->
+						<div class="mb-4 rounded-md border border-border p-3">
+							<label class="flex items-start gap-2 cursor-pointer">
+								<input type="checkbox" bind:checked={composeAllowUnsafe} class="mt-0.5" />
+								<span class="flex-1">
+									<span class="block text-sm font-medium">Allow unsafe</span>
+									<span class="block text-xs text-muted-foreground">
+										Permit <code>privileged</code>, host namespaces, dangerous capabilities,
+										host devices, and bind mounts outside the standard sandbox.
+										Required for Tailscale, Plex/Jellyfin GPU transcoding, and similar workloads.
+										Engine state under <code>/var/lib/nasty/</code>, the host root, and
+										<code>..</code> traversals are still rejected.
+									</span>
+								</span>
+							</label>
+							{#if composeAllowUnsafe}
+								<p class="mt-2 text-xs text-amber-500">
+									⚠ This stack will run with elevated privileges. The deploy is logged in the audit trail and shown with an unsafe badge in the app list.
+								</p>
+							{/if}
+						</div>
+						<div class="flex gap-2">
+							<Button onclick={installCompose} disabled={!composeName || !composeContent.trim() || (!editingCompose && !isValidAppName(composeName))}>
+								{editingCompose ? 'Update' : 'Deploy'}
+							</Button>
+							<Button variant="secondary" onclick={cancelCompose}>Cancel</Button>
+						</div>
+					</div>
+					<!-- Right column: ingress picker + warnings. Hidden when empty so the editor breathes. -->
+					<div class="space-y-3">
+						{#if composeTcpPorts.length > 0}
+							<div class="rounded-md border border-border bg-secondary/20 p-3">
+								<Label for="ingress-port" class="text-xs">Reverse-proxy target</Label>
+								<select id="ingress-port" bind:value={newIngressPort} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+									{#each composeTcpPorts as p}
+										<option value={p.host_port}>:{p.host_port} → container :{p.container_port}</option>
+									{/each}
+								</select>
+								<p class="mt-1.5 text-xs text-muted-foreground">
+									Which TCP port <code>/apps/{composeName || '&lt;name&gt;'}/</code> proxies to. UDP ports are excluded — nginx is TCP-only.
+								</p>
+							</div>
+						{/if}
+						{#if portConflicts.length > 0}
+							<div class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+								<p class="mb-1 font-medium">Port conflicts</p>
+								{#each portConflicts as c}
+									{@const alt = c.port < 1000 ? c.port + 8000 : c.port + 1}
+									{@const lineNo = composePortLineMap.get(c.port)}
+								<div><span class="font-semibold">Line {lineNo}:</span> port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span> — change to e.g. <code>{alt}</code></div>
+								{/each}
+							</div>
+						{/if}
+						{#if deviceMissing.length > 0}
+							<div class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+								<p class="mb-1 font-medium">Missing devices</p>
+								{#each deviceMissing as d}
+									{@const lineNo = composeDeviceLineMap.get(d.path)}
 									<div>
-										<span class="font-semibold">Line {m.line ?? '?'}:</span>
-										<code>{m.host_path}</code>
-										{#if m.exists}
-											is owned by <code>{m.current_uid}:{m.current_gid}</code>, but
+										<span class="font-semibold">Line {lineNo}:</span> device <code>{d.path}</code> doesn't exist on this host
+										{#if !d.parent_exists}
+											— parent directory missing too, the kernel driver may not be loaded (e.g. <code>i915</code> for Intel GPU)
 										{:else}
-											doesn't exist yet —
+											— check the device name (<code>ls {(d.path.split('/').slice(0, -1).join('/')) || '/'}</code>) or whether the device is physically present
 										{/if}
-										service <span class="font-semibold">{m.service}</span> will run as <code>{expectedLabel}</code>.
 									</div>
-									{#if m.exists}
-										<div class="mt-1 flex flex-wrap gap-2">
-											<Button
-												size="xs"
-												variant="secondary"
-												disabled={fixingVolume === m.host_path}
-												onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, false)}
-											>
-												{fixingVolume === m.host_path ? 'Chowning…' : `Chown to ${expectedLabel}`}
-											</Button>
-											<Button
-												size="xs"
-												variant="ghost"
-												disabled={fixingVolume === m.host_path}
-												onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, true)}
-												title="Recursive — rewrites every existing file's owner"
-											>
-												…and contents
-											</Button>
+								{/each}
+							</div>
+						{/if}
+						{#if volumeMismatches.length > 0}
+							<div class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+								<p class="mb-2 font-medium">
+									Bind-mount permissions don't match the container's <code>user:</code> — the container will likely fail with <em>Permission denied</em>.
+								</p>
+								{#each volumeMismatches as m}
+									{@const expectedLabel = `${m.expected_uid}:${m.expected_gid ?? m.expected_uid}`}
+									<div class="mb-2 last:mb-0">
+										<div>
+											<span class="font-semibold">Line {m.line ?? '?'}:</span>
+											<code>{m.host_path}</code>
+											{#if m.exists}
+												is owned by <code>{m.current_uid}:{m.current_gid}</code>, but
+											{:else}
+												doesn't exist yet —
+											{/if}
+											service <span class="font-semibold">{m.service}</span> will run as <code>{expectedLabel}</code>.
 										</div>
-									{:else}
-										<div class="mt-1 text-muted-foreground">Will be created with the right ownership when you deploy.</div>
-									{/if}
-								</div>
-							{/each}
-						</div>
-					{/if}
-				</div>
-				<!-- Allow unsafe — opt out of strict compose sandbox -->
-				<div class="mb-4 rounded-md border border-border p-3">
-					<label class="flex items-start gap-2 cursor-pointer">
-						<input type="checkbox" bind:checked={composeAllowUnsafe} class="mt-0.5" />
-						<span class="flex-1">
-							<span class="block text-sm font-medium">Allow unsafe</span>
-							<span class="block text-xs text-muted-foreground">
-								Permit <code>privileged</code>, host namespaces, dangerous capabilities,
-								host devices, and bind mounts outside the standard sandbox.
-								Required for Tailscale, Plex/Jellyfin GPU transcoding, and similar workloads.
-								Engine state under <code>/var/lib/nasty/</code>, the host root, and
-								<code>..</code> traversals are still rejected.
-							</span>
-						</span>
-					</label>
-					{#if composeAllowUnsafe}
-						<p class="mt-2 text-xs text-amber-500">
-							⚠ This stack will run with elevated privileges. The deploy is logged in the audit trail and shown with an unsafe badge in the app list.
-						</p>
-					{/if}
-				</div>
-				<div class="flex gap-2">
-					<Button onclick={installCompose} disabled={!composeName || !composeContent.trim() || (!editingCompose && !isValidAppName(composeName))}>
-						{editingCompose ? 'Update' : 'Deploy'}
-					</Button>
-					<Button variant="secondary" onclick={cancelCompose}>Cancel</Button>
+										{#if m.exists}
+											<div class="mt-1 flex flex-wrap gap-2">
+												<Button
+													size="xs"
+													variant="secondary"
+													disabled={fixingVolume === m.host_path}
+													onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, false)}
+												>
+													{fixingVolume === m.host_path ? 'Chowning…' : `Chown to ${expectedLabel}`}
+												</Button>
+												<Button
+													size="xs"
+													variant="ghost"
+													disabled={fixingVolume === m.host_path}
+													onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, true)}
+													title="Recursive — rewrites every existing file's owner"
+												>
+													…and contents
+												</Button>
+											</div>
+										{:else}
+											<div class="mt-1 text-muted-foreground">Will be created with the right ownership when you deploy.</div>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
 				</div>
 				{/if}
 			</CardContent>
