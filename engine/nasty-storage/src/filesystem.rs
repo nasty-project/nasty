@@ -1083,7 +1083,19 @@ impl FilesystemService {
 
         let first_device = fs.devices.first().map(|d| d.path.as_str()).unwrap_or("");
 
-        // Unlock encrypted filesystem if key is stored
+        // Unlock encrypted filesystem before mounting. Three paths:
+        // 1. Stored key file exists (auto-unlock-on-boot setup) → use
+        //    it to load the key into the session keyring.
+        // 2. No stored key file BUT the keyring already has the key
+        //    (user clicked Unlock with a passphrase earlier this
+        //    session) → nothing to do, kernel will use the loaded
+        //    key when we call `bcachefs mount`.
+        // 3. Neither → genuinely locked, ask user to unlock first.
+        //
+        // Path 2 was missing before — a passphrase-unlocked FS would
+        // hit the else-error even though the keyring was ready, and
+        // the UI would show the FS as Unmounted (correctly: the
+        // `locked` flag is keyring-aware) but Mount would fail.
         if opts.encrypted == Some(true) {
             let key_path = format!("{KEYS_DIR}/{name}.key");
             if Path::new(&key_path).exists() {
@@ -1093,7 +1105,7 @@ impl FilesystemService {
                 )
                 .await
                 .map_err(FilesystemError::CommandFailed)?;
-            } else {
+            } else if !is_bcachefs_key_loaded(&fs.uuid).await {
                 return Err(FilesystemError::CommandFailed(format!(
                     "encrypted filesystem '{name}' is locked — unlock it first, then mount."
                 )));
