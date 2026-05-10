@@ -286,7 +286,17 @@ async fn main() -> anyhow::Result<()> {
             post(files_upload_handler).layer(DefaultBodyLimit::max(10_737_418_240)),
         )
         .route("/api/files/mkdir", post(files_mkdir_handler))
-        .route("/api/files/content", get(files_content_handler))
+        .route("/api/files/rename", post(files_rename_handler))
+        .route(
+            "/api/files/content",
+            get(files_content_handler)
+                // 10 MiB cap on edit-in-place writes. The Files page surfaces an
+                // edit affordance only for textual files (conf, yml, md, …) where
+                // hand-editing past a megabyte is already a smell; using upload
+                // for bigger blobs keeps the small fast-path small.
+                .put(files_content_put_handler)
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+        )
         .route("/api/auth/check", get(auth_check_handler))
         .route("/health", get(health))
         .with_state(state);
@@ -1109,6 +1119,147 @@ async fn files_mkdir_handler(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct RenameRequest {
+    /// Existing path under /fs. Resolved to a canonical path; the
+    /// rename is rejected if it falls outside FILES_ROOT or targets a
+    /// filesystem root (the first path component under /fs).
+    from: String,
+    /// New path. Doesn't have to exist yet — the parent must, and the
+    /// destination itself must not already be there (we never silently
+    /// overwrite). Cross-directory renames are allowed as long as both
+    /// ends live under the same filesystem (kernel `rename(2)` will
+    /// return EXDEV otherwise; we surface that as a 409 with a hint).
+    to: String,
+}
+
+/// Rename or move a file/directory.  POST /api/files/rename
+/// Body: { from: "first/foo.txt", to: "first/bar.txt" }
+async fn files_rename_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RenameRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = validate_bearer(&headers, &state.auth).await {
+        return e.into_response();
+    }
+
+    // Source must already exist and resolve under /fs.
+    let from = match safe_path(&req.from) {
+        Ok(p) => p,
+        Err(status) => {
+            return (
+                status,
+                Json(serde_json::json!({"error": "Invalid source path"})),
+            )
+                .into_response();
+        }
+    };
+    // Refuse to move filesystem/subvolume roots (depth 1 under /fs).
+    let from_rel = from.strip_prefix(FILES_ROOT).unwrap_or(&from);
+    if from_rel.components().count() <= 1 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot rename filesystem root directories — use the Subvolumes page"})),
+        )
+            .into_response();
+    }
+    if is_inside_block_subvolume(&from) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot rename block subvolume contents — manage via the Subvolumes page"})),
+        )
+            .into_response();
+    }
+
+    // Destination: parent must resolve under /fs and not already exist.
+    // We don't canonicalize the destination itself (it doesn't exist
+    // yet); we canonicalize the parent and join the leaf name back on
+    // so traversal in the leaf is impossible.
+    let clean_to = req.to.replace("\\", "/");
+    let trimmed_to = clean_to.trim_start_matches('/');
+    let (parent_req, leaf) = match trimmed_to.rsplit_once('/') {
+        Some((p, l)) => (p, l),
+        None => {
+            // Renaming to a bare leaf under /fs would land at /fs/<leaf>
+            // which is a filesystem root — refuse.
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Destination must include a filesystem path component"})),
+            )
+                .into_response();
+        }
+    };
+    if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains('/') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid destination name"})),
+        )
+            .into_response();
+    }
+    let parent = match safe_path(parent_req) {
+        Ok(p) => p,
+        Err(status) => {
+            return (
+                status,
+                Json(serde_json::json!({"error": "Invalid destination parent"})),
+            )
+                .into_response();
+        }
+    };
+    if is_inside_block_subvolume(&parent) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot move into block subvolume contents"})),
+        )
+            .into_response();
+    }
+    let to = parent.join(leaf);
+    if !to.starts_with(FILES_ROOT) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Invalid destination path"})),
+        )
+            .into_response();
+    }
+    if to == from {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok": true, "noop": true})),
+        )
+            .into_response();
+    }
+    if to.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Destination already exists"})),
+        )
+            .into_response();
+    }
+
+    match tokio::fs::rename(&from, &to).await {
+        Ok(()) => {
+            info!("Renamed {} -> {}", from.display(), to.display());
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
+        // EXDEV (18) — cross-device rename. Reachable when source and
+        // destination live on different bcachefs filesystems mounted
+        // under /fs. `rename(2)` is atomic but inherently single-fs,
+        // so we surface a clear message rather than swallowing it as
+        // a generic 500.
+        Err(e) if e.raw_os_error() == Some(18) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Cross-filesystem rename not supported — use copy + delete"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 // ── File content/download endpoint ─────────────────────────────
 
 /// Serve file content with appropriate Content-Type for browser preview.
@@ -1265,6 +1416,108 @@ async fn files_content_handler(
     );
 
     (StatusCode::OK, headers, body).into_response()
+}
+
+/// Overwrite a file with new content. PUT /api/files/content?path=…
+///
+/// Used by the in-page text editor (config files, YAML, scripts).
+/// Body is the raw new contents — Content-Type is ignored. The target
+/// must already exist as a regular file; writing to a missing path
+/// would be the upload endpoint's job, and writing into a directory
+/// or block-subvolume backing file is rejected. Body size is capped
+/// by the route's `DefaultBodyLimit` (10 MiB) — the in-browser editor
+/// isn't where someone should be pasting a gigabyte of logs.
+async fn files_content_put_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if let Err(e) = validate_bearer(&headers, &state.auth).await {
+        return e.into_response();
+    }
+
+    let req_path = match params.get("path") {
+        Some(p) if !p.is_empty() => p.as_str(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "path is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    let target = match safe_path(req_path) {
+        Ok(p) => p,
+        Err(status) => {
+            return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
+        }
+    };
+
+    // Refuse to edit filesystem roots (no regular-file targets there
+    // anyway, but the error message is clearer than "is a directory").
+    let rel = target.strip_prefix(FILES_ROOT).unwrap_or(&target);
+    if rel.components().count() <= 1 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot edit filesystem root directories"})),
+        )
+            .into_response();
+    }
+    if is_inside_block_subvolume(&target) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot edit block subvolume contents — manage via the Subvolumes page"})),
+        )
+            .into_response();
+    }
+
+    let meta = match tokio::fs::metadata(&target).await {
+        Ok(m) => m,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Not found"})),
+            )
+                .into_response();
+        }
+    };
+    if !meta.is_file() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Target is not a regular file"})),
+        )
+            .into_response();
+    }
+
+    // Write to a sibling temp file and rename. Keeps the original
+    // intact if the write fails partway, and means concurrent readers
+    // never see a truncated file. The temp name uses the PID to avoid
+    // colliding with anything else the engine might create.
+    let tmp = target.with_extension(format!("nasty-edit.{}.tmp", std::process::id()));
+    if let Err(e) = tokio::fs::write(&tmp, &body).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("write failed: {e}")})),
+        )
+            .into_response();
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &target).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("rename failed: {e}")})),
+        )
+            .into_response();
+    }
+    info!("Edited {} ({} bytes)", target.display(), body.len());
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "bytes": body.len()})),
+    )
+        .into_response()
 }
 
 // ── Login endpoint ──────────────────────────────────────────────

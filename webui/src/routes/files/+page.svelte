@@ -3,7 +3,8 @@
 	import { goto } from '$app/navigation';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download } from '@lucide/svelte';
+	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil } from '@lucide/svelte';
+	import SortTh from '$lib/components/SortTh.svelte';
 
 	interface FileEntry {
 		name: string;
@@ -81,11 +82,37 @@
 		} else {
 			previewText = '';
 		}
+		// Switching files (or closing the modal) must drop the edit
+		// buffer so the next open starts in read mode.
+		editing = false;
+		editBuffer = '';
 	});
 
-	const visibleEntries = $derived(
-		showHidden ? entries : entries.filter(e => !e.name.startsWith('.'))
-	);
+	const visibleEntries = $derived.by(() => {
+		const filtered = showHidden ? entries : entries.filter(e => !e.name.startsWith('.'));
+		const sign = sortDir === 'asc' ? 1 : -1;
+		const sorted = [...filtered].sort((a, b) => {
+			// Directories first regardless of column. Most users navigate
+			// by folder, and inverting that within a "size" or "modified"
+			// sort would make the listing harder to scan.
+			if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+			let cmp = 0;
+			if (sortKey === 'name') {
+				cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+			} else if (sortKey === 'size') {
+				cmp = a.size - b.size;
+			} else {
+				cmp = a.modified - b.modified;
+			}
+			// Fall back to name as a tiebreaker so equal-mtime/size rows
+			// stay stably ordered between renders.
+			if (cmp === 0) {
+				cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+			}
+			return sign * cmp;
+		});
+		return sorted;
+	});
 
 	// Upload state
 	let uploading = $state(false);
@@ -98,6 +125,29 @@
 
 	// Delete confirmation
 	let deleteTarget: FileEntry | null = $state(null);
+
+	// Rename inline
+	let renameTarget: FileEntry | null = $state(null);
+	let renameValue = $state('');
+
+	// Edit (text files in the preview modal)
+	let editing = $state(false);
+	let editBuffer = $state('');
+	let editSaving = $state(false);
+
+	// Sort state — directories always group above files; within each
+	// group we order by the user's chosen column and direction.
+	type SortKey = 'name' | 'size' | 'modified';
+	let sortKey = $state<SortKey>('name');
+	let sortDir = $state<'asc' | 'desc'>('asc');
+	function toggleSort(key: SortKey) {
+		if (sortKey === key) {
+			sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+		} else {
+			sortKey = key;
+			sortDir = key === 'name' ? 'asc' : 'desc';
+		}
+	}
 
 	onMount(() => browse(''));
 
@@ -225,6 +275,74 @@
 		deleteTarget = null;
 		await browse(currentPath);
 	}
+
+	function startRename(entry: FileEntry) {
+		renameTarget = entry;
+		renameValue = entry.name;
+	}
+
+	async function confirmRename() {
+		if (!renameTarget) return;
+		const newName = renameValue.trim();
+		if (!newName || newName === renameTarget.name) {
+			renameTarget = null;
+			return;
+		}
+		if (newName.includes('/')) {
+			alert('Name cannot contain slashes — use this directory only.');
+			return;
+		}
+		const from = currentPath ? `${currentPath}/${renameTarget.name}` : renameTarget.name;
+		const to = currentPath ? `${currentPath}/${newName}` : newName;
+		const res = await fetch('/api/files/rename', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ from, to }),
+		});
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			alert(data.error || 'Failed to rename');
+			return;
+		}
+		renameTarget = null;
+		renameValue = '';
+		await browse(currentPath);
+	}
+
+	function startEdit() {
+		if (!previewFile) return;
+		editBuffer = previewText;
+		editing = true;
+	}
+
+	function cancelEdit() {
+		editing = false;
+		editBuffer = '';
+	}
+
+	async function saveEdit() {
+		if (!previewFile) return;
+		editSaving = true;
+		const path = currentPath ? `${currentPath}/${previewFile.name}` : previewFile.name;
+		try {
+			const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+				body: editBuffer,
+			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				alert(data.error || 'Failed to save');
+				return;
+			}
+			previewText = editBuffer;
+			editing = false;
+			// Refresh the listing so the modified timestamp updates.
+			await browse(currentPath);
+		} finally {
+			editSaving = false;
+		}
+	}
 </script>
 
 <!-- Toolbar -->
@@ -300,12 +418,12 @@
 {:else}
 	<table class="w-full text-sm">
 		<thead>
-			<tr class="border-b-2 border-border">
-				<th class="p-3 text-left text-xs uppercase text-muted-foreground">Name</th>
-				<th class="p-3 text-right text-xs uppercase text-muted-foreground">Size</th>
-				<th class="p-3 text-right text-xs uppercase text-muted-foreground">Modified</th>
+			<tr>
+				<SortTh label="Name" active={sortKey === 'name'} dir={sortDir} onclick={() => toggleSort('name')} />
+				<SortTh label="Size" active={sortKey === 'size'} dir={sortDir} onclick={() => toggleSort('size')} align="right" />
+				<SortTh label="Modified" active={sortKey === 'modified'} dir={sortDir} onclick={() => toggleSort('modified')} align="right" />
 				{#if !isRoot}
-					<th class="w-10"></th>
+					<th class="w-10 border-b-2 border-border"></th>
 				{/if}
 			</tr>
 		</thead>
@@ -351,6 +469,12 @@
 									</a>
 								{/if}
 								<button
+									class="text-muted-foreground/40 hover:text-foreground transition-colors"
+									onclick={() => startRename(entry)}
+									title="Rename">
+									<Pencil size={14} />
+								</button>
+								<button
 									class="text-muted-foreground/40 hover:text-destructive transition-colors"
 									onclick={() => deleteTarget = entry}
 									title="Delete">
@@ -363,6 +487,32 @@
 			{/each}
 		</tbody>
 	</table>
+{/if}
+
+<!-- Rename modal -->
+{#if renameTarget}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<Card class="w-full max-w-sm">
+			<CardContent class="pt-6">
+				<h3 class="mb-2 text-lg font-semibold">Rename {renameTarget.is_dir ? 'folder' : 'file'}</h3>
+				<p class="mb-3 text-sm text-muted-foreground">
+					New name for <span class="font-mono font-medium text-foreground">{renameTarget.name}</span>:
+				</p>
+				<!-- svelte-ignore a11y_autofocus -->
+				<input
+					type="text"
+					bind:value={renameValue}
+					class="mb-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm font-mono"
+					onkeydown={(e) => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') renameTarget = null; }}
+					autofocus
+				/>
+				<div class="flex gap-2">
+					<Button onclick={confirmRename} disabled={!renameValue.trim() || renameValue === renameTarget.name}>Rename</Button>
+					<Button variant="secondary" onclick={() => { renameTarget = null; renameValue = ''; }}>Cancel</Button>
+				</div>
+			</CardContent>
+		</Card>
+	</div>
 {/if}
 
 <!-- Delete confirmation -->
@@ -390,19 +540,36 @@
 <!-- File preview modal -->
 {#if previewFile}
 	{@const cat = fileCategory(previewFile.name)}
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm" role="button" tabindex="-1" onclick={() => previewFile = null} onkeydown={(e) => { if (e.key === 'Escape') previewFile = null; }}>
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm" role="button" tabindex="-1" onclick={() => { if (!editing) previewFile = null; }} onkeydown={(e) => { if (e.key === 'Escape' && !editing) previewFile = null; }}>
 		<div class="relative flex flex-col max-w-[90vw] max-h-[90vh] rounded-lg border border-border bg-[#0f1117] shadow-2xl" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 			<!-- Header -->
 			<div class="flex items-center justify-between px-4 py-2 border-b border-border">
-				<span class="text-sm font-semibold text-white font-mono">{previewFile.name}</span>
+				<span class="text-sm font-semibold text-white font-mono">{previewFile.name}{editing ? ' (editing)' : ''}</span>
 				<div class="flex items-center gap-2">
+					{#if cat === 'text' && !isRoot}
+						{#if editing}
+							<Button size="xs" onclick={saveEdit} disabled={editSaving}>
+								{editSaving ? 'Saving…' : 'Save'}
+							</Button>
+							<Button variant="ghost" size="xs" onclick={cancelEdit} disabled={editSaving} class="text-white hover:text-white/80">
+								Cancel
+							</Button>
+						{:else}
+							<button
+								class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+								onclick={startEdit}
+								title="Edit this file in the browser">
+								<Pencil size={12} /> Edit
+							</button>
+						{/if}
+					{/if}
 					<a
 						href={contentUrl(previewFile)}
 						download={previewFile.name}
 						class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
 						<Download size={12} /> Download
 					</a>
-					<Button variant="ghost" size="xs" onclick={() => previewFile = null} class="text-white hover:text-white/80">
+					<Button variant="ghost" size="xs" onclick={() => { if (!editing) previewFile = null; }} disabled={editing} class="text-white hover:text-white/80">
 						Close
 					</Button>
 				</div>
@@ -426,7 +593,16 @@
 				{:else if cat === 'pdf'}
 					<iframe src={contentUrl(previewFile)} class="w-full h-[80vh]" title={previewFile.name}></iframe>
 				{:else if cat === 'text'}
-					<pre class="w-full max-h-[80vh] overflow-auto text-xs text-green-400 font-mono whitespace-pre-wrap p-4">{previewText || 'Loading...'}</pre>
+					{#if editing}
+						<textarea
+							bind:value={editBuffer}
+							spellcheck="false"
+							class="w-[80vw] max-w-3xl h-[70vh] resize-none rounded-md border border-input bg-background p-3 text-xs text-foreground font-mono"
+							disabled={editSaving}
+						></textarea>
+					{:else}
+						<pre class="w-full max-h-[80vh] overflow-auto text-xs text-green-400 font-mono whitespace-pre-wrap p-4">{previewText || 'Loading...'}</pre>
+					{/if}
 				{/if}
 			</div>
 		</div>
