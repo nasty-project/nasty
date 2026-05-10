@@ -4,7 +4,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { VmStatus, VmCapabilities, Subvolume, FsDependents } from '$lib/types';
+	import type { VmStatus, VmCapabilities, Subvolume, FsDependents, NetworkState } from '$lib/types';
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -12,6 +12,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import BridgeCreator from '$lib/components/BridgeCreator.svelte';
 	import { CircleCheck, Circle, CircleX, Lock } from '@lucide/svelte';
 	import { Terminal } from '@xterm/xterm';
 	import { FitAddon } from '@xterm/addon-fit';
@@ -23,6 +24,7 @@
 	// badge so the user sees why their stopped VM can't start.
 	let lockedFsByVm = $state(new Map<string, string>());
 	let blockSubvolumes: Subvolume[] = $state([]);
+	let networkState: NetworkState | null = $state(null);
 	let wizardStep: -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6 = $state(0); // 0=hidden, -1=prerequisites
 	let loading = $state(true);
 	let editTab: 'general' | 'system' | 'storage' | 'network' | 'passthrough' = $state('general');
@@ -92,6 +94,14 @@
 	let newNetMode = $state('user');
 	let newNetBridge = $state('');
 	let newNetMac = $state('');
+	let showInlineBridgeForm = $state(false);
+
+	// Auto-select first bridge when switching into bridge mode with bridges available.
+	$effect(() => {
+		if (newNetMode === 'bridge' && !newNetBridge && networkState && networkState.config.bridges.length > 0) {
+			newNetBridge = networkState.config.bridges[0].name;
+		}
+	});
 
 	async function loadFilesystems() {
 		try {
@@ -250,9 +260,15 @@
 	});
 
 	onMount(async () => {
-		await Promise.all([refresh(), loadCapabilities(), loadFilesystems(), loadImages(), loadSubvolumes()]);
+		await Promise.all([refresh(), loadCapabilities(), loadFilesystems(), loadImages(), loadSubvolumes(), loadNetwork()]);
 		loading = false;
 	});
+
+	async function loadNetwork() {
+		try {
+			networkState = await client.call<NetworkState>('system.network.get');
+		} catch { /* ignore — bridge picker will show empty state */ }
+	}
 
 	async function refresh() {
 		await withToast(async () => {
@@ -344,8 +360,12 @@
 		}
 		if (newDescription) params.description = newDescription;
 		// Network
+		if (newNetMode === 'bridge' && !newNetBridge) {
+			await withToast(async () => { throw new Error('Pick a bridge or switch to NAT mode'); }, '');
+			return;
+		}
 		const net: Record<string, unknown> = { mode: newNetMode };
-		if (newNetMode === 'bridge' && newNetBridge) net.bridge = newNetBridge;
+		if (newNetMode === 'bridge') net.bridge = newNetBridge;
 		if (newNetMac) net.mac = newNetMac;
 		params.networks = [net];
 		// Passthrough
@@ -874,7 +894,37 @@
 			{#if newNetMode === 'bridge'}
 				<div class="mb-4">
 					<Label>Bridge Interface</Label>
-					<Input bind:value={newNetBridge} placeholder="br0" class="mt-1" />
+					{#if !networkState}
+						<p class="mt-1 text-xs text-muted-foreground">Loading bridges…</p>
+					{:else if showInlineBridgeForm}
+						<div class="mt-2">
+							<BridgeCreator
+								{networkState}
+								onCreated={async (name) => {
+									await loadNetwork();
+									newNetBridge = name;
+									showInlineBridgeForm = false;
+								}}
+								onCancel={() => { showInlineBridgeForm = false; }}
+							/>
+						</div>
+					{:else if networkState.config.bridges.length === 0}
+						<div class="mt-1 rounded border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
+							<p class="font-medium mb-1">No bridges configured</p>
+							<p class="text-muted-foreground mb-2">VMs in bridge mode need an existing host bridge — NASty does not auto-create one. Create one here without leaving the wizard.</p>
+							<Button size="sm" variant="secondary" onclick={() => { showInlineBridgeForm = true; }}>+ Create bridge</Button>
+						</div>
+					{:else}
+						<div class="mt-1 flex gap-2">
+							<select bind:value={newNetBridge} class="h-9 flex-1 rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="" disabled>Select a bridge…</option>
+								{#each networkState.config.bridges as br}
+									<option value={br.name}>{br.name}{br.members.length > 0 ? ` (${br.members.join(', ')})` : ' (host-internal)'}</option>
+								{/each}
+							</select>
+							<Button size="sm" variant="ghost" onclick={() => { showInlineBridgeForm = true; }}>+ New</Button>
+						</div>
+					{/if}
 				</div>
 			{/if}
 			<details class="mb-4">
@@ -947,7 +997,7 @@
 					<span class="font-mono text-xs">{newIso}</span>
 				{/if}
 				<span class="text-muted-foreground">Network</span>
-				<span>{newNetMode === 'bridge' ? `Bridge (${newNetBridge || 'br0'})` : 'NAT'}</span>
+				<span>{newNetMode === 'bridge' ? `Bridge (${newNetBridge || 'none selected'})` : 'NAT'}</span>
 				{#if newPassthrough.length > 0}
 					<span class="text-muted-foreground">Passthrough</span>
 					<span>{newPassthrough.length} device{newPassthrough.length !== 1 ? 's' : ''}</span>
