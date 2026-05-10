@@ -144,6 +144,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.settings.timezones"
                 | "audit.list"
                 | "apps.check_ports"
+                | "apps.check_devices"
                 | "apps.status"
                 | "apps.logs"
                 | "apps.compose.logs"
@@ -2545,6 +2546,10 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "apps.check_ports" => match parse_params(req) {
             Ok(p) => ok(req, state.apps.check_ports(p).await),
+            Err(e) => invalid(req, e),
+        },
+        "apps.check_devices" => match parse_params(req) {
+            Ok(p) => ok(req, state.apps.check_devices(p).await),
             Err(e) => invalid(req, e),
         },
         "apps.config" => match require_str(req, "name") {

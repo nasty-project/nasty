@@ -250,10 +250,19 @@
 
 	// Port conflict state
 	let portConflicts = $state<{ port: number; used_by: string }[]>([]);
-	let composeErrorLines = $state<number[]>([]);
+	let composePortErrorLines = $state<number[]>([]);
 	let composePortLineMap = $state<Map<number, number>>(new Map()); // port → line number
 	let checkingPorts = $state(false);
 	let portCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Device existence state — populated for compose mode only (the simple
+	// installer doesn't surface a `devices:` field).
+	let deviceMissing = $state<{ path: string; parent_exists: boolean }[]>([]);
+	let composeDeviceErrorLines = $state<number[]>([]);
+	let composeDeviceLineMap = $state<Map<string, number>>(new Map()); // path → line number
+
+	// Editor underlines both port-conflict and missing-device lines.
+	const composeErrorLines = $derived([...composePortErrorLines, ...composeDeviceErrorLines]);
 
 	const client = getClient();
 	let startupPoll: ReturnType<typeof setInterval> | null = null;
@@ -317,6 +326,11 @@
 	}
 
 	function checkComposeConflicts() {
+		checkComposePortConflicts();
+		checkComposeDeviceConflicts();
+	}
+
+	function checkComposePortConflicts() {
 		// Parse host ports from compose YAML (best-effort), tracking line numbers
 		const portLines: { port: number; line: number }[] = [];
 		const lines = composeContent.split('\n');
@@ -327,7 +341,8 @@
 		const ports = portLines.map(p => p.port);
 		if (ports.length === 0) {
 			portConflicts = [];
-			composeErrorLines = [];
+			composePortErrorLines = [];
+			composePortLineMap = new Map();
 			return;
 		}
 		checkingPorts = true;
@@ -337,9 +352,62 @@
 		).then(r => {
 			portConflicts = r;
 			const conflictPorts = new Set(r.map(c => c.port));
-			composeErrorLines = portLines.filter(p => conflictPorts.has(p.port)).map(p => p.line);
+			composePortErrorLines = portLines.filter(p => conflictPorts.has(p.port)).map(p => p.line);
 			composePortLineMap = new Map(portLines.map(p => [p.port, p.line]));
-		}).catch(() => { portConflicts = []; composeErrorLines = []; composePortLineMap = new Map(); }).finally(() => { checkingPorts = false; });
+		}).catch(() => { portConflicts = []; composePortErrorLines = []; composePortLineMap = new Map(); }).finally(() => { checkingPorts = false; });
+	}
+
+	/** Parse `devices:` block entries from compose YAML, tracking the host
+	 * path of each entry (everything before the first colon) and its
+	 * source-line number. We track the section by indent rather than
+	 * regex-on-every-line so we don't mis-classify volumes or env vars
+	 * that happen to start with a dash. */
+	function parseComposeDeviceLines(content: string): { path: string; line: number }[] {
+		const out: { path: string; line: number }[] = [];
+		const lines = content.split('\n');
+		let inDevices = false;
+		let devicesIndent = -1;
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i];
+			const indentMatch = line.match(/^(\s*)/);
+			const indent = indentMatch ? indentMatch[1].length : 0;
+			const trimmed = line.trim();
+			if (!trimmed || trimmed.startsWith('#')) continue;
+			if (inDevices && indent <= devicesIndent && !trimmed.startsWith('-')) {
+				inDevices = false;
+			}
+			if (trimmed.match(/^devices:\s*(#.*)?$/)) {
+				inDevices = true;
+				devicesIndent = indent;
+				continue;
+			}
+			if (inDevices) {
+				// `- /dev/foo`, `- /dev/foo:/dev/foo`, `- "/dev/foo:/dev/foo:rwm"`
+				const m = line.match(/^\s*-\s*"?([^":\s]+)/);
+				if (m) out.push({ path: m[1], line: i + 1 });
+			}
+		}
+		return out;
+	}
+
+	function checkComposeDeviceConflicts() {
+		const deviceLines = parseComposeDeviceLines(composeContent);
+		if (deviceLines.length === 0) {
+			deviceMissing = [];
+			composeDeviceErrorLines = [];
+			composeDeviceLineMap = new Map();
+			return;
+		}
+		const paths = deviceLines.map(d => d.path);
+		client.call<{ path: string; parent_exists: boolean }[]>(
+			'apps.check_devices',
+			{ paths }
+		).then(r => {
+			deviceMissing = r;
+			const missingSet = new Set(r.map(m => m.path));
+			composeDeviceErrorLines = deviceLines.filter(d => missingSet.has(d.path)).map(d => d.line);
+			composeDeviceLineMap = new Map(deviceLines.map(d => [d.path, d.line]));
+		}).catch(() => { deviceMissing = []; composeDeviceErrorLines = []; composeDeviceLineMap = new Map(); });
 	}
 
 	onMount(async () => {
@@ -710,7 +778,11 @@
 		showCompose = false;
 		editingCompose = null;
 		portConflicts = [];
-		composeErrorLines = [];
+		composePortErrorLines = [];
+		composePortLineMap = new Map();
+		deviceMissing = [];
+		composeDeviceErrorLines = [];
+		composeDeviceLineMap = new Map();
 		composeName = ''; composeContent = '';
 		composeAllowUnsafe = false;
 	}
@@ -1067,6 +1139,21 @@
 								{@const alt = c.port < 1000 ? c.port + 8000 : c.port + 1}
 								{@const lineNo = composePortLineMap.get(c.port)}
 							<div><span class="font-semibold">Line {lineNo}:</span> port {c.port} is already in use by <span class="font-semibold">{c.used_by}</span> — change to e.g. <code>{alt}</code></div>
+							{/each}
+						</div>
+					{/if}
+					{#if deviceMissing.length > 0}
+						<div class="mt-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+							{#each deviceMissing as d}
+								{@const lineNo = composeDeviceLineMap.get(d.path)}
+								<div>
+									<span class="font-semibold">Line {lineNo}:</span> device <code>{d.path}</code> doesn't exist on this host
+									{#if !d.parent_exists}
+										— parent directory missing too, the kernel driver may not be loaded (e.g. <code>i915</code> for Intel GPU)
+									{:else}
+										— check the device name (<code>ls {(d.path.split('/').slice(0, -1).join('/')) || '/'}</code>) or whether the device is physically present
+									{/if}
+								</div>
 							{/each}
 						</div>
 					{/if}

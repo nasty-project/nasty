@@ -358,6 +358,29 @@ pub struct PortConflict {
     pub used_by: String,
 }
 
+// ── Device check types ────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckDevicesRequest {
+    /// Host device paths to check, e.g. `/dev/dri/renderD128`. Anything
+    /// after the first colon (the in-container path or cgroup perms) is
+    /// the caller's job to strip — this RPC only stat()s host paths.
+    pub paths: Vec<String>,
+}
+
+/// One missing device. `parent_exists` lets the UI distinguish between
+/// "device doesn't exist but its parent dir does" (likely the host has
+/// some GPU but not the requested one) and "parent dir is missing too"
+/// (likely the relevant kernel module isn't loaded — `/dev/dri` not
+/// being present means no DRM driver bound any display device).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DeviceMissing {
+    /// The device path the caller asked about, echoed back.
+    pub path: String,
+    /// True when the path's parent directory exists on the host.
+    pub parent_exists: bool,
+}
+
 // ── Service ─────────────────────────────────────────────────────
 
 pub struct AppsService {
@@ -1728,6 +1751,41 @@ impl AppsService {
         conflicts
     }
 
+    // ── Device existence check ────────────────────────────────────
+
+    /// Stat each requested host path; report the ones that don't exist.
+    /// Cheap enough to call on every keystroke (it's just `stat(2)` per
+    /// path, no Docker round-trip), so the WebUI debounces it the same
+    /// way as `check_ports`. Errors other than ENOENT (permission
+    /// denied, etc.) are treated as "exists" — we'd rather miss a
+    /// warning than block a legitimate deploy because of a stat hiccup.
+    pub async fn check_devices(&self, req: CheckDevicesRequest) -> Vec<DeviceMissing> {
+        let mut missing = Vec::new();
+        for raw in &req.paths {
+            let path = raw.trim();
+            if path.is_empty() {
+                continue;
+            }
+            match tokio::fs::metadata(path).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let parent_exists = match std::path::Path::new(path).parent() {
+                        Some(p) if !p.as_os_str().is_empty() => {
+                            tokio::fs::metadata(p).await.is_ok()
+                        }
+                        _ => false,
+                    };
+                    missing.push(DeviceMissing {
+                        path: raw.clone(),
+                        parent_exists,
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+        missing
+    }
+
     // ── Image inspection ────────────────────────────────────
 
     pub async fn inspect_image(&self, image: &str) -> Result<ImageInspectResult, AppsError> {
@@ -2681,5 +2739,56 @@ mod tests {
             true,
         )
         .unwrap();
+    }
+
+    use super::{AppsService, CheckDevicesRequest};
+
+    #[tokio::test]
+    async fn check_devices_reports_missing_with_parent_existing() {
+        // /dev exists on every Linux host; the named device cannot.
+        let svc = AppsService::new();
+        let r = svc
+            .check_devices(CheckDevicesRequest {
+                paths: vec!["/dev/this-device-cannot-exist-nasty-test".to_string()],
+            })
+            .await;
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].path, "/dev/this-device-cannot-exist-nasty-test");
+        assert!(r[0].parent_exists, "/dev should exist");
+    }
+
+    #[tokio::test]
+    async fn check_devices_flags_missing_parent() {
+        let svc = AppsService::new();
+        let r = svc
+            .check_devices(CheckDevicesRequest {
+                paths: vec!["/this-parent-cannot-exist-nasty-test/whatever".to_string()],
+            })
+            .await;
+        assert_eq!(r.len(), 1);
+        assert!(!r[0].parent_exists);
+    }
+
+    #[tokio::test]
+    async fn check_devices_skips_existing() {
+        // /dev/null is on every Linux host. Don't report it.
+        let svc = AppsService::new();
+        let r = svc
+            .check_devices(CheckDevicesRequest {
+                paths: vec!["/dev/null".to_string()],
+            })
+            .await;
+        assert!(r.is_empty(), "expected empty, got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn check_devices_skips_blank_entries() {
+        let svc = AppsService::new();
+        let r = svc
+            .check_devices(CheckDevicesRequest {
+                paths: vec!["".to_string(), "   ".to_string()],
+            })
+            .await;
+        assert!(r.is_empty());
     }
 }
