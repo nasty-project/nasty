@@ -145,6 +145,7 @@ fn is_read_only(method: &str) -> bool {
                 | "audit.list"
                 | "apps.check_ports"
                 | "apps.check_devices"
+                | "apps.check_volumes"
                 | "apps.status"
                 | "apps.logs"
                 | "apps.compose.logs"
@@ -2550,6 +2551,17 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         },
         "apps.check_devices" => match parse_params(req) {
             Ok(p) => ok(req, state.apps.check_devices(p).await),
+            Err(e) => invalid(req, e),
+        },
+        "apps.check_volumes" => match parse_params(req) {
+            Ok(p) => ok(req, state.apps.check_volumes(p).await),
+            Err(e) => invalid(req, e),
+        },
+        "apps.fix_volume_perms" => match parse_params(req) {
+            Ok(p) => match state.apps.fix_volume_perms(p).await {
+                Ok(()) => ok(req, serde_json::json!({"ok": true})),
+                Err(e) => err(req, e),
+            },
             Err(e) => invalid(req, e),
         },
         "apps.config" => match require_str(req, "name") {

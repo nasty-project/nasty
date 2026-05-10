@@ -261,8 +261,33 @@
 	let composeDeviceErrorLines = $state<number[]>([]);
 	let composeDeviceLineMap = $state<Map<string, number>>(new Map()); // path → line number
 
-	// Editor underlines both port-conflict and missing-device lines.
-	const composeErrorLines = $derived([...composePortErrorLines, ...composeDeviceErrorLines]);
+	// Volume-permission warnings — bind-mount sources whose owner doesn't
+	// match the service's `user:` field (or PUID/PGID).
+	type VolumeMismatch = {
+		service: string;
+		host_path: string;
+		mount_path: string;
+		expected_uid: number;
+		expected_gid: number | null;
+		current_uid: number | null;
+		current_gid: number | null;
+		exists: boolean;
+		line: number | null;
+	};
+	let volumeMismatches = $state<VolumeMismatch[]>([]);
+	let composeVolumeErrorLines = $derived(
+		volumeMismatches
+			.filter(m => m.exists && m.line != null)
+			.map(m => m.line as number)
+	);
+	let fixingVolume = $state<string | null>(null); // host_path currently being chowned
+
+	// Editor underlines port-conflict, missing-device, and existing-but-wrong-owner lines.
+	const composeErrorLines = $derived([
+		...composePortErrorLines,
+		...composeDeviceErrorLines,
+		...composeVolumeErrorLines,
+	]);
 
 	const client = getClient();
 	let startupPoll: ReturnType<typeof setInterval> | null = null;
@@ -328,6 +353,36 @@
 	function checkComposeConflicts() {
 		checkComposePortConflicts();
 		checkComposeDeviceConflicts();
+		checkComposeVolumePerms();
+	}
+
+	function checkComposeVolumePerms() {
+		// Server parses the YAML and stat()s each bind source. We just
+		// hand it the full text — keeps client-side parsing minimal and
+		// avoids drifting from the deploy-time validator.
+		client.call<VolumeMismatch[]>('apps.check_volumes', { compose: composeContent })
+			.then(r => { volumeMismatches = r; })
+			.catch(() => { volumeMismatches = []; });
+	}
+
+	async function fixVolume(host_path: string, uid: number, gid: number | null, recursive: boolean) {
+		const effectiveGid = gid ?? uid; // mirror docker's "user: 1000" → gid=1000 default
+		fixingVolume = host_path;
+		try {
+			await withToast(
+				() => client.call('apps.fix_volume_perms', {
+					host_path,
+					uid,
+					gid: effectiveGid,
+					recursive,
+				}),
+				`Chowned ${host_path} to ${uid}:${effectiveGid}${recursive ? ' (recursive)' : ''}`
+			);
+			// Re-check so the row disappears from the warning list.
+			checkComposeVolumePerms();
+		} finally {
+			fixingVolume = null;
+		}
 	}
 
 	function checkComposePortConflicts() {
@@ -783,6 +838,7 @@
 		deviceMissing = [];
 		composeDeviceErrorLines = [];
 		composeDeviceLineMap = new Map();
+		volumeMismatches = [];
 		composeName = ''; composeContent = '';
 		composeAllowUnsafe = false;
 	}
@@ -1152,6 +1208,51 @@
 										— parent directory missing too, the kernel driver may not be loaded (e.g. <code>i915</code> for Intel GPU)
 									{:else}
 										— check the device name (<code>ls {(d.path.split('/').slice(0, -1).join('/')) || '/'}</code>) or whether the device is physically present
+									{/if}
+								</div>
+							{/each}
+						</div>
+					{/if}
+					{#if volumeMismatches.length > 0}
+						<div class="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+							<p class="mb-2">
+								Bind-mount permissions don't match the container's <code>user:</code> — the container will likely fail with <em>Permission denied</em>.
+							</p>
+							{#each volumeMismatches as m}
+								{@const expectedLabel = `${m.expected_uid}:${m.expected_gid ?? m.expected_uid}`}
+								<div class="mb-2 last:mb-0">
+									<div>
+										<span class="font-semibold">Line {m.line ?? '?'}:</span>
+										<code>{m.host_path}</code>
+										{#if m.exists}
+											is owned by <code>{m.current_uid}:{m.current_gid}</code>, but
+										{:else}
+											doesn't exist yet —
+										{/if}
+										service <span class="font-semibold">{m.service}</span> will run as <code>{expectedLabel}</code>.
+									</div>
+									{#if m.exists}
+										<div class="mt-1 flex flex-wrap gap-2">
+											<Button
+												size="xs"
+												variant="secondary"
+												disabled={fixingVolume === m.host_path}
+												onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, false)}
+											>
+												{fixingVolume === m.host_path ? 'Chowning…' : `Chown to ${expectedLabel}`}
+											</Button>
+											<Button
+												size="xs"
+												variant="ghost"
+												disabled={fixingVolume === m.host_path}
+												onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, true)}
+												title="Recursive — rewrites every existing file's owner"
+											>
+												…and contents
+											</Button>
+										</div>
+									{:else}
+										<div class="mt-1 text-muted-foreground">Will be created with the right ownership when you deploy.</div>
 									{/if}
 								</div>
 							{/each}

@@ -140,6 +140,173 @@ impl From<bollard::errors::Error> for AppsError {
     }
 }
 
+/// Parse `user:` into (uid, gid). Compose accepts `1000`, `1000:1000`,
+/// `username`, `username:groupname`. We resolve only numeric forms —
+/// resolving usernames would require reading /etc/passwd off the host
+/// (which is fine in principle, just punted for v1 to keep the surface
+/// small). Returns None for non-numeric or missing.
+fn parse_user_field(v: &serde_json::Value) -> Option<(u32, Option<u32>)> {
+    let s = v.as_str()?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (uid_part, gid_part) = match s.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (s, None),
+    };
+    let uid: u32 = uid_part.parse().ok()?;
+    let gid: Option<u32> = gid_part.and_then(|g| g.parse().ok());
+    Some((uid, gid))
+}
+
+/// Pull PUID/PGID out of an `environment:` block (LinuxServer.io
+/// convention). Both list form (`- PUID=1000`) and map form
+/// (`PUID: 1000`) are supported.
+fn parse_puid_pgid(env: &serde_json::Value) -> Option<(u32, Option<u32>)> {
+    let mut puid: Option<u32> = None;
+    let mut pgid: Option<u32> = None;
+    let assign = |key: &str, value: &str, puid: &mut Option<u32>, pgid: &mut Option<u32>| match key
+    {
+        "PUID" => *puid = value.parse().ok(),
+        "PGID" => *pgid = value.parse().ok(),
+        _ => {}
+    };
+    if let Some(map) = env.as_object() {
+        for (k, v) in map {
+            let value = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue,
+            };
+            assign(k, &value, &mut puid, &mut pgid);
+        }
+    } else if let Some(list) = env.as_array() {
+        for item in list {
+            if let Some(s) = item.as_str()
+                && let Some((k, v)) = s.split_once('=')
+            {
+                assign(k, v, &mut puid, &mut pgid);
+            }
+        }
+    }
+    puid.map(|u| (u, pgid))
+}
+
+/// Extract the host path of one volume entry. Compose accepts:
+/// short-form `"src:dst[:opts]"` and long-form
+/// `{ type: bind, source: ..., target: ... }`. Named volumes (`data:/x`)
+/// and tmpfs/npipe are skipped.
+fn extract_bind_source_target(entry: &serde_json::Value) -> Option<(String, String)> {
+    match entry {
+        serde_json::Value::String(s) => {
+            // "src:dst[:opts]" — only the host bind case has an absolute
+            // src starting with '/'. Named volumes look like "data:/path".
+            let mut parts = s.splitn(3, ':');
+            let src = parts.next()?.to_string();
+            let dst = parts.next()?.to_string();
+            if !src.starts_with('/') {
+                return None;
+            }
+            Some((src, dst))
+        }
+        serde_json::Value::Object(map) => {
+            let kind = map.get("type").and_then(|v| v.as_str()).unwrap_or("volume");
+            if kind != "bind" {
+                return None;
+            }
+            let src = map.get("source").and_then(|v| v.as_str())?.to_string();
+            let dst = map.get("target").and_then(|v| v.as_str())?.to_string();
+            if !src.starts_with('/') {
+                return None;
+            }
+            Some((src, dst))
+        }
+        _ => None,
+    }
+}
+
+/// Walk a parsed compose YAML and extract every bind-mount paired with
+/// its service's expected (uid, gid). The expected ids come from the
+/// service's `user:` field, falling back to PUID/PGID env vars when
+/// `user:` isn't set (LinuxServer.io style images).
+pub fn extract_compose_binds(yaml: &str) -> Vec<ComposeBind> {
+    let parsed: serde_json::Value = match serde_yaml_ng::from_str(yaml) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let services = match parsed.get("services").and_then(|s| s.as_object()) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let mut binds = Vec::new();
+    for (svc_name, svc) in services {
+        let user = svc
+            .get("user")
+            .and_then(parse_user_field)
+            .or_else(|| svc.get("environment").and_then(parse_puid_pgid));
+        let (expected_uid, expected_gid) = match user {
+            Some((u, g)) => (Some(u), g),
+            None => (None, None),
+        };
+        let volumes = match svc.get("volumes").and_then(|v| v.as_array()) {
+            Some(v) => v,
+            None => continue,
+        };
+        for entry in volumes {
+            if let Some((src, dst)) = extract_bind_source_target(entry) {
+                binds.push(ComposeBind {
+                    service: svc_name.clone(),
+                    host_path: src,
+                    mount_path: dst,
+                    expected_uid,
+                    expected_gid,
+                });
+            }
+        }
+    }
+    binds
+}
+
+/// Best-effort 1-based line number of the first occurrence of `needle`
+/// in `haystack`. Used to underline the offending volume entry in the
+/// compose editor.
+fn find_line(haystack: &str, needle: &str) -> Option<u32> {
+    for (i, line) in haystack.lines().enumerate() {
+        if line.contains(needle) {
+            return Some((i + 1) as u32);
+        }
+    }
+    None
+}
+
+/// Same forbidden-bind rules as the compose deploy validator: no
+/// traversal, no `/`, no engine state. Used to gate `fix_volume_perms`
+/// so the WebUI can't be tricked into chowning `/etc` because the user
+/// pasted an evil path.
+fn validate_chown_target(host_path: &str) -> Result<(), AppsError> {
+    if host_path.contains("..") {
+        return Err(AppsError::ForbiddenBind(format!(
+            "'{host_path}' contains '..'"
+        )));
+    }
+    if host_path == "/" {
+        return Err(AppsError::ForbiddenBind(
+            "host root '/' is never allowed".to_string(),
+        ));
+    }
+    if host_path == "/var/lib/nasty" || host_path.starts_with("/var/lib/nasty/") {
+        return Err(AppsError::ForbiddenBind(format!(
+            "'{host_path}' targets engine state"
+        )));
+    }
+    if !host_path.starts_with('/') {
+        return Err(AppsError::ForbiddenBind(format!(
+            "'{host_path}' is not absolute"
+        )));
+    }
+    Ok(())
+}
+
 // ── Types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -379,6 +546,70 @@ pub struct DeviceMissing {
     pub path: String,
     /// True when the path's parent directory exists on the host.
     pub parent_exists: bool,
+}
+
+// ── Volume permission check types ─────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckVolumesRequest {
+    /// Full docker-compose YAML text. Server parses it and stat()s each
+    /// bind-mount source. Sent in full (rather than per-volume) so the
+    /// server can correlate sources with their owning service's `user:`
+    /// field — that's the comparison we make.
+    pub compose: String,
+}
+
+/// One bind-mount whose host owner doesn't match what the container
+/// will run as (or whose host path is missing). Returned by
+/// `apps.check_volumes`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct VolumeMismatch {
+    pub service: String,
+    pub host_path: String,
+    pub mount_path: String,
+    pub expected_uid: u32,
+    pub expected_gid: Option<u32>,
+    /// Owner UID on the host. None when the path doesn't exist yet.
+    pub current_uid: Option<u32>,
+    pub current_gid: Option<u32>,
+    /// True when the source path exists on the host. False = the
+    /// directory will be created by the deploy pipeline; we'll chown
+    /// it to expected at create time, so it's informational rather
+    /// than an error.
+    pub exists: bool,
+    /// 1-based line number of the volume entry in the compose file
+    /// (for editor underlining). Best-effort: we substring-match the
+    /// host path against the source; ambiguous duplicates resolve to
+    /// the first occurrence.
+    pub line: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FixVolumePermsRequest {
+    /// Host bind-mount source to chown. Validated against the same
+    /// forbidden-bind rules as compose deploys (no `..`, no `/`, no
+    /// engine state).
+    pub host_path: String,
+    pub uid: u32,
+    pub gid: u32,
+    /// When true, recurse into the directory tree. Off by default
+    /// because recursive chown on a path like `/fs/tank/media` rewrites
+    /// ownership on every existing file under it — almost never what
+    /// the user wants if the path was pre-populated.
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+/// One bind-mount extracted from a compose file. Used both by
+/// `check_volumes` (read-only) and the install pipeline's auto-chown
+/// step (it pre-creates missing dirs with the right ownership).
+#[derive(Debug, Clone)]
+pub struct ComposeBind {
+    pub service: String,
+    pub host_path: String,
+    pub mount_path: String,
+    pub expected_uid: Option<u32>,
+    pub expected_gid: Option<u32>,
 }
 
 // ── Service ─────────────────────────────────────────────────────
@@ -1445,6 +1676,11 @@ impl AppsService {
             return Err(e);
         }
 
+        // Pre-create missing bind-mount source dirs with the service's
+        // expected ownership. Existing dirs are left alone — they go
+        // through the explicit "Fix permissions" path.
+        self.precreate_compose_binds(&req.compose_file).await;
+
         // Run docker compose up — pull only, no building from source
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(300),
@@ -1534,6 +1770,11 @@ impl AppsService {
             &req.compose_file,
         )
         .await?;
+
+        // Same pre-create pass as install: any newly added bind-mount
+        // sources get created with the right ownership. Existing dirs
+        // are untouched.
+        self.precreate_compose_binds(&req.compose_file).await;
 
         // Bring up with new config — pull only, no building from source
         let result = tokio::time::timeout(
@@ -1784,6 +2025,161 @@ impl AppsService {
             }
         }
         missing
+    }
+
+    // ── Volume permission check ───────────────────────────────────
+
+    /// Pre-deploy check: parse the compose, find every bind-mount whose
+    /// host owner doesn't match its service's `user:` (or PUID/PGID env
+    /// fallback), and report missing-source paths so the UI can show
+    /// they'll be created with the right ownership.
+    pub async fn check_volumes(&self, req: CheckVolumesRequest) -> Vec<VolumeMismatch> {
+        use std::os::unix::fs::MetadataExt;
+        let mut out = Vec::new();
+        for bind in extract_compose_binds(&req.compose) {
+            // No `user:` and no PUID — the container will run as root,
+            // and root can write anywhere on the host filesystem so
+            // there's nothing for us to flag.
+            let expected_uid = match bind.expected_uid {
+                Some(u) => u,
+                None => continue,
+            };
+            // We don't allow chowning the engine state dir, so we also
+            // don't bother surfacing warnings about it — they'd be
+            // unactionable.
+            if validate_chown_target(&bind.host_path).is_err() {
+                continue;
+            }
+            let line = find_line(&req.compose, &bind.host_path);
+            match tokio::fs::metadata(&bind.host_path).await {
+                Ok(md) => {
+                    let cur_uid = md.uid();
+                    let cur_gid = md.gid();
+                    let uid_mismatch = cur_uid != expected_uid;
+                    let gid_mismatch = bind.expected_gid.is_some_and(|g| g != cur_gid);
+                    if uid_mismatch || gid_mismatch {
+                        out.push(VolumeMismatch {
+                            service: bind.service,
+                            host_path: bind.host_path,
+                            mount_path: bind.mount_path,
+                            expected_uid,
+                            expected_gid: bind.expected_gid,
+                            current_uid: Some(cur_uid),
+                            current_gid: Some(cur_gid),
+                            exists: true,
+                            line,
+                        });
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Missing dir — the install pipeline will create
+                    // and chown it. Surface as "will be created" so
+                    // the user understands what'll happen.
+                    out.push(VolumeMismatch {
+                        service: bind.service,
+                        host_path: bind.host_path,
+                        mount_path: bind.mount_path,
+                        expected_uid,
+                        expected_gid: bind.expected_gid,
+                        current_uid: None,
+                        current_gid: None,
+                        exists: false,
+                        line,
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+        out
+    }
+
+    /// Chown a bind-mount source to (uid, gid). Optionally recursive.
+    /// Path is validated against the same forbidden-bind rules as the
+    /// deploy pipeline, so a malicious WebUI session can't wipe `/etc`
+    /// ownership through this entrypoint.
+    pub async fn fix_volume_perms(&self, req: FixVolumePermsRequest) -> Result<(), AppsError> {
+        validate_chown_target(&req.host_path)?;
+        // If the target doesn't exist, create it. Mode 0o755 mirrors
+        // what `mkdir -p` produces; the chown below sets ownership.
+        if tokio::fs::metadata(&req.host_path).await.is_err() {
+            tokio::fs::create_dir_all(&req.host_path)
+                .await
+                .map_err(|e| {
+                    AppsError::CommandFailed(format!("create_dir_all({}): {e}", req.host_path))
+                })?;
+        }
+        let owner = format!("{}:{}", req.uid, req.gid);
+        let mut cmd = Command::new("chown");
+        if req.recursive {
+            cmd.arg("-R");
+        }
+        cmd.arg(&owner).arg(&req.host_path);
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| AppsError::CommandFailed(format!("chown: {e}")))?;
+        if !output.status.success() {
+            return Err(AppsError::CommandFailed(format!(
+                "chown {} {}: {}",
+                owner,
+                req.host_path,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        info!(
+            "Chowned {} to {} (recursive={})",
+            req.host_path, owner, req.recursive
+        );
+        Ok(())
+    }
+
+    /// Pre-create missing bind-mount source dirs and chown them to the
+    /// service's expected user. Called from `compose_install` /
+    /// `compose_update` right before `docker compose up`. Existing dirs
+    /// are left alone — the explicit "Fix permissions" button is the
+    /// path for those, so we never silently chown a tree the user
+    /// already populated.
+    async fn precreate_compose_binds(&self, yaml: &str) {
+        for bind in extract_compose_binds(yaml) {
+            if validate_chown_target(&bind.host_path).is_err() {
+                continue;
+            }
+            // Skip dirs that already exist — auto-chown is "B" only.
+            if tokio::fs::metadata(&bind.host_path).await.is_ok() {
+                continue;
+            }
+            if let Err(e) = tokio::fs::create_dir_all(&bind.host_path).await {
+                warn!("Failed to pre-create bind source '{}': {e}", bind.host_path);
+                continue;
+            }
+            let (Some(uid), gid_opt) = (bind.expected_uid, bind.expected_gid) else {
+                continue;
+            };
+            // chown to uid:gid (gid defaults to uid when compose only
+            // specifies `user: 1000` — that's what Docker does, too).
+            let gid = gid_opt.unwrap_or(uid);
+            let owner = format!("{uid}:{gid}");
+            let res = Command::new("chown")
+                .arg(&owner)
+                .arg(&bind.host_path)
+                .output()
+                .await;
+            match res {
+                Ok(o) if o.status.success() => {
+                    info!(
+                        "Pre-created '{}' owned by {} for service '{}'",
+                        bind.host_path, owner, bind.service
+                    );
+                }
+                Ok(o) => warn!(
+                    "Pre-created '{}' but chown to {} failed: {}",
+                    bind.host_path,
+                    owner,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+                Err(e) => warn!("chown {} {} failed: {e}", owner, bind.host_path),
+            }
+        }
     }
 
     // ── Image inspection ────────────────────────────────────
@@ -2741,7 +3137,10 @@ mod tests {
         .unwrap();
     }
 
-    use super::{AppsService, CheckDevicesRequest};
+    use super::{
+        AppsService, CheckDevicesRequest, CheckVolumesRequest, extract_compose_binds,
+        validate_chown_target,
+    };
 
     #[tokio::test]
     async fn check_devices_reports_missing_with_parent_existing() {
@@ -2790,5 +3189,183 @@ mod tests {
             })
             .await;
         assert!(r.is_empty());
+    }
+
+    // ── Compose bind parser ──
+
+    #[test]
+    fn extract_binds_short_form_with_user() {
+        let yaml = r#"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    user: "3001:100"
+    volumes:
+      - /home/jellyfin:/config
+      - /home/jellyfin/cache:/cache
+"#;
+        let binds = extract_compose_binds(yaml);
+        assert_eq!(binds.len(), 2);
+        assert_eq!(binds[0].service, "jellyfin");
+        assert_eq!(binds[0].host_path, "/home/jellyfin");
+        assert_eq!(binds[0].mount_path, "/config");
+        assert_eq!(binds[0].expected_uid, Some(3001));
+        assert_eq!(binds[0].expected_gid, Some(100));
+        assert_eq!(binds[1].host_path, "/home/jellyfin/cache");
+    }
+
+    #[test]
+    fn extract_binds_long_form() {
+        let yaml = r#"
+services:
+  app:
+    image: foo
+    user: "1000"
+    volumes:
+      - type: bind
+        source: /fs/tank/media
+        target: /media
+"#;
+        let binds = extract_compose_binds(yaml);
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].host_path, "/fs/tank/media");
+        assert_eq!(binds[0].mount_path, "/media");
+        assert_eq!(binds[0].expected_uid, Some(1000));
+        assert_eq!(binds[0].expected_gid, None);
+    }
+
+    #[test]
+    fn extract_binds_skips_named_volume() {
+        let yaml = r#"
+services:
+  db:
+    image: postgres
+    user: "1000:1000"
+    volumes:
+      - data:/var/lib/postgresql/data
+volumes:
+  data:
+"#;
+        let binds = extract_compose_binds(yaml);
+        assert!(binds.is_empty(), "got {binds:?}");
+    }
+
+    #[test]
+    fn extract_binds_falls_back_to_puid_pgid_list_form() {
+        let yaml = r#"
+services:
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin
+    environment:
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - /home/jelly:/config
+"#;
+        let binds = extract_compose_binds(yaml);
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].expected_uid, Some(1000));
+        assert_eq!(binds[0].expected_gid, Some(1000));
+    }
+
+    #[test]
+    fn extract_binds_falls_back_to_puid_pgid_map_form() {
+        let yaml = r#"
+services:
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin
+    environment:
+      PUID: 1000
+      PGID: 1000
+    volumes:
+      - /home/jelly:/config
+"#;
+        let binds = extract_compose_binds(yaml);
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].expected_uid, Some(1000));
+        assert_eq!(binds[0].expected_gid, Some(1000));
+    }
+
+    #[test]
+    fn extract_binds_skips_username_user_field() {
+        // We don't resolve names server-side; treat as "no expected user".
+        let yaml = r#"
+services:
+  app:
+    image: foo
+    user: "alice"
+    volumes:
+      - /home/alice:/data
+"#;
+        let binds = extract_compose_binds(yaml);
+        assert_eq!(binds.len(), 1);
+        assert_eq!(binds[0].expected_uid, None);
+    }
+
+    #[test]
+    fn validate_chown_target_rejects_dangerous_paths() {
+        for bad in [
+            "/",
+            "/etc/../passwd",
+            "/var/lib/nasty",
+            "/var/lib/nasty/auth.json",
+            "relative/path",
+        ] {
+            assert!(
+                validate_chown_target(bad).is_err(),
+                "expected rejection for {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_chown_target_accepts_normal_paths() {
+        for ok in ["/home/jellyfin", "/fs/tank/media", "/var/lib/foo"] {
+            assert!(
+                validate_chown_target(ok).is_ok(),
+                "expected accept for {ok}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn check_volumes_returns_nothing_when_no_user_set() {
+        // Without a `user:` field and no PUID/PGID, the container runs
+        // as root and there's nothing to flag.
+        let svc = AppsService::new();
+        let r = svc
+            .check_volumes(CheckVolumesRequest {
+                compose: r#"
+services:
+  app:
+    image: foo
+    volumes:
+      - /tmp:/data
+"#
+                .to_string(),
+            })
+            .await;
+        assert!(r.is_empty(), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn check_volumes_flags_missing_source_dir() {
+        let svc = AppsService::new();
+        let r = svc
+            .check_volumes(CheckVolumesRequest {
+                compose: r#"
+services:
+  app:
+    image: foo
+    user: "3001:100"
+    volumes:
+      - /tmp/this-source-does-not-exist-nasty-test:/data
+"#
+                .to_string(),
+            })
+            .await;
+        assert_eq!(r.len(), 1);
+        assert!(!r[0].exists);
+        assert_eq!(r[0].expected_uid, 3001);
     }
 }
