@@ -5,6 +5,7 @@ pub mod hardware;
 pub mod network;
 pub mod notifications;
 pub mod nut;
+pub mod passthrough;
 pub mod protocol;
 pub mod settings;
 pub mod tailscale;

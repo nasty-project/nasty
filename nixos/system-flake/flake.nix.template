@@ -47,10 +47,10 @@
             # Machine-local overlay files live directly under /etc/nixos.
             ./hardware-configuration.nix
             ./networking.nix
-          ];
+          ] ++ nixpkgs.lib.optional (builtins.pathExists ./passthrough.nix) ./passthrough.nix;
         };
     in {
-      wrapperFlakeVersion = "v0.2";
+      wrapperFlakeVersion = "v0.3";
       nixosConfigurations =
         let
           sys = mkSystem "@LOCAL_SYSTEM@";

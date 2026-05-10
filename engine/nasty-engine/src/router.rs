@@ -99,6 +99,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.health"
                 | "system.hardware.iommu"
                 | "system.hardware.summary"
+                | "system.passthrough.get"
                 | "system.stats"
                 | "system.disks"
                 | "system.network.get"
@@ -466,6 +467,26 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         // Server-side cached for 60s (dmidecode is slow); the data
         // doesn't change between reboots so this is fine.
         "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
+        // Persistent vfio-pci passthrough config. `get` is read-only;
+        // `update` writes /etc/nixos/passthrough.nix and requires a
+        // reboot to take effect (we don't trigger nixos-rebuild
+        // automatically — same model as PR #113's hostname.nix).
+        "system.passthrough.get" => ok(req, nasty_system::passthrough::load().await),
+        "system.passthrough.update" => {
+            match parse_params::<nasty_system::passthrough::PassthroughUpdate>(req) {
+                Ok(p) => {
+                    let mgmt = match session.client_ip.as_deref() {
+                        Some(peer) => nasty_system::network::mgmt_iface_for_peer(peer).await,
+                        None => None,
+                    };
+                    match nasty_system::passthrough::save_and_apply(p, mgmt.as_deref()).await {
+                        Ok(cfg) => ok(req, cfg),
+                        Err(e) => err(req, e),
+                    }
+                }
+                Err(e) => invalid(req, e),
+            }
+        }
         "system.stats" => match fetch_metrics_json::<nasty_system::SystemStats>(
             &state.metrics_client,
             "/api/stats",
