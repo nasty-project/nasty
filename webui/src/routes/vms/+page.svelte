@@ -4,19 +4,24 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { VmStatus, VmCapabilities, Subvolume } from '$lib/types';
+	import type { VmStatus, VmCapabilities, Subvolume, FsDependents } from '$lib/types';
+	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
-	import { CircleCheck, Circle, CircleX } from '@lucide/svelte';
+	import { CircleCheck, Circle, CircleX, Lock } from '@lucide/svelte';
 	import { Terminal } from '@xterm/xterm';
 	import { FitAddon } from '@xterm/addon-fit';
 
 	let vms: VmStatus[] = $state([]);
 	let capabilities: VmCapabilities | null = $state(null);
+	// Map of vm-name → locked-FS-name. Same shape and population
+	// pattern as the apps page; lets each VM row show a "🔒 on tank"
+	// badge so the user sees why their stopped VM can't start.
+	let lockedFsByVm = $state(new Map<string, string>());
 	let blockSubvolumes: Subvolume[] = $state([]);
 	let wizardStep: -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6 = $state(0); // 0=hidden, -1=prerequisites
 	let loading = $state(true);
@@ -253,6 +258,31 @@
 		await withToast(async () => {
 			vms = await client.call<VmStatus[]>('vm.list');
 		});
+		await loadLockedFsByVm();
+	}
+
+	/** Build the {vmName: lockedFsName} map for the per-row badge.
+	 * Best-effort — failure leaves the map empty. */
+	async function loadLockedFsByVm() {
+		try {
+			const locked = await client.call<FsDependents[]>('fs.locked_dependents');
+			const next = new Map<string, string>();
+			for (const fs of locked) {
+				for (const vmName of fs.vms) next.set(vmName, fs.filesystem);
+			}
+			lockedFsByVm = next;
+		} catch {
+			lockedFsByVm = new Map();
+		}
+	}
+
+	async function unlockBlockingFs(fsName: string) {
+		// Imperative dialog mounted in root layout. VMs aren't
+		// auto-restarted on unlock — user explicitly took them down
+		// when they locked the FS, so they explicitly bring them up.
+		if (await unlockFs(fsName)) {
+			await refresh();
+		}
 	}
 
 	async function loadCapabilities() {
@@ -961,6 +991,18 @@
 						<span class="font-semibold">{vm.name}</span>
 						{#if vm.autostart}
 							<Badge variant="secondary" class="ml-2 text-[0.6rem]">autostart</Badge>
+						{/if}
+						{#if lockedFsByVm.get(vm.name)}
+							{@const blockingFs = lockedFsByVm.get(vm.name)!}
+							<button
+								type="button"
+								onclick={(e) => { e.stopPropagation(); unlockBlockingFs(blockingFs); }}
+								class="ml-2 inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[0.6rem] font-medium text-amber-400 hover:bg-amber-500/25"
+								title="VM has a disk on a locked filesystem. Click to unlock."
+							>
+								<Lock size={10} />
+								on {blockingFs}
+							</button>
 						{/if}
 						{#if vm.description}
 							<span class="ml-2 text-xs text-muted-foreground">{vm.description}</span>

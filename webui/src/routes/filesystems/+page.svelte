@@ -15,6 +15,7 @@
 	);
 	import { confirm } from '$lib/confirm.svelte';
 	import { confirmDangerous } from '$lib/confirm-dangerous.svelte';
+	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { summarizeDependents } from '$lib/fs-dependents';
 	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
@@ -76,8 +77,6 @@
 	let editMetadataReplicas = $state(1);
 	let editMoveIos = $state(32);
 	let editMoveBytes = $state('');
-	let unlockFs: string | null = $state(null);
-	let unlockPassphrase = $state('');
 	let editDegraded = $state(false);
 	let editVerbose = $state(false);
 	let editFsck = $state(false);
@@ -595,16 +594,12 @@
 		await refresh();
 	}
 
-	async function doUnlock() {
-		if (!unlockFs || !unlockPassphrase) return;
-		const name = unlockFs;
-		await withToast(
-			() => client.call('fs.unlock', { name, passphrase: unlockPassphrase }),
-			`Filesystem "${name}" unlocked`
-		);
-		unlockFs = null;
-		unlockPassphrase = '';
-		await refresh();
+	async function doUnlock(name: string) {
+		// Imperative dialog (mounted in root layout) — same UX, but
+		// also reachable from Apps/VMs pages via the locked-FS badge.
+		if (await unlockFs(name)) {
+			await refresh();
+		}
 	}
 
 	async function saveOptions(fsName: string) {
@@ -1325,7 +1320,7 @@
 							</Button>
 						{/if}
 						{#if fs.options.encrypted && fs.options.locked}
-							<Button variant="default" size="xs" onclick={() => { unlockFs = fs.name; unlockPassphrase = ''; }}>
+							<Button variant="default" size="xs" onclick={() => doUnlock(fs.name)}>
 								Unlock
 							</Button>
 						{:else if fs.options.encrypted}
@@ -1697,23 +1692,7 @@
 
 {/if}
 <!-- end pageTab === 'manage' -->
-
-<!-- Unlock Modal -->
-{#if unlockFs}
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-		<Card class="w-full max-w-sm">
-			<CardContent class="pt-6">
-				<h3 class="mb-2 text-lg font-semibold">Unlock "{unlockFs}"</h3>
-				<p class="mb-4 text-sm text-muted-foreground">Enter the passphrase to unlock this encrypted filesystem.</p>
-				<input type="password" bind:value={unlockPassphrase}
-					class="mb-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-					placeholder="Passphrase"
-					onkeydown={(e) => { if (e.key === 'Enter' && unlockPassphrase) doUnlock(); }} />
-				<div class="flex gap-2">
-					<Button onclick={doUnlock} disabled={!unlockPassphrase}>Unlock</Button>
-					<Button variant="secondary" onclick={() => unlockFs = null}>Cancel</Button>
-				</div>
-			</CardContent>
-		</Card>
-	</div>
-{/if}
+<!-- The unlock modal that used to live here is now a global imperative
+     dialog mounted once in the root layout (see UnlockFsDialog.svelte).
+     The Apps and VMs pages call into the same dialog via `unlockFs(name)`
+     when their locked-FS badge is clicked. -->

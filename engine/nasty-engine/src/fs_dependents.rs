@@ -164,6 +164,35 @@ pub async fn find_dependents(state: &AppState, fs_name: &str) -> FsDependents {
     out
 }
 
+/// Reverse-index of currently-locked encrypted filesystems → what
+/// would come back to life if they were unlocked. Powers the
+/// "🔒 on tank" badges on the Apps and VMs pages: those pages need
+/// to know "is *my* app/VM blocked by a locked FS, and which one?"
+/// without hitting `find_dependents` per FS in the browser.
+///
+/// Only includes FSes that are currently encrypted AND locked AND
+/// have at least one app or VM among their dependents — empty
+/// entries would just be wire bytes the UI filters back out.
+pub async fn find_locked_dependents(state: &AppState) -> Vec<FsDependents> {
+    let Ok(filesystems) = state.filesystems.list().await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for fs in filesystems {
+        // Only encrypted-and-locked is interesting here. A plain
+        // unmounted FS has no badge story; an encrypted-but-unlocked
+        // one is just waiting for `fs.mount`.
+        if fs.options.encrypted != Some(true) || fs.options.locked != Some(true) {
+            continue;
+        }
+        let deps = find_dependents(state, &fs.name).await;
+        if !deps.apps.is_empty() || !deps.vms.is_empty() {
+            out.push(deps);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

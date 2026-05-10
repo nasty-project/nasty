@@ -14,7 +14,9 @@
 	import SortTh from '$lib/components/SortTh.svelte';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 	import { CircleCheck, Circle } from '@lucide/svelte';
-	import type { Filesystem } from '$lib/types';
+	import type { Filesystem, FsDependents } from '$lib/types';
+	import { unlockFs } from '$lib/unlock-fs.svelte';
+	import { Lock } from '@lucide/svelte';
 
 	// Deploy stream state
 	let deployLog: string[] = $state([]);
@@ -101,6 +103,11 @@
 
 	let status: AppsStatus | null = $state(null);
 	let apps: App[] = $state([]);
+	// Map of app-name → locked-FS-name. Populated from
+	// `fs.locked_dependents` so each app row can show a "🔒 on tank"
+	// badge that opens the global unlock dialog. Stays empty when
+	// nothing's locked, so non-encrypted setups pay zero overhead.
+	let lockedFsByApp = $state(new Map<string, string>());
 	let loading = $state(true);
 	let enabling = $state(false);
 	let showInstall = $state(false);
@@ -376,6 +383,34 @@
 				ingresses = [];
 			}
 		} catch { /* ignore */ }
+		await loadLockedFsByApp();
+	}
+
+	/** Build the {appName: lockedFsName} map for the per-row badge.
+	 * Best-effort — failure leaves the map empty (no badges, no error
+	 * toast). Runs alongside every refresh so an unlock from this
+	 * page or another tab clears the badge promptly. */
+	async function loadLockedFsByApp() {
+		try {
+			const locked = await client.call<FsDependents[]>('fs.locked_dependents');
+			const next = new Map<string, string>();
+			for (const fs of locked) {
+				for (const appName of fs.apps) next.set(appName, fs.filesystem);
+			}
+			lockedFsByApp = next;
+		} catch {
+			lockedFsByApp = new Map();
+		}
+	}
+
+	async function unlockBlockingFs(fsName: string) {
+		// Imperative dialog mounted in root layout. Truthy resolution
+		// = unlock RPC succeeded; refresh to clear the badge. The app
+		// itself stays stopped — per #86 PR-B's decision, no
+		// auto-restart on unlock.
+		if (await unlockFs(fsName)) {
+			await refresh();
+		}
 	}
 
 	async function enableApps() {
@@ -1099,6 +1134,18 @@
 									>
 										unsafe
 									</Badge>
+								{/if}
+								{#if lockedFsByApp.get(app.name)}
+									{@const blockingFs = lockedFsByApp.get(app.name)!}
+									<button
+										type="button"
+										onclick={() => unlockBlockingFs(blockingFs)}
+										class="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[0.6rem] font-medium text-amber-400 hover:bg-amber-500/25"
+										title="App is on a locked filesystem. Click to unlock."
+									>
+										<Lock size={10} />
+										on {blockingFs}
+									</button>
 								{/if}
 								{#if app.containers && app.containers.length > 1}
 									<button class="text-xs text-muted-foreground hover:text-foreground" onclick={() => expanded[app.name] = !expanded[app.name]}>

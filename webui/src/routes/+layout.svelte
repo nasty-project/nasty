@@ -7,6 +7,7 @@
 	import Toasts from '$lib/components/Toasts.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import ConfirmDangerousDialog from '$lib/components/ConfirmDangerousDialog.svelte';
+	import UnlockFsDialog from '$lib/components/UnlockFsDialog.svelte';
 	import ReconnectSpinner from '$lib/components/ReconnectSpinner.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { AuthResult } from '$lib/rpc';
@@ -547,6 +548,7 @@
 <Toasts />
 <ConfirmDialog />
 <ConfirmDangerousDialog />
+<UnlockFsDialog />
 
 {#if showLogin}
 	<div class="flex min-h-screen items-center justify-center">

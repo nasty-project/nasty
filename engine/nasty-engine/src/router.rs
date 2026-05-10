@@ -121,6 +121,7 @@ fn is_read_only(method: &str) -> bool {
                 | "auth.list_users"
                 | "auth.token.list"
                 | "fs.dependents"
+                | "fs.locked_dependents"
                 | "fs.usage"
                 | "fs.scrub.status"
                 | "fs.reconcile.status"
@@ -1416,6 +1417,14 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             ),
             Err(r) => r,
         },
+        // Reverse-index for the Apps/VMs pages: which apps/VMs are
+        // blocked by a locked encrypted FS, grouped by FS so the
+        // badge can name the blocker. Returns empty list when no
+        // encrypted FS is currently locked.
+        "fs.locked_dependents" => ok(
+            req,
+            crate::fs_dependents::find_locked_dependents(state).await,
+        ),
         "fs.key.export" => match require_str(req, "name") {
             Ok(name) => match state.filesystems.export_key(name).await {
                 Ok(key) => ok(req, key),
