@@ -110,6 +110,10 @@
 	let lockedFsByApp = $state(new Map<string, string>());
 	let loading = $state(true);
 	let enabling = $state(false);
+	// Inline enable prompt shown when the user clicks Install App while the
+	// runtime is disabled — keeps the empty-state apps page looking like the
+	// running page so the user doesn't see two unrelated layouts.
+	let showEnablePrompt = $state(false);
 	let showInstall = $state(false);
 	let editingApp: string | null = $state(null);
 	let logsApp: string | null = $state(null);
@@ -758,43 +762,6 @@
 			<p class="mt-1 text-sm text-muted-foreground">Docker is starting up. This should only take a few seconds.</p>
 		</CardContent>
 	</Card>
-{:else if status && !status.enabled}
-	<div class="mb-4 flex items-center gap-4 rounded-lg border border-border px-4 py-2.5 text-sm">
-		<div class="flex items-center gap-2">
-			<span class="h-2 w-2 rounded-full bg-red-400"></span>
-			<span class="text-muted-foreground">Docker {status.docker_version ?? ''}</span>
-		</div>
-	</div>
-	<Card class="max-w-xl">
-		<CardContent class="py-8 text-center">
-			<p class="mb-1 font-medium">Apps are disabled</p>
-			<p class="mb-4 text-sm text-muted-foreground">
-				Container apps run on a Docker daemon NASty manages as a service. Pick a filesystem for Docker's data, then enable the runtime — no need to leave this page.
-			</p>
-			{#if filesystems.length === 0}
-				<p class="mb-4 text-sm text-amber-400">You need at least one mounted filesystem before enabling Apps.</p>
-				<Button variant="secondary" onclick={() => goto('/filesystems')}>Go to Filesystems →</Button>
-			{:else}
-				<div class="mb-4 inline-flex items-center gap-2 text-sm">
-					{#if filesystems.length > 1}
-						<label for="apps-fs" class="text-muted-foreground">Storage filesystem:</label>
-						<select id="apps-fs" bind:value={selectedFs} class="h-8 rounded-md border border-input bg-transparent px-2 text-sm">
-							{#each filesystems as fs}
-								<option value={fs.name}>{fs.name}</option>
-							{/each}
-						</select>
-					{:else}
-						<span class="text-muted-foreground">Storage filesystem: <code class="font-mono">{selectedFs}</code></span>
-					{/if}
-				</div>
-				<div>
-					<Button onclick={enableApps} disabled={enabling || !selectedFs}>
-						{enabling ? 'Enabling…' : 'Enable Apps'}
-					</Button>
-				</div>
-			{/if}
-		</CardContent>
-	</Card>
 {:else}
 	<!-- Docker status bar -->
 	{#if status}
@@ -849,13 +816,52 @@
 
 	<!-- Action bar -->
 	<div class="mb-4 flex items-center gap-3">
-		<Button size="sm" onclick={() => { if (showInstall || showCompose) { cancelEdit(); cancelCompose(); } else { editingApp = null; newPorts = [{ name: 'http', container_port: 80, host_port: '', protocol: 'TCP' }]; showInstall = true; installMode = 'simple'; } }}>
-			{showInstall || showCompose ? 'Cancel' : 'Install App'}
+		<Button size="sm" onclick={() => {
+			if (showInstall || showCompose) { cancelEdit(); cancelCompose(); }
+			else if (showEnablePrompt) { showEnablePrompt = false; }
+			else if (!status?.enabled) { showEnablePrompt = true; }
+			else { editingApp = null; newPorts = [{ name: 'http', container_port: 80, host_port: '', protocol: 'TCP' }]; showInstall = true; installMode = 'simple'; }
+		}}>
+			{showInstall || showCompose || showEnablePrompt ? 'Cancel' : 'Install App'}
 		</Button>
 		{#if apps.length > 3}
 			<Input bind:value={search} placeholder="Filter..." class="h-9 w-40" />
 		{/if}
 	</div>
+
+	{#if showEnablePrompt}
+		<Card class="mb-4 max-w-xl">
+			<CardContent class="py-6">
+				<p class="mb-1 font-medium">Apps need the Docker runtime</p>
+				<p class="mb-4 text-sm text-muted-foreground">
+					Container apps run on a Docker daemon NASty manages as a service. Pick a filesystem for Docker's data, then enable the runtime — once it's up, click Install App again to continue.
+				</p>
+				{#if filesystems.length === 0}
+					<p class="mb-4 text-sm text-amber-400">You need at least one mounted filesystem before enabling Apps.</p>
+					<Button variant="secondary" onclick={() => goto('/filesystems')}>Go to Filesystems →</Button>
+				{:else}
+					<div class="mb-4 flex items-center gap-2 text-sm">
+						{#if filesystems.length > 1}
+							<label for="apps-fs" class="text-muted-foreground">Storage filesystem:</label>
+							<select id="apps-fs" bind:value={selectedFs} class="h-8 rounded-md border border-input bg-transparent px-2 text-sm">
+								{#each filesystems as fs}
+									<option value={fs.name}>{fs.name}</option>
+								{/each}
+							</select>
+						{:else}
+							<span class="text-muted-foreground">Storage filesystem: <code class="font-mono">{selectedFs}</code></span>
+						{/if}
+					</div>
+					<div class="flex gap-2">
+						<Button onclick={async () => { await enableApps(); showEnablePrompt = false; }} disabled={enabling || !selectedFs}>
+							{enabling ? 'Enabling…' : 'Enable Apps'}
+						</Button>
+						<Button variant="ghost" onclick={() => { showEnablePrompt = false; }}>Cancel</Button>
+					</div>
+				{/if}
+			</CardContent>
+		</Card>
+	{/if}
 
 	{#if showInstall || showCompose}
 		<Card class="mb-6 max-w-2xl">
