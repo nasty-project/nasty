@@ -15,7 +15,8 @@
 	);
 	import { confirm } from '$lib/confirm.svelte';
 	import { confirmDangerous } from '$lib/confirm-dangerous.svelte';
-	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId } from '$lib/types';
+	import { summarizeDependents } from '$lib/fs-dependents';
+	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -555,11 +556,21 @@
 	}
 
 	async function lockFs(fs: Filesystem) {
-		const ok = await confirm(
-			`Lock Filesystem "${fs.name}"`,
-			`This will unmount the filesystem and revoke the encryption key from the kernel. Any NFS, SMB, iSCSI, or NVMe-oF shares, apps, or VMs running on this filesystem will stop immediately and stay broken until you unlock it again with the passphrase.`,
-			{ confirmLabel: 'Lock' },
-		);
+		// Pre-lock impact preview: ask the engine which apps/VMs/shares/
+		// backups touch this filesystem, then surface the concrete list
+		// in the confirm dialog. Failure to fetch is non-fatal — falls
+		// back to the generic warning, same as before this PR (#86).
+		let detail: string | null = null;
+		try {
+			const deps = await client.call<FsDependents>('fs.dependents', { name: fs.name });
+			detail = summarizeDependents(deps);
+		} catch { /* non-fatal — render the generic message */ }
+
+		const message = detail
+			? `Locking will unmount the filesystem and revoke its encryption key from the kernel. The following will stop or break until you unlock and remount:\n\n${detail}\n\nContinue?`
+			: `This will unmount the filesystem and revoke the encryption key from the kernel. Any NFS, SMB, iSCSI, or NVMe-oF shares, apps, or VMs running on this filesystem will stop immediately and stay broken until you unlock it again with the passphrase.`;
+
+		const ok = await confirm(`Lock Filesystem "${fs.name}"`, message, { confirmLabel: 'Lock' });
 		if (!ok) return;
 		await withToast(
 			() => client.call('fs.lock', { name: fs.name }, 120000),

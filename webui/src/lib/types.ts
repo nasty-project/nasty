@@ -111,6 +111,24 @@ export interface PassthroughConfig {
 	ids: PassthroughDeviceId[];
 }
 
+/** Aggregated view of everything that depends on a filesystem,
+ * returned by `fs.dependents`. Powers the impact-preview dialog
+ * before destructive operations like Lock — the WebUI lists these
+ * so the user sees what will break before they confirm. Empty
+ * arrays serialize as `[]` so consumers can render unconditionally. */
+export interface FsDependents {
+	filesystem: string;
+	mounted: boolean;
+	subvolumes: string[];
+	apps: string[];
+	vms: string[];
+	backup_jobs: string[];
+	nfs_shares: string[];
+	smb_shares: string[];
+	iscsi_targets: string[];
+	nvmeof_subsystems: string[];
+}
+
 export interface ServiceStatus {
 	name: string;
 	running: boolean;

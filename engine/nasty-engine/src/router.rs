@@ -120,6 +120,7 @@ fn is_read_only(method: &str) -> bool {
                 | "auth.me"
                 | "auth.list_users"
                 | "auth.token.list"
+                | "fs.dependents"
                 | "fs.usage"
                 | "fs.scrub.status"
                 | "fs.reconcile.status"
@@ -1404,6 +1405,15 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
                 Ok(fs) => ok(req, fs),
                 Err(e) => err(req, e),
             },
+            Err(r) => r,
+        },
+        // Read-only impact preview before destructive FS operations.
+        // Powers the rich Lock confirmation dialog (issue #86 follow-up).
+        "fs.dependents" => match require_str(req, "name") {
+            Ok(name) => ok(
+                req,
+                crate::fs_dependents::find_dependents(state, name).await,
+            ),
             Err(r) => r,
         },
         "fs.key.export" => match require_str(req, "name") {

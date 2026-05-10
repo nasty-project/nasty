@@ -16,7 +16,13 @@
 		<DialogHeader>
 			<DialogTitle>{confirmState.title}</DialogTitle>
 			{#if confirmState.message}
-				<DialogDescription>{confirmState.message}</DialogDescription>
+				<!-- whitespace-pre-line preserves embedded `\n` as line breaks
+				     while collapsing other whitespace runs. Lets callers pass
+				     multi-line messages (e.g. the FS-dependents impact preview)
+				     without having to switch to a richer dialog component. -->
+				<DialogDescription class="whitespace-pre-line"
+					>{confirmState.message}</DialogDescription
+				>
 			{/if}
 		</DialogHeader>
 		<DialogFooter class="gap-2">

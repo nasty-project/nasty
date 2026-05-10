@@ -18,6 +18,7 @@ use tracing_subscriber::{prelude::*, reload};
 mod app_deploy;
 mod auth;
 mod auth_oidc;
+mod fs_dependents;
 mod log_stream;
 mod router;
 mod telemetry;
