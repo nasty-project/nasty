@@ -37,3 +37,9 @@ tokio-util = { workspace = true, features = ["io"] }
 openidconnect = { version = "4", default-features = false, features = ["accept-rfc3339-timestamps", "accept-string-booleans"] }
 http = "1"
 url = "2"
+
+[dev-dependencies]
+# `test-util` enables tokio::time::pause/start_paused for fs_lock's
+# wait-with-timeout tests. The `tokio = { features = ["full"] }`
+# workspace dep doesn't include test-util.
+tokio = { workspace = true, features = ["test-util"] }

@@ -19,6 +19,7 @@ mod app_deploy;
 mod auth;
 mod auth_oidc;
 mod fs_dependents;
+mod fs_lock;
 mod log_stream;
 mod router;
 mod telemetry;

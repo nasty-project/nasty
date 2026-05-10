@@ -561,17 +561,33 @@
 		// in the confirm dialog. Failure to fetch is non-fatal — falls
 		// back to the generic warning, same as before this PR (#86).
 		let detail: string | null = null;
+		let willStop = false;
 		try {
 			const deps = await client.call<FsDependents>('fs.dependents', { name: fs.name });
 			detail = summarizeDependents(deps);
+			// Apps and VMs get actively stopped by the engine before
+			// unmount (PR-B follow-up). Shares/backups are left alone
+			// (the engine's lock_with_dependents comments explain why)
+			// — they'll error gracefully on the next access.
+			willStop = deps.apps.length > 0 || deps.vms.length > 0;
 		} catch { /* non-fatal — render the generic message */ }
 
-		const message = detail
-			? `Locking will unmount the filesystem and revoke its encryption key from the kernel. The following will stop or break until you unlock and remount:\n\n${detail}\n\nContinue?`
-			: `This will unmount the filesystem and revoke the encryption key from the kernel. Any NFS, SMB, iSCSI, or NVMe-oF shares, apps, or VMs running on this filesystem will stop immediately and stay broken until you unlock it again with the passphrase.`;
+		let message: string;
+		if (detail && willStop) {
+			message = `Locking will stop the following apps and VMs, then unmount the filesystem and revoke its encryption key from the kernel:\n\n${detail}\n\nApps stop immediately. VMs are asked to shut down gracefully (up to 60s) before being force-killed. They will not be restarted automatically when you unlock the filesystem.\n\nContinue?`;
+		} else if (detail) {
+			message = `Locking will unmount the filesystem and revoke its encryption key from the kernel. The following will see I/O errors until you unlock and remount:\n\n${detail}\n\nContinue?`;
+		} else {
+			message = `This will unmount the filesystem and revoke the encryption key from the kernel. Any NFS, SMB, iSCSI, or NVMe-oF shares, apps, or VMs running on this filesystem will stop immediately and stay broken until you unlock it again with the passphrase.`;
+		}
 
-		const ok = await confirm(`Lock Filesystem "${fs.name}"`, message, { confirmLabel: 'Lock' });
+		const ok = await confirm(`Lock Filesystem "${fs.name}"`, message, {
+			confirmLabel: willStop ? 'Stop and Lock' : 'Lock',
+		});
 		if (!ok) return;
+		// Bumped timeout: the engine cascade can take up to ~60s if a VM
+		// drags on graceful shutdown. The default 120s already covered
+		// long unmounts; this comment is just to document expectations.
 		await withToast(
 			() => client.call('fs.lock', { name: fs.name }, 120000),
 			`Filesystem "${fs.name}" locked`,

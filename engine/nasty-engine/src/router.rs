@@ -1401,7 +1401,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
             Err(e) => invalid(req, e),
         },
         "fs.lock" => match require_str(req, "name") {
-            Ok(name) => match state.filesystems.lock(name).await {
+            Ok(name) => match crate::fs_lock::lock_with_dependents(state, name).await {
                 Ok(fs) => ok(req, fs),
                 Err(e) => err(req, e),
             },
