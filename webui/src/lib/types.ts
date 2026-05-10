@@ -18,6 +18,29 @@ export interface SystemHealth {
 	services: ServiceStatus[];
 }
 
+/** One IOMMU group with its constituent PCI devices, returned by
+ * `system.hardware.iommu`. The id is the kernel's group number;
+ * devices are sorted by BDF. Empty list = IOMMU is off in BIOS. */
+export interface IommuGroup {
+	id: number;
+	devices: PciDevice[];
+}
+
+/** One PCI device. Numeric IDs are 4-hex-digit strings. Names come
+ * from `pci.ids` via `lspci` and may be null on bleeding-edge or
+ * exotic hardware. `driver` is the currently bound kernel module
+ * (`vfio-pci` = ready for passthrough). */
+export interface PciDevice {
+	bdf: string;
+	vendor_id: string;
+	device_id: string;
+	class_id: string;
+	vendor_name: string | null;
+	device_name: string | null;
+	class_name: string | null;
+	driver: string | null;
+}
+
 export interface ServiceStatus {
 	name: string;
 	running: boolean;
