@@ -590,6 +590,23 @@ impl NetworkService {
                     "Migration cleanup: persist after prune failed: {e}. Continuing with in-memory cleaned config."
                 );
             }
+
+            // Same orphans typically have dangling firewall entries
+            // attached: the user restricted a protocol to bond0 via
+            // the WebUI, then bond0 went away but the rule kept the
+            // ref. The dropdown source no longer offers bond0, so
+            // the user can't unselect it from the UI. Strip those
+            // refs in lockstep with the interface prune.
+            let mut restrictions = crate::firewall::FirewallRestrictions::load();
+            if restrictions.strip_iface_refs(&orphans) {
+                if let Err(e) = restrictions.save().await {
+                    warn!(
+                        "Migration cleanup: persist firewall restrictions after iface strip failed: {e}"
+                    );
+                } else {
+                    info!("Migration cleanup: stripped firewall references to pruned interface(s)");
+                }
+            }
         }
 
         let layered_cfg = layered::to_layered(&cfg);
