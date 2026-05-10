@@ -98,6 +98,19 @@ export interface UsbDevice {
 	description: string;
 }
 
+/** One PCI device-class identifier — what `vfio-pci.ids=` consumes.
+ * Granularity: vendor:device, not BDF, so the binding survives slot
+ * moves. Caveat: marking a (vendor, device) pair claims **all**
+ * matching devices. */
+export interface PassthroughDeviceId {
+	vendor: string;
+	device: string;
+}
+
+export interface PassthroughConfig {
+	ids: PassthroughDeviceId[];
+}
+
 export interface ServiceStatus {
 	name: string;
 	running: boolean;

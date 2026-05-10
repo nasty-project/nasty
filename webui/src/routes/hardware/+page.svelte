@@ -1,11 +1,18 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
+	import { withToast } from '$lib/toast.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
-	import type { HardwareSummary, IommuGroup, PciDevice } from '$lib/types';
+	import type {
+		HardwareSummary,
+		IommuGroup,
+		PassthroughConfig,
+		PciDevice,
+	} from '$lib/types';
 	import { formatBytes } from '$lib/format';
+	import { rebootState } from '$lib/reboot.svelte';
 	import { ChevronDown, ChevronRight, RefreshCw } from '@lucide/svelte';
 
 	let summary: HardwareSummary | null = $state(null);
@@ -16,19 +23,73 @@
 	let filter = $state('');
 	let showAllDimms = $state(false);
 
+	// Persisted passthrough config from the engine. `pending` is the
+	// local edit set (before Apply); each entry is "vendor:device" so
+	// Set membership tests work without a custom equality predicate.
+	let passthroughConfig: PassthroughConfig = $state({ ids: [] });
+	let pending = $state(new Set<string>());
+	let saving = $state(false);
+
 	const client = getClient();
 
 	async function load() {
 		try {
-			[summary, groups] = await Promise.all([
+			const [s, g, p] = await Promise.all([
 				client.call<HardwareSummary>('system.hardware.summary'),
 				client.call<IommuGroup[]>('system.hardware.iommu'),
+				client.call<PassthroughConfig>('system.passthrough.get'),
 			]);
+			summary = s;
+			groups = g;
+			passthroughConfig = p;
+			pending = new Set(p.ids.map((i) => `${i.vendor}:${i.device}`));
 		} catch {
 			summary = null;
 			groups = [];
+			passthroughConfig = { ids: [] };
+			pending = new Set();
 		}
 		loading = false;
+	}
+
+	function devKey(d: PciDevice): string {
+		return `${d.vendor_id}:${d.device_id}`;
+	}
+
+	function togglePassthrough(d: PciDevice) {
+		const key = devKey(d);
+		if (pending.has(key)) pending.delete(key);
+		else pending.add(key);
+		pending = new Set(pending);
+	}
+
+	function discardPending() {
+		pending = new Set(passthroughConfig.ids.map((i) => `${i.vendor}:${i.device}`));
+	}
+
+	let dirty = $derived.by(() => {
+		const saved = new Set(passthroughConfig.ids.map((i) => `${i.vendor}:${i.device}`));
+		if (saved.size !== pending.size) return true;
+		for (const k of pending) if (!saved.has(k)) return true;
+		return false;
+	});
+
+	async function applyPassthrough() {
+		saving = true;
+		const ids = [...pending].map((k) => {
+			const [vendor, device] = k.split(':');
+			return { vendor, device };
+		});
+		const result = await withToast(
+			() => client.call<PassthroughConfig>('system.passthrough.update', { ids }),
+			'Passthrough config saved — reboot required to apply',
+		);
+		if (result) {
+			passthroughConfig = result;
+			pending = new Set(result.ids.map((i) => `${i.vendor}:${i.device}`));
+			rebootState.set();
+		}
+		saving = false;
 	}
 
 	async function refresh() {
@@ -274,6 +335,31 @@
 		</Card>
 	{:else}
 	<h2 class="mb-3 text-base font-semibold">IOMMU groups</h2>
+	<p class="mb-3 max-w-3xl text-xs text-muted-foreground">
+		Mark a device for passthrough to claim it with <code class="font-mono">vfio-pci</code> at boot
+		— the kernel binds it before regular drivers, freeing it for assignment to a VM. Changes
+		take effect after the next system update and reboot. Marking by vendor:device claims
+		<strong>all</strong> matching devices on the system.
+	</p>
+
+	{#if dirty}
+		<div
+			class="mb-3 flex items-center gap-3 rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-2.5 text-sm"
+		>
+			<span class="font-medium text-amber-200">{pending.size - passthroughConfig.ids.length >= 0 ? '+' : ''}{pending.size - passthroughConfig.ids.length} change{Math.abs(pending.size - passthroughConfig.ids.length) === 1 ? '' : 's'} pending</span>
+			<span class="text-xs text-amber-300/80">
+				Apply will rewrite <code class="font-mono">/etc/nixos/passthrough.nix</code> and require a
+				reboot to take effect.
+			</span>
+			<div class="ml-auto flex gap-2">
+				<Button size="xs" variant="ghost" onclick={discardPending} disabled={saving}>Discard</Button>
+				<Button size="xs" onclick={applyPassthrough} disabled={saving}>
+					{saving ? 'Saving…' : 'Apply'}
+				</Button>
+			</div>
+		</div>
+	{/if}
+
 	<div class="mb-3 flex items-center gap-3">
 		<input
 			bind:value={filter}
@@ -326,10 +412,13 @@
 										<th class="pb-2 font-medium">Device</th>
 										<th class="pb-2 font-medium">IDs</th>
 										<th class="pb-2 font-medium">Driver</th>
+										<th class="pb-2 font-medium">Passthrough</th>
 									</tr>
 								</thead>
 								<tbody>
 									{#each group.devices as device (device.bdf)}
+										{@const key = devKey(device)}
+										{@const marked = pending.has(key)}
 										<tr class="border-t border-border/40">
 											<td class="py-2 pr-3 font-mono text-xs">{device.bdf}</td>
 											<td class="py-2 pr-3 text-xs text-muted-foreground"
@@ -339,10 +428,23 @@
 											<td class="py-2 pr-3 font-mono text-xs text-muted-foreground"
 												>{device.vendor_id}:{device.device_id}</td
 											>
-											<td class="py-2">
+											<td class="py-2 pr-3">
 												<Badge variant={driverBadgeVariant(device.driver)} class="text-[0.65rem]">
 													{device.driver ?? 'unbound'}
 												</Badge>
+											</td>
+											<td class="py-2">
+												<label class="inline-flex cursor-pointer items-center gap-2 text-xs">
+													<input
+														type="checkbox"
+														checked={marked}
+														onchange={() => togglePassthrough(device)}
+														class="h-3.5 w-3.5 cursor-pointer"
+													/>
+													<span class="text-muted-foreground">
+														{marked ? 'Mark vfio-pci' : ''}
+													</span>
+												</label>
 											</td>
 										</tr>
 									{/each}
