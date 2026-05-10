@@ -54,6 +54,7 @@
 		Zap,
 		Globe,
 		Cpu,
+		CircuitBoard,
 		Server,
 		Wrench,
 		ScrollText,
@@ -446,6 +447,7 @@
 			{ href: '/terminal', label: 'Terminal', icon: Terminal },
 			{ label: 'System', icon: Wrench, children: [
 				{ href: '/services', label: 'Services',       icon: Server },
+				{ href: '/hardware', label: 'Hardware',       icon: CircuitBoard },
 				{ href: '/logs',     label: 'Logs',           icon: ScrollText },
 				{ href: '/update',   label: 'Update',         icon: RefreshCw },
 				{ href: '/users',    label: 'Access Control', icon: ShieldCheck },
@@ -513,6 +515,7 @@
 		{ href: '/apps', label: 'Apps', keywords: ['app', 'docker', 'container', 'compose', 'install', 'image', 'port'] },
 		{ href: '/terminal', label: 'Terminal', keywords: ['terminal', 'shell', 'ssh', 'console', 'command', 'bash'] },
 		{ href: '/services', label: 'Services', keywords: ['service', 'protocol', 'nfs', 'smb', 'iscsi', 'smart', 'avahi', 'mdns', 'enable', 'disable', 'rest server', 'docker', 'container', 'runtime', 'ups', 'nut', 'battery', 'power', 'shutdown', 'uninterruptible'] },
+		{ href: '/hardware', label: 'Hardware', keywords: ['hardware', 'pci', 'iommu', 'group', 'passthrough', 'vfio', 'gpu', 'device', 'driver', 'lspci'] },
 		{ href: '/logs', label: 'Logs', keywords: ['log', 'journal', 'systemd', 'debug', 'error', 'follow', 'stream'] },
 		{ href: '/update', label: 'Update', keywords: ['update', 'upgrade', 'version', 'release', 'nixos', 'rebuild', 'generation'] },
 		{ href: '/users', label: 'Access Control', keywords: ['user', 'password', 'role', 'admin', 'group', 'permission', 'token', 'api', 'access', 'auth', 'login'] },
