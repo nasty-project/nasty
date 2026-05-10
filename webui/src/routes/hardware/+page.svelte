@@ -4,21 +4,28 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
-	import type { IommuGroup, PciDevice } from '$lib/types';
+	import type { HardwareSummary, IommuGroup, PciDevice } from '$lib/types';
+	import { formatBytes } from '$lib/format';
 	import { ChevronDown, ChevronRight, RefreshCw } from '@lucide/svelte';
 
+	let summary: HardwareSummary | null = $state(null);
 	let groups: IommuGroup[] = $state([]);
 	let loading = $state(true);
 	let refreshing = $state(false);
 	let expanded = $state(new Set<number>());
 	let filter = $state('');
+	let showAllDimms = $state(false);
 
 	const client = getClient();
 
 	async function load() {
 		try {
-			groups = await client.call<IommuGroup[]>('system.hardware.iommu');
+			[summary, groups] = await Promise.all([
+				client.call<HardwareSummary>('system.hardware.summary'),
+				client.call<IommuGroup[]>('system.hardware.iommu'),
+			]);
 		} catch {
+			summary = null;
 			groups = [];
 		}
 		loading = false;
@@ -95,8 +102,8 @@
 	<div>
 		<h1 class="text-2xl font-semibold">Hardware</h1>
 		<p class="text-sm text-muted-foreground">
-			PCI devices grouped by IOMMU group. Useful for planning VM passthrough — devices in the same
-			group must be assigned together.
+			Hardware overview and IOMMU groupings. Devices in the same IOMMU group must be passed through
+			together.
 		</p>
 	</div>
 	<Button size="sm" variant="secondary" onclick={refresh} disabled={refreshing}>
@@ -109,17 +116,164 @@
 	<Card>
 		<CardContent class="py-12 text-center text-sm text-muted-foreground">Loading…</CardContent>
 	</Card>
-{:else if groups.length === 0}
-	<Card>
-		<CardContent class="py-8 text-center">
-			<p class="mb-1 font-medium">No IOMMU groups found</p>
-			<p class="text-sm text-muted-foreground">
-				IOMMU is likely off in BIOS. Enable VT-d (Intel) or AMD-Vi (AMD) and reboot. NASty's kernel
-				params already pass <code class="font-mono">intel_iommu=on amd_iommu=on iommu=pt</code>.
-			</p>
-		</CardContent>
-	</Card>
 {:else}
+	<!-- ── Hardware overview cards ─────────────────────────────────── -->
+	<div class="mb-6 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+		<Card>
+			<CardContent class="pt-4 pb-3">
+				<h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+					System
+				</h3>
+				{#if summary?.system}
+					<div class="text-sm font-medium">
+						{summary.system.manufacturer ?? 'Unknown'}
+						{summary.system.product ?? ''}
+					</div>
+					{#if summary.system.version}
+						<div class="text-xs text-muted-foreground">v{summary.system.version}</div>
+					{/if}
+				{:else}
+					<div class="text-sm text-muted-foreground">—</div>
+				{/if}
+				{#if summary?.bios}
+					<div class="mt-3 border-t border-border/40 pt-2 text-xs text-muted-foreground">
+						BIOS: {summary.bios.vendor ?? '—'}
+						{#if summary.bios.version} · {summary.bios.version}{/if}
+						{#if summary.bios.release_date} · {summary.bios.release_date}{/if}
+					</div>
+				{/if}
+			</CardContent>
+		</Card>
+
+		<Card>
+			<CardContent class="pt-4 pb-3">
+				<h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+					CPU
+				</h3>
+				{#if summary?.cpu}
+					<div class="text-sm font-medium">{summary.cpu.model ?? 'Unknown'}</div>
+					<div class="mt-1 text-xs text-muted-foreground">
+						{summary.cpu.physical_cores > 0
+							? `${summary.cpu.physical_cores} core${summary.cpu.physical_cores === 1 ? '' : 's'} · `
+							: ''}{summary.cpu.logical_cores} thread{summary.cpu.logical_cores === 1 ? '' : 's'}
+						{#if summary.cpu.max_mhz} · {(summary.cpu.max_mhz / 1000).toFixed(2)} GHz{/if}
+					</div>
+				{:else}
+					<div class="text-sm text-muted-foreground">—</div>
+				{/if}
+			</CardContent>
+		</Card>
+
+		<Card>
+			<CardContent class="pt-4 pb-3">
+				<h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+					Memory
+				</h3>
+				{#if summary && summary.memory.slots_total > 0}
+					<div class="text-sm font-medium">{formatBytes(summary.memory.total_bytes)}</div>
+					<div class="mt-1 text-xs text-muted-foreground">
+						{summary.memory.slots_used} of {summary.memory.slots_total} slot{summary.memory
+							.slots_total === 1
+							? ''
+							: 's'} populated
+						{#if summary.memory.ecc} · ECC{/if}
+					</div>
+				{:else}
+					<div class="text-sm text-muted-foreground">—</div>
+				{/if}
+			</CardContent>
+		</Card>
+
+		<Card>
+			<CardContent class="pt-4 pb-3">
+				<h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+					USB
+				</h3>
+				<div class="text-sm font-medium">
+					{summary?.usb.length ?? 0} device{summary?.usb.length === 1 ? '' : 's'}
+				</div>
+				{#if summary?.usb.length}
+					<div class="mt-1 text-xs text-muted-foreground">
+						{summary.usb
+							.slice(0, 3)
+							.map((d) => d.description.split(' ').slice(0, 3).join(' '))
+							.join(' · ')}{summary.usb.length > 3 ? ' · …' : ''}
+					</div>
+				{/if}
+			</CardContent>
+		</Card>
+	</div>
+
+	<!-- ── DIMM detail (collapsed by default) ──────────────────────── -->
+	{#if summary && summary.memory.dimms.length > 0}
+		<Card class="mb-6">
+			<CardContent class="p-0">
+				<button
+					onclick={() => (showAllDimms = !showAllDimms)}
+					class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-accent/50"
+				>
+					{#if showAllDimms}
+						<ChevronDown size={16} class="text-muted-foreground" />
+					{:else}
+						<ChevronRight size={16} class="text-muted-foreground" />
+					{/if}
+					<span class="text-sm font-medium">Memory slots</span>
+					<span class="text-xs text-muted-foreground">
+						{summary.memory.slots_used} populated of {summary.memory.dimms.length}
+					</span>
+				</button>
+				{#if showAllDimms}
+					<div class="border-t border-border bg-muted/20 px-4 py-3">
+						<table class="w-full text-sm">
+							<thead>
+								<tr
+									class="text-left text-[0.7rem] uppercase tracking-wide text-muted-foreground"
+								>
+									<th class="pb-2 font-medium">Slot</th>
+									<th class="pb-2 font-medium">Size</th>
+									<th class="pb-2 font-medium">Type</th>
+									<th class="pb-2 font-medium">Speed</th>
+									<th class="pb-2 font-medium">Manufacturer</th>
+									<th class="pb-2 font-medium">Part #</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each summary.memory.dimms as dimm (dimm.locator)}
+									<tr class="border-t border-border/40 {dimm.size_bytes === 0 ? 'opacity-50' : ''}">
+										<td class="py-2 pr-3 font-mono text-xs">{dimm.locator}</td>
+										<td class="py-2 pr-3"
+											>{dimm.size_bytes === 0 ? '—' : formatBytes(dimm.size_bytes)}</td
+										>
+										<td class="py-2 pr-3 text-xs">{dimm.mem_type ?? '—'}</td>
+										<td class="py-2 pr-3 text-xs"
+											>{dimm.speed_mts ? `${dimm.speed_mts} MT/s` : '—'}</td
+										>
+										<td class="py-2 pr-3 text-xs">{dimm.manufacturer ?? '—'}</td>
+										<td class="py-2 font-mono text-xs">{dimm.part_number ?? '—'}</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			</CardContent>
+		</Card>
+	{/if}
+
+	<!-- ── IOMMU group tree ───────────────────────────────────────── -->
+	{#if groups.length === 0}
+		<Card>
+			<CardContent class="py-8 text-center">
+				<p class="mb-1 font-medium">No IOMMU groups found</p>
+				<p class="text-sm text-muted-foreground">
+					IOMMU is likely off in BIOS. Enable VT-d (Intel) or AMD-Vi (AMD) and reboot. NASty's
+					kernel params already pass
+					<code class="font-mono">intel_iommu=on amd_iommu=on iommu=pt</code>.
+				</p>
+			</CardContent>
+		</Card>
+	{:else}
+	<h2 class="mb-3 text-base font-semibold">IOMMU groups</h2>
 	<div class="mb-3 flex items-center gap-3">
 		<input
 			bind:value={filter}
@@ -200,4 +354,5 @@
 			</Card>
 		{/each}
 	</div>
+	{/if}
 {/if}

@@ -41,6 +41,63 @@ export interface PciDevice {
 	driver: string | null;
 }
 
+/** Hardware overview, returned by `system.hardware.summary`. Server-
+ * side cached for 60s; expect stale-by-up-to-a-minute data after
+ * suspend/resume cycles, but the underlying physical hardware
+ * doesn't change between boots so this is fine. */
+export interface HardwareSummary {
+	system: DmiSystem | null;
+	bios: DmiBios | null;
+	cpu: CpuSummary | null;
+	memory: MemorySummary;
+	usb: UsbDevice[];
+}
+
+export interface DmiSystem {
+	manufacturer: string | null;
+	product: string | null;
+	version: string | null;
+}
+
+export interface DmiBios {
+	vendor: string | null;
+	version: string | null;
+	release_date: string | null;
+}
+
+export interface CpuSummary {
+	model: string | null;
+	vendor: string | null;
+	physical_cores: number;
+	logical_cores: number;
+	max_mhz: number | null;
+}
+
+export interface MemorySummary {
+	total_bytes: number;
+	slots_total: number;
+	slots_used: number;
+	ecc: boolean;
+	dimms: DimmInfo[];
+}
+
+export interface DimmInfo {
+	locator: string;
+	size_bytes: number;
+	mem_type: string | null;
+	speed_mts: number | null;
+	manufacturer: string | null;
+	part_number: string | null;
+}
+
+export interface UsbDevice {
+	bus: number;
+	device: number;
+	vendor_id: string;
+	product_id: string;
+	description: string;
+}
+
 export interface ServiceStatus {
 	name: string;
 	running: boolean;
