@@ -362,6 +362,10 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
             if let Some(fd) = forward_delay {
                 out.push_str(&format!("forward-delay={fd}\n"));
             }
+            // Bridge-master MTU lives here, not in [ethernet] (NM ≥1.20).
+            if let Some(mtu) = p.mtu {
+                out.push_str(&format!("mtu={mtu}\n"));
+            }
             out.push('\n');
         }
         NmTypeSpecific::Vlan { parent, id } => {
@@ -371,8 +375,17 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
         }
     }
 
-    // [ethernet] for ethernet type — carries MTU and cloned-mac.
-    if matches!(p.conn_type, NmConnectionType::Ethernet) {
+    // [ethernet] carries MTU and cloned-mac for ethernet-like types
+    // (ethernet, bond, vlan). Bridge has its own [bridge] section
+    // for MTU and is handled above. NM treats [ethernet] as the
+    // ethernet-layer settings even on bond/vlan connections.
+    let needs_eth_section = matches!(
+        p.conn_type,
+        NmConnectionType::Ethernet | NmConnectionType::Bond | NmConnectionType::Vlan
+    );
+    if needs_eth_section
+        && (p.mtu.is_some() || p.mac.is_some() || matches!(p.conn_type, NmConnectionType::Ethernet))
+    {
         out.push_str("[ethernet]\n");
         if let Some(mtu) = p.mtu {
             out.push_str(&format!("mtu={mtu}\n"));
@@ -381,32 +394,6 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
             out.push_str(&format!("cloned-mac-address={mac}\n"));
         }
         out.push('\n');
-    }
-
-    // For non-ethernet (bond/bridge/vlan), MTU goes in the type section
-    // (or globally — NM accepts both). Keyfile MTU-on-master is set on
-    // the type-specific section in older NM, and as a separate field in
-    // newer; we put it in [<type>] to be safe. Actually: NM accepts
-    // `mtu` in `[connection]` for all types since 1.20. Use that.
-    if !matches!(p.conn_type, NmConnectionType::Ethernet)
-        && let Some(mtu) = p.mtu
-    {
-        // Re-write [connection] MTU as a fallback section. NM honors
-        // mtu= in any of the type-specific sections too, but [connection]
-        // is the most portable.
-        // Already handled by re-emitting under the section below.
-        let section = match p.conn_type {
-            NmConnectionType::Bond => "[bond]",
-            NmConnectionType::Bridge => "[bridge]",
-            NmConnectionType::Vlan => "[vlan]",
-            NmConnectionType::Ethernet => unreachable!(),
-        };
-        // We already emitted this section above with mode/stp/parent.
-        // To keep the output simple, put MTU in a dedicated `[ethernet]`-
-        // style trailing block — NM accepts it as a setting on the
-        // connection itself when the type-specific section is absent.
-        out.push_str(&format!("# mtu setting belongs to {section}\n"));
-        out.push_str(&format!("# mtu={mtu}\n\n"));
     }
 
     // [ipv4]
@@ -500,6 +487,13 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
                 // NM expects forward-delay as a u32 in seconds.
                 bridge.insert("forward-delay".into(), into_value(u32::from(*fd)));
             }
+            // Bridge-master MTU lives in [bridge] (NM ≥1.20). Reported
+            // in #96: bond/bridge MTU was being silently dropped because
+            // we only emitted MTU under [802-3-ethernet] for Ethernet
+            // type. The other types each have their own correct home.
+            if let Some(mtu) = p.mtu {
+                bridge.insert("mtu".into(), into_value(u32::from(mtu)));
+            }
             out.insert("bridge".into(), bridge);
         }
         NmTypeSpecific::Vlan { parent, id } => {
@@ -510,8 +504,17 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
         }
     }
 
-    // [ethernet] for Ethernet type. Carries MTU + cloned-mac.
-    if matches!(p.conn_type, NmConnectionType::Ethernet) {
+    // [802-3-ethernet] carries MTU and cloned-mac for ethernet-like
+    // types. NM accepts this section on Ethernet, Bond, and VLAN
+    // connections (a bond is "bond-over-ethernet"; a vlan over an
+    // ethernet/bond parent inherits the ethernet layer). Bridge MTU
+    // is handled above in the [bridge] section since its NM-canonical
+    // location is different.
+    let needs_eth_section = matches!(
+        p.conn_type,
+        NmConnectionType::Ethernet | NmConnectionType::Bond | NmConnectionType::Vlan
+    );
+    if needs_eth_section {
         let mut eth = HashMap::new();
         if let Some(mtu) = p.mtu {
             eth.insert("mtu".into(), into_value(u32::from(mtu)));
@@ -519,7 +522,13 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
         if let Some(mac) = &p.mac {
             eth.insert("cloned-mac-address".into(), into_value(mac.clone()));
         }
-        out.insert("802-3-ethernet".into(), eth);
+        // Always emit the section for ethernet so a profile with
+        // neither MTU nor cloned-mac still has the type's primary
+        // setting block. Bond/VLAN: only emit when populated, since
+        // an empty block adds no value but does add wire bytes.
+        if matches!(p.conn_type, NmConnectionType::Ethernet) || !eth.is_empty() {
+            out.insert("802-3-ethernet".into(), eth);
+        }
     }
 
     // [ipv4]
@@ -1013,6 +1022,90 @@ mod tests {
         assert!(keyfile.contains("cloned-mac-address=aa:bb:cc:dd:ee:ff"));
     }
 
+    #[test]
+    fn keyfile_emits_bond_mtu_under_ethernet_section() {
+        // Reproducer from issue #96 follow-up: setting MTU on a bond
+        // produced no `mtu=` line at all in the keyfile (just a stale
+        // `# mtu=...` comment), so jumbo frames silently dropped to
+        // 1500 on apply. Bond MTU lives under [ethernet] in NM.
+        let mut bond0 = link_bond("bond0", &["eth0"]);
+        bond0.mtu = Some(9000);
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), bond0],
+            ..Default::default()
+        };
+        let bond_profile = to_nm_profiles(&layered)
+            .into_iter()
+            .find(|p| p.id == "nasty-bond0")
+            .unwrap();
+        let keyfile = serialize_keyfile(&bond_profile);
+        assert!(
+            keyfile.contains("[ethernet]"),
+            "bond should emit [ethernet] section for MTU"
+        );
+        assert!(
+            keyfile.contains("mtu=9000"),
+            "MTU must be plain `mtu=`, not `# mtu=`"
+        );
+    }
+
+    #[test]
+    fn keyfile_emits_bridge_mtu_under_bridge_section() {
+        // Bridges have their own [bridge] section that takes mtu —
+        // not [ethernet]. Different from bonds/vlans.
+        let mut br0 = link_bridge("br0", &["eth0"]);
+        br0.mtu = Some(9000);
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), br0],
+            ..Default::default()
+        };
+        let br_profile = to_nm_profiles(&layered)
+            .into_iter()
+            .find(|p| p.id == "nasty-br0")
+            .unwrap();
+        let keyfile = serialize_keyfile(&br_profile);
+        // mtu appears once, in the bridge section. Easiest assertion:
+        // the [bridge] block contains an mtu= line.
+        let bridge_idx = keyfile.find("[bridge]").expect("bridge section missing");
+        let after_bridge = &keyfile[bridge_idx..];
+        let next_section = after_bridge[1..]
+            .find('[')
+            .map_or(after_bridge.len(), |i| i + 1);
+        let bridge_block = &after_bridge[..next_section];
+        assert!(
+            bridge_block.contains("mtu=9000"),
+            "bridge block missing mtu: {bridge_block:?}"
+        );
+    }
+
+    #[test]
+    fn keyfile_emits_vlan_mtu_under_ethernet_section() {
+        // VLANs over ethernet/bond parents inherit the [ethernet]
+        // layer — same as bonds.
+        let mut eth0_100 = Link {
+            name: "eth0.100".into(),
+            enabled: true,
+            mtu: Some(1400),
+            mac: None,
+            kind: LinkKind::Vlan {
+                parent: "eth0".into(),
+                id: 100,
+            },
+        };
+        eth0_100.mtu = Some(1400);
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), eth0_100],
+            ..Default::default()
+        };
+        let vlan_profile = to_nm_profiles(&layered)
+            .into_iter()
+            .find(|p| p.id == "nasty-eth0.100")
+            .unwrap();
+        let keyfile = serialize_keyfile(&vlan_profile);
+        assert!(keyfile.contains("[ethernet]"));
+        assert!(keyfile.contains("mtu=1400"));
+    }
+
     // ── DBus settings dict conversion (phase 3a) ───────────────
 
     fn cidr_addr_data_first(dict: &HashMap<String, OwnedValue>) -> Option<(String, u32)> {
@@ -1204,6 +1297,107 @@ mod tests {
             .unwrap();
         assert_eq!(mtu, 9000);
         assert_eq!(mac, "aa:bb:cc:dd:ee:ff");
+    }
+
+    #[test]
+    fn dict_bond_includes_mtu_in_ethernet_section() {
+        // Issue #96 follow-up: bond MTU was being silently dropped on
+        // every apply, not just migration. The DBus path that sends
+        // the connection to NM is `to_settings_dict`, used by both
+        // user-initiated bond creation and the cutover migration —
+        // so the same fix covers both.
+        let mut bond0 = link_bond("bond0", &["eth0"]);
+        bond0.mtu = Some(9000);
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), bond0],
+            ..Default::default()
+        };
+        let bond_profile = to_nm_profiles(&layered)
+            .into_iter()
+            .find(|p| p.id == "nasty-bond0")
+            .unwrap();
+        let dict = to_settings_dict(&bond_profile);
+        let eth = dict
+            .get("802-3-ethernet")
+            .expect("bond should emit 802-3-ethernet for MTU");
+        let mtu: u32 = eth["mtu"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(mtu, 9000);
+    }
+
+    #[test]
+    fn dict_bridge_includes_mtu_in_bridge_section() {
+        // Bridge MTU goes in [bridge] (NM ≥1.20), not [802-3-ethernet]
+        // — distinct from bond/vlan.
+        let mut br0 = link_bridge("br0", &["eth0"]);
+        br0.mtu = Some(9000);
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), br0],
+            ..Default::default()
+        };
+        let br_profile = to_nm_profiles(&layered)
+            .into_iter()
+            .find(|p| p.id == "nasty-br0")
+            .unwrap();
+        let dict = to_settings_dict(&br_profile);
+        let bridge = dict.get("bridge").expect("bridge section");
+        let mtu: u32 = bridge["mtu"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(mtu, 9000);
+        // And NOT in 802-3-ethernet — bridges don't use it.
+        assert!(
+            dict.get("802-3-ethernet")
+                .is_none_or(|eth| !eth.contains_key("mtu")),
+            "bridge MTU must not also leak into 802-3-ethernet"
+        );
+    }
+
+    #[test]
+    fn dict_vlan_includes_mtu_in_ethernet_section() {
+        // VLAN MTU lives under [802-3-ethernet] like ethernet/bond.
+        let eth0_100 = Link {
+            name: "eth0.100".into(),
+            enabled: true,
+            mtu: Some(1400),
+            mac: None,
+            kind: LinkKind::Vlan {
+                parent: "eth0".into(),
+                id: 100,
+            },
+        };
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), eth0_100],
+            ..Default::default()
+        };
+        let vlan_profile = to_nm_profiles(&layered)
+            .into_iter()
+            .find(|p| p.id == "nasty-eth0.100")
+            .unwrap();
+        let dict = to_settings_dict(&vlan_profile);
+        let eth = dict
+            .get("802-3-ethernet")
+            .expect("vlan should emit 802-3-ethernet for MTU");
+        let mtu: u32 = eth["mtu"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(mtu, 1400);
+    }
+
+    #[test]
+    fn dict_bond_without_mtu_or_mac_omits_ethernet_section() {
+        // Optimization detail: when a bond/vlan has no ethernet-layer
+        // properties to set, skip the empty section to keep the wire
+        // dict small. (Ethernet is the exception — it always gets the
+        // section since it's the type's primary settings.)
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), link_bond("bond0", &["eth0"])],
+            ..Default::default()
+        };
+        let bond_profile = to_nm_profiles(&layered)
+            .into_iter()
+            .find(|p| p.id == "nasty-bond0")
+            .unwrap();
+        let dict = to_settings_dict(&bond_profile);
+        assert!(
+            !dict.contains_key("802-3-ethernet"),
+            "empty ethernet section should be omitted on bonds"
+        );
     }
 
     // ── UUIDv5 sanity checks ───────────────────────────────────
