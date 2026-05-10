@@ -76,6 +76,13 @@ pub enum LinkKind {
         #[serde(default)]
         members: Vec<String>,
         mode: BondMode,
+        /// User-controlled: when true, the bond inherits its MAC
+        /// from the primary member (mgmt iface preferred, else
+        /// first declared member). See `BondConfig::inherit_member_mac`.
+        /// Default true; the WebUI exposes an inverted "Don't inherit"
+        /// checkbox.
+        #[serde(default = "default_true")]
+        inherit_member_mac: bool,
     },
     Bridge {
         #[serde(default)]
@@ -84,6 +91,11 @@ pub enum LinkKind {
         stp: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forward_delay_s: Option<u8>,
+        /// Same as `LinkKind::Bond::inherit_member_mac` — controls
+        /// whether the bridge adopts a member's MAC (DHCP-stable)
+        /// instead of getting a random one (NM/kernel default).
+        #[serde(default = "default_true")]
+        inherit_member_mac: bool,
     },
     Vlan {
         parent: String,
@@ -178,6 +190,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
             kind: LinkKind::Bond {
                 members: bond.members.clone(),
                 mode: bond.mode.clone(),
+                inherit_member_mac: bond.inherit_member_mac,
             },
         });
         push_addresses(&mut addresses, &bond.name, &bond.ipv4, &bond.ipv6);
@@ -192,6 +205,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
                 members: bridge.members.clone(),
                 stp: bridge.stp,
                 forward_delay_s: bridge.forward_delay_s,
+                inherit_member_mac: bridge.inherit_member_mac,
             },
         });
         push_addresses(&mut addresses, &bridge.name, &bridge.ipv4, &bridge.ipv6);
@@ -274,18 +288,24 @@ pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
                 ipv6,
                 mtu: link.mtu,
             }),
-            LinkKind::Bond { members, mode } => bonds.push(BondConfig {
+            LinkKind::Bond {
+                members,
+                mode,
+                inherit_member_mac,
+            } => bonds.push(BondConfig {
                 name: link.name.clone(),
                 members: members.clone(),
                 mode: mode.clone(),
                 ipv4,
                 ipv6,
                 mtu: link.mtu,
+                inherit_member_mac: *inherit_member_mac,
             }),
             LinkKind::Bridge {
                 members,
                 stp,
                 forward_delay_s,
+                inherit_member_mac,
             } => bridges.push(BridgeConfig {
                 name: link.name.clone(),
                 members: members.clone(),
@@ -294,6 +314,7 @@ pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
                 mtu: link.mtu,
                 stp: *stp,
                 forward_delay_s: *forward_delay_s,
+                inherit_member_mac: *inherit_member_mac,
             }),
             LinkKind::Vlan { parent, id } => vlans.push(VlanConfig {
                 parent: parent.clone(),
@@ -477,6 +498,7 @@ mod tests {
             mtu: None,
             stp: false,
             forward_delay_s: None,
+            inherit_member_mac: false,
         }
     }
 
@@ -488,6 +510,7 @@ mod tests {
             ipv4: IpConfig::default(),
             ipv6: IpConfig::default(),
             mtu: None,
+            inherit_member_mac: false,
         }
     }
 
@@ -663,6 +686,7 @@ mod tests {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 stp: false,
                 forward_delay_s: None,
+                inherit_member_mac: false,
             },
         }
     }
@@ -676,6 +700,7 @@ mod tests {
             kind: LinkKind::Bond {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 mode: BondMode::Lacp,
+                inherit_member_mac: false,
             },
         }
     }

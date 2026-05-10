@@ -110,6 +110,19 @@ pub struct BondConfig {
     pub ipv6: IpConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+    /// When true, the bond's MAC address is taken from the primary
+    /// member's live MAC instead of letting NM/the kernel generate
+    /// a random one. Keeps DHCP servers handing out the same lease
+    /// across the enslave step — important when one of the members
+    /// is the management interface, since otherwise the user's
+    /// session lands on a new IP.
+    ///
+    /// Defaults to `true` because the surprise-IP-change on the
+    /// random-MAC default is the much louder failure mode. Users
+    /// who want a different identity for the bond can opt out via
+    /// the "Don't inherit member MAC" checkbox in the WebUI.
+    #[serde(default = "default_true")]
+    pub inherit_member_mac: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -150,6 +163,13 @@ pub struct BridgeConfig {
     /// 15-second blackhole when STP is off but forward-delay still applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forward_delay_s: Option<u8>,
+    /// When true, the bridge's MAC address is taken from the primary
+    /// member's live MAC instead of letting NM/the kernel generate
+    /// a random one. See `BondConfig::inherit_member_mac` for the
+    /// rationale; the rule is identical (DHCP-stable identity for
+    /// the master across the enslave step).
+    #[serde(default = "default_true")]
+    pub inherit_member_mac: bool,
 }
 
 fn inherit_ip() -> IpConfig {
@@ -426,7 +446,7 @@ impl NetworkService {
                 .map_err(|e| format!("write {PENDING_REVERT_PATH}: {e}"))?;
 
             persist_config(&config).await?;
-            apply_config(&config).await?;
+            apply_config(&config, mgmt_iface.as_deref()).await?;
 
             let txn_id = new_txn_id();
             let revert_at_unix = unix_now() + secs;
@@ -449,7 +469,7 @@ impl NetworkService {
             })
         } else {
             persist_config(&config).await?;
-            apply_config(&config).await?;
+            apply_config(&config, mgmt_iface.as_deref()).await?;
 
             info!(
                 "Network config updated ({} interfaces, {} bonds, {} bridges, {} VLANs)",
@@ -531,7 +551,10 @@ impl NetworkService {
             warn!("restore: persist failed: {e}");
             return;
         }
-        if let Err(e) = apply_config(&prev).await {
+        // Restore path: we don't know which iface the user is on
+        // (they might have reconnected on a new IP). MAC inheritance
+        // for any masters in `prev` falls back to "first member".
+        if let Err(e) = apply_config(&prev, None).await {
             warn!("restore: apply failed: {e}");
             return;
         }
@@ -780,7 +803,11 @@ async fn perform_rollback(txn_id: &str) {
         warn!("rollback {txn_id}: persist failed: {e}");
         return;
     }
-    if let Err(e) = apply_config(&prev).await {
+    // Rollback runs from a tokio task without a session — no mgmt
+    // iface to prefer. Same as `restore_pending_revert`: pre-existing
+    // masters in the rolled-back config fall back to first-member
+    // MAC, which matches what was applied originally.
+    if let Err(e) = apply_config(&prev, None).await {
         warn!("rollback {txn_id}: apply failed: {e}");
         return;
     }
@@ -1513,13 +1540,28 @@ fn parse_dhcp_managed(json: &str) -> Option<std::collections::HashSet<String>> {
     )
 }
 
-async fn apply_config(config: &NetworkConfig) -> Result<(), String> {
+async fn apply_config(config: &NetworkConfig, mgmt_iface: Option<&str>) -> Result<(), String> {
     // Post-cutover (phase 3b-beta): NetworkManager is the active
     // backend. Convert the resolved config to layered form, then to
     // NM profiles, then push to NM via DBus. NM owns DHCP, DNS, and
     // L2 management; the engine just authors the connection profiles.
+    //
+    // Build a name → MAC map from live state so bond/bridge masters
+    // with `inherit_member_mac=true` can adopt their primary
+    // member's MAC. Without this, NM creates the master with a
+    // random MAC and DHCP gives it a new lease — which yanks the
+    // user's session if they're enslaving the management iface.
+    let live_macs = enumerate_interfaces()
+        .await
+        .into_iter()
+        .map(|i| (i.name, i.mac))
+        .collect();
+    let mac_ctx = nm::MacContext {
+        live_macs,
+        mgmt_iface: mgmt_iface.map(|s| s.to_string()),
+    };
     let layered_cfg = layered::to_layered(config);
-    let profiles = nm::to_nm_profiles(&layered_cfg);
+    let profiles = nm::to_nm_profiles_with_macs(&layered_cfg, &mac_ctx);
     let client = nm::dbus::NmDbusClient::new()
         .await
         .map_err(|e| format!("connect to NetworkManager: {e}"))?;
@@ -1574,6 +1616,7 @@ mod tests {
             mtu: None,
             stp: false,
             forward_delay_s: None,
+            inherit_member_mac: false,
         }
     }
 
@@ -1585,6 +1628,7 @@ mod tests {
             ipv4: IpConfig::default(),
             ipv6: IpConfig::default(),
             mtu: None,
+            inherit_member_mac: false,
         }
     }
 

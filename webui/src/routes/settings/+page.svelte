@@ -49,6 +49,10 @@
 	let bondMembers: string[] = $state([]);
 	let bondMode: 'lacp' | 'active_backup' | 'balance_rr' | 'balance_xor' = $state('active_backup');
 	let bondMtu = $state('');
+	// Inverted in the UI ("Don't inherit member MAC"). Default OFF
+	// (i.e. inherit_member_mac=true) so bonds get DHCP-stable
+	// identity by default — same logic as bridges below.
+	let bondNoInheritMac = $state(false);
 	// VLAN form
 	let showVlanForm = $state(false);
 	let vlanParent = $state('');
@@ -59,6 +63,11 @@
 	let bridgeName = $state('br0');
 	let bridgeMembers: string[] = $state([]);
 	let bridgeMtu = $state('');
+	// Same as `bondNoInheritMac` — inverted UI flag (checked = NM
+	// generates a random MAC). Default unchecked: bridges adopt
+	// the primary member's MAC, so DHCP keeps handing out the same
+	// lease and the user's WebUI session survives the enslave step.
+	let bridgeNoInheritMac = $state(false);
 	// ── General tab state ───────────────────────────────────
 	let settings: Settings | null = $state(null);
 	let info: SystemInfo | null = $state(null);
@@ -443,13 +452,22 @@
 		const payload: NetworkConfig = {
 			interfaces: network.interfaces || [],
 			dns: network.dns || [],
-			bonds: [...(network.bonds || []), { name: bondName, members: bondMembers, mode: bondMode, ipv4: { method: 'dhcp', addresses: [], gateway: null }, ipv6: { method: 'slaac', addresses: [], gateway: null }, mtu }],
+			bonds: [...(network.bonds || []), {
+				name: bondName,
+				members: bondMembers,
+				mode: bondMode,
+				ipv4: { method: 'dhcp', addresses: [], gateway: null },
+				ipv6: { method: 'slaac', addresses: [], gateway: null },
+				mtu,
+				// Checkbox is "Don't inherit member MAC" → invert.
+				inherit_member_mac: !bondNoInheritMac,
+			}],
 			vlans: network.vlans || [],
 			bridges: network.bridges || [],
 		};
 		await applyNetworkUpdate(payload, `Bond ${bondName} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
-		showBondForm = false; bondName = 'bond0'; bondMembers = []; bondMtu = '';
+		showBondForm = false; bondName = 'bond0'; bondMembers = []; bondMtu = ''; bondNoInheritMac = false;
 	}
 
 	async function createVlan() {
@@ -480,11 +498,19 @@
 			// Static/Dhcp before persisting so reboot reapplies the same L3.
 			// For host-internal bridges (no members), inherit resolves to
 			// Disabled — the bridge is L2-only, which is what VMs want.
-			bridges: [...(network.bridges || []), { name: bridgeName, members: bridgeMembers, ipv4: { method: 'inherit', addresses: [], gateway: null }, ipv6: { method: 'inherit', addresses: [], gateway: null }, mtu }],
+			bridges: [...(network.bridges || []), {
+				name: bridgeName,
+				members: bridgeMembers,
+				ipv4: { method: 'inherit', addresses: [], gateway: null },
+				ipv6: { method: 'inherit', addresses: [], gateway: null },
+				mtu,
+				// Checkbox is "Don't inherit member MAC" → invert.
+				inherit_member_mac: !bridgeNoInheritMac,
+			}],
 		};
 		await applyNetworkUpdate(payload, `Bridge ${bridgeName} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
-		showBridgeForm = false; bridgeName = 'br0'; bridgeMembers = []; bridgeMtu = '';
+		showBridgeForm = false; bridgeName = 'br0'; bridgeMembers = []; bridgeMtu = ''; bridgeNoInheritMac = false;
 	}
 
 	async function deleteBond(name: string) {
@@ -1028,6 +1054,27 @@
 						<label for="bond-mtu" class="text-xs text-muted-foreground">MTU (optional)</label>
 						<input id="bond-mtu" type="number" min="68" max="65535" bind:value={bondMtu} placeholder="default (1500), 9000 for jumbo frames" class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
 					</div>
+					<div>
+						<label class="flex items-start gap-2 text-xs">
+							<input type="checkbox" bind:checked={bondNoInheritMac} class="mt-0.5" />
+							<span>
+								<span class="text-foreground">Don't inherit member MAC</span>
+								<span class="block text-muted-foreground mt-0.5">By default, the bond adopts the primary member's MAC so DHCP keeps handing out the same lease across the enslave step. Check this to let the kernel pick from active slaves instead.</span>
+							</span>
+						</label>
+					</div>
+					{#if networkState?.mgmt_iface && bondMembers.includes(networkState.mgmt_iface)}
+						<div class="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-300 space-y-1">
+							<div class="font-medium">Heads up — this bonds your management interface</div>
+							<p>You're connected through <span class="font-mono">{networkState.mgmt_iface}</span>. After applying, you'll have 30 seconds to keep the change before it auto-rolls back.</p>
+							{#if bondMembers.length > 1}
+								<p>The bond will use <span class="font-mono">{networkState.mgmt_iface}</span>'s MAC (the management interface, preferred when it's a member among multiple).</p>
+							{/if}
+							{#if bondNoInheritMac}
+								<p class="font-medium">⚠ "Don't inherit member MAC" is checked. Your DHCP server will treat the bond as a new client and is very likely to hand out a different IP — your session will land on the new IP and you'll need to reconnect there to confirm.</p>
+							{/if}
+						</div>
+					{/if}
 					<Button size="sm" onclick={createBond} disabled={bondMembers.length < 2}>Create Bond</Button>
 				</div>
 			{/if}
@@ -1058,10 +1105,25 @@
 						<label for="bridge-mtu" class="text-xs text-muted-foreground">MTU (optional)</label>
 						<input id="bridge-mtu" type="number" min="68" max="65535" bind:value={bridgeMtu} placeholder="default (1500), 9000 for jumbo frames" class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
 					</div>
+					<div>
+						<label class="flex items-start gap-2 text-xs">
+							<input type="checkbox" bind:checked={bridgeNoInheritMac} class="mt-0.5" />
+							<span>
+								<span class="text-foreground">Don't inherit member MAC</span>
+								<span class="block text-muted-foreground mt-0.5">By default, the bridge adopts the primary member's MAC so DHCP keeps handing out the same lease across the enslave step. Check this to let NM/the kernel pick a random MAC instead — you'll likely get a new IP.</span>
+							</span>
+						</label>
+					</div>
 					{#if networkState?.mgmt_iface && bridgeMembers.includes(networkState.mgmt_iface)}
-						<div class="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-300">
-							<div class="font-medium mb-1">Heads up — this bridges your management interface</div>
-							<p>You're connected through <span class="font-mono">{networkState.mgmt_iface}</span>. The bridge will adopt its IP and route, but you may briefly see the page reconnect. After applying, you'll have 30 seconds to keep the change before it auto-rolls back.</p>
+						<div class="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-300 space-y-1">
+							<div class="font-medium">Heads up — this bridges your management interface</div>
+							<p>You're connected through <span class="font-mono">{networkState.mgmt_iface}</span>. The bridge will adopt its IP and route. After applying, you'll have 30 seconds to keep the change before it auto-rolls back.</p>
+							{#if bridgeMembers.length > 1}
+								<p>With multiple members, the bridge will use <span class="font-mono">{networkState.mgmt_iface}</span>'s MAC (the management interface, preferred when it's a member). The other members keep their own MACs as bridge slaves — they're L2-only inside the bridge.</p>
+							{/if}
+							{#if bridgeNoInheritMac}
+								<p class="font-medium">⚠ "Don't inherit member MAC" is checked. Your DHCP server will treat the bridge as a new client and is very likely to hand out a different IP — your session will land on the new IP and you'll need to reconnect there to confirm before the 30-second rollback fires.</p>
+							{/if}
 						</div>
 					{/if}
 					<Button size="sm" onclick={createBridge} disabled={!bridgeName}>Create Bridge</Button>

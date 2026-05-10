@@ -168,10 +168,46 @@ pub enum NmTypeSpecific {
 
 // ── Converter ──────────────────────────────────────────────────
 
+/// Per-apply context that's not in the layered model itself. Currently
+/// just for MAC inheritance — without it, NM creates bonds/bridges
+/// with a random MAC, which makes DHCP servers see "a new client" and
+/// hand out a different lease the moment a master comes up. If the
+/// user is enslaving their management interface, that yanks the
+/// session and lands them on a new IP. Inheriting the primary
+/// member's MAC keeps DHCP recognising the same client.
+///
+/// `mgmt_iface` is the management interface name resolved from the
+/// caller's socket (same one the risk classifier uses). When it's
+/// among a master's members, prefer its MAC over the first member's
+/// MAC — that's the one the user is currently reachable on, and
+/// keeping it stable preserves their session across the enslave step.
+#[derive(Debug, Default)]
+pub struct MacContext {
+    /// Live `name → MAC` map from `enumerate_interfaces()`. Empty
+    /// for tests / migration / nm_preview where live state isn't
+    /// readily available — callers fall back to NM's default
+    /// (random MAC) which is fine when the bridge/bond doesn't
+    /// touch the management path.
+    pub live_macs: HashMap<String, String>,
+    pub mgmt_iface: Option<String>,
+}
+
+/// Convenience wrapper that calls into [`to_nm_profiles_with_macs`]
+/// with an empty context. Used by tests and by migration code paths
+/// where we don't have live MAC info to plumb through.
+pub fn to_nm_profiles(layered: &LayeredConfig) -> Vec<NmConnection> {
+    to_nm_profiles_with_macs(layered, &MacContext::default())
+}
+
 /// Project a `LayeredConfig` to NM connection profiles. One `NmConnection`
 /// per `Link`, with members getting `controller = <master>` + IP method
 /// `disabled` (the master owns the L3).
-pub fn to_nm_profiles(layered: &LayeredConfig) -> Vec<NmConnection> {
+///
+/// Bond/bridge masters get their `mac` populated from the primary
+/// member's live MAC (preferring the management iface when it's a
+/// member). The serializer then emits this as `bridge.mac-address`
+/// for bridges and `802-3-ethernet.cloned-mac-address` for bonds.
+pub fn to_nm_profiles_with_macs(layered: &LayeredConfig, ctx: &MacContext) -> Vec<NmConnection> {
     // Per-link IP settings, indexed by link name.
     let mut addrs_by_link: HashMap<&str, (NmIpSettings, NmIpSettings)> = HashMap::new();
     for addr in &layered.addresses {
@@ -221,9 +257,57 @@ pub fn to_nm_profiles(layered: &LayeredConfig) -> Vec<NmConnection> {
                 conn.ipv4.dns.clone_from(&dns_v4);
                 conn.ipv6.dns.clone_from(&dns_v6);
             }
+            // Bond/bridge masters: inherit the primary member's MAC
+            // *if the user opted in* (default for new bridges/bonds;
+            // can be turned off via the WebUI's "Don't inherit member
+            // MAC" checkbox). Skipping inheritance lets NM/the kernel
+            // assign a random MAC, which makes DHCP servers see a new
+            // client identity — that's the right call for some users
+            // who want a separate identity for the master, and the
+            // wrong one for users enslaving their mgmt iface, hence
+            // the toggle. `pick_primary_member` prefers the mgmt iface
+            // when it's a member so the user's session survives the
+            // enslave step.
+            if inherits_member_mac(&link.kind)
+                && let Some(member) = pick_primary_member(&link.kind, ctx)
+                && let Some(mac) = ctx.live_macs.get(member)
+            {
+                conn.mac = Some(mac.clone());
+            }
             conn
         })
         .collect()
+}
+
+fn inherits_member_mac(kind: &LinkKind) -> bool {
+    match kind {
+        LinkKind::Bond {
+            inherit_member_mac, ..
+        }
+        | LinkKind::Bridge {
+            inherit_member_mac, ..
+        } => *inherit_member_mac,
+        _ => false,
+    }
+}
+
+/// Pick which member's MAC the master should adopt. When the user's
+/// management interface is in the member list, return that — DHCP
+/// will keep handing out the same lease, so their session survives.
+/// Otherwise fall back to the first declared member; that's the most
+/// common bridge/bond case (one or two members, list order matches
+/// user intent). Returns `None` when the link isn't a master.
+fn pick_primary_member<'a>(kind: &'a LinkKind, ctx: &'a MacContext) -> Option<&'a str> {
+    let members = match kind {
+        LinkKind::Bond { members, .. } | LinkKind::Bridge { members, .. } => members.as_slice(),
+        _ => return None,
+    };
+    if let Some(mgmt) = ctx.mgmt_iface.as_deref()
+        && members.iter().any(|m| m == mgmt)
+    {
+        return Some(mgmt);
+    }
+    members.first().map(|s| s.as_str())
 }
 
 /// Bucket DNS server strings by family. A colon means IPv6; absence
@@ -407,6 +491,12 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
             if let Some(mtu) = p.mtu {
                 out.push_str(&format!("mtu={mtu}\n"));
             }
+            // Bridge MAC also lives here (`bridge.mac-address`), not
+            // in [802-3-ethernet]. Without it NM creates the bridge
+            // with a kernel-random MAC and DHCP hands out a new lease.
+            if let Some(mac) = &p.mac {
+                out.push_str(&format!("mac-address={mac}\n"));
+            }
             out.push('\n');
         }
         NmTypeSpecific::Vlan { parent, id } => {
@@ -546,6 +636,14 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
             if let Some(mtu) = p.mtu {
                 bridge.insert("mtu".into(), into_value(u32::from(mtu)));
             }
+            // Bridge MAC: same reasoning. NM's `bridge.mac-address`
+            // pins the bridge interface's MAC at activation time;
+            // without it the kernel generates a random MAC and
+            // DHCP hands out a new lease (issue from the bridge
+            // creation test on 10.10.10.61).
+            if let Some(mac) = &p.mac {
+                bridge.insert("mac-address".into(), into_value(mac.clone()));
+            }
             out.insert("bridge".into(), bridge);
         }
         NmTypeSpecific::Vlan { parent, id } => {
@@ -674,6 +772,7 @@ mod tests {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 stp: false,
                 forward_delay_s: None,
+                inherit_member_mac: false,
             },
         }
     }
@@ -687,6 +786,7 @@ mod tests {
             kind: LinkKind::Bond {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 mode: BondMode::Lacp,
+                inherit_member_mac: false,
             },
         }
     }
@@ -853,6 +953,7 @@ mod tests {
                     members: vec![],
                     stp: true,
                     forward_delay_s: Some(0),
+                    inherit_member_mac: false,
                 },
             }],
             ..Default::default()
@@ -1025,6 +1126,7 @@ mod tests {
                     members: vec![],
                     stp: true,
                     forward_delay_s: Some(4),
+                    inherit_member_mac: false,
                 },
             }],
             ..Default::default()
@@ -1297,6 +1399,7 @@ mod tests {
                     members: vec![],
                     stp: true,
                     forward_delay_s: Some(7),
+                    inherit_member_mac: false,
                 },
             }],
             ..Default::default()
@@ -1584,5 +1687,209 @@ mod tests {
             deterministic_uuid_for("eth0"),
             deterministic_uuid_for("eth1")
         );
+    }
+
+    // ── MAC inheritance ──────────────────────────────────────────
+
+    fn live_macs(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(n, m)| ((*n).to_string(), (*m).to_string()))
+            .collect()
+    }
+
+    fn link_bridge_inherit(name: &str, members: &[&str]) -> Link {
+        Link {
+            name: name.into(),
+            enabled: true,
+            mtu: None,
+            mac: None,
+            kind: LinkKind::Bridge {
+                members: members.iter().map(|s| (*s).to_string()).collect(),
+                stp: false,
+                forward_delay_s: None,
+                inherit_member_mac: true,
+            },
+        }
+    }
+
+    fn link_bond_inherit(name: &str, members: &[&str]) -> Link {
+        Link {
+            name: name.into(),
+            enabled: true,
+            mtu: None,
+            mac: None,
+            kind: LinkKind::Bond {
+                members: members.iter().map(|s| (*s).to_string()).collect(),
+                mode: BondMode::Lacp,
+                inherit_member_mac: true,
+            },
+        }
+    }
+
+    #[test]
+    fn pick_primary_prefers_mgmt_iface_when_member() {
+        // Reproducer for the .61 → .62 surprise: user's mgmt iface
+        // is in the bond's members. Bond should adopt mgmt's MAC so
+        // DHCP keeps handing out the same lease and the session
+        // survives the enslave step.
+        let kind = LinkKind::Bond {
+            members: vec!["eth0".into(), "eth1".into()],
+            mode: BondMode::Lacp,
+            inherit_member_mac: true,
+        };
+        let ctx = MacContext {
+            live_macs: live_macs(&[("eth0", "aa:..."), ("eth1", "bb:...")]),
+            mgmt_iface: Some("eth1".into()),
+        };
+        assert_eq!(pick_primary_member(&kind, &ctx), Some("eth1"));
+    }
+
+    #[test]
+    fn pick_primary_falls_back_to_first_when_mgmt_not_a_member() {
+        // Bond not touching the mgmt path: pick first declared
+        // member as the MAC source. Order matches user intent in
+        // the WebUI.
+        let kind = LinkKind::Bond {
+            members: vec!["eth1".into(), "eth2".into()],
+            mode: BondMode::Lacp,
+            inherit_member_mac: true,
+        };
+        let ctx = MacContext {
+            live_macs: live_macs(&[]),
+            mgmt_iface: Some("eth0".into()), // mgmt not in members
+        };
+        assert_eq!(pick_primary_member(&kind, &ctx), Some("eth1"));
+    }
+
+    #[test]
+    fn pick_primary_returns_none_for_non_master() {
+        // Physical/VLAN are not master types. The MAC inheritance
+        // rule doesn't apply to them; their MAC comes from the
+        // hardware directly (or kernel for VLANs).
+        let physical = LinkKind::Physical;
+        let vlan = LinkKind::Vlan {
+            parent: "eth0".into(),
+            id: 100,
+        };
+        let ctx = MacContext::default();
+        assert_eq!(pick_primary_member(&physical, &ctx), None);
+        assert_eq!(pick_primary_member(&vlan, &ctx), None);
+    }
+
+    #[test]
+    fn dict_bridge_emits_mac_address_when_inherit_true() {
+        // The headline fix: with inherit_member_mac=true and a known
+        // member MAC, the bridge connection's [bridge] section
+        // carries `mac-address`. NM uses this to pin the bridge's
+        // MAC at activation, keeping DHCP recognising the same client.
+        let layered = LayeredConfig {
+            links: vec![link_phys("ens18"), link_bridge_inherit("br0", &["ens18"])],
+            ..Default::default()
+        };
+        let ctx = MacContext {
+            live_macs: live_macs(&[("ens18", "bc:24:11:34:a0:27")]),
+            mgmt_iface: None,
+        };
+        let profiles = to_nm_profiles_with_macs(&layered, &ctx);
+        let br = profiles.iter().find(|p| p.id == "nasty-br0").unwrap();
+        let dict = to_settings_dict(br);
+        let bridge = dict.get("bridge").expect("bridge section");
+        let mac: String = bridge["mac-address"]
+            .try_clone()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(mac, "bc:24:11:34:a0:27");
+    }
+
+    #[test]
+    fn dict_bridge_omits_mac_address_when_inherit_false() {
+        // Opt-out: user toggled "Don't inherit member MAC" → no
+        // mac-address field → NM/kernel assign a random MAC at
+        // activation (the previous default). Test guards against
+        // the flag being silently ignored.
+        let layered = LayeredConfig {
+            links: vec![link_phys("ens18"), link_bridge("br0", &["ens18"])],
+            ..Default::default()
+        };
+        let ctx = MacContext {
+            live_macs: live_macs(&[("ens18", "bc:24:11:34:a0:27")]),
+            mgmt_iface: None,
+        };
+        let profiles = to_nm_profiles_with_macs(&layered, &ctx);
+        let br = profiles.iter().find(|p| p.id == "nasty-br0").unwrap();
+        assert!(br.mac.is_none());
+        let dict = to_settings_dict(br);
+        let bridge = dict.get("bridge").expect("bridge section");
+        assert!(!bridge.contains_key("mac-address"));
+    }
+
+    #[test]
+    fn dict_bond_emits_cloned_mac_address_when_inherit_true() {
+        // Bonds put MAC in [802-3-ethernet] (not [bridge]) — NM
+        // models bonds as having an underlying ethernet layer.
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), link_bond_inherit("bond0", &["eth0"])],
+            ..Default::default()
+        };
+        let ctx = MacContext {
+            live_macs: live_macs(&[("eth0", "aa:bb:cc:dd:ee:ff")]),
+            mgmt_iface: None,
+        };
+        let profiles = to_nm_profiles_with_macs(&layered, &ctx);
+        let bond = profiles.iter().find(|p| p.id == "nasty-bond0").unwrap();
+        let dict = to_settings_dict(bond);
+        let eth = dict.get("802-3-ethernet").expect("ethernet section");
+        let mac: String = eth["cloned-mac-address"]
+            .try_clone()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(mac, "aa:bb:cc:dd:ee:ff");
+    }
+
+    #[test]
+    fn keyfile_bridge_mac_address_in_bridge_section() {
+        let layered = LayeredConfig {
+            links: vec![link_phys("ens18"), link_bridge_inherit("br0", &["ens18"])],
+            ..Default::default()
+        };
+        let ctx = MacContext {
+            live_macs: live_macs(&[("ens18", "bc:24:11:34:a0:27")]),
+            mgmt_iface: None,
+        };
+        let br = to_nm_profiles_with_macs(&layered, &ctx)
+            .into_iter()
+            .find(|p| p.id == "nasty-br0")
+            .unwrap();
+        let keyfile = serialize_keyfile(&br);
+        // Has to land in the [bridge] section, not [ethernet].
+        let bridge_idx = keyfile.find("[bridge]").expect("bridge section");
+        let after = &keyfile[bridge_idx..];
+        let next_section = after[1..].find('[').map_or(after.len(), |i| i + 1);
+        assert!(
+            after[..next_section].contains("mac-address=bc:24:11:34:a0:27"),
+            "[bridge] block missing mac-address: {:?}",
+            &after[..next_section]
+        );
+    }
+
+    #[test]
+    fn empty_mac_context_inherits_nothing() {
+        // Tests / migration code paths use `to_nm_profiles` (the
+        // empty-context wrapper). Bridges/bonds get no inherited
+        // MAC — same as the pre-#96-followup behaviour. Guards
+        // against test scaffolding accidentally pinning a member's
+        // MAC because of the new code path.
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), link_bridge_inherit("br0", &["eth0"])],
+            ..Default::default()
+        };
+        // No live_macs — even with inherit_member_mac=true, there's
+        // no MAC to inherit.
+        let profiles = to_nm_profiles(&layered);
+        let br = profiles.iter().find(|p| p.id == "nasty-br0").unwrap();
+        assert!(br.mac.is_none());
     }
 }

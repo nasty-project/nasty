@@ -625,6 +625,12 @@ export interface BondConfig {
 	ipv4: IpConfig;
 	ipv6: IpConfig;
 	mtu: number | null;
+	/** When true (default for newly-created bonds), the bond's MAC is
+	 * taken from the primary member's live MAC instead of letting NM
+	 * generate a random one. Keeps DHCP servers handing out the same
+	 * lease across the enslave step — important when one of the
+	 * members is the management interface. */
+	inherit_member_mac?: boolean;
 }
 
 export interface VlanConfig {
@@ -643,6 +649,10 @@ export interface BridgeConfig {
 	mtu: number | null;
 	stp?: boolean;
 	forward_delay_s?: number | null;
+	/** Same semantics as `BondConfig.inherit_member_mac`: when true,
+	 * the bridge takes its MAC from the primary member instead of
+	 * getting a kernel-random MAC at creation. */
+	inherit_member_mac?: boolean;
 }
 
 export interface NetworkConfig {
