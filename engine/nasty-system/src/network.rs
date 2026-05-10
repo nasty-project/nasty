@@ -240,6 +240,66 @@ pub struct ConfirmRequest {
     pub txn_id: String,
 }
 
+// ── Orphan-interface detection ────────────────────────────────
+//
+// An entry in `interfaces[]` is "orphan" when its name doesn't
+// correspond to any real device on the system AND isn't a name
+// the user has reserved for a configured-but-not-yet-applied
+// virtual interface (bond/bridge/vlan). This happens when:
+//
+// - The user manually edits networking.json and leaves stale
+//   entries (the case in issue #96).
+// - A bond/bridge create-then-delete cycle leaves the master's
+//   IP-config entry behind in interfaces[].
+// - Migration from the legacy stack inherits a config that was
+//   already broken before the cutover.
+//
+// Side effect of leaving these in: the layered model emits a
+// `LinkKind::Physical` for them, the next bond/bridge create
+// with the same name fails the `validate_layered` duplicate-name
+// check, and the user gets a cryptic error with no path forward
+// short of editing the JSON by hand.
+
+/// Find the names of orphan `interfaces[]` entries. Pure — passes
+/// in live state explicitly so it's testable without sysfs.
+///
+/// We require BOTH signals (no live device AND no virtual-master
+/// claim) to flag a name. That keeps:
+/// - down-but-still-in-sysfs NICs safe (they're in `live`),
+/// - freshly-added bonds before Apply safe (they're in
+///   `bonds[]`/`bridges[]`/`vlans[]` even though no live device
+///   exists yet),
+/// - and only stale leftovers get flagged.
+pub fn find_orphan_interfaces(cfg: &NetworkConfig, live: &[LiveInterface]) -> Vec<String> {
+    use std::collections::HashSet;
+    let live_names: HashSet<&str> = live.iter().map(|i| i.name.as_str()).collect();
+    let bond_names: HashSet<&str> = cfg.bonds.iter().map(|b| b.name.as_str()).collect();
+    let bridge_names: HashSet<&str> = cfg.bridges.iter().map(|b| b.name.as_str()).collect();
+    let vlan_names: HashSet<String> = cfg
+        .vlans
+        .iter()
+        .map(|v| format!("{}.{}", v.parent, v.vlan_id))
+        .collect();
+    cfg.interfaces
+        .iter()
+        .filter(|i| {
+            !live_names.contains(i.name.as_str())
+                && !bond_names.contains(i.name.as_str())
+                && !bridge_names.contains(i.name.as_str())
+                && !vlan_names.contains(&i.name)
+        })
+        .map(|i| i.name.clone())
+        .collect()
+}
+
+/// Strip the named entries from `cfg.interfaces[]`. Used by the
+/// migration to clean orphans before to_layered conversion. Does
+/// not touch any other section.
+pub fn prune_orphan_interfaces(cfg: &mut NetworkConfig, names: &[String]) {
+    let drop: std::collections::HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+    cfg.interfaces.retain(|i| !drop.contains(i.name.as_str()));
+}
+
 // ── Service ────────────────────────────────────────────────────
 
 pub struct NetworkService {
@@ -505,7 +565,50 @@ impl NetworkService {
 
         info!("Running one-shot network migration to NetworkManager...");
 
-        let cfg = load_config().await;
+        let mut cfg = load_config().await;
+
+        // Issue #96: configs from the pre-NM era sometimes have stale
+        // interfaces[] entries — typically a bond's IP-config row that
+        // got left behind when the user manually edited the JSON or
+        // hit the duplicate-bond UI bug. The layered model then emits
+        // a `Physical` Link for them, and a future bond/bridge create
+        // with the same name fails the `validate_layered` duplicate-
+        // name check. Easier to surface as a forced cleanup here than
+        // to leave the user stuck on first use of the new backend.
+        let live = enumerate_interfaces().await;
+        let orphans = find_orphan_interfaces(&cfg, &live);
+        if !orphans.is_empty() {
+            warn!(
+                "Migration cleanup: pruning {} stale interfaces[] entr{} that match neither a real device nor a configured virtual interface: {:?}",
+                orphans.len(),
+                if orphans.len() == 1 { "y" } else { "ies" },
+                orphans
+            );
+            prune_orphan_interfaces(&mut cfg, &orphans);
+            if let Err(e) = persist_config(&cfg).await {
+                warn!(
+                    "Migration cleanup: persist after prune failed: {e}. Continuing with in-memory cleaned config."
+                );
+            }
+
+            // Same orphans typically have dangling firewall entries
+            // attached: the user restricted a protocol to bond0 via
+            // the WebUI, then bond0 went away but the rule kept the
+            // ref. The dropdown source no longer offers bond0, so
+            // the user can't unselect it from the UI. Strip those
+            // refs in lockstep with the interface prune.
+            let mut restrictions = crate::firewall::FirewallRestrictions::load();
+            if restrictions.strip_iface_refs(&orphans) {
+                if let Err(e) = restrictions.save().await {
+                    warn!(
+                        "Migration cleanup: persist firewall restrictions after iface strip failed: {e}"
+                    );
+                } else {
+                    info!("Migration cleanup: stripped firewall references to pruned interface(s)");
+                }
+            }
+        }
+
         let layered_cfg = layered::to_layered(&cfg);
         let profiles = nm::to_nm_profiles(&layered_cfg);
 
@@ -2088,5 +2191,108 @@ mod tests {
             let id = new_txn_id();
             assert!(seen.insert(id), "duplicate txn_id");
         }
+    }
+
+    // ── orphan interface detection ────────────────────────────────
+
+    fn live(name: &str) -> LiveInterface {
+        LiveInterface {
+            name: name.to_string(),
+            mac: "00:00:00:00:00:00".to_string(),
+            up: true,
+            speed_mbps: None,
+            carrier: true,
+            ipv4_addresses: Vec::new(),
+            ipv6_addresses: Vec::new(),
+            mtu: 1500,
+            kind: "physical".to_string(),
+        }
+    }
+
+    #[test]
+    fn find_orphan_flags_an_interfaces_entry_with_no_real_device() {
+        // The reproducer from issue #96: networking.json had bond0
+        // in interfaces[] but bonds[] was empty and no live bond0
+        // device exists. Migration must surface and clean this so
+        // the layered model doesn't emit a duplicate-named Link the
+        // next time the user adds a bond named bond0.
+        let cfg = NetworkConfig {
+            interfaces: vec![iface("enp4s0"), iface("bond0"), iface("enp6s0f1")],
+            ..Default::default()
+        };
+        let live_state = vec![live("enp4s0"), live("enp6s0f1")];
+        assert_eq!(find_orphan_interfaces(&cfg, &live_state), vec!["bond0"]);
+    }
+
+    #[test]
+    fn find_orphan_does_not_flag_a_freshly_added_bond_pre_apply() {
+        // The user added bond0 to bonds[] but hasn't clicked Apply
+        // yet — no live bond0 device. We must not flag it as orphan;
+        // the bonds[] entry is the user's documented intent.
+        let cfg = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            bonds: vec![bond("bond0", &["eth0"])],
+            ..Default::default()
+        };
+        let live_state = vec![live("eth0")];
+        assert!(find_orphan_interfaces(&cfg, &live_state).is_empty());
+    }
+
+    #[test]
+    fn find_orphan_does_not_flag_a_down_nic_still_in_sysfs() {
+        // A NIC that's been unplugged but is still in sysfs (cable
+        // out, or USB NIC removed and re-inserted) shows up in
+        // `live` with up=false carrier=false. We should NOT strip
+        // its config entry — that would lose user IP/DHCP settings
+        // that they expect back when the cable is reconnected.
+        let cfg = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        let mut down = live("eth0");
+        down.up = false;
+        down.carrier = false;
+        assert!(find_orphan_interfaces(&cfg, &[down]).is_empty());
+    }
+
+    #[test]
+    fn find_orphan_respects_bridge_and_vlan_names_too() {
+        // The check is symmetric across bonds, bridges, and vlans —
+        // an interfaces[] entry whose name matches any of those is
+        // user intent, not orphan.
+        let cfg = NetworkConfig {
+            interfaces: vec![iface("br0"), iface("eth0.100")],
+            bridges: vec![bridge("br0", &[])],
+            vlans: vec![VlanConfig {
+                parent: "eth0".to_string(),
+                vlan_id: 100,
+                ipv4: IpConfig::default(),
+                ipv6: IpConfig::default(),
+                mtu: None,
+            }],
+            ..Default::default()
+        };
+        assert!(find_orphan_interfaces(&cfg, &[]).is_empty());
+    }
+
+    #[test]
+    fn prune_orphan_interfaces_removes_only_the_named_entries() {
+        let mut cfg = NetworkConfig {
+            interfaces: vec![iface("eth0"), iface("bond0"), iface("eth1")],
+            ..Default::default()
+        };
+        prune_orphan_interfaces(&mut cfg, &["bond0".to_string()]);
+        let names: Vec<_> = cfg.interfaces.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["eth0", "eth1"]);
+    }
+
+    #[test]
+    fn prune_orphan_interfaces_is_a_noop_when_list_empty() {
+        let mut cfg = NetworkConfig {
+            interfaces: vec![iface("eth0")],
+            ..Default::default()
+        };
+        prune_orphan_interfaces(&mut cfg, &[]);
+        assert_eq!(cfg.interfaces.len(), 1);
     }
 }

@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { promoteOrphanedMembers } from './network';
-import type { BondConfig, BridgeConfig, InterfaceConfig, NetworkConfig } from './types';
+import { findOrphanInterfaces, promoteOrphanedMembers, stripInterfaces } from './network';
+import type {
+	BondConfig,
+	BridgeConfig,
+	InterfaceConfig,
+	LiveInterface,
+	NetworkConfig,
+} from './types';
+
+function liveIface(name: string): LiveInterface {
+	return {
+		name,
+		mac: '00:00:00:00:00:00',
+		up: true,
+		speed_mbps: null,
+		carrier: true,
+		ipv4_addresses: [],
+		ipv6_addresses: [],
+		mtu: 1500,
+		kind: 'physical',
+	};
+}
 
 function iface(name: string): InterfaceConfig {
 	return {
@@ -117,5 +137,104 @@ describe('promoteOrphanedMembers', () => {
 		const net = emptyNet({ bonds: [bond('bond0', ['eth0'])] });
 		const result = promoteOrphanedMembers(net, { kind: 'bond', name: 'bond0' }, ['eth0']);
 		expect(result.map((i) => i.name)).toEqual(['eth0']);
+	});
+});
+
+describe('findOrphanInterfaces', () => {
+	it('flags an interface entry that is neither live nor a configured master', () => {
+		// The headline case from issue #96: bond0 is in interfaces[]
+		// (likely from a past manual edit) but doesn't exist as a live
+		// device and isn't in bonds[]. The engine's validator now
+		// trips when the user tries to recreate the bond because the
+		// layered model would have two Links named bond0; the WebUI
+		// surfaces the orphan first so the user can clean it up.
+		const net = emptyNet({
+			interfaces: [iface('enp4s0'), iface('bond0'), iface('enp6s0f1')],
+		});
+		const live = [liveIface('enp4s0'), liveIface('enp6s0f1')];
+		expect(findOrphanInterfaces(net, live)).toEqual(['bond0']);
+	});
+
+	it('does not flag a freshly-added bond before it has been applied', () => {
+		// User added bond0 to bonds[] but hasn't clicked Apply yet —
+		// it's not in the live list either. We must not falsely
+		// surface it as orphan; the bonds[] entry covers it.
+		const net = emptyNet({
+			interfaces: [iface('eth0')],
+			bonds: [bond('bond0', ['eth0'])],
+		});
+		const live = [liveIface('eth0')]; // bond0 not yet a real device
+		expect(findOrphanInterfaces(net, live)).toEqual([]);
+	});
+
+	it('does not flag a bridge or vlan name held in interfaces[]', () => {
+		// Symmetric coverage with bridges + vlans — same logic, no
+		// regression for users who manage bridges or vlans.
+		const net = emptyNet({
+			interfaces: [iface('br0'), iface('eth0.100')],
+			bridges: [
+				{
+					name: 'br0',
+					members: [],
+					ipv4: { method: 'inherit', addresses: [], gateway: null },
+					ipv6: { method: 'inherit', addresses: [], gateway: null },
+					mtu: null,
+				},
+			],
+			vlans: [
+				{
+					parent: 'eth0',
+					vlan_id: 100,
+					ipv4: { method: 'dhcp', addresses: [], gateway: null },
+					ipv6: { method: 'slaac', addresses: [], gateway: null },
+					mtu: null,
+				},
+			],
+		});
+		expect(findOrphanInterfaces(net, [])).toEqual([]);
+	});
+
+	it('does not flag a NIC that is down but still present in sysfs', () => {
+		// Disconnected/disabled NICs still show up in
+		// `enumerate_interfaces` (sysfs is the source); their
+		// `up`/`carrier` may be false but the name is still in the
+		// live list. Don't strip user config for those — that would
+		// destroy DHCP/static settings on temporarily-unplugged
+		// devices.
+		const net = emptyNet({ interfaces: [iface('eth0')] });
+		const down = { ...liveIface('eth0'), up: false, carrier: false };
+		expect(findOrphanInterfaces(net, [down])).toEqual([]);
+	});
+
+	it('returns multiple orphans in interfaces[] order', () => {
+		// Ordering matters for the banner — show orphans in the same
+		// order they appear in the user's config so the message is
+		// stable across renders.
+		const net = emptyNet({
+			interfaces: [iface('zoot'), iface('eth0'), iface('apple')],
+		});
+		const live = [liveIface('eth0')];
+		expect(findOrphanInterfaces(net, live)).toEqual(['zoot', 'apple']);
+	});
+});
+
+describe('stripInterfaces', () => {
+	it('removes only the named entries, preserving order', () => {
+		const net = emptyNet({
+			interfaces: [iface('eth0'), iface('bond0'), iface('eth1')],
+		});
+		const result = stripInterfaces(net, ['bond0']);
+		expect(result.map((i) => i.name)).toEqual(['eth0', 'eth1']);
+	});
+
+	it('is a no-op when the names list is empty', () => {
+		const net = emptyNet({ interfaces: [iface('eth0')] });
+		expect(stripInterfaces(net, [])).toEqual(net.interfaces);
+	});
+
+	it('skips names that are not present', () => {
+		// Tolerant: a stale ref shouldn't make us throw.
+		const net = emptyNet({ interfaces: [iface('eth0')] });
+		expect(stripInterfaces(net, ['ghost']).map((i) => i.name)).toEqual(['eth0']);
 	});
 });

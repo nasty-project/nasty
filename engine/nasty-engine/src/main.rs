@@ -163,17 +163,6 @@ async fn main() -> anyhow::Result<()> {
     }
     state.protocols.restore().await;
 
-    // Initialize firewall based on current protocol states
-    {
-        use nasty_system::protocol::Protocol;
-        let mut proto_states = Vec::new();
-        for p in Protocol::ALL {
-            let enabled = state.protocols.is_enabled(*p).await;
-            proto_states.push((*p, enabled));
-        }
-        state.firewall.init(&proto_states).await;
-    }
-
     // SSH password auth is managed via /var/lib/nasty/sshd_override.conf
     // (created by tmpfiles with default "yes", toggled by the WebUI).
 
@@ -194,7 +183,25 @@ async fn main() -> anyhow::Result<()> {
     // marker file. Runs after restore_pending_revert so any in-flight
     // rollback from before the upgrade is settled first. Best-effort:
     // skipped if NM isn't reachable yet, retried next boot.
+    //
+    // Runs BEFORE firewall.init: migration may prune orphaned
+    // interfaces[] entries (issue #96) and strip dangling references
+    // to them from firewall-restrictions.json. Initializing the
+    // firewall after migration means the in-memory restrictions
+    // mirror the cleaned-on-disk state, so the next user edit
+    // doesn't accidentally re-persist the orphans.
     state.network.run_migration_if_needed().await;
+
+    // Initialize firewall based on current protocol states
+    {
+        use nasty_system::protocol::Protocol;
+        let mut proto_states = Vec::new();
+        for p in Protocol::ALL {
+            let enabled = state.protocols.is_enabled(*p).await;
+            proto_states.push((*p, enabled));
+        }
+        state.firewall.init(&proto_states).await;
+    }
 
     // Sync NVMe-oF ports with Tailscale IP (if Tailscale reconnected on boot)
     {

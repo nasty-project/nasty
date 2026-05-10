@@ -39,6 +39,33 @@ impl FirewallRestrictions {
             .await
             .map_err(|e| format!("write {RESTRICTIONS_PATH}: {e}"))
     }
+
+    /// Drop every reference to interfaces in `removed` from this
+    /// restrictions config. Used by the migration cleanup pass so a
+    /// pruned-from-`interfaces[]` name doesn't leave dangling
+    /// firewall rules pointing at a now-nonexistent iface (which the
+    /// WebUI also can't unselect because the dropdown source no
+    /// longer offers it). Returns true when the config changed —
+    /// caller decides whether to persist.
+    pub fn strip_iface_refs(&mut self, removed: &[String]) -> bool {
+        if removed.is_empty() || self.interfaces.is_empty() {
+            return false;
+        }
+        let drop: std::collections::HashSet<&str> = removed.iter().map(|s| s.as_str()).collect();
+        let mut changed = false;
+        // Per-service iface lists: filter out removed names. Service
+        // entries that drop to empty are themselves removed (empty
+        // means "no restriction" — same as not being in the map).
+        self.interfaces.retain(|_service, ifaces| {
+            let before = ifaces.len();
+            ifaces.retain(|iface| !drop.contains(iface.as_str()));
+            if ifaces.len() != before {
+                changed = true;
+            }
+            !ifaces.is_empty()
+        });
+        changed
+    }
 }
 
 // ── Types ──────────────────────────────────────────────────────
@@ -142,17 +169,26 @@ impl Default for FirewallService {
 
 impl FirewallService {
     pub fn new() -> Self {
+        // Restrictions are loaded lazily in `init()` rather than here,
+        // because the migration cleanup pass (run_migration_if_needed)
+        // can rewrite firewall-restrictions.json between AppState
+        // construction and firewall init. Loading at construction
+        // would cache pre-cleanup state and the next user edit would
+        // re-persist the orphans we just stripped.
         Self {
             state: tokio::sync::Mutex::new(FirewallState::default()),
-            restrictions: tokio::sync::Mutex::new(FirewallRestrictions::load()),
+            restrictions: tokio::sync::Mutex::new(FirewallRestrictions::default()),
         }
     }
 
     /// Initialize firewall with current protocol states.
-    /// Called at engine startup after protocol restore.
+    /// Called at engine startup after protocol restore + migration.
     pub async fn init(&self, enabled_protocols: &[(Protocol, bool)]) {
+        // Load fresh from disk so any migration-time cleanup is
+        // reflected in the in-memory state from the get-go.
         let mut state = self.state.lock().await;
-        let restrictions = self.restrictions.lock().await;
+        let mut restrictions = self.restrictions.lock().await;
+        *restrictions = FirewallRestrictions::load();
 
         // WebUI is always open
         let webui_sources = restrictions
@@ -467,5 +503,71 @@ mod tests {
                 .iter()
                 .any(|p| p.port == 3702 && p.transport == Transport::Udp)
         );
+    }
+
+    // ── strip_iface_refs ──────────────────────────────────────────
+
+    fn restrictions_with(items: &[(&str, &[&str])]) -> FirewallRestrictions {
+        FirewallRestrictions {
+            services: HashMap::new(),
+            interfaces: items
+                .iter()
+                .map(|(svc, ifaces)| {
+                    (
+                        svc.to_string(),
+                        ifaces.iter().map(|i| i.to_string()).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn strip_iface_refs_removes_named_iface_from_each_service_list() {
+        // The reproducer from issue #96: user attached restrictions
+        // to bond0 + enp4s0 across multiple protocols, then bond0
+        // went away. We must remove bond0 from every service's list
+        // without dropping the unaffected entries (enp4s0).
+        let mut r = restrictions_with(&[
+            ("nfs", &["bond0", "enp4s0"]),
+            ("smb", &["bond0"]),
+            ("iscsi", &["enp4s0"]),
+        ]);
+        let changed = r.strip_iface_refs(&["bond0".to_string()]);
+        assert!(changed);
+        // nfs: enp4s0 survives.
+        assert_eq!(
+            r.interfaces.get("nfs").unwrap(),
+            &vec!["enp4s0".to_string()]
+        );
+        // smb: only had bond0, list goes empty so the service entry
+        // is dropped (empty == "no restriction" — same as not being
+        // in the map at all, but we keep the map clean).
+        assert!(!r.interfaces.contains_key("smb"));
+        // iscsi: untouched.
+        assert_eq!(
+            r.interfaces.get("iscsi").unwrap(),
+            &vec!["enp4s0".to_string()]
+        );
+    }
+
+    #[test]
+    fn strip_iface_refs_returns_false_when_nothing_changed() {
+        let mut r = restrictions_with(&[("nfs", &["enp4s0"])]);
+        assert!(!r.strip_iface_refs(&["bond0".to_string()]));
+        assert_eq!(
+            r.interfaces.get("nfs").unwrap(),
+            &vec!["enp4s0".to_string()]
+        );
+    }
+
+    #[test]
+    fn strip_iface_refs_handles_empty_inputs() {
+        // Defensive — neither side should panic when the other is empty.
+        let mut empty = FirewallRestrictions::default();
+        assert!(!empty.strip_iface_refs(&["bond0".to_string()]));
+
+        let mut populated = restrictions_with(&[("nfs", &["enp4s0"])]);
+        assert!(!populated.strip_iface_refs(&[]));
     }
 }
