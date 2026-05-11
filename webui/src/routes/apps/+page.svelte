@@ -305,6 +305,48 @@
 	);
 	let fixingVolume = $state<string | null>(null); // host_path currently being chowned
 
+	/** One owner-mismatch group: a parent path plus any of its
+	 * descendant binds that share the same expected (uid, gid). A
+	 * single recursive chown of the parent covers all descendants,
+	 * so we render them folded under the parent — saves the user
+	 * clicking N near-identical Chown buttons in a row. */
+	type AggregatedMismatch = {
+		parent: VolumeMismatch;
+		descendants: VolumeMismatch[];
+	};
+
+	function effectiveGid(m: VolumeMismatch): number {
+		return m.expected_gid ?? m.expected_uid;
+	}
+
+	function aggregateOwnerMismatches(items: VolumeMismatch[]): AggregatedMismatch[] {
+		// Shortest paths first — any parent is shorter than its child.
+		const sorted = [...items].sort((a, b) => a.host_path.length - b.host_path.length);
+		const taken = new Set<number>();
+		const out: AggregatedMismatch[] = [];
+		for (let i = 0; i < sorted.length; i++) {
+			if (taken.has(i)) continue;
+			const parent = sorted[i];
+			const descendants: VolumeMismatch[] = [];
+			for (let j = i + 1; j < sorted.length; j++) {
+				if (taken.has(j)) continue;
+				const child = sorted[j];
+				// Strict-prefix check with the `/` separator so
+				// `/data` doesn't capture `/data-other`.
+				if (!child.host_path.startsWith(parent.host_path + '/')) continue;
+				// Recursive chown only covers descendants if they
+				// share the parent's expected owner. Different
+				// `user:` per service → can't fold.
+				if (child.expected_uid !== parent.expected_uid) continue;
+				if (effectiveGid(child) !== effectiveGid(parent)) continue;
+				descendants.push(child);
+				taken.add(j);
+			}
+			out.push({ parent, descendants });
+		}
+		return out;
+	}
+
 	// Editor underlines port-conflict, missing-device, and existing-but-wrong-owner lines.
 	const composeErrorLines = $derived([
 		...composePortErrorLines,
@@ -1367,8 +1409,10 @@
 									<p class="mb-2 font-medium">
 										Bind-mount permissions don't match the container's <code>user:</code> — the container will likely fail with <em>Permission denied</em>.
 									</p>
-									{#each ownerMismatches as m}
+									{#each aggregateOwnerMismatches(ownerMismatches) as group}
+										{@const m = group.parent}
 										{@const expectedLabel = `${m.expected_uid}:${m.expected_gid ?? m.expected_uid}`}
+										{@const nested = group.descendants.length}
 										<div class="mb-2 last:mb-0">
 											<div>
 												<span class="font-semibold">Line {m.line ?? '?'}:</span>
@@ -1380,6 +1424,13 @@
 												{/if}
 												service <span class="font-semibold">{m.service}</span> will run as <code>{expectedLabel}</code>.
 											</div>
+											{#if nested > 0}
+												<div class="mt-1 text-muted-foreground">
+													↳ {nested} nested bind{nested === 1 ? '' : 's'} share{nested === 1 ? 's' : ''} the same expected owner
+													{#each group.descendants as d, i}{#if i === 0} ({:else}, {/if}line {d.line ?? '?'}: <code>{d.host_path}</code>{#if i === group.descendants.length - 1}){/if}{/each}
+													— a recursive chown of the parent covers them all.
+												</div>
+											{/if}
 											{#if m.exists}
 												<div class="mt-1 flex flex-wrap gap-2">
 													<Button
@@ -1392,7 +1443,7 @@
 													</Button>
 													<Button
 														size="xs"
-														variant="ghost"
+														variant={nested > 0 ? 'secondary' : 'ghost'}
 														disabled={fixingVolume === m.host_path}
 														onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, true)}
 														title="Recursive — rewrites every existing file's owner"
@@ -1401,7 +1452,9 @@
 													</Button>
 												</div>
 											{:else}
-												<div class="mt-1 text-muted-foreground">Will be created with the right ownership when you deploy.</div>
+												<div class="mt-1 text-muted-foreground">
+													Will be created with the right ownership when you deploy{nested > 0 ? ` (along with the ${nested} nested bind${nested === 1 ? '' : 's'})` : ''}.
+												</div>
 											{/if}
 										</div>
 									{/each}
