@@ -227,6 +227,7 @@
 	type ImageInfo = { format: string; virtual_size: number; actual_size: number };
 	let importOpen = $state(false);
 	let importImageKey = $state(''); // "filesystem/name" to drive a <select>
+	let importTargetMode: 'existing' | 'create' = $state('existing');
 	let importTargetKey = $state(''); // "filesystem/subvolume" same idea
 	let importInfo: ImageInfo | null = $state(null);
 	let importInfoError = $state('');
@@ -237,6 +238,15 @@
 	let importDone = $state(false);
 	let importError = $state('');
 	let importWs: WebSocket | null = null;
+	// Auto-create target subvolume state. Only consulted when
+	// importTargetMode === 'create'. The size auto-fills from the
+	// image's virtual_size when an image is picked (see effect below),
+	// but stays user-editable for the "I want some headroom" case.
+	let importNewSvFs = $state('');
+	let importNewSvName = $state('');
+	let importNewSvSize = $state(0); // GiB
+	let importSvSizeTouched = $state(false);
+	let importCreating = $state(false);
 
 	// Only images that can become a disk show in the picker — ISOs are
 	// installer media and the engine rejects them up front, so hiding
@@ -247,9 +257,15 @@
 	);
 
 	async function openImportModal() {
-		await Promise.all([loadImages(), loadSubvolumes()]);
+		await Promise.all([loadImages(), loadSubvolumes(), loadFilesystems()]);
 		importImageKey = '';
+		importTargetMode = blockSubvolumes.length === 0 ? 'create' : 'existing';
 		importTargetKey = '';
+		importNewSvFs = filesystems[0]?.name ?? '';
+		importNewSvName = '';
+		importNewSvSize = 0;
+		importSvSizeTouched = false;
+		importCreating = false;
 		importInfo = null;
 		importInfoError = '';
 		importLog = [];
@@ -266,6 +282,33 @@
 		importWs?.close();
 		importWs = null;
 	}
+
+	// Default the new-subvolume name from the image filename — the
+	// stem is usually a recognizable distro/version identifier (e.g.
+	// haos_ova-12.0), which makes a fine subvolume name. User can
+	// override.
+	$effect(() => {
+		const key = importImageKey;
+		if (!key || importNewSvName !== '') return;
+		const [, ...rest] = key.split('/');
+		const filename = rest.join('/');
+		const stem = filename.replace(/\.[^.]+$/, '');
+		importNewSvName = stem
+			.toLowerCase()
+			.replace(/[^a-z0-9-]+/g, '-')
+			.replace(/^-+|-+$/g, '')
+			.slice(0, 40);
+	});
+
+	// Auto-fill the size from the image's virtual_size (rounded up to
+	// the next whole GiB) once we've fetched the info, unless the user
+	// has already typed a size — clobbering their input would be rude.
+	$effect(() => {
+		if (importInfo && !importSvSizeTouched) {
+			const gib = Math.ceil(importInfo.virtual_size / (1024 * 1024 * 1024));
+			importNewSvSize = Math.max(gib, 1);
+		}
+	});
 
 	// Whenever the user picks an image, fetch virtual-size so we can
 	// disable target subvolumes that are too small before any bytes
@@ -298,7 +341,39 @@
 	});
 
 	async function startImport() {
-		if (!importImageKey || !importTargetKey || !importInfo) return;
+		if (!importImageKey || !importInfo) return;
+
+		// Create the target subvolume first if the user picked the
+		// "create new" mode. We do this before flipping importBusy so
+		// the create error surfaces in importError and the user can
+		// retry without losing the modal.
+		if (importTargetMode === 'create') {
+			if (!importNewSvFs || !importNewSvName || importNewSvSize <= 0) return;
+			importCreating = true;
+			importError = '';
+			try {
+				const sv = await client.call<{ block_device: string | null }>('subvolume.create', {
+					filesystem: importNewSvFs,
+					name: importNewSvName,
+					subvolume_type: 'block',
+					volsize_bytes: importNewSvSize * 1024 * 1024 * 1024,
+				});
+				if (!sv.block_device) {
+					importError = 'Subvolume created but no loop device attached — try refreshing.';
+					importCreating = false;
+					return;
+				}
+				importTargetKey = `${importNewSvFs}/${importNewSvName}`;
+				await loadSubvolumes(); // so the new sv shows up if the user retries
+			} catch (e) {
+				importError = `Failed to create subvolume: ${e}`;
+				importCreating = false;
+				return;
+			}
+			importCreating = false;
+		}
+
+		if (!importTargetKey) return;
 		const [image_filesystem, ...iRest] = importImageKey.split('/');
 		const image_name = iRest.join('/');
 		const [target_filesystem, ...tRest] = importTargetKey.split('/');
@@ -1677,30 +1752,92 @@
 				</div>
 
 				<div>
-					<Label class="text-xs">Target block subvolume</Label>
-					{#if blockSubvolumes.length === 0}
-						<p class="mt-1 text-xs text-muted-foreground">
-							No block subvolumes available. Create one on the Subvolumes page first.
-						</p>
-						<Button size="xs" class="mt-1" onclick={() => goto('/subvolumes')}>Subvolumes</Button>
+					<div class="flex items-center justify-between">
+						<Label class="text-xs">Target block subvolume</Label>
+						<div class="flex rounded-md overflow-hidden border border-input text-xs">
+							<button
+								type="button"
+								class="px-2 py-0.5 transition-colors {importTargetMode === 'existing' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}"
+								onclick={() => (importTargetMode = 'existing')}
+								disabled={importBusy || importCreating}
+							>Existing</button>
+							<button
+								type="button"
+								class="px-2 py-0.5 transition-colors {importTargetMode === 'create' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}"
+								onclick={() => (importTargetMode = 'create')}
+								disabled={importBusy || importCreating}
+							>Create new</button>
+						</div>
+					</div>
+					{#if importTargetMode === 'existing'}
+						{#if blockSubvolumes.length === 0}
+							<p class="mt-1 text-xs text-muted-foreground">
+								No block subvolumes available — switch to "Create new" or make one on the Subvolumes page.
+							</p>
+						{:else}
+							<select
+								bind:value={importTargetKey}
+								disabled={importBusy}
+								class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+							>
+								<option value="">Select a target…</option>
+								{#each blockSubvolumes as sv}
+									{@const tooSmall = !!importInfo && !!sv.volsize_bytes && sv.volsize_bytes < importInfo.virtual_size}
+									<option value={`${sv.filesystem}/${sv.name}`} disabled={tooSmall}>
+										{sv.filesystem}/{sv.name}
+										({sv.volsize_bytes ? formatSize(sv.volsize_bytes) : '—'}, {sv.block_device})
+										{tooSmall ? '— too small' : ''}
+									</option>
+								{/each}
+							</select>
+							<p class="mt-1 text-xs text-muted-foreground">
+								The whole subvolume is overwritten — any prior contents are destroyed.
+							</p>
+						{/if}
 					{:else}
-						<select
-							bind:value={importTargetKey}
-							disabled={importBusy}
-							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-						>
-							<option value="">Select a target…</option>
-							{#each blockSubvolumes as sv}
-								{@const tooSmall = !!importInfo && !!sv.volsize_bytes && sv.volsize_bytes < importInfo.virtual_size}
-								<option value={`${sv.filesystem}/${sv.name}`} disabled={tooSmall}>
-									{sv.filesystem}/{sv.name}
-									({sv.volsize_bytes ? formatSize(sv.volsize_bytes) : '—'}, {sv.block_device})
-									{tooSmall ? '— too small' : ''}
-								</option>
-							{/each}
-						</select>
+						<div class="grid grid-cols-3 gap-2 mt-1">
+							<div class="col-span-1">
+								<Label class="text-[0.65rem] text-muted-foreground uppercase tracking-wide">Filesystem</Label>
+								<select
+									bind:value={importNewSvFs}
+									disabled={importBusy || importCreating}
+									class="mt-0.5 h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+								>
+									{#each filesystems as fs}
+										<option value={fs.name}>{fs.name}</option>
+									{/each}
+								</select>
+							</div>
+							<div class="col-span-1">
+								<Label class="text-[0.65rem] text-muted-foreground uppercase tracking-wide">Name</Label>
+								<Input
+									bind:value={importNewSvName}
+									disabled={importBusy || importCreating}
+									placeholder="haos-disk"
+									class="mt-0.5 h-9 text-sm"
+								/>
+							</div>
+							<div class="col-span-1">
+								<Label class="text-[0.65rem] text-muted-foreground uppercase tracking-wide">Size (GiB)</Label>
+								<Input
+									type="number"
+									min={1}
+									value={importNewSvSize}
+									disabled={importBusy || importCreating}
+									oninput={(e) => {
+										importSvSizeTouched = true;
+										importNewSvSize = parseInt((e.target as HTMLInputElement).value, 10) || 0;
+									}}
+									class="mt-0.5 h-9 text-sm"
+								/>
+							</div>
+						</div>
 						<p class="mt-1 text-xs text-muted-foreground">
-							The whole subvolume is overwritten — any prior contents are destroyed.
+							{#if importInfo}
+								Pre-filled to {Math.ceil(importInfo.virtual_size / (1024 * 1024 * 1024))} GiB (image virtual size). Bump it if you want headroom for guest growth.
+							{:else}
+								Pick an image above to auto-fill the minimum size.
+							{/if}
 						</p>
 					{/if}
 				</div>
@@ -1738,13 +1875,16 @@
 			</div>
 			<div class="flex items-center justify-end gap-2 px-4 py-2 border-t border-border">
 				{#if !importBusy && !importDone}
-					<Button variant="ghost" size="sm" onclick={closeImportModal}>Cancel</Button>
+					<Button variant="ghost" size="sm" onclick={closeImportModal} disabled={importCreating}>Cancel</Button>
+					{@const targetReady = importTargetMode === 'existing'
+						? !!importTargetKey
+						: !!importNewSvFs && !!importNewSvName && importNewSvSize > 0}
 					<Button
 						size="sm"
 						onclick={startImport}
-						disabled={!importImageKey || !importTargetKey || !importInfo || importInfoLoading}
+						disabled={!importImageKey || !targetReady || !importInfo || importInfoLoading || importCreating}
 					>
-						Start import
+						{importCreating ? 'Creating subvolume…' : importTargetMode === 'create' ? 'Create & import' : 'Start import'}
 					</Button>
 				{:else if importDone}
 					<Button size="sm" onclick={closeImportModal}>Done</Button>
