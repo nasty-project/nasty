@@ -203,6 +203,14 @@
 				async () => { await loadImages(); },
 				`Uploaded ${file.name}`
 			);
+			// If the upload happened from the import modal, auto-select
+			// the freshly-uploaded image so the user doesn't have to
+			// scroll the picker looking for it. Match on filename — the
+			// upload endpoint refuses collisions, so this is unique.
+			if (importOpen) {
+				const match = imageFiles.find((img) => img.name === file.name);
+				if (match) importImageKey = `${match.filesystem}/${match.name}`;
+			}
 		} catch (e) {
 			alert(`Upload failed: ${e}`);
 		} finally {
@@ -1737,10 +1745,41 @@
 			</div>
 			<div class="flex-1 overflow-auto px-4 py-3 space-y-3">
 				<div>
-					<Label class="text-xs">Source image</Label>
-					{#if importableImages.length === 0}
+					<div class="flex items-center justify-between">
+						<Label class="text-xs">Source image</Label>
+						{#if !noImagesSubvolume}
+							<Button
+								size="xs"
+								variant="outline"
+								disabled={uploading || importBusy}
+								onclick={() => document.getElementById('import-modal-file-upload')?.click()}
+							>
+								{uploading ? 'Uploading…' : 'Upload new…'}
+							</Button>
+							<input
+								id="import-modal-file-upload"
+								type="file"
+								accept=".iso,.qcow2,.img,.raw,.vdi,.vmdk,.qcow2.xz,.qcow2.gz,.qcow2.bz2,.img.xz,.img.gz,.img.bz2,.raw.xz,.raw.gz,.raw.bz2,.vdi.xz,.vdi.gz,.vdi.bz2,.vmdk.xz,.vmdk.gz,.vmdk.bz2"
+								class="hidden"
+								onchange={uploadImage}
+								disabled={uploading}
+							/>
+						{/if}
+					</div>
+					{#if noImagesSubvolume && filesystems.length > 0}
+						<div class="mt-1 rounded border border-dashed border-muted-foreground/30 p-3 text-xs text-muted-foreground">
+							<p class="mb-2">No image storage found. Create a <span class="font-mono">vms/images</span> subvolume to upload to:</p>
+							<div class="flex gap-2 items-center">
+								{#each filesystems as fs}
+									<Button size="xs" variant="outline" onclick={() => createImagesSubvolume(fs.name)}>
+										Create on {fs.name}
+									</Button>
+								{/each}
+							</div>
+						</div>
+					{:else if importableImages.length === 0}
 						<p class="mt-1 text-xs text-muted-foreground">
-							No disk images uploaded yet — supported: qcow2 / img / raw / vdi / vmdk, optionally .xz / .gz / .bz2. Upload one via the Create VM wizard.
+							No disk images uploaded yet — supported: qcow2 / img / raw / vdi / vmdk, optionally .xz / .gz / .bz2. Use "Upload new…" above to add one.
 						</p>
 					{:else}
 						<select
@@ -1755,6 +1794,14 @@
 								</option>
 							{/each}
 						</select>
+					{/if}
+					{#if uploading}
+						<div class="mt-2 flex items-center gap-2">
+							<div class="h-2 flex-1 rounded-full bg-muted overflow-hidden">
+								<div class="h-full bg-primary transition-all" style="width: {uploadProgress}%"></div>
+							</div>
+							<span class="text-xs text-muted-foreground w-10 text-right">{uploadProgress}%</span>
+						</div>
 					{/if}
 					{#if importInfoLoading}
 						<p class="mt-1 text-xs text-muted-foreground">Reading image metadata…</p>
