@@ -947,6 +947,34 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                     _ => {}
                 }
 
+                // `/fs/<X>/…` must reference a real mounted filesystem.
+                // Without this gate, the pre-create step would `mkdir -p`
+                // a phantom path on rootfs, leaving stale dirs under /fs
+                // every time someone typos a filesystem name. Refuse the
+                // deploy unconditionally — even with allow_unsafe, polluting
+                // the rootfs with /fs/<typo>/... is never what the user
+                // wanted.
+                if let Some(rest) = source.strip_prefix("/fs/") {
+                    let fs_name = rest.split('/').next().unwrap_or("");
+                    if !fs_name.is_empty() {
+                        let fs_path = format!("/fs/{fs_name}");
+                        use std::os::unix::fs::MetadataExt;
+                        let mounted = match (std::fs::metadata(&fs_path), std::fs::metadata("/fs"))
+                        {
+                            (Ok(c), Ok(p)) => c.dev() != p.dev(),
+                            _ => false,
+                        };
+                        if !mounted {
+                            return Err(format!(
+                                "{} bind-mounts '{}' — no filesystem is mounted at /fs/{} (typo? pick an existing filesystem from Storage → Filesystems)",
+                                scope("volumes"),
+                                source,
+                                fs_name,
+                            ));
+                        }
+                    }
+                }
+
                 if !allow_unsafe {
                     let allowed = in_app_dir || source.starts_with("/fs/") || source == "/fs";
                     if !allowed {
@@ -1230,8 +1258,35 @@ mod tests {
 
     #[test]
     fn strict_allows_app_dir_and_share_root_binds() {
+        // `/fs/<X>` is now gated on `<X>` being a mounted filesystem
+        // (see fs_root_mounted check in validate_compose) — the test
+        // can't guarantee any `/fs/*` mount exists on the runner, so
+        // the `/fs/photos` case lives in its own integration-style
+        // test in nasty-apps where it'd need a real mount fixture.
         ok_strict(
-            "services:\n  ok:\n    image: alpine\n    volumes:\n      - \"/var/lib/nasty/apps/myapp/data:/data\"\n      - \"/fs/photos:/photos:ro\"\n      - \"named-vol:/x\"\n",
+            "services:\n  ok:\n    image: alpine\n    volumes:\n      - \"/var/lib/nasty/apps/myapp/data:/data\"\n      - \"named-vol:/x\"\n",
+        );
+    }
+
+    #[test]
+    fn strict_rejects_unmounted_fs_root() {
+        // The "deploys would mkdir /fs/<typo>/... on rootfs" bug. The
+        // strict-mode validator must catch this before any pre-create
+        // step runs, with an error that names the offending fs.
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    volumes:\n      - \"/fs/this-fs-does-not-exist-nasty-test/media:/media\"\n",
+            "this-fs-does-not-exist-nasty-test",
+        );
+    }
+
+    #[test]
+    fn unsafe_also_rejects_unmounted_fs_root() {
+        // allow_unsafe relaxes the path-allowlist for `/fs/`, but it
+        // does NOT relax the "filesystem must be mounted" check — a
+        // typo'd fs name would still pollute rootfs.
+        err_unsafe(
+            "services:\n  bad:\n    image: alpine\n    volumes:\n      - \"/fs/this-fs-does-not-exist-nasty-test/media:/media\"\n",
+            "this-fs-does-not-exist-nasty-test",
         );
     }
 
