@@ -2569,25 +2569,46 @@ async fn read_fs_options_show_super(device: Option<&str>) -> FilesystemOptions {
     opts
 }
 
+/// One row pulled from `/proc/mounts` for a bcachefs filesystem.
+/// `devices` is the colon-separated source split into individual
+/// device paths (`/dev/sda:/dev/sdb` → `["/dev/sda", "/dev/sdb"]`),
+/// since multi-device bcachefs filesystems are first-class.
+#[derive(Debug, PartialEq, Eq)]
+struct ProcMountsBcachefs {
+    devices: Vec<String>,
+    mount_point: String,
+}
+
+/// Parse one `/proc/mounts` line into a bcachefs mount entry, or
+/// `None` for non-bcachefs or malformed rows. The kernel format is
+/// fixed (man proc(5): `device mount_point fstype options dump pass`),
+/// so this stays simple — but naming the fields keeps the call site
+/// readable and gives us a test seam for any future regression.
+fn parse_bcachefs_mount_line(line: &str) -> Option<ProcMountsBcachefs> {
+    let mut fields = line.split_whitespace();
+    let device = fields.next()?;
+    let mount_point = fields.next()?;
+    let fstype = fields.next()?;
+    if fstype != "bcachefs" {
+        return None;
+    }
+    Some(ProcMountsBcachefs {
+        devices: device.split(':').map(String::from).collect(),
+        mount_point: mount_point.to_string(),
+    })
+}
+
 /// Parse /proc/mounts for bcachefs entries.
 /// Returns map of mount_point -> list of devices.
 async fn read_bcachefs_mounts() -> Result<HashMap<String, Vec<String>>, FilesystemError> {
     let content = tokio::fs::read_to_string("/proc/mounts")
         .await
         .unwrap_or_default();
-
-    let mut mounts: HashMap<String, Vec<String>> = HashMap::new();
-
-    for line in content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 && parts[2] == "bcachefs" {
-            let device_str = parts[0]; // could be "dev1:dev2" for multi-device
-            let mount_point = parts[1].to_string();
-            let devices: Vec<String> = device_str.split(':').map(String::from).collect();
-            mounts.insert(mount_point, devices);
-        }
-    }
-
+    let mounts = content
+        .lines()
+        .filter_map(parse_bcachefs_mount_line)
+        .map(|m| (m.mount_point, m.devices))
+        .collect();
     Ok(mounts)
 }
 
@@ -2938,6 +2959,46 @@ mod tests {
         );
         assert!(parse_device_table_line("").is_none());
         assert!(parse_device_table_line("nonsense without colon-paren").is_none());
+    }
+
+    // ── parse_bcachefs_mount_line ──────────────────────────────────
+
+    #[test]
+    fn parse_bcachefs_mount_single_device() {
+        let m = parse_bcachefs_mount_line("/dev/sda /mnt/tank bcachefs rw,relatime 0 0")
+            .expect("should parse");
+        assert_eq!(m.mount_point, "/mnt/tank");
+        assert_eq!(m.devices, vec!["/dev/sda".to_string()]);
+    }
+
+    #[test]
+    fn parse_bcachefs_mount_multi_device() {
+        let m = parse_bcachefs_mount_line(
+            "/dev/sda:/dev/sdb:/dev/sdc /mnt/pool bcachefs rw,compression=zstd 0 0",
+        )
+        .expect("should parse");
+        assert_eq!(m.mount_point, "/mnt/pool");
+        assert_eq!(
+            m.devices,
+            vec![
+                "/dev/sda".to_string(),
+                "/dev/sdb".to_string(),
+                "/dev/sdc".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_bcachefs_mount_skips_other_fstypes() {
+        assert!(parse_bcachefs_mount_line("/dev/sda /mnt ext4 rw 0 0").is_none());
+        assert!(parse_bcachefs_mount_line("tmpfs /run tmpfs rw 0 0").is_none());
+    }
+
+    #[test]
+    fn parse_bcachefs_mount_skips_short_lines() {
+        assert!(parse_bcachefs_mount_line("").is_none());
+        assert!(parse_bcachefs_mount_line("/dev/sda").is_none());
+        assert!(parse_bcachefs_mount_line("/dev/sda /mnt").is_none());
     }
 
     // ── parse_bcachefs_opt ─────────────────────────────────────────
