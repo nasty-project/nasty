@@ -13,7 +13,8 @@
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
-	import { CircleCheck, Circle } from '@lucide/svelte';
+	import PathPicker from '$lib/components/PathPicker.svelte';
+	import { CircleCheck, Circle, FolderOpen } from '@lucide/svelte';
 	import type { Filesystem, FsDependents } from '$lib/types';
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { Lock } from '@lucide/svelte';
@@ -236,6 +237,9 @@
 	let newPorts = $state<{ name: string; container_port: number; host_port: string; protocol: string }[]>([]);
 	let newEnvs = $state<{ name: string; value: string }[]>([]);
 	let newVolumes = $state<{ name: string; mount_path: string; host_path: string }[]>([]);
+	/** Index into `newVolumes` of the row whose host_path picker is
+	 * currently open; null when no picker is up. */
+	let volumePickerIndex = $state<number | null>(null);
 	let newCpuLimit = $state('');
 	let newMemoryLimit = $state('');
 	/** Opt out of the strict bind-mount sandbox for simple apps. Persisted per-app. */
@@ -1180,14 +1184,17 @@
 						<Button size="xs" variant="outline" onclick={addVolume}>+ Add Volume</Button>
 					</div>
 					{#each newVolumes as vol, i}
-						<div class="grid grid-cols-[1fr_1fr_auto] gap-2 mt-1 items-center">
+						<div class="grid grid-cols-[1fr_1fr_auto_auto] gap-2 mt-1 items-center">
 							<Input bind:value={vol.mount_path} placeholder="/config" class="h-8 text-xs" />
-							<Input bind:value={vol.host_path} placeholder="auto (bcachefs)" class="h-8 text-xs" />
+							<Input bind:value={vol.host_path} placeholder="auto (bcachefs)" class="h-8 text-xs font-mono" />
+							<Button size="xs" variant="outline" onclick={() => { volumePickerIndex = i; }} title="Browse for a host folder or subvolume">
+								<FolderOpen size={12} />
+							</Button>
 							<Button size="xs" variant="ghost" onclick={() => removeVolume(i)}>x</Button>
 						</div>
 					{/each}
 					{#if newVolumes.length > 0}
-						<span class="mt-1 block text-xs text-muted-foreground">Host path is auto-generated under apps storage if left empty.</span>
+						<span class="mt-1 block text-xs text-muted-foreground">Leave empty to auto-create under apps storage, or pick an existing folder/subvolume with the browse button.</span>
 					{/if}
 				</div>
 
@@ -1540,6 +1547,20 @@
 		</table>
 	{/if}
 {/if}
+
+<!-- Volume host-path picker (simple installer Volume rows) -->
+<PathPicker
+	open={volumePickerIndex !== null}
+	initialPath={volumePickerIndex !== null ? newVolumes[volumePickerIndex]?.host_path ?? '' : ''}
+	title="Pick host folder for this volume"
+	onPick={(path) => {
+		if (volumePickerIndex !== null) {
+			newVolumes[volumePickerIndex].host_path = path;
+		}
+		volumePickerIndex = null;
+	}}
+	onClose={() => { volumePickerIndex = null; }}
+/>
 
 <!-- Deploy Output Modal -->
 {#if deployLog.length > 0 || deploying}
