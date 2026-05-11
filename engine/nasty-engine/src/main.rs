@@ -510,15 +510,20 @@ async fn upload_vm_image_handler(
         session.username, file_name, images_path
     );
 
-    let extensions = ["iso", "qcow2", "img", "raw"];
-    let ext = std::path::Path::new(&file_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-
-    if !extensions.contains(&ext.as_str()) {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("Invalid file type. Supported: {:?}", extensions) }))).into_response();
+    // Validate the filename through the central classifier so plain
+    // and compressed shapes (e.g. .qcow2.xz, .img.bz2) are all
+    // accepted via the same allowlist the importer and lister use.
+    if vm_disk_import::classify_vm_image(&file_name).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "Invalid file type. Supported: {}",
+                    vm_disk_import::supported_image_extensions_hint()
+                )
+            })),
+        )
+            .into_response();
     }
 
     let dest_path = std::path::Path::new(&images_path).join(&file_name);

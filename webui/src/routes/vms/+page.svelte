@@ -224,7 +224,16 @@
 	// subvolume so the VM can boot from it" — the canonical use case is
 	// distros that ship as qcow2 (HAOS, OPNsense, CoreOS) which can't
 	// be used as installer ISOs.
-	type ImageInfo = { format: string; virtual_size: number; actual_size: number };
+	type ImageInfo = {
+		format: string;
+		virtual_size: number;
+		actual_size: number;
+		/** Set when the source is a compressed wrapper (xz/gz/bz2). In
+		 * that case virtual_size is 0 — the engine doesn't decompress
+		 * just to peek, so the true virtual size is only known after
+		 * the WS import starts. */
+		compression?: string | null;
+	};
 	let importOpen = $state(false);
 	let importImageKey = $state(''); // "filesystem/name" to drive a <select>
 	let importTargetMode: 'existing' | 'create' = $state('existing');
@@ -250,8 +259,14 @@
 
 	// Only images that can become a disk show in the picker — ISOs are
 	// installer media and the engine rejects them up front, so hiding
-	// them here keeps the affordance honest.
-	const IMPORTABLE_EXTS = ['.qcow2', '.img', '.raw'];
+	// them here keeps the affordance honest. Compressed wrappers
+	// (xz/gz/bz2) are accepted around any disk format — the engine
+	// decompresses to a sibling tmp file before running qemu-img.
+	const IMPORTABLE_BASE_EXTS = ['.qcow2', '.img', '.raw', '.vdi', '.vmdk'];
+	const IMPORTABLE_COMPRESSION = ['', '.xz', '.gz', '.bz2'];
+	const IMPORTABLE_EXTS = IMPORTABLE_BASE_EXTS.flatMap((b) =>
+		IMPORTABLE_COMPRESSION.map((c) => `${b}${c}`),
+	);
 	let importableImages = $derived(
 		imageFiles.filter((img) => IMPORTABLE_EXTS.some((ext) => img.name.toLowerCase().endsWith(ext))),
 	);
@@ -303,8 +318,11 @@
 	// Auto-fill the size from the image's virtual_size (rounded up to
 	// the next whole GiB) once we've fetched the info, unless the user
 	// has already typed a size — clobbering their input would be rude.
+	// For compressed sources the engine doesn't decompress for the
+	// preflight (would block the modal for ~30s on HAOS), so
+	// virtual_size is 0 and we leave the field for the user to fill.
 	$effect(() => {
-		if (importInfo && !importSvSizeTouched) {
+		if (importInfo && importInfo.virtual_size > 0 && !importSvSizeTouched) {
 			const gib = Math.ceil(importInfo.virtual_size / (1024 * 1024 * 1024));
 			importNewSvSize = Math.max(gib, 1);
 		}
@@ -1096,12 +1114,12 @@
 						<input
 							id="file-upload"
 							type="file"
-							accept=".iso,.qcow2,.img,.raw"
+							accept=".iso,.qcow2,.img,.raw,.vdi,.vmdk,.qcow2.xz,.qcow2.gz,.qcow2.bz2,.img.xz,.img.gz,.img.bz2,.raw.xz,.raw.gz,.raw.bz2,.vdi.xz,.vdi.gz,.vdi.bz2,.vmdk.xz,.vmdk.gz,.vmdk.bz2"
 							class="hidden"
 							onchange={uploadImage}
 							disabled={uploading}
 						/>
-						<span class="text-xs text-muted-foreground">ISO, qcow2, img, raw</span>
+						<span class="text-xs text-muted-foreground">ISO, qcow2, img, raw, vdi, vmdk (xz/gz/bz2 OK)</span>
 					</div>
 					{#if uploading}
 						<div class="mt-2 flex items-center gap-2">
@@ -1722,7 +1740,7 @@
 					<Label class="text-xs">Source image</Label>
 					{#if importableImages.length === 0}
 						<p class="mt-1 text-xs text-muted-foreground">
-							No qcow2/img/raw images uploaded yet. Upload one via the Create VM wizard.
+							No disk images uploaded yet — supported: qcow2 / img / raw / vdi / vmdk, optionally .xz / .gz / .bz2. Upload one via the Create VM wizard.
 						</p>
 					{:else}
 						<select
@@ -1743,11 +1761,19 @@
 					{:else if importInfoError}
 						<p class="mt-1 text-xs text-destructive">{importInfoError}</p>
 					{:else if importInfo}
-						<p class="mt-1 text-xs text-muted-foreground">
-							Format <span class="font-mono">{importInfo.format}</span>, virtual size
-							<span class="font-mono">{formatSize(importInfo.virtual_size)}</span>
-							(on-disk {formatSize(importInfo.actual_size)})
-						</p>
+						{#if importInfo.compression}
+							<p class="mt-1 text-xs text-muted-foreground">
+								Format <span class="font-mono">{importInfo.format}</span> compressed with
+								<span class="font-mono">{importInfo.compression}</span>
+								(on-disk {formatSize(importInfo.actual_size)}). Virtual size is reported after decompression.
+							</p>
+						{:else}
+							<p class="mt-1 text-xs text-muted-foreground">
+								Format <span class="font-mono">{importInfo.format}</span>, virtual size
+								<span class="font-mono">{formatSize(importInfo.virtual_size)}</span>
+								(on-disk {formatSize(importInfo.actual_size)})
+							</p>
+						{/if}
 					{/if}
 				</div>
 
@@ -1833,8 +1859,10 @@
 							</div>
 						</div>
 						<p class="mt-1 text-xs text-muted-foreground">
-							{#if importInfo}
+							{#if importInfo && importInfo.virtual_size > 0}
 								Pre-filled to {Math.ceil(importInfo.virtual_size / (1024 * 1024 * 1024))} GiB (image virtual size). Bump it if you want headroom for guest growth.
+							{:else if importInfo && importInfo.compression}
+								Compressed source — virtual size unknown until decompression. Set the size to match what the image expects (HAOS is 32 GiB, OPNsense is 8 GiB).
 							{:else}
 								Pick an image above to auto-fill the minimum size.
 							{/if}

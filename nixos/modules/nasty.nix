@@ -920,6 +920,14 @@ in {
         nix              # nix flake lock (for bcachefs-tools version switching)
         git              # for update check (git ls-remote)
         qemu             # QEMU/KVM for virtual machines
+        # Decompressors for the VM disk-import flow: HAOS ships as
+        # *.qcow2.xz, OPNsense as *.img.bz2, lots of cloud images as
+        # *.qcow2.gz. The engine shells out to whichever matches the
+        # uploaded file's wrapper before handing the inner image to
+        # qemu-img convert.
+        xz
+        gzip
+        bzip2
         docker                       # Docker for apps runtime
         docker-compose               # Docker Compose for multi-container apps
         fwupd                        # fwupdmgr for firmware updates
