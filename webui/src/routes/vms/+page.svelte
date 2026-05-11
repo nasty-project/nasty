@@ -87,10 +87,32 @@
 
 	let filesystems: { name: string; mounted: boolean }[] = $state([]);
 
+	/** Reset every wizard field to its declared default. Single source of
+	 * truth so a newly-added `new*` state var only needs to land in one
+	 * place — adding the field to the declarations above and to this
+	 * function keeps `openWizard` and the post-create cleanup in sync
+	 * automatically. */
+	function resetCreateForm() {
+		newName = '';
+		newCpus = 1;
+		newMemory = 1024;
+		newDisk = '';
+		newDiskCreate = false;
+		newDiskFs = '';
+		newDiskSize = 10;
+		newIso = '';
+		newDescription = '';
+		newBootOrder = 'disk';
+		newAutostart = false;
+		newPassthrough = [];
+		newUsbPassthrough = [];
+		newNetMode = 'user';
+		newNetBridge = '';
+		newNetMac = '';
+	}
+
 	async function openWizard() {
-		newName = ''; newCpus = 1; newMemory = 1024; newDisk = ''; newDiskCreate = false;
-		newDiskFs = ''; newDiskSize = 10; newIso = ''; newDescription = '';
-		newBootOrder = 'disk'; newAutostart = false; newPassthrough = []; newUsbPassthrough = [];
+		resetCreateForm();
 		await Promise.all([loadSubvolumes(), loadFilesystems(), loadImages(), loadUsbDevices()]);
 		wizardStep = canCreateVm ? 1 : -1; // -1 = prerequisites
 	}
@@ -403,11 +425,7 @@
 		);
 		if (ok !== undefined) {
 			wizardStep = 0;
-			newName = ''; newCpus = 1; newMemory = 1024; newDisk = '';
-			newDiskCreate = false; newDiskFs = ''; newDiskSize = 10;
-			newIso = ''; newDescription = ''; newBootOrder = 'disk';
-			newAutostart = false; newPassthrough = []; newUsbPassthrough = [];
-			newNetMode = 'user'; newNetBridge = ''; newNetMac = '';
+			resetCreateForm();
 			await refresh();
 		}
 	}
