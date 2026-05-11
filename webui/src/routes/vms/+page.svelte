@@ -1122,7 +1122,7 @@
 						<input
 							id="file-upload"
 							type="file"
-							accept=".iso,.qcow2,.img,.raw,.vdi,.vmdk,.qcow2.xz,.qcow2.gz,.qcow2.bz2,.img.xz,.img.gz,.img.bz2,.raw.xz,.raw.gz,.raw.bz2,.vdi.xz,.vdi.gz,.vdi.bz2,.vmdk.xz,.vmdk.gz,.vmdk.bz2"
+							accept=".iso,.qcow2,.img,.raw,.vdi,.vmdk,.xz,.gz,.bz2"
 							class="hidden"
 							onchange={uploadImage}
 							disabled={uploading}
@@ -1759,7 +1759,7 @@
 							<input
 								id="import-modal-file-upload"
 								type="file"
-								accept=".iso,.qcow2,.img,.raw,.vdi,.vmdk,.qcow2.xz,.qcow2.gz,.qcow2.bz2,.img.xz,.img.gz,.img.bz2,.raw.xz,.raw.gz,.raw.bz2,.vdi.xz,.vdi.gz,.vdi.bz2,.vmdk.xz,.vmdk.gz,.vmdk.bz2"
+								accept=".iso,.qcow2,.img,.raw,.vdi,.vmdk,.xz,.gz,.bz2"
 								class="hidden"
 								onchange={uploadImage}
 								disabled={uploading}
