@@ -100,10 +100,12 @@ pub(super) async fn try_route(
         {
             (Ok(fs), Ok(name)) => {
                 match crate::vm_disk_import::resolve_image_path(state, fs, name).await {
-                    Ok(path) => match crate::vm_disk_import::read_image_info(&path).await {
-                        Ok(info) => ok(req, info),
-                        Err(e) => err(req, e),
-                    },
+                    Ok((path, kind)) => {
+                        match crate::vm_disk_import::read_image_info(&path, &kind).await {
+                            Ok(info) => ok(req, info),
+                            Err(e) => err(req, e),
+                        }
+                    }
                     Err(e) => err(req, e),
                 }
             }

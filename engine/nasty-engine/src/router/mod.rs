@@ -466,15 +466,16 @@ pub(super) async fn check_block_device_conflict(
 
 // ── VM image management ─────────────────────────────────────────
 
-pub(super) const VM_IMAGE_EXTENSIONS: &[&str] = &["iso", "qcow2", "img", "raw"];
-
 #[derive(serde::Serialize)]
 pub(super) struct VmImageListResult {
     subvolume_exists: bool,
     images: Vec<serde_json::Value>,
 }
 
-/// List all VM images from `vms/images` directories across all filesystems.
+/// List all VM images from `vms/images` directories across all
+/// filesystems. The classifier in `vm_disk_import` is the single
+/// source of truth for what counts as a VM image — including
+/// compressed shapes like `.qcow2.xz`.
 pub(super) async fn list_vm_images(state: &AppState) -> VmImageListResult {
     let filesystems = state.filesystems.list().await.unwrap_or_default();
     let mut images = Vec::new();
@@ -496,32 +497,30 @@ pub(super) async fn list_vm_images(state: &AppState) -> VmImageListResult {
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                let is_image = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| {
-                        VM_IMAGE_EXTENSIONS
-                            .iter()
-                            .any(|ext| e.eq_ignore_ascii_case(ext))
-                    })
-                    .unwrap_or(false);
-
-                if is_image {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let size = tokio::fs::metadata(&path)
-                        .await
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    images.push(serde_json::json!({
-                        "name": name,
-                        "path": path.to_string_lossy(),
-                        "filesystem": fs.name,
-                        "size_bytes": size,
-                    }));
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                let Some(kind) = crate::vm_disk_import::classify_vm_image(name) else {
+                    continue;
+                };
+                // Skip the hidden tmp files an in-flight decompression
+                // leaves behind so they don't pollute the picker.
+                if name.starts_with(".nasty-import.") {
+                    continue;
                 }
+                let size = tokio::fs::metadata(&path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                images.push(serde_json::json!({
+                    "name": name,
+                    "path": path.to_string_lossy(),
+                    "filesystem": fs.name,
+                    "size_bytes": size,
+                    "format": kind.format,
+                    "compression": kind.compression,
+                }));
             }
         }
     }
