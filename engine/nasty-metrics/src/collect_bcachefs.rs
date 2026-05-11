@@ -91,7 +91,7 @@ pub struct BackgroundOps {
     pub btree_write_buffer: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CompressionEntry {
     pub algorithm: String,
     pub compressed_bytes: u64,
@@ -100,21 +100,34 @@ pub struct CompressionEntry {
 
 // ── Discovery ───────────────────────────────────────────────────
 
+/// Extract the mount point of a bcachefs row from a `/proc/mounts`
+/// line. Returns `None` for non-bcachefs rows, header garbage, or
+/// malformed lines. The `/proc/mounts` format is fixed by the kernel
+/// (man proc(5)): `device mount_point fstype options dump pass` —
+/// five whitespace-separated fields. We name the fields we care
+/// about (fstype, mount_point) so a kernel reorder shows up here as
+/// a test failure rather than a silent skip.
+fn parse_bcachefs_mount_line(line: &str) -> Option<&str> {
+    let mut fields = line.split_whitespace();
+    let _device = fields.next()?;
+    let mount_point = fields.next()?;
+    let fstype = fields.next()?;
+    if fstype != "bcachefs" {
+        return None;
+    }
+    Some(mount_point)
+}
+
 /// Discover mounted bcachefs filesystems from /proc/mounts.
 pub fn discover_filesystems() -> Vec<BcachefsFs> {
     let content = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
     let mut result = Vec::new();
 
     for line in content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+        let Some(mount_point) = parse_bcachefs_mount_line(line) else {
             continue;
-        }
-        if parts[2] != "bcachefs" {
-            continue;
-        }
-
-        let mount_point = parts[1].to_string();
+        };
+        let mount_point = mount_point.to_string();
         let fs_name = Path::new(&mount_point)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -423,35 +436,39 @@ pub fn read_background_ops(sysfs: &Path) -> BackgroundOps {
 
 // ── Compression stats ───────────────────────────────────────────
 
+/// Parse one row of `sysfs/compression_stats`. The header line and
+/// any malformed row return `None`. Format is whitespace-separated:
+///
+///   `type    compressed      uncompressed    average extent size`
+///   `lz4     1.2G            3.5G            128K`
+///
+/// Empty rows (all-zero) yield `None` so the caller doesn't have to
+/// filter them after the fact.
+fn parse_compression_line(line: &str) -> Option<CompressionEntry> {
+    let mut fields = line.split_whitespace();
+    let algorithm = fields.next()?.to_string();
+    let compressed = parse_human_bytes(fields.next()?).unwrap_or(0);
+    let uncompressed = parse_human_bytes(fields.next()?).unwrap_or(0);
+    if compressed == 0 && uncompressed == 0 {
+        return None;
+    }
+    Some(CompressionEntry {
+        algorithm,
+        compressed_bytes: compressed,
+        uncompressed_bytes: uncompressed,
+    })
+}
+
 /// Parse compression_stats from sysfs.
 pub fn read_compression_stats(sysfs: &Path) -> Vec<CompressionEntry> {
-    let mut entries = Vec::new();
     let Ok(content) = std::fs::read_to_string(sysfs.join("compression_stats")) else {
-        return entries;
+        return Vec::new();
     };
-
-    // Format (tab-separated, first line is header):
-    //   type    compressed      uncompressed    average extent size
-    //   lz4     1.2G            3.5G            128K
-    for line in content.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let algorithm = parts[0].to_string();
-        let compressed = parse_human_bytes(parts[1]).unwrap_or(0);
-        let uncompressed = parse_human_bytes(parts[2]).unwrap_or(0);
-
-        if compressed > 0 || uncompressed > 0 {
-            entries.push(CompressionEntry {
-                algorithm,
-                compressed_bytes: compressed,
-                uncompressed_bytes: uncompressed,
-            });
-        }
-    }
-
-    entries
+    content
+        .lines()
+        .skip(1)
+        .filter_map(parse_compression_line)
+        .collect()
 }
 
 // ── Collect all ─────────────────────────────────────────────────
@@ -522,4 +539,76 @@ fn parse_human_bytes(s: &str) -> Option<u64> {
         .parse::<f64>()
         .ok()
         .map(|v| (v * multiplier as f64) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CompressionEntry, parse_bcachefs_mount_line, parse_compression_line};
+
+    #[test]
+    fn parse_compression_lz4_row() {
+        // Real-shape row from sysfs/compression_stats (tab-separated in
+        // the kernel, whitespace-separated after `lines()`).
+        let row = parse_compression_line("lz4    1.2G    3.5G    128K").expect("should parse");
+        assert_eq!(
+            row,
+            CompressionEntry {
+                algorithm: "lz4".to_string(),
+                compressed_bytes: 1_288_490_188,
+                uncompressed_bytes: 3_758_096_384,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_compression_zstd_row() {
+        let row = parse_compression_line("zstd  500M  2.0G").expect("should parse");
+        assert_eq!(row.algorithm, "zstd");
+        assert!(row.compressed_bytes > 0);
+        assert!(row.uncompressed_bytes > 0);
+    }
+
+    #[test]
+    fn parse_compression_all_zero_returns_none() {
+        // bcachefs sysfs lists every supported algorithm even when
+        // unused; filter those out at parse time.
+        assert!(parse_compression_line("zstd 0 0").is_none());
+        assert!(parse_compression_line("gzip 0B 0B").is_none());
+    }
+
+    #[test]
+    fn parse_compression_short_row_returns_none() {
+        assert!(parse_compression_line("lz4").is_none());
+        assert!(parse_compression_line("lz4 1.2G").is_none());
+        assert!(parse_compression_line("").is_none());
+    }
+
+    #[test]
+    fn parse_proc_mounts_bcachefs_single_device() {
+        let mp = parse_bcachefs_mount_line("/dev/sda /mnt/tank bcachefs rw,relatime 0 0")
+            .expect("should parse");
+        assert_eq!(mp, "/mnt/tank");
+    }
+
+    #[test]
+    fn parse_proc_mounts_bcachefs_multi_device() {
+        let mp = parse_bcachefs_mount_line(
+            "/dev/sda:/dev/sdb /mnt/pool bcachefs rw,compression=zstd 0 0",
+        )
+        .expect("should parse");
+        assert_eq!(mp, "/mnt/pool");
+    }
+
+    #[test]
+    fn parse_proc_mounts_skips_non_bcachefs() {
+        assert!(parse_bcachefs_mount_line("/dev/sda /mnt/tank ext4 rw 0 0").is_none());
+        assert!(parse_bcachefs_mount_line("tmpfs /run tmpfs rw 0 0").is_none());
+    }
+
+    #[test]
+    fn parse_proc_mounts_skips_short_lines() {
+        assert!(parse_bcachefs_mount_line("").is_none());
+        assert!(parse_bcachefs_mount_line("/dev/sda").is_none());
+        assert!(parse_bcachefs_mount_line("/dev/sda /mnt").is_none());
+    }
 }

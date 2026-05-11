@@ -2672,6 +2672,46 @@ async fn reload_nginx() {
         .await;
 }
 
+/// One row parsed from `ss -tlnp` output.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SsListener {
+    pub port: u16,
+    pub process: String,
+}
+
+/// Parse a single non-header line of `ss -tlnp` output. The header
+/// row and any line that doesn't carry a parseable `host:port` are
+/// returned as `None`. Format example:
+///
+///   `LISTEN 0 4096 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=1753,fd=6))`
+///
+/// We name the columns we care about (local addr, users blob) rather
+/// than accessing `fields[3]` and `fields[5]` positionally — that way
+/// an `ss` column reorder in a future iproute2 release fails this
+/// unit test instead of silently breaking port-conflict detection.
+pub(crate) fn parse_ss_listener_line(line: &str) -> Option<SsListener> {
+    let mut fields = line.split_whitespace();
+    let _state = fields.next()?; // "LISTEN"
+    let _recv_q = fields.next()?;
+    let _send_q = fields.next()?;
+    let local = fields.next()?; // local address:port
+    let _peer = fields.next()?; // peer address:port
+
+    // Local can be "0.0.0.0:443", "[::]:443", "*:443", "127.0.0.1:8080", etc.
+    let port: u16 = local.rsplit(':').next()?.parse().ok()?;
+
+    // Users blob looks like `users:(("nginx",pid=1753,fd=6))`. Some lines
+    // have no `users:` column (e.g. when `ss` is run without enough
+    // privilege to peek at PIDs); fall back to "unknown".
+    let process = fields
+        .next()
+        .and_then(|users| users.split('"').nth(1))
+        .unwrap_or("unknown")
+        .to_string();
+
+    Some(SsListener { port, process })
+}
+
 /// Query system TCP listeners via `ss -tlnp` and return (port, process_name) pairs.
 async fn system_listeners() -> Result<Vec<(u16, String)>, AppsError> {
     let output = Command::new("ss")
@@ -2684,29 +2724,12 @@ async fn system_listeners() -> Result<Vec<(u16, String)>, AppsError> {
     let mut listeners = Vec::new();
 
     for line in stdout.lines().skip(1) {
-        // Format: "LISTEN 0 4096 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=1753,fd=6))"
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 5 {
+        let Some(l) = parse_ss_listener_line(line) else {
             continue;
-        }
-        let local = fields[3];
-        // Extract port from "0.0.0.0:443" or "[::]:443" or "*:443"
-        let port_str = local.rsplit(':').next().unwrap_or("");
-        let port: u16 = match port_str.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
         };
-
-        // Extract process name from users:(("name",...))
-        let process = if let Some(users) = fields.get(5) {
-            users.split('"').nth(1).unwrap_or("unknown").to_string()
-        } else {
-            "unknown".to_string()
-        };
-
         // Deduplicate (IPv4 + IPv6 both show up)
-        if !listeners.iter().any(|(p, _): &(u16, String)| *p == port) {
-            listeners.push((port, process));
+        if !listeners.iter().any(|(p, _): &(u16, String)| *p == l.port) {
+            listeners.push((l.port, l.process));
         }
     }
 
@@ -3380,5 +3403,77 @@ services:
         assert_eq!(r.len(), 1);
         assert!(!r[0].exists);
         assert_eq!(r[0].expected_uid, 3001);
+    }
+
+    // ── parse_ss_listener_line ──
+
+    use super::{SsListener, parse_ss_listener_line};
+
+    #[test]
+    fn parse_ss_ipv4_with_process() {
+        let l = parse_ss_listener_line(
+            r#"LISTEN 0      4096   0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=1753,fd=6))"#,
+        )
+        .expect("should parse");
+        assert_eq!(
+            l,
+            SsListener {
+                port: 443,
+                process: "nginx".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ss_ipv6_dual_bind() {
+        // `[::]:443` is the IPv6-any form ss emits when a TCP socket is
+        // bound on `::` and there's no explicit IPv4-only socket.
+        let l = parse_ss_listener_line(
+            r#"LISTEN 0      4096   [::]:80 [::]:* users:(("caddy",pid=42,fd=3))"#,
+        )
+        .expect("should parse");
+        assert_eq!(l.port, 80);
+        assert_eq!(l.process, "caddy");
+    }
+
+    #[test]
+    fn parse_ss_wildcard_address() {
+        let l = parse_ss_listener_line(r#"LISTEN 0 128 *:22 *:* users:(("sshd",pid=900,fd=4))"#)
+            .expect("should parse");
+        assert_eq!(l.port, 22);
+        assert_eq!(l.process, "sshd");
+    }
+
+    #[test]
+    fn parse_ss_without_users_column() {
+        // Without `-p` or without privilege, `ss` omits the trailing
+        // users column entirely. We still want the port; process
+        // falls back to "unknown".
+        let l = parse_ss_listener_line(r#"LISTEN 0 4096 127.0.0.1:9100 0.0.0.0:*"#)
+            .expect("should parse");
+        assert_eq!(l.port, 9100);
+        assert_eq!(l.process, "unknown");
+    }
+
+    #[test]
+    fn parse_ss_header_returns_none() {
+        // The first row of `ss -tlnp` output is the column header. Our
+        // caller `.skip(1)`s past it, but the parser should also bail
+        // because "Local" isn't a parseable port.
+        let h = parse_ss_listener_line(
+            "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process",
+        );
+        assert!(h.is_none(), "header should not parse: {h:?}");
+    }
+
+    #[test]
+    fn parse_ss_blank_line_returns_none() {
+        assert!(parse_ss_listener_line("").is_none());
+        assert!(parse_ss_listener_line("   ").is_none());
+    }
+
+    #[test]
+    fn parse_ss_garbage_returns_none() {
+        assert!(parse_ss_listener_line("not ss output").is_none());
     }
 }
