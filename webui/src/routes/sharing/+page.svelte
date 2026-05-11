@@ -5,8 +5,8 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type {
-		SmbShare, IscsiTarget, NvmeofSubsystem,
-		Subvolume, ProtocolStatus, SmbGroup
+		IscsiTarget, NvmeofSubsystem,
+		Subvolume, ProtocolStatus
 	} from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -16,11 +16,18 @@
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { AlertTriangle } from '@lucide/svelte';
 	import NfsPanel from './NfsPanel.svelte';
+	import SmbPanel from './SmbPanel.svelte';
 	import {
 		nfs,
 		nfsRefresh,
 		nfsLoadProtocol,
 	} from '$lib/sharing/nfs.svelte';
+	import {
+		smb,
+		smbRefresh,
+		smbLoadProtocol,
+		smbEnsureSystemUsers,
+	} from '$lib/sharing/smb.svelte';
 
 	// ── Share creation wizard ────────────────────────────
 	let shareWizardStep: 0 | 1 | 2 | 3 | 4 = $state(0);
@@ -34,7 +41,6 @@
 	let shareSmbGuestOk = $state(false);
 	let shareSmbReadOnly = $state(false);
 	let shareSmbValidUsers: string[] = $state([]);
-	let smbSystemUsers: { username: string; uid: number }[] = $state([]);
 	let showInlineUserCreate = $state(false);
 	let inlineUsername = $state('');
 	let inlinePassword = $state('');
@@ -213,135 +219,12 @@
 	// events), and `nfsLoadProtocol()` (triggered on protocol events).
 
 	// ── SMB state ────────────────────────────────────────
-	let smbShares: SmbShare[] = $state([]);
-	let smbLoading = $state(true);
-	let smbProtocol: ProtocolStatus | null = $state(null);
-	let smbShowCreate = $state(false);
-	let smbSubvolumes: Subvolume[] = $state([]);
-	let smbNewSubvolume = $state('');
-	let smbNewName = $state('');
-	let smbNewComment = $state('');
-	let smbNewReadOnly = $state(false);
-	let smbNewGuestOk = $state(false);
-	let smbExpanded = $state<Record<string, boolean>>({});
-	let smbAddUserShare = $state<string | null>(null);
-	let smbAddUserName = $state('');
-	let smbGroups: SmbGroup[] = $state([]);
-	let smbSearch = $state('');
-	type SmbSortKey = 'name' | 'path' | 'status';
-	let smbSortKey = $state<SmbSortKey | null>(null);
-	let smbSortDir = $state<'asc' | 'desc'>('asc');
-
-	$effect(() => { if (smbShowCreate) smbLoadSubvolumes(); });
-
-	function smbToggleSort(key: SmbSortKey) {
-		if (smbSortKey === key) smbSortDir = smbSortDir === 'asc' ? 'desc' : 'asc';
-		else { smbSortKey = key; smbSortDir = 'asc'; }
-	}
-
-	const smbFiltered = $derived(
-		smbSearch.trim()
-			? smbShares.filter(s =>
-				s.name.toLowerCase().includes(smbSearch.toLowerCase()) ||
-				s.path.toLowerCase().includes(smbSearch.toLowerCase()) ||
-				s.comment?.toLowerCase().includes(smbSearch.toLowerCase()))
-			: smbShares
-	);
-
-	const smbSorted = $derived.by(() => {
-		if (!smbSortKey) return smbFiltered;
-		return [...smbFiltered].sort((a, b) => {
-			let cmp = 0;
-			if (smbSortKey === 'name') cmp = a.name.localeCompare(b.name);
-			else if (smbSortKey === 'path') cmp = a.path.localeCompare(b.path);
-			else if (smbSortKey === 'status') cmp = Number(b.enabled) - Number(a.enabled);
-			return smbSortDir === 'asc' ? cmp : -cmp;
-		});
-	});
-
-	async function smbRefresh() {
-		await withToast(async () => {
-			[smbShares, smbGroups] = await Promise.all([
-				client.call<SmbShare[]>('share.smb.list'),
-				client.call<SmbGroup[]>('smb.group.list').catch(() => [] as SmbGroup[]),
-			]);
-		});
-	}
-	async function smbLoadProtocol() {
-		try {
-			const all = await client.call<ProtocolStatus[]>('service.protocol.list');
-			smbProtocol = all.find(p => p.name === 'smb') ?? null;
-		} catch { /* ignore */ }
-	}
-	async function smbLoadSubvolumes() {
-		await withToast(async () => {
-			const all = await client.call<Subvolume[]>('subvolume.list_all');
-			smbSubvolumes = all.filter(s => s.subvolume_type === 'filesystem');
-		});
-	}
-	function smbOnSubvolumeSelect() {
-		if (smbNewSubvolume && !smbNewName) {
-			const sv = smbSubvolumes.find(s => s.path === smbNewSubvolume);
-			if (sv) smbNewName = sv.name;
-		}
-	}
-	async function smbCreate() {
-		if (!smbNewName || !smbNewSubvolume) return;
-		const ok = await withToast(
-			() => client.call('share.smb.create', {
-				name: smbNewName,
-				path: smbNewSubvolume,
-				comment: smbNewComment || undefined,
-				read_only: smbNewReadOnly,
-				guest_ok: smbNewGuestOk,
-			}),
-			'SMB share created'
-		);
-		if (ok !== undefined) {
-			smbShowCreate = false;
-			smbNewSubvolume = '';
-			smbNewName = '';
-			smbNewComment = '';
-			await smbRefresh();
-		}
-	}
-	async function smbToggleEnabled(share: SmbShare) {
-		await withToast(
-			() => client.call('share.smb.update', { id: share.id, enabled: !share.enabled }),
-			`Share ${share.enabled ? 'disabled' : 'enabled'}`
-		);
-		await smbRefresh();
-	}
-	async function smbRemove(id: string) {
-		if (!await confirm('Delete this SMB share?')) return;
-		await withToast(() => client.call('share.smb.delete', { id }), 'SMB share deleted');
-		await smbRefresh();
-	}
-	async function smbToggleField(share: SmbShare, field: 'read_only' | 'browseable' | 'guest_ok') {
-		await withToast(
-			() => client.call('share.smb.update', { id: share.id, [field]: !share[field] }),
-			'Share updated'
-		);
-		await smbRefresh();
-	}
-	async function smbRemoveUser(share: SmbShare, username: string) {
-		const valid_users = share.valid_users.filter(u => u !== username);
-		await withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), 'User removed');
-		await smbRefresh();
-	}
-	async function smbAddUser(share: SmbShare) {
-		if (!smbAddUserName) return;
-		const valid_users = [...share.valid_users, smbAddUserName];
-		const ok = await withToast(
-			() => client.call('share.smb.update', { id: share.id, valid_users }),
-			'User added'
-		);
-		if (ok !== undefined) {
-			smbAddUserShare = null;
-			smbAddUserName = '';
-		}
-		await smbRefresh();
-	}
+	// SMB state + handlers live in lib/sharing/smb.svelte.ts and the
+	// <SmbPanel> component. The page imports only what the cross-
+	// protocol wizard, onMount, and event broadcasts need: `smb.protocol`
+	// for the protocol toggle button, `smb.systemUsers` (and the
+	// `smbEnsureSystemUsers()` lazy-loader) for the wizard's valid-users
+	// picker, and the refresh/loadProtocol entry points.
 
 	// ── iSCSI state ──────────────────────────────────────
 	let iscsiTargets: IscsiTarget[] = $state([]);
@@ -633,7 +516,7 @@
 		client.onEvent(handleEvent);
 		await Promise.all([
 			nfsRefresh().then(() => { nfs.loading = false; }),
-			smbRefresh().then(() => { smbLoading = false; }),
+			smbRefresh().then(() => { smb.loading = false; }),
 			iscsiRefresh().then(() => { iscsiLoading = false; }),
 			nvmeRefresh().then(() => { nvmeLoading = false; }),
 			nfsLoadProtocol(),
@@ -670,7 +553,7 @@
 
 			<!-- Step 1: Protocol -->
 			{#if shareWizardStep === 1}
-			{@const selectedProto = ({ nfs: nfs.protocol, smb: smbProtocol, iscsi: iscsiProtocol, nvmeof: nvmeProtocol })[shareProtocol]}
+			{@const selectedProto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsiProtocol, nvmeof: nvmeProtocol })[shareProtocol]}
 			<div class="mb-4">
 				<Label>Protocol</Label>
 				<select bind:value={shareProtocol} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
@@ -757,8 +640,8 @@
 						if (shareProtocol === 'nvmeof' && !shareNvmeofName) shareNvmeofName = sv.name;
 					}
 					shareWizardStep = 3;
-					if (shareProtocol === 'smb' && smbSystemUsers.length === 0) {
-						client.call<{ username: string; uid: number }[]>('smb.user.list').then(u => { smbSystemUsers = u; }).catch(() => {});
+					if (shareProtocol === 'smb') {
+						smbEnsureSystemUsers();
 					}
 				}} disabled={!shareSubvolume}>Next: Access →</Button>
 			</div>
@@ -808,16 +691,16 @@
 							</div>
 						{/if}
 
-						{#if smbSystemUsers.some(u => !shareSmbValidUsers.includes(u.username)) || smbGroups.some(g => !shareSmbValidUsers.includes(`@${g.name}`))}
+						{#if smb.systemUsers.some(u => !shareSmbValidUsers.includes(u.username)) || smb.groups.some(g => !shareSmbValidUsers.includes(`@${g.name}`))}
 							<div class="mb-3 rounded-md border border-border p-3">
 								<p class="mb-2 text-[0.65rem] font-semibold uppercase tracking-wide text-muted-foreground/70">Click to add</p>
 								<div class="flex flex-wrap gap-2">
-									{#each smbSystemUsers.filter(u => !shareSmbValidUsers.includes(u.username)) as user}
+									{#each smb.systemUsers.filter(u => !shareSmbValidUsers.includes(u.username)) as user}
 										<Button size="xs" variant="secondary" onclick={() => { shareSmbValidUsers = [...shareSmbValidUsers, user.username]; }}>
 											{user.username}
 										</Button>
 									{/each}
-									{#each smbGroups.filter(g => !shareSmbValidUsers.includes(`@${g.name}`)) as group}
+									{#each smb.groups.filter(g => !shareSmbValidUsers.includes(`@${g.name}`)) as group}
 										<Button size="xs" variant="secondary" class="text-blue-400" onclick={() => { shareSmbValidUsers = [...shareSmbValidUsers, `@${group.name}`]; }}>
 											@{group.name}
 										</Button>
@@ -847,7 +730,7 @@
 									<div class="mb-4">
 										<Label>Add to Groups</Label>
 										<div class="mt-1 flex flex-wrap gap-2">
-											{#each smbGroups as group}
+											{#each smb.groups as group}
 												<label class="flex items-center gap-1.5 text-sm cursor-pointer rounded border border-border px-2 py-1 hover:bg-muted/30">
 													<input type="checkbox" class="rounded border-input"
 														onchange={(e) => {
@@ -865,7 +748,7 @@
 													<Input bind:value={inlineGroupName} placeholder="Group name" class="h-7 w-32 text-xs" />
 													<Button size="xs" disabled={!inlineGroupName.trim()} onclick={async () => {
 														await withToast(() => client.call('smb.group.create', { name: inlineGroupName.trim() }), `Group "${inlineGroupName}" created`);
-														smbGroups = await client.call('smb.group.list');
+														smb.groups = await client.call('smb.group.list');
 														inlineGroups = [...inlineGroups, inlineGroupName.trim()];
 														inlineGroupName = '';
 														showInlineGroupCreate = false;
@@ -888,7 +771,7 @@
 													await client.call('smb.group.add_member', { group: g, user: inlineUsername }).catch(() => {});
 												}
 												shareSmbValidUsers = [...shareSmbValidUsers, inlineUsername];
-												smbSystemUsers = [...smbSystemUsers, { username: inlineUsername, uid: 0 }];
+												smb.systemUsers = [...smb.systemUsers, { username: inlineUsername, uid: 0 }];
 												showInlineUserCreate = false;
 												inlineUsername = ''; inlinePassword = ''; inlinePasswordConfirm = ''; inlineGroups = [];
 											}
@@ -975,8 +858,8 @@
 <!-- Tab bar with inline status -->
 <div class="mb-6 flex items-center border-b border-border">
 	{#each TABS as tab}
-		{@const proto = ({ nfs: nfs.protocol, smb: smbProtocol, iscsi: iscsiProtocol, nvmeof: nvmeProtocol })[tab.key]}
-		{@const count = ({ nfs: nfs.shares.length, smb: smbShares.length, iscsi: iscsiTargets.length, nvmeof: nvmeSubsystems.length })[tab.key]}
+		{@const proto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsiProtocol, nvmeof: nvmeProtocol })[tab.key]}
+		{@const count = ({ nfs: nfs.shares.length, smb: smb.shares.length, iscsi: iscsiTargets.length, nvmeof: nvmeSubsystems.length })[tab.key]}
 		<button
 			onclick={() => switchTab(tab.key)}
 			class="flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors {activeTab === tab.key
@@ -1008,181 +891,7 @@
 
 <!-- ════════════════════════════════════════════════════ SMB ════════════════════════════════════════════════════ -->
 {:else if activeTab === 'smb'}
-
-
-<div class="mb-4 flex items-center gap-3">
-	<Input bind:value={smbSearch} placeholder="Search..." class="h-9 w-48" />
-</div>
-
-{#if smbShowCreate}
-	<Card class="mb-6 max-w-2xl">
-		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
-			<div class="mb-4">
-				<Label for="smb-subvol">Subvolume</Label>
-				<select id="smb-subvol" bind:value={smbNewSubvolume} onchange={smbOnSubvolumeSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-					<option value="">Select a subvolume...</option>
-					{#each smbSubvolumes as sv}
-						<option value={sv.path}>{sv.filesystem}/{sv.name} ({sv.path})</option>
-					{/each}
-				</select>
-				{#if smbSubvolumes.length === 0}
-					<span class="mt-1 block text-xs text-muted-foreground">No filesystem subvolumes found.</span>
-					<Button size="xs" class="mt-1" onclick={() => goto('/subvolumes')}>Subvolumes</Button>
-				{/if}
-			</div>
-			<div class="mb-4">
-				<Label for="smb-name">Share Name</Label>
-				<Input id="smb-name" bind:value={smbNewName} placeholder="documents" class="mt-1" />
-				<span class="mt-1 block text-xs text-muted-foreground">Name visible to network clients</span>
-			</div>
-			<div class="mb-4">
-				<Label for="smb-comment">Comment</Label>
-				<Input id="smb-comment" bind:value={smbNewComment} placeholder="Optional description" class="mt-1" />
-			</div>
-			<div class="mb-4 flex gap-6">
-				<label class="flex cursor-pointer items-center gap-2">
-					<input type="checkbox" bind:checked={smbNewReadOnly} class="h-4 w-4" /> Read-only
-				</label>
-				<label class="flex cursor-pointer items-center gap-2">
-					<input type="checkbox" bind:checked={smbNewGuestOk} class="h-4 w-4" /> Allow guests
-				</label>
-			</div>
-			<Button onclick={smbCreate} disabled={!smbNewName || !smbNewSubvolume}>Create</Button>
-		</CardContent>
-	</Card>
-{/if}
-
-{#if smbLoading}
-	<p class="text-muted-foreground">Loading...</p>
-{:else if smbShares.length === 0}
-	<p class="text-muted-foreground">No shares configured.</p>
-{:else}
-	<table class="w-full text-sm">
-		<thead>
-			<tr>
-				<SortTh label="Name" active={smbSortKey === 'name'} dir={smbSortDir} onclick={() => smbToggleSort('name')} />
-				<SortTh label="Path" active={smbSortKey === 'path'} dir={smbSortDir} onclick={() => smbToggleSort('path')} />
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Access</th>
-				<SortTh label="Status" active={smbSortKey === 'status'} dir={smbSortDir} onclick={() => smbToggleSort('status')} />
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each smbSorted as share}
-				<tr
-					class="border-b border-border cursor-pointer hover:bg-muted/30 transition-colors"
-					onclick={() => smbExpanded[share.id] = !smbExpanded[share.id]}
-				>
-					<td class="p-3">
-						<strong>{share.name}</strong>
-						{#if share.comment}<br /><span class="text-xs text-muted-foreground">{share.comment}</span>{/if}
-					</td>
-					<td class="p-3 font-mono text-sm">{share.path}</td>
-					<td class="p-3">
-						<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">{share.read_only ? 'RO' : 'RW'}</span>
-						{#if share.guest_ok}<span class="mr-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">Guest</span>{/if}
-						{#if share.valid_users.length > 0}
-							{@const userCount = share.valid_users.filter(u => !u.startsWith('@')).length}
-							{@const groupCount = share.valid_users.filter(u => u.startsWith('@')).length}
-							<span class="inline-block rounded bg-secondary px-1.5 py-0.5 text-xs">
-								{#if userCount > 0}{userCount} user{userCount !== 1 ? 's' : ''}{/if}{#if userCount > 0 && groupCount > 0}, {/if}{#if groupCount > 0}{groupCount} group{groupCount !== 1 ? 's' : ''}{/if}
-							</span>
-						{/if}
-					</td>
-					<td class="p-3">
-						<Badge variant={share.enabled ? 'default' : 'secondary'}>
-							{share.enabled ? 'Enabled' : 'Disabled'}
-						</Badge>
-					</td>
-					<td class="p-3" onclick={(e) => e.stopPropagation()}>
-						<div class="flex gap-2">
-							<Button variant="secondary" size="xs" onclick={() => smbExpanded[share.id] = !smbExpanded[share.id]}>
-								{smbExpanded[share.id] ? 'Hide' : 'Details'}
-							</Button>
-							<Button variant="secondary" size="xs" onclick={() => smbToggleEnabled(share)}>
-								{share.enabled ? 'Disable' : 'Enable'}
-							</Button>
-							<Button variant="destructive" size="xs" onclick={() => smbRemove(share.id)}>Delete</Button>
-						</div>
-					</td>
-				</tr>
-				{#if smbExpanded[share.id]}
-					<tr class="border-b border-border bg-muted/20">
-						<td colspan="5" class="px-6 py-4">
-							<div class="flex gap-12">
-								<div>
-									<p class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Settings</p>
-									<div class="space-y-2">
-										<label class="flex cursor-pointer items-center gap-2 text-sm">
-											<input type="checkbox" checked={share.read_only} onchange={() => smbToggleField(share, 'read_only')} class="h-4 w-4" />
-											Read-only
-										</label>
-										<label class="flex cursor-pointer items-center gap-2 text-sm">
-											<input type="checkbox" checked={share.browseable} onchange={() => smbToggleField(share, 'browseable')} class="h-4 w-4" />
-											Browseable
-										</label>
-										<label class="flex cursor-pointer items-center gap-2 text-sm">
-											<input type="checkbox" checked={share.guest_ok} onchange={() => smbToggleField(share, 'guest_ok')} class="h-4 w-4" />
-											Allow guests
-										</label>
-									</div>
-								</div>
-								<div class="flex-1">
-									<p class="mb-2 text-xs font-semibold uppercase text-muted-foreground">Valid Users & Groups</p>
-									{#if share.valid_users.length === 0}
-										<p class="mb-3 text-xs text-muted-foreground">No restrictions — all authenticated users may access.</p>
-									{:else}
-										<div class="mb-3 flex flex-wrap gap-2">
-											{#each share.valid_users as entry}
-												<span class="flex items-center gap-1 rounded-md border px-2 py-1 text-xs {entry.startsWith('@') ? 'border-blue-500/40 bg-blue-500/10' : 'border-border'}">
-													{#if entry.startsWith('@')}
-														<span class="text-blue-400">{entry}</span>
-													{:else}
-														{entry}
-													{/if}
-													<button class="ml-1 text-muted-foreground hover:text-destructive" onclick={(e) => { e.stopPropagation(); smbRemoveUser(share, entry); }}>&times;</button>
-												</span>
-											{/each}
-										</div>
-									{/if}
-									{#if smbAddUserShare === share.id}
-										<div class="flex flex-wrap gap-1.5" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-											{#each smbSystemUsers.filter(u => !share.valid_users.includes(u.username)) as user}
-												<Button size="xs" variant="secondary" onclick={() => {
-													const valid_users = [...share.valid_users, user.username];
-													withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `${user.username} added`).then(() => smbRefresh());
-												}}>{user.username}</Button>
-											{/each}
-											{#each smbGroups.filter(g => !share.valid_users.includes(`@${g.name}`)) as group}
-												<Button size="xs" variant="secondary" class="text-blue-400" onclick={() => {
-													const valid_users = [...share.valid_users, `@${group.name}`];
-													withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `@${group.name} added`).then(() => smbRefresh());
-												}}>@{group.name}</Button>
-											{/each}
-											<Button size="xs" variant="secondary" onclick={() => goto('/users')}>Create User / Group</Button>
-											<Button variant="secondary" size="xs" onclick={() => { smbAddUserShare = null; }}>Done</Button>
-										</div>
-									{:else}
-										<Button variant="secondary" size="xs" onclick={(e) => {
-											e.stopPropagation();
-											smbAddUserShare = share.id;
-											if (smbSystemUsers.length === 0) {
-												client.call<{ username: string; uid: number }[]>('smb.user.list').then(u => { smbSystemUsers = u; }).catch(() => {});
-											}
-										}}>
-											Add User / Group
-										</Button>
-									{/if}
-								</div>
-							</div>
-						</td>
-					</tr>
-				{/if}
-			{/each}
-		</tbody>
-	</table>
-{/if}
+	<SmbPanel />
 
 
 <!-- ════════════════════════════════════════════════════ iSCSI ════════════════════════════════════════════════════ -->
