@@ -291,12 +291,16 @@
 		current_uid: number | null;
 		current_gid: number | null;
 		exists: boolean;
+		filesystem_missing?: boolean;
 		line: number | null;
 	};
 	let volumeMismatches = $state<VolumeMismatch[]>([]);
+	// Underline every actionable line: existing-owner mismatches need
+	// the user's attention, and a missing-filesystem path is a hard
+	// error in the source field.
 	let composeVolumeErrorLines = $derived(
 		volumeMismatches
-			.filter(m => m.exists && m.line != null)
+			.filter(m => (m.exists || m.filesystem_missing) && m.line != null)
 			.map(m => m.line as number)
 	);
 	let fixingVolume = $state<string | null>(null); // host_path currently being chowned
@@ -1341,50 +1345,69 @@
 							</div>
 						{/if}
 						{#if volumeMismatches.length > 0}
-							<div class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-								<p class="mb-2 font-medium">
-									Bind-mount permissions don't match the container's <code>user:</code> — the container will likely fail with <em>Permission denied</em>.
-								</p>
-								{#each volumeMismatches as m}
-									{@const expectedLabel = `${m.expected_uid}:${m.expected_gid ?? m.expected_uid}`}
-									<div class="mb-2 last:mb-0">
-										<div>
+							{@const fsMissing = volumeMismatches.filter(m => m.filesystem_missing)}
+							{@const ownerMismatches = volumeMismatches.filter(m => !m.filesystem_missing)}
+							{#if fsMissing.length > 0}
+								<div class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+									<p class="mb-2 font-medium">
+										Bind source points at a filesystem that isn't mounted — fix the source path, the deploy will fail otherwise.
+									</p>
+									{#each fsMissing as m}
+										{@const fsName = m.host_path.replace(/^\/fs\//, '').split('/')[0]}
+										<div class="mb-1 last:mb-0">
 											<span class="font-semibold">Line {m.line ?? '?'}:</span>
-											<code>{m.host_path}</code>
-											{#if m.exists}
-												is owned by <code>{m.current_uid}:{m.current_gid}</code>, but
-											{:else}
-												doesn't exist yet —
-											{/if}
-											service <span class="font-semibold">{m.service}</span> will run as <code>{expectedLabel}</code>.
+											<code>{m.host_path}</code> — no filesystem is mounted at
+											<code>/fs/{fsName}</code>. Pick an existing filesystem (see Storage → Filesystems).
 										</div>
-										{#if m.exists}
-											<div class="mt-1 flex flex-wrap gap-2">
-												<Button
-													size="xs"
-													variant="secondary"
-													disabled={fixingVolume === m.host_path}
-													onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, false)}
-												>
-													{fixingVolume === m.host_path ? 'Chowning…' : `Chown to ${expectedLabel}`}
-												</Button>
-												<Button
-													size="xs"
-													variant="ghost"
-													disabled={fixingVolume === m.host_path}
-													onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, true)}
-													title="Recursive — rewrites every existing file's owner"
-												>
-													…and contents
-												</Button>
+									{/each}
+								</div>
+							{/if}
+							{#if ownerMismatches.length > 0}
+								<div class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+									<p class="mb-2 font-medium">
+										Bind-mount permissions don't match the container's <code>user:</code> — the container will likely fail with <em>Permission denied</em>.
+									</p>
+									{#each ownerMismatches as m}
+										{@const expectedLabel = `${m.expected_uid}:${m.expected_gid ?? m.expected_uid}`}
+										<div class="mb-2 last:mb-0">
+											<div>
+												<span class="font-semibold">Line {m.line ?? '?'}:</span>
+												<code>{m.host_path}</code>
+												{#if m.exists}
+													is owned by <code>{m.current_uid}:{m.current_gid}</code>, but
+												{:else}
+													doesn't exist yet —
+												{/if}
+												service <span class="font-semibold">{m.service}</span> will run as <code>{expectedLabel}</code>.
 											</div>
-										{:else}
-											<div class="mt-1 text-muted-foreground">Will be created with the right ownership when you deploy.</div>
-										{/if}
-									</div>
-								{/each}
+											{#if m.exists}
+												<div class="mt-1 flex flex-wrap gap-2">
+													<Button
+														size="xs"
+														variant="secondary"
+														disabled={fixingVolume === m.host_path}
+														onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, false)}
+													>
+														{fixingVolume === m.host_path ? 'Chowning…' : `Chown to ${expectedLabel}`}
+													</Button>
+													<Button
+														size="xs"
+														variant="ghost"
+														disabled={fixingVolume === m.host_path}
+														onclick={() => fixVolume(m.host_path, m.expected_uid, m.expected_gid, true)}
+														title="Recursive — rewrites every existing file's owner"
+													>
+														…and contents
+													</Button>
+												</div>
+											{:else}
+												<div class="mt-1 text-muted-foreground">Will be created with the right ownership when you deploy.</div>
+											{/if}
+										</div>
+									{/each}
 							</div>
 						{/if}
+					{/if}
 					</div>
 				</div>
 				{/if}

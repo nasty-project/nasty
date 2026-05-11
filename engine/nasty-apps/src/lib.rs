@@ -279,11 +279,44 @@ fn find_line(haystack: &str, needle: &str) -> Option<u32> {
     None
 }
 
-/// Same forbidden-bind rules as the compose deploy validator: no
-/// traversal, no `/`, no engine state. Used to gate `fix_volume_perms`
-/// so the WebUI can't be tricked into chowning `/etc` because the user
-/// pasted an evil path.
-fn validate_chown_target(host_path: &str) -> Result<(), AppsError> {
+/// If `path` is `/fs/<X>/…`, return `Some("X")`. Otherwise `None`
+/// (bare `/fs`, `/fs/`, or anything outside `/fs/`). This is just
+/// string parsing — `fs_root_is_mounted` below does the actual
+/// stat() check. Split out so it can be unit-tested without
+/// touching the real `/fs`.
+fn fs_root_segment(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/fs/")?;
+    let seg = rest.split('/').next()?;
+    if seg.is_empty() { None } else { Some(seg) }
+}
+
+/// True when a bind path's first `/fs/<X>/` segment names an actual
+/// mounted filesystem. Compares the `st_dev` of `/fs/<X>` against
+/// `/fs` — they only differ when `<X>` is a separate mountpoint, so
+/// a stale rootfs directory from a previous buggy run still reports
+/// as not-mounted. Paths outside `/fs/` (allow_unsafe territory)
+/// pass through as true — they're the user's responsibility, not
+/// ours to manage.
+fn fs_root_is_mounted(path: &str) -> bool {
+    let Some(fs_name) = fs_root_segment(path) else {
+        // Either the path isn't under /fs/ at all, or it's the bare
+        // /fs root — pre-creating that is not a thing we'd ever do.
+        return path.strip_prefix("/fs/").is_none();
+    };
+    use std::os::unix::fs::MetadataExt;
+    let fs_path = format!("/fs/{fs_name}");
+    let (Ok(child), Ok(parent)) = (std::fs::metadata(&fs_path), std::fs::metadata("/fs")) else {
+        return false;
+    };
+    child.dev() != parent.dev()
+}
+
+/// Security half of the bind validator: no `..` traversal, no host
+/// root, no engine state, must be absolute. These failures are
+/// admin-policy violations the user can't fix from the wizard — the
+/// volume-warning code skips them silently because surfacing them
+/// would just be noise.
+fn validate_chown_target_security(host_path: &str) -> Result<(), AppsError> {
     if host_path.contains("..") {
         return Err(AppsError::ForbiddenBind(format!(
             "'{host_path}' contains '..'"
@@ -304,6 +337,34 @@ fn validate_chown_target(host_path: &str) -> Result<(), AppsError> {
             "'{host_path}' is not absolute"
         )));
     }
+    Ok(())
+}
+
+/// Filesystem-existence half of the bind validator: a path of the
+/// form `/fs/<X>/…` requires `<X>` to be a real mounted bcachefs
+/// filesystem. Without this guard, `precreate_compose_binds` would
+/// `mkdir -p` the path on rootfs, which a) pollutes `/fs` with
+/// phantom entries from typos and b) silently masks "wrong
+/// filesystem name" mistakes. Unlike the security checks, this one
+/// is user-fixable — the volume-warning code surfaces it as a hard
+/// error in the wizard so the user sees what's wrong with their
+/// compose.
+fn validate_fs_root_mounted(host_path: &str) -> Result<(), AppsError> {
+    if let Some(fs_name) = fs_root_segment(host_path)
+        && !fs_root_is_mounted(host_path)
+    {
+        return Err(AppsError::ForbiddenBind(format!(
+            "filesystem '{fs_name}' is not mounted at /fs/{fs_name} — fix the bind source path"
+        )));
+    }
+    Ok(())
+}
+
+/// Full bind validator used by `fix_volume_perms` and the
+/// pre-create step. Combines the security and FS-mounted checks.
+fn validate_chown_target(host_path: &str) -> Result<(), AppsError> {
+    validate_chown_target_security(host_path)?;
+    validate_fs_root_mounted(host_path)?;
     Ok(())
 }
 
@@ -577,6 +638,12 @@ pub struct VolumeMismatch {
     /// it to expected at create time, so it's informational rather
     /// than an error.
     pub exists: bool,
+    /// True when the path is `/fs/<X>/…` and `<X>` is not a mounted
+    /// filesystem. Distinct from `!exists` because pre-create would
+    /// `mkdir -p` it on rootfs — a hard error the user must fix in
+    /// their compose, not a "we'll create it for you" hint.
+    #[serde(default)]
+    pub filesystem_missing: bool,
     /// 1-based line number of the volume entry in the compose file
     /// (for editor underlining). Best-effort: we substring-match the
     /// host path against the source; ambiguous duplicates resolve to
@@ -2057,13 +2124,35 @@ impl AppsService {
                 Some(u) => u,
                 None => continue,
             };
-            // We don't allow chowning the engine state dir, so we also
-            // don't bother surfacing warnings about it — they'd be
-            // unactionable.
-            if validate_chown_target(&bind.host_path).is_err() {
+            // Engine-state / `..` / root binds are admin-policy
+            // violations the user can't fix from the wizard — silently
+            // skip those. Filesystem-missing failures (`/fs/<X>/…`
+            // where `<X>` isn't mounted) ARE user-fixable and get
+            // surfaced as a distinct mismatch below.
+            if validate_chown_target_security(&bind.host_path).is_err() {
                 continue;
             }
             let line = find_line(&req.compose, &bind.host_path);
+            if validate_fs_root_mounted(&bind.host_path).is_err() {
+                // Don't even stat() — the path's prefix is invalid and
+                // would normally turn into a rootfs mkdir at deploy
+                // time. Flag it as filesystem_missing so the WebUI
+                // shows a hard "fix your compose" message instead of
+                // the friendly "will be created" hint.
+                out.push(VolumeMismatch {
+                    service: bind.service,
+                    host_path: bind.host_path,
+                    mount_path: bind.mount_path,
+                    expected_uid,
+                    expected_gid: bind.expected_gid,
+                    current_uid: None,
+                    current_gid: None,
+                    exists: false,
+                    filesystem_missing: true,
+                    line,
+                });
+                continue;
+            }
             match tokio::fs::metadata(&bind.host_path).await {
                 Ok(md) => {
                     let cur_uid = md.uid();
@@ -2080,6 +2169,7 @@ impl AppsService {
                             current_uid: Some(cur_uid),
                             current_gid: Some(cur_gid),
                             exists: true,
+                            filesystem_missing: false,
                             line,
                         });
                     }
@@ -2097,6 +2187,7 @@ impl AppsService {
                         current_uid: None,
                         current_gid: None,
                         exists: false,
+                        filesystem_missing: false,
                         line,
                     });
                 }
@@ -3355,13 +3446,64 @@ services:
     }
 
     #[test]
-    fn validate_chown_target_accepts_normal_paths() {
-        for ok in ["/home/jellyfin", "/fs/tank/media", "/var/lib/foo"] {
+    fn validate_chown_target_accepts_paths_outside_fs() {
+        // Paths outside `/fs/` get past the FS-mounted check
+        // unconditionally — the user opted into allow_unsafe territory
+        // and we don't manage those mounts.
+        for ok in ["/home/jellyfin", "/var/lib/foo"] {
             assert!(
                 validate_chown_target(ok).is_ok(),
                 "expected accept for {ok}"
             );
         }
+    }
+
+    #[test]
+    fn fs_root_segment_extracts_first_path_segment() {
+        assert_eq!(super::fs_root_segment("/fs/tank/media"), Some("tank"));
+        assert_eq!(super::fs_root_segment("/fs/first"), Some("first"));
+        assert_eq!(
+            super::fs_root_segment("/fs/pool/subvol/nested/path"),
+            Some("pool"),
+        );
+    }
+
+    #[test]
+    fn fs_root_segment_returns_none_outside_fs() {
+        assert_eq!(super::fs_root_segment("/home/user"), None);
+        assert_eq!(super::fs_root_segment("/etc"), None);
+        assert_eq!(super::fs_root_segment("relative/path"), None);
+    }
+
+    #[test]
+    fn fs_root_segment_returns_none_for_bare_fs() {
+        // `/fs/` with nothing after isn't a valid bind source — we
+        // never pre-create the root of /fs.
+        assert_eq!(super::fs_root_segment("/fs/"), None);
+        assert_eq!(super::fs_root_segment("/fs"), None);
+    }
+
+    #[test]
+    fn validate_fs_root_mounted_passes_paths_outside_fs() {
+        // Paths outside /fs aren't our concern — they're allow_unsafe
+        // host paths, the user owns them.
+        assert!(super::validate_fs_root_mounted("/home/jellyfin").is_ok());
+        assert!(super::validate_fs_root_mounted("/var/lib/foo").is_ok());
+    }
+
+    #[test]
+    fn validate_fs_root_mounted_rejects_unmounted_fs() {
+        // No /fs/this-filesystem-does-not-exist-nasty-test on any
+        // CI runner. The error message must name the missing fs so
+        // the WebUI can show a clear hint.
+        let e =
+            super::validate_fs_root_mounted("/fs/this-filesystem-does-not-exist-nasty-test/media")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            e.contains("this-filesystem-does-not-exist-nasty-test"),
+            "error should name the missing fs: {e}",
+        );
     }
 
     #[tokio::test]
@@ -3386,6 +3528,9 @@ services:
 
     #[tokio::test]
     async fn check_volumes_flags_missing_source_dir() {
+        // /tmp is outside /fs so the FS-mounted check passes and the
+        // path falls into the normal "doesn't exist yet — will be
+        // pre-created" branch.
         let svc = AppsService::new();
         let r = svc
             .check_volumes(CheckVolumesRequest {
@@ -3402,7 +3547,34 @@ services:
             .await;
         assert_eq!(r.len(), 1);
         assert!(!r[0].exists);
+        assert!(!r[0].filesystem_missing);
         assert_eq!(r[0].expected_uid, 3001);
+    }
+
+    #[tokio::test]
+    async fn check_volumes_flags_filesystem_missing_for_unmounted_fs() {
+        // `/fs/<X>/…` where `<X>` is not mounted: the original bug
+        // would have led to `mkdir -p /fs/<X>/...` on rootfs during
+        // pre-create. We surface this as a distinct mismatch with
+        // filesystem_missing=true so the WebUI shows a "fix your
+        // source path" warning instead of a friendly create hint.
+        let svc = AppsService::new();
+        let r = svc
+            .check_volumes(CheckVolumesRequest {
+                compose: r#"
+services:
+  app:
+    image: foo
+    user: "3001:100"
+    volumes:
+      - /fs/this-filesystem-does-not-exist-nasty-test/media:/media
+"#
+                .to_string(),
+            })
+            .await;
+        assert_eq!(r.len(), 1);
+        assert!(r[0].filesystem_missing);
+        assert!(!r[0].exists);
     }
 
     // ── parse_ss_listener_line ──
