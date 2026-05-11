@@ -47,6 +47,38 @@
 	let createPickerOpen = $state(false);
 	let editPickerOpen = $state(false);
 
+	/** Reset every create-form field to its declared default. Previously
+	 * the post-create handler only cleared name/sources/password, so
+	 * target credentials (S3 keys, SFTP host, B2 secret, …) and the
+	 * retention spec leaked between successive profile creations. One
+	 * source of truth here keeps the declared defaults and the reset
+	 * in sync. */
+	function resetCreateForm() {
+		newName = '';
+		newSources = '';
+		newTargetType = 'local';
+		newLocalPath = '';
+		newS3Endpoint = '';
+		newS3Bucket = '';
+		newS3Key = '';
+		newS3Secret = '';
+		newSftpHost = '';
+		newSftpUser = '';
+		newSftpPath = '';
+		newRestUrl = '';
+		newB2Bucket = '';
+		newB2Id = '';
+		newB2Key = '';
+		newPassword = '';
+		newSchedule = '';
+		newKeepLast = '7';
+		newKeepDaily = '7';
+		newKeepWeekly = '4';
+		newKeepMonthly = '6';
+		selectedSources = new Set();
+		schedulePreset = 'daily';
+	}
+
 	async function loadSourceData() {
 		try {
 			[subvolumes, filesystems] = await Promise.all([
@@ -210,7 +242,7 @@
 			'Backup profile created'
 		);
 		showCreate = false;
-		newName = ''; newSources = ''; newPassword = '';
+		resetCreateForm();
 		await refresh();
 	}
 

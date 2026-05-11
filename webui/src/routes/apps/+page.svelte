@@ -733,8 +733,17 @@
 	}
 
 	function resetForm() {
-		newName = ''; newImage = ''; newPorts = []; newEnvs = []; newVolumes = [];
-		newCpuLimit = ''; newMemoryLimit = '';
+		// Simple-installer create form. One field per line so a newly
+		// added `new*` state var only needs to land here in addition
+		// to its declaration — the scan-for-omissions cost stays
+		// linear instead of hiding inside a dense one-liner.
+		newName = '';
+		newImage = '';
+		newPorts = [];
+		newEnvs = [];
+		newVolumes = [];
+		newCpuLimit = '';
+		newMemoryLimit = '';
 		newAllowUnsafe = false;
 		lastInspectedImage = '';
 	}

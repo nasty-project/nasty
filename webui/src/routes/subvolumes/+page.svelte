@@ -90,10 +90,28 @@
 		['3', 'Review'],
 	];
 
+	/** Reset every wizard field to its declared default. One source of
+	 * truth keeps the open-wizard path and the post-create cleanup
+	 * from drifting — the original `openWizard` only reset 6 fields
+	 * while the post-create block reset 11, so target-label fields
+	 * persisted across re-opens until this consolidation. */
+	function resetCreateForm() {
+		newName = '';
+		newType = 'filesystem';
+		newVolsize = '';
+		newCompression = '';
+		newForegroundTarget = '';
+		newBackgroundTarget = '';
+		newPromoteTarget = '';
+		newMetadataTarget = '';
+		newDataReplicas = '';
+		newComments = '';
+		newDirectIo = false;
+	}
+
 	function openWizard() {
 		wizardStep = 1;
-		newName = ''; newType = 'filesystem'; newVolsize = ''; newCompression = '';
-		newComments = ''; newDirectIo = false;
+		resetCreateForm();
 	}
 
 	let showSnap = $state<string | null>(null);
@@ -323,10 +341,7 @@
 		);
 		if (ok !== undefined) {
 			wizardStep = 0;
-			newName = ''; newType = 'filesystem'; newVolsize = ''; newCompression = '';
-			newForegroundTarget = ''; newBackgroundTarget = ''; newPromoteTarget = '';
-			newMetadataTarget = ''; newDataReplicas = '';
-			newComments = ''; newDirectIo = false;
+			resetCreateForm();
 			await refresh();
 		}
 	}
