@@ -4,10 +4,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type {
-		NvmeofSubsystem,
-		Subvolume, ProtocolStatus
-	} from '$lib/types';
+	import type { Subvolume, ProtocolStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -18,6 +15,7 @@
 	import NfsPanel from './NfsPanel.svelte';
 	import SmbPanel from './SmbPanel.svelte';
 	import IscsiPanel from './IscsiPanel.svelte';
+	import NvmeofPanel from './NvmeofPanel.svelte';
 	import {
 		nfs,
 		nfsRefresh,
@@ -34,6 +32,11 @@
 		iscsiRefresh,
 		iscsiLoadProtocol,
 	} from '$lib/sharing/iscsi.svelte';
+	import {
+		nvme,
+		nvmeRefresh,
+		nvmeLoadProtocol,
+	} from '$lib/sharing/nvmeof.svelte';
 
 	// ── Share creation wizard ────────────────────────────
 	let shareWizardStep: 0 | 1 | 2 | 3 | 4 = $state(0);
@@ -239,154 +242,10 @@
 	// entry points for onMount + event broadcasts.
 
 	// ── NVMe-oF state ───────────────────────────────────
-	let nvmeSubsystems: NvmeofSubsystem[] = $state([]);
-	let nvmeLoading = $state(true);
-	let nvmeProtocol: ProtocolStatus | null = $state(null);
-	let nvmeShowCreate = $state(false);
-	let nvmeBlockSubvolumes: Subvolume[] = $state([]);
-	let nvmeExpanded: Record<string, boolean> = $state({});
-	let nvmeNewName = $state('');
-	let nvmeNewDevice = $state('');
-	let nvmeNewAddr = $state('0.0.0.0');
-	let nvmeNewPort = $state(4420);
-	let nvmeAddNsSubsys = $state('');
-	let nvmeAddNsDevice = $state('');
-	let nvmeAddPortSubsys = $state('');
-	let nvmeAddPortTransport = $state('tcp');
-	let nvmeAddPortAddr = $state('0.0.0.0');
-	let nvmeAddPortSvcId = $state(4420);
-	let nvmeAddPortFamily = $state('ipv4');
-	let nvmeAddHostSubsys = $state('');
-	let nvmeAddHostNqn = $state('');
-	let nvmeSearch = $state('');
-	let nvmeSortDir = $state<'asc' | 'desc'>('asc');
-
-	$effect(() => { if (nvmeShowCreate || nvmeAddNsSubsys) nvmeLoadSubvolumes(); });
-
-	function nvmeToggleSort() { nvmeSortDir = nvmeSortDir === 'asc' ? 'desc' : 'asc'; }
-
-	const nvmeFiltered = $derived(
-		nvmeSearch.trim()
-			? nvmeSubsystems.filter(s => s.nqn.toLowerCase().includes(nvmeSearch.toLowerCase()))
-			: nvmeSubsystems
-	);
-
-	const nvmeSorted = $derived.by(() => {
-		return [...nvmeFiltered].sort((a, b) => {
-			const cmp = a.nqn.localeCompare(b.nqn);
-			return nvmeSortDir === 'asc' ? cmp : -cmp;
-		});
-	});
-
-	async function nvmeRefresh() {
-		await withToast(async () => { nvmeSubsystems = await client.call<NvmeofSubsystem[]>('share.nvmeof.list'); });
-	}
-	async function nvmeLoadProtocol() {
-		try {
-			const all = await client.call<ProtocolStatus[]>('service.protocol.list');
-			nvmeProtocol = all.find(p => p.name === 'nvmeof') ?? null;
-		} catch { /* ignore */ }
-	}
-	async function nvmeLoadSubvolumes() {
-		await withToast(async () => {
-			const all = await client.call<Subvolume[]>('subvolume.list_all');
-			nvmeBlockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
-		});
-	}
-	function nvmeOnDeviceSelect() {
-		if (nvmeNewDevice && !nvmeNewName) {
-			const sv = nvmeBlockSubvolumes.find(s => s.block_device === nvmeNewDevice);
-			if (sv) nvmeNewName = sv.name;
-		}
-	}
-	async function nvmeCreate() {
-		if (!nvmeNewName || !nvmeNewDevice) return;
-		const ok = await withToast(
-			() => client.call('share.nvmeof.create', {
-				name: nvmeNewName,
-				device_path: nvmeNewDevice,
-				addr: nvmeNewAddr,
-				port: nvmeNewPort,
-			}),
-			'NVMe-oF share created'
-		);
-		if (ok !== undefined) {
-			nvmeShowCreate = false;
-			nvmeNewName = '';
-			nvmeNewDevice = '';
-			nvmeNewAddr = '0.0.0.0';
-			nvmeNewPort = 4420;
-			await nvmeRefresh();
-		}
-	}
-	async function nvmeRemove(id: string) {
-		if (!await confirm('Delete this NVMe-oF share?')) return;
-		await withToast(() => client.call('share.nvmeof.delete', { id }), 'NVMe-oF share deleted');
-		await nvmeRefresh();
-	}
-	async function nvmeAddNamespace() {
-		if (!nvmeAddNsSubsys || !nvmeAddNsDevice) return;
-		await withToast(
-			() => client.call('share.nvmeof.add_namespace', { subsystem_id: nvmeAddNsSubsys, device_path: nvmeAddNsDevice }),
-			'Namespace added'
-		);
-		nvmeAddNsSubsys = '';
-		nvmeAddNsDevice = '';
-		await nvmeRefresh();
-	}
-	async function nvmeRemoveNamespace(subsystemId: string, nsid: number) {
-		if (!await confirm(`Remove namespace ${nsid}?`)) return;
-		await withToast(
-			() => client.call('share.nvmeof.remove_namespace', { subsystem_id: subsystemId, nsid }),
-			'Namespace removed'
-		);
-		await nvmeRefresh();
-	}
-	async function nvmeAddPort() {
-		if (!nvmeAddPortSubsys) return;
-		await withToast(
-			() => client.call('share.nvmeof.add_port', {
-				subsystem_id: nvmeAddPortSubsys,
-				transport: nvmeAddPortTransport,
-				addr: nvmeAddPortAddr,
-				service_id: nvmeAddPortSvcId,
-				addr_family: nvmeAddPortFamily,
-			}),
-			'Port added'
-		);
-		nvmeAddPortSubsys = '';
-		nvmeAddPortTransport = 'tcp';
-		nvmeAddPortAddr = '0.0.0.0';
-		nvmeAddPortSvcId = 4420;
-		nvmeAddPortFamily = 'ipv4';
-		await nvmeRefresh();
-	}
-	async function nvmeRemovePort(subsystemId: string, portId: number) {
-		if (!await confirm(`Remove port ${portId}?`)) return;
-		await withToast(
-			() => client.call('share.nvmeof.remove_port', { subsystem_id: subsystemId, port_id: portId }),
-			'Port removed'
-		);
-		await nvmeRefresh();
-	}
-	async function nvmeAddHost() {
-		if (!nvmeAddHostSubsys || !nvmeAddHostNqn) return;
-		await withToast(
-			() => client.call('share.nvmeof.add_host', { subsystem_id: nvmeAddHostSubsys, host_nqn: nvmeAddHostNqn }),
-			'Allowed host added'
-		);
-		nvmeAddHostSubsys = '';
-		nvmeAddHostNqn = '';
-		await nvmeRefresh();
-	}
-	async function nvmeRemoveHost(subsystemId: string, hostNqn: string) {
-		if (!await confirm(`Remove access for ${hostNqn}?`)) return;
-		await withToast(
-			() => client.call('share.nvmeof.remove_host', { subsystem_id: subsystemId, host_nqn: hostNqn }),
-			'Allowed host removed'
-		);
-		await nvmeRefresh();
-	}
+	// NVMe-oF state + handlers live in lib/sharing/nvmeof.svelte.ts and
+	// the <NvmeofPanel> component. The page imports only `nvme.protocol`
+	// for the wizard / toggle button, and the refresh/loadProtocol entry
+	// points for onMount + event broadcasts.
 
 	async function toggleProtocol(name: string, currentlyEnabled: boolean) {
 		const action = currentlyEnabled ? 'disable' : 'enable';
@@ -417,7 +276,7 @@
 			nfsRefresh().then(() => { nfs.loading = false; }),
 			smbRefresh().then(() => { smb.loading = false; }),
 			iscsiRefresh().then(() => { iscsi.loading = false; }),
-			nvmeRefresh().then(() => { nvmeLoading = false; }),
+			nvmeRefresh().then(() => { nvme.loading = false; }),
 			nfsLoadProtocol(),
 			smbLoadProtocol(),
 			iscsiLoadProtocol(),
@@ -452,7 +311,7 @@
 
 			<!-- Step 1: Protocol -->
 			{#if shareWizardStep === 1}
-			{@const selectedProto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsi.protocol, nvmeof: nvmeProtocol })[shareProtocol]}
+			{@const selectedProto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsi.protocol, nvmeof: nvme.protocol })[shareProtocol]}
 			<div class="mb-4">
 				<Label>Protocol</Label>
 				<select bind:value={shareProtocol} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
@@ -757,8 +616,8 @@
 <!-- Tab bar with inline status -->
 <div class="mb-6 flex items-center border-b border-border">
 	{#each TABS as tab}
-		{@const proto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsi.protocol, nvmeof: nvmeProtocol })[tab.key]}
-		{@const count = ({ nfs: nfs.shares.length, smb: smb.shares.length, iscsi: iscsi.targets.length, nvmeof: nvmeSubsystems.length })[tab.key]}
+		{@const proto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsi.protocol, nvmeof: nvme.protocol })[tab.key]}
+		{@const count = ({ nfs: nfs.shares.length, smb: smb.shares.length, iscsi: iscsi.targets.length, nvmeof: nvme.subsystems.length })[tab.key]}
 		<button
 			onclick={() => switchTab(tab.key)}
 			class="flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors {activeTab === tab.key
@@ -800,214 +659,6 @@
 
 <!-- ════════════════════════════════════════════════════ NVMe-oF ════════════════════════════════════════════════════ -->
 {:else if activeTab === 'nvmeof'}
-
-<div class="mb-4 flex items-center gap-3">
-	<Input bind:value={nvmeSearch} placeholder="Search..." class="h-9 w-48" />
-</div>
-
-{#if nvmeShowCreate}
-	<Card class="mb-6 max-w-2xl">
-		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
-			<div class="mb-4">
-				<Label for="nvme-device">Block Subvolume</Label>
-				<select id="nvme-device" bind:value={nvmeNewDevice} onchange={nvmeOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-					<option value="">Select a block subvolume...</option>
-					{#each nvmeBlockSubvolumes as sv}
-						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
-					{/each}
-				</select>
-				{#if nvmeBlockSubvolumes.length === 0}
-					<span class="mt-1 block text-xs text-muted-foreground">No attached block subvolumes found. Create a block subvolume and attach it first.</span>
-				{/if}
-			</div>
-			<div class="mb-4">
-				<Label for="nvme-name">Share Name</Label>
-				<Input id="nvme-name" bind:value={nvmeNewName} placeholder="faststore" class="mt-1" />
-				<span class="mt-1 block text-xs text-muted-foreground">NQN: nqn.2137.com.nasty:{nvmeNewName || '...'}</span>
-			</div>
-			<div class="grid grid-cols-2 gap-4 mb-4">
-				<div>
-					<Label for="nvme-addr">Listen Address</Label>
-					<Input id="nvme-addr" bind:value={nvmeNewAddr} class="mt-1" />
-				</div>
-				<div>
-					<Label for="nvme-port">Port</Label>
-					<Input id="nvme-port" type="number" bind:value={nvmeNewPort} class="mt-1" />
-				</div>
-			</div>
-			<Button onclick={nvmeCreate} disabled={!nvmeNewName || !nvmeNewDevice}>Create</Button>
-		</CardContent>
-	</Card>
-{/if}
-
-{#if nvmeLoading}
-	<p class="text-muted-foreground">Loading...</p>
-{:else if nvmeSubsystems.length === 0}
-	<p class="text-muted-foreground">No shares configured.</p>
-{:else}
-	<table class="w-full text-sm">
-		<thead>
-			<tr>
-				<SortTh label="NQN" active={true} dir={nvmeSortDir} onclick={nvmeToggleSort} />
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Summary</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each nvmeSorted as subsys}
-				<tr class="border-b border-border cursor-pointer hover:bg-muted/30 transition-colors" onclick={() => nvmeExpanded[subsys.id] = !nvmeExpanded[subsys.id]}>
-					<td class="p-3">
-						<span class="font-mono text-sm font-semibold">{subsys.nqn}</span>
-					</td>
-					<td class="p-3 text-xs text-muted-foreground">
-						{subsys.namespaces.length} namespace{subsys.namespaces.length !== 1 ? 's' : ''}
-						&middot; {subsys.ports.length} port{subsys.ports.length !== 1 ? 's' : ''}
-						&middot; {subsys.allow_any_host ? 'any host' : `${subsys.allowed_hosts.length} allowed host${subsys.allowed_hosts.length !== 1 ? 's' : ''}`}
-					</td>
-					<td class="p-3" onclick={(e) => e.stopPropagation()}>
-						<div class="flex gap-2">
-							<Button variant="secondary" size="xs" onclick={() => nvmeExpanded[subsys.id] = !nvmeExpanded[subsys.id]}>
-								{nvmeExpanded[subsys.id] ? 'Hide' : 'Details'}
-							</Button>
-							<Button variant="destructive" size="xs" onclick={() => nvmeRemove(subsys.id)}>Delete</Button>
-						</div>
-					</td>
-				</tr>
-				{#if nvmeExpanded[subsys.id]}
-					<tr class="border-b border-border bg-secondary/20">
-						<td colspan="3" class="px-4 py-4">
-							<div class="space-y-4">
-								<!-- Namespaces -->
-								<div>
-									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Namespaces</h4>
-									{#if subsys.namespaces.length === 0}
-										<p class="text-xs text-muted-foreground">No namespaces</p>
-									{:else}
-										<div class="space-y-1">
-											{#each subsys.namespaces as ns}
-												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
-													<div class="text-sm">
-														<span class="font-mono text-xs font-semibold">NSID {ns.nsid}</span>
-														<span class="ml-2 text-muted-foreground">{ns.device_path}</span>
-														<Badge variant={ns.enabled ? 'default' : 'secondary'} class="ml-2 text-[0.6rem]">{ns.enabled ? 'Active' : 'Off'}</Badge>
-													</div>
-													<Button variant="destructive" size="xs" onclick={() => nvmeRemoveNamespace(subsys.id, ns.nsid)}>Remove</Button>
-												</div>
-											{/each}
-										</div>
-									{/if}
-									{#if nvmeAddNsSubsys === subsys.id}
-										<div class="mt-3 rounded border p-3">
-											<div class="mb-2">
-												<Label class="text-xs">Block Device</Label>
-												<select bind:value={nvmeAddNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-													<option value="">Select...</option>
-													{#each nvmeBlockSubvolumes as sv}
-														<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
-													{/each}
-												</select>
-											</div>
-											<div class="flex gap-2">
-												<Button size="xs" onclick={nvmeAddNamespace} disabled={!nvmeAddNsDevice}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { nvmeAddNsSubsys = ''; }}>Cancel</Button>
-											</div>
-										</div>
-									{:else}
-										<Button size="xs" variant="outline" class="mt-2" onclick={() => { nvmeAddNsSubsys = subsys.id; }}>+ Add Namespace</Button>
-									{/if}
-								</div>
-
-								<!-- Ports -->
-								<div>
-									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ports</h4>
-									{#if subsys.ports.length === 0}
-										<p class="text-xs text-muted-foreground">Not listening (no ports configured)</p>
-									{:else}
-										<div class="flex flex-wrap gap-2">
-											{#each subsys.ports as port}
-												<div class="flex items-center gap-2 rounded bg-secondary/50 px-2 py-1">
-													<span class="font-mono text-xs">{port.transport.toUpperCase()} {port.addr}:{port.service_id}</span>
-													<Button variant="destructive" size="xs" class="h-5 text-xs" onclick={() => nvmeRemovePort(subsys.id, port.port_id)}>×</Button>
-												</div>
-											{/each}
-										</div>
-									{/if}
-									{#if nvmeAddPortSubsys === subsys.id}
-										<div class="mt-3 rounded border p-3">
-											<div class="grid grid-cols-2 gap-2 mb-2">
-												<div>
-													<Label class="text-xs">Transport</Label>
-													<select bind:value={nvmeAddPortTransport} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-														<option value="tcp">TCP</option>
-														<option value="rdma">RDMA</option>
-													</select>
-												</div>
-												<div>
-													<Label class="text-xs">Address Family</Label>
-													<select bind:value={nvmeAddPortFamily} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-														<option value="ipv4">IPv4</option>
-														<option value="ipv6">IPv6</option>
-													</select>
-												</div>
-											</div>
-											<div class="grid grid-cols-2 gap-2 mb-2">
-												<div>
-													<Label class="text-xs">Listen Address</Label>
-													<Input bind:value={nvmeAddPortAddr} class="mt-1 h-8 text-xs" />
-												</div>
-												<div>
-													<Label class="text-xs">Port</Label>
-													<Input type="number" bind:value={nvmeAddPortSvcId} class="mt-1 h-8 text-xs" />
-												</div>
-											</div>
-											<div class="flex gap-2">
-												<Button size="xs" onclick={nvmeAddPort}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { nvmeAddPortSubsys = ''; }}>Cancel</Button>
-											</div>
-										</div>
-									{:else}
-										<Button size="xs" variant="outline" class="mt-2" onclick={() => { nvmeAddPortSubsys = subsys.id; }}>+ Add Port</Button>
-									{/if}
-								</div>
-
-								<!-- Allowed Hosts -->
-								<div>
-									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Allowed Hosts</h4>
-									{#if subsys.allow_any_host && subsys.allowed_hosts.length === 0}
-										<p class="text-xs text-muted-foreground">Any host can connect. Add a host NQN to restrict access.</p>
-									{:else}
-										<div class="space-y-1">
-											{#each subsys.allowed_hosts as hostNqn}
-												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
-													<span class="font-mono text-xs">{hostNqn}</span>
-													<Button variant="destructive" size="xs" onclick={() => nvmeRemoveHost(subsys.id, hostNqn)}>Remove</Button>
-												</div>
-											{/each}
-										</div>
-									{/if}
-									{#if nvmeAddHostSubsys === subsys.id}
-										<div class="mt-3 rounded border p-3">
-											<div class="mb-2">
-												<Label class="text-xs">Host NQN</Label>
-												<Input bind:value={nvmeAddHostNqn} placeholder="nqn.2024-01.com.client:host1" class="mt-1 h-8 text-xs" />
-											</div>
-											<div class="flex gap-2">
-												<Button size="xs" onclick={nvmeAddHost} disabled={!nvmeAddHostNqn}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { nvmeAddHostSubsys = ''; }}>Cancel</Button>
-											</div>
-										</div>
-									{:else}
-										<Button size="xs" variant="outline" class="mt-2" onclick={() => { nvmeAddHostSubsys = subsys.id; }}>+ Add Host</Button>
-									{/if}
-								</div>
-							</div>
-						</td>
-					</tr>
-				{/if}
-			{/each}
-		</tbody>
-	</table>
-{/if}
+	<NvmeofPanel />
 
 {/if}
