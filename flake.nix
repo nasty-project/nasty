@@ -66,6 +66,11 @@
         cargoDeps = pkgs.rustPlatform.importCargoLock {
           lockFile = "${bcachefs-tools}/Cargo.lock";
         };
+        # bcachefs-tools v1.38.3 added libunwind as a pkg-config dep
+        # (Makefile:113 fails with "pkg-config error: libunwind" without it).
+        # Nixpkgs' base derivation hasn't picked this up yet, so we add it
+        # to buildInputs here so the override builds against the new release.
+        buildInputs = (old.buildInputs or []) ++ [ pkgs.libunwind ];
       });
     in base.overrideAttrs (old: {
       passthru = old.passthru // {
