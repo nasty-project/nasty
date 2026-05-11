@@ -25,6 +25,7 @@ mod router;
 mod telemetry;
 mod terminal;
 mod vm_console;
+mod vm_disk_import;
 
 use auth::{AuthService, Session};
 use router::handle_rpc_request;
@@ -263,6 +264,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws", get(ws_handler))
         .route("/ws/terminal", get(terminal::terminal_handler))
         .route("/ws/apps/deploy", get(app_deploy::deploy_handler))
+        .route(
+            "/ws/vm/disk-import",
+            get(vm_disk_import::disk_import_handler),
+        )
         .route("/ws/system/logs", get(log_stream::logs_handler))
         .route("/ws/vm/{vm_id}/vnc", get(vm_console::vnc_handler))
         .route("/ws/vm/{vm_id}/serial", get(vm_console::serial_handler))

@@ -93,6 +93,22 @@ pub(super) async fn try_route(
             },
             Err(r) => r,
         },
+        // Pre-flight for the streaming disk-import WS — surfaces the
+        // image's virtual size so the UI can recommend (or block) a
+        // target subvolume before opening the WebSocket.
+        "vm.images.import_info" => match (require_str(req, "filesystem"), require_str(req, "name"))
+        {
+            (Ok(fs), Ok(name)) => {
+                match crate::vm_disk_import::resolve_image_path(state, fs, name).await {
+                    Ok(path) => match crate::vm_disk_import::read_image_info(&path).await {
+                        Ok(info) => ok(req, info),
+                        Err(e) => err(req, e),
+                    },
+                    Err(e) => err(req, e),
+                }
+            }
+            (Err(r), _) | (_, Err(r)) => r,
+        },
         _ => return None,
     })
 }

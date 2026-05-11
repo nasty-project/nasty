@@ -168,6 +168,7 @@ fn is_read_only(method: &str) -> bool {
                 | "apps.inspect"
                 | "system.firewall.status"
                 | "vm.capabilities"
+                | "vm.images.import_info"
                 | "firmware.available"
                 | "firmware.check"
                 | "firmware.devices"

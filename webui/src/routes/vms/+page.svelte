@@ -218,6 +218,146 @@
 		return `${bytes} B`;
 	}
 
+	// ── Disk-image import (qcow2/img → block subvolume) ────────────
+	// Streams `qemu-img convert -p -O raw` over /ws/vm/disk-import. The
+	// flow is "lay an upstream image down on a pre-allocated block
+	// subvolume so the VM can boot from it" — the canonical use case is
+	// distros that ship as qcow2 (HAOS, OPNsense, CoreOS) which can't
+	// be used as installer ISOs.
+	type ImageInfo = { format: string; virtual_size: number; actual_size: number };
+	let importOpen = $state(false);
+	let importImageKey = $state(''); // "filesystem/name" to drive a <select>
+	let importTargetKey = $state(''); // "filesystem/subvolume" same idea
+	let importInfo: ImageInfo | null = $state(null);
+	let importInfoError = $state('');
+	let importInfoLoading = $state(false);
+	let importLog: string[] = $state([]);
+	let importProgress: number | null = $state(null);
+	let importBusy = $state(false);
+	let importDone = $state(false);
+	let importError = $state('');
+	let importWs: WebSocket | null = null;
+
+	// Only images that can become a disk show in the picker — ISOs are
+	// installer media and the engine rejects them up front, so hiding
+	// them here keeps the affordance honest.
+	const IMPORTABLE_EXTS = ['.qcow2', '.img', '.raw'];
+	let importableImages = $derived(
+		imageFiles.filter((img) => IMPORTABLE_EXTS.some((ext) => img.name.toLowerCase().endsWith(ext))),
+	);
+
+	async function openImportModal() {
+		await Promise.all([loadImages(), loadSubvolumes()]);
+		importImageKey = '';
+		importTargetKey = '';
+		importInfo = null;
+		importInfoError = '';
+		importLog = [];
+		importProgress = null;
+		importBusy = false;
+		importDone = false;
+		importError = '';
+		importOpen = true;
+	}
+
+	function closeImportModal() {
+		if (importBusy) return; // can't dismiss mid-flight; would orphan the WS
+		importOpen = false;
+		importWs?.close();
+		importWs = null;
+	}
+
+	// Whenever the user picks an image, fetch virtual-size so we can
+	// disable target subvolumes that are too small before any bytes
+	// move.
+	$effect(() => {
+		const key = importImageKey;
+		if (!key) {
+			importInfo = null;
+			importInfoError = '';
+			return;
+		}
+		const [filesystem, ...rest] = key.split('/');
+		const name = rest.join('/');
+		importInfoLoading = true;
+		importInfo = null;
+		importInfoError = '';
+		client
+			.call<ImageInfo>('vm.images.import_info', { filesystem, name })
+			.then((info) => {
+				// Guard against a stale response after the user picked a
+				// different image while this one was inflight.
+				if (importImageKey === key) importInfo = info;
+			})
+			.catch((e) => {
+				if (importImageKey === key) importInfoError = String(e);
+			})
+			.finally(() => {
+				if (importImageKey === key) importInfoLoading = false;
+			});
+	});
+
+	async function startImport() {
+		if (!importImageKey || !importTargetKey || !importInfo) return;
+		const [image_filesystem, ...iRest] = importImageKey.split('/');
+		const image_name = iRest.join('/');
+		const [target_filesystem, ...tRest] = importTargetKey.split('/');
+		const target_subvolume = tRest.join('/');
+
+		importBusy = true;
+		importDone = false;
+		importError = '';
+		importLog = [];
+		importProgress = 0;
+
+		const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+		const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/vm/disk-import`);
+		importWs = ws;
+
+		ws.onopen = () => {
+			ws.send(
+				JSON.stringify({
+					image_filesystem,
+					image_name,
+					target_filesystem,
+					target_subvolume,
+				}),
+			);
+		};
+		ws.onmessage = (event) => {
+			try {
+				const msg = JSON.parse(event.data);
+				if (msg.type === 'log') {
+					importLog = [...importLog, msg.data];
+				} else if (msg.type === 'progress') {
+					importProgress = msg.percent;
+				} else if (msg.type === 'error') {
+					importError = msg.data;
+					importLog = [...importLog, `ERROR: ${msg.data}`];
+					importBusy = false;
+					ws.close();
+				} else if (msg.type === 'done') {
+					importDone = true;
+					importBusy = false;
+					importProgress = 100;
+					ws.close();
+				}
+			} catch {
+				/* ignore */
+			}
+		};
+		ws.onerror = () => {
+			importError = 'WebSocket connection failed';
+			importBusy = false;
+		};
+		ws.onclose = () => {
+			if (!importDone && !importError) {
+				importError = 'Connection closed unexpectedly';
+				importBusy = false;
+			}
+		};
+	}
+
 	// Initialize serial console (xterm) when element mounts
 	$effect(() => {
 		if (consoleEl && consoleVm && consoleMode === 'serial' && !consoleTerm) {
@@ -648,6 +788,9 @@
 <div class="mb-4 flex items-center gap-3">
 	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}>
 		{wizardStep !== 0 ? 'Cancel' : 'Create VM'}
+	</Button>
+	<Button size="sm" variant="outline" onclick={openImportModal} disabled={wizardStep !== 0}>
+		Import disk image…
 	</Button>
 	{#if vms.length > 3}
 		<Input bind:value={search} placeholder="Filter..." class="h-9 w-40" />
@@ -1487,6 +1630,128 @@
 			{/each}
 		</tbody>
 	</table>
+{/if}
+
+<!-- Disk-Image Import Modal -->
+{#if importOpen}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<div class="flex flex-col w-[90vw] max-w-3xl max-h-[85vh] rounded-lg border border-border bg-card shadow-2xl">
+			<div class="flex items-center justify-between px-4 py-2 border-b border-border">
+				<span class="text-sm font-semibold">Import disk image</span>
+				<Button variant="ghost" size="xs" onclick={closeImportModal} disabled={importBusy}>
+					Close
+				</Button>
+			</div>
+			<div class="flex-1 overflow-auto px-4 py-3 space-y-3">
+				<div>
+					<Label class="text-xs">Source image</Label>
+					{#if importableImages.length === 0}
+						<p class="mt-1 text-xs text-muted-foreground">
+							No qcow2/img/raw images uploaded yet. Upload one via the Create VM wizard.
+						</p>
+					{:else}
+						<select
+							bind:value={importImageKey}
+							disabled={importBusy}
+							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+						>
+							<option value="">Select an image…</option>
+							{#each importableImages as img}
+								<option value={`${img.filesystem}/${img.name}`}>
+									{img.name} ({img.filesystem}, {formatSize(img.size_bytes)})
+								</option>
+							{/each}
+						</select>
+					{/if}
+					{#if importInfoLoading}
+						<p class="mt-1 text-xs text-muted-foreground">Reading image metadata…</p>
+					{:else if importInfoError}
+						<p class="mt-1 text-xs text-destructive">{importInfoError}</p>
+					{:else if importInfo}
+						<p class="mt-1 text-xs text-muted-foreground">
+							Format <span class="font-mono">{importInfo.format}</span>, virtual size
+							<span class="font-mono">{formatSize(importInfo.virtual_size)}</span>
+							(on-disk {formatSize(importInfo.actual_size)})
+						</p>
+					{/if}
+				</div>
+
+				<div>
+					<Label class="text-xs">Target block subvolume</Label>
+					{#if blockSubvolumes.length === 0}
+						<p class="mt-1 text-xs text-muted-foreground">
+							No block subvolumes available. Create one on the Subvolumes page first.
+						</p>
+						<Button size="xs" class="mt-1" onclick={() => goto('/subvolumes')}>Subvolumes</Button>
+					{:else}
+						<select
+							bind:value={importTargetKey}
+							disabled={importBusy}
+							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+						>
+							<option value="">Select a target…</option>
+							{#each blockSubvolumes as sv}
+								{@const tooSmall = !!importInfo && !!sv.volsize_bytes && sv.volsize_bytes < importInfo.virtual_size}
+								<option value={`${sv.filesystem}/${sv.name}`} disabled={tooSmall}>
+									{sv.filesystem}/{sv.name}
+									({sv.volsize_bytes ? formatSize(sv.volsize_bytes) : '—'}, {sv.block_device})
+									{tooSmall ? '— too small' : ''}
+								</option>
+							{/each}
+						</select>
+						<p class="mt-1 text-xs text-muted-foreground">
+							The whole subvolume is overwritten — any prior contents are destroyed.
+						</p>
+					{/if}
+				</div>
+
+				{#if importProgress !== null || importLog.length > 0}
+					<div>
+						<div class="flex items-center gap-2 mb-1">
+							{#if importBusy}
+								<div class="h-3 w-3 animate-spin rounded-full border-2 border-muted border-t-primary"></div>
+							{:else if importError}
+								<div class="h-3 w-3 rounded-full bg-destructive"></div>
+							{:else if importDone}
+								<div class="h-3 w-3 rounded-full bg-green-500"></div>
+							{/if}
+							<span class="text-xs font-medium">
+								{importDone ? 'Import complete' : importError ? 'Import failed' : 'Importing…'}
+							</span>
+							{#if importProgress !== null}
+								<span class="text-xs text-muted-foreground ml-auto font-mono">{importProgress.toFixed(1)}%</span>
+							{/if}
+						</div>
+						<div class="h-2 rounded-full bg-muted overflow-hidden">
+							<div
+								class="h-full transition-all {importError ? 'bg-destructive' : 'bg-primary'}"
+								style="width: {importProgress ?? 0}%"
+							></div>
+						</div>
+						{#if importLog.length > 0}
+							<pre
+								class="mt-2 max-h-40 overflow-auto rounded border border-border bg-[#0f1117] p-2 text-xs font-mono text-green-400 whitespace-pre-wrap"
+							>{importLog.join('\n')}</pre>
+						{/if}
+					</div>
+				{/if}
+			</div>
+			<div class="flex items-center justify-end gap-2 px-4 py-2 border-t border-border">
+				{#if !importBusy && !importDone}
+					<Button variant="ghost" size="sm" onclick={closeImportModal}>Cancel</Button>
+					<Button
+						size="sm"
+						onclick={startImport}
+						disabled={!importImageKey || !importTargetKey || !importInfo || importInfoLoading}
+					>
+						Start import
+					</Button>
+				{:else if importDone}
+					<Button size="sm" onclick={closeImportModal}>Done</Button>
+				{/if}
+			</div>
+		</div>
+	</div>
 {/if}
 
 <!-- Console Modal -->
