@@ -11,6 +11,8 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Badge } from '$lib/components/ui/badge';
+	import PathPicker from '$lib/components/PathPicker.svelte';
+	import { FolderOpen } from '@lucide/svelte';
 
 	const client = getClient();
 	let profiles: BackupProfile[] = $state([]);
@@ -40,6 +42,11 @@
 	let selectedSources: Set<string> = $state(new Set());
 	let schedulePreset: 'daily' | 'weekly' | 'hourly' | 'custom' = $state('daily');
 
+	// Whether the host-path picker dialog is open for the create form
+	// (true) or the edit form (the profile id whose modal is showing).
+	let createPickerOpen = $state(false);
+	let editPickerOpen = $state(false);
+
 	async function loadSourceData() {
 		try {
 			[subvolumes, filesystems] = await Promise.all([
@@ -53,7 +60,29 @@
 		const s = new Set(selectedSources);
 		if (s.has(path)) s.delete(path); else s.add(path);
 		selectedSources = s;
-		newSources = [...s].join(', ');
+		// Preserve any typed-in or browse-added paths that aren't part
+		// of a checkbox row, so toggling a checkbox doesn't wipe them.
+		const knownPaths = new Set<string>([
+			'/var/lib/nasty',
+			...filesystems.filter(f => f.mounted).map(f => `/fs/${f.name}`),
+			...subvolumes.map(sv => `/fs/${sv.filesystem}/${sv.name}`),
+		]);
+		const extras = newSources
+			.split(',')
+			.map(p => p.trim())
+			.filter(Boolean)
+			.filter(p => !knownPaths.has(p) && !s.has(p));
+		newSources = [...s, ...extras].join(', ');
+	}
+
+	/** Append a path to a comma-separated string, skipping if it's
+	 * already present (compared with leading/trailing whitespace
+	 * trimmed). */
+	function appendPath(current: string, path: string): string {
+		const parts = current.split(',').map(s => s.trim()).filter(Boolean);
+		if (parts.includes(path)) return current;
+		parts.push(path);
+		return parts.join(', ');
 	}
 
 	function applySchedulePreset(preset: typeof schedulePreset) {
@@ -326,6 +355,17 @@
 							<span class="font-mono text-xs">/var/lib/nasty</span>
 							<span class="text-xs text-muted-foreground">NASty configuration</span>
 						</label>
+						<!-- Whole-filesystem sources. Useful when the user wants
+						     everything under a pool without picking subvolumes
+						     individually. -->
+						{#each filesystems.filter(f => f.mounted) as fs}
+							{@const path = `/fs/${fs.name}`}
+							<label class="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/30 {selectedSources.has(path) ? 'bg-muted/20' : ''}">
+								<input type="checkbox" checked={selectedSources.has(path)} onchange={() => toggleSource(path)} class="rounded border-input" />
+								<span class="font-mono text-xs">{path}</span>
+								<span class="text-xs text-muted-foreground">whole filesystem</span>
+							</label>
+						{/each}
 						<!-- Subvolumes -->
 						{#each subvolumes as sv}
 							{@const path = `/fs/${sv.filesystem}/${sv.name}`}
@@ -335,8 +375,11 @@
 							</label>
 						{/each}
 					</div>
-					<div class="mt-2">
+					<div class="mt-2 flex gap-2">
 						<Input bind:value={newSources} placeholder="Additional paths (comma-separated)" class="font-mono text-xs" />
+						<Button variant="outline" size="sm" onclick={() => { createPickerOpen = true; }} title="Browse for a folder under /fs">
+							<FolderOpen size={14} class="mr-1" /> Browse
+						</Button>
 					</div>
 				</div>
 
@@ -511,7 +554,12 @@
 									</div>
 									<div>
 										<Label>Sources (comma-separated)</Label>
-										<Input bind:value={editSources} class="mt-1 font-mono" />
+										<div class="mt-1 flex gap-2">
+											<Input bind:value={editSources} class="font-mono" />
+											<Button variant="outline" size="sm" onclick={() => { editPickerOpen = true; }} title="Browse for a folder under /fs">
+												<FolderOpen size={14} />
+											</Button>
+										</div>
 									</div>
 								</div>
 								<div class="grid grid-cols-2 gap-3">
@@ -585,3 +633,24 @@
 		</div>
 	</div>
 {/if}
+
+<!-- Path picker shared by the create form and per-profile edit form.
+     Only one is ever open at a time. -->
+<PathPicker
+	open={createPickerOpen}
+	title="Pick a backup source"
+	onPick={(path) => {
+		newSources = appendPath(newSources, path);
+		createPickerOpen = false;
+	}}
+	onClose={() => { createPickerOpen = false; }}
+/>
+<PathPicker
+	open={editPickerOpen}
+	title="Pick a backup source"
+	onPick={(path) => {
+		editSources = appendPath(editSources, path);
+		editPickerOpen = false;
+	}}
+	onClose={() => { editPickerOpen = false; }}
+/>
