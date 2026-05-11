@@ -31,10 +31,15 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Read-only — cache.yml owns pushes to the binary cache.
+      # Read-only on PRs and workflow_dispatch; the conditional push step
+      # below populates the cache when this run is a push to main. Folding
+      # what used to be a separate "Push to Cachix" workflow in here means
+      # we Nix-build engine/webui/bcachefs-tools once per push instead of
+      # twice (the smoke checks already depend on them as derivations).
       - uses: cachix/cachix-action@v17
         with:
           name: nasty
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Compute npm deps hash
         # appliance-smoke builds the webui via Nix, which hardcodes
@@ -50,3 +55,21 @@ jobs:
             .#checks.x86_64-linux.bcachefs-smoke \
             .#checks.x86_64-linux.appliance-smoke \
             -L --print-build-logs
+
+      - name: Build and push packages to Cachix
+        # Run on push-to-main and manual dispatch (matches what the
+        # standalone cache.yml workflow used to trigger on), and only
+        # after the checks above pass. cachix-action pushes everything
+        # currently in /nix/store on exit, so explicitly building the
+        # package outputs here ensures they land in the cache for end
+        # users to pull. The checks above already pulled in
+        # engine/webui/bcachefs-tools transitively, so this is mostly a
+        # no-op rebuild that just realises the named output paths.
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        run: |
+          nix build .#packages.x86_64-linux.engine \
+            --no-link -L
+          nix build .#packages.x86_64-linux.webui \
+            --no-link -L
+          nix build .#packages.x86_64-linux.bcachefs-tools \
+            --no-link -L
