@@ -5,7 +5,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type {
-		IscsiTarget, NvmeofSubsystem,
+		NvmeofSubsystem,
 		Subvolume, ProtocolStatus
 	} from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
@@ -17,6 +17,7 @@
 	import { AlertTriangle } from '@lucide/svelte';
 	import NfsPanel from './NfsPanel.svelte';
 	import SmbPanel from './SmbPanel.svelte';
+	import IscsiPanel from './IscsiPanel.svelte';
 	import {
 		nfs,
 		nfsRefresh,
@@ -28,6 +29,11 @@
 		smbLoadProtocol,
 		smbEnsureSystemUsers,
 	} from '$lib/sharing/smb.svelte';
+	import {
+		iscsi,
+		iscsiRefresh,
+		iscsiLoadProtocol,
+	} from '$lib/sharing/iscsi.svelte';
 
 	// ── Share creation wizard ────────────────────────────
 	let shareWizardStep: 0 | 1 | 2 | 3 | 4 = $state(0);
@@ -227,117 +233,10 @@
 	// picker, and the refresh/loadProtocol entry points.
 
 	// ── iSCSI state ──────────────────────────────────────
-	let iscsiTargets: IscsiTarget[] = $state([]);
-	let iscsiLoading = $state(true);
-	let iscsiProtocol: ProtocolStatus | null = $state(null);
-	let iscsiShowCreate = $state(false);
-	let iscsiBlockSubvolumes: Subvolume[] = $state([]);
-	let iscsiExpanded: Record<string, boolean> = $state({});
-	let iscsiNewName = $state('');
-	let iscsiNewDevice = $state('');
-	let iscsiAddLunTarget = $state('');
-	let iscsiAddLunPath = $state('');
-	let iscsiAddLunType = $state('');
-	let iscsiAddAclTarget = $state('');
-	let iscsiAddAclIqn = $state('');
-	let iscsiAddAclUser = $state('');
-	let iscsiAddAclPass = $state('');
-	let iscsiSearch = $state('');
-	let iscsiSortDir = $state<'asc' | 'desc'>('asc');
-
-	$effect(() => { if (iscsiShowCreate || iscsiAddLunTarget) iscsiLoadSubvolumes(); });
-
-	function iscsiToggleSort() { iscsiSortDir = iscsiSortDir === 'asc' ? 'desc' : 'asc'; }
-
-	const iscsiFiltered = $derived(
-		iscsiSearch.trim()
-			? iscsiTargets.filter(t =>
-				t.iqn.toLowerCase().includes(iscsiSearch.toLowerCase()) ||
-				t.alias?.toLowerCase().includes(iscsiSearch.toLowerCase()))
-			: iscsiTargets
-	);
-
-	const iscsiSorted = $derived.by(() => {
-		return [...iscsiFiltered].sort((a, b) => {
-			const cmp = a.iqn.localeCompare(b.iqn);
-			return iscsiSortDir === 'asc' ? cmp : -cmp;
-		});
-	});
-
-	async function iscsiRefresh() {
-		await withToast(async () => { iscsiTargets = await client.call<IscsiTarget[]>('share.iscsi.list'); });
-	}
-	async function iscsiLoadProtocol() {
-		try {
-			const all = await client.call<ProtocolStatus[]>('service.protocol.list');
-			iscsiProtocol = all.find(p => p.name === 'iscsi') ?? null;
-		} catch { /* ignore */ }
-	}
-	async function iscsiLoadSubvolumes() {
-		await withToast(async () => {
-			const all = await client.call<Subvolume[]>('subvolume.list_all');
-			iscsiBlockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
-		});
-	}
-	function iscsiOnDeviceSelect() {
-		if (iscsiNewDevice && !iscsiNewName) {
-			const sv = iscsiBlockSubvolumes.find(s => s.block_device === iscsiNewDevice);
-			if (sv) iscsiNewName = sv.name;
-		}
-	}
-	async function iscsiCreate() {
-		if (!iscsiNewName || !iscsiNewDevice) return;
-		const ok = await withToast(
-			() => client.call('share.iscsi.create', { name: iscsiNewName, device_path: iscsiNewDevice }),
-			'iSCSI target created'
-		);
-		if (ok !== undefined) {
-			iscsiShowCreate = false;
-			iscsiNewName = '';
-			iscsiNewDevice = '';
-			await iscsiRefresh();
-		}
-	}
-	async function iscsiRemove(id: string) {
-		if (!await confirm('Delete this iSCSI target?', 'All its LUNs will also be removed.')) return;
-		await withToast(() => client.call('share.iscsi.delete', { id }), 'iSCSI target deleted');
-		await iscsiRefresh();
-	}
-	async function iscsiAddLun() {
-		if (!iscsiAddLunTarget || !iscsiAddLunPath) return;
-		const params: Record<string, unknown> = { target_id: iscsiAddLunTarget, backstore_path: iscsiAddLunPath };
-		if (iscsiAddLunType) params.backstore_type = iscsiAddLunType;
-		await withToast(() => client.call('share.iscsi.add_lun', params), 'LUN added');
-		iscsiAddLunTarget = '';
-		iscsiAddLunPath = '';
-		iscsiAddLunType = '';
-		await iscsiRefresh();
-	}
-	async function iscsiRemoveLun(targetId: string, lunId: number) {
-		if (!await confirm(`Remove LUN ${lunId}?`)) return;
-		await withToast(() => client.call('share.iscsi.remove_lun', { target_id: targetId, lun_id: lunId }), 'LUN removed');
-		await iscsiRefresh();
-	}
-	async function iscsiAddAcl() {
-		if (!iscsiAddAclTarget || !iscsiAddAclIqn) return;
-		const params: Record<string, unknown> = { target_id: iscsiAddAclTarget, initiator_iqn: iscsiAddAclIqn };
-		if (iscsiAddAclUser) params.userid = iscsiAddAclUser;
-		if (iscsiAddAclPass) params.password = iscsiAddAclPass;
-		await withToast(() => client.call('share.iscsi.add_acl', params), 'ACL added');
-		iscsiAddAclTarget = '';
-		iscsiAddAclIqn = '';
-		iscsiAddAclUser = '';
-		iscsiAddAclPass = '';
-		await iscsiRefresh();
-	}
-	async function iscsiRemoveAcl(targetId: string, initiatorIqn: string) {
-		if (!await confirm(`Remove ACL for ${initiatorIqn}?`)) return;
-		await withToast(
-			() => client.call('share.iscsi.remove_acl', { target_id: targetId, initiator_iqn: initiatorIqn }),
-			'ACL removed'
-		);
-		await iscsiRefresh();
-	}
+	// iSCSI state + handlers live in lib/sharing/iscsi.svelte.ts and the
+	// <IscsiPanel> component. The page imports only `iscsi.protocol` for
+	// the wizard / toggle-button heading, and the refresh/loadProtocol
+	// entry points for onMount + event broadcasts.
 
 	// ── NVMe-oF state ───────────────────────────────────
 	let nvmeSubsystems: NvmeofSubsystem[] = $state([]);
@@ -517,7 +416,7 @@
 		await Promise.all([
 			nfsRefresh().then(() => { nfs.loading = false; }),
 			smbRefresh().then(() => { smb.loading = false; }),
-			iscsiRefresh().then(() => { iscsiLoading = false; }),
+			iscsiRefresh().then(() => { iscsi.loading = false; }),
 			nvmeRefresh().then(() => { nvmeLoading = false; }),
 			nfsLoadProtocol(),
 			smbLoadProtocol(),
@@ -553,7 +452,7 @@
 
 			<!-- Step 1: Protocol -->
 			{#if shareWizardStep === 1}
-			{@const selectedProto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsiProtocol, nvmeof: nvmeProtocol })[shareProtocol]}
+			{@const selectedProto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsi.protocol, nvmeof: nvmeProtocol })[shareProtocol]}
 			<div class="mb-4">
 				<Label>Protocol</Label>
 				<select bind:value={shareProtocol} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
@@ -858,8 +757,8 @@
 <!-- Tab bar with inline status -->
 <div class="mb-6 flex items-center border-b border-border">
 	{#each TABS as tab}
-		{@const proto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsiProtocol, nvmeof: nvmeProtocol })[tab.key]}
-		{@const count = ({ nfs: nfs.shares.length, smb: smb.shares.length, iscsi: iscsiTargets.length, nvmeof: nvmeSubsystems.length })[tab.key]}
+		{@const proto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsi.protocol, nvmeof: nvmeProtocol })[tab.key]}
+		{@const count = ({ nfs: nfs.shares.length, smb: smb.shares.length, iscsi: iscsi.targets.length, nvmeof: nvmeSubsystems.length })[tab.key]}
 		<button
 			onclick={() => switchTab(tab.key)}
 			class="flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors {activeTab === tab.key
@@ -896,188 +795,7 @@
 
 <!-- ════════════════════════════════════════════════════ iSCSI ════════════════════════════════════════════════════ -->
 {:else if activeTab === 'iscsi'}
-
-<div class="mb-4 flex items-center gap-3">
-	<Input bind:value={iscsiSearch} placeholder="Search..." class="h-9 w-48" />
-</div>
-
-{#if iscsiShowCreate}
-	<Card class="mb-6 max-w-2xl">
-		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New Target</h3>
-			<div class="mb-4">
-				<Label for="iscsi-device">Block Subvolume</Label>
-				<select id="iscsi-device" bind:value={iscsiNewDevice} onchange={iscsiOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-					<option value="">Select a block subvolume...</option>
-					{#each iscsiBlockSubvolumes as sv}
-						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
-					{/each}
-				</select>
-				{#if iscsiBlockSubvolumes.length === 0}
-					<span class="mt-1 block text-xs text-muted-foreground">No attached block subvolumes found. Create a block subvolume and attach it first.</span>
-				{/if}
-			</div>
-			<div class="mb-4">
-				<Label for="iscsi-name">Target Name</Label>
-				<Input id="iscsi-name" bind:value={iscsiNewName} placeholder="dbserver" class="mt-1" />
-				<span class="mt-1 block text-xs text-muted-foreground">IQN: iqn.2137-01.com.nasty:{iscsiNewName || '...'}</span>
-			</div>
-			<Button onclick={iscsiCreate} disabled={!iscsiNewName || !iscsiNewDevice}>Create</Button>
-		</CardContent>
-	</Card>
-{/if}
-
-{#if iscsiLoading}
-	<p class="text-muted-foreground">Loading...</p>
-{:else if iscsiTargets.length === 0}
-	<p class="text-muted-foreground">No targets configured.</p>
-{:else}
-	<table class="w-full text-sm">
-		<thead>
-			<tr>
-				<SortTh label="IQN" active={true} dir={iscsiSortDir} onclick={iscsiToggleSort} />
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Summary</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each iscsiSorted as target}
-				<tr class="border-b border-border cursor-pointer hover:bg-muted/30 transition-colors" onclick={() => iscsiExpanded[target.id] = !iscsiExpanded[target.id]}>
-					<td class="p-3">
-						<span class="font-mono text-sm font-semibold">{target.iqn}</span>
-						{#if target.alias}<span class="ml-2 text-xs text-muted-foreground">({target.alias})</span>{/if}
-					</td>
-					<td class="p-3 text-xs text-muted-foreground">
-						{target.luns.length} LUN{target.luns.length !== 1 ? 's' : ''}
-						&middot; {target.portals.length} portal{target.portals.length !== 1 ? 's' : ''}
-						&middot; {target.acls.length === 0 ? 'open (any initiator)' : `${target.acls.length} ACL${target.acls.length !== 1 ? 's' : ''}`}
-					</td>
-					<td class="p-3" onclick={(e) => e.stopPropagation()}>
-						<div class="flex gap-2">
-							<Button variant="secondary" size="xs" onclick={() => iscsiExpanded[target.id] = !iscsiExpanded[target.id]}>
-								{iscsiExpanded[target.id] ? 'Hide' : 'Details'}
-							</Button>
-							<Button variant="destructive" size="xs" onclick={() => iscsiRemove(target.id)}>Delete</Button>
-						</div>
-					</td>
-				</tr>
-				{#if iscsiExpanded[target.id]}
-					<tr class="border-b border-border bg-secondary/20">
-						<td colspan="3" class="px-4 py-4">
-							<div class="space-y-4">
-								<!-- Portals -->
-								<div>
-									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Portals</h4>
-									{#if target.portals.length === 0}
-										<p class="text-xs text-muted-foreground">None</p>
-									{:else}
-										<div class="flex flex-wrap gap-2">
-											{#each target.portals as p}
-												<span class="rounded bg-secondary px-2 py-0.5 font-mono text-xs">{p.ip}:{p.port}</span>
-											{/each}
-										</div>
-									{/if}
-								</div>
-
-								<!-- LUNs -->
-								<div>
-									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">LUNs</h4>
-									{#if target.luns.length === 0}
-										<p class="text-xs text-muted-foreground">No LUNs</p>
-									{:else}
-										<div class="space-y-1">
-											{#each target.luns as lun}
-												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
-													<div class="text-sm">
-														<span class="font-mono text-xs font-semibold">LUN {lun.lun_id}</span>
-														<span class="ml-2 text-muted-foreground">{lun.backstore_path}</span>
-														<span class="ml-1 text-xs text-muted-foreground">({lun.backstore_type})</span>
-													</div>
-													<Button variant="destructive" size="xs" onclick={() => iscsiRemoveLun(target.id, lun.lun_id)}>Remove</Button>
-												</div>
-											{/each}
-										</div>
-									{/if}
-									{#if iscsiAddLunTarget === target.id}
-										<div class="mt-3 rounded border p-3">
-											<div class="mb-2">
-												<Label class="text-xs">Block Device or Subvolume</Label>
-												<select bind:value={iscsiAddLunPath} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-													<option value="">Select...</option>
-													{#each iscsiBlockSubvolumes as sv}
-														<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
-													{/each}
-												</select>
-											</div>
-											<div class="mb-2">
-												<Label class="text-xs">Type</Label>
-												<select bind:value={iscsiAddLunType} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-													<option value="">Auto-detect</option>
-													<option value="block">Block</option>
-													<option value="fileio">File I/O</option>
-												</select>
-											</div>
-											<div class="flex gap-2">
-												<Button size="xs" onclick={iscsiAddLun} disabled={!iscsiAddLunPath}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { iscsiAddLunTarget = ''; }}>Cancel</Button>
-											</div>
-										</div>
-									{:else}
-										<Button size="xs" variant="outline" class="mt-2" onclick={() => { iscsiAddLunTarget = target.id; }}>+ Add LUN</Button>
-									{/if}
-								</div>
-
-								<!-- ACLs -->
-								<div>
-									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Access Control (ACLs)</h4>
-									{#if target.acls.length === 0}
-										<p class="text-xs text-muted-foreground">Open access — any initiator can connect. Add an ACL to restrict.</p>
-									{:else}
-										<div class="space-y-1">
-											{#each target.acls as acl}
-												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
-													<div class="text-sm">
-														<span class="font-mono text-xs">{acl.initiator_iqn}</span>
-														{#if acl.userid}<span class="ml-2 text-xs text-muted-foreground">CHAP: {acl.userid}</span>{/if}
-													</div>
-													<Button variant="destructive" size="xs" onclick={() => iscsiRemoveAcl(target.id, acl.initiator_iqn)}>Remove</Button>
-												</div>
-											{/each}
-										</div>
-									{/if}
-									{#if iscsiAddAclTarget === target.id}
-										<div class="mt-3 rounded border p-3">
-											<div class="mb-2">
-												<Label class="text-xs">Initiator IQN</Label>
-												<Input bind:value={iscsiAddAclIqn} placeholder="iqn.2024-01.com.client:initiator1" class="mt-1 h-8 text-xs" />
-											</div>
-											<div class="grid grid-cols-2 gap-2 mb-2">
-												<div>
-													<Label class="text-xs">CHAP User (optional)</Label>
-													<Input bind:value={iscsiAddAclUser} class="mt-1 h-8 text-xs" />
-												</div>
-												<div>
-													<Label class="text-xs">CHAP Password (optional)</Label>
-													<Input bind:value={iscsiAddAclPass} type="password" class="mt-1 h-8 text-xs" />
-												</div>
-											</div>
-											<div class="flex gap-2">
-												<Button size="xs" onclick={iscsiAddAcl} disabled={!iscsiAddAclIqn}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { iscsiAddAclTarget = ''; }}>Cancel</Button>
-											</div>
-										</div>
-									{:else}
-										<Button size="xs" variant="outline" class="mt-2" onclick={() => { iscsiAddAclTarget = target.id; }}>+ Add ACL</Button>
-									{/if}
-								</div>
-							</div>
-						</td>
-					</tr>
-				{/if}
-			{/each}
-		</tbody>
-	</table>
-{/if}
+	<IscsiPanel />
 
 
 <!-- ════════════════════════════════════════════════════ NVMe-oF ════════════════════════════════════════════════════ -->
