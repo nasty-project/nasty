@@ -1,0 +1,106 @@
+name: Weekly nixpkgs bump
+
+# Runs `nix flake update nixpkgs` on a schedule and opens a PR with
+# the result. The point is to pull in upstream kernel + package
+# bumps (especially LTS kernel patches — bcachefs builds against
+# whatever nixpkgs ships) without anyone having to remember to
+# chase them.
+#
+# CI runs on the resulting PR like any other branch. The integration
+# workflow builds the appliance + smoke-tests it, so a bad nixpkgs
+# move fails before merge instead of in production. Cachix gets
+# repopulated post-merge via integration.yml's existing push step.
+#
+# Heads-up about the bot PR: PRs opened with the default GITHUB_TOKEN
+# do not trigger downstream workflows (GitHub's recursion guard). The
+# easiest workaround is to land a personal access token as the
+# `BUMP_PAT` repo secret; the steps below use it when present and
+# fall back to GITHUB_TOKEN otherwise. Without it, kick CI by pushing
+# an empty commit to the auto/nixpkgs-bump branch (or close + reopen
+# the PR from the UI).
+
+on:
+  schedule:
+    # Monday 05:00 UTC. Catches the weekend's stable kernel pushes
+    # before the work week starts.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: nixpkgs-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run nix flake update nixpkgs
+        id: update
+        run: |
+          BEFORE=$(jq -r '.nodes.nixpkgs.locked.rev' flake.lock)
+          nix flake update nixpkgs
+          AFTER=$(jq -r '.nodes.nixpkgs.locked.rev' flake.lock)
+          echo "before=$BEFORE" >> "$GITHUB_OUTPUT"
+          echo "after=$AFTER" >> "$GITHUB_OUTPUT"
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "nixpkgs lock unchanged — exiting"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "nixpkgs moved $BEFORE → $AFTER"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect kernel bump
+        # Best-effort: pull the 6.18 LTS version string out of both
+        # nixpkgs commits and surface it in the PR title/body so the
+        # reviewer sees at a glance whether this round brought a
+        # kernel update.
+        id: kernel
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          set -eu
+          BEFORE_VER=$(curl -fsSL "https://raw.githubusercontent.com/NixOS/nixpkgs/${{ steps.update.outputs.before }}/pkgs/os-specific/linux/kernel/kernels-org.json" 2>/dev/null | jq -r '."6.18".version // "unknown"' || echo "unknown")
+          AFTER_VER=$(curl -fsSL "https://raw.githubusercontent.com/NixOS/nixpkgs/${{ steps.update.outputs.after }}/pkgs/os-specific/linux/kernel/kernels-org.json" 2>/dev/null | jq -r '."6.18".version // "unknown"' || echo "unknown")
+          echo "before=$BEFORE_VER" >> "$GITHUB_OUTPUT"
+          echo "after=$AFTER_VER" >> "$GITHUB_OUTPUT"
+          if [ "$BEFORE_VER" != "$AFTER_VER" ] && [ "$BEFORE_VER" != "unknown" ] && [ "$AFTER_VER" != "unknown" ]; then
+            echo "summary=Linux 6.18: $BEFORE_VER → $AFTER_VER" >> "$GITHUB_OUTPUT"
+          else
+            echo "summary=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open PR
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          # Prefer a PAT so downstream CI fires; fall back to the
+          # default token (CI won't auto-run in that case — see the
+          # header comment).
+          token: ${{ secrets.BUMP_PAT || secrets.GITHUB_TOKEN }}
+          branch: auto/nixpkgs-bump
+          delete-branch: true
+          commit-message: |
+            flake: weekly nixpkgs bump
+
+            ${{ steps.kernel.outputs.summary }}
+          title: "flake: weekly nixpkgs bump${{ steps.kernel.outputs.summary && format(' — {0}', steps.kernel.outputs.summary) }}"
+          body: |
+            Weekly automated `nix flake update nixpkgs`.
+
+            **nixpkgs**: `${{ steps.update.outputs.before }}` → `${{ steps.update.outputs.after }}`
+            ${{ steps.kernel.outputs.summary && format('**Kernel**: {0}', steps.kernel.outputs.summary) || '' }}
+
+            Compare: https://github.com/NixOS/nixpkgs/compare/${{ steps.update.outputs.before }}...${{ steps.update.outputs.after }}
+
+            CI runs as usual — the appliance-smoke integration test will catch most regressions before merge. Review and merge when green.
