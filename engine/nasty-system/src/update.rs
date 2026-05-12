@@ -211,12 +211,6 @@ struct ParsedFlakeInput {
     value_end: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct WrapperFlakeVersion {
-    major: u64,
-    minor: u64,
-}
-
 impl NastyInputSource {
     fn repo_url(&self) -> String {
         format!("https://github.com/{}/{}.git", self.owner, self.repo)
@@ -1405,25 +1399,64 @@ fn render_system_flake_template(
             "system flake template is missing @LOCAL_SYSTEM@ placeholder".into(),
         ));
     }
+    if !template.contains("@WRAPPER_FLAKE_VERSION@") {
+        return Err(UpdateError::CommandFailed(
+            "system flake template is missing @WRAPPER_FLAKE_VERSION@ placeholder".into(),
+        ));
+    }
     let nasty_tag = normalize_release_tag(nasty_version)?;
+    let wrapper_version = wrapper_flake_content_hash(template);
 
     Ok(template
         .replace("@NASTY_VERSION@", &nasty_tag)
-        .replace("@LOCAL_SYSTEM@", local_system))
+        .replace("@LOCAL_SYSTEM@", local_system)
+        .replace("@WRAPPER_FLAKE_VERSION@", &wrapper_version))
 }
 
+/// Content-hash of the template body, used as wrapperFlakeVersion.
+///
+/// The line carrying `@WRAPPER_FLAKE_VERSION@` is excluded from the
+/// hash — otherwise the hash would depend on itself, which would
+/// always change after substitution. Excluded too: the `@NASTY_VERSION@`
+/// and `@LOCAL_SYSTEM@` placeholders are NOT stripped because they get
+/// substituted *consistently* on both upstream and local renders
+/// (so two installs of the same release tag hash to the same value;
+/// installs of *different* tags get different hashes, which correctly
+/// triggers rebootstrap when the user upgrades).
+///
+/// The hash output is shortened to 16 hex chars and prefixed with
+/// `sha256-` for human readability — 64 bits of identifier is plenty
+/// for change detection.
+fn wrapper_flake_content_hash(template: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let body: String = template
+        .lines()
+        .filter(|line| !line.contains("@WRAPPER_FLAKE_VERSION@"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let digest = Sha256::digest(body.as_bytes());
+    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("sha256-{hex}")
+}
+
+/// Compare the local flake's stored wrapperFlakeVersion against the
+/// hash the upstream template *would render to*. Any difference (or
+/// missing local value) triggers a rebootstrap. A malformed upstream
+/// template skips rebootstrap — we'd rather preserve the user's
+/// working flake than re-render from garbage.
 fn should_rebootstrap_wrapper_flake(
     local_flake: &str,
     upstream_template: &str,
 ) -> Result<bool, UpdateError> {
-    let upstream_version = read_wrapper_flake_version(upstream_template)?;
-    let local_version = read_wrapper_flake_version(local_flake)?;
-
-    match (local_version, upstream_version) {
-        (_, None) => Ok(false),
-        (None, Some(_)) => Ok(true),
-        (Some(local), Some(upstream)) => Ok(upstream > local),
+    if !upstream_template.contains("@WRAPPER_FLAKE_VERSION@") {
+        // Old-style template with no placeholder — pre-content-hash
+        // releases. Skip rebootstrap; their wrapperFlakeVersion is a
+        // literal semver we no longer know how to compare cleanly.
+        return Ok(false);
     }
+    let expected = wrapper_flake_content_hash(upstream_template);
+    let local = read_wrapper_flake_version(local_flake)?;
+    Ok(local.as_deref() != Some(expected.as_str()))
 }
 
 fn normalize_release_tag(version_or_tag: &str) -> Result<String, UpdateError> {
@@ -1735,7 +1768,11 @@ fn parse_flake_input_urls(content: &str) -> Result<HashMap<String, ParsedFlakeIn
     Ok(urls)
 }
 
-fn read_wrapper_flake_version(content: &str) -> Result<Option<WrapperFlakeVersion>, UpdateError> {
+/// Extract the literal string value of `wrapperFlakeVersion` from a
+/// rendered flake.nix. Returns `None` on parse errors or when the
+/// attribute is missing — both cases get treated as "needs rebootstrap"
+/// upstream of here.
+fn read_wrapper_flake_version(content: &str) -> Result<Option<String>, UpdateError> {
     let parsed = rnix::Root::parse(content);
     if !parsed.errors().is_empty() {
         return Ok(None);
@@ -1762,25 +1799,10 @@ fn read_wrapper_flake_version(content: &str) -> Result<Option<WrapperFlakeVersio
         }
         let Some(value) = node.value() else { continue };
         let raw_value = value.syntax().text().to_string();
-        let Some(version) = unquote_nix_string(&raw_value) else {
-            continue;
-        };
-        return Ok(parse_wrapper_flake_version(&version));
+        return Ok(unquote_nix_string(&raw_value));
     }
 
     Ok(None)
-}
-
-fn parse_wrapper_flake_version(raw: &str) -> Option<WrapperFlakeVersion> {
-    let trimmed = raw.trim();
-    let raw = trimmed.strip_prefix('v')?;
-    let mut parts = raw.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(WrapperFlakeVersion { major, minor })
 }
 
 fn rewrite_flake_input_urls(
@@ -2004,9 +2026,9 @@ async fn read_flake_lock_bcachefs() -> (Option<String>, Option<String>) {
 mod tests {
     use super::{
         is_booted_generation, map_systemd_state, normalize_git_tag_ref, parse_flake_input_urls,
-        parse_official_nasty_release_tag, parse_release_tag_version, parse_wrapper_flake_version,
-        read_wrapper_flake_version, rewrite_flake_input_urls, should_rebootstrap_wrapper_flake,
-        unquote_nix_string,
+        parse_official_nasty_release_tag, parse_release_tag_version, read_wrapper_flake_version,
+        rewrite_flake_input_urls, should_rebootstrap_wrapper_flake, unquote_nix_string,
+        wrapper_flake_content_hash,
     };
     use std::collections::HashMap;
     use std::path::Path;
@@ -2045,23 +2067,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_wrapper_flake_versions() {
-        assert!(parse_wrapper_flake_version("v0.1").is_some());
-        assert!(parse_wrapper_flake_version("v2.7").is_some());
-        assert_eq!(parse_wrapper_flake_version("0.1"), None);
-        assert_eq!(parse_wrapper_flake_version("v0.1.2"), None);
-    }
-
-    #[test]
-    fn reads_wrapper_flake_version_from_source() {
+    fn reads_wrapper_flake_version_returns_raw_string() {
         let flake = r#"
 {
   outputs = { self, nixpkgs, nasty, ... }: {
-    wrapperFlakeVersion = "v0.1";
+    wrapperFlakeVersion = "sha256-abc123";
   };
 }
 "#;
-        assert!(read_wrapper_flake_version(flake).expect("parsed").is_some());
+        assert_eq!(
+            read_wrapper_flake_version(flake).expect("parsed"),
+            Some("sha256-abc123".to_string())
+        );
     }
 
     #[test]
@@ -2078,37 +2095,93 @@ mod tests {
     }
 
     #[test]
-    fn rebootstrap_when_local_wrapper_version_is_missing_or_older() {
-        let local_without_version = r#"
-{
-  outputs = { self, nixpkgs, nasty, ... }: {
-    nixosConfigurations = {};
-  };
-}
-"#;
-        let local_old = r#"
-{
-  outputs = { self, nixpkgs, nasty, ... }: {
-    wrapperFlakeVersion = "v0.1";
-  };
-}
-"#;
-        let upstream_new = r#"
-{
-  outputs = { self, nixpkgs, nasty, ... }: {
-    wrapperFlakeVersion = "v0.2";
-  };
-}
-"#;
-        assert!(
-            should_rebootstrap_wrapper_flake(local_without_version, upstream_new)
-                .expect("comparison")
+    fn content_hash_excludes_placeholder_line_only() {
+        // wrapper_flake_content_hash is meant to be called on the
+        // upstream template (with the placeholder). It excludes the
+        // placeholder-bearing line so the hash doesn't depend on
+        // itself after substitution.
+        let with_placeholder = "\
+inputs = { foo = 1; };
+wrapperFlakeVersion = \"@WRAPPER_FLAKE_VERSION@\";
+body = true;
+";
+        let without_that_line = "\
+inputs = { foo = 1; };
+body = true;
+";
+        assert_eq!(
+            wrapper_flake_content_hash(with_placeholder),
+            wrapper_flake_content_hash(without_that_line)
         );
-        assert!(should_rebootstrap_wrapper_flake(local_old, upstream_new).expect("comparison"));
-        assert!(!should_rebootstrap_wrapper_flake(upstream_new, local_old).expect("comparison"));
+
+        // A body change must produce a different hash so re-renders
+        // trigger on template content drift.
+        let body_changed = "\
+inputs = { foo = 2; };
+wrapperFlakeVersion = \"@WRAPPER_FLAKE_VERSION@\";
+body = true;
+";
+        assert_ne!(
+            wrapper_flake_content_hash(with_placeholder),
+            wrapper_flake_content_hash(body_changed)
+        );
+    }
+
+    #[test]
+    fn rebootstrap_when_local_hash_differs_from_upstream() {
+        let upstream = r#"
+{
+  outputs = { self, nixpkgs, nasty, ... }: {
+    foo = 1;
+    wrapperFlakeVersion = "@WRAPPER_FLAKE_VERSION@";
+  };
+}
+"#;
+        let expected = wrapper_flake_content_hash(upstream);
+        let local_matching = format!(
+            r#"
+{{
+  outputs = {{ self, nixpkgs, nasty, ... }}: {{
+    foo = 1;
+    wrapperFlakeVersion = "{expected}";
+  }};
+}}
+"#
+        );
+        let local_stale = r#"
+{
+  outputs = { self, nixpkgs, nasty, ... }: {
+    foo = 1;
+    wrapperFlakeVersion = "sha256-deadbeef";
+  };
+}
+"#;
+        let local_missing = r#"
+{
+  outputs = { self, nixpkgs, nasty, ... }: {
+    foo = 1;
+  };
+}
+"#;
+
+        // Local matches what the upstream renders to → no rebootstrap.
+        assert!(!should_rebootstrap_wrapper_flake(&local_matching, upstream).expect("comparison"));
+        // Local has stale hash (e.g. older template) → rebootstrap.
+        assert!(should_rebootstrap_wrapper_flake(local_stale, upstream).expect("comparison"));
+        // Local missing wrapperFlakeVersion entirely → rebootstrap.
+        assert!(should_rebootstrap_wrapper_flake(local_missing, upstream).expect("comparison"));
+        // Upstream without the placeholder is treated as "pre-content-hash"
+        // (older release tag) and skips rebootstrap rather than guessing.
+        let legacy_upstream = r#"
+{
+  outputs = { self, ... }: {
+    foo = 1;
+  };
+}
+"#;
         assert!(
-            !should_rebootstrap_wrapper_flake(local_old, "{ invalid")
-                .expect("malformed upstream skips rebootstrap")
+            !should_rebootstrap_wrapper_flake(&local_matching, legacy_upstream)
+                .expect("legacy upstream skips rebootstrap")
         );
     }
 
@@ -2116,6 +2189,7 @@ mod tests {
     fn renders_system_flake_template() {
         let template = r#"
 inputs = { nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@"; };
+wrapperFlakeVersion = "@WRAPPER_FLAKE_VERSION@";
 "#
         .to_string()
             + r#"
@@ -2127,6 +2201,21 @@ outputs = { nixpkgs, nasty, ... }: {
             .expect("rendered");
         assert!(rendered.contains("github:nasty-project/nasty/v0.0.3"));
         assert!(rendered.contains("\"x86_64-linux\""));
+        // The placeholder must be substituted with a content hash.
+        assert!(!rendered.contains("@WRAPPER_FLAKE_VERSION@"));
+        assert!(rendered.contains("wrapperFlakeVersion = \"sha256-"));
+        // Rendering twice yields the same hash (deterministic).
+        let rendered2 = super::render_system_flake_template(&template, "0.0.3", "x86_64-linux")
+            .expect("rendered");
+        assert_eq!(rendered, rendered2);
+    }
+
+    #[test]
+    fn render_fails_without_wrapper_placeholder() {
+        let template = "inputs = { nasty.url = \"github:nasty-project/nasty/@NASTY_VERSION@\"; };\nsystem = \"@LOCAL_SYSTEM@\";\n";
+        let err = super::render_system_flake_template(template, "0.0.3", "x86_64-linux")
+            .expect_err("placeholder enforcement");
+        assert!(format!("{err:?}").contains("@WRAPPER_FLAKE_VERSION@"));
     }
 
     // ── systemd state mapping ──────────────────────────────────────

@@ -50,7 +50,13 @@
           ] ++ nixpkgs.lib.optional (builtins.pathExists ./passthrough.nix) ./passthrough.nix;
         };
     in {
-      wrapperFlakeVersion = "v0.3";
+      # Content-hash placeholder substituted at render time by
+      # render_system_flake_template. The engine compares this against
+      # what the upstream template would render to and re-renders the
+      # local /etc/nixos/flake.nix when they differ — so any change to
+      # the template body propagates to existing installs on their next
+      # update, no manual version bump required.
+      wrapperFlakeVersion = "@WRAPPER_FLAKE_VERSION@";
       nixosConfigurations =
         let
           sys = mkSystem "@LOCAL_SYSTEM@";
