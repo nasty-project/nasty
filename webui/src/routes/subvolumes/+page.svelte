@@ -918,26 +918,28 @@
 		{/if}
 	</div>
 {:else}
-	{#each subvolumeGroups as group (group.fs ?? '__flat__')}
-		{#if group.fs}
-			<h2 class="mt-6 mb-2 flex items-baseline gap-2 text-sm font-semibold">
-				<span>{group.fs}</span>
-				<span class="text-xs font-normal text-muted-foreground">{group.items.length} subvolume{group.items.length === 1 ? '' : 's'}</span>
-			</h2>
-		{/if}
-		<table class="w-full text-sm">
-			<thead>
-				<tr>
-					<SortTh label="Name" active={sortKey === 'name'} dir={sortDir} onclick={() => toggleSort('name')} />
-					<SortTh label="Type" active={sortKey === 'type'} dir={sortDir} onclick={() => toggleSort('type')} />
-					<SortTh label="Size" active={sortKey === 'size'} dir={sortDir} onclick={() => toggleSort('size')} />
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Used by</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Block Device</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Snapshots</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
-				</tr>
-			</thead>
-			<tbody>
+	<table class="w-full text-sm">
+		<thead>
+			<tr>
+				<SortTh label="Name" active={sortKey === 'name'} dir={sortDir} onclick={() => toggleSort('name')} />
+				<SortTh label="Type" active={sortKey === 'type'} dir={sortDir} onclick={() => toggleSort('type')} />
+				<SortTh label="Size" active={sortKey === 'size'} dir={sortDir} onclick={() => toggleSort('size')} />
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Used by</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Block Device</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Snapshots</th>
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
+			</tr>
+		</thead>
+		<tbody>
+			{#each subvolumeGroups as group (group.fs ?? '__flat__')}
+				{#if group.fs}
+					<tr class="bg-muted/30">
+						<td colspan="7" class="border-b border-border px-3 py-2">
+							<span class="font-semibold">{group.fs}</span>
+							<span class="ml-2 text-xs text-muted-foreground">{group.items.length} subvolume{group.items.length === 1 ? '' : 's'}</span>
+						</td>
+					</tr>
+				{/if}
 				{#each group.items as sv (svKey(sv))}
 					{@const usage = usageFor(sv)}
 					<tr class="border-b border-border">
@@ -1272,9 +1274,9 @@
 					</tr>
 				{/if}
 			{/each}
+			{/each}
 		</tbody>
 	</table>
-	{/each}
 {/if}
 
 
