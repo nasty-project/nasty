@@ -20,7 +20,14 @@
 	);
 
 	let filesystems: Filesystem[] = $state([]);
+	// Empty string = "All filesystems" overview (default). A non-empty value
+	// narrows the list to that filesystem only. Switching is filtering, not
+	// loading: every mounted FS is fetched on every refresh, so changing the
+	// dropdown is instant.
 	let selectedFs = $state('');
+	// Filesystem picked in the create wizard. Must be a real FS name when the
+	// user submits — overview mode doesn't know where to create otherwise.
+	let newFilesystem = $state('');
 
 	// Snapshots tab state
 	let allSnapshots: Snapshot[] = $state([]);
@@ -28,38 +35,52 @@
 	let snapshotSearch = $state('');
 
 	async function loadSnapshots() {
-		if (!selectedFs) return;
+		const mounted = filesystems.filter(p => p.mounted);
+		if (mounted.length === 0) {
+			allSnapshots = [];
+			return;
+		}
 		snapshotsLoading = true;
 		try {
-			allSnapshots = await client.call<Snapshot[]>('snapshot.list', { filesystem: selectedFs });
+			const results = await Promise.all(
+				mounted.map(fs =>
+					client.call<Snapshot[]>('snapshot.list', { filesystem: fs.name }).catch(() => [])
+				)
+			);
+			allSnapshots = results.flat();
 		} catch {
 			allSnapshots = [];
 		}
 		snapshotsLoading = false;
 	}
 
-	const filteredSnapshots = $derived(
-		snapshotSearch.trim()
-			? allSnapshots.filter(s =>
-				s.name.toLowerCase().includes(snapshotSearch.toLowerCase()) ||
-				s.subvolume.toLowerCase().includes(snapshotSearch.toLowerCase()))
-			: allSnapshots
-	);
+	const filteredSnapshots = $derived.by(() => {
+		let snaps = allSnapshots;
+		if (selectedFs) snaps = snaps.filter(s => s.filesystem === selectedFs);
+		if (snapshotSearch.trim()) {
+			const q = snapshotSearch.toLowerCase();
+			snaps = snaps.filter(s =>
+				s.name.toLowerCase().includes(q) ||
+				s.subvolume.toLowerCase().includes(q)
+			);
+		}
+		return snaps;
+	});
 
-	function switchToSubvolumeAndExpand(subvolumeName: string) {
+	function switchToSubvolumeAndExpand(filesystem: string, subvolumeName: string) {
 		pageTab = 'subvolumes';
 		history.replaceState(null, '', '#subvolumes');
-		const sv = subvolumes.find(s => s.name === subvolumeName);
+		const sv = subvolumes.find(s => s.filesystem === filesystem && s.name === subvolumeName);
 		if (sv) {
 			openDetail(sv);
 		}
 	}
 
-	async function deleteSnapshotFromTab(subvolume: string, snap: string) {
+	async function deleteSnapshotFromTab(filesystem: string, subvolume: string, snap: string) {
 		if (!await confirm(`Delete snapshot "${snap}"?`)) return;
 		await withToast(
 			() => client.call('snapshot.delete', {
-				filesystem: selectedFs,
+				filesystem,
 				subvolume,
 				name: snap,
 			}),
@@ -114,11 +135,27 @@
 	function openWizard() {
 		wizardStep = 1;
 		resetCreateForm();
+		// Default the wizard's FS picker to the active filter (if any),
+		// otherwise the first mounted FS so the user can hit Next
+		// immediately on single-FS setups.
+		const mounted = filesystems.filter(p => p.mounted);
+		if (selectedFs && mounted.some(fs => fs.name === selectedFs)) {
+			newFilesystem = selectedFs;
+		} else if (mounted.length > 0) {
+			newFilesystem = mounted[0].name;
+		} else {
+			newFilesystem = '';
+		}
 	}
 
-	let showSnap = $state<string | null>(null);
+	// Snapshot / clone dialogs carry the source subvolume (not just its name)
+	// so the actions know which filesystem to operate on once the overview
+	// view can mix subvolumes from multiple filesystems.
+	interface SnapSource { filesystem: string; name: string }
+	interface CloneSource { filesystem: string; name: string; snapshot?: string }
+	let showSnap = $state<SnapSource | null>(null);
 	let snapName = $state('');
-	let showClone = $state<string | null>(null);
+	let showClone = $state<CloneSource | null>(null);
 	let cloneName = $state('');
 	let showResize = $state(false);
 	let resizeValue = $state('');
@@ -126,17 +163,16 @@
 	async function resizeSubvolume() {
 		if (!detailSv || !resizeValue) return;
 		const bytes = parseFloat(resizeValue) * 1073741824;
+		const target = detailSv;
 		await withToast(
-			() => client.call('subvolume.resize', { filesystem: selectedFs, name: detailSv!.name, volsize_bytes: bytes }),
-			`${detailSv.subvolume_type === 'block' ? 'Volume' : 'Quota'} updated to ${resizeValue} GiB`
+			() => client.call('subvolume.resize', { filesystem: target.filesystem, name: target.name, volsize_bytes: bytes }),
+			`${target.subvolume_type === 'block' ? 'Volume' : 'Quota'} updated to ${resizeValue} GiB`
 		);
 		showResize = false;
 		resizeValue = '';
 		await refresh();
-		if (detailSv) {
-			const updated = subvolumes.find(sv => sv.name === detailSv!.name);
-			if (updated) detailSv = updated;
-		}
+		const updated = subvolumes.find(sv => sv.filesystem === target.filesystem && sv.name === target.name);
+		if (updated) detailSv = updated;
 	}
 
 	// Inline expanded detail
@@ -159,9 +195,10 @@
 
 	async function saveEdit() {
 		if (!detailSv || !editingField) return;
+		const target = detailSv;
 		const params: Record<string, string> = {
-			filesystem: selectedFs,
-			name: detailSv.name,
+			filesystem: target.filesystem,
+			name: target.name,
 		};
 		params[editingField] = editValue;
 		const ok = await withToast(
@@ -171,10 +208,8 @@
 		if (ok !== undefined) {
 			editingField = null;
 			await refresh();
-			const updated = subvolumes.find(sv => sv.name === detailSv!.name);
-			if (updated) {
-				detailSv = updated;
-			}
+			const updated = subvolumes.find(sv => sv.filesystem === target.filesystem && sv.name === target.name);
+			if (updated) detailSv = updated;
 		}
 	}
 
@@ -190,16 +225,37 @@
 		nvmeof: NvmeofSubsystem[];
 	}
 	let detailShares = $state<LinkedShares>({ nfs: [], smb: [], iscsi: [], nvmeof: [] });
+	// All shares loaded once at page level so the overview usage column and
+	// each detail panel can index them without re-fetching.
+	let allNfs: NfsShare[] = $state([]);
+	let allSmb: SmbShare[] = $state([]);
+	let allIscsi: IscsiTarget[] = $state([]);
+	let allNvmeof: NvmeofSubsystem[] = $state([]);
+
+	async function loadShares() {
+		const [nfs, smb, iscsi, nvmeof] = await Promise.allSettled([
+			client.call<NfsShare[]>('share.nfs.list'),
+			client.call<SmbShare[]>('share.smb.list'),
+			client.call<IscsiTarget[]>('share.iscsi.list'),
+			client.call<NvmeofSubsystem[]>('share.nvmeof.list'),
+		]);
+		allNfs = nfs.status === 'fulfilled' ? nfs.value : [];
+		allSmb = smb.status === 'fulfilled' ? smb.value : [];
+		allIscsi = iscsi.status === 'fulfilled' ? iscsi.value : [];
+		allNvmeof = nvmeof.status === 'fulfilled' ? nvmeof.value : [];
+	}
+
 	// Tree: find parent chain and children for the selected subvolume
 	const detailParentChain = $derived.by((): string[] => {
 		if (!detailSv) return [];
 		const chain: string[] = [];
 		let current = detailSv.parent;
 		const seen = new Set<string>();
+		const fs = detailSv.filesystem;
 		while (current && !seen.has(current)) {
 			seen.add(current);
 			chain.unshift(current);
-			const parentSv = subvolumes.find(sv => sv.name === current);
+			const parentSv = subvolumes.find(sv => sv.filesystem === fs && sv.name === current);
 			current = parentSv?.parent ?? null;
 		}
 		return chain;
@@ -208,9 +264,10 @@
 	const detailChildren = $derived.by((): { name: string; type: 'clone' | 'snapshot' }[] => {
 		if (!detailSv) return [];
 		const result: { name: string; type: 'clone' | 'snapshot' }[] = [];
-		// Writable clones: subvolumes whose parent is this subvolume
+		// Writable clones: subvolumes whose parent is this subvolume.
+		// Scope to the same filesystem — clones and parents always share one.
 		for (const sv of subvolumes) {
-			if (sv.parent === detailSv.name) {
+			if (sv.filesystem === detailSv.filesystem && sv.parent === detailSv.name) {
 				result.push({ name: sv.name, type: 'clone' });
 			}
 		}
@@ -226,27 +283,29 @@
 		detailShares.iscsi.length + detailShares.nvmeof.length
 	);
 
+	function svKey(sv: { filesystem: string; name: string }): string {
+		return `${sv.filesystem}|${sv.name}`;
+	}
+
 	async function openDetail(sv: Subvolume) {
-		if (expandedName === sv.name) {
+		const key = svKey(sv);
+		if (expandedName === key) {
 			expandedName = null;
 			detailSv = null;
 			return;
 		}
-		expandedName = sv.name;
+		expandedName = key;
 		detailSv = sv;
 		detailTab = 'info';
 		detailSnapshots = [];
 		nestedSubvolumes = [];
 		detailShares = { nfs: [], smb: [], iscsi: [], nvmeof: [] };
 
-		// Load snapshots, shares, and children in parallel
-		const [snapResult, nfsResult, smbResult, iscsiResult, nvmeofResult, childrenResult] = await Promise.allSettled([
-			client.call<Snapshot[]>('snapshot.list', { filesystem: selectedFs }),
-			client.call<NfsShare[]>('share.nfs.list'),
-			client.call<SmbShare[]>('share.smb.list'),
-			client.call<IscsiTarget[]>('share.iscsi.list'),
-			client.call<NvmeofSubsystem[]>('share.nvmeof.list'),
-			client.call<string[]>('subvolume.children', { filesystem: selectedFs, name: sv.name }),
+		// Snapshots and children are per-FS API calls; share lists are
+		// page-level state (loadShares) so we just index them here.
+		const [snapResult, childrenResult] = await Promise.allSettled([
+			client.call<Snapshot[]>('snapshot.list', { filesystem: sv.filesystem }),
+			client.call<string[]>('subvolume.children', { filesystem: sv.filesystem, name: sv.name }),
 		]);
 
 		if (snapResult.status === 'fulfilled') {
@@ -257,16 +316,12 @@
 		const blockDev = sv.block_device;
 
 		detailShares = {
-			nfs: nfsResult.status === 'fulfilled'
-				? nfsResult.value.filter(s => s.path === svPath) : [],
-			smb: smbResult.status === 'fulfilled'
-				? smbResult.value.filter(s => s.path === svPath) : [],
-			iscsi: iscsiResult.status === 'fulfilled'
-				? iscsiResult.value.filter(t =>
-					blockDev != null && t.luns.some(l => l.backstore_path === blockDev)) : [],
-			nvmeof: nvmeofResult.status === 'fulfilled'
-				? nvmeofResult.value.filter(sub =>
-					blockDev != null && sub.namespaces.some(ns => ns.device_path === blockDev)) : [],
+			nfs: allNfs.filter(s => s.path === svPath),
+			smb: allSmb.filter(s => s.path === svPath),
+			iscsi: allIscsi.filter(t =>
+				blockDev != null && t.luns.some(l => l.backstore_path === blockDev)),
+			nvmeof: allNvmeof.filter(sub =>
+				blockDev != null && sub.namespaces.some(ns => ns.device_path === blockDev)),
 		};
 
 		if (childrenResult.status === 'fulfilled') {
@@ -287,6 +342,10 @@
 			refresh();
 			if (pageTab === 'snapshots') loadSnapshots();
 		}
+		// Share changes invalidate the usage column — reload so the badges stay accurate.
+		if (p?.collection === 'nfs' || p?.collection === 'smb' || p?.collection === 'iscsi' || p?.collection === 'nvmeof') {
+			loadShares();
+		}
 	}
 
 	onMount(async () => {
@@ -294,8 +353,7 @@
 		filesystems = await client.call<Filesystem[]>('fs.list');
 		const mounted = filesystems.filter(p => p.mounted);
 		if (mounted.length > 0) {
-			selectedFs = mounted[0].name;
-			await refresh();
+			await Promise.all([refresh(), loadShares()]);
 			if (pageTab === 'snapshots') await loadSnapshots();
 		}
 		loading = false;
@@ -304,24 +362,34 @@
 	onDestroy(() => client.offEvent(handleEvent));
 
 	async function refresh() {
-		if (!selectedFs) return;
+		const mounted = filesystems.filter(p => p.mounted);
+		if (mounted.length === 0) {
+			subvolumes = [];
+			return;
+		}
 		await withToast(async () => {
-			subvolumes = await client.call<Subvolume[]>('subvolume.list', { filesystem: selectedFs });
+			const results = await Promise.all(
+				mounted.map(fs =>
+					client.call<Subvolume[]>('subvolume.list', { filesystem: fs.name }).catch(() => [])
+				)
+			);
+			subvolumes = results.flat();
 		});
 	}
 
-	async function selectFs(name: string) {
+	// Changing the filter is pure filtering — the underlying data is already
+	// loaded for every mounted filesystem. Just keep the snapshots tab in
+	// sync if it's the active tab (its derived filter does the rest).
+	function selectFs(name: string) {
 		selectedFs = name;
-		await refresh();
-		if (pageTab === 'snapshots') await loadSnapshots();
 	}
 
 	async function createSubvolume() {
-		if (!newName || !selectedFs) return;
+		if (!newName || !newFilesystem) return;
 		if (newType === 'block' && !newVolsize) return;
 
 		const params: Record<string, unknown> = {
-			filesystem: selectedFs,
+			filesystem: newFilesystem,
 			name: newName,
 			subvolume_type: newType,
 		};
@@ -353,11 +421,11 @@
 		'vms': 'Virtual machine images and disk storage',
 	};
 
-	async function deleteSubvolume(name: string) {
-		const systemUse = SYSTEM_SUBVOLUMES[name];
+	async function deleteSubvolume(sv: Subvolume) {
+		const systemUse = SYSTEM_SUBVOLUMES[sv.name];
 		// Check for child subvolumes
 		let children: string[] = [];
-		try { children = await client.call<string[]>('subvolume.children', { filesystem: selectedFs, name }); } catch {}
+		try { children = await client.call<string[]>('subvolume.children', { filesystem: sv.filesystem, name: sv.name }); } catch {}
 		let warning = '';
 		if (systemUse) {
 			warning += `This subvolume is used by the system for: ${systemUse}. Deleting it may break functionality. `;
@@ -366,37 +434,38 @@
 			warning += `This will also delete ${children.length} nested subvolume${children.length > 1 ? 's' : ''}: ${children.join(', ')}. `;
 		}
 		warning += 'All snapshots will also be deleted.';
-		if (!await confirm(`Delete "${name}"?`, warning)) return;
+		if (!await confirm(`Delete "${sv.name}"?`, warning)) return;
 		await withToast(
-			() => client.call('subvolume.delete', { filesystem: selectedFs, name }),
-			`Subvolume "${name}" deleted`
+			() => client.call('subvolume.delete', { filesystem: sv.filesystem, name: sv.name }),
+			`Subvolume "${sv.name}" deleted`
 		);
 		await refresh();
 	}
 
-	async function attachSubvolume(name: string) {
+	async function attachSubvolume(sv: Subvolume) {
 		await withToast(
-			() => client.call('subvolume.attach', { filesystem: selectedFs, name }),
-			`Loop device attached for "${name}"`
+			() => client.call('subvolume.attach', { filesystem: sv.filesystem, name: sv.name }),
+			`Loop device attached for "${sv.name}"`
 		);
 		await refresh();
 	}
 
-	async function detachSubvolume(name: string) {
-		if (!await confirm(`Detach loop device for "${name}"?`, 'Any active iSCSI/NVMe-oF connections using this device will break.')) return;
+	async function detachSubvolume(sv: Subvolume) {
+		if (!await confirm(`Detach loop device for "${sv.name}"?`, 'Any active iSCSI/NVMe-oF connections using this device will break.')) return;
 		await withToast(
-			() => client.call('subvolume.detach', { filesystem: selectedFs, name }),
-			`Loop device detached for "${name}"`
+			() => client.call('subvolume.detach', { filesystem: sv.filesystem, name: sv.name }),
+			`Loop device detached for "${sv.name}"`
 		);
 		await refresh();
 	}
 
 	async function createSnapshot() {
 		if (!showSnap || !snapName) return;
+		const src = showSnap;
 		const ok = await withToast(
 			() => client.call('snapshot.create', {
-				filesystem: selectedFs,
-				subvolume: showSnap,
+				filesystem: src.filesystem,
+				subvolume: src.name,
 				name: snapName,
 				read_only: true,
 			}),
@@ -409,28 +478,27 @@
 		await refresh();
 		// Update detail view so tab count reflects the new snapshot
 		if (detailSv) {
-			const updated = subvolumes.find(sv => sv.name === detailSv!.name);
+			const updated = subvolumes.find(sv => sv.filesystem === detailSv!.filesystem && sv.name === detailSv!.name);
 			if (updated) detailSv = updated;
 		}
 	}
 
 	async function cloneSubvolume() {
 		if (!showClone || !cloneName) return;
-		const isSnapshotClone = showClone.includes('@');
-		const ok = isSnapshotClone
-			? await withToast(() => {
-				const [subvolume, snapshot] = showClone!.split('@');
-				return client.call('snapshot.clone', {
-					filesystem: selectedFs,
-					subvolume,
-					snapshot,
+		const src = showClone;
+		const ok = src.snapshot
+			? await withToast(() =>
+				client.call('snapshot.clone', {
+					filesystem: src.filesystem,
+					subvolume: src.name,
+					snapshot: src.snapshot,
 					new_name: cloneName,
-				});
-			}, `Clone "${cloneName}" created from snapshot`)
+				}),
+				`Clone "${cloneName}" created from snapshot`)
 			: await withToast(
 				() => client.call('subvolume.clone', {
-					filesystem: selectedFs,
-					name: showClone,
+					filesystem: src.filesystem,
+					name: src.name,
 					new_name: cloneName,
 				}),
 				`Clone "${cloneName}" created`
@@ -441,44 +509,78 @@
 			await refresh();
 			// Reopen detail if we cloned the detail subvolume
 			if (detailSv) {
-				const updated = subvolumes.find(sv => sv.name === detailSv!.name);
+				const updated = subvolumes.find(sv => sv.filesystem === detailSv!.filesystem && sv.name === detailSv!.name);
 				if (updated) openDetail(updated);
 			}
 		}
 	}
 
-	async function deleteSnapshot(subvolume: string, snap: string) {
+	async function deleteSnapshot(sv: Subvolume, snap: string) {
 		if (!await confirm(`Delete snapshot "${snap}"?`)) return;
 		await withToast(
 			() => client.call('snapshot.delete', {
-				filesystem: selectedFs,
-				subvolume,
+				filesystem: sv.filesystem,
+				subvolume: sv.name,
 				name: snap,
 			}),
 			`Snapshot "${snap}" deleted`
 		);
 		await refresh();
 		if (detailSv) {
-			const updated = subvolumes.find(sv => sv.name === detailSv!.name);
+			const updated = subvolumes.find(s => s.filesystem === detailSv!.filesystem && s.name === detailSv!.name);
 			if (updated) detailSv = updated;
 		}
 	}
 
 	const mountedFilesystems = $derived(filesystems.filter(p => p.mounted));
 
-	// Unique device labels from the selected filesystem (for tiering dropdowns)
+	// Per-subvolume usage tally: what shares / system flags reference it.
+	// Keyed by `fs|name`. Recomputed whenever subvolumes or shares change.
+	interface SubvolumeUsage {
+		system: string | null;     // SYSTEM_SUBVOLUMES description, or null
+		nfs: number;
+		smb: number;
+		iscsi: number;
+		nvmeof: number;
+	}
+	const subvolumeUsage = $derived.by(() => {
+		const out = new Map<string, SubvolumeUsage>();
+		for (const sv of subvolumes) {
+			const usage: SubvolumeUsage = {
+				system: SYSTEM_SUBVOLUMES[sv.name] ?? null,
+				nfs: allNfs.filter(s => s.path === sv.path).length,
+				smb: allSmb.filter(s => s.path === sv.path).length,
+				iscsi: sv.block_device
+					? allIscsi.filter(t => t.luns.some(l => l.backstore_path === sv.block_device)).length
+					: 0,
+				nvmeof: sv.block_device
+					? allNvmeof.filter(sub => sub.namespaces.some(ns => ns.device_path === sv.block_device)).length
+					: 0,
+			};
+			out.set(svKey(sv), usage);
+		}
+		return out;
+	});
+
+	function usageFor(sv: Subvolume): SubvolumeUsage {
+		return subvolumeUsage.get(svKey(sv)) ?? { system: null, nfs: 0, smb: 0, iscsi: 0, nvmeof: 0 };
+	}
+
+	// Unique device labels from the filesystem chosen in the create wizard
+	// (for tiering dropdowns). Tracks `newFilesystem`, not the page filter,
+	// so the wizard reflects the FS the user is creating in.
 	const deviceLabels = $derived(() => {
-		const fs = filesystems.find(f => f.name === selectedFs);
+		const fs = filesystems.find(f => f.name === newFilesystem);
 		if (!fs) return [];
 		const labels = fs.devices.map(d => d.label).filter((l): l is string => !!l);
 		return [...new Set(labels)].sort();
 	});
 
 	// Filesystem-level defaults so "Inherit" options can show what they'll
-	// actually resolve to — leaving the word naked is intimidating for
-	// first-time users who don't know what the parent FS is set to.
+	// actually resolve to. Same target as deviceLabels — the FS the wizard
+	// will create the subvolume in, not whatever the page filter shows.
 	const fsDefaults = $derived(() =>
-		filesystems.find(f => f.name === selectedFs)?.options ?? null
+		filesystems.find(f => f.name === newFilesystem)?.options ?? null
 	);
 	function inheritLabel(value: string | number | null | undefined): string {
 		return value == null || value === '' ? 'Inherit' : `Inherit (${value})`;
@@ -503,13 +605,18 @@
 		return sv.subvolume_type === 'block' ? (sv.volsize_bytes ?? 0) : (sv.used_bytes ?? 0);
 	}
 
-	const filtered = $derived(
-		search.trim()
-			? subvolumes.filter(sv =>
-				sv.name.toLowerCase().includes(search.toLowerCase()) ||
-				sv.comments?.toLowerCase().includes(search.toLowerCase()))
-			: subvolumes
-	);
+	const filtered = $derived.by(() => {
+		let items = subvolumes;
+		if (selectedFs) items = items.filter(sv => sv.filesystem === selectedFs);
+		if (search.trim()) {
+			const q = search.toLowerCase();
+			items = items.filter(sv =>
+				sv.name.toLowerCase().includes(q) ||
+				sv.comments?.toLowerCase().includes(q)
+			);
+		}
+		return items;
+	});
 
 	const sorted = $derived.by(() => {
 		if (!sortKey) return filtered;
@@ -520,6 +627,24 @@
 			else if (sortKey === 'size') cmp = svSize(a) - svSize(b);
 			return sortDir === 'asc' ? cmp : -cmp;
 		});
+	});
+
+	// One section per filesystem in overview mode; one flat section when the
+	// user has filtered to a specific FS or only one FS exists. `fs === null`
+	// is the flat case so the template can decide whether to draw a header.
+	const subvolumeGroups = $derived.by((): { fs: string | null; items: Subvolume[] }[] => {
+		if (selectedFs || mountedFilesystems.length <= 1) {
+			return [{ fs: null, items: sorted }];
+		}
+		const byFs = new Map<string, Subvolume[]>();
+		for (const sv of sorted) {
+			let bucket = byFs.get(sv.filesystem);
+			if (!bucket) { bucket = []; byFs.set(sv.filesystem, bucket); }
+			bucket.push(sv);
+		}
+		return mountedFilesystems
+			.filter(fs => byFs.has(fs.name))
+			.map(fs => ({ fs: fs.name, items: byFs.get(fs.name)! }));
 	});
 </script>
 
@@ -545,11 +670,14 @@
 		<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}>
 			{wizardStep !== 0 ? 'Cancel' : 'Create Subvolume'}
 		</Button>
-		<select value={selectedFs} onchange={(e) => selectFs((e.target as HTMLSelectElement).value)} class="h-9 w-auto rounded-md border border-input bg-transparent px-3 text-sm">
-			{#each mountedFilesystems as p}
-				<option value={p.name}>{p.name}</option>
-			{/each}
-		</select>
+		{#if mountedFilesystems.length > 1}
+			<select value={selectedFs} onchange={(e) => selectFs((e.target as HTMLSelectElement).value)} class="h-9 w-auto rounded-md border border-input bg-transparent px-3 text-sm">
+				<option value="">All filesystems</option>
+				{#each mountedFilesystems as p}
+					<option value={p.name}>{p.name}</option>
+				{/each}
+			</select>
+		{/if}
 		<Input bind:value={search} placeholder="Search..." class="h-9 w-48" />
 	</div>
 {/if}
@@ -579,6 +707,16 @@
 
 			<!-- Step 1: Basic -->
 			{#if wizardStep === 1}
+			{#if mountedFilesystems.length > 1}
+				<div class="mb-4">
+					<Label for="sv-filesystem">Filesystem</Label>
+					<select id="sv-filesystem" bind:value={newFilesystem} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+						{#each mountedFilesystems as p}
+							<option value={p.name}>{p.name}</option>
+						{/each}
+					</select>
+				</div>
+			{/if}
 			<div class="mb-4">
 				<Label for="sv-name">Name</Label>
 				<Input id="sv-name" bind:value={newName} placeholder="documents or projects/web" class="mt-1" />
@@ -596,7 +734,7 @@
 				<Input id="sv-comments" bind:value={newComments} placeholder="Optional description" class="mt-1" />
 			</div>
 			<div class="flex gap-2">
-				<Button size="sm" onclick={() => wizardStep = 2} disabled={!newName}>Next: Storage →</Button>
+				<Button size="sm" onclick={() => wizardStep = 2} disabled={!newName || !newFilesystem}>Next: Storage →</Button>
 			</div>
 
 			<!-- Step 2: Storage -->
@@ -704,7 +842,7 @@
 			{:else if wizardStep === 3}
 			<div class="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
 				<span class="text-muted-foreground">Filesystem</span>
-				<span class="font-mono">{selectedFs}</span>
+				<span class="font-mono">{newFilesystem}</span>
 				<span class="text-muted-foreground">Name</span>
 				<span class="font-mono">{newName}</span>
 				<span class="text-muted-foreground">Type</span>
@@ -767,94 +905,132 @@
 		<p class="text-muted-foreground">No mounted filesystems.</p>
 		<Button size="sm" class="mt-2" onclick={() => goto('/filesystems')}>Filesystems</Button>
 	</div>
-{:else if subvolumes.length === 0}
+{:else if filtered.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">
-		<p class="text-muted-foreground">No subvolumes in filesystem "{selectedFs}".</p>
-		<p class="mt-1 text-sm text-muted-foreground">Use the <strong>Create Subvolume</strong> button above to get started.</p>
+		{#if search.trim()}
+			<p class="text-muted-foreground">No subvolumes matching "{search}".</p>
+		{:else if selectedFs}
+			<p class="text-muted-foreground">No subvolumes in filesystem "{selectedFs}".</p>
+			<p class="mt-1 text-sm text-muted-foreground">Use the <strong>Create Subvolume</strong> button above to get started.</p>
+		{:else}
+			<p class="text-muted-foreground">No subvolumes yet.</p>
+			<p class="mt-1 text-sm text-muted-foreground">Use the <strong>Create Subvolume</strong> button above to get started.</p>
+		{/if}
 	</div>
 {:else}
-	<table class="w-full text-sm">
-		<thead>
-			<tr>
-				<SortTh label="Name" active={sortKey === 'name'} dir={sortDir} onclick={() => toggleSort('name')} />
-				<SortTh label="Type" active={sortKey === 'type'} dir={sortDir} onclick={() => toggleSort('type')} />
-				<SortTh label="Size" active={sortKey === 'size'} dir={sortDir} onclick={() => toggleSort('size')} />
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Block Device</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Snapshots</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each sorted as sv}
-				<tr class="border-b border-border">
-					<td class="p-3">
-						<button class="text-left hover:text-blue-400 transition-colors" onclick={() => openDetail(sv)}>
-							<strong>{sv.name}</strong>
-						</button>
-						<span class="block font-mono text-xs text-muted-foreground">{sv.path}</span>
-						{#if sv.comments}
-							<span class="mt-0.5 block text-xs italic text-muted-foreground">{sv.comments}</span>
-						{/if}
-					</td>
-					<td class="p-3">
-						<Badge variant={sv.subvolume_type === 'filesystem' ? 'secondary' : 'outline'}
-							class={sv.subvolume_type === 'filesystem' ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}>
-							{sv.subvolume_type === 'filesystem' ? 'File Share' : 'Block'}
-						</Badge>
-					</td>
-					<td class="p-3 text-sm">
-						{#if sv.volsize_bytes}
-							{formatBytes(sv.volsize_bytes)}
-							{#if sv.used_bytes !== null}
-								<span class="text-xs text-muted-foreground">({formatBytes(sv.used_bytes)} used)</span>
-							{/if}
-						{:else if sv.used_bytes !== null}
-							{formatBytes(sv.used_bytes)}
-						{:else}
-							—
-						{/if}
-					</td>
-					<td class="p-3">
-						{#if sv.subvolume_type === 'block'}
-							{#if sv.block_device}
-								<span class="font-mono text-xs">{sv.block_device}</span>
-								<Button variant="destructive" size="xs" class="ml-2" onclick={() => detachSubvolume(sv.name)}>Detach</Button>
-							{:else}
-								<span class="text-muted-foreground">Detached</span>
-								<Button variant="secondary" size="xs" class="ml-2" onclick={() => attachSubvolume(sv.name)}>Attach</Button>
-							{/if}
-						{:else}
-							<span class="text-muted-foreground">N/A</span>
-						{/if}
-					</td>
-					<td class="p-3">
-						{#if sv.snapshots.length === 0}
-							<span class="text-muted-foreground">None</span>
-						{:else if sv.snapshots.length <= 2}
-							{#each sv.snapshots as snap}
-								<div class="my-0.5 flex items-center gap-2">
-									<span class="font-mono text-xs">{snap}</span>
-									<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(sv.name, snap)}>Delete</Button>
-								</div>
-							{/each}
-						{:else}
-							<button class="text-sm text-blue-400 hover:text-blue-300 transition-colors" onclick={() => { openDetail(sv); detailTab = 'snapshots'; }}>
-								{sv.snapshots.length} snapshots
-							</button>
-						{/if}
-					</td>
-					<td class="p-3">
-						<div class="flex gap-2">
-							<Button variant="secondary" size="xs" onclick={() => openDetail(sv)}>
-								{expandedName === sv.name ? 'Hide' : 'Details'}
-							</Button>
-							<Button variant="destructive" size="xs" onclick={() => deleteSubvolume(sv.name)}>Delete</Button>
-						</div>
-					</td>
+	{#each subvolumeGroups as group (group.fs ?? '__flat__')}
+		{#if group.fs}
+			<h2 class="mt-6 mb-2 flex items-baseline gap-2 text-sm font-semibold">
+				<span>{group.fs}</span>
+				<span class="text-xs font-normal text-muted-foreground">{group.items.length} subvolume{group.items.length === 1 ? '' : 's'}</span>
+			</h2>
+		{/if}
+		<table class="w-full text-sm">
+			<thead>
+				<tr>
+					<SortTh label="Name" active={sortKey === 'name'} dir={sortDir} onclick={() => toggleSort('name')} />
+					<SortTh label="Type" active={sortKey === 'type'} dir={sortDir} onclick={() => toggleSort('type')} />
+					<SortTh label="Size" active={sortKey === 'size'} dir={sortDir} onclick={() => toggleSort('size')} />
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Used by</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Block Device</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Snapshots</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 				</tr>
-				{#if expandedName === sv.name && detailSv}
+			</thead>
+			<tbody>
+				{#each group.items as sv (svKey(sv))}
+					{@const usage = usageFor(sv)}
+					<tr class="border-b border-border">
+						<td class="p-3">
+							<button class="text-left hover:text-blue-400 transition-colors" onclick={() => openDetail(sv)}>
+								<strong>{sv.name}</strong>
+							</button>
+							<span class="block font-mono text-xs text-muted-foreground">{sv.path}</span>
+							{#if sv.comments}
+								<span class="mt-0.5 block text-xs italic text-muted-foreground">{sv.comments}</span>
+							{/if}
+						</td>
+						<td class="p-3">
+							<Badge variant={sv.subvolume_type === 'filesystem' ? 'secondary' : 'outline'}
+								class={sv.subvolume_type === 'filesystem' ? 'bg-blue-950 text-blue-400' : 'bg-purple-950 text-purple-400'}>
+								{sv.subvolume_type === 'filesystem' ? 'File Share' : 'Block'}
+							</Badge>
+						</td>
+						<td class="p-3 text-sm">
+							{#if sv.volsize_bytes}
+								{formatBytes(sv.volsize_bytes)}
+								{#if sv.used_bytes !== null}
+									<span class="text-xs text-muted-foreground">({formatBytes(sv.used_bytes)} used)</span>
+								{/if}
+							{:else if sv.used_bytes !== null}
+								{formatBytes(sv.used_bytes)}
+							{:else}
+								—
+							{/if}
+						</td>
+						<td class="p-3">
+							<div class="flex flex-wrap gap-1">
+								{#if usage.system}
+									<Badge class="bg-slate-800 text-slate-300 text-[0.6rem]" title={usage.system}>System</Badge>
+								{/if}
+								{#if usage.nfs > 0}
+									<Badge class="bg-green-950 text-green-400 text-[0.6rem]" title="{usage.nfs} NFS share{usage.nfs === 1 ? '' : 's'}">NFS{usage.nfs > 1 ? ` ×${usage.nfs}` : ''}</Badge>
+								{/if}
+								{#if usage.smb > 0}
+									<Badge class="bg-amber-950 text-amber-400 text-[0.6rem]" title="{usage.smb} SMB share{usage.smb === 1 ? '' : 's'}">SMB{usage.smb > 1 ? ` ×${usage.smb}` : ''}</Badge>
+								{/if}
+								{#if usage.iscsi > 0}
+									<Badge class="bg-purple-950 text-purple-400 text-[0.6rem]" title="{usage.iscsi} iSCSI target{usage.iscsi === 1 ? '' : 's'}">iSCSI{usage.iscsi > 1 ? ` ×${usage.iscsi}` : ''}</Badge>
+								{/if}
+								{#if usage.nvmeof > 0}
+									<Badge class="bg-cyan-950 text-cyan-400 text-[0.6rem]" title="{usage.nvmeof} NVMe-oF subsystem{usage.nvmeof === 1 ? '' : 's'}">NVMe-oF{usage.nvmeof > 1 ? ` ×${usage.nvmeof}` : ''}</Badge>
+								{/if}
+								{#if !usage.system && usage.nfs === 0 && usage.smb === 0 && usage.iscsi === 0 && usage.nvmeof === 0}
+									<span class="text-xs text-muted-foreground">—</span>
+								{/if}
+							</div>
+						</td>
+						<td class="p-3">
+							{#if sv.subvolume_type === 'block'}
+								{#if sv.block_device}
+									<span class="font-mono text-xs">{sv.block_device}</span>
+									<Button variant="destructive" size="xs" class="ml-2" onclick={() => detachSubvolume(sv)}>Detach</Button>
+								{:else}
+									<span class="text-muted-foreground">Detached</span>
+									<Button variant="secondary" size="xs" class="ml-2" onclick={() => attachSubvolume(sv)}>Attach</Button>
+								{/if}
+							{:else}
+								<span class="text-muted-foreground">N/A</span>
+							{/if}
+						</td>
+						<td class="p-3">
+							{#if sv.snapshots.length === 0}
+								<span class="text-muted-foreground">None</span>
+							{:else if sv.snapshots.length <= 2}
+								{#each sv.snapshots as snap}
+									<div class="my-0.5 flex items-center gap-2">
+										<span class="font-mono text-xs">{snap}</span>
+										<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(sv, snap)}>Delete</Button>
+									</div>
+								{/each}
+							{:else}
+								<button class="text-sm text-blue-400 hover:text-blue-300 transition-colors" onclick={() => { openDetail(sv); detailTab = 'snapshots'; }}>
+									{sv.snapshots.length} snapshots
+								</button>
+							{/if}
+						</td>
+						<td class="p-3">
+							<div class="flex gap-2">
+								<Button variant="secondary" size="xs" onclick={() => openDetail(sv)}>
+									{expandedName === svKey(sv) ? 'Hide' : 'Details'}
+								</Button>
+								<Button variant="destructive" size="xs" onclick={() => deleteSubvolume(sv)}>Delete</Button>
+							</div>
+						</td>
+					</tr>
+					{#if expandedName === svKey(sv) && detailSv}
 					<tr>
-						<td colspan="6" class="border-b border-border bg-muted/20 p-0">
+						<td colspan="7" class="border-b border-border bg-muted/20 p-0">
 							<div class="p-4">
 								<!-- Tabs -->
 								<div class="mb-4 flex border-b border-border">
@@ -934,7 +1110,7 @@
 										{/if}
 										{#if detailSv.parent}
 											<span class="text-muted-foreground">Parent</span>
-											<button class="font-mono text-xs text-blue-400 hover:text-blue-300 text-left" onclick={() => { const p = subvolumes.find(s => s.name === detailSv!.parent); if (p) openDetail(p); }}>{detailSv.parent}</button>
+											<button class="font-mono text-xs text-blue-400 hover:text-blue-300 text-left" onclick={() => { const p = subvolumes.find(s => s.filesystem === detailSv!.filesystem && s.name === detailSv!.parent); if (p) openDetail(p); }}>{detailSv.parent}</button>
 										{/if}
 										{#if detailSv.bcachefs_options && Object.keys(detailSv.bcachefs_options).length > 0}
 											<span class="text-muted-foreground">bcachefs Options</span>
@@ -969,10 +1145,10 @@
 										</span>
 									</div>
 									<div class="mt-3 flex gap-2">
-										<Button size="xs" variant="secondary" onclick={() => { showSnap = detailSv?.name ?? null; snapName = ''; }}>
+										<Button size="xs" variant="secondary" onclick={() => { showSnap = detailSv ? { filesystem: detailSv.filesystem, name: detailSv.name } : null; snapName = ''; }}>
 											<Camera class="mr-1 h-3 w-3" />Snapshot
 										</Button>
-										<Button size="xs" variant="secondary" onclick={() => { showClone = detailSv?.name ?? null; cloneName = ''; }}>
+										<Button size="xs" variant="secondary" onclick={() => { showClone = detailSv ? { filesystem: detailSv.filesystem, name: detailSv.name } : null; cloneName = ''; }}>
 											<Copy class="mr-1 h-3 w-3" />Clone
 										</Button>
 									</div>
@@ -982,17 +1158,17 @@
 										<p class="text-sm text-muted-foreground">No snapshots.</p>
 									{:else}
 										<div class="space-y-1.5">
-											{#each detailSnapshots.length > 0 ? detailSnapshots : detailSv.snapshots.map(s => ({ name: s, subvolume: detailSv!.name, filesystem: selectedFs, path: '', read_only: true, parent: null })) as snap}
+											{#each detailSnapshots.length > 0 ? detailSnapshots : detailSv.snapshots.map(s => ({ name: s, subvolume: detailSv!.name, filesystem: detailSv!.filesystem, path: '', read_only: true, parent: null })) as snap}
 												<div class="flex items-center justify-between rounded-md border border-border px-3 py-2">
 													<div>
 														<span class="font-mono text-xs">{snap.name}</span>
 														<span class="ml-2 text-xs text-muted-foreground">{snap.read_only ? 'read-only' : 'writable'}</span>
 													</div>
 													<div class="flex gap-1">
-														<Button variant="secondary" size="xs" onclick={() => { showClone = `${detailSv!.name}@${snap.name}`; cloneName = ''; }}>
+														<Button variant="secondary" size="xs" onclick={() => { showClone = { filesystem: detailSv!.filesystem, name: detailSv!.name, snapshot: snap.name }; cloneName = ''; }}>
 															<Copy class="mr-1 h-3 w-3" />Clone
 														</Button>
-														<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(detailSv!.name, snap.name)}>
+														<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(detailSv!, snap.name)}>
 															<Trash2 class="h-3 w-3" />
 														</Button>
 													</div>
@@ -1043,7 +1219,7 @@
 												{#each detailParentChain as ancestor, i}
 													<div class="flex items-center gap-1" style="padding-left: {i * 16}px">
 														<span class="text-muted-foreground text-xs">└─</span>
-														<button class="font-mono text-xs text-blue-400 hover:text-blue-300" onclick={() => { const s = subvolumes.find(x => x.name === ancestor); if (s) openDetail(s); }}>{ancestor}</button>
+														<button class="font-mono text-xs text-blue-400 hover:text-blue-300" onclick={() => { const s = subvolumes.find(x => x.filesystem === detailSv!.filesystem && x.name === ancestor); if (s) openDetail(s); }}>{ancestor}</button>
 													</div>
 												{/each}
 												<div class="flex items-center gap-1" style="padding-left: {detailParentChain.length * 16}px">
@@ -1065,7 +1241,7 @@
 													<div class="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 mb-1">
 														<Badge class="{child.type === 'snapshot' ? 'bg-amber-950 text-amber-400' : 'bg-green-950 text-green-400'} text-[0.55rem]">{child.type}</Badge>
 														{#if child.type === 'clone'}
-															<button class="font-mono text-xs text-blue-400 hover:text-blue-300" onclick={() => { const s = subvolumes.find(x => x.name === child.name); if (s) openDetail(s); }}>{child.name}</button>
+															<button class="font-mono text-xs text-blue-400 hover:text-blue-300" onclick={() => { const s = subvolumes.find(x => x.filesystem === detailSv!.filesystem && x.name === child.name); if (s) openDetail(s); }}>{child.name}</button>
 														{:else}
 															<span class="font-mono text-xs">{child.name}</span>
 														{/if}
@@ -1098,6 +1274,7 @@
 			{/each}
 		</tbody>
 	</table>
+	{/each}
 {/if}
 
 
@@ -1107,75 +1284,92 @@
 
 {#if mountedFilesystems.length > 0}
 	<div class="mb-4 flex items-center gap-4">
-		<select value={selectedFs} onchange={(e) => selectFs((e.target as HTMLSelectElement).value)} class="h-9 w-auto rounded-md border border-input bg-transparent px-3 text-sm">
-			{#each mountedFilesystems as p}
-				<option value={p.name}>{p.name}</option>
-			{/each}
-		</select>
+		{#if mountedFilesystems.length > 1}
+			<select value={selectedFs} onchange={(e) => selectFs((e.target as HTMLSelectElement).value)} class="h-9 w-auto rounded-md border border-input bg-transparent px-3 text-sm">
+				<option value="">All filesystems</option>
+				{#each mountedFilesystems as p}
+					<option value={p.name}>{p.name}</option>
+				{/each}
+			</select>
+		{/if}
 		<Input bind:value={snapshotSearch} placeholder="Search snapshots..." class="h-9 w-48" />
 	</div>
 {/if}
 
 {#if snapshotsLoading}
 	<p class="text-muted-foreground">Loading snapshots...</p>
-{:else if !selectedFs}
+{:else if mountedFilesystems.length === 0}
 	<p class="text-muted-foreground">No mounted filesystems.</p>
 {:else if filteredSnapshots.length === 0}
-	<p class="text-muted-foreground">{snapshotSearch ? 'No matching snapshots.' : `No snapshots in filesystem "${selectedFs}".`}</p>
+	<p class="text-muted-foreground">{snapshotSearch ? 'No matching snapshots.' : selectedFs ? `No snapshots in filesystem "${selectedFs}".` : 'No snapshots yet.'}</p>
 {:else}
-	<table class="w-full text-sm">
-		<thead>
-			<tr>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Snapshot Name</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Parent Subvolume</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Read-only</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Type</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each filteredSnapshots as snap}
-				<tr class="border-b border-border">
-					<td class="p-3">
-						<span class="font-mono text-sm">{snap.name}</span>
-						{#if snap.path}
-							<span class="block font-mono text-xs text-muted-foreground">{snap.path}</span>
-						{/if}
-					</td>
-					<td class="p-3">
-						{#if subvolumes.find(sv => sv.name === snap.subvolume)}
-							<button
-								class="font-mono text-sm text-blue-400 hover:text-blue-300 transition-colors"
-								onclick={() => switchToSubvolumeAndExpand(snap.subvolume)}
-							>{snap.subvolume}</button>
-						{:else}
-							<span class="flex items-center gap-1.5">
-								<span class="font-mono text-sm text-muted-foreground">{snap.subvolume}</span>
-								<Badge variant="outline" class="bg-amber-950 text-amber-400 text-[0.6rem]">
-									<AlertTriangle class="mr-0.5 h-2.5 w-2.5" />deleted
-								</Badge>
-							</span>
-						{/if}
-					</td>
-					<td class="p-3">
-						{#if snap.read_only}
-							<Badge class="bg-green-950 text-green-400">read-only</Badge>
-						{:else}
-							<Badge variant="outline" class="text-muted-foreground">writable</Badge>
-						{/if}
-					</td>
-					<td class="p-3">
-						<Badge variant="secondary" class="bg-amber-950 text-amber-400">snapshot</Badge>
-					</td>
-					<td class="p-3">
-						<Button variant="destructive" size="xs" onclick={() => deleteSnapshotFromTab(snap.subvolume, snap.name)}>
-							<Trash2 class="mr-1 h-3 w-3" />Delete
-						</Button>
-					</td>
+	{@const showFsHeaders = !selectedFs && mountedFilesystems.length > 1}
+	{@const snapsByFs = showFsHeaders
+		? mountedFilesystems
+			.map(fs => ({ fs: fs.name, items: filteredSnapshots.filter(s => s.filesystem === fs.name) }))
+			.filter(g => g.items.length > 0)
+		: [{ fs: null as string | null, items: filteredSnapshots }]}
+	{#each snapsByFs as group (group.fs ?? '__flat__')}
+		{#if group.fs}
+			<h2 class="mt-6 mb-2 flex items-baseline gap-2 text-sm font-semibold">
+				<span>{group.fs}</span>
+				<span class="text-xs font-normal text-muted-foreground">{group.items.length} snapshot{group.items.length === 1 ? '' : 's'}</span>
+			</h2>
+		{/if}
+		<table class="w-full text-sm">
+			<thead>
+				<tr>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Snapshot Name</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Parent Subvolume</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Read-only</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Type</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 				</tr>
-			{/each}
-		</tbody>
-	</table>
+			</thead>
+			<tbody>
+				{#each group.items as snap (`${snap.filesystem}|${snap.subvolume}|${snap.name}`)}
+					<tr class="border-b border-border">
+						<td class="p-3">
+							<span class="font-mono text-sm">{snap.name}</span>
+							{#if snap.path}
+								<span class="block font-mono text-xs text-muted-foreground">{snap.path}</span>
+							{/if}
+						</td>
+						<td class="p-3">
+							{#if subvolumes.find(sv => sv.filesystem === snap.filesystem && sv.name === snap.subvolume)}
+								<button
+									class="font-mono text-sm text-blue-400 hover:text-blue-300 transition-colors"
+									onclick={() => switchToSubvolumeAndExpand(snap.filesystem, snap.subvolume)}
+								>{snap.subvolume}</button>
+							{:else}
+								<span class="flex items-center gap-1.5">
+									<span class="font-mono text-sm text-muted-foreground">{snap.subvolume}</span>
+									<Badge variant="outline" class="bg-amber-950 text-amber-400 text-[0.6rem]">
+										<AlertTriangle class="mr-0.5 h-2.5 w-2.5" />deleted
+									</Badge>
+								</span>
+							{/if}
+						</td>
+						<td class="p-3">
+							{#if snap.read_only}
+								<Badge class="bg-green-950 text-green-400">read-only</Badge>
+							{:else}
+								<Badge variant="outline" class="text-muted-foreground">writable</Badge>
+							{/if}
+						</td>
+						<td class="p-3">
+							<Badge variant="secondary" class="bg-amber-950 text-amber-400">snapshot</Badge>
+						</td>
+						<td class="p-3">
+							<Button variant="destructive" size="xs" onclick={() => deleteSnapshotFromTab(snap.filesystem, snap.subvolume, snap.name)}>
+								<Trash2 class="mr-1 h-3 w-3" />Delete
+							</Button>
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/each}
 {/if}
 
 {/if}
@@ -1183,7 +1377,7 @@
 <Dialog.Root open={showSnap !== null} onOpenChange={(open) => { if (!open) showSnap = null; }}>
 	<Dialog.Content>
 		<Dialog.Header>
-			<Dialog.Title>Snapshot "{showSnap}"</Dialog.Title>
+			<Dialog.Title>Snapshot "{showSnap?.name ?? ''}"</Dialog.Title>
 			<p class="text-sm text-muted-foreground">Create a read-only point-in-time copy.</p>
 		</Dialog.Header>
 		<div class="mb-4">
@@ -1200,7 +1394,7 @@
 <Dialog.Root open={showClone !== null} onOpenChange={(open) => { if (!open) showClone = null; }}>
 	<Dialog.Content>
 		<Dialog.Header>
-			<Dialog.Title>Clone "{showClone}"</Dialog.Title>
+			<Dialog.Title>Clone "{showClone?.name ?? ''}{showClone?.snapshot ? `@${showClone.snapshot}` : ''}"</Dialog.Title>
 			<p class="text-sm text-muted-foreground">Create a writable copy (COW — instant, shares data until modified).</p>
 		</Dialog.Header>
 		<div class="mb-4">
