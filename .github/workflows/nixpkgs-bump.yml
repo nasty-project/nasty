@@ -80,6 +80,50 @@ jobs:
             echo "summary=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Diff high-signal package versions
+        # Evaluate a curated list of packages against both nixpkgs revs
+        # and surface any version deltas in the PR body. One nix eval
+        # per rev = two tarball fetches; runs in roughly 30–60 s on
+        # GitHub-hosted runners.
+        id: pkgdiff
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          set -eu
+          eval_versions() {
+            local rev="$1"
+            nix eval --json --impure --expr "
+              let
+                pkgs = (builtins.getFlake \"github:NixOS/nixpkgs/$rev\").legacyPackages.x86_64-linux;
+                names = [
+                  \"qemu\" \"docker\" \"openssl\" \"openssh\" \"networkmanager\"
+                  \"samba\" \"nfs-utils\" \"nginx\" \"targetcli-fb\" \"lvm2\"
+                  \"util-linux\" \"glibc\"
+                ];
+                versionOf = name:
+                  if builtins.hasAttr name pkgs then
+                    let tried = builtins.tryEval (builtins.getAttr name pkgs).version;
+                    in if tried.success then tried.value else null
+                  else null;
+              in builtins.listToAttrs (map (n: { name = n; value = versionOf n; }) names)
+            "
+          }
+          BEFORE_JSON=$(eval_versions "${{ steps.update.outputs.before }}")
+          AFTER_JSON=$(eval_versions "${{ steps.update.outputs.after }}")
+          DIFF=$(jq -rn --argjson b "$BEFORE_JSON" --argjson a "$AFTER_JSON" '
+            $b | to_entries
+              | map(select(.value != null and $a[.key] != null and .value != $a[.key]))
+              | .[] | "- \(.key): \(.value) → \($a[.key])"
+          ')
+          {
+            echo 'block<<DIFFEOF'
+            if [ -n "$DIFF" ]; then
+              echo "**Package version changes** (curated):"
+              echo
+              printf '%s\n' "$DIFF"
+            fi
+            echo DIFFEOF
+          } >> "$GITHUB_OUTPUT"
+
       - name: Open PR
         if: steps.update.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
@@ -100,6 +144,8 @@ jobs:
 
             **nixpkgs**: `${{ steps.update.outputs.before }}` → `${{ steps.update.outputs.after }}`
             ${{ steps.kernel.outputs.summary && format('**Kernel**: {0}', steps.kernel.outputs.summary) || '' }}
+
+            ${{ steps.pkgdiff.outputs.block }}
 
             Compare: https://github.com/NixOS/nixpkgs/compare/${{ steps.update.outputs.before }}...${{ steps.update.outputs.after }}
 
