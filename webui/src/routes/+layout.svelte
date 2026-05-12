@@ -291,6 +291,13 @@
 					return;
 				}
 			} catch { /* health check failed, continue with stale UI */ }
+			// Engine binary is the same, but the kernel/bcachefs module may have
+			// changed underneath (e.g. a bcachefs-tools-only bump rebuilt the DKMS
+			// module without moving the engine commit). The footer reads
+			// system.info, which is fetched once on connect and cached client-side
+			// — without this trigger it shows the pre-reboot version until the
+			// user hits cmd+R.
+			sysInfoRefresh.trigger();
 		};
 		const onDisconnect = () => { reconnecting = true; };
 		getClient().onReconnect(onReconnect);
