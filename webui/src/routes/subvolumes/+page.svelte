@@ -83,6 +83,7 @@
 	let newDataReplicas = $state('');
 	let newComments = $state('');
 	let newDirectIo = $state(false);
+	let showAdvancedStorage = $state(false);
 
 	const WIZARD_STEPS: [string, string][] = [
 		['1', 'Basic'],
@@ -107,6 +108,7 @@
 		newDataReplicas = '';
 		newComments = '';
 		newDirectIo = false;
+		showAdvancedStorage = false;
 	}
 
 	function openWizard() {
@@ -472,6 +474,16 @@
 		return [...new Set(labels)].sort();
 	});
 
+	// Filesystem-level defaults so "Inherit" options can show what they'll
+	// actually resolve to — leaving the word naked is intimidating for
+	// first-time users who don't know what the parent FS is set to.
+	const fsDefaults = $derived(() =>
+		filesystems.find(f => f.name === selectedFs)?.options ?? null
+	);
+	function inheritLabel(value: string | number | null | undefined): string {
+		return value == null || value === '' ? 'Inherit' : `Inherit (${value})`;
+	}
+
 	let search = $state('');
 
 	type SortKey = 'name' | 'type' | 'size';
@@ -605,64 +617,84 @@
 					<option value="gzip">Gzip</option>
 				</select>
 			</div>
-			{#if deviceLabels().length > 0}
-				<div class="mb-4">
-					<Label>Tiering Targets</Label>
-					<p class="mb-2 text-xs text-muted-foreground">Override filesystem defaults. Leave empty to inherit.</p>
-					<div class="grid grid-cols-2 gap-2">
-						<div>
-							<label for="sv-fg-target" class="mb-1 block text-xs text-muted-foreground">Foreground Target</label>
-							<select id="sv-fg-target" bind:value={newForegroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-								<option value="">Inherit</option>
-								{#each deviceLabels() as label}
-									<option value={label}>{label}</option>
-								{/each}
-							</select>
-						</div>
-						<div>
-							<label for="sv-meta-target" class="mb-1 block text-xs text-muted-foreground">Metadata Target</label>
-							<select id="sv-meta-target" bind:value={newMetadataTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-								<option value="">Inherit</option>
-								{#each deviceLabels() as label}
-									<option value={label}>{label}</option>
-								{/each}
-							</select>
-						</div>
-						<div>
-							<label for="sv-bg-target" class="mb-1 block text-xs text-muted-foreground">Background Target</label>
-							<select id="sv-bg-target" bind:value={newBackgroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-								<option value="">Inherit</option>
-								{#each deviceLabels() as label}
-									<option value={label}>{label}</option>
-								{/each}
-							</select>
-						</div>
-						<div>
-							<label for="sv-promote-target" class="mb-1 block text-xs text-muted-foreground">Promote Target</label>
-							<select id="sv-promote-target" bind:value={newPromoteTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-								<option value="">Inherit</option>
-								{#each deviceLabels() as label}
-									<option value={label}>{label}</option>
-								{/each}
-							</select>
-						</div>
-					</div>
-				</div>
-			{/if}
 			<div class="mb-4">
-				<label for="sv-data-replicas" class="mb-1 block text-sm font-medium">Data Replicas</label>
-				<input id="sv-data-replicas" type="number" bind:value={newDataReplicas} placeholder="Inherit from filesystem" min="1" max="8" class="h-8 w-32 rounded-md border border-input bg-transparent px-2 text-sm" />
-				<p class="mt-1 text-xs text-muted-foreground">Number of data copies. Leave empty to inherit from filesystem.</p>
+				<button
+					type="button"
+					onclick={() => showAdvancedStorage = !showAdvancedStorage}
+					class="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground"
+				>
+					<span class="inline-block w-3 text-xs">{showAdvancedStorage ? '▾' : '▸'}</span>
+					Advanced storage options
+				</button>
+				{#if showAdvancedStorage}
+					<div class="mt-3 space-y-4 rounded-md border border-border bg-secondary/20 p-3">
+						{#if deviceLabels().length > 0}
+							<div>
+								<Label>Tiering Targets</Label>
+								<p class="mb-2 text-xs text-muted-foreground">Override filesystem defaults. Leave empty to inherit.</p>
+								<div class="grid grid-cols-2 gap-2">
+									<div>
+										<label for="sv-fg-target" class="mb-1 block text-xs text-muted-foreground">Foreground Target</label>
+										<select id="sv-fg-target" bind:value={newForegroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+											<option value="">{inheritLabel(fsDefaults()?.foreground_target)}</option>
+											{#each deviceLabels() as label}
+												<option value={label}>{label}</option>
+											{/each}
+										</select>
+									</div>
+									<div>
+										<label for="sv-meta-target" class="mb-1 block text-xs text-muted-foreground">Metadata Target</label>
+										<select id="sv-meta-target" bind:value={newMetadataTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+											<option value="">{inheritLabel(fsDefaults()?.metadata_target)}</option>
+											{#each deviceLabels() as label}
+												<option value={label}>{label}</option>
+											{/each}
+										</select>
+									</div>
+									<div>
+										<label for="sv-bg-target" class="mb-1 block text-xs text-muted-foreground">Background Target</label>
+										<select id="sv-bg-target" bind:value={newBackgroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+											<option value="">{inheritLabel(fsDefaults()?.background_target)}</option>
+											{#each deviceLabels() as label}
+												<option value={label}>{label}</option>
+											{/each}
+										</select>
+									</div>
+									<div>
+										<label for="sv-promote-target" class="mb-1 block text-xs text-muted-foreground">Promote Target</label>
+										<select id="sv-promote-target" bind:value={newPromoteTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+											<option value="">{inheritLabel(fsDefaults()?.promote_target)}</option>
+											{#each deviceLabels() as label}
+												<option value={label}>{label}</option>
+											{/each}
+										</select>
+									</div>
+								</div>
+							</div>
+						{/if}
+						<div>
+							<label for="sv-data-replicas" class="mb-1 block text-xs text-muted-foreground">Data Replicas</label>
+							<select id="sv-data-replicas" bind:value={newDataReplicas} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+								<option value="">{inheritLabel(fsDefaults()?.data_replicas)}</option>
+								<option value="1">1</option>
+								<option value="2">2</option>
+								<option value="3">3</option>
+								<option value="4">4</option>
+							</select>
+							<p class="mt-1 text-xs text-muted-foreground">Number of data copies kept on this subvolume.</p>
+						</div>
+						{#if newType === 'block'}
+							<div>
+								<label class="flex cursor-pointer items-center gap-2 text-sm font-medium">
+									<input type="checkbox" bind:checked={newDirectIo} class="h-4 w-4" />
+									Direct I/O (O_DIRECT)
+								</label>
+								<p class="mt-1 text-xs text-muted-foreground">Bypass host page cache for the backing file. Reduces double-caching when the client (iSCSI/NVMe-oF) manages its own cache.</p>
+							</div>
+						{/if}
+					</div>
+				{/if}
 			</div>
-			{#if newType === 'block'}
-				<div class="mb-4">
-					<label class="flex cursor-pointer items-center gap-2 text-sm font-medium">
-						<input type="checkbox" bind:checked={newDirectIo} class="h-4 w-4" />
-						Direct I/O (O_DIRECT)
-					</label>
-					<p class="mt-1 text-xs text-muted-foreground">Bypass host page cache for the backing file. Reduces double-caching when the client (iSCSI/NVMe-oF) manages its own cache.</p>
-				</div>
-			{/if}
 			<div class="flex gap-2">
 				<Button variant="secondary" size="sm" onclick={() => wizardStep = 1}>← Back</Button>
 				<Button size="sm" onclick={() => wizardStep = 3} disabled={newType === 'block' && !newVolsize}>Next: Review →</Button>
