@@ -519,13 +519,30 @@ echo "==> Update complete!"
         // Strip "-dirty" suffix for comparison — the local build has a dirty
         // git tree (hardware-configuration.nix) but the commit is the same
         let current_clean = current.trim_end_matches("-dirty");
-        let available = if latest == "unknown" {
+        let mut available = if latest == "unknown" {
             None
         } else if current_clean == "dev" {
             Some(true) // dev builds should always offer to update
         } else {
             Some(current_clean != latest)
         };
+
+        // Revs match? The wrapper-flake template can still have drifted
+        // (e.g. a maintainer-side bcachefs URL bump landed without
+        // moving the lock here). Surface that as "update available" so
+        // the Upgrade button appears — clicking it triggers a
+        // rebootstrap of /etc/nixos/flake.nix from the new template.
+        if available == Some(false)
+            && let Some(drifted) = check_wrapper_template_drift(
+                &nasty_input.owner,
+                &nasty_input.repo,
+                &nasty_input.tracked_ref,
+            )
+            .await
+            && drifted
+        {
+            available = Some(true);
+        }
 
         Ok(UpdateInfo {
             current_version: current,
@@ -1462,6 +1479,46 @@ fn render_system_flake_template_with_ref(
         .replace("@NASTY_VERSION@", nasty_ref)
         .replace("@LOCAL_SYSTEM@", local_system)
         .replace("@WRAPPER_FLAKE_VERSION@", &wrapper_version))
+}
+
+/// Check whether the upstream wrapper-flake template at the given
+/// canonical ref differs from what's baked into the local
+/// /etc/nixos/flake.nix. Used by system.update.check to surface
+/// template-only drift as "update available" — without this,
+/// dev-build trackers whose locked rev already matches main HEAD
+/// would never see the Upgrade button despite the template having
+/// new bcachefs URLs (etc) to adopt.
+///
+/// Returns `Some(true)` for "drift detected", `Some(false)` for
+/// "in sync", `None` on any error (network, parse, fork repos that
+/// our placeholder substitution can't safely reason about). None is
+/// treated as "don't change the answer" upstream of here.
+async fn check_wrapper_template_drift(owner: &str, repo: &str, git_ref: &str) -> Option<bool> {
+    // Only nasty-project/nasty templates carry the @WRAPPER_FLAKE_VERSION@
+    // placeholder we know how to hash — refuse to reason about forks.
+    if owner != DEFAULT_NASTY_OWNER || repo != DEFAULT_NASTY_REPO {
+        return None;
+    }
+    let token = read_github_token().await;
+    let template = fetch_github_text_file(
+        token.as_deref(),
+        owner,
+        repo,
+        SYSTEM_FLAKE_TEMPLATE_PATH,
+        git_ref,
+    )
+    .await
+    .ok()?;
+    // Pre-content-hash templates (no placeholder) → no drift signal
+    // available, defer to the rev-based check alone.
+    if !template.contains("@WRAPPER_FLAKE_VERSION@") {
+        return None;
+    }
+    let expected = wrapper_flake_content_hash(&template);
+    let flake_path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
+    let local_flake = tokio::fs::read_to_string(&flake_path).await.ok()?;
+    let local = read_wrapper_flake_version(&local_flake).ok().flatten();
+    Some(local.as_deref() != Some(expected.as_str()))
 }
 
 /// Content-hash of the template body, used as wrapperFlakeVersion.
