@@ -84,6 +84,10 @@
 	let editJournalFlushDelay = $state('');
 	let editIoScheduler = $state('');
 
+	let showCreateAdvanced = $state(false);
+	let showCreateCommands = $state(false);
+	let showEditAdvanced = $state(false);
+
 	// Inline label editing: key is "fsName|devicePath"
 	let editingLabel: string | null = $state(null);
 	let editLabelValue = $state('');
@@ -420,6 +424,8 @@
 		manualBgTarget = '';
 		manualPromoteTarget = '';
 		erasureCode = false;
+		showCreateAdvanced = false;
+		showCreateCommands = false;
 		wizardStep = 1;
 	}
 
@@ -552,6 +558,7 @@
 		editJournalFlushDisabled = fs.options.journal_flush_disabled ?? false;
 		editJournalFlushDelay = fs.options.journal_flush_delay?.toString() ?? '';
 		editIoScheduler = fs.options.io_scheduler ?? '';
+		showEditAdvanced = false;
 	}
 
 	async function lockFs(fs: Filesystem) {
@@ -1177,8 +1184,16 @@
 				</div>
 
 				<!-- Advanced format options -->
-				<details class="mb-5">
-					<summary class="cursor-pointer text-sm text-muted-foreground hover:text-foreground">Advanced options</summary>
+				<div class="mb-5">
+					<button
+						type="button"
+						onclick={() => showCreateAdvanced = !showCreateAdvanced}
+						class="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground"
+					>
+						<span class="inline-block w-3 text-xs">{showCreateAdvanced ? '▾' : '▸'}</span>
+						Advanced format options
+					</button>
+				{#if showCreateAdvanced}
 					<p class="mt-2 text-xs text-amber-400">Defaults are recommended for most setups. Only change these if you understand their impact.</p>
 					<div class="mt-3 flex flex-wrap gap-4">
 						<div class="flex-1 min-w-[140px]">
@@ -1269,13 +1284,23 @@
 						</div>
 					</div>
 					<p class="mt-2 text-xs text-muted-foreground">Checksum and bucket size are set at format time. Mount options can be changed later via Edit Options.</p>
-				</details>
+				{/if}
+				</div>
 
 				<div class="mb-5">
-					<Label>Commands</Label>
-					<pre class="mt-1 rounded-md border border-border bg-black/40 p-3 text-xs font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap">{formatCommandLines(buildFormatCommand())}
+					<button
+						type="button"
+						onclick={() => showCreateCommands = !showCreateCommands}
+						class="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground"
+					>
+						<span class="inline-block w-3 text-xs">{showCreateCommands ? '▾' : '▸'}</span>
+						Show format / mount commands
+					</button>
+					{#if showCreateCommands}
+						<pre class="mt-2 rounded-md border border-border bg-black/40 p-3 text-xs font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap">{formatCommandLines(buildFormatCommand())}
 
 {buildMountCommand().join(' ')}</pre>
+					{/if}
 				</div>
 
 				<div class="flex gap-2">
@@ -1376,44 +1401,6 @@
 				<div class="mt-4 border-t border-border pt-4">
 					<h4 class="mb-4 text-xs uppercase tracking-wide text-muted-foreground">Edit Options</h4>
 					<div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
-						<!-- Data Protection -->
-						<fieldset class="rounded-md border border-border p-3">
-							<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Data Protection</legend>
-							<div class="grid grid-cols-2 gap-3">
-								<div>
-									<label for="edit-data-replicas-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Data Replicas</label>
-									<input id="edit-data-replicas-{fs.name}" type="number" min="1" max="4" bind:value={editDataReplicas} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm" />
-								</div>
-								<div>
-									<label for="edit-meta-replicas-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Metadata Replicas</label>
-									<input id="edit-meta-replicas-{fs.name}" type="number" min="1" max="4" bind:value={editMetadataReplicas} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm" />
-								</div>
-							</div>
-							<label class="mt-2 flex cursor-pointer items-center gap-2 text-sm">
-								<input id="edit-erasure-{fs.name}" type="checkbox" bind:checked={editErasureCode} class="h-4 w-4" />
-								<span class="text-xs">Erasure coding</span>
-									</label>
-							<div class="mt-3 grid grid-cols-2 gap-3">
-								<div>
-									<label for="edit-data-checksum-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Data Checksum</label>
-									<select id="edit-data-checksum-{fs.name}" bind:value={editDataChecksum} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-										<option value="none">None</option>
-										<option value="crc32c">CRC32C</option>
-										<option value="crc64">CRC64</option>
-										<option value="xxhash">xxHash</option>
-									</select>
-								</div>
-								<div>
-									<label for="edit-meta-checksum-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Metadata Checksum</label>
-									<select id="edit-meta-checksum-{fs.name}" bind:value={editMetadataChecksum} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-										<option value="none">None</option>
-										<option value="crc32c">CRC32C</option>
-										<option value="crc64">CRC64</option>
-										<option value="xxhash">xxHash</option>
-									</select>
-								</div>
-							</div>
-						</fieldset>
 						<!-- Compression -->
 						<fieldset class="rounded-md border border-border p-3">
 							<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Compression</legend>
@@ -1438,67 +1425,124 @@
 								</div>
 							</div>
 						</fieldset>
-						<!-- Background Mover -->
+						<!-- Data Protection (basic) -->
 						<fieldset class="rounded-md border border-border p-3">
-							<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Background Mover</legend>
-							<div class="grid grid-cols-2 gap-3">
-								<div>
-									<label for="edit-move-ios-{fs.name}" class="mb-1 block text-xs text-muted-foreground">IOs in Flight</label>
-									<input id="edit-move-ios-{fs.name}" type="number" min="1" max="256" bind:value={editMoveIos} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm" />
-								</div>
-								<div>
-									<label for="edit-move-bytes-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Bytes in Flight</label>
-									<input id="edit-move-bytes-{fs.name}" type="text" placeholder="e.g. 8.0M" bind:value={editMoveBytes} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm" />
-								</div>
-							</div>
-						</fieldset>
-						<!-- Mount Options -->
-						<fieldset class="rounded-md border border-border p-3">
-							<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Mount Options</legend>
+							<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Data Protection</legend>
 							<div>
-								<label for="edit-vu-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Version Upgrade</label>
-								<select id="edit-vu-{fs.name}" bind:value={editVersionUpgrade} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-									<option value="">None</option>
-									<option value="compatible">Compatible</option>
-									<option value="incompatible">Incompatible</option>
-								</select>
+								<label for="edit-data-replicas-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Data Replicas</label>
+								<input id="edit-data-replicas-{fs.name}" type="number" min="1" max="4" bind:value={editDataReplicas} class="h-8 w-32 rounded-md border border-input bg-transparent px-2 text-sm" />
 							</div>
-							<div class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
-								<label class="flex cursor-pointer items-center gap-2">
-									<input type="checkbox" bind:checked={editDegraded} class="h-3.5 w-3.5" />
-									<span class="text-xs">Degraded mode</span>
-								</label>
-								<label class="flex cursor-pointer items-center gap-2">
-									<input type="checkbox" bind:checked={editFsck} class="h-3.5 w-3.5" />
-									<span class="text-xs">Fsck on mount</span>
-								</label>
-								<label class="flex cursor-pointer items-center gap-2">
-									<input type="checkbox" bind:checked={editVerbose} class="h-3.5 w-3.5" />
-									<span class="text-xs">Verbose</span>
-								</label>
-								<label class="flex cursor-pointer items-center gap-2">
-									<input type="checkbox" bind:checked={editJournalFlushDisabled} class="h-3.5 w-3.5" />
-									<span class="text-xs">Disable journal flush</span>
-								</label>
-							</div>
-							<div class="mt-2 grid grid-cols-2 gap-2">
-								<div>
-									<Label class="text-[0.65rem]">Journal flush delay (µs)</Label>
-									<Input type="number" bind:value={editJournalFlushDelay} placeholder="1000" class="mt-0.5 h-7 text-xs" />
-								</div>
-								<div>
-									<Label class="text-[0.65rem]">I/O scheduler</Label>
-									<select bind:value={editIoScheduler} class="mt-0.5 h-7 w-full rounded-md border border-input bg-background px-2 text-xs">
-										<option value="">Default</option>
-										<option value="none">none (recommended for SSDs)</option>
-										<option value="mq-deadline">mq-deadline</option>
-										<option value="kyber">kyber</option>
-									</select>
-								</div>
-							</div>
-							<p class="mt-1.5 text-[0.6rem] text-muted-foreground">These require a remount to take effect.</p>
+							<label class="mt-3 flex cursor-pointer items-center gap-2 text-sm">
+								<input id="edit-erasure-{fs.name}" type="checkbox" bind:checked={editErasureCode} class="h-4 w-4" />
+								<span class="text-xs">Erasure coding</span>
+							</label>
 						</fieldset>
 					</div>
+
+					<!-- Advanced options — bcachefs tuning knobs most users won't touch -->
+					<div class="mt-4">
+						<button
+							type="button"
+							onclick={() => showEditAdvanced = !showEditAdvanced}
+							class="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground"
+						>
+							<span class="inline-block w-3 text-xs">{showEditAdvanced ? '▾' : '▸'}</span>
+							Advanced options
+						</button>
+						{#if showEditAdvanced}
+							<div class="mt-3 grid grid-cols-1 gap-5 sm:grid-cols-2">
+								<!-- Checksums + Metadata Replicas -->
+								<fieldset class="rounded-md border border-border p-3">
+									<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Checksums &amp; Metadata</legend>
+									<div>
+										<label for="edit-meta-replicas-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Metadata Replicas</label>
+										<input id="edit-meta-replicas-{fs.name}" type="number" min="1" max="4" bind:value={editMetadataReplicas} class="h-8 w-32 rounded-md border border-input bg-transparent px-2 text-sm" />
+									</div>
+									<div class="mt-3 grid grid-cols-2 gap-3">
+										<div>
+											<label for="edit-data-checksum-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Data Checksum</label>
+											<select id="edit-data-checksum-{fs.name}" bind:value={editDataChecksum} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+												<option value="none">None</option>
+												<option value="crc32c">CRC32C</option>
+												<option value="crc64">CRC64</option>
+												<option value="xxhash">xxHash</option>
+											</select>
+										</div>
+										<div>
+											<label for="edit-meta-checksum-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Metadata Checksum</label>
+											<select id="edit-meta-checksum-{fs.name}" bind:value={editMetadataChecksum} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+												<option value="none">None</option>
+												<option value="crc32c">CRC32C</option>
+												<option value="crc64">CRC64</option>
+												<option value="xxhash">xxHash</option>
+											</select>
+										</div>
+									</div>
+								</fieldset>
+								<!-- Background Mover -->
+								<fieldset class="rounded-md border border-border p-3">
+									<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Background Mover</legend>
+									<div class="grid grid-cols-2 gap-3">
+										<div>
+											<label for="edit-move-ios-{fs.name}" class="mb-1 block text-xs text-muted-foreground">IOs in Flight</label>
+											<input id="edit-move-ios-{fs.name}" type="number" min="1" max="256" bind:value={editMoveIos} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm" />
+										</div>
+										<div>
+											<label for="edit-move-bytes-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Bytes in Flight</label>
+											<input id="edit-move-bytes-{fs.name}" type="text" placeholder="e.g. 8.0M" bind:value={editMoveBytes} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm" />
+										</div>
+									</div>
+								</fieldset>
+								<!-- Mount Options -->
+								<fieldset class="rounded-md border border-border p-3 sm:col-span-2">
+									<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Mount Options</legend>
+									<div>
+										<label for="edit-vu-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Version Upgrade</label>
+										<select id="edit-vu-{fs.name}" bind:value={editVersionUpgrade} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+											<option value="">None</option>
+											<option value="compatible">Compatible</option>
+											<option value="incompatible">Incompatible</option>
+										</select>
+									</div>
+									<div class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
+										<label class="flex cursor-pointer items-center gap-2">
+											<input type="checkbox" bind:checked={editDegraded} class="h-3.5 w-3.5" />
+											<span class="text-xs">Degraded mode</span>
+										</label>
+										<label class="flex cursor-pointer items-center gap-2">
+											<input type="checkbox" bind:checked={editFsck} class="h-3.5 w-3.5" />
+											<span class="text-xs">Fsck on mount</span>
+										</label>
+										<label class="flex cursor-pointer items-center gap-2">
+											<input type="checkbox" bind:checked={editVerbose} class="h-3.5 w-3.5" />
+											<span class="text-xs">Verbose</span>
+										</label>
+										<label class="flex cursor-pointer items-center gap-2">
+											<input type="checkbox" bind:checked={editJournalFlushDisabled} class="h-3.5 w-3.5" />
+											<span class="text-xs">Disable journal flush</span>
+										</label>
+									</div>
+									<div class="mt-2 grid grid-cols-2 gap-2">
+										<div>
+											<Label class="text-[0.65rem]">Journal flush delay (µs)</Label>
+											<Input type="number" bind:value={editJournalFlushDelay} placeholder="1000" class="mt-0.5 h-7 text-xs" />
+										</div>
+										<div>
+											<Label class="text-[0.65rem]">I/O scheduler</Label>
+											<select bind:value={editIoScheduler} class="mt-0.5 h-7 w-full rounded-md border border-input bg-background px-2 text-xs">
+												<option value="">Default</option>
+												<option value="none">none (recommended for SSDs)</option>
+												<option value="mq-deadline">mq-deadline</option>
+												<option value="kyber">kyber</option>
+											</select>
+										</div>
+									</div>
+									<p class="mt-1.5 text-[0.6rem] text-muted-foreground">These require a remount to take effect.</p>
+								</fieldset>
+							</div>
+						{/if}
+					</div>
+
 					<div class="mt-4 flex gap-2">
 						<Button size="xs" onclick={() => saveOptions(fs.name)}>Save</Button>
 						<Button variant="secondary" size="xs" onclick={() => editOptionsFs = null}>Cancel</Button>
