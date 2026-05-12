@@ -309,14 +309,32 @@
 	// Default the new-subvolume name from the image filename — the
 	// stem is usually a recognizable distro/version identifier (e.g.
 	// haos_ova-12.0), which makes a fine subvolume name. User can
-	// override.
+	// override. We strip both layers of known suffix (compression
+	// wrapper + image format) so `haos_ova-17.3.qcow2.xz` becomes
+	// `haos-ova-17-3` rather than `haos-ova-17-3-qcow2`.
+	function stripImageSuffixes(filename: string): string {
+		let s = filename;
+		for (const ext of ['.xz', '.gz', '.bz2']) {
+			if (s.toLowerCase().endsWith(ext)) {
+				s = s.slice(0, -ext.length);
+				break;
+			}
+		}
+		for (const ext of ['.qcow2', '.img', '.raw', '.vdi', '.vmdk', '.iso']) {
+			if (s.toLowerCase().endsWith(ext)) {
+				s = s.slice(0, -ext.length);
+				break;
+			}
+		}
+		return s;
+	}
+
 	$effect(() => {
 		const key = importImageKey;
 		if (!key || importNewSvName !== '') return;
 		const [, ...rest] = key.split('/');
 		const filename = rest.join('/');
-		const stem = filename.replace(/\.[^.]+$/, '');
-		importNewSvName = stem
+		importNewSvName = stripImageSuffixes(filename)
 			.toLowerCase()
 			.replace(/[^a-z0-9-]+/g, '-')
 			.replace(/^-+|-+$/g, '')
