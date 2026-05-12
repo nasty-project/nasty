@@ -395,7 +395,19 @@ nix flake update bcachefs-tools
 nix flake update nasty
 
 echo "==> Rebuilding system..."
-NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}
+_RC=0
+NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake} || _RC=$?
+if [ "$_RC" -ne 0 ]; then
+    echo
+    echo "==> nixos-rebuild switch failed (exit $_RC)."
+    echo "==> Below is the tail of the switch-to-configuration journal — it"
+    echo "    usually carries the real error (systemd-boot tracebacks, failed"
+    echo "    service starts, ENOSPC on /boot, etc):"
+    echo "--- journalctl -u nixos-rebuild-switch-to-configuration -n 60 ---"
+    journalctl -u nixos-rebuild-switch-to-configuration --no-pager -n 60 || true
+    echo "--- end journal dump ---"
+    exit "$_RC"
+fi
 
 _NGINX_CONF_AFTER=$(_nginx_conf)
 WEBUI_AFTER=$([ -n "$_NGINX_CONF_AFTER" ] && grep 'nasty-webui' "$_NGINX_CONF_AFTER" 2>/dev/null | head -1 || echo "")
@@ -638,7 +650,19 @@ cd {LOCAL_REPO}
 # No custom GC logic needed here — just rebuild.
 
 echo "==> Rebuilding system..."
-NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}
+_RC=0
+NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake} || _RC=$?
+if [ "$_RC" -ne 0 ]; then
+    echo
+    echo "==> nixos-rebuild switch failed (exit $_RC)."
+    echo "==> Below is the tail of the switch-to-configuration journal — it"
+    echo "    usually carries the real error (systemd-boot tracebacks, failed"
+    echo "    service starts, ENOSPC on /boot, etc):"
+    echo "--- journalctl -u nixos-rebuild-switch-to-configuration -n 60 ---"
+    journalctl -u nixos-rebuild-switch-to-configuration --no-pager -n 60 || true
+    echo "--- end journal dump ---"
+    exit "$_RC"
+fi
 
 # Detect if the webui store path changed so the frontend knows whether to prompt a reload.
 # /run/current-system now points to the newly activated closure.
@@ -907,6 +931,13 @@ if [ "$LOCK_BEFORE" != "$LOCK_AFTER" ]; then
         echo "==> Rebuild failed (exit $RC). Restoring previous flake.lock so update can be retried."
         cp flake.lock.pre-rebuild flake.lock
         rm -f flake.lock.pre-rebuild
+        echo
+        echo "==> Below is the tail of the switch-to-configuration journal — it"
+        echo "    usually carries the real error (systemd-boot tracebacks, failed"
+        echo "    service starts, ENOSPC on /boot, etc):"
+        echo "--- journalctl -u nixos-rebuild-switch-to-configuration -n 60 ---"
+        journalctl -u nixos-rebuild-switch-to-configuration --no-pager -n 60 || true
+        echo "--- end journal dump ---"
         exit "$RC"
     fi
     _NGINX_CONF_AFTER=$(_nginx_conf)
