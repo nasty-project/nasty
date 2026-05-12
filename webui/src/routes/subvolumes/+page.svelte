@@ -566,6 +566,23 @@
 		return subvolumeUsage.get(svKey(sv)) ?? { system: null, nfs: 0, smb: 0, iscsi: 0, nvmeof: 0 };
 	}
 
+	// Pick a ceiling to scale the disk-usage bar against:
+	// - block subvolumes: the configured volsize is the hard cap
+	// - filesystem subvolumes with a quota: that quota
+	// - filesystem subvolumes without a quota: filesystem total — the bar
+	//   then reads as "% of FS occupied by this subvolume", which is the
+	//   only meaningful denominator we have
+	function sizeDisplay(sv: Subvolume): { used: number | null; ceiling: number | null; source: 'volsize' | 'quota' | 'filesystem' | null } {
+		if (sv.subvolume_type === 'block') {
+			return { used: sv.used_bytes, ceiling: sv.volsize_bytes, source: sv.volsize_bytes ? 'volsize' : null };
+		}
+		if (sv.quota_bytes != null) {
+			return { used: sv.used_bytes, ceiling: sv.quota_bytes, source: 'quota' };
+		}
+		const fsTotal = filesystems.find(f => f.name === sv.filesystem)?.total_bytes ?? null;
+		return { used: sv.used_bytes, ceiling: fsTotal && fsTotal > 0 ? fsTotal : null, source: fsTotal && fsTotal > 0 ? 'filesystem' : null };
+	}
+
 	// Unique device labels from the filesystem chosen in the create wizard
 	// (for tiering dropdowns). Tracks `newFilesystem`, not the page filter,
 	// so the wizard reflects the FS the user is creating in.
@@ -942,6 +959,8 @@
 				{/if}
 				{#each group.items as sv (svKey(sv))}
 					{@const usage = usageFor(sv)}
+					{@const size = sizeDisplay(sv)}
+					{@const sizePct = size.used != null && size.ceiling ? Math.min(100, Math.max(0, (size.used / size.ceiling) * 100)) : 0}
 					<tr class="border-b border-border">
 						<td class="p-3">
 							<button class="text-left hover:text-blue-400 transition-colors" onclick={() => openDetail(sv)}>
@@ -958,16 +977,26 @@
 								{sv.subvolume_type === 'filesystem' ? 'File Share' : 'Block'}
 							</Badge>
 						</td>
-						<td class="p-3 text-sm">
-							{#if sv.volsize_bytes}
-								{formatBytes(sv.volsize_bytes)}
-								{#if sv.used_bytes !== null}
-									<span class="text-xs text-muted-foreground">({formatBytes(sv.used_bytes)} used)</span>
-								{/if}
-							{:else if sv.used_bytes !== null}
-								{formatBytes(sv.used_bytes)}
+						<td class="p-3 text-sm w-48">
+							{#if size.used == null}
+								<span class="text-muted-foreground">—</span>
+							{:else if size.ceiling == null}
+								{formatBytes(size.used)}
 							{:else}
-								—
+								<div class="space-y-0.5">
+									<div class="flex items-baseline justify-between gap-2 text-xs">
+										<span class="font-mono">{formatBytes(size.used)}</span>
+										<span class="text-muted-foreground" title={size.source === 'filesystem' ? `${sizePct.toFixed(1)}% of filesystem total` : `${sizePct.toFixed(1)}% of ${formatBytes(size.ceiling)} ${size.source === 'volsize' ? 'volume' : 'quota'}`}>
+											{sizePct < 1 && size.used > 0 ? '<1' : sizePct.toFixed(0)}% {size.source === 'filesystem' ? 'of FS' : 'of ' + formatBytes(size.ceiling)}
+										</span>
+									</div>
+									<div class="h-1 w-full overflow-hidden rounded bg-muted">
+										<div
+											class="h-full transition-all {sizePct >= 90 ? 'bg-red-500' : sizePct >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}"
+											style="width: {sizePct}%"
+										></div>
+									</div>
+								</div>
 							{/if}
 						</td>
 						<td class="p-3">

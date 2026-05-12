@@ -73,8 +73,17 @@ pub struct Subvolume {
     pub subvolume_type: SubvolumeType,
     /// Absolute filesystem path to the subvolume directory.
     pub path: String,
-    /// Disk usage in bytes (filesystem subvolumes only, from `du`).
+    /// Disk usage in bytes. For filesystem subvolumes, comes from the
+    /// per-project quota (set on every create, so tracking is always
+    /// on); `None` only on legacy subvolumes created before the
+    /// always-track change. For block subvolumes, comes from the
+    /// backing image's allocated size.
     pub used_bytes: Option<u64>,
+    /// Hard quota limit in bytes for filesystem subvolumes. `None`
+    /// means no limit set (the subvolume can grow to fill the
+    /// filesystem). Always `None` for block subvolumes — their
+    /// ceiling is `volsize_bytes`, not a quota.
+    pub quota_bytes: Option<u64>,
     /// Compression algorithm applied to this subvolume (e.g. `lz4`, `zstd`).
     pub compression: Option<String>,
     /// Free-text description or notes for this subvolume.
@@ -573,12 +582,19 @@ impl SubvolumeService {
                 })
                 .collect();
 
-            // Get size: project quota for filesystem subvols, stat for block subvols
-            let size = match attrs.meta.subvolume_type {
-                SubvolumeType::Block => block_image_size(&path_str),
+            // Get size + quota: project quota for filesystem subvols, stat for block subvols.
+            // hard_bytes == 0 in repquota means "no limit" → translate to None.
+            let (size, quota_bytes) = match attrs.meta.subvolume_type {
+                SubvolumeType::Block => (block_image_size(&path_str), None),
                 SubvolumeType::Filesystem => {
                     let projid = project_id_for(fs_name, name);
-                    project_usages.get(&projid).copied()
+                    match project_usages.get(&projid) {
+                        Some(info) => (
+                            Some(info.used_bytes),
+                            (info.hard_bytes > 0).then_some(info.hard_bytes),
+                        ),
+                        None => (None, None),
+                    }
                 }
             };
 
@@ -598,6 +614,7 @@ impl SubvolumeService {
                 subvolume_type: attrs.meta.subvolume_type,
                 path: path_str.clone(),
                 used_bytes: size,
+                quota_bytes,
                 compression: attrs.meta.compression,
                 comments: attrs.meta.comments,
                 volsize_bytes: attrs.meta.volsize_bytes,
@@ -757,12 +774,14 @@ impl SubvolumeService {
             .await;
         }
 
-        // For filesystem subvolumes: enforce size via bcachefs project quota
-        if req.subvolume_type == SubvolumeType::Filesystem
-            && let Some(size) = req.volsize_bytes
-        {
+        // For filesystem subvolumes: always assign a project ID so usage
+        // tracking via repquota works regardless of whether the user set
+        // a hard limit. `0` is the quota-tools convention for "no limit"
+        // — repquota still reports usage, it just won't enforce.
+        if req.subvolume_type == SubvolumeType::Filesystem {
             let projid = project_id_for(&req.filesystem, &req.name);
-            set_project_quota(&mount_point, &subvol_path, projid, size).await;
+            let limit = req.volsize_bytes.unwrap_or(0);
+            set_project_quota(&mount_point, &subvol_path, projid, limit).await;
         }
 
         // For block subvolumes: create sparse file and attach loop device
@@ -1686,10 +1705,19 @@ fn block_image_size(subvol_path: &str) -> Option<u64> {
     std::fs::metadata(&img_path).ok().map(|m| m.len())
 }
 
+/// Per-project quota state extracted from `repquota` — both the live
+/// usage and the hard limit. `hard_bytes == 0` is the quota-tools
+/// convention for "no limit".
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProjectQuotaInfo {
+    pub used_bytes: u64,
+    pub hard_bytes: u64,
+}
+
 /// Query project quota usage for all projects on a filesystem in one shot.
-/// Returns a map of project_id → used_bytes.
+/// Returns a map of project_id → (used, hard limit).
 /// Falls back to empty map if repquota is unavailable or fails.
-async fn query_project_usages(mount_point: &str) -> HashMap<u32, u64> {
+async fn query_project_usages(mount_point: &str) -> HashMap<u32, ProjectQuotaInfo> {
     let mut usages = HashMap::new();
 
     // repquota -P --raw-grace outputs KB values with numeric project IDs when using -n
@@ -1719,7 +1747,15 @@ async fn query_project_usages(mount_point: &str) -> HashMap<u32, u64> {
             Some(v) => v,
             None => continue,
         };
-        usages.insert(projid, used_kb * 1024);
+        let _soft_kb = parts.next();
+        let hard_kb: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        usages.insert(
+            projid,
+            ProjectQuotaInfo {
+                used_bytes: used_kb * 1024,
+                hard_bytes: hard_kb * 1024,
+            },
+        );
     }
 
     usages

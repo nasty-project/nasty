@@ -265,6 +265,8 @@ export interface Subvolume {
 	subvolume_type: SubvolumeType;
 	path: string;
 	used_bytes: number | null;
+	/** Hard quota limit in bytes (filesystem subvolumes only). null = no limit. */
+	quota_bytes: number | null;
 	compression: string | null;
 	comments: string | null;
 	volsize_bytes: number | null;
