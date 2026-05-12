@@ -65,6 +65,7 @@
 
 	// Passthrough edit state (for running/stopped VM detail view)
 	let editPtVm = $state<string | null>(null);
+	let editUsbVm = $state<string | null>(null);
 
 	// Snapshot/clone dialogs
 	let snapshotVm = $state<string | null>(null);
@@ -555,7 +556,7 @@
 	});
 
 	onMount(async () => {
-		await Promise.all([refresh(), loadCapabilities(), loadFilesystems(), loadImages(), loadSubvolumes(), loadNetwork()]);
+		await Promise.all([refresh(), loadCapabilities(), loadFilesystems(), loadImages(), loadSubvolumes(), loadNetwork(), loadUsbDevices()]);
 		loading = false;
 	});
 
@@ -833,6 +834,33 @@
 		await withToast(
 			() => client.call('vm.update', { id: vmId, passthrough_devices: updated }),
 			'Passthrough device removed'
+		);
+		await refresh();
+	}
+
+	async function addUsbDevice(vmId: string, vendor_id: string, product_id: string) {
+		const vm = vms.find(v => v.id === vmId);
+		if (!vm) return;
+		const existing = vm.usb_devices ?? [];
+		if (existing.some(d => d.vendor_id === vendor_id && d.product_id === product_id)) return;
+		const dev = usbDevices.find(d => d.vendor_id === vendor_id && d.product_id === product_id);
+		const updated = [...existing, { vendor_id, product_id, label: dev?.description ?? null }];
+		await withToast(
+			() => client.call('vm.update', { id: vmId, usb_devices: updated }),
+			'USB device added'
+		);
+		await refresh();
+	}
+
+	async function removeUsbDevice(vmId: string, vendor_id: string, product_id: string) {
+		const vm = vms.find(v => v.id === vmId);
+		if (!vm) return;
+		const updated = (vm.usb_devices ?? []).filter(
+			d => !(d.vendor_id === vendor_id && d.product_id === product_id)
+		);
+		await withToast(
+			() => client.call('vm.update', { id: vmId, usb_devices: updated }),
+			'USB device removed'
 		);
 		await refresh();
 	}
@@ -1707,6 +1735,47 @@
 											<Button size="xs" variant="ghost" class="mt-1" onclick={() => editPtVm = null}>Cancel</Button>
 										{:else}
 											<Button size="xs" variant="outline" class="mt-2" onclick={() => editPtVm = vm.id}>+ Add Device</Button>
+										{/if}
+									{/if}
+								</div>
+
+								<div class="mt-4">
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">USB Passthrough</h4>
+									{#if !vm.usb_devices || vm.usb_devices.length === 0}
+										<p class="text-xs text-muted-foreground">No devices assigned</p>
+									{:else}
+										<div class="space-y-1">
+											{#each vm.usb_devices as dev}
+												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
+													<span class="font-mono text-xs">{dev.vendor_id}:{dev.product_id}</span>
+													{#if dev.label}
+														<span class="text-xs text-muted-foreground truncate">{dev.label}</span>
+													{/if}
+													{#if !vm.running}
+														<Button variant="destructive" size="xs" onclick={() => removeUsbDevice(vm.id, dev.vendor_id, dev.product_id)}>Remove</Button>
+													{/if}
+												</div>
+											{/each}
+										</div>
+									{/if}
+									{#if !vm.running}
+										{@const assignedKeys = new Set((vm.usb_devices ?? []).map(d => `${d.vendor_id}:${d.product_id}`))}
+										{@const availableUsb = usbDevices.filter(d => !assignedKeys.has(`${d.vendor_id}:${d.product_id}`))}
+										{#if availableUsb.length > 0}
+											{#if editUsbVm === vm.id}
+												<div class="mt-2 max-h-32 overflow-y-auto rounded border p-2 space-y-1">
+													{#each availableUsb as dev}
+														<div class="flex items-center gap-2 text-xs hover:bg-muted/30 rounded p-1">
+															<Button size="xs" variant="outline" onclick={() => { addUsbDevice(vm.id, dev.vendor_id, dev.product_id); editUsbVm = null; }}>Add</Button>
+															<span class="font-mono">{dev.vendor_id}:{dev.product_id}</span>
+															<span class="text-muted-foreground truncate">{dev.description}</span>
+														</div>
+													{/each}
+												</div>
+												<Button size="xs" variant="ghost" class="mt-1" onclick={() => editUsbVm = null}>Cancel</Button>
+											{:else}
+												<Button size="xs" variant="outline" class="mt-2" onclick={() => editUsbVm = vm.id}>+ Add Device</Button>
+											{/if}
 										{/if}
 									{/if}
 								</div>
