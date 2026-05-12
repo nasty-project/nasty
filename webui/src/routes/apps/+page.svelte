@@ -1348,20 +1348,20 @@
 					<!-- Right column: ingress picker + warnings. Hidden when empty so the editor breathes. -->
 					<div class="space-y-3">
 						{#if composeTcpPorts.length > 0}
-							<div class="rounded-md border border-border bg-secondary/20 p-3">
-								<Label for="ingress-port" class="text-xs">Reverse-proxy target</Label>
-								<select id="ingress-port" bind:value={newIngressPort} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+							<div class="rounded-md border border-border bg-secondary/20 px-3 py-2 text-xs">
+								<p class="mb-1 font-medium"><label for="ingress-port">Reverse-proxy target</label></p>
+								<select id="ingress-port" bind:value={newIngressPort} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
 									{#each composeTcpPorts as p}
 										<option value={p.host_port}>:{p.host_port} → container :{p.container_port}</option>
 									{/each}
 								</select>
-								<p class="mt-1.5 text-xs text-muted-foreground">
-									Which TCP port <code>/apps/{composeName || '&lt;name&gt;'}/</code> proxies to. UDP ports are excluded — nginx is TCP-only.
+								<p class="mt-1.5 text-muted-foreground">
+									Which TCP port <code>/apps/{composeName || '<name>'}/</code> proxies to. UDP ports are excluded — nginx is TCP-only.
 								</p>
 							</div>
 						{/if}
 						{#if portConflicts.length > 0}
-							<div class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+							<div class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
 								<p class="mb-1 font-medium">Port conflicts</p>
 								{#each portConflicts as c}
 									{@const alt = c.port < 1000 ? c.port + 8000 : c.port + 1}
