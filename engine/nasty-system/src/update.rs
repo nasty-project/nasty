@@ -582,7 +582,9 @@ echo "==> Update complete!"
             .await;
 
         // Build the update script:
-        // 1. Update the local wrapper flake input for nasty
+        // 1. Update the local wrapper flake inputs (channel-specific:
+        //    Mild/Spicy pin nasty to a release tag, Nasty refreshes
+        //    nixpkgs + bcachefs-tools + nasty)
         // 2. Rebuild from local flake (which keeps hardware-configuration.nix)
         let channel = read_channel().await;
         let token = read_github_token().await;
@@ -614,8 +616,17 @@ echo "==> Update complete!"
                 )
             }
             ReleaseChannel::Nasty => (
+                // Refresh every flake input the wrapper owns, not just
+                // `nasty`. Without this, the weekly nixpkgs bump never
+                // reaches `main`-tracking users — they'd see only the
+                // new nasty commits while their kernel + system
+                // packages stayed pinned to whatever the wrapper's
+                // lock had at install time. Mirrors the tagged-release
+                // upgrade path which already refreshes all three.
                 format!(
-                    "echo \"==> Updating NASty input ({})...\"\n\
+                    "echo \"==> Updating wrapper flake inputs (nixpkgs, bcachefs-tools, nasty[{}])...\"\n\
+                     nix flake update nixpkgs\n\
+                     nix flake update bcachefs-tools\n\
                      nix flake update nasty",
                     nasty_input.tracked_ref
                 ),
