@@ -539,10 +539,7 @@ impl SubvolumeService {
             let subvols = match self.list(&fs.name, None).await {
                 Ok(v) => v,
                 Err(e) => {
-                    warn!(
-                        "reconcile_project_ids: list({}) failed: {e}",
-                        fs.name
-                    );
+                    warn!("reconcile_project_ids: list({}) failed: {e}", fs.name);
                     continue;
                 }
             };
