@@ -763,49 +763,73 @@ echo "==> Update complete!"
             .get("nasty")
             .map(|input| input.url.clone())
             .ok_or_else(|| UpdateError::CommandFailed("missing request entry for nasty".into()))?;
-        let rewritten_flake =
-            if let Some(target_tag) = parse_official_nasty_release_tag(&requested_nasty_url) {
+        // Whether we rebootstrap (re-render the wrapper flake from the
+        // upstream template) depends on whether the user's nasty URL
+        // points at a canonical ref in nasty-project/nasty. For any
+        // canonical ref — release tag or branch — we fetch the template
+        // from that ref and compare wrapper-flake content hashes. The
+        // URL-preservation policy then forks on tag vs branch:
+        //
+        // - Release tag: preserve the request's nixpkgs + bcachefs-tools
+        //   URLs. The user is pinning to an exact release and explicitly
+        //   chose those URLs in the WebUI form.
+        // - Branch (e.g. `main`): adopt the template's URLs. The user is
+        //   saying "give me what main has" — which includes upstream
+        //   bumps to nixpkgs/bcachefs-tools the maintainer baked into
+        //   the template. Without this branch, dev-build trackers stay
+        //   stuck on whatever URLs their /etc/nixos/flake.nix happened
+        //   to be installed with.
+        let rewritten_flake = match parse_official_nasty_ref(&requested_nasty_url) {
+            Some((nasty_ref, is_release_tag)) => {
                 let token = read_github_token().await;
                 let template = fetch_github_text_file(
                     token.as_deref(),
                     DEFAULT_NASTY_OWNER,
                     DEFAULT_NASTY_REPO,
                     SYSTEM_FLAKE_TEMPLATE_PATH,
-                    &target_tag,
+                    &nasty_ref,
                 )
                 .await?;
 
                 if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
                     let local_system = detect_local_system().await?;
-                    let bootstrapped_flake =
-                        render_system_flake_template(&template, &target_tag, &local_system)?;
-                    let preserved_urls = HashMap::from([
-                        (
-                            String::from("nixpkgs"),
-                            requested
-                                .get("nixpkgs")
-                                .ok_or_else(|| {
-                                    UpdateError::CommandFailed(
-                                        "missing request entry for nixpkgs".into(),
-                                    )
-                                })?
-                                .url
-                                .clone(),
-                        ),
-                        (
-                            String::from("bcachefs-tools"),
-                            requested
-                                .get("bcachefs-tools")
-                                .ok_or_else(|| {
-                                    UpdateError::CommandFailed(
-                                        "missing request entry for bcachefs-tools".into(),
-                                    )
-                                })?
-                                .url
-                                .clone(),
-                        ),
-                    ]);
-                    rewrite_flake_input_urls(&bootstrapped_flake, &preserved_urls)?
+                    let bootstrapped_flake = render_system_flake_template_with_ref(
+                        &template,
+                        &nasty_ref,
+                        &local_system,
+                    )?;
+                    if is_release_tag {
+                        let preserved_urls = HashMap::from([
+                            (
+                                String::from("nixpkgs"),
+                                requested
+                                    .get("nixpkgs")
+                                    .ok_or_else(|| {
+                                        UpdateError::CommandFailed(
+                                            "missing request entry for nixpkgs".into(),
+                                        )
+                                    })?
+                                    .url
+                                    .clone(),
+                            ),
+                            (
+                                String::from("bcachefs-tools"),
+                                requested
+                                    .get("bcachefs-tools")
+                                    .ok_or_else(|| {
+                                        UpdateError::CommandFailed(
+                                            "missing request entry for bcachefs-tools".into(),
+                                        )
+                                    })?
+                                    .url
+                                    .clone(),
+                            ),
+                        ]);
+                        rewrite_flake_input_urls(&bootstrapped_flake, &preserved_urls)?
+                    } else {
+                        // Branch-tracker: keep the template's URLs as-is.
+                        bootstrapped_flake
+                    }
                 } else {
                     let flake_replacements = url_changes
                         .iter()
@@ -813,13 +837,18 @@ echo "==> Update complete!"
                         .collect::<HashMap<_, _>>();
                     rewrite_flake_input_urls(&current_flake, &flake_replacements)?
                 }
-            } else {
+            }
+            None => {
+                // Fork or non-canonical URL: we can't safely fetch a
+                // template from an unknown source, so just rewrite the
+                // input URLs the user explicitly requested.
                 let flake_replacements = url_changes
                     .iter()
                     .map(|(name, url)| (name.clone(), url.clone()))
                     .collect::<HashMap<_, _>>();
                 rewrite_flake_input_urls(&current_flake, &flake_replacements)?
-            };
+            }
+        };
         let flake_temp_path = "/tmp/nasty-version-flake.nix";
         tokio::fs::write(flake_temp_path, &rewritten_flake)
             .await
@@ -1384,9 +1413,27 @@ pub async fn bootstrap_system_flake_from_template(
     Ok(BootstrapSystemFlakeResult { flake_path })
 }
 
+/// Render the wrapper-flake template, normalizing the nasty version
+/// to a leading-`v` semver tag. Used by the install-time bootstrap
+/// path (and a few legacy callers) that pass the engine's Cargo
+/// version like "0.0.7" rather than a pre-formatted ref.
 fn render_system_flake_template(
     template: &str,
     nasty_version: &str,
+    local_system: &str,
+) -> Result<String, UpdateError> {
+    let nasty_tag = normalize_release_tag(nasty_version)?;
+    render_system_flake_template_with_ref(template, &nasty_tag, local_system)
+}
+
+/// Render the wrapper-flake template with the nasty ref passed
+/// verbatim. Branch refs like `main` aren't semver — the tag-path
+/// `render_system_flake_template` would reject them — but they're
+/// valid GitHub refs and we want main-trackers to be able to
+/// rebootstrap too.
+fn render_system_flake_template_with_ref(
+    template: &str,
+    nasty_ref: &str,
     local_system: &str,
 ) -> Result<String, UpdateError> {
     if !template.contains("@NASTY_VERSION@") {
@@ -1404,11 +1451,15 @@ fn render_system_flake_template(
             "system flake template is missing @WRAPPER_FLAKE_VERSION@ placeholder".into(),
         ));
     }
-    let nasty_tag = normalize_release_tag(nasty_version)?;
+    if nasty_ref.is_empty() {
+        return Err(UpdateError::CommandFailed(
+            "nasty ref must not be empty".into(),
+        ));
+    }
     let wrapper_version = wrapper_flake_content_hash(template);
 
     Ok(template
-        .replace("@NASTY_VERSION@", &nasty_tag)
+        .replace("@NASTY_VERSION@", nasty_ref)
         .replace("@LOCAL_SYSTEM@", local_system)
         .replace("@WRAPPER_FLAKE_VERSION@", &wrapper_version))
 }
@@ -1966,7 +2017,12 @@ fn official_nasty_release_url(tag: &str) -> String {
     format!("github:{DEFAULT_NASTY_OWNER}/{DEFAULT_NASTY_REPO}/{tag}")
 }
 
-fn parse_official_nasty_release_tag(url: &str) -> Option<String> {
+/// Extract the git ref from a canonical `github:nasty-project/nasty/<ref>`
+/// URL, returning `(ref, is_release_tag)`. Forks and non-canonical URLs
+/// return None. Branch refs (e.g. `main`) return `(ref, false)` so
+/// callers can distinguish "user is pinned to a release" from "user is
+/// tracking a development branch" — the rebootstrap policy differs.
+fn parse_official_nasty_ref(url: &str) -> Option<(String, bool)> {
     let trimmed = url.trim();
     let rest = trimmed.strip_prefix("github:")?;
     let mut parts = rest.split('/');
@@ -1979,7 +2035,11 @@ fn parse_official_nasty_release_tag(url: &str) -> Option<String> {
     if owner != DEFAULT_NASTY_OWNER || repo != DEFAULT_NASTY_REPO {
         return None;
     }
-    parse_release_tag_version(git_ref).map(|_| git_ref.to_string())
+    if git_ref.is_empty() {
+        return None;
+    }
+    let is_tag = parse_release_tag_version(git_ref).is_some();
+    Some((git_ref.to_string(), is_tag))
 }
 
 fn parse_release_tag_version(tag: &str) -> Option<(u64, u64, u64)> {
@@ -2026,7 +2086,7 @@ async fn read_flake_lock_bcachefs() -> (Option<String>, Option<String>) {
 mod tests {
     use super::{
         is_booted_generation, map_systemd_state, normalize_git_tag_ref, parse_flake_input_urls,
-        parse_official_nasty_release_tag, parse_release_tag_version, read_wrapper_flake_version,
+        parse_official_nasty_ref, parse_release_tag_version, read_wrapper_flake_version,
         rewrite_flake_input_urls, should_rebootstrap_wrapper_flake, unquote_nix_string,
         wrapper_flake_content_hash,
     };
@@ -2040,21 +2100,38 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_official_release_tags() {
+    fn parses_official_canonical_refs_with_tag_vs_branch_distinction() {
+        // Release tag → (ref, true).
         assert_eq!(
-            parse_official_nasty_release_tag("github:nasty-project/nasty/v0.0.2"),
-            Some("v0.0.2".to_string())
+            parse_official_nasty_ref("github:nasty-project/nasty/v0.0.2"),
+            Some(("v0.0.2".to_string(), true))
         );
+        // Branch ref → (ref, false). Distinguishing main from v0.0.X
+        // matters because the rebootstrap path forks on it: tag-trackers
+        // preserve request URLs, branch-trackers adopt the template's.
         assert_eq!(
-            parse_official_nasty_release_tag("github:nasty-project/nasty/main"),
+            parse_official_nasty_ref("github:nasty-project/nasty/main"),
+            Some(("main".to_string(), false))
+        );
+        // Non-canonical owner — refuse so we never fetch a template
+        // from a random fork.
+        assert_eq!(
+            parse_official_nasty_ref("github:someone-else/nasty/v0.0.2"),
             None
         );
+        // Pre-release tag isn't a semver match, so is_tag = false.
         assert_eq!(
-            parse_official_nasty_release_tag("github:someone-else/nasty/v0.0.2"),
+            parse_official_nasty_ref("github:nasty-project/nasty/v0.0.2-rc1"),
+            Some(("v0.0.2-rc1".to_string(), false))
+        );
+        // Empty ref → None.
+        assert_eq!(
+            parse_official_nasty_ref("github:nasty-project/nasty/"),
             None
         );
+        // Path with extra slashes → None.
         assert_eq!(
-            parse_official_nasty_release_tag("github:nasty-project/nasty/v0.0.2-rc1"),
+            parse_official_nasty_ref("github:nasty-project/nasty/main/extra"),
             None
         );
     }
