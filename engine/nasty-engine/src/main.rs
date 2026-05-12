@@ -195,6 +195,14 @@ async fn main() -> anyhow::Result<()> {
     // doesn't accidentally re-persist the orphans.
     state.network.run_migration_if_needed().await;
 
+    // Backfill project quota IDs on filesystem subvolumes that
+    // predate the always-assign change (#176). Without this, those
+    // subvolumes have no repquota row, so their `used_bytes` stays
+    // `None` and the WebUI shows `—` forever. Idempotent: scans
+    // repquota output and only writes for subvolumes that lack a
+    // row. Best-effort; failures are logged and don't block startup.
+    state.subvolumes.reconcile_project_ids().await;
+
     // Initialize firewall based on current protocol states
     {
         use nasty_system::protocol::Protocol;
