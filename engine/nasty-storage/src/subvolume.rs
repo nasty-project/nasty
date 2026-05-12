@@ -515,6 +515,67 @@ impl SubvolumeService {
         dev_map
     }
 
+    /// One-shot migration: assign a project quota ID to every
+    /// filesystem subvolume that doesn't have one yet. Idempotent —
+    /// safe to run on every engine startup. Necessary because
+    /// subvolumes created before the always-assign-project-id change
+    /// (#176) have no quota row, so `repquota` can't report their
+    /// usage and the WebUI's size cell shows `—`.
+    pub async fn reconcile_project_ids(&self) {
+        let filesystems = match self.filesystems.list().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("reconcile_project_ids: filesystems.list failed: {e}");
+                return;
+            }
+        };
+
+        for fs in filesystems.into_iter().filter(|f| f.mounted) {
+            let Some(mount_point) = fs.mount_point.clone() else {
+                continue;
+            };
+            let project_usages = query_project_usages(&mount_point).await;
+
+            let subvols = match self.list(&fs.name, None).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "reconcile_project_ids: list({}) failed: {e}",
+                        fs.name
+                    );
+                    continue;
+                }
+            };
+
+            let mut assigned = 0usize;
+            for sv in subvols
+                .into_iter()
+                .filter(|s| s.subvolume_type == SubvolumeType::Filesystem)
+            {
+                let projid = project_id_for(&fs.name, &sv.name);
+                if project_usages.contains_key(&projid) {
+                    continue;
+                }
+                info!(
+                    "reconcile_project_ids: assigning project {projid} to {} ({}@{})",
+                    sv.path, sv.name, fs.name
+                );
+                // hard=0 means tracked-but-unlimited; matches the
+                // semantics applied at create time for subvolumes
+                // without an explicit quota.
+                set_project_quota(&mount_point, &sv.path, projid, 0).await;
+                assigned += 1;
+            }
+
+            if assigned > 0 {
+                info!(
+                    "reconcile_project_ids: assigned {assigned} project ID(s) on filesystem '{}'",
+                    fs.name
+                );
+            }
+        }
+    }
+
     /// Get the mount point for a filesystem, or error if not mounted
     async fn fs_mount_point(&self, fs_name: &str) -> Result<String, SubvolumeError> {
         let fs = self
