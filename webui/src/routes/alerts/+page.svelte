@@ -41,6 +41,8 @@
 		bcachefs_io_errors: 'bcachefs IO Errors',
 		bcachefs_scrub_errors: 'bcachefs Scrub Corruption',
 		bcachefs_reconcile_stalled: 'bcachefs Reconcile Stalled',
+		root_disk_free_gb: 'Root Partition Free (GB)',
+		boot_disk_free_mb: '/boot (ESP) Free (MB)',
 		kernel_errors: 'Kernel Errors',
 	});
 

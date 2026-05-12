@@ -42,6 +42,12 @@ pub enum AlertMetric {
     BcachefsReconcileStalled,
     /// Root partition free space in GB.
     RootDiskFreeGb,
+    /// /boot (ESP) free space in MB. Tiny by design (often 250–512 MB)
+    /// and a single kernel+initrd pair is ~50 MB, so an MB-scale alert
+    /// gives users meaningful warning before the next system update's
+    /// switch-to-configuration step fails with ENOSPC trying to copy
+    /// the new initrd onto the ESP.
+    BootDiskFreeMb,
     // Kernel error monitoring
     KernelErrors,
 }
@@ -182,7 +188,8 @@ impl AlertService {
     }
 
     /// Evaluate all enabled rules against current system state.
-    /// Reads the configured root partition free space via `statvfs("/")`.
+    /// Reads the configured root partition free space via `statvfs("/")`
+    /// and the ESP free space via `statvfs("/boot")`.
     pub async fn evaluate(
         &self,
         stats: &super::SystemStats,
@@ -199,13 +206,27 @@ impl AlertService {
             disk_health,
             bcachefs_health,
             kernel_errors,
-            root_free_gb(),
+            DiskFreeSpace {
+                root_free_gb: root_free_gb(),
+                boot_free_mb: boot_free_mb(),
+            },
         )
     }
 }
 
-/// Pure rule dispatch — no I/O, no async, no shared state.
-/// `root_free_gb_value` is injected so tests don't depend on `statvfs("/")`.
+/// Free-space readings for the alert metrics that need them. Bundled
+/// so the rule evaluator's signature stays manageable and so tests
+/// can express "/boot unknown, / known" without juggling positional
+/// `Option<f64>` args.
+#[derive(Debug, Clone, Copy, Default)]
+struct DiskFreeSpace {
+    root_free_gb: Option<f64>,
+    boot_free_mb: Option<f64>,
+}
+
+/// Pure rule dispatch — no I/O, no async, no shared state. Disk-free
+/// values are injected via `DiskFreeSpace` so tests don't depend on
+/// `statvfs("/")` / `statvfs("/boot")` and can drive every metric.
 fn evaluate_rules(
     rules: &[AlertRule],
     stats: &super::SystemStats,
@@ -213,7 +234,7 @@ fn evaluate_rules(
     disk_health: &[DiskHealthSummary],
     bcachefs_health: &[BcachefsHealth],
     kernel_errors: &KernelErrorAlert,
-    root_free_gb_value: Option<f64>,
+    disk_free: DiskFreeSpace,
 ) -> Vec<ActiveAlert> {
     let mut alerts = Vec::new();
 
@@ -489,7 +510,7 @@ fn evaluate_rules(
                 }
             }
             AlertMetric::RootDiskFreeGb => {
-                if let Some(free_gb) = root_free_gb_value
+                if let Some(free_gb) = disk_free.root_free_gb
                     && check_condition(free_gb, &rule.condition, rule.threshold)
                 {
                     alerts.push(ActiveAlert {
@@ -504,6 +525,28 @@ fn evaluate_rules(
                         current_value: free_gb,
                         threshold: rule.threshold,
                         source: "/".into(),
+                    });
+                }
+            }
+            AlertMetric::BootDiskFreeMb => {
+                if let Some(free_mb) = disk_free.boot_free_mb
+                    && check_condition(free_mb, &rule.condition, rule.threshold)
+                {
+                    alerts.push(ActiveAlert {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        severity: rule.severity.clone(),
+                        metric: rule.metric.clone(),
+                        // Mention the actionable remedy in the message
+                        // so the user doesn't have to dig — the typical
+                        // path is "trim old generations" not "resize ESP".
+                        message: format!(
+                            "/boot has {:.0} MB free (threshold: {:.0} MB). The next system update may fail to install its initrd. Run `nix-collect-garbage --delete-older-than 7d` and `switch-to-configuration boot` to reclaim space.",
+                            free_mb, rule.threshold
+                        ),
+                        current_value: free_mb,
+                        threshold: rule.threshold,
+                        source: "/boot".into(),
                     });
                 }
             }
@@ -582,16 +625,28 @@ pub struct AlertRuleUpdate {
 }
 
 fn root_free_gb() -> Option<f64> {
+    statvfs_free_bytes("/").map(|b| b / 1_073_741_824.0)
+}
+
+/// Free bytes on the ESP, reported in MB. Returns None when /boot
+/// isn't a separate mount or statvfs fails — in that case the alert
+/// arm sees no value and no alert fires (a not-mounted /boot can't
+/// "fill up", so silence is correct).
+fn boot_free_mb() -> Option<f64> {
+    statvfs_free_bytes("/boot").map(|b| b / 1_048_576.0)
+}
+
+fn statvfs_free_bytes(path: &str) -> Option<f64> {
     use std::ffi::CString;
     use std::mem::MaybeUninit;
-    let path = CString::new("/").ok()?;
+    let path = CString::new(path).ok()?;
     let mut buf = MaybeUninit::<libc::statvfs>::uninit();
     let ret = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
     if ret != 0 {
         return None;
     }
     let stat = unsafe { buf.assume_init() };
-    Some(stat.f_bavail as f64 * stat.f_frsize as f64 / 1_073_741_824.0)
+    Some(stat.f_bavail as f64 * stat.f_frsize as f64)
 }
 
 fn check_condition(value: f64, condition: &AlertCondition, threshold: f64) -> bool {
@@ -741,6 +796,29 @@ fn default_rules() -> Vec<AlertRule> {
             threshold: 3.0,
             severity: AlertSeverity::Critical,
         },
+        // /boot (ESP) space. Each kernel+initrd pair is roughly 50 MB;
+        // when the ESP is under 100 MB free the next system update is
+        // at real risk of failing in switch-to-configuration's bootloader
+        // install step. 30 MB is "you got a build through but barely" —
+        // upgrade to critical so the user fixes it before the next try.
+        AlertRule {
+            id: "boot-disk-low".into(),
+            name: "/boot partition low on space".into(),
+            enabled: true,
+            metric: AlertMetric::BootDiskFreeMb,
+            condition: AlertCondition::Below,
+            threshold: 100.0,
+            severity: AlertSeverity::Warning,
+        },
+        AlertRule {
+            id: "boot-disk-crit".into(),
+            name: "/boot partition critically low".into(),
+            enabled: true,
+            metric: AlertMetric::BootDiskFreeMb,
+            condition: AlertCondition::Below,
+            threshold: 30.0,
+            severity: AlertSeverity::Critical,
+        },
         // Kernel error monitoring
         AlertRule {
             id: "kernel-errors".into(),
@@ -849,7 +927,7 @@ mod tests {
             &[],
             &[],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         )
     }
 
@@ -894,7 +972,7 @@ mod tests {
             &[],
             &[],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert!(alerts.is_empty());
     }
@@ -923,7 +1001,7 @@ mod tests {
             &[],
             &[],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source, "tank");
@@ -991,7 +1069,7 @@ mod tests {
             &disks,
             &[],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source, "sda");
@@ -1019,7 +1097,7 @@ mod tests {
             &disks,
             &[],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source, "sdb");
@@ -1056,7 +1134,7 @@ mod tests {
             &[],
             &[h],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source, "tank");
@@ -1081,7 +1159,7 @@ mod tests {
             &[],
             &[h],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source, "/dev/sdc");
@@ -1102,7 +1180,7 @@ mod tests {
             &[],
             &[h],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source, "/dev/sda");
@@ -1120,7 +1198,7 @@ mod tests {
             &[],
             &[h],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert_eq!(alerts.len(), 1);
         assert!((alerts[0].current_value - 7.0).abs() < 0.001);
@@ -1148,7 +1226,7 @@ mod tests {
             &[],
             &[h],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
         );
         assert_eq!(alerts.len(), 2);
     }
@@ -1160,7 +1238,15 @@ mod tests {
             total_count: 3,
             categories: vec!["mce".into(), "oom".into()],
         };
-        let alerts = evaluate_rules(&[r], &zero_stats(), &[], &[], &[], &kernel_errors, None);
+        let alerts = evaluate_rules(
+            &[r],
+            &zero_stats(),
+            &[],
+            &[],
+            &[],
+            &kernel_errors,
+            DiskFreeSpace::default(),
+        );
         assert_eq!(alerts.len(), 1);
         assert!(alerts[0].message.contains("mce"));
         assert!(alerts[0].message.contains("oom"));
@@ -1177,7 +1263,10 @@ mod tests {
             &[],
             &[],
             &KernelErrorAlert::default(),
-            Some(5.0),
+            DiskFreeSpace {
+                root_free_gb: Some(5.0),
+                boot_free_mb: None,
+            },
         );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source, "/");
@@ -1189,7 +1278,54 @@ mod tests {
             &[],
             &[],
             &KernelErrorAlert::default(),
-            None,
+            DiskFreeSpace::default(),
+        );
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn evaluate_rules_boot_disk_free_mb_fires_when_below_threshold() {
+        let r = rule(AlertMetric::BootDiskFreeMb, AlertCondition::Below, 100.0);
+        let rules = std::slice::from_ref(&r);
+        let alerts = evaluate_rules(
+            rules,
+            &zero_stats(),
+            &[],
+            &[],
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace {
+                root_free_gb: None,
+                boot_free_mb: Some(20.0),
+            },
+        );
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].source, "/boot");
+        assert!((alerts[0].current_value - 20.0).abs() < 0.001);
+        // None means "/boot not statvfs'able" (e.g. not a separate
+        // mount) — no fire, silence is correct.
+        let alerts = evaluate_rules(
+            rules,
+            &zero_stats(),
+            &[],
+            &[],
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace::default(),
+        );
+        assert!(alerts.is_empty());
+        // Above threshold — no fire.
+        let alerts = evaluate_rules(
+            rules,
+            &zero_stats(),
+            &[],
+            &[],
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace {
+                root_free_gb: None,
+                boot_free_mb: Some(150.0),
+            },
         );
         assert!(alerts.is_empty());
     }
