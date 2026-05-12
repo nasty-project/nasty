@@ -82,7 +82,7 @@ jobs:
 
       - name: Open PR
         if: steps.update.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           # Prefer a PAT so downstream CI fires; fall back to the
           # default token (CI won't auto-run in that case — see the
