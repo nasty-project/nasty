@@ -1758,9 +1758,16 @@ fn unregister_project(projid: u32) {
 
 /// Get disk usage for a block subvolume by statting the sparse image file directly.
 /// Much faster than `du -sb` since it's a single syscall instead of a tree walk.
+/// Actual on-disk allocation for a block subvolume's image, in bytes.
+///
+/// We use `st_blocks * 512` (allocated blocks) rather than `m.len()` (logical
+/// size) so sparse images report what's truly written. Since the image is
+/// created with `truncate -s <volsize>`, `len()` always equals volsize and
+/// would make the progress bar a constant 100%.
 fn block_image_size(subvol_path: &str) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
     let img_path = format!("{subvol_path}/{BLOCK_FILE_NAME}");
-    std::fs::metadata(&img_path).ok().map(|m| m.len())
+    std::fs::metadata(&img_path).ok().map(|m| m.blocks() * 512)
 }
 
 /// Per-project quota state extracted from `repquota` — both the live
