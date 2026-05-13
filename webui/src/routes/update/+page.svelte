@@ -381,7 +381,11 @@
 				inputs: versionRows.map((row) => ({
 					name: row.name,
 					url: row.url.trim(),
-					update: row.name === 'nasty'
+					// Refresh every wrapper input, not just `nasty`. Without
+					// this the kernel + bcachefs-tools stay pinned to whatever
+					// flake.lock had at install time even as `main` brings in
+					// upstream bumps — see #175 for the parallel apply() fix.
+					update: true
 				}))
 			}),
 			'Development build update started'
