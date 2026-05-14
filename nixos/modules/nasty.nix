@@ -599,8 +599,15 @@ in {
         nix-env --delete-generations +3 -p /nix/var/nix/profiles/system 2>/dev/null || true
         echo "==> Running garbage collection..."
         nix-collect-garbage 2>&1
+        # Re-sync /boot to match the surviving generations: GC removed
+        # their store paths but systemd-boot's entries (and the kernel +
+        # initrd copies under /boot) stick around until we rebuild the
+        # bootloader.  Without this the /boot-full alert keeps firing
+        # even after nix-collect-garbage reclaimed everything in /.
+        echo "==> Re-syncing bootloader entries (/boot cleanup)..."
+        /run/current-system/bin/switch-to-configuration boot
         echo "==> Done."
-        df -h /
+        df -h / /boot
       '')
 
       (writeShellScriptBin "nasty-rebuild" ''
