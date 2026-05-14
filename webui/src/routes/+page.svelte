@@ -256,7 +256,6 @@
 			}">
 				<span class="shrink-0 text-base font-bold">{alert.severity === 'critical' ? '!' : '⚠'}</span>
 				<span class="flex-1">{alert.message}</span>
-				<a class="text-xs opacity-70 hover:opacity-100" href="/alerts">Configure</a>
 			</div>
 		{/each}
 	</div>
