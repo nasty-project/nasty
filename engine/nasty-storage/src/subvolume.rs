@@ -516,11 +516,19 @@ impl SubvolumeService {
     }
 
     /// One-shot migration: assign a project quota ID to every
-    /// filesystem subvolume that doesn't have one yet. Idempotent —
-    /// safe to run on every engine startup. Necessary because
-    /// subvolumes created before the always-assign-project-id change
-    /// (#176) have no quota row, so `repquota` can't report their
-    /// usage and the WebUI's size cell shows `—`.
+    /// filesystem subvolume that doesn't have one yet, AND rewrite any
+    /// hard limits that match the pre-fix 1024× bug pattern. Idempotent
+    /// — safe to run on every engine startup.
+    ///
+    /// - Missing project IDs: legacy subvolumes created before #176 had
+    ///   no quota row at all, so `repquota` couldn't report their usage
+    ///   and the WebUI's size cell showed `—`.
+    /// - Inflated quotas: until the setquota-units fix, every requested
+    ///   quota was stored 1024× larger than intended (bytes passed where
+    ///   KiB blocks were expected). If `hard_bytes == volsize_xattr *
+    ///   1024`, that's the exact bug signature — rewrite with the
+    ///   corrected value. Anything else (manual edits, intentional
+    ///   over/under-commit) is left untouched.
     pub async fn reconcile_project_ids(&self) {
         let filesystems = match self.filesystems.list().await {
             Ok(v) => v,
@@ -545,28 +553,49 @@ impl SubvolumeService {
             };
 
             let mut assigned = 0usize;
+            let mut rewritten = 0usize;
             for sv in subvols
                 .into_iter()
                 .filter(|s| s.subvolume_type == SubvolumeType::Filesystem)
             {
                 let projid = project_id_for(&fs.name, &sv.name);
-                if project_usages.contains_key(&projid) {
-                    continue;
+                match project_usages.get(&projid) {
+                    None => {
+                        info!(
+                            "reconcile_project_ids: assigning project {projid} to {} ({}@{})",
+                            sv.path, sv.name, fs.name
+                        );
+                        // hard=0 means tracked-but-unlimited; matches the
+                        // semantics applied at create time for subvolumes
+                        // without an explicit quota.
+                        set_project_quota(&mount_point, &sv.path, projid, 0).await;
+                        assigned += 1;
+                    }
+                    Some(info) => {
+                        // Detect the 1024× setquota-units bug: an
+                        // intended volsize of N bytes was stored as N
+                        // KiB blocks, which we read back as N * 1024
+                        // bytes. Rewrite only when the on-disk value
+                        // matches that exact pattern.
+                        if let Some(volsize) = sv.volsize_bytes
+                            && volsize > 0
+                            && info.hard_bytes == volsize.saturating_mul(1024)
+                        {
+                            info!(
+                                "reconcile_project_ids: rewriting inflated quota for {} \
+                                 (was {} bytes, intended {} bytes)",
+                                sv.path, info.hard_bytes, volsize
+                            );
+                            set_project_quota(&mount_point, &sv.path, projid, volsize).await;
+                            rewritten += 1;
+                        }
+                    }
                 }
-                info!(
-                    "reconcile_project_ids: assigning project {projid} to {} ({}@{})",
-                    sv.path, sv.name, fs.name
-                );
-                // hard=0 means tracked-but-unlimited; matches the
-                // semantics applied at create time for subvolumes
-                // without an explicit quota.
-                set_project_quota(&mount_point, &sv.path, projid, 0).await;
-                assigned += 1;
             }
 
-            if assigned > 0 {
+            if assigned > 0 || rewritten > 0 {
                 info!(
-                    "reconcile_project_ids: assigned {assigned} project ID(s) on filesystem '{}'",
+                    "reconcile_project_ids: {assigned} assigned, {rewritten} rewritten on filesystem '{}'",
                     fs.name
                 );
             }
@@ -1689,19 +1718,19 @@ async fn set_project_quota(mount_point: &str, dir_path: &str, projid: u32, bytes
     }
 
     // setquota -P <name> <soft> <hard> <isoft> <ihard> <mountpoint>
-    // soft == hard (no grace period), no inode limits
-    let bytes_str = bytes.to_string();
+    // soft == hard (no grace period), no inode limits.
+    //
+    // setquota's block-limit arguments are in 1 KiB blocks, not bytes —
+    // passing bytes directly stored every quota 1024× larger than
+    // intended (e.g. a 5 GiB PVC ended up as 5 TiB on disk).  The read
+    // side already converts KiB→bytes (`hard_kb * 1024` in
+    // query_project_usages), so the round-trip was internally
+    // consistent but consistently wrong.  Integer-divide here: typical
+    // PVC sizes are exact Gi multiples and align cleanly to KiB.
+    let kib_str = (bytes / 1024).to_string();
     match cmd::run_ok(
         "setquota",
-        &[
-            "-P",
-            &proj_name,
-            &bytes_str,
-            &bytes_str,
-            "0",
-            "0",
-            mount_point,
-        ],
+        &["-P", &proj_name, &kib_str, &kib_str, "0", "0", mount_point],
     )
     .await
     {
