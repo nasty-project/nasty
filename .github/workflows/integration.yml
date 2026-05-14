@@ -73,3 +73,42 @@ jobs:
             --no-link -L
           nix build .#packages.x86_64-linux.bcachefs-tools \
             --no-link -L
+
+  aarch64-cache-push:
+    name: Build & push aarch64 packages to Cachix
+    # No native aarch64 NixOS test job (the smoke tests live under
+    # checks.x86_64-linux), so this runs in parallel with bcachefs-smoke
+    # and just ensures the aarch64 engine/webui/bcachefs-tools land in
+    # cachix.  Without this, aarch64 boxes (Pi, Odroid, etc.) miss the
+    # cache for every upgrade and rebuild Rust + npm + bcachefs-tools
+    # locally — 10+ minutes of CPU per upgrade.
+    runs-on: ubuntu-24.04-arm
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: nasty
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Compute npm deps hash
+        # Same trick as the x86_64 job — webui build's npmDepsHash must
+        # match the current package-lock.json.
+        run: |
+          HASH=$(nix run nixpkgs#prefetch-npm-deps -- webui/package-lock.json 2>/dev/null)
+          sed -i "s|npmDepsHash = \".*\"|npmDepsHash = \"$HASH\"|" flake.nix
+
+      - name: Build aarch64 packages
+        run: |
+          nix build .#packages.aarch64-linux.engine \
+            --no-link -L
+          nix build .#packages.aarch64-linux.webui \
+            --no-link -L
+          nix build .#packages.aarch64-linux.bcachefs-tools \
+            --no-link -L
