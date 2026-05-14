@@ -951,6 +951,17 @@ export interface AppContainer {
 	status: string;
 }
 
+export interface AppStats {
+	name: string;
+	cpu_percent: number;
+	memory_bytes: number;
+	memory_limit_bytes: number;
+	net_rx_bytes: number;
+	net_tx_bytes: number;
+	block_read_bytes: number;
+	block_write_bytes: number;
+}
+
 export interface MappedPort {
 	host_port: number;
 	container_port: number;

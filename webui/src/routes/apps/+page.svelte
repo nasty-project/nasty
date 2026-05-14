@@ -4,7 +4,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, MappedPort, PruneResult } from '$lib/types';
+	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, AppStats, MappedPort, PruneResult } from '$lib/types';
 	import { formatBytes } from '$lib/format';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -109,6 +109,10 @@
 	// badge that opens the global unlock dialog. Stays empty when
 	// nothing's locked, so non-encrypted setups pay zero overhead.
 	let lockedFsByApp = $state(new Map<string, string>());
+	// Map of app-name → latest stats sample. Empty until `apps.stats`
+	// returns its first response, and emptied when the page is hidden so
+	// we don't poll Docker from a background tab.
+	let appStats = $state<Record<string, AppStats>>({});
 	let loading = $state(true);
 	let enabling = $state(false);
 	// Inline enable prompt shown when the user clicks Install App while the
@@ -356,6 +360,7 @@
 
 	const client = getClient();
 	let startupPoll: ReturnType<typeof setInterval> | null = null;
+	let statsPoll: ReturnType<typeof setInterval> | null = null;
 	const APP_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
 
 	function isValidAppName(name: string): boolean {
@@ -549,17 +554,24 @@
 		await Promise.all([refresh(), loadFilesystems()]);
 		loading = false;
 		if (status?.enabled && !status?.running) startStartupPolling();
+		if (status?.enabled && status?.running) startStatsPolling();
+		document.addEventListener('visibilitychange', onVisibilityChange);
 	});
 
 	onDestroy(() => {
 		stopStartupPolling();
+		stopStatsPolling();
+		document.removeEventListener('visibilitychange', onVisibilityChange);
 	});
 
 	function startStartupPolling() {
 		stopStartupPolling();
 		startupPoll = setInterval(async () => {
 			await refresh();
-			if (status?.running) stopStartupPolling();
+			if (status?.running) {
+				stopStartupPolling();
+				startStatsPolling();
+			}
 		}, 5000);
 	}
 
@@ -567,6 +579,42 @@
 		if (startupPoll) {
 			clearInterval(startupPoll);
 			startupPoll = null;
+		}
+	}
+
+	// Live per-app resource usage. Docker's stats endpoint walks
+	// cgroups on every call, so we pace at 2s (matches the "feels live"
+	// threshold without thrashing the daemon) and pause entirely when
+	// the tab is backgrounded — a hidden tab polling stats earned no
+	// useful information and cost real CPU on the box.
+	function startStatsPolling() {
+		stopStatsPolling();
+		void refreshStats();
+		statsPoll = setInterval(refreshStats, 2000);
+	}
+
+	function stopStatsPolling() {
+		if (statsPoll) {
+			clearInterval(statsPoll);
+			statsPoll = null;
+		}
+	}
+
+	async function refreshStats() {
+		if (document.hidden) return;
+		try {
+			const list = await client.call<AppStats[]>('apps.stats');
+			const next: Record<string, AppStats> = {};
+			for (const s of list) next[s.name] = s;
+			appStats = next;
+		} catch { /* ignore — keep last good values */ }
+	}
+
+	function onVisibilityChange() {
+		if (document.hidden) {
+			stopStatsPolling();
+		} else if (status?.enabled && status?.running) {
+			startStatsPolling();
 		}
 	}
 
@@ -586,8 +634,11 @@
 			apps = await client.call<App[]>('apps.list');
 			if (status.enabled && status.running) {
 				await loadIngresses();
+				if (!statsPoll) startStatsPolling();
 			} else {
 				ingresses = [];
+				stopStatsPolling();
+				appStats = {};
 			}
 		} catch { /* ignore */ }
 		await loadLockedFsByApp();
@@ -1485,6 +1536,10 @@
 				<tr>
 					<SortTh label="Name" active={true} dir={sortDir} onclick={toggleSort} />
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Image</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap">CPU</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap">Memory</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap" title="Cumulative bytes since container start">Net&nbsp;I/O</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap" title="Cumulative block-device read/write since container start">Disk&nbsp;I/O</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Ports</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
 					<th class="w-px border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap">Actions</th>
@@ -1492,6 +1547,7 @@
 			</thead>
 			<tbody>
 				{#each sorted as app}
+					{@const s = appStats[app.name]}
 					<tr class="border-b border-border hover:bg-muted/30 transition-colors">
 						<td class="p-3">
 							<div class="flex items-center gap-2">
@@ -1526,6 +1582,18 @@
 							</div>
 						</td>
 						<td class="p-3 text-xs text-muted-foreground font-mono max-w-[200px] truncate">{app.kind === 'compose' && (app.containers?.length ?? 0) > 1 ? `${app.containers?.length} images` : app.image}</td>
+						<td class="p-3 text-xs font-mono whitespace-nowrap">
+							{#if s}{s.cpu_percent.toFixed(1)}%{:else}<span class="text-muted-foreground">—</span>{/if}
+						</td>
+						<td class="p-3 text-xs font-mono whitespace-nowrap" title={s ? `cgroup limit: ${formatBytes(s.memory_limit_bytes)}` : ''}>
+							{#if s}{formatBytes(s.memory_bytes)}{:else}<span class="text-muted-foreground">—</span>{/if}
+						</td>
+						<td class="p-3 text-xs font-mono whitespace-nowrap" title="rx ↓ / tx ↑ since container start">
+							{#if s}<span class="text-muted-foreground">↓</span>&nbsp;{formatBytes(s.net_rx_bytes)}&nbsp;&nbsp;<span class="text-muted-foreground">↑</span>&nbsp;{formatBytes(s.net_tx_bytes)}{:else}<span class="text-muted-foreground">—</span>{/if}
+						</td>
+						<td class="p-3 text-xs font-mono whitespace-nowrap" title="block read / write since container start">
+							{#if s}<span class="text-muted-foreground">R</span>&nbsp;{formatBytes(s.block_read_bytes)}&nbsp;&nbsp;<span class="text-muted-foreground">W</span>&nbsp;{formatBytes(s.block_write_bytes)}{:else}<span class="text-muted-foreground">—</span>{/if}
+						</td>
 						<td class="p-3 text-xs font-mono">
 							{#if app.ports && app.ports.length > 0}
 								{@const currentIngress = getIngress(app.name)?.host_port}

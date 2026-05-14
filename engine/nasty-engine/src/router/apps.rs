@@ -33,6 +33,10 @@ pub(super) async fn try_route(
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
         },
+        "apps.stats" => match state.apps.stats().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
         "apps.get" => match require_str(req, "name") {
             Ok(name) => match state.apps.get(name).await {
                 Ok(v) => ok(req, v),

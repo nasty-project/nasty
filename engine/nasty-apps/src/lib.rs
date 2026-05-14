@@ -19,9 +19,9 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptions, CreateImageOptions, ListContainersOptions, LogsOptions,
-    RemoveContainerOptions, StopContainerOptions,
+    RemoveContainerOptions, StatsOptions, StopContainerOptions,
 };
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -446,6 +446,34 @@ pub struct AppContainer {
     pub image: String,
     /// Container status.
     pub status: String,
+}
+
+/// Aggregated live resource usage for a NASty-managed app. For compose
+/// apps with multiple containers the per-container values are summed,
+/// matching the rest of the WebUI which treats compose apps as a single
+/// unit.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AppStats {
+    /// App name. Matches the `name` of an entry in `apps.list`.
+    pub name: String,
+    /// CPU percentage averaged over the Docker stats sample window
+    /// (Docker stats CLI semantics — capped only by num-CPUs * 100).
+    pub cpu_percent: f64,
+    /// Memory in use, with page cache / inactive-file subtracted to
+    /// match `docker stats`. Sum across compose containers.
+    pub memory_bytes: u64,
+    /// Memory limit reported by cgroup. Equals total host memory when
+    /// no explicit limit is set; the WebUI decides what to render when
+    /// the value matches host memory.
+    pub memory_limit_bytes: u64,
+    /// Total bytes received across all container interfaces.
+    pub net_rx_bytes: u64,
+    /// Total bytes transmitted across all container interfaces.
+    pub net_tx_bytes: u64,
+    /// Cumulative block-device bytes read (cgroup v2 io_service_bytes).
+    pub block_read_bytes: u64,
+    /// Cumulative block-device bytes written.
+    pub block_write_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1184,6 +1212,90 @@ impl AppsService {
         }
         // Docker not running — return offline list from filesystem
         Self::list_offline().await
+    }
+
+    /// Live resource usage for every NASty-managed app that has at
+    /// least one running container.  Returns an entry per app, not per
+    /// container — compose-app values are summed across services to
+    /// match how `list` presents them.
+    ///
+    /// We fetch one stats frame per container with `stream=false` and
+    /// `one_shot=false`, which gives a frame whose `precpu_stats` are
+    /// populated by the daemon's internal sampler so CPU % is real
+    /// (rather than 0 as with `one_shot=true`).  Calls are issued
+    /// concurrently — Docker's stats endpoint walks cgroups on every
+    /// request, so a serial loop would dominate latency once the user
+    /// has more than a handful of apps installed.
+    pub async fn stats(&self) -> Result<Vec<AppStats>, AppsError> {
+        self.require_ready().await?;
+        let docker = self.docker()?;
+
+        // Pull running containers we manage (simple or compose).  We
+        // skip non-running ones up front — stats on a stopped container
+        // returns an empty frame and we'd waste a request per app.
+        let mut filters = HashMap::new();
+        filters.insert("status".to_string(), vec!["running".to_string()]);
+        let running = docker
+            .list_containers(Some(ListContainersOptions {
+                all: false,
+                filters: Some(filters),
+                ..Default::default()
+            }))
+            .await?;
+
+        // (container_id, app_name) for everything we care about.  An
+        // app_name of None means the container isn't part of a NASty
+        // app and we ignore it.
+        let targets: Vec<(String, String)> = running
+            .iter()
+            .filter_map(|c| {
+                let id = c.id.clone()?;
+                let labels = c.labels.as_ref()?;
+                let app = labels
+                    .get(LABEL_APP_NAME)
+                    .or_else(|| labels.get("com.docker.compose.project"))
+                    .cloned()?;
+                Some((id, app))
+            })
+            .collect();
+
+        // Concurrent fan-out — each per-container call is independent.
+        // join_all preserves order so we can zip back to app_name below.
+        let stats_opts = StatsOptions {
+            stream: false,
+            one_shot: false,
+        };
+        let frames = futures_util::future::join_all(targets.iter().map(|(id, _)| {
+            let docker = docker.clone();
+            let id = id.clone();
+            let opts = stats_opts.clone();
+            async move {
+                // The endpoint streams in general but with stream=false
+                // emits exactly one frame; .next() gives us that frame.
+                docker.stats(&id, Some(opts)).next().await
+            }
+        }))
+        .await;
+
+        let mut by_app: HashMap<String, AppStats> = HashMap::new();
+        for ((_, app_name), frame) in targets.iter().zip(frames) {
+            let Some(Ok(frame)) = frame else { continue };
+            let entry = by_app.entry(app_name.clone()).or_insert_with(|| AppStats {
+                name: app_name.clone(),
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                memory_limit_bytes: 0,
+                net_rx_bytes: 0,
+                net_tx_bytes: 0,
+                block_read_bytes: 0,
+                block_write_bytes: 0,
+            });
+            accumulate_stats(entry, &frame);
+        }
+
+        let mut out: Vec<AppStats> = by_app.into_values().collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
     }
 
     /// List apps from on-disk state when Docker is not running.
@@ -2900,6 +3012,79 @@ fn container_status_str(c: &bollard::models::ContainerSummary) -> String {
         .as_ref()
         .map(|s| format!("{:?}", s).to_lowercase())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Fold one container's stats frame into the running aggregate for its
+/// app. Implements the same CPU-percent + memory-working-set + I/O
+/// derivations that `docker stats` uses, so users see numbers that
+/// match the CLI.
+fn accumulate_stats(out: &mut AppStats, frame: &bollard::models::ContainerStatsResponse) {
+    // CPU %: ((cpu_delta / system_delta) * num_cpus * 100).  num_cpus
+    // falls back to percpu_usage.len() on cgroup v1 where online_cpus
+    // is sometimes absent.  precpu values are zero on the first sample
+    // ever taken — the result then evaluates to 0 and the next poll
+    // shows a real value, which is acceptable.
+    if let (Some(cpu), Some(precpu)) = (frame.cpu_stats.as_ref(), frame.precpu_stats.as_ref()) {
+        let cpu_total = cpu
+            .cpu_usage
+            .as_ref()
+            .and_then(|u| u.total_usage)
+            .unwrap_or(0);
+        let pre_total = precpu
+            .cpu_usage
+            .as_ref()
+            .and_then(|u| u.total_usage)
+            .unwrap_or(0);
+        let sys = cpu.system_cpu_usage.unwrap_or(0);
+        let pre_sys = precpu.system_cpu_usage.unwrap_or(0);
+        let cpu_delta = cpu_total.saturating_sub(pre_total) as f64;
+        let sys_delta = sys.saturating_sub(pre_sys) as f64;
+        let num_cpus = cpu.online_cpus.unwrap_or_else(|| {
+            cpu.cpu_usage
+                .as_ref()
+                .and_then(|u| u.percpu_usage.as_ref().map(|v| v.len() as u32))
+                .unwrap_or(1)
+        }) as f64;
+        if cpu_delta > 0.0 && sys_delta > 0.0 {
+            out.cpu_percent += (cpu_delta / sys_delta) * num_cpus * 100.0;
+        }
+    }
+
+    // Memory working set: usage minus page-cache (cgroup v1 "cache" /
+    // cgroup v2 "inactive_file"), matching `docker stats`. Fall back to
+    // raw usage if the breakdown isn't present.
+    if let Some(mem) = frame.memory_stats.as_ref() {
+        let usage = mem.usage.unwrap_or(0);
+        let cache_like = mem
+            .stats
+            .as_ref()
+            .and_then(|m| m.get("inactive_file").or_else(|| m.get("cache")).copied())
+            .unwrap_or(0);
+        out.memory_bytes += usage.saturating_sub(cache_like);
+        out.memory_limit_bytes = out.memory_limit_bytes.max(mem.limit.unwrap_or(0));
+    }
+
+    if let Some(nets) = frame.networks.as_ref() {
+        for net in nets.values() {
+            out.net_rx_bytes += net.rx_bytes.unwrap_or(0);
+            out.net_tx_bytes += net.tx_bytes.unwrap_or(0);
+        }
+    }
+
+    // cgroup v2 only populates io_service_bytes_recursive; bucket by
+    // the `op` field which Docker normalises to "read" / "write".
+    if let Some(blkio) = frame.blkio_stats.as_ref()
+        && let Some(entries) = blkio.io_service_bytes_recursive.as_ref()
+    {
+        for e in entries {
+            let v = e.value.unwrap_or(0);
+            match e.op.as_deref() {
+                Some(op) if op.eq_ignore_ascii_case("read") => out.block_read_bytes += v,
+                Some(op) if op.eq_ignore_ascii_case("write") => out.block_write_bytes += v,
+                _ => {}
+            }
+        }
+    }
 }
 
 fn chrono_from_timestamp(ts: i64) -> String {
