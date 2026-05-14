@@ -166,8 +166,20 @@
           ./nixos/modules/linuxquota.nix
           ./nixos/modules/nasty.nix
           ./nixos/configuration.nix
-          ({ ... }: {
+          ({ lib, ... }: {
             boot.isContainer = true;
+            # `boot.isContainer = true` flips
+            # `networking.useHostResolvConf` to true by default (so
+            # containers inherit the host's DNS), but nasty.nix also
+            # enables systemd-resolved — and the two trip the
+            # "Using host resolv.conf is not supported with
+            # systemd-resolved" assertion.  This rootfs is bundled
+            # into the ISO as a store path, so the failed assertion
+            # blocks every ISO build.  Force-disable host resolv.conf
+            # here; nothing actually consumes /etc/resolv.conf inside
+            # this container payload (it's a pre-built closure, not
+            # a running container).
+            networking.useHostResolvConf = lib.mkForce false;
           })
         ];
       };
