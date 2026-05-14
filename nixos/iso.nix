@@ -409,6 +409,17 @@ in
   networking.wireless.enable = pkgs.lib.mkForce false;
   networking.useDHCP = pkgs.lib.mkForce true;
 
+  # installation-cd-base.nix sets `useHostResolvConf = true` to copy the
+  # live medium's resolv.conf into the installer, but recent nixpkgs
+  # also pulls in systemd-resolved on the same image (via
+  # NetworkManager) — and the two are mutually exclusive by NixOS
+  # assertion ("Using host resolv.conf is not supported with
+  # systemd-resolved"). Disable host-resolv-conf and let resolved
+  # provide DNS during the install; the installer just needs working
+  # name resolution and resolved gives us that via the stub at
+  # /run/systemd/resolve/stub-resolv.conf.
+  networking.useHostResolvConf = lib.mkForce false;
+
   # Auto-launch the installer on tty1
   services.getty.autologinUser = lib.mkForce "root";
   programs.bash.loginShellInit = ''
