@@ -541,7 +541,7 @@ fn evaluate_rules(
                         // so the user doesn't have to dig — the typical
                         // path is "trim old generations" not "resize ESP".
                         message: format!(
-                            "/boot has {:.0} MB free (threshold: {:.0} MB). The next system update may fail to install its initrd. Run `nix-collect-garbage --delete-older-than 7d` and `switch-to-configuration boot` to reclaim space.",
+                            "/boot has {:.0} MB free (threshold: {:.0} MB). The next system update may fail to install its initrd. Run `nix-collect-garbage --delete-older-than 7d` and `/run/current-system/bin/switch-to-configuration boot` to reclaim space.",
                             free_mb, rule.threshold
                         ),
                         current_value: free_mb,
