@@ -629,8 +629,10 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
             // without it the kernel generates a random MAC and
             // DHCP hands out a new lease (issue from the bridge
             // creation test on 10.10.10.61).
-            if let Some(mac) = &p.mac {
-                bridge.insert("mac-address".into(), into_value(mac.clone()));
+            if let Some(mac) = &p.mac
+                && let Some(bytes) = mac_to_bytes(mac)
+            {
+                bridge.insert("mac-address".into(), into_value(bytes));
             }
             out.insert("bridge".into(), bridge);
         }
@@ -657,8 +659,10 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
         if let Some(mtu) = p.mtu {
             eth.insert("mtu".into(), into_value(u32::from(mtu)));
         }
-        if let Some(mac) = &p.mac {
-            eth.insert("cloned-mac-address".into(), into_value(mac.clone()));
+        if let Some(mac) = &p.mac
+            && let Some(bytes) = mac_to_bytes(mac)
+        {
+            eth.insert("cloned-mac-address".into(), into_value(bytes));
         }
         // Always emit the section for ethernet so a profile with
         // neither MTU nor cloned-mac still has the type's primary
@@ -758,6 +762,27 @@ fn parse_cidr(cidr: &str, _family: Family) -> Option<(String, u32)> {
     let (addr, prefix_str) = cidr.split_once('/')?;
     let prefix: u32 = prefix_str.parse().ok()?;
     Some((addr.to_string(), prefix))
+}
+
+/// Parse a colon-separated MAC address like "aa:bb:cc:dd:ee:ff" into the
+/// 6-byte form NetworkManager expects for `ay`-typed MAC fields
+/// (`bridge.mac-address`, `802-3-ethernet.cloned-mac-address`).
+///
+/// Returns `None` for malformed input; callers skip the field so NM uses
+/// its default rather than rejecting the whole connection.
+fn mac_to_bytes(mac: &str) -> Option<Vec<u8>> {
+    let parts: Vec<&str> = mac.split(':').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(6);
+    for p in parts {
+        if p.len() != 2 {
+            return None;
+        }
+        out.push(u8::from_str_radix(p, 16).ok()?);
+    }
+    Some(out)
 }
 
 /// Wrap a value in `OwnedValue`. Centralized so the unwrap handling is
@@ -1467,6 +1492,11 @@ mod tests {
 
     #[test]
     fn dict_ethernet_section_carries_mtu_and_cloned_mac() {
+        // NM's `802-3-ethernet.cloned-mac-address` is type `ay`
+        // (byte array), not `s`. Sending a string gets rejected
+        // with "InvalidProperty: 802-3-ethernet.cloned-mac-address:
+        // can't set property of type 'ay' from value of type 's'"
+        // which then aborts the whole add_connection.
         let mut eth0 = link_phys("eth0");
         eth0.mtu = Some(9000);
         eth0.mac = Some("aa:bb:cc:dd:ee:ff".into());
@@ -1477,13 +1507,58 @@ mod tests {
         let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
         let eth = dict.get("802-3-ethernet").expect("ethernet section");
         let mtu: u32 = eth["mtu"].try_clone().unwrap().try_into().unwrap();
-        let mac: String = eth["cloned-mac-address"]
+        let mac: Vec<u8> = eth["cloned-mac-address"]
             .try_clone()
             .unwrap()
             .try_into()
             .unwrap();
         assert_eq!(mtu, 9000);
-        assert_eq!(mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(mac, vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    }
+
+    #[test]
+    fn dict_bridge_mac_address_emitted_as_byte_array() {
+        // NM's `bridge.mac-address` is type `ay` (byte array), not `s`
+        // — same wire-type story as cloned-mac-address. Pin the bytes
+        // so this can't drift back to string form.
+        let mut br0 = link_bridge("br0", &["eth0"]);
+        br0.mac = Some("11:22:33:44:55:66".into());
+        let layered = LayeredConfig {
+            links: vec![link_phys("eth0"), br0],
+            ..Default::default()
+        };
+        let br_profile = to_nm_profiles(&layered)
+            .into_iter()
+            .find(|p| p.id == "nasty-br0")
+            .unwrap();
+        let dict = to_settings_dict(&br_profile);
+        let bridge = dict.get("bridge").expect("bridge section");
+        let mac: Vec<u8> = bridge["mac-address"]
+            .try_clone()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(mac, vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    }
+
+    #[test]
+    fn mac_to_bytes_parses_canonical_and_rejects_garbage() {
+        assert_eq!(
+            mac_to_bytes("aa:bb:cc:dd:ee:ff"),
+            Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
+        // Mixed case is fine — `from_str_radix` accepts both.
+        assert_eq!(
+            mac_to_bytes("AA:Bb:cC:DD:ee:FF"),
+            Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
+        // Wrong separator / wrong length / non-hex → None (we skip
+        // the field rather than poison the whole connection).
+        assert!(mac_to_bytes("aa-bb-cc-dd-ee-ff").is_none());
+        assert!(mac_to_bytes("aa:bb:cc:dd:ee").is_none());
+        assert!(mac_to_bytes("aa:bb:cc:dd:ee:ff:00").is_none());
+        assert!(mac_to_bytes("aa:bb:cc:dd:ee:gg").is_none());
+        assert!(mac_to_bytes("a:bb:cc:dd:ee:ff").is_none());
     }
 
     #[test]
@@ -1835,12 +1910,12 @@ mod tests {
         let br = profiles.iter().find(|p| p.id == "nasty-br0").unwrap();
         let dict = to_settings_dict(br);
         let bridge = dict.get("bridge").expect("bridge section");
-        let mac: String = bridge["mac-address"]
+        let mac: Vec<u8> = bridge["mac-address"]
             .try_clone()
             .unwrap()
             .try_into()
             .unwrap();
-        assert_eq!(mac, "bc:24:11:34:a0:27");
+        assert_eq!(mac, vec![0xbc, 0x24, 0x11, 0x34, 0xa0, 0x27]);
     }
 
     #[test]
@@ -1881,12 +1956,12 @@ mod tests {
         let bond = profiles.iter().find(|p| p.id == "nasty-bond0").unwrap();
         let dict = to_settings_dict(bond);
         let eth = dict.get("802-3-ethernet").expect("ethernet section");
-        let mac: String = eth["cloned-mac-address"]
+        let mac: Vec<u8> = eth["cloned-mac-address"]
             .try_clone()
             .unwrap()
             .try_into()
             .unwrap();
-        assert_eq!(mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(mac, vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
     }
 
     #[test]
