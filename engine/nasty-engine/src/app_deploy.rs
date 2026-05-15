@@ -681,9 +681,15 @@ async fn stream_command(socket: &mut WebSocket, cmd: &str, args: &[&str]) -> Res
         all_lines.push(line);
     }
 
-    // Wait for reader tasks to finish
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    // Wait for reader tasks to finish. If either panics (BufReader,
+    // channel send, line decode), the deployment status the user sees
+    // is missing the tail of docker output — log so it's debuggable.
+    if let Err(e) = stdout_task.await {
+        tracing::warn!("compose stdout reader task panicked / cancelled: {e}");
+    }
+    if let Err(e) = stderr_task.await {
+        tracing::warn!("compose stderr reader task panicked / cancelled: {e}");
+    }
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
 
