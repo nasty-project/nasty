@@ -14,6 +14,16 @@
 
 NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity hardware into a storage appliance serving NFS, SMB, iSCSI, and NVMe-oF — managed from a single web UI, updated atomically, and rolled back when things go sideways.
 
+## Star History
+
+<a href="https://www.star-history.com/#nasty-project/nasty&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=nasty-project/nasty&type=Date&theme=dark&legend=top-left" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=nasty-project/nasty&type=Date&legend=top-left" />
+    <img alt="NASty star history" src="https://api.star-history.com/svg?repos=nasty-project/nasty&type=Date&legend=top-left" />
+  </picture>
+</a>
+
 ## Features
 
 ### Storage
