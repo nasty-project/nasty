@@ -373,6 +373,15 @@ pkgs.testers.runNixOSTest {
     # rpc-smoke also opens wss://127.0.0.1/ws through nginx as its
     # third session, and (session 4) installs a Docker app whose
     # /apps/<name>/ ingress we then assert against below.
+    #
+    # Docker is needed before we can `docker load` the smoke image.
+    # The engine's `apps.enable` RPC would start it too, but the
+    # load step runs from the testScript (host-side), so we bring
+    # it up explicitly first.  Once up, rpc-smoke's `apps.enable`
+    # is a no-op systemctl restart.
+    machine.succeed("systemctl start docker.socket")
+    machine.wait_for_unit("docker.socket")
+    machine.wait_until_succeeds("docker info >/dev/null 2>&1")
     machine.succeed("docker load -i ${smokeAppImage}")
     machine.succeed(
         f"${pythonWithWs}/bin/python3 ${rpcSmoke} {shlex.quote(login_obj['token'])}"
