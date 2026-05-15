@@ -360,14 +360,11 @@ impl UpdateService {
             )?
         };
 
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         let flake_temp_path = "/tmp/nasty-upgrade-flake.nix";
         tokio::fs::write(flake_temp_path, &next_flake)
@@ -572,14 +569,11 @@ echo "==> Update complete!"
         }
 
         // Clean up any previous update unit
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         // Build the update script:
         // 1. Update the local wrapper flake inputs (channel-specific:
@@ -798,14 +792,11 @@ echo "==> Update complete!"
             ));
         }
 
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         let flake_path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
         let current_flake = tokio::fs::read_to_string(&flake_path)
@@ -1009,14 +1000,11 @@ echo "==> Update complete!"
             return Err(UpdateError::AlreadyRunning);
         }
 
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         let path = std::env::var("PATH").unwrap_or_default();
         let output = tokio::process::Command::new("systemd-run")
@@ -1176,14 +1164,11 @@ echo "==> Update complete!"
             )));
         }
 
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         let path = std::env::var("PATH").unwrap_or_default();
         let script = format!(

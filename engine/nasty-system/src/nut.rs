@@ -165,7 +165,14 @@ impl NutService {
         if is_nut_running().await {
             // Spawn restart in background — some drivers (nutdrv_qx) take 20-30s
             // to probe USB and we don't want the API call to block/timeout.
-            tokio::spawn(async { restart_nut_services().await });
+            // restart_nut_services() logs per-service errors itself; the spawn
+            // wrapper just guards against a task-panic vanishing into nothing.
+            let h = tokio::spawn(async { restart_nut_services().await });
+            tokio::spawn(async move {
+                if let Err(e) = h.await {
+                    warn!("NUT restart task panicked / cancelled: {e}");
+                }
+            });
         }
 
         Ok(config.clone())
@@ -323,10 +330,19 @@ async fn restart_nut_services() {
         "nut-server.service",
         "nut-driver.service",
     ] {
-        let _ = tokio::process::Command::new("systemctl")
+        match tokio::process::Command::new("systemctl")
             .args(["restart", svc])
             .output()
-            .await;
+            .await
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => warn!(
+                "systemctl restart {svc} exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => warn!("systemctl restart {svc} failed to spawn: {e}"),
+        }
     }
 }
 

@@ -663,10 +663,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             "Stopping web server for TLS challenge...",
             Some(domain),
         );
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", "nginx"])
-            .output()
-            .await;
+        nasty_common::cmd::try_run("systemctl", &["stop", "nginx"]).await;
     }
 
     if settings.tls_challenge_type == "dns" {
@@ -746,10 +743,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     // ALWAYS restart nginx, regardless of lego success/failure
     if need_nginx_stop {
         set_acme_status("running", "Restarting web server...", Some(domain));
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["start", "nginx"])
-            .output()
-            .await;
+        nasty_common::cmd::try_run("systemctl", &["start", "nginx"]).await;
     }
 
     let (exit_status, stderr_lines) = lego_result?;
@@ -785,11 +779,11 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     // Set permissions so nginx (running as nginx user) can read the cert
     let _ = tokio::fs::set_permissions(TLS_CERT_PATH, std::fs::Permissions::from_mode(0o644)).await;
     let _ = tokio::fs::set_permissions(TLS_KEY_PATH, std::fs::Permissions::from_mode(0o640)).await;
-    // Set key group to nginx so it can read it
-    let _ = tokio::process::Command::new("chown")
-        .args(["root:nginx", TLS_KEY_PATH])
-        .output()
-        .await;
+    // Set key group to nginx so it can read it. `try_run` logs failures
+    // — a chown failure here means nginx can't read the cert and reload
+    // will surface that as a "permission denied" anyway, but logging the
+    // chown error directly makes the chain easier to follow.
+    nasty_common::cmd::try_run("chown", &["root:nginx", TLS_KEY_PATH]).await;
 
     // Reload nginx to pick up the new certificate
     let reload = tokio::process::Command::new("systemctl")

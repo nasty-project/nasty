@@ -112,11 +112,11 @@ pub(super) async fn try_route(
                 return Some(err(req, format!("write config: {e}")));
             }
 
-            // Restart rest-server to pick up new path
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["restart", "nasty-rest-server"])
-                .output()
-                .await;
+            // Restart rest-server to pick up new path. `try_run` logs
+            // failures so a botched restart (config typo, port collision,
+            // etc.) shows up in the journal even though we don't surface
+            // it on the RPC reply (we already ack'd the path write).
+            nasty_common::cmd::try_run("systemctl", &["restart", "nasty-rest-server"]).await;
 
             ok(req, "ok")
         }

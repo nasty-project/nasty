@@ -372,11 +372,10 @@ async fn apply_smb_tuning(config: &TuningConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to write {SMB_TUNING_CONF}: {e}"))?;
 
-    // Reload Samba config (non-fatal if smbd isn't running)
-    let _ = tokio::process::Command::new("smbcontrol")
-        .args(["smbd", "reload-config"])
-        .output()
-        .await;
+    // Reload Samba config (non-fatal if smbd isn't running). `try_run`
+    // logs the "smbd not running" error at warn! so we still see it in
+    // the journal if reload was actually expected to take effect.
+    nasty_common::cmd::try_run("smbcontrol", &["smbd", "reload-config"]).await;
 
     info!("SMB tuning config written and reload requested");
     Ok(())

@@ -438,8 +438,13 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
                 DeployMessage::log("Cleaning up failed deployment...").into(),
             ))
             .await;
-        let _ = Command::new("docker")
-            .args([
+        // Best-effort cleanup of partially-created containers. `try_run`
+        // logs failures so a leak (containers/volumes that didn't get
+        // removed) is debuggable from the journal rather than mysterious
+        // disk-space loss.
+        nasty_common::cmd::try_run(
+            "docker",
+            &[
                 "compose",
                 "-f",
                 &compose_path,
@@ -448,9 +453,9 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
                 "down",
                 "-v",
                 "--remove-orphans",
-            ])
-            .output()
-            .await;
+            ],
+        )
+        .await;
         if !is_update {
             let _ = tokio::fs::remove_dir_all(&compose_dir).await;
         }

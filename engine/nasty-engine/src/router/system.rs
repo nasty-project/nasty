@@ -159,15 +159,11 @@ pub(super) async fn try_route(
                 if let Err(e) = tokio::fs::write("/root/.ssh/authorized_keys", &existing).await {
                     return Some(err(req, format!("write authorized_keys: {e}")));
                 }
-                // Set permissions
-                let _ = tokio::process::Command::new("chmod")
-                    .args(["600", "/root/.ssh/authorized_keys"])
-                    .status()
-                    .await;
-                let _ = tokio::process::Command::new("chmod")
-                    .args(["700", "/root/.ssh"])
-                    .status()
-                    .await;
+                // Set permissions. `try_run` logs failures so a chmod
+                // that silently doesn't take effect (and would later
+                // cause sshd to refuse the key) shows up in the journal.
+                nasty_common::cmd::try_run("chmod", &["600", "/root/.ssh/authorized_keys"]).await;
+                nasty_common::cmd::try_run("chmod", &["700", "/root/.ssh"]).await;
             }
             ok(req, "Key added")
         }
@@ -223,10 +219,7 @@ pub(super) async fn try_route(
             {
                 tracing::warn!("Failed to write sshd override: {e}");
             }
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["reload", "sshd"])
-                .status()
-                .await;
+            nasty_common::cmd::try_run("systemctl", &["reload", "sshd"]).await;
             ok(
                 req,
                 format!(

@@ -110,11 +110,10 @@ impl FirmwareService {
     /// Check for available firmware updates.
     /// Returns the device list with update info populated.
     pub async fn check_updates(&self) -> Vec<FirmwareDevice> {
-        // First refresh metadata from LVFS
-        let _ = Command::new("fwupdmgr")
-            .args(["refresh", "--force"])
-            .output()
-            .await;
+        // First refresh metadata from LVFS — best-effort. A failure here
+        // means the device list won't have the latest firmware versions
+        // available, which is logged at warn! by `try_run`.
+        nasty_common::cmd::try_run("fwupdmgr", &["refresh", "--force"]).await;
 
         let mut devices = self.list_devices().await;
 

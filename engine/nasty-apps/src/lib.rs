@@ -1891,9 +1891,12 @@ impl AppsService {
 
         let compose_path = format!("{}/docker-compose.yml", project_dir);
         let cleanup = |project_dir: String, name: String, compose_path: String| async move {
-            // Tear down any partially created containers before removing the dir
-            let _ = Command::new("docker")
-                .args([
+            // Tear down any partially created containers before removing the dir.
+            // `try_run` logs failures so a stuck container that prevents the
+            // dir-removal from completing is debuggable.
+            nasty_common::cmd::try_run(
+                "docker",
+                &[
                     "compose",
                     "-f",
                     &compose_path,
@@ -1902,10 +1905,12 @@ impl AppsService {
                     "down",
                     "-v",
                     "--remove-orphans",
-                ])
-                .output()
-                .await;
-            let _ = tokio::fs::remove_dir_all(&project_dir).await;
+                ],
+            )
+            .await;
+            if let Err(e) = tokio::fs::remove_dir_all(&project_dir).await {
+                tracing::warn!("cleanup: remove_dir_all({project_dir}) failed: {e}");
+            }
         };
 
         let output = match result {
@@ -2429,8 +2434,13 @@ impl AppsService {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let path = compose_file.to_string_lossy().to_string();
                 info!("Restoring compose app '{name}'");
-                let _ = Command::new("docker")
-                    .args([
+                // `try_run` logs failures so a compose app that won't
+                // come back up after reboot is debuggable from the
+                // journal — the previous `let _ =` form left this case
+                // completely silent.
+                nasty_common::cmd::try_run(
+                    "docker",
+                    &[
                         "compose",
                         "-f",
                         &path,
@@ -2439,9 +2449,9 @@ impl AppsService {
                         "up",
                         "-d",
                         "--no-build",
-                    ])
-                    .output()
-                    .await;
+                    ],
+                )
+                .await;
             }
         }
     }
@@ -2879,10 +2889,7 @@ async fn find_container_shell(container: &str) -> Option<&'static str> {
 }
 
 async fn reload_nginx() {
-    let _ = Command::new("systemctl")
-        .args(["reload", "nginx"])
-        .output()
-        .await;
+    nasty_common::cmd::try_run("systemctl", &["reload", "nginx"]).await;
 }
 
 /// One row parsed from `ss -tlnp` output.

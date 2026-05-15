@@ -1,3 +1,4 @@
+pub mod cmd;
 pub mod jsonrpc;
 pub mod metrics_types;
 pub mod state;

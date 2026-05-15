@@ -451,10 +451,19 @@ impl FilesystemService {
 
         // Wait for udev to finish device enumeration before any mount attempts.
         info!("Waiting for block devices to settle...");
-        let _ = tokio::process::Command::new("udevadm")
+        match tokio::process::Command::new("udevadm")
             .args(["settle", "--timeout=30"])
             .status()
-            .await;
+            .await
+        {
+            Ok(s) if s.success() => {}
+            Ok(s) => warn!(
+                "udevadm settle exited {s} — proceeding to mount with possibly-incomplete device enumeration"
+            ),
+            Err(e) => warn!(
+                "udevadm settle failed to spawn: {e} — proceeding to mount blind, expect mount failures if devices haven't enumerated"
+            ),
+        }
 
         let mut failed_names = Vec::new();
 
@@ -501,10 +510,21 @@ impl FilesystemService {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
                 // Refresh blkid cache after devices appear
-                let _ = tokio::process::Command::new("blkid")
+                match tokio::process::Command::new("blkid")
                     .arg("-g")
                     .output()
-                    .await;
+                    .await
+                {
+                    Ok(o) if o.status.success() => {}
+                    Ok(o) => warn!(
+                        "blkid -g cache refresh exited {}: {} — mount probe may use a stale cache",
+                        o.status,
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ),
+                    Err(e) => {
+                        warn!("blkid -g failed to spawn: {e} — mount probe may use a stale cache")
+                    }
+                }
             }
 
             info!("Mounting filesystem '{name}'...");
