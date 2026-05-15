@@ -243,8 +243,12 @@ pkgs.testers.runNixOSTest {
     # the public path.
     machine.wait_until_succeeds("curl -ksS https://127.0.0.1/ -o /dev/null")
     body = machine.succeed("curl -ksS https://127.0.0.1/")
-    assert "NASty" in body or "<title>" in body.lower(), (
-        f"WebUI response through nginx looks empty/wrong: {body[:200]!r}"
+    # SvelteKit hydrates title / branding in JS so the initial HTML
+    # body doesn't carry app-specific strings — assert only that we
+    # got real HTML back through the proxy, not an error page.
+    body_lc = body.lstrip().lower()
+    assert body_lc.startswith("<!doctype html>") or "<html" in body_lc, (
+        f"WebUI response through nginx doesn't look like HTML: {body[:200]!r}"
     )
 
     # The /health endpoint should also be reachable through nginx, not
