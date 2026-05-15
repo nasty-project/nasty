@@ -63,13 +63,13 @@ let
         return resp["result"]
 
 
-    def http_login(password):
+    def http_login(password, url="http://127.0.0.1:2137/api/login", ctx=None):
         req = urllib.request.Request(
-            "http://127.0.0.1:2137/api/login",
+            url,
             data=json.dumps({"username": "admin", "password": password}).encode(),
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=ctx) as resp:
             return json.loads(resp.read())["token"]
 
 
@@ -128,12 +128,23 @@ let
 
     # ── Session 3: same RPC through the nginx proxy on 443 ────────
     # Earlier sessions hit the engine on its loopback port directly,
-    # which skips nginx entirely.  This one goes wss://127.0.0.1/ws
-    # so nginx's WebSocket-upgrade handling is part of what's being
-    # asserted.  If a future proxy swap (or nginx config change)
-    # breaks Upgrade / Connection forwarding, the engine stays
-    # reachable on 2137 but the WebUI breaks — this catches that.
-    ws, _ = ws_auth(new_token, url="wss://127.0.0.1/ws", sslopt=SSL_OPTS)
+    # which skips nginx entirely.  This one goes through nginx end
+    # to end so the proxy's WebSocket-upgrade handling is part of
+    # what's being asserted.  If a future proxy swap (or nginx
+    # config change) breaks Upgrade / Connection forwarding, the
+    # engine stays reachable on 2137 but the WebUI breaks — this
+    # catches that.
+    #
+    # Sessions are bound to the client IP the engine sees, so a
+    # token issued direct to :2137 isn't valid through nginx (and
+    # vice versa).  Login + WS therefore share the nginx path.
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    proxy_token = http_login(
+        NEW_PW, url="https://127.0.0.1/api/login", ctx=ssl_ctx
+    )
+    ws, _ = ws_auth(proxy_token, url="wss://127.0.0.1/ws", sslopt=SSL_OPTS)
     try:
         health = call(ws, "system.health", 1)
         print("system.health via nginx:", health, file=sys.stderr)
