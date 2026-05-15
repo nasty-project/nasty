@@ -745,12 +745,14 @@ impl AppsService {
             return Ok(d.clone());
         }
         drop(guard);
-        // Try to connect (Docker may have started after engine)
+        // Try to connect (Docker may have started after engine). Keep the
+        // bollard error in the message so a permission-denied vs
+        // socket-not-found can be distinguished without re-running.
         let d = Docker::connect_with_unix_defaults()
             .or_else(|_| {
                 Docker::connect_with_unix("/var/run/docker.sock", 120, bollard::API_DEFAULT_VERSION)
             })
-            .map_err(|_| AppsError::NotReady("Docker socket not available".into()))?;
+            .map_err(|e| AppsError::NotReady(format!("Docker socket not available: {e}")))?;
         *self.docker.lock().unwrap() = Some(d.clone());
         info!("Connected to Docker socket");
         Ok(d)
@@ -806,36 +808,59 @@ impl AppsService {
 
         // Bootstrap in background
         tokio::spawn(async move {
-            // Wait for Docker to be ready (up to 30s)
+            // Wait for Docker to be ready (up to 30s). Track the last
+            // failure reason so the "didn't become ready" log can say
+            // *why* (permission denied, connection refused, etc.) instead
+            // of just timing out silently.
             let mut ready = false;
+            let mut last_err: Option<String> = None;
             for _ in 0..15 {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                if let Ok(docker) = Docker::connect_with_unix_defaults()
-                    && docker.ping().await.is_ok()
-                {
-                    ready = true;
-                    break;
+                match Docker::connect_with_unix_defaults() {
+                    Ok(docker) => match docker.ping().await {
+                        Ok(_) => {
+                            ready = true;
+                            break;
+                        }
+                        Err(e) => last_err = Some(format!("ping: {e}")),
+                    },
+                    Err(e) => last_err = Some(format!("connect: {e}")),
                 }
             }
 
             if !ready {
-                error!("Docker did not become ready within 30s");
+                error!(
+                    "Docker did not become ready within 30s — last error: {}",
+                    last_err.unwrap_or_else(|| "(no error captured)".into())
+                );
                 return;
             }
 
             // Set up storage directory
             let storage_path = setup_apps_storage(filesystem.as_deref()).await;
 
-            // Create compose directory
-            let _ = tokio::fs::create_dir_all(COMPOSE_DIR).await;
+            // Create compose directory. A failure here means every
+            // subsequent compose-app deploy will hit a confusing
+            // "no such directory" error — the root cause needs to be
+            // visible *now*, in the bootstrap log.
+            if let Err(e) = tokio::fs::create_dir_all(COMPOSE_DIR).await {
+                error!("create_dir_all({COMPOSE_DIR}) failed: {e} — compose deploys will fail");
+            }
 
-            // Persist storage path in config
+            // Persist storage path in config. A failure here means the
+            // chosen storage path won't survive an engine restart, which
+            // breaks app data persistence — log loudly.
             if let Some(ref path) = storage_path {
                 let config = AppsConfig {
                     enabled: true,
                     storage_path: Some(path.clone()),
                 };
-                let _ = AppsService::save_config(&config).await;
+                if let Err(e) = AppsService::save_config(&config).await {
+                    error!(
+                        "AppsConfig save failed: {e} — apps storage path won't \
+                         survive engine restart"
+                    );
+                }
             }
 
             info!("Apps bootstrap complete");
@@ -993,8 +1018,15 @@ impl AppsService {
                     .as_deref()
                     .unwrap_or("/var/lib/nasty/apps-data");
                 let path = format!("{}/{}/{}", base, req.name, v.name);
-                // Ensure the directory exists
-                let _ = tokio::fs::create_dir_all(&path).await;
+                // Ensure the directory exists. A failure here means the
+                // bind-mount will land on a missing path and Docker will
+                // either refuse to start the container or auto-create a
+                // root-owned dir — either way, a logged failure now is
+                // way easier to debug than the resulting "container
+                // exits immediately" report later.
+                if let Err(e) = tokio::fs::create_dir_all(&path).await {
+                    warn!("apps volume: create_dir_all({path}) failed: {e}");
+                }
                 path
             } else {
                 v.host_path.clone()
@@ -1081,7 +1113,9 @@ impl AppsService {
             "allow_unsafe": req.allow_unsafe,
         });
         let manifest_path = format!("{}/{}.json", COMPOSE_DIR, req.name);
-        let _ = tokio::fs::create_dir_all(COMPOSE_DIR).await;
+        if let Err(e) = tokio::fs::create_dir_all(COMPOSE_DIR).await {
+            warn!("create_dir_all({COMPOSE_DIR}) failed: {e}");
+        }
         if let Err(e) = tokio::fs::write(
             &manifest_path,
             serde_json::to_string_pretty(&manifest).unwrap(),

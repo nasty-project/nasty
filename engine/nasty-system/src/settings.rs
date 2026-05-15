@@ -776,9 +776,19 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             m
         })?;
 
-    // Set permissions so nginx (running as nginx user) can read the cert
-    let _ = tokio::fs::set_permissions(TLS_CERT_PATH, std::fs::Permissions::from_mode(0o644)).await;
-    let _ = tokio::fs::set_permissions(TLS_KEY_PATH, std::fs::Permissions::from_mode(0o640)).await;
+    // Set permissions so nginx (running as nginx user) can read the cert.
+    // A failure here means nginx will hit "permission denied" on reload,
+    // which is way easier to diagnose with this log line in front of it.
+    if let Err(e) =
+        tokio::fs::set_permissions(TLS_CERT_PATH, std::fs::Permissions::from_mode(0o644)).await
+    {
+        warn!("chmod 644 {TLS_CERT_PATH} failed: {e}");
+    }
+    if let Err(e) =
+        tokio::fs::set_permissions(TLS_KEY_PATH, std::fs::Permissions::from_mode(0o640)).await
+    {
+        warn!("chmod 640 {TLS_KEY_PATH} failed: {e}");
+    }
     // Set key group to nginx so it can read it. `try_run` logs failures
     // — a chown failure here means nginx can't read the cert and reload
     // will surface that as a "permission denied" anyway, but logging the
@@ -886,8 +896,14 @@ async fn write_dns_credentials(settings: &Settings) {
             warn!("Failed to write DNS credentials: {e}");
             return;
         }
-        let _ = tokio::fs::set_permissions(DNS_CREDS_PATH, std::fs::Permissions::from_mode(0o600))
-            .await;
+        if let Err(e) =
+            tokio::fs::set_permissions(DNS_CREDS_PATH, std::fs::Permissions::from_mode(0o600)).await
+        {
+            warn!(
+                "chmod 600 {DNS_CREDS_PATH} failed: {e} — \
+                 DNS provider credentials may be world-readable"
+            );
+        }
     }
 }
 

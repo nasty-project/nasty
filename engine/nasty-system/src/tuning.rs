@@ -408,8 +408,15 @@ async fn apply_iscsi_cmdsn_depth(depth: u32) -> Result<(), String> {
                     continue;
                 }
                 let attr_path = tpg.path().join("attrib/default_cmdsn_depth");
-                if attr_path.exists() {
-                    let _ = tokio::fs::write(&attr_path, depth.to_string()).await;
+                if attr_path.exists()
+                    && let Err(e) = tokio::fs::write(&attr_path, depth.to_string()).await
+                {
+                    // sysfs writes are typically EACCES (kernel says no
+                    // for this attribute) or EBUSY (target is in use).
+                    // Either way, the value won't take effect — log so
+                    // the user isn't left wondering why their tuning
+                    // didn't apply.
+                    warn!("write {} = {depth} failed: {e}", attr_path.display());
                 }
             }
         }
@@ -442,8 +449,10 @@ async fn apply_iscsi_login_timeout(timeout: u32) -> Result<(), String> {
                     continue;
                 }
                 let attr_path = tpg.path().join("param/login_timeout");
-                if attr_path.exists() {
-                    let _ = tokio::fs::write(&attr_path, timeout.to_string()).await;
+                if attr_path.exists()
+                    && let Err(e) = tokio::fs::write(&attr_path, timeout.to_string()).await
+                {
+                    warn!("write {} = {timeout} failed: {e}", attr_path.display());
                 }
             }
         }

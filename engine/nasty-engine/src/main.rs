@@ -432,8 +432,17 @@ async fn upload_vm_image_handler(
         }
     };
 
-    // Get or create the images subvolume
-    let filesystems = state.filesystems.list().await.unwrap_or_default();
+    // Get or create the images subvolume. If list() fails (corrupt state,
+    // permissions) we fall back to an empty set so the upload returns a
+    // user-friendly "no filesystem" error instead of crashing — but we log
+    // the underlying failure so it's debuggable.
+    let filesystems = match state.filesystems.list().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("VM image upload: filesystems.list() failed: {e}");
+            Vec::new()
+        }
+    };
     let fs_name = filesystems
         .first()
         .map(|f| f.name.clone())

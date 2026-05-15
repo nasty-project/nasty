@@ -1243,8 +1243,13 @@ echo "==> Switch to generation {gen_id} complete!"
         let profile_link = format!("/nix/var/nix/profiles/system-{gen_id}-link");
         let current_link = "/nix/var/nix/profiles/system";
 
-        let gen_target = tokio::fs::read_link(&profile_link).await.map_err(|_| {
-            UpdateError::CommandFailed(format!("generation {gen_id} does not exist"))
+        let gen_target = tokio::fs::read_link(&profile_link).await.map_err(|e| {
+            // Keep the io::Error in the message — "permission denied" or
+            // any other failure mode shouldn't be misreported as "doesn't
+            // exist" (that drove a debug-cycle once already).
+            UpdateError::CommandFailed(format!(
+                "generation {gen_id}: read_link({profile_link}): {e}"
+            ))
         })?;
         let current_target = tokio::fs::read_link(current_link)
             .await

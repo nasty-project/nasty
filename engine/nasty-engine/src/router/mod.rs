@@ -477,7 +477,13 @@ pub(super) struct VmImageListResult {
 /// source of truth for what counts as a VM image — including
 /// compressed shapes like `.qcow2.xz`.
 pub(super) async fn list_vm_images(state: &AppState) -> VmImageListResult {
-    let filesystems = state.filesystems.list().await.unwrap_or_default();
+    let filesystems = match state.filesystems.list().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("list_vm_images: filesystems.list() failed: {e}");
+            Vec::new()
+        }
+    };
     let mut images = Vec::new();
     let mut subvolume_exists = false;
 
@@ -882,7 +888,16 @@ pub(crate) async fn evaluate_active_alerts(
             }
         };
 
-    let filesystems = state.filesystems.list().await.unwrap_or_default();
+    let filesystems = match state.filesystems.list().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "alert evaluation: filesystems.list() failed: {e} — \
+                 fs-level alerts will be skipped this cycle"
+            );
+            Vec::new()
+        }
+    };
     let disk_health: Vec<nasty_system::DiskHealth> = if state
         .protocols
         .is_enabled(nasty_system::protocol::Protocol::Smart)
@@ -1012,7 +1027,16 @@ pub(crate) async fn evaluate_active_alerts(
     // by the user drop out entirely.
     let mount_failures = state.mount_failures.lock().await;
     if !mount_failures.is_empty() {
-        let current_fses = state.filesystems.list().await.unwrap_or_default();
+        let current_fses = match state.filesystems.list().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "mount-failure alert enrichment: filesystems.list() failed: {e} — \
+                     using empty fs set, alerts may show stale state"
+                );
+                Vec::new()
+            }
+        };
         for name in mount_failures.iter() {
             let fs = current_fses.iter().find(|f| &f.name == name);
             // Already mounted (user fixed it via UI) — drop the alert.

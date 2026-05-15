@@ -65,10 +65,16 @@ pub(super) async fn try_route(
                 Ok(s) => s.to_string(),
                 Err(r) => return Some(r),
             };
-            // Run in background, return immediately
+            // Run in background, return immediately. The RPC ack is just
+            // "we accepted the request" — the actual backup status lands
+            // in the journal, with a per-backup-id error so the user can
+            // grep for *which* backup failed.
             let backups = state.backups.clone_for_task();
+            let id_for_log = id.clone();
             tokio::spawn(async move {
-                let _ = backups.run_backup(&id).await;
+                if let Err(e) = backups.run_backup(&id).await {
+                    tracing::warn!("backup '{id_for_log}' failed: {e}");
+                }
             });
             ok(req, "Backup started")
         }

@@ -146,7 +146,9 @@ pub(super) async fn try_route(
                     "Invalid SSH public key — must start with ssh-rsa, ssh-ed25519, etc.",
                 ));
             }
-            let _ = tokio::fs::create_dir_all("/root/.ssh").await;
+            if let Err(e) = tokio::fs::create_dir_all("/root/.ssh").await {
+                tracing::warn!("create_dir_all(/root/.ssh) failed: {e}");
+            }
             let mut existing = tokio::fs::read_to_string("/root/.ssh/authorized_keys")
                 .await
                 .unwrap_or_default();
@@ -397,7 +399,16 @@ pub(super) async fn try_route(
                 // (Tailscale IPs are in the 100.x.y.z range)
                 let nvmeof = state.nvmeof.clone();
                 tokio::spawn(async move {
-                    let subsystems = nvmeof.list().await.unwrap_or_default();
+                    let subsystems = match nvmeof.list().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(
+                                "tailscale-disconnect cleanup: nvmeof.list() failed, \
+                                 leaving any 100.x ports orphaned: {e}"
+                            );
+                            return;
+                        }
+                    };
                     for subsys in &subsystems {
                         for port in &subsys.ports {
                             if port.addr.starts_with("100.") {

@@ -1229,16 +1229,19 @@ impl FilesystemService {
     /// Export the stored encryption key for a filesystem.
     pub async fn export_key(&self, name: &str) -> Result<String, FilesystemError> {
         let key_path = format!("{KEYS_DIR}/{name}.key");
-        tokio::fs::read_to_string(&key_path).await.map_err(|_| {
-            FilesystemError::CommandFailed(format!("no stored key for filesystem '{name}'"))
+        tokio::fs::read_to_string(&key_path).await.map_err(|e| {
+            // Keep the io::Error kind in the message — "permission denied"
+            // vs "not found" is the difference between a real bug and a
+            // user with no stored key.
+            FilesystemError::CommandFailed(format!("read key for '{name}' at {key_path}: {e}"))
         })
     }
 
     /// Delete the stored encryption key (switch to passphrase-only mode).
     pub async fn delete_key(&self, name: &str) -> Result<(), FilesystemError> {
         let key_path = format!("{KEYS_DIR}/{name}.key");
-        tokio::fs::remove_file(&key_path).await.map_err(|_| {
-            FilesystemError::CommandFailed(format!("no stored key for filesystem '{name}'"))
+        tokio::fs::remove_file(&key_path).await.map_err(|e| {
+            FilesystemError::CommandFailed(format!("delete key for '{name}' at {key_path}: {e}"))
         })
     }
 
@@ -1405,8 +1408,22 @@ impl FilesystemService {
 
     /// List block devices available for filesystem creation
     pub async fn list_devices(&self) -> Result<Vec<BlockDevice>, FilesystemError> {
-        // Collect all device paths already used by filesystems
-        let filesystems = self.list().await.unwrap_or_default();
+        // Collect all device paths already used by filesystems. If list()
+        // fails (corrupt state file, permissions, …) we fall back to an
+        // empty set so the caller still gets *some* answer, but we log
+        // the failure so the operator can see why "available devices"
+        // suddenly includes ones that are actually in use.
+        let filesystems = match self.list().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "list_devices: failed to enumerate existing filesystems ({e}) — \
+                     falling back to empty set; some devices may appear available \
+                     even though they're actually in use"
+                );
+                Vec::new()
+            }
+        };
         let used_devices: std::collections::HashSet<String> = filesystems
             .iter()
             .flat_map(|f| f.devices.iter().map(|d| d.path.clone()))

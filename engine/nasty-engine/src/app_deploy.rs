@@ -350,9 +350,15 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
         return;
     }
 
-    // Write .env
+    // Write .env. Failure here is non-fatal for `docker compose` (it
+    // falls back to the project name from --project-name) but it can
+    // mask why a `${COMPOSE_PROJECT_NAME}` interpolation came back
+    // empty in user-supplied YAML — log so it's debuggable.
     let env_content = format!("COMPOSE_PROJECT_NAME={}\n", req.name);
-    let _ = tokio::fs::write(format!("{}/.env", compose_dir), &env_content).await;
+    let env_path = format!("{}/.env", compose_dir);
+    if let Err(e) = tokio::fs::write(&env_path, &env_content).await {
+        tracing::warn!("compose .env write to {env_path} failed: {e}");
+    }
 
     // Validate
     let _ = socket

@@ -210,8 +210,12 @@ async fn send_telegram(
         .map_err(|e| format!("telegram request: {e}"))?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("telegram API error: {body}"));
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("(failed to read body: {e})"));
+        return Err(format!("telegram API error {status}: {body}"));
     }
 
     Ok(())
@@ -244,7 +248,10 @@ async fn send_webhook(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("(failed to read body: {e})"));
         return Err(format!("webhook error {status}: {body}"));
     }
 
@@ -277,7 +284,10 @@ async fn send_ntfy(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("(failed to read body: {e})"));
         return Err(format!("ntfy error {status}: {body}"));
     }
 
@@ -310,7 +320,10 @@ async fn send_signal(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("(failed to read body: {e})"));
         return Err(format!("signal API error {status}: {body}"));
     }
 
