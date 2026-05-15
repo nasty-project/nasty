@@ -346,9 +346,7 @@ impl ProtocolService {
                 // each one even if one of the stops fails.
                 for started_svc in &started {
                     if let Err(stop_err) = systemctl("stop", started_svc).await {
-                        warn!(
-                            "rollback stop of {started_svc} failed: {stop_err}"
-                        );
+                        warn!("rollback stop of {started_svc} failed: {stop_err}");
                     }
                 }
                 // Roll back persistent state. A failure here means

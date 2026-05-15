@@ -2684,8 +2684,7 @@ async fn get_fs_uuid(device: &str) -> Option<String> {
 
 /// Get filesystem usage via statvfs-style info from `df`
 async fn get_mount_usage(mount_point: &str) -> Option<(u64, u64, u64)> {
-    let output = match cmd::run_ok("df", &["-B1", "--output=size,used,avail", mount_point]).await
-    {
+    let output = match cmd::run_ok("df", &["-B1", "--output=size,used,avail", mount_point]).await {
         Ok(o) => o,
         Err(e) => {
             // Reporting all-zeros to capacity dashboards on a real query
