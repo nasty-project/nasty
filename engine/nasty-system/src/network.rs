@@ -234,10 +234,11 @@ pub struct UpdateRequest {
     pub confirm_within_secs: Option<u64>,
 }
 
-/// Response shape for `system.network.update`. All fields are `None` when
-/// no rollback was scheduled (safe change applied directly). When a
-/// rollback is pending, the caller must hit `system.network.confirm` with
-/// `txn_id` before `revert_at_unix` to keep the change.
+/// Response shape for `system.network.update`. Rollback-related fields
+/// are `None` when no rollback was scheduled (safe change applied
+/// directly).  When a rollback is pending, the caller must hit
+/// `system.network.confirm` with `txn_id` before `revert_at_unix` to
+/// keep the change.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct UpdateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -248,6 +249,28 @@ pub struct UpdateResponse {
     /// the management iface eth0"). Surfaced in the WebUI banner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk_reason: Option<String>,
+    /// Per-connection NetworkManager apply failures, if any.  The
+    /// overall apply is still considered successful — other
+    /// connections may have gone through fine — but these are
+    /// surfaced so the user can see what didn't actually take
+    /// effect instead of assuming everything worked.  Empty in the
+    /// common case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apply_errors: Vec<NetworkApplyError>,
+}
+
+/// One NetworkManager connection that failed to apply.  Surfaced
+/// in `UpdateResponse.apply_errors` so the WebUI can render the
+/// error instead of pretending the whole apply succeeded.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkApplyError {
+    /// The `nasty-<iface>` connection ID NM was working on.
+    pub connection_id: String,
+    /// NM's verbatim error message.  These look like
+    /// "Activation failed: ..." or "DBus error: ..."; we don't
+    /// try to normalise — they're meant to be readable as-is and
+    /// pasted into a bug report.
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -381,7 +404,7 @@ impl NetworkService {
                 .map_err(|e| format!("write {PENDING_REVERT_PATH}: {e}"))?;
 
             persist_config(&config).await?;
-            apply_config(&config, mgmt_iface.as_deref()).await?;
+            let outcome = apply_config(&config, mgmt_iface.as_deref()).await?;
 
             let txn_id = new_txn_id();
             let revert_at_unix = unix_now() + secs;
@@ -401,10 +424,11 @@ impl NetworkService {
                 txn_id: Some(txn_id),
                 revert_at_unix: Some(revert_at_unix),
                 risk_reason: Some(reason),
+                apply_errors: outcome_to_apply_errors(&outcome),
             })
         } else {
             persist_config(&config).await?;
-            apply_config(&config, mgmt_iface.as_deref()).await?;
+            let outcome = apply_config(&config, mgmt_iface.as_deref()).await?;
 
             info!(
                 "Network config updated ({} interfaces, {} bonds, {} bridges, {} VLANs)",
@@ -419,7 +443,10 @@ impl NetworkService {
             // apply_profiles, so reboot picks them up automatically.
             // No nixos-rebuild needed.
 
-            Ok(UpdateResponse::default())
+            Ok(UpdateResponse {
+                apply_errors: outcome_to_apply_errors(&outcome),
+                ..Default::default()
+            })
         }
     }
 
@@ -1315,7 +1342,21 @@ fn parse_dhcp_managed(json: &str) -> Option<std::collections::HashSet<String>> {
     )
 }
 
-async fn apply_config(config: &NetworkConfig, mgmt_iface: Option<&str>) -> Result<(), String> {
+fn outcome_to_apply_errors(outcome: &nm::dbus::NmApplyOutcome) -> Vec<NetworkApplyError> {
+    outcome
+        .errors
+        .iter()
+        .map(|(id, message)| NetworkApplyError {
+            connection_id: id.clone(),
+            message: message.clone(),
+        })
+        .collect()
+}
+
+async fn apply_config(
+    config: &NetworkConfig,
+    mgmt_iface: Option<&str>,
+) -> Result<nm::dbus::NmApplyOutcome, String> {
     // NetworkManager is the active backend.  Convert the resolved
     // config to layered form, then to NM profiles, then push to NM
     // via DBus.  NM owns DHCP, DNS, and L2 management; the engine
@@ -1352,15 +1393,16 @@ async fn apply_config(config: &NetworkConfig, mgmt_iface: Option<&str>) -> Resul
         outcome.errors.len(),
     );
     if !outcome.errors.is_empty() {
-        // Best-effort apply: report per-connection errors via the
-        // outcome, but don't fail the whole apply unless ALL
+        // Best-effort apply: log per-connection errors and return
+        // them in the outcome so the caller can surface them to
+        // the user, but don't fail the whole apply unless ALL
         // connections failed (which would indicate something
         // genuinely broken — NM not running, DBus permissions, etc.).
         for (id, msg) in &outcome.errors {
             warn!("network apply: connection '{id}' failed: {msg}");
         }
     }
-    Ok(())
+    Ok(outcome)
 }
 #[cfg(test)]
 mod tests {

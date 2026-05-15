@@ -9,7 +9,7 @@
  * from the settings page during the confirm window. */
 
 import { getClient } from './client';
-import { withToast } from './toast.svelte';
+import { error as toastError, withToast } from './toast.svelte';
 import type { NetworkPendingTxn, NetworkUpdateRequest, NetworkUpdateResponse } from './types';
 
 export interface PendingRollback {
@@ -56,6 +56,19 @@ export async function applyNetworkUpdate(
 			revertAtUnix: res.revert_at_unix,
 			riskReason: res.risk_reason ?? null,
 		};
+	}
+	// Surface per-connection NM errors as an explicit error toast.
+	// The success toast above already fired — engine treats partial
+	// failures as overall success — but the user needs to know that
+	// not everything went through.  Without this, a bond that NM
+	// rejected silently looks like it "worked" in the UI.
+	if (res?.apply_errors && res.apply_errors.length > 0) {
+		const lines = res.apply_errors
+			.map((e) => `${e.connection_id}: ${e.message}`)
+			.join('\n');
+		toastError(
+			`Network applied, but ${res.apply_errors.length} connection(s) reported errors:\n${lines}`,
+		);
 	}
 	return res;
 }

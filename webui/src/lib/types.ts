@@ -693,12 +693,23 @@ export interface NetworkUpdateRequest extends NetworkConfig {
 	confirm_within_secs?: number;
 }
 
-/** Returned by `system.network.update`. Fields are populated only when the
- * server scheduled a rollback. */
+/** Returned by `system.network.update`.  Rollback-related fields are
+ * populated only when the server scheduled one; `apply_errors` is
+ * populated when one or more NM connections failed to apply (other
+ * connections in the same payload may have succeeded — the engine
+ * treats this as a partial success rather than a whole-apply
+ * failure, but surfaces the per-connection messages so the user
+ * isn't lied to). */
 export interface NetworkUpdateResponse {
 	txn_id?: string | null;
 	revert_at_unix?: number | null;
 	risk_reason?: string | null;
+	apply_errors?: NetworkApplyError[];
+}
+
+export interface NetworkApplyError {
+	connection_id: string;
+	message: string;
 }
 
 /** One pending rollback transaction, as returned by `system.network.pending`.
