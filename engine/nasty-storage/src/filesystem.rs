@@ -595,6 +595,8 @@ impl FilesystemService {
                 None => continue,
             };
 
+            // None falls through to (0, 0, 0). The cause is logged inside
+            // get_mount_usage itself so we don't need to match here.
             let (total, used, available) = get_mount_usage(mount_point).await.unwrap_or((0, 0, 0));
 
             let name = Path::new(mount_point)
@@ -997,6 +999,7 @@ impl FilesystemService {
         saved_opts.uuid = Some(uuid.clone());
         saved_opts.devices = req.devices.iter().map(|d| d.path.clone()).collect();
         save_fs_mounted_with_opts(&req.name, saved_opts).await;
+        // Logged inside get_mount_usage on failure.
         let (total, used, available) = get_mount_usage(&mount_point).await.unwrap_or((0, 0, 0));
 
         let fs_devices = req
@@ -1362,7 +1365,14 @@ impl FilesystemService {
                     opts.io_scheduler = Some(v.clone());
                 }
             }
-            let _ = save_fs_state(&state).await;
+            if let Err(e) = save_fs_state(&state).await {
+                // The runtime FS state is updated in memory, but at next
+                // boot we'll fall back to whatever was last persisted —
+                // so user-tweaked mount options silently revert. Log so
+                // the user can match a "my settings keep resetting"
+                // bug to the persistence failure that caused it.
+                warn!("save_fs_state after option update failed: {e}");
+            }
         }
 
         if mount_changed {
@@ -2674,12 +2684,27 @@ async fn get_fs_uuid(device: &str) -> Option<String> {
 
 /// Get filesystem usage via statvfs-style info from `df`
 async fn get_mount_usage(mount_point: &str) -> Option<(u64, u64, u64)> {
-    let output = cmd::run_ok("df", &["-B1", "--output=size,used,avail", mount_point])
-        .await
-        .ok()?;
+    let output = match cmd::run_ok("df", &["-B1", "--output=size,used,avail", mount_point]).await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            // Reporting all-zeros to capacity dashboards on a real query
+            // failure makes the UI lie ("disk empty!" when it's actually
+            // inaccessible). Log so a "0/0/0" reading can be matched to
+            // the underlying df failure.
+            warn!("df --output=size,used,avail {mount_point} failed: {e}");
+            return None;
+        }
+    };
 
-    // Skip header line, parse second line
-    let line = output.lines().nth(1)?;
+    // Skip header line, parse second line.
+    let Some(line) = output.lines().nth(1) else {
+        warn!(
+            "df output for {mount_point} had no second line — got: {:?}",
+            output
+        );
+        return None;
+    };
     let nums: Vec<u64> = line
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
@@ -2687,6 +2712,10 @@ async fn get_mount_usage(mount_point: &str) -> Option<(u64, u64, u64)> {
     if nums.len() == 3 {
         Some((nums[0], nums[1], nums[2]))
     } else {
+        warn!(
+            "df output for {mount_point} didn't parse as 3 u64s — got: {:?}",
+            line
+        );
         None
     }
 }
@@ -2793,21 +2822,46 @@ type FsState = HashMap<String, FsMountOptions>;
 async fn save_fs_mounted_with_opts(fs_name: &str, opts: FsMountOptions) {
     let mut state = load_fs_state().await;
     state.insert(fs_name.to_string(), opts);
-    let _ = save_fs_state(&state).await;
+    if let Err(e) = save_fs_state(&state).await {
+        // The mount itself worked — Linux has the mount in its table —
+        // but next boot won't know to remount this fs. Log so the user
+        // can match a "filesystem isn't mounted after reboot" report
+        // to the persistence error.
+        warn!("save_fs_state(mounted: {fs_name}) failed: {e}");
+    }
 }
 
 async fn save_fs_unmounted(fs_name: &str) {
     let mut state = load_fs_state().await;
     state.remove(fs_name);
-    let _ = save_fs_state(&state).await;
+    if let Err(e) = save_fs_state(&state).await {
+        warn!("save_fs_state(unmounted: {fs_name}) failed: {e}");
+    }
 }
 
 async fn load_fs_state() -> FsState {
     let content = match tokio::fs::read_to_string(FS_STATE_PATH).await {
         Ok(c) => c,
-        Err(_) => return FsState::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FsState::new(),
+        Err(e) => {
+            // A non-NotFound read error means we *might* be silently
+            // resetting persisted mount state — log so a "filesystems
+            // didn't auto-mount" report can be matched to the real
+            // cause (permissions, IO error, etc.).
+            warn!("read {FS_STATE_PATH} failed: {e} — using empty state");
+            return FsState::new();
+        }
     };
-    serde_json::from_str(&content).unwrap_or_default()
+    match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                "parse {FS_STATE_PATH} failed: {e} — file may be corrupt; \
+                 using empty state (mount-option overrides will be lost)"
+            );
+            FsState::new()
+        }
+    }
 }
 
 async fn save_fs_state(state: &FsState) -> Result<(), FilesystemError> {

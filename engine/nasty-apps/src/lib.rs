@@ -771,9 +771,27 @@ impl AppsService {
     pub fn load_config() -> AppsConfig {
         let content = match std::fs::read_to_string(STATE_PATH) {
             Ok(c) => c,
-            Err(_) => return AppsConfig::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AppsConfig::default(),
+            Err(e) => {
+                // A non-NotFound read error (permissions, IO) means we
+                // *might* be silently resetting a real config. Log
+                // before returning defaults so the user can match a
+                // "my installed apps disappeared" report to the
+                // underlying cause.
+                warn!("apps.json read from {STATE_PATH} failed: {e} — using defaults");
+                return AppsConfig::default();
+            }
         };
-        serde_json::from_str(&content).unwrap_or_default()
+        match serde_json::from_str(&content) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!(
+                    "apps.json parse failed: {e} — file may be corrupt; \
+                     using defaults (any persisted config will be lost)"
+                );
+                AppsConfig::default()
+            }
+        }
     }
 
     async fn save_config(config: &AppsConfig) -> Result<(), AppsError> {
@@ -1231,8 +1249,12 @@ impl AppsService {
             )
             .await?;
 
-        // Clean up ingress and manifest
-        let _ = self.ingress_remove(name).await;
+        // Clean up ingress and manifest. ingress_remove failures get
+        // logged here because an orphaned reverse-proxy entry survives
+        // until the next restart and keeps proxying to a dead container.
+        if let Err(e) = self.ingress_remove(name).await {
+            warn!("ingress_remove({name}) failed during app removal: {e}");
+        }
         let manifest_path = format!("{}/{}.json", COMPOSE_DIR, name);
         let _ = tokio::fs::remove_file(&manifest_path).await;
 
@@ -1393,36 +1415,49 @@ impl AppsService {
                     });
                 }
             } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                // Simple app: manifest JSON
-                if let Ok(content) = tokio::fs::read_to_string(&path).await
-                    && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
-                {
-                    let app_name = manifest
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let image = manifest
-                        .get("image")
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let unsafe_mode = manifest
-                        .get("allow_unsafe")
-                        .and_then(|b| b.as_bool())
-                        .unwrap_or(false);
-                    if !app_name.is_empty() {
-                        apps.push(App {
-                            name: app_name,
-                            image,
-                            status: "stopped".to_string(),
-                            created: String::new(),
-                            kind: "simple".to_string(),
-                            containers: Vec::new(),
-                            ports: Vec::new(),
-                            unsafe_mode,
-                        });
+                // Simple app: manifest JSON. Log read/parse failures —
+                // a corrupt manifest silently disappearing from the
+                // app list is exactly the "I installed it, where did
+                // it go" debug story we're trying to prevent.
+                let content = match tokio::fs::read_to_string(&path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("apps: read manifest {} failed: {e}", path.display());
+                        continue;
                     }
+                };
+                let manifest: serde_json::Value = match serde_json::from_str(&content) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!("apps: parse manifest {} failed: {e}", path.display());
+                        continue;
+                    }
+                };
+                let app_name = manifest
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let image = manifest
+                    .get("image")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let unsafe_mode = manifest
+                    .get("allow_unsafe")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false);
+                if !app_name.is_empty() {
+                    apps.push(App {
+                        name: app_name,
+                        image,
+                        status: "stopped".to_string(),
+                        created: String::new(),
+                        kind: "simple".to_string(),
+                        containers: Vec::new(),
+                        ports: Vec::new(),
+                        unsafe_mode,
+                    });
                 }
             }
         }
@@ -2079,7 +2114,9 @@ impl AppsService {
             return Err(AppsError::AppNotFound(name.to_string()));
         }
 
-        let _ = self.ingress_remove(name).await;
+        if let Err(e) = self.ingress_remove(name).await {
+            warn!("ingress_remove({name}) failed during compose app removal: {e}");
+        }
 
         info!("Removed compose app '{name}'");
         Ok(())

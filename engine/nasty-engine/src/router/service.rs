@@ -60,8 +60,7 @@ pub(super) async fn try_route(
                 .as_ref()
                 .and_then(|p| p.get("iqn_prefix"))
                 .and_then(|v| v.as_str())
-                && let Err(e) =
-                    tokio::fs::write("/var/lib/nasty/iscsi-base-iqn", iqn.trim()).await
+                && let Err(e) = tokio::fs::write("/var/lib/nasty/iscsi-base-iqn", iqn.trim()).await
             {
                 // Non-fatal — the engine still has the value in memory
                 // — but at restart it'll fall back to the default IQN,
@@ -74,8 +73,7 @@ pub(super) async fn try_route(
                 .as_ref()
                 .and_then(|p| p.get("nqn_prefix"))
                 .and_then(|v| v.as_str())
-                && let Err(e) =
-                    tokio::fs::write("/var/lib/nasty/nvmeof-base-nqn", nqn.trim()).await
+                && let Err(e) = tokio::fs::write("/var/lib/nasty/nvmeof-base-nqn", nqn.trim()).await
             {
                 tracing::warn!("persist nvmeof base NQN failed: {e}");
             }
