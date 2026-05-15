@@ -60,7 +60,14 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **UPS monitoring** — NUT integration for graceful shutdown on power loss (opt-in)
 - **Atomic updates** — NixOS-based, with one-click rollback to any previous generation
 - **Binary cache** — fast updates via cachix on both x86_64 and aarch64 (engine, webui, bcachefs-tools pre-built — no Rust + npm compile on Pi / Odroid / Rockchip boxes)
-- **Kubernetes integration** — CSI driver for dynamic volume provisioning across all 4 protocols
+
+## Kubernetes
+
+NASty can serve as a storage backend for Kubernetes — provisioning persistent volumes, snapshots, and clones on demand across all four protocols (NFS, SMB, iSCSI, NVMe-oF).
+
+- **[nasty-csi](https://github.com/nasty-project/nasty-csi)** — CSI driver for dynamic provisioning, snapshots, cloning, and online expansion
+- **[nasty-chart](https://github.com/nasty-project/nasty-chart)** — Helm chart for one-command install
+- **[nasty-plugin](https://github.com/nasty-project/nasty-plugin)** — `kubectl-nasty` for inspecting volumes, snapshots, clones, and health from the CLI
 
 ## Screenshots
 
