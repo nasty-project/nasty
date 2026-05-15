@@ -16,6 +16,7 @@ let
   # string, which mangles indentation under the testScript type-checker.
   rpcSmoke = pkgs.writeText "rpc-smoke.py" ''
     import json
+    import ssl
     import sys
     import urllib.request
     import websocket
@@ -23,9 +24,12 @@ let
     initial_token = sys.argv[1]
     NEW_PW = "password-changed-by-smoke-test"
 
+    # Self-signed cert in the test VM — skip verification.
+    SSL_OPTS = {"cert_reqs": ssl.CERT_NONE}
 
-    def ws_auth(token):
-        ws = websocket.create_connection("ws://127.0.0.1:2137/ws", timeout=10)
+
+    def ws_auth(token, url="ws://127.0.0.1:2137/ws", sslopt=None):
+        ws = websocket.create_connection(url, timeout=10, sslopt=sslopt)
         ws.send(json.dumps({"token": token}))
         auth = json.loads(ws.recv())
         assert auth.get("authenticated") is True, f"WS auth failed: {auth!r}"
@@ -59,13 +63,13 @@ let
         return resp["result"]
 
 
-    def http_login(password):
+    def http_login(password, url="http://127.0.0.1:2137/api/login", ctx=None):
         req = urllib.request.Request(
-            "http://127.0.0.1:2137/api/login",
+            url,
             data=json.dumps({"username": "admin", "password": password}).encode(),
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=ctx) as resp:
             return json.loads(resp.read())["token"]
 
 
@@ -119,6 +123,31 @@ let
         assert bad.get("id") == 3, f"id mismatch: {bad!r}"
         assert bad.get("error"), f"unknown method should error: {bad!r}"
         print("unknown method error:", bad["error"], file=sys.stderr)
+    finally:
+        ws.close()
+
+    # ── Session 3: same RPC through the nginx proxy on 443 ────────
+    # Earlier sessions hit the engine on its loopback port directly,
+    # which skips nginx entirely.  This one goes through nginx end
+    # to end so the proxy's WebSocket-upgrade handling is part of
+    # what's being asserted.  If a future proxy swap (or nginx
+    # config change) breaks Upgrade / Connection forwarding, the
+    # engine stays reachable on 2137 but the WebUI breaks — this
+    # catches that.
+    #
+    # Sessions are bound to the client IP the engine sees, so a
+    # token issued direct to :2137 isn't valid through nginx (and
+    # vice versa).  Login + WS therefore share the nginx path.
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    proxy_token = http_login(
+        NEW_PW, url="https://127.0.0.1/api/login", ctx=ssl_ctx
+    )
+    ws, _ = ws_auth(proxy_token, url="wss://127.0.0.1/ws", sslopt=SSL_OPTS)
+    try:
+        health = call(ws, "system.health", 1)
+        print("system.health via nginx:", health, file=sys.stderr)
     finally:
         ws.close()
   '';
@@ -216,11 +245,59 @@ pkgs.testers.runNixOSTest {
     # Same endpoint without a cookie should be rejected.
     machine.fail("curl -fsS http://127.0.0.1:2137/api/auth/check")
 
+    # ── HTTPS through nginx ────────────────────────────────────────
+    # Everything above talked to the engine on 2137 directly, which
+    # skips the nginx vhost entirely.  Now exercise the same proxy
+    # path the WebUI loads through — `https://127.0.0.1/` with the
+    # self-signed cert.  This is what'll catch a future proxy-config
+    # regression that leaves the engine reachable on 2137 but breaks
+    # the public path.
+    machine.wait_until_succeeds("curl -ksS https://127.0.0.1/ -o /dev/null")
+    body = machine.succeed("curl -ksS https://127.0.0.1/")
+    # SvelteKit hydrates title / branding in JS so the initial HTML
+    # body doesn't carry app-specific strings — assert only that we
+    # got real HTML back through the proxy, not an error page.
+    body_lc = body.lstrip().lower()
+    assert body_lc.startswith("<!doctype html>") or "<html" in body_lc, (
+        f"WebUI response through nginx doesn't look like HTML: {body[:200]!r}"
+    )
+
+    # The /health endpoint should also be reachable through nginx, not
+    # just on the engine loopback.
+    health_via_nginx = machine.succeed("curl -ksS https://127.0.0.1/health")
+    print(f"=== /health via nginx ===\n{health_via_nginx}")
+    assert json.loads(health_via_nginx)["status"] == "ok", (
+        f"unexpected health via nginx: {health_via_nginx!r}"
+    )
+
+    # ── Security headers on the WebUI response ─────────────────────
+    # These are the headers nasty.nix's nginx vhost adds — every one
+    # of them is a hardening assertion we don't want to silently lose
+    # in a future proxy refactor.  Match prefix-only so a Caddy port
+    # that ships slightly different values (e.g. `max-age=63072000`
+    # instead of `31536000`) still passes if the header is present.
+    headers = machine.succeed("curl -ksS -D - https://127.0.0.1/ -o /dev/null")
+    print(f"=== response headers ===\n{headers}")
+    lower = headers.lower()
+    for required in (
+        "strict-transport-security:",
+        "x-content-type-options:",
+        "x-frame-options:",
+        "referrer-policy:",
+        "content-security-policy:",
+    ):
+        assert required in lower, (
+            f"missing security header {required!r} in:\n{headers}"
+        )
+
     # ── JSON-RPC over /ws ──────────────────────────────────────────
     # Drive the same dispatch path the WebUI uses: open a WebSocket,
     # auth with the token from /api/login, send a few requests, check
     # responses come back correlated by id. Exercises router.rs
     # end-to-end — the part unit tests deliberately don't reach.
+    # rpc-smoke also opens wss://127.0.0.1/ws through nginx as its
+    # third session, so the proxy's Upgrade / Connection handling
+    # is part of what's being asserted.
     machine.succeed(
         f"${pythonWithWs}/bin/python3 ${rpcSmoke} {shlex.quote(login_obj['token'])}"
     )
