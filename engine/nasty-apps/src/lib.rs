@@ -2491,6 +2491,16 @@ impl AppsService {
     }
 
     async fn pull_image(&self, image: &str) -> Result<(), AppsError> {
+        let docker = self.docker()?;
+
+        // Short-circuit when the image is already in the local store.
+        // Skips a round-trip to the registry every install, lets
+        // airgapped boxes install from `docker load`-imported tarballs,
+        // and lets the appliance-smoke nixosTest run without network.
+        if docker.inspect_image(image).await.is_ok() {
+            return Ok(());
+        }
+
         let (from_image, tag) = if let Some((img, tag)) = image.rsplit_once(':') {
             (img.to_string(), tag.to_string())
         } else {
@@ -2503,7 +2513,7 @@ impl AppsService {
             ..Default::default()
         };
 
-        self.docker()?
+        docker
             .create_image(Some(options), None, None)
             .try_collect::<Vec<_>>()
             .await?;
