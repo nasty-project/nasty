@@ -270,16 +270,22 @@ pub(super) async fn try_route(
                                     let nvmeof = state.nvmeof.clone();
                                     let id = v.id.clone();
                                     let ip = ip.clone();
+                                    let nqn_for_log = v.nqn.clone();
                                     tokio::spawn(async move {
-                                        let _ = nvmeof
+                                        if let Err(e) = nvmeof
                                             .add_port(nasty_sharing::nvmeof::AddPortRequest {
                                                 subsystem_id: id,
                                                 transport: Some("tcp".to_string()),
-                                                addr: Some(ip),
+                                                addr: Some(ip.clone()),
                                                 service_id: Some(4420),
                                                 addr_family: Some("ipv4".to_string()),
                                             })
-                                            .await;
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "auto-add Tailscale port for '{nqn_for_log}' on {ip} failed: {e}"
+                                            );
+                                        }
                                     });
                                 }
                             }

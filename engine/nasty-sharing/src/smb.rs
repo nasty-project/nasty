@@ -357,10 +357,7 @@ async fn write_share_conf(share: &SmbShare) -> Result<(), SmbError> {
     // (valid_users, guest ok, etc.) — filesystem permissions should be permissive.
     // Using chown with usernames fails when the user only exists in Samba's
     // database (pdbedit) but not as a UNIX system user.
-    let _ = tokio::process::Command::new("chmod")
-        .args(["0777", &share.path])
-        .output()
-        .await;
+    nasty_common::cmd::try_run("chmod", &["0777", &share.path]).await;
 
     Ok(())
 }
@@ -528,11 +525,9 @@ impl SmbService {
 
     /// Delete a Linux system user and remove their Samba password.
     pub async fn delete_user(&self, username: &str) -> Result<(), SmbError> {
-        // Remove Samba password
-        let _ = tokio::process::Command::new("smbpasswd")
-            .args(["-x", username])
-            .output()
-            .await;
+        // Remove Samba password. `try_run` logs failures so a stale
+        // pdbedit entry that survives a "delete user" is debuggable.
+        nasty_common::cmd::try_run("smbpasswd", &["-x", username]).await;
 
         // Delete system user
         let output = tokio::process::Command::new("userdel")

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Primary version path — writable by the update script, not managed by NixOS.
 const VERSION_PATH: &str = "/var/lib/nasty/version";
@@ -360,14 +360,11 @@ impl UpdateService {
             )?
         };
 
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         let flake_temp_path = "/tmp/nasty-upgrade-flake.nix";
         tokio::fs::write(flake_temp_path, &next_flake)
@@ -572,14 +569,11 @@ echo "==> Update complete!"
         }
 
         // Clean up any previous update unit
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         // Build the update script:
         // 1. Update the local wrapper flake inputs (channel-specific:
@@ -798,14 +792,11 @@ echo "==> Update complete!"
             ));
         }
 
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         let flake_path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
         let current_flake = tokio::fs::read_to_string(&flake_path)
@@ -1009,14 +1000,11 @@ echo "==> Update complete!"
             return Err(UpdateError::AlreadyRunning);
         }
 
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         let path = std::env::var("PATH").unwrap_or_default();
         let output = tokio::process::Command::new("systemd-run")
@@ -1176,14 +1164,11 @@ echo "==> Update complete!"
             )));
         }
 
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["reset-failed", UPDATE_UNIT])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", UPDATE_UNIT])
-            .output()
-            .await;
+        // Best-effort cleanup of any prior unit state. `try_run` logs spawn
+        // failures and non-zero exits at warn! — a missing-unit "exited 5"
+        // shows up in the journal but doesn't propagate.
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
         let path = std::env::var("PATH").unwrap_or_default();
         let script = format!(
@@ -1258,8 +1243,13 @@ echo "==> Switch to generation {gen_id} complete!"
         let profile_link = format!("/nix/var/nix/profiles/system-{gen_id}-link");
         let current_link = "/nix/var/nix/profiles/system";
 
-        let gen_target = tokio::fs::read_link(&profile_link).await.map_err(|_| {
-            UpdateError::CommandFailed(format!("generation {gen_id} does not exist"))
+        let gen_target = tokio::fs::read_link(&profile_link).await.map_err(|e| {
+            // Keep the io::Error in the message — "permission denied" or
+            // any other failure mode shouldn't be misreported as "doesn't
+            // exist" (that drove a debug-cycle once already).
+            UpdateError::CommandFailed(format!(
+                "generation {gen_id}: read_link({profile_link}): {e}"
+            ))
         })?;
         let current_target = tokio::fs::read_link(current_link)
             .await
@@ -1285,10 +1275,15 @@ echo "==> Switch to generation {gen_id} complete!"
             UpdateError::CommandFailed(format!("failed to remove generation {gen_id}: {e}"))
         })?;
 
-        // Clean up the label if any
+        // Clean up the label if any. A persistence failure here
+        // leaves a stale label pointing at a deleted generation —
+        // surface it so the user can match a "phantom label" report
+        // to the underlying save error.
         let mut labels = load_generation_labels().await;
-        if labels.remove(&gen_id).is_some() {
-            let _ = save_generation_labels(&labels).await;
+        if labels.remove(&gen_id).is_some()
+            && let Err(e) = save_generation_labels(&labels).await
+        {
+            warn!("save_generation_labels after delete of gen {gen_id} failed: {e}");
         }
 
         info!("Deleted generation {gen_id}");

@@ -146,7 +146,9 @@ pub(super) async fn try_route(
                     "Invalid SSH public key — must start with ssh-rsa, ssh-ed25519, etc.",
                 ));
             }
-            let _ = tokio::fs::create_dir_all("/root/.ssh").await;
+            if let Err(e) = tokio::fs::create_dir_all("/root/.ssh").await {
+                tracing::warn!("create_dir_all(/root/.ssh) failed: {e}");
+            }
             let mut existing = tokio::fs::read_to_string("/root/.ssh/authorized_keys")
                 .await
                 .unwrap_or_default();
@@ -159,15 +161,11 @@ pub(super) async fn try_route(
                 if let Err(e) = tokio::fs::write("/root/.ssh/authorized_keys", &existing).await {
                     return Some(err(req, format!("write authorized_keys: {e}")));
                 }
-                // Set permissions
-                let _ = tokio::process::Command::new("chmod")
-                    .args(["600", "/root/.ssh/authorized_keys"])
-                    .status()
-                    .await;
-                let _ = tokio::process::Command::new("chmod")
-                    .args(["700", "/root/.ssh"])
-                    .status()
-                    .await;
+                // Set permissions. `try_run` logs failures so a chmod
+                // that silently doesn't take effect (and would later
+                // cause sshd to refuse the key) shows up in the journal.
+                nasty_common::cmd::try_run("chmod", &["600", "/root/.ssh/authorized_keys"]).await;
+                nasty_common::cmd::try_run("chmod", &["700", "/root/.ssh"]).await;
             }
             ok(req, "Key added")
         }
@@ -223,10 +221,7 @@ pub(super) async fn try_route(
             {
                 tracing::warn!("Failed to write sshd override: {e}");
             }
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["reload", "sshd"])
-                .status()
-                .await;
+            nasty_common::cmd::try_run("systemctl", &["reload", "sshd"]).await;
             ok(
                 req,
                 format!(
@@ -384,12 +379,23 @@ pub(super) async fn try_route(
         "system.tailscale.connect" => match parse_params(req) {
             Ok(p) => match state.tailscale.connect(p).await {
                 Ok(v) => {
-                    // Sync NVMe-oF ports for the new Tailscale IP
+                    // Sync NVMe-oF ports for the new Tailscale IP.
+                    // ensure_tailscale_ports() logs per-subsystem
+                    // failures internally with warn!; the observer
+                    // here logs the spawn-panic case so a missed
+                    // port-sync isn't completely silent.
                     if let Some(ref ip) = v.ip {
                         let nvmeof = state.nvmeof.clone();
                         let ip = ip.clone();
-                        tokio::spawn(async move {
+                        let h = tokio::spawn(async move {
                             nvmeof.ensure_tailscale_ports(&ip).await;
+                        });
+                        tokio::spawn(async move {
+                            if let Err(e) = h.await {
+                                tracing::warn!(
+                                    "tailscale-connect: ensure_tailscale_ports task panicked / cancelled: {e}"
+                                );
+                            }
                         });
                     }
                     ok(req, v)
@@ -404,7 +410,16 @@ pub(super) async fn try_route(
                 // (Tailscale IPs are in the 100.x.y.z range)
                 let nvmeof = state.nvmeof.clone();
                 tokio::spawn(async move {
-                    let subsystems = nvmeof.list().await.unwrap_or_default();
+                    let subsystems = match nvmeof.list().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(
+                                "tailscale-disconnect cleanup: nvmeof.list() failed, \
+                                 leaving any 100.x ports orphaned: {e}"
+                            );
+                            return;
+                        }
+                    };
                     for subsys in &subsystems {
                         for port in &subsys.ports {
                             if port.addr.starts_with("100.") {

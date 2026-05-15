@@ -228,14 +228,31 @@ async fn main() -> anyhow::Result<()> {
     state.system.info().await;
     info!("Caches warm in {}ms", t0.elapsed().as_millis());
 
-    // Check ACME cert renewal on startup and daily thereafter
-    tokio::spawn(async {
+    // Check ACME cert renewal on startup and daily thereafter. The
+    // observer spawn logs if the loop ever exits — either cleanly
+    // (which would be a bug; this loop is meant to run forever) or
+    // with a panic (which would silently kill cert renewal until the
+    // next engine restart, with no log connecting "my cert expired"
+    // to the original failure).
+    let acme_loop = tokio::spawn(async {
         nasty_system::settings::check_acme_renewal().await;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
         interval.tick().await; // skip first immediate tick
         loop {
             interval.tick().await;
             nasty_system::settings::check_acme_renewal().await;
+        }
+    });
+    tokio::spawn(async move {
+        match acme_loop.await {
+            Ok(()) => tracing::error!(
+                "ACME renewal loop exited unexpectedly — cert renewal will not happen \
+                 until next engine restart"
+            ),
+            Err(e) => tracing::error!(
+                "ACME renewal loop panicked / cancelled: {e} — cert renewal will not \
+                 happen until next engine restart"
+            ),
         }
     });
 
@@ -432,8 +449,17 @@ async fn upload_vm_image_handler(
         }
     };
 
-    // Get or create the images subvolume
-    let filesystems = state.filesystems.list().await.unwrap_or_default();
+    // Get or create the images subvolume. If list() fails (corrupt state,
+    // permissions) we fall back to an empty set so the upload returns a
+    // user-friendly "no filesystem" error instead of crashing — but we log
+    // the underlying failure so it's debuggable.
+    let filesystems = match state.filesystems.list().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("VM image upload: filesystems.list() failed: {e}");
+            Vec::new()
+        }
+    };
     let fs_name = filesystems
         .first()
         .map(|f| f.name.clone())
@@ -1972,7 +1998,7 @@ async fn wait_for_auth(
 // ── Background Alert Notifier ──────────────────────────────────
 
 fn spawn_alert_notifier(state: Arc<AppState>) {
-    tokio::spawn(async move {
+    let h = tokio::spawn(async move {
         use nasty_system::notifications;
         use std::collections::HashSet;
 
@@ -2028,6 +2054,21 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
             }
 
             previously_active = current_keys;
+        }
+    });
+    // Observer spawn — alert evaluation is supposed to run forever; if
+    // the loop dies, notifications stop entirely with no log line
+    // connecting "I never got a disk-full alert" to the underlying bug.
+    tokio::spawn(async move {
+        match h.await {
+            Ok(()) => tracing::error!(
+                "alert notifier loop exited unexpectedly — no further notifications \
+                 will fire until engine restart"
+            ),
+            Err(e) => tracing::error!(
+                "alert notifier loop panicked / cancelled: {e} — no further \
+                 notifications will fire until engine restart"
+            ),
         }
     });
 }

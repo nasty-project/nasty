@@ -801,12 +801,12 @@ impl VmService {
         let qmp_path = qmp_socket_path(id);
         let _ = qmp::execute(&qmp_path, "quit", None).await;
 
-        // If QMP quit didn't work, try killing by PID
+        // If QMP quit didn't work, try killing by PID. `try_run` logs
+        // a kill failure (e.g. PID already gone, EPERM) — useful when
+        // a VM "won't stop" reproduces and we want to know why kill -9
+        // didn't take effect.
         if let Some(pid) = self.get_pid(id).await {
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output()
-                .await;
+            nasty_common::cmd::try_run("kill", &["-9", &pid.to_string()]).await;
         }
 
         // Clean up socket files

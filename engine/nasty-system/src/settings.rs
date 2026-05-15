@@ -327,7 +327,15 @@ impl SettingsService {
             let name = name.trim().to_string();
             if !name.is_empty() {
                 settings.hostname = Some(name);
-                let _ = save(&settings).await;
+                if let Err(e) = save(&settings).await {
+                    // The in-memory hostname is set so the running engine
+                    // sees it correctly, but at next startup we'll re-seed
+                    // from /proc — which is fine on a normal box, but on
+                    // a host where /proc/sys/kernel/hostname diverges
+                    // from the persisted name (e.g., systemd hostnamed
+                    // race) we'd silently lose the saved value.
+                    warn!("seed-hostname save failed: {e}");
+                }
             }
         }
         Self {
@@ -663,10 +671,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             "Stopping web server for TLS challenge...",
             Some(domain),
         );
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", "nginx"])
-            .output()
-            .await;
+        nasty_common::cmd::try_run("systemctl", &["stop", "nginx"]).await;
     }
 
     if settings.tls_challenge_type == "dns" {
@@ -746,10 +751,7 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
     // ALWAYS restart nginx, regardless of lego success/failure
     if need_nginx_stop {
         set_acme_status("running", "Restarting web server...", Some(domain));
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["start", "nginx"])
-            .output()
-            .await;
+        nasty_common::cmd::try_run("systemctl", &["start", "nginx"]).await;
     }
 
     let (exit_status, stderr_lines) = lego_result?;
@@ -782,14 +784,24 @@ async fn run_lego(settings: &Settings) -> Result<(), String> {
             m
         })?;
 
-    // Set permissions so nginx (running as nginx user) can read the cert
-    let _ = tokio::fs::set_permissions(TLS_CERT_PATH, std::fs::Permissions::from_mode(0o644)).await;
-    let _ = tokio::fs::set_permissions(TLS_KEY_PATH, std::fs::Permissions::from_mode(0o640)).await;
-    // Set key group to nginx so it can read it
-    let _ = tokio::process::Command::new("chown")
-        .args(["root:nginx", TLS_KEY_PATH])
-        .output()
-        .await;
+    // Set permissions so nginx (running as nginx user) can read the cert.
+    // A failure here means nginx will hit "permission denied" on reload,
+    // which is way easier to diagnose with this log line in front of it.
+    if let Err(e) =
+        tokio::fs::set_permissions(TLS_CERT_PATH, std::fs::Permissions::from_mode(0o644)).await
+    {
+        warn!("chmod 644 {TLS_CERT_PATH} failed: {e}");
+    }
+    if let Err(e) =
+        tokio::fs::set_permissions(TLS_KEY_PATH, std::fs::Permissions::from_mode(0o640)).await
+    {
+        warn!("chmod 640 {TLS_KEY_PATH} failed: {e}");
+    }
+    // Set key group to nginx so it can read it. `try_run` logs failures
+    // — a chown failure here means nginx can't read the cert and reload
+    // will surface that as a "permission denied" anyway, but logging the
+    // chown error directly makes the chain easier to follow.
+    nasty_common::cmd::try_run("chown", &["root:nginx", TLS_KEY_PATH]).await;
 
     // Reload nginx to pick up the new certificate
     let reload = tokio::process::Command::new("systemctl")
@@ -892,8 +904,14 @@ async fn write_dns_credentials(settings: &Settings) {
             warn!("Failed to write DNS credentials: {e}");
             return;
         }
-        let _ = tokio::fs::set_permissions(DNS_CREDS_PATH, std::fs::Permissions::from_mode(0o600))
-            .await;
+        if let Err(e) =
+            tokio::fs::set_permissions(DNS_CREDS_PATH, std::fs::Permissions::from_mode(0o600)).await
+        {
+            warn!(
+                "chmod 600 {DNS_CREDS_PATH} failed: {e} — \
+                 DNS provider credentials may be world-readable"
+            );
+        }
     }
 }
 

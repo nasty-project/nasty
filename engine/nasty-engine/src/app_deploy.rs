@@ -350,9 +350,15 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
         return;
     }
 
-    // Write .env
+    // Write .env. Failure here is non-fatal for `docker compose` (it
+    // falls back to the project name from --project-name) but it can
+    // mask why a `${COMPOSE_PROJECT_NAME}` interpolation came back
+    // empty in user-supplied YAML — log so it's debuggable.
     let env_content = format!("COMPOSE_PROJECT_NAME={}\n", req.name);
-    let _ = tokio::fs::write(format!("{}/.env", compose_dir), &env_content).await;
+    let env_path = format!("{}/.env", compose_dir);
+    if let Err(e) = tokio::fs::write(&env_path, &env_content).await {
+        tracing::warn!("compose .env write to {env_path} failed: {e}");
+    }
 
     // Validate
     let _ = socket
@@ -438,8 +444,13 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
                 DeployMessage::log("Cleaning up failed deployment...").into(),
             ))
             .await;
-        let _ = Command::new("docker")
-            .args([
+        // Best-effort cleanup of partially-created containers. `try_run`
+        // logs failures so a leak (containers/volumes that didn't get
+        // removed) is debuggable from the journal rather than mysterious
+        // disk-space loss.
+        nasty_common::cmd::try_run(
+            "docker",
+            &[
                 "compose",
                 "-f",
                 &compose_path,
@@ -448,9 +459,9 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
                 "down",
                 "-v",
                 "--remove-orphans",
-            ])
-            .output()
-            .await;
+            ],
+        )
+        .await;
         if !is_update {
             let _ = tokio::fs::remove_dir_all(&compose_dir).await;
         }
@@ -670,9 +681,15 @@ async fn stream_command(socket: &mut WebSocket, cmd: &str, args: &[&str]) -> Res
         all_lines.push(line);
     }
 
-    // Wait for reader tasks to finish
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    // Wait for reader tasks to finish. If either panics (BufReader,
+    // channel send, line decode), the deployment status the user sees
+    // is missing the tail of docker output — log so it's debuggable.
+    if let Err(e) = stdout_task.await {
+        tracing::warn!("compose stdout reader task panicked / cancelled: {e}");
+    }
+    if let Err(e) = stderr_task.await {
+        tracing::warn!("compose stderr reader task panicked / cancelled: {e}");
+    }
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
 

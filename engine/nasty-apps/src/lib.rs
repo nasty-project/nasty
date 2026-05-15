@@ -745,12 +745,14 @@ impl AppsService {
             return Ok(d.clone());
         }
         drop(guard);
-        // Try to connect (Docker may have started after engine)
+        // Try to connect (Docker may have started after engine). Keep the
+        // bollard error in the message so a permission-denied vs
+        // socket-not-found can be distinguished without re-running.
         let d = Docker::connect_with_unix_defaults()
             .or_else(|_| {
                 Docker::connect_with_unix("/var/run/docker.sock", 120, bollard::API_DEFAULT_VERSION)
             })
-            .map_err(|_| AppsError::NotReady("Docker socket not available".into()))?;
+            .map_err(|e| AppsError::NotReady(format!("Docker socket not available: {e}")))?;
         *self.docker.lock().unwrap() = Some(d.clone());
         info!("Connected to Docker socket");
         Ok(d)
@@ -769,9 +771,27 @@ impl AppsService {
     pub fn load_config() -> AppsConfig {
         let content = match std::fs::read_to_string(STATE_PATH) {
             Ok(c) => c,
-            Err(_) => return AppsConfig::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AppsConfig::default(),
+            Err(e) => {
+                // A non-NotFound read error (permissions, IO) means we
+                // *might* be silently resetting a real config. Log
+                // before returning defaults so the user can match a
+                // "my installed apps disappeared" report to the
+                // underlying cause.
+                warn!("apps.json read from {STATE_PATH} failed: {e} — using defaults");
+                return AppsConfig::default();
+            }
         };
-        serde_json::from_str(&content).unwrap_or_default()
+        match serde_json::from_str(&content) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!(
+                    "apps.json parse failed: {e} — file may be corrupt; \
+                     using defaults (any persisted config will be lost)"
+                );
+                AppsConfig::default()
+            }
+        }
     }
 
     async fn save_config(config: &AppsConfig) -> Result<(), AppsError> {
@@ -806,36 +826,59 @@ impl AppsService {
 
         // Bootstrap in background
         tokio::spawn(async move {
-            // Wait for Docker to be ready (up to 30s)
+            // Wait for Docker to be ready (up to 30s). Track the last
+            // failure reason so the "didn't become ready" log can say
+            // *why* (permission denied, connection refused, etc.) instead
+            // of just timing out silently.
             let mut ready = false;
+            let mut last_err: Option<String> = None;
             for _ in 0..15 {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                if let Ok(docker) = Docker::connect_with_unix_defaults()
-                    && docker.ping().await.is_ok()
-                {
-                    ready = true;
-                    break;
+                match Docker::connect_with_unix_defaults() {
+                    Ok(docker) => match docker.ping().await {
+                        Ok(_) => {
+                            ready = true;
+                            break;
+                        }
+                        Err(e) => last_err = Some(format!("ping: {e}")),
+                    },
+                    Err(e) => last_err = Some(format!("connect: {e}")),
                 }
             }
 
             if !ready {
-                error!("Docker did not become ready within 30s");
+                error!(
+                    "Docker did not become ready within 30s — last error: {}",
+                    last_err.unwrap_or_else(|| "(no error captured)".into())
+                );
                 return;
             }
 
             // Set up storage directory
             let storage_path = setup_apps_storage(filesystem.as_deref()).await;
 
-            // Create compose directory
-            let _ = tokio::fs::create_dir_all(COMPOSE_DIR).await;
+            // Create compose directory. A failure here means every
+            // subsequent compose-app deploy will hit a confusing
+            // "no such directory" error — the root cause needs to be
+            // visible *now*, in the bootstrap log.
+            if let Err(e) = tokio::fs::create_dir_all(COMPOSE_DIR).await {
+                error!("create_dir_all({COMPOSE_DIR}) failed: {e} — compose deploys will fail");
+            }
 
-            // Persist storage path in config
+            // Persist storage path in config. A failure here means the
+            // chosen storage path won't survive an engine restart, which
+            // breaks app data persistence — log loudly.
             if let Some(ref path) = storage_path {
                 let config = AppsConfig {
                     enabled: true,
                     storage_path: Some(path.clone()),
                 };
-                let _ = AppsService::save_config(&config).await;
+                if let Err(e) = AppsService::save_config(&config).await {
+                    error!(
+                        "AppsConfig save failed: {e} — apps storage path won't \
+                         survive engine restart"
+                    );
+                }
             }
 
             info!("Apps bootstrap complete");
@@ -993,8 +1036,15 @@ impl AppsService {
                     .as_deref()
                     .unwrap_or("/var/lib/nasty/apps-data");
                 let path = format!("{}/{}/{}", base, req.name, v.name);
-                // Ensure the directory exists
-                let _ = tokio::fs::create_dir_all(&path).await;
+                // Ensure the directory exists. A failure here means the
+                // bind-mount will land on a missing path and Docker will
+                // either refuse to start the container or auto-create a
+                // root-owned dir — either way, a logged failure now is
+                // way easier to debug than the resulting "container
+                // exits immediately" report later.
+                if let Err(e) = tokio::fs::create_dir_all(&path).await {
+                    warn!("apps volume: create_dir_all({path}) failed: {e}");
+                }
                 path
             } else {
                 v.host_path.clone()
@@ -1081,7 +1131,9 @@ impl AppsService {
             "allow_unsafe": req.allow_unsafe,
         });
         let manifest_path = format!("{}/{}.json", COMPOSE_DIR, req.name);
-        let _ = tokio::fs::create_dir_all(COMPOSE_DIR).await;
+        if let Err(e) = tokio::fs::create_dir_all(COMPOSE_DIR).await {
+            warn!("create_dir_all({COMPOSE_DIR}) failed: {e}");
+        }
         if let Err(e) = tokio::fs::write(
             &manifest_path,
             serde_json::to_string_pretty(&manifest).unwrap(),
@@ -1197,8 +1249,12 @@ impl AppsService {
             )
             .await?;
 
-        // Clean up ingress and manifest
-        let _ = self.ingress_remove(name).await;
+        // Clean up ingress and manifest. ingress_remove failures get
+        // logged here because an orphaned reverse-proxy entry survives
+        // until the next restart and keeps proxying to a dead container.
+        if let Err(e) = self.ingress_remove(name).await {
+            warn!("ingress_remove({name}) failed during app removal: {e}");
+        }
         let manifest_path = format!("{}/{}.json", COMPOSE_DIR, name);
         let _ = tokio::fs::remove_file(&manifest_path).await;
 
@@ -1359,36 +1415,49 @@ impl AppsService {
                     });
                 }
             } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                // Simple app: manifest JSON
-                if let Ok(content) = tokio::fs::read_to_string(&path).await
-                    && let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content)
-                {
-                    let app_name = manifest
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let image = manifest
-                        .get("image")
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let unsafe_mode = manifest
-                        .get("allow_unsafe")
-                        .and_then(|b| b.as_bool())
-                        .unwrap_or(false);
-                    if !app_name.is_empty() {
-                        apps.push(App {
-                            name: app_name,
-                            image,
-                            status: "stopped".to_string(),
-                            created: String::new(),
-                            kind: "simple".to_string(),
-                            containers: Vec::new(),
-                            ports: Vec::new(),
-                            unsafe_mode,
-                        });
+                // Simple app: manifest JSON. Log read/parse failures —
+                // a corrupt manifest silently disappearing from the
+                // app list is exactly the "I installed it, where did
+                // it go" debug story we're trying to prevent.
+                let content = match tokio::fs::read_to_string(&path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("apps: read manifest {} failed: {e}", path.display());
+                        continue;
                     }
+                };
+                let manifest: serde_json::Value = match serde_json::from_str(&content) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!("apps: parse manifest {} failed: {e}", path.display());
+                        continue;
+                    }
+                };
+                let app_name = manifest
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let image = manifest
+                    .get("image")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let unsafe_mode = manifest
+                    .get("allow_unsafe")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false);
+                if !app_name.is_empty() {
+                    apps.push(App {
+                        name: app_name,
+                        image,
+                        status: "stopped".to_string(),
+                        created: String::new(),
+                        kind: "simple".to_string(),
+                        containers: Vec::new(),
+                        ports: Vec::new(),
+                        unsafe_mode,
+                    });
                 }
             }
         }
@@ -1891,9 +1960,12 @@ impl AppsService {
 
         let compose_path = format!("{}/docker-compose.yml", project_dir);
         let cleanup = |project_dir: String, name: String, compose_path: String| async move {
-            // Tear down any partially created containers before removing the dir
-            let _ = Command::new("docker")
-                .args([
+            // Tear down any partially created containers before removing the dir.
+            // `try_run` logs failures so a stuck container that prevents the
+            // dir-removal from completing is debuggable.
+            nasty_common::cmd::try_run(
+                "docker",
+                &[
                     "compose",
                     "-f",
                     &compose_path,
@@ -1902,10 +1974,12 @@ impl AppsService {
                     "down",
                     "-v",
                     "--remove-orphans",
-                ])
-                .output()
-                .await;
-            let _ = tokio::fs::remove_dir_all(&project_dir).await;
+                ],
+            )
+            .await;
+            if let Err(e) = tokio::fs::remove_dir_all(&project_dir).await {
+                tracing::warn!("cleanup: remove_dir_all({project_dir}) failed: {e}");
+            }
         };
 
         let output = match result {
@@ -2040,7 +2114,9 @@ impl AppsService {
             return Err(AppsError::AppNotFound(name.to_string()));
         }
 
-        let _ = self.ingress_remove(name).await;
+        if let Err(e) = self.ingress_remove(name).await {
+            warn!("ingress_remove({name}) failed during compose app removal: {e}");
+        }
 
         info!("Removed compose app '{name}'");
         Ok(())
@@ -2429,8 +2505,13 @@ impl AppsService {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let path = compose_file.to_string_lossy().to_string();
                 info!("Restoring compose app '{name}'");
-                let _ = Command::new("docker")
-                    .args([
+                // `try_run` logs failures so a compose app that won't
+                // come back up after reboot is debuggable from the
+                // journal — the previous `let _ =` form left this case
+                // completely silent.
+                nasty_common::cmd::try_run(
+                    "docker",
+                    &[
                         "compose",
                         "-f",
                         &path,
@@ -2439,9 +2520,9 @@ impl AppsService {
                         "up",
                         "-d",
                         "--no-build",
-                    ])
-                    .output()
-                    .await;
+                    ],
+                )
+                .await;
             }
         }
     }
@@ -2879,10 +2960,7 @@ async fn find_container_shell(container: &str) -> Option<&'static str> {
 }
 
 async fn reload_nginx() {
-    let _ = Command::new("systemctl")
-        .args(["reload", "nginx"])
-        .output()
-        .await;
+    nasty_common::cmd::try_run("systemctl", &["reload", "nginx"]).await;
 }
 
 /// One row parsed from `ss -tlnp` output.

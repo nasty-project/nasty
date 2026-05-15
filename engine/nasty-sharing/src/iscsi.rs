@@ -774,7 +774,12 @@ async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
     if changed {
         match serde_json::to_string_pretty(&json) {
             Ok(out) => {
-                let _ = tokio::fs::write(SAVECONFIG, out).await;
+                if let Err(e) = tokio::fs::write(SAVECONFIG, out).await {
+                    // The patched config exists in memory but won't survive
+                    // a restart — log so a "iSCSI config keeps reverting"
+                    // bug is debuggable from a single message.
+                    warn!("write patched saveconfig to {SAVECONFIG} failed: {e}");
+                }
             }
             Err(e) => warn!("Failed to serialize patched saveconfig.json: {e}"),
         }

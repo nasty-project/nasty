@@ -222,9 +222,16 @@ async fn disk_collector(state: Arc<AppState>) {
 /// bcachefs metrics collector: samples every 5s.
 async fn bcachefs_collector(state: Arc<AppState>) {
     loop {
-        let metrics = tokio::task::spawn_blocking(collect_bcachefs::collect_all)
-            .await
-            .unwrap_or_default();
+        let metrics = match tokio::task::spawn_blocking(collect_bcachefs::collect_all).await {
+            Ok(v) => v,
+            Err(e) => {
+                // Spawn error means the worker thread panicked or was
+                // cancelled. Without this log the bcachefs panel just
+                // freezes on stale data with no clue why.
+                tracing::warn!("bcachefs collector worker panicked / cancelled: {e}");
+                Default::default()
+            }
+        };
         *state.bcachefs.write().await = metrics;
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
@@ -237,9 +244,13 @@ async fn kernel_error_collector(state: Arc<AppState>) {
     ));
     loop {
         let c = collector.clone();
-        let summary = tokio::task::spawn_blocking(move || c.lock().unwrap().collect())
-            .await
-            .unwrap_or_default();
+        let summary = match tokio::task::spawn_blocking(move || c.lock().unwrap().collect()).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("kernel error collector worker panicked / cancelled: {e}");
+                Default::default()
+            }
+        };
         *state.kernel_errors.write().await = summary;
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }

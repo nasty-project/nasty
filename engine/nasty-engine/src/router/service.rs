@@ -60,16 +60,22 @@ pub(super) async fn try_route(
                 .as_ref()
                 .and_then(|p| p.get("iqn_prefix"))
                 .and_then(|v| v.as_str())
+                && let Err(e) = tokio::fs::write("/var/lib/nasty/iscsi-base-iqn", iqn.trim()).await
             {
-                let _ = tokio::fs::write("/var/lib/nasty/iscsi-base-iqn", iqn.trim()).await;
+                // Non-fatal — the engine still has the value in memory
+                // — but at restart it'll fall back to the default IQN,
+                // which is confusing if the user just configured a
+                // custom one.
+                tracing::warn!("persist iscsi base IQN failed: {e}");
             }
             if let Some(nqn) = req
                 .params
                 .as_ref()
                 .and_then(|p| p.get("nqn_prefix"))
                 .and_then(|v| v.as_str())
+                && let Err(e) = tokio::fs::write("/var/lib/nasty/nvmeof-base-nqn", nqn.trim()).await
             {
-                let _ = tokio::fs::write("/var/lib/nasty/nvmeof-base-nqn", nqn.trim()).await;
+                tracing::warn!("persist nvmeof base NQN failed: {e}");
             }
             ok(req, "ok")
         }
@@ -105,18 +111,25 @@ pub(super) async fn try_route(
                     metadata_target: None,
                     data_replicas: None,
                 };
-                let _ = state.subvolumes.create(create_req, None).await;
+                if let Err(e) = state.subvolumes.create(create_req, None).await {
+                    // Without this log, the path write below succeeds
+                    // but the subvolume actually doesn't exist —
+                    // rest-server then refuses to start with a confusing
+                    // "no such file" error and the user has nothing to
+                    // tie the two together.
+                    tracing::warn!("rest-server storage subvolume create failed: {e}");
+                }
             }
 
             if let Err(e) = tokio::fs::write("/var/lib/nasty/rest-server-path", &path).await {
                 return Some(err(req, format!("write config: {e}")));
             }
 
-            // Restart rest-server to pick up new path
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["restart", "nasty-rest-server"])
-                .output()
-                .await;
+            // Restart rest-server to pick up new path. `try_run` logs
+            // failures so a botched restart (config typo, port collision,
+            // etc.) shows up in the journal even though we don't surface
+            // it on the RPC reply (we already ack'd the path write).
+            nasty_common::cmd::try_run("systemctl", &["restart", "nasty-rest-server"]).await;
 
             ok(req, "ok")
         }
