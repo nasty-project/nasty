@@ -704,11 +704,49 @@ fn ip_section_dict(ip: &NmIpSettings, family: Family) -> HashMap<String, OwnedVa
     if let Some(gw) = &ip.gateway {
         s.insert("gateway".into(), into_value(gw.clone()));
     }
-    // NM accepts DNS as `as` (array of strings) on `[ipv4]`/`[ipv6]`.
-    // Only emit when populated; an empty array would replace the
-    // DHCP-supplied DNS on auto-method connections with nothing.
+    // NM's DBus types for DNS are family-specific and not strings:
+    //   ipv4.dns  → `au`   array of u32 in network byte order
+    //   ipv6.dns  → `aay`  array of 16-byte arrays
+    // Sending the string-array shape (as) gets rejected as
+    //   "InvalidProperty: ipv4.dns: can't set property of type 'au'
+    //    from value of type 'as'"
+    // which then prevents the bond from being created, which
+    // cascades into DependencyFailed errors on its members — the
+    // shape reported in discussion #159.  Pack to the correct
+    // family-specific type here.  We silently drop entries that
+    // don't parse for the target family rather than fail the whole
+    // apply; `split_dns_by_family` upstream is supposed to route
+    // them correctly already, but a malformed string from a hand-
+    // edited config shouldn't take the whole network apply down.
+    //
+    // Empty arrays aren't emitted at all — overwriting the DHCP-
+    // supplied DNS on auto-method connections with an empty list
+    // would yank name resolution.
     if !ip.dns.is_empty() {
-        s.insert("dns".into(), into_value(ip.dns.clone()));
+        match family {
+            Family::V4 => {
+                let packed: Vec<u32> = ip
+                    .dns
+                    .iter()
+                    .filter_map(|s| s.parse::<std::net::Ipv4Addr>().ok())
+                    .map(|a| u32::from_be_bytes(a.octets()))
+                    .collect();
+                if !packed.is_empty() {
+                    s.insert("dns".into(), into_value(packed));
+                }
+            }
+            Family::V6 => {
+                let packed: Vec<Vec<u8>> = ip
+                    .dns
+                    .iter()
+                    .filter_map(|s| s.parse::<std::net::Ipv6Addr>().ok())
+                    .map(|a| a.octets().to_vec())
+                    .collect();
+                if !packed.is_empty() {
+                    s.insert("dns".into(), into_value(packed));
+                }
+            }
+        }
     }
     s
 }
@@ -1565,11 +1603,16 @@ mod tests {
     }
 
     #[test]
-    fn dict_emits_dns_on_ipv4_section_when_set() {
-        // Headline case from #96 audit: user has dns: ["10.10.11.1"]
-        // in their networking.json. Pre-fix, to_nm_profiles dropped
-        // it; after, every connection's [ipv4].dns carries the
-        // entry so NM/systemd-resolved sees it.
+    fn dict_emits_dns_on_ipv4_section_as_packed_uint32() {
+        // Regression test for the discussion #159 bug: NM's
+        // `ipv4.dns` is type `au` (array of u32 in network byte
+        // order), NOT `as`.  Sending a string array gets rejected
+        // with "InvalidProperty: ipv4.dns: can't set property of
+        // type 'au' from value of type 'as'" which then prevents
+        // every other connection in the apply from going through.
+        //
+        // 10.10.11.1 in network byte order packs to
+        //   ((10<<24) | (10<<16) | (11<<8) | 1) = 0x0A0A0B01
         let layered = LayeredConfig {
             links: vec![link_phys("eth0")],
             dns: vec!["10.10.11.1".into()],
@@ -1577,15 +1620,19 @@ mod tests {
         };
         let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
         let ipv4 = dict.get("ipv4").expect("ipv4 section");
-        let dns: Vec<String> = ipv4["dns"].try_clone().unwrap().try_into().unwrap();
-        assert_eq!(dns, vec!["10.10.11.1".to_string()]);
+        let dns: Vec<u32> = ipv4["dns"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(dns, vec![0x0A_0A_0B_01]);
         // No leakage into ipv6 (no v6 entries in input).
         let ipv6 = dict.get("ipv6").expect("ipv6 section");
         assert!(!ipv6.contains_key("dns"), "ipv6 must not carry v4 DNS");
     }
 
     #[test]
-    fn dict_routes_dns_to_ipv6_section_for_v6_addresses() {
+    fn dict_routes_dns_to_ipv6_section_as_byte_arrays() {
+        // IPv6 DNS is type `aay`: each entry is a 16-byte array
+        // (the address in big-endian / network byte order).
+        // 2606:4700:4700::1111 octets:
+        //   26 06 47 00 47 00 00 00 00 00 00 00 00 00 11 11
         let layered = LayeredConfig {
             links: vec![link_phys("eth0")],
             dns: vec!["2606:4700:4700::1111".into()],
@@ -1593,8 +1640,14 @@ mod tests {
         };
         let dict = to_settings_dict(&to_nm_profiles(&layered)[0]);
         let ipv6 = dict.get("ipv6").expect("ipv6 section");
-        let dns: Vec<String> = ipv6["dns"].try_clone().unwrap().try_into().unwrap();
-        assert_eq!(dns, vec!["2606:4700:4700::1111".to_string()]);
+        let dns: Vec<Vec<u8>> = ipv6["dns"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(
+            dns,
+            vec![vec![
+                0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x11, 0x11,
+            ]]
+        );
         let ipv4 = dict.get("ipv4").expect("ipv4 section");
         assert!(!ipv4.contains_key("dns"), "ipv4 must not carry v6 DNS");
     }
