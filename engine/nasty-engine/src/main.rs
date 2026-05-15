@@ -181,6 +181,17 @@ async fn main() -> anyhow::Result<()> {
     // so a confirm can't race the rollback.
     state.network.restore_pending_revert().await;
 
+    // Idempotent sweep: drop networking.json `interfaces[]` entries
+    // that no longer correspond to any live device or virtual
+    // master, and the matching `nasty-*` NM connection profiles.
+    // Happens automatically on every boot — needed because the
+    // kernel can rename devices across reboots (Mellanox multi-port
+    // adapters: `enp6s0f0` → `enp6s0f0np0`), and because the
+    // engine's apply path doesn't garbage-collect dead profiles
+    // otherwise.  Runs before firewall.init so the firewall mirrors
+    // the cleaned-on-disk state.
+    state.network.reconcile_orphans().await;
+
     // Backfill project quota IDs on filesystem subvolumes that
     // predate the always-assign change (#176). Without this, those
     // subvolumes have no repquota row, so their `used_bytes` stays
