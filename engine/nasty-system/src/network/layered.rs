@@ -1,19 +1,13 @@
-//! Layered network model — proposed long-term shape for NASty's network
-//! state. See `docs/network-architecture.md` for the architectural rationale.
+//! Layered network model — the shape we hand to NetworkManager.  See
+//! `docs/network-architecture.md` for the architectural rationale.
 //!
-//! Phase 1 scope: types + bidirectional converters + graph validation,
-//! all shadow. The persisted legacy `NetworkConfig` is still the source of
-//! truth and the only thing the apply pipeline reads. This module emits a
-//! parallel `/var/lib/nasty/networking-v2.json` so future phases have a
-//! file to migrate from, and runs `validate()` as a warning-only check
-//! against new submissions.
-//!
-//! Why two shapes during the migration: the legacy shape conflates L2
-//! (a bridge has members) with L3 (a bridge has an IP). The layered
-//! shape splits them — `Link` is L2-only, `Address` attaches L3 to a
-//! link by name. That's the pivot the new architecture is built on.
-//! Validating the same data through both shapes (in shadow mode) gives
-//! us confidence the converter is correct before phase 3 cuts over.
+//! Two shapes live in this codebase: the persisted `NetworkConfig`
+//! (the WebUI's wire format) and this `LayeredConfig`.  The persisted
+//! shape conflates L2 (a bridge has members) with L3 (a bridge has an
+//! IP); the layered shape splits them — `Link` is L2-only, `Address`
+//! attaches L3 to a link by name.  `to_layered` converts on every
+//! apply and `validate` rejects structurally-broken graphs before NM
+//! sees them.
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,12 +27,11 @@ pub struct LayeredConfig {
     pub links: Vec<Link>,
     #[serde(default)]
     pub addresses: Vec<Address>,
-    /// Static routes. Empty when `gateway` on an `Address` covers the
-    /// default-route case. Reserved for policy routing in phase 5.
+    /// Static routes.  Empty when `gateway` on an `Address` covers the
+    /// default-route case.  Reserved for policy routing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<Route>,
-    /// IP rules (policy routing). Reserved for phase 5; phase 1 always
-    /// produces empty.
+    /// IP rules (policy routing).  Reserved; currently always empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<Rule>,
     #[serde(default)]
@@ -123,13 +116,13 @@ pub enum Family {
     V6,
 }
 
-/// Phase 1 alias — same variants as the legacy `IpMethod`. Phase 3 may
-/// fork this if semantic divergence emerges (e.g., NM has finer-grained
-/// methods than NixOS scripted networking did).
+/// Same variants as `IpMethod` on the wire shape.  Aliased here so
+/// the two can diverge later if NM grows finer-grained methods we
+/// want to surface separately.
 pub type AddressMethod = IpMethod;
 
-/// Static route. Phase 1 produces empty; reserved for the routing /
-/// per-service-binding work in phase 5.
+/// Static route.  Currently always empty in produced configs —
+/// reserved for explicit routing / per-service-binding work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Route {
     /// Routing table id. 254 (main) is the kernel default.
@@ -148,7 +141,7 @@ fn default_table() -> u32 {
     254
 }
 
-/// Policy routing rule. Phase 1 produces empty; reserved for phase 5.
+/// Policy routing rule.  Currently always empty in produced configs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Rule {
     pub priority: u32,
@@ -261,11 +254,11 @@ fn is_empty_ip(ip: &IpConfig) -> bool {
     matches!(ip.method, IpMethod::Disabled) && ip.addresses.is_empty() && ip.gateway.is_none()
 }
 
-/// Project the layered model back to the legacy flat shape. Lossy on
-/// fields that exist only in the layered model: `routes`, `rules`,
-/// `Link.mac`. Phase 1 produces those fields as empty/`None` from
-/// `to_layered`, so a round-trip through both directions is the
-/// identity for any input that started as legacy.
+/// Project the layered model back to the flat `NetworkConfig` wire
+/// shape.  Lossy on fields that exist only in the layered model:
+/// `routes`, `rules`, `Link.mac`.  `to_layered` produces those fields
+/// as empty/`None`, so a round-trip through both directions is the
+/// identity for any input that started as the flat shape.
 pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
     let addrs_by_link = group_addresses(&layered.addresses);
 
@@ -355,10 +348,8 @@ fn group_addresses(addrs: &[Address]) -> HashMap<&str, (IpConfig, IpConfig)> {
 /// Reject configs that can't be applied: dup names, dangling refs,
 /// double-enslavement, self-reference, cycles. Cheap; runs before
 /// persist so structurally-broken input never reaches the kernel.
-///
-/// Phase 1 callers log failures as warnings (not errors) so we don't
-/// reject configs the legacy path used to accept; phase 2 onward the
-/// caller will treat the result as authoritative.
+/// Callers treat the result as authoritative — a failed validation
+/// is a hard apply error, not a warning.
 pub fn validate(layered: &LayeredConfig) -> Result<(), String> {
     // 1. No duplicate link names.
     let mut names = HashSet::new();

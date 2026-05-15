@@ -17,15 +17,15 @@ const HISTORY_KEEP: usize = 10;
 /// Removed when the user confirms the change. If still present at engine
 /// startup, the engine was killed mid-apply and we restore from it.
 const PENDING_REVERT_PATH: &str = "/var/lib/nasty/networking.json.pending-revert";
-/// Phase 1 shadow output of the layered model (see
-/// `docs/network-architecture.md`). Written alongside `JSON_PATH` on every
-/// successful apply; the legacy file remains the source of truth until
-/// phase 3 cuts over.
+/// Layered model snapshot of the active config (see
+/// `docs/network-architecture.md`).  Written alongside `JSON_PATH` on
+/// every successful apply.  Inspectable artifact for debugging — NM is
+/// the source of truth at runtime.
 const JSON_PATH_V2: &str = "/var/lib/nasty/networking-v2.json";
-/// Phase 2 shadow output: per-link NM connection-profile previews. One
-/// `<id>.nmconnection.preview` file per managed link, in NM keyfile
-/// format. Phase 3 will swap these for real
-/// `/etc/NetworkManager/system-connections/` files (or DBus calls).
+/// Per-link NM connection-profile previews in keyfile format, one
+/// `<id>.nmconnection.preview` per managed link.  Rendered for
+/// inspection; the actual profiles applied to NetworkManager go via
+/// DBus, not from these files.
 const NM_PREVIEW_DIR: &str = "/var/lib/nasty/networking-v2-nm-preview";
 // ── Types ──────────────────────────────────────────────────────
 
@@ -414,7 +414,7 @@ impl NetworkService {
                 config.vlans.len()
             );
 
-            // Post-cutover (phase 3b-beta): NM persists profiles to
+            // NM persists profiles to
             // /etc/NetworkManager/system-connections/ as part of
             // apply_profiles, so reboot picks them up automatically.
             // No nixos-rebuild needed.
@@ -454,9 +454,9 @@ impl NetworkService {
                 let _ = txn.cancel.send(());
                 let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
                 info!("Network txn {txn_id} confirmed");
-                // Post-cutover: NM keyfiles already persisted as part
-                // of the apply that scheduled this rollback. No
-                // explicit rebuild step needed on confirm.
+                // NM keyfiles already persisted as part of the apply
+                // that scheduled this rollback. No explicit rebuild
+                // step needed on confirm.
                 Ok(())
             }
             None => Err(format!("unknown or already-completed txn_id {txn_id}")),
@@ -540,13 +540,11 @@ impl NetworkService {
         enumerate_interfaces().await
     }
 
-    /// Phase 3a — connect to NetworkManager via DBus and report what
-    /// would change if the persisted (resolved) network config were
-    /// applied via NM. **Read-only**; no NM state is touched. Phase 3b
-    /// adds the actual apply.
-    ///
-    /// Returns the diff as data so callers (and the future WebUI) can
-    /// surface it before committing to the cutover.
+    /// Connect to NetworkManager via DBus and report what would change
+    /// if the persisted (resolved) network config were applied.
+    /// **Read-only**; no NM state is touched.  Returns the diff as
+    /// data so callers (and the WebUI's confirm-or-rollback preview)
+    /// can surface it before committing.
     pub async fn nm_preview(&self) -> Result<nm::dbus::NmDiff, String> {
         let cfg = load_config().await;
         let layered_cfg = layered::to_layered(&cfg);
@@ -557,13 +555,11 @@ impl NetworkService {
         Ok(nm::dbus::compute_diff(&desired, &existing))
     }
 
-    /// Phase 3b-alpha — push the current desired config into NM via
-    /// DBus. **Persists profiles to disk; does not activate them.**
-    ///
-    /// Intended for explicit invocation (curl + `nm_apply` RPC) on a
-    /// box that has NM installed alongside the legacy stack. Phase
-    /// 3b-beta replaces this with automatic invocation as part of
-    /// the cutover migration.
+    /// Manual NM apply RPC — push the current desired config into NM
+    /// via DBus.  **Persists profiles to disk; does not activate them.**
+    /// Intended as an inspection / dry-run hook (curl + `nm_apply`);
+    /// the normal apply flow goes through `apply_profiles` and runs
+    /// activation too.
     ///
     /// Calling this on a box without NM installed errors out at the
     /// DBus connect step; safe.
@@ -661,11 +657,9 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to write {JSON_PATH}: {e}"))?;
 
-    // Layered validation is now authoritative (post-cutover): a
-    // structurally-broken config (cycle, dangling reference, double
-    // enslavement, ...) is rejected here before NM ever sees it.
-    // Phase 1 shipped this as warn-only while the legacy stack was
-    // still authoritative; phase 3b-beta flips it to error.
+    // Layered validation is authoritative: a structurally-broken
+    // config (cycle, dangling reference, double enslavement, ...) is
+    // rejected here before NM ever sees it.
     let layered_cfg = layered::to_layered(config);
     layered::validate(&layered_cfg)
         .map_err(|e| format!("network config rejected by validator: {e}"))?;
@@ -678,9 +672,9 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
         Err(e) => warn!("failed to serialize layered config: {e}"),
     }
 
-    // Phase 2 shadow write of NM connection-profile previews. Same
-    // best-effort stance — these are inspectable artifacts, not yet
-    // active. Phase 3 will replace them with real NM keyfiles + DBus.
+    // Inspectable per-link NM connection-profile previews.  NM gets
+    // the real profiles via DBus in `apply_profiles`; these files are
+    // just artifacts for debugging.
     if let Err(e) = write_nm_previews(&layered_cfg).await {
         warn!("failed to write NM connection previews: {e}");
     }
@@ -1177,8 +1171,8 @@ fn resolve_inherit_one(
 /// Snapshot of the kernel's view of the network at apply time. Used by
 /// `resolve_inherit` to decide what L3 a bridge should adopt from its
 /// primary member when the prior config doesn't give a clearer answer.
-/// Post-cutover (phase 3b-beta): no longer used for create-vs-skip
-/// link decisions — NM handles that internally.
+/// Not used for create-vs-skip link decisions — NM handles that
+/// internally.
 #[derive(Debug, Default, Clone)]
 struct LiveTopology {
     /// Per-iface IPv4 addresses (CIDR strings).
@@ -1322,10 +1316,10 @@ fn parse_dhcp_managed(json: &str) -> Option<std::collections::HashSet<String>> {
 }
 
 async fn apply_config(config: &NetworkConfig, mgmt_iface: Option<&str>) -> Result<(), String> {
-    // Post-cutover (phase 3b-beta): NetworkManager is the active
-    // backend. Convert the resolved config to layered form, then to
-    // NM profiles, then push to NM via DBus. NM owns DHCP, DNS, and
-    // L2 management; the engine just authors the connection profiles.
+    // NetworkManager is the active backend.  Convert the resolved
+    // config to layered form, then to NM profiles, then push to NM
+    // via DBus.  NM owns DHCP, DNS, and L2 management; the engine
+    // just authors the connection profiles.
     //
     // Build a name → MAC map from live state so bond/bridge masters
     // with `inherit_member_mac=true` can adopt their primary

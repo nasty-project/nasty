@@ -1,11 +1,11 @@
 //! NetworkManager D-Bus client.
 //!
-//! Talks to NM via zbus. Reads (`list_connections`, `get_settings`)
-//! and diff computation arrived in phase 3a; writes (`AddConnection` /
-//! `Update` / `Delete`) and `apply_profiles` in phase 3b-alpha;
-//! activation in phase 3b-beta. After 3b-beta this is the active
-//! apply backend — `apply_config` in `super::super::network` calls
-//! `apply_profiles` directly, the legacy ip-command path is gone.
+//! Talks to NM via zbus.  Read side: `list_connections`,
+//! `get_settings`, `compute_diff`.  Write side: `AddConnection`,
+//! `Connection.Update`, `Connection.Delete`, all wrapped by
+//! `apply_profiles` which also activates the resulting profiles.
+//! This is the active backend — `apply_config` in
+//! `super::super::network` calls `apply_profiles` directly.
 
 use std::collections::HashMap;
 
@@ -44,9 +44,9 @@ trait Settings {
     default_service = "org.freedesktop.NetworkManager"
 )]
 trait ConnectionSettings {
-    /// Read the connection's settings dict. Phase 3a uses this to
-    /// identify NASty-managed connections (id starting with `nasty-`)
-    /// and to diff against the desired profile set.
+    /// Read the connection's settings dict.  Used to identify
+    /// NASty-managed connections (id starting with `nasty-`) and to
+    /// diff against the desired profile set.
     fn get_settings(&self) -> zbus::Result<SettingsDict>;
     /// Replace the connection's settings dict in place. Profile
     /// identity (UUID, object path) is preserved. Does not re-activate;
@@ -82,27 +82,26 @@ trait NetworkManager {
     default_service = "org.freedesktop.NetworkManager"
 )]
 trait Device {
-    /// Kernel interface name (`eth0`, `br0`, `bond0`, ...). Phase 3b
-    /// uses this to resolve a profile's `interface_name` to the device
-    /// path that `ActivateConnection` needs.
+    /// Kernel interface name (`eth0`, `br0`, `bond0`, ...).  Used to
+    /// resolve a profile's `interface_name` to the device path that
+    /// `ActivateConnection` needs.
     #[zbus(property)]
     fn interface(&self) -> zbus::Result<String>;
 }
 
 // ── Client ─────────────────────────────────────────────────────
 
-/// Read-only NM DBus client. Holds a system-bus connection and the
-/// top-level proxies. Cheap to construct — proxies don't open new
-/// connections.
+/// NM DBus client. Holds a system-bus connection and the top-level
+/// proxies. Cheap to construct — proxies don't open new connections.
 pub struct NmDbusClient {
     conn: DbusConnection,
 }
 
 impl NmDbusClient {
-    /// Connect to the system bus. Fails if NM isn't running, the bus
-    /// isn't reachable, or the user lacks access. Surface the error
-    /// verbatim — phase 3a's `nm_preview` RPC reports it to the
-    /// caller so a misconfigured box is immediately diagnosable.
+    /// Connect to the system bus.  Fails if NM isn't running, the bus
+    /// isn't reachable, or the user lacks access.  Surface the error
+    /// verbatim — the `nm_preview` RPC reports it to the caller so a
+    /// misconfigured box is immediately diagnosable.
     pub async fn new() -> Result<Self, String> {
         let conn = DbusConnection::system()
             .await
@@ -137,10 +136,10 @@ impl NmDbusClient {
             .map_err(|e| format!("get_settings {path}: {e}"))
     }
 
-    /// All NASty-managed connections. Discriminator: the
-    /// `[connection].id` field starts with `nasty-`. Returns
+    /// All NASty-managed connections.  Discriminator: the
+    /// `[connection].id` field starts with `nasty-`.  Returns
     /// (object path, settings) so callers can both compare settings
-    /// and identify which path to update/delete in phase 3b.
+    /// and identify which path to update/delete.
     pub async fn list_nasty_connections(&self) -> Result<Vec<NmExisting>, String> {
         let mut out = Vec::new();
         for path in self.list_connections().await? {
@@ -278,18 +277,18 @@ pub struct NmExisting {
 
 // ── Diff ───────────────────────────────────────────────────────
 
-/// What `nm_preview` would do if it were an apply: the per-id breakdown
-/// of additions, updates, and deletions. JSON-serialized for the RPC.
+/// Per-id breakdown of what `apply_profiles` would change.  The same
+/// data drives both `nm_preview` (read-only) and the actual apply.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct NmDiff {
     /// Connection IDs present in the desired set but not currently in
-    /// NM. Phase 3b would call `Settings.AddConnection`.
+    /// NM — `apply_profiles` calls `Settings.AddConnection` for these.
     pub to_add: Vec<String>,
-    /// IDs present in both, but with different settings. Phase 3b would
-    /// call `Connection.Update`.
+    /// IDs present in both, but with different settings — `apply_profiles`
+    /// calls `Connection.Update`.
     pub to_update: Vec<NmDiffUpdate>,
     /// NASty-managed IDs in NM but not in the desired set — user must
-    /// have removed the link. Phase 3b would call `Connection.Delete`.
+    /// have removed the link.  `apply_profiles` calls `Connection.Delete`.
     pub to_delete: Vec<String>,
     /// Counts for at-a-glance display in the WebUI.
     pub summary: NmDiffSummary,
@@ -299,8 +298,8 @@ pub struct NmDiff {
 pub struct NmDiffUpdate {
     pub id: String,
     /// One line per differing top-level section (e.g. `"ipv4"`,
-    /// `"bridge"`). Cheap signal for the UI; phase 3b can show a
-    /// richer diff.
+    /// `"bridge"`).  Cheap signal for the UI; the WebUI can render a
+    /// richer diff if it wants by re-fetching settings.
     pub changed_sections: Vec<String>,
 }
 
@@ -352,9 +351,9 @@ pub fn compute_diff(desired: &[NmConnection], existing: &[NmExisting]) -> NmDiff
 }
 
 /// Names of top-level sections that differ between two settings dicts.
-/// We compare section-by-section by serialized representation — good
-/// enough signal for phase 3a's preview, sidesteps the OwnedValue
-/// equality awkwardness.
+/// We compare section-by-section by serialized representation —
+/// sidesteps the `OwnedValue` equality awkwardness and is enough
+/// signal for change detection.
 fn diff_sections(a: &SettingsDict, b: &SettingsDict) -> Vec<String> {
     let mut sections: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     sections.extend(a.keys().map(String::as_str));
@@ -374,10 +373,10 @@ fn section_changed(
         (None, None) => false,
         (Some(_), None) | (None, Some(_)) => true,
         (Some(a), Some(b)) => {
-            // Compare keys-and-values via Debug repr — OwnedValue
-            // doesn't impl Eq, but its Debug is stable and includes
-            // the variant + payload. Phase 3b gets a real comparator
-            // that walks the variant tree.
+            // Compare keys-and-values via Debug repr — `OwnedValue`
+            // doesn't impl `Eq`, but its Debug is stable and includes
+            // the variant + payload.  A real variant-walker would be
+            // tighter; this is good enough for change detection.
             if a.len() != b.len() {
                 return true;
             }
@@ -396,20 +395,11 @@ fn section_changed(
 
 // ── Apply ──────────────────────────────────────────────────────
 //
-// Phase 3b-alpha: writes the diff to NM. **Does not activate**
-// connections — profiles are persisted to
-// `/etc/NetworkManager/system-connections/` but not brought up. A
-// caller wanting to test a profile end-to-end can do
-// `nmcli connection up nasty-<iface>` manually after `apply_profiles`
-// returns. Phase 3b-beta will add automatic activation as part of the
-// cutover.
-//
-// Why no activation here: activation deactivates whatever was holding
-// the iface previously. On a box still running the legacy ip-command
-// apply path, that's the live network config — auto-activating an NM
-// profile would drop connectivity. Keeping `apply_profiles` to
-// "persist only" makes phase 3b-alpha safe to invoke at any time on
-// any box that has NM installed.
+// `apply_profiles` computes the desired-vs-existing diff and issues
+// `AddConnection` / `Connection.Update` / `Connection.Delete` for it,
+// then activates each enabled connection on its matching device.
+// NM is the authoritative apply backend — there's no parallel
+// ip-command path to coordinate with.
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct NmApplyOutcome {
@@ -426,17 +416,11 @@ pub struct NmApplyOutcome {
     pub errors: HashMap<String, String>,
 }
 
-/// Apply a desired profile set to NM. Computes the diff against the
+/// Apply a desired profile set to NM.  Computes the diff against the
 /// current `nasty-*` connections, then issues `AddConnection` /
-/// `Update` / `Delete` calls. After Add/Update, activates each
+/// `Update` / `Delete` calls.  After Add/Update, activates each
 /// enabled connection on its matching device (idempotent — NM no-ops
 /// when the connection is already the active one for the device).
-///
-/// Activation is the right behavior post-cutover (phase 3b-beta): NM
-/// is now authoritative for the running network, so persisted-but-
-/// inactive profiles serve no purpose. Phase 3b-alpha's "no
-/// activation" guarantee was a transitional safety while the legacy
-/// ip-command apply was still authoritative; it no longer applies.
 pub async fn apply_profiles(
     client: &NmDbusClient,
     desired: &[NmConnection],
