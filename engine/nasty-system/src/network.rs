@@ -2016,5 +2016,4 @@ mod tests {
             assert!(seen.insert(id), "duplicate txn_id");
         }
     }
-
 }
