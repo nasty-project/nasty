@@ -379,12 +379,23 @@ pub(super) async fn try_route(
         "system.tailscale.connect" => match parse_params(req) {
             Ok(p) => match state.tailscale.connect(p).await {
                 Ok(v) => {
-                    // Sync NVMe-oF ports for the new Tailscale IP
+                    // Sync NVMe-oF ports for the new Tailscale IP.
+                    // ensure_tailscale_ports() logs per-subsystem
+                    // failures internally with warn!; the observer
+                    // here logs the spawn-panic case so a missed
+                    // port-sync isn't completely silent.
                     if let Some(ref ip) = v.ip {
                         let nvmeof = state.nvmeof.clone();
                         let ip = ip.clone();
-                        tokio::spawn(async move {
+                        let h = tokio::spawn(async move {
                             nvmeof.ensure_tailscale_ports(&ip).await;
+                        });
+                        tokio::spawn(async move {
+                            if let Err(e) = h.await {
+                                tracing::warn!(
+                                    "tailscale-connect: ensure_tailscale_ports task panicked / cancelled: {e}"
+                                );
+                            }
                         });
                     }
                     ok(req, v)
