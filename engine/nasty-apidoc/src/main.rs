@@ -332,13 +332,6 @@ fn methods(generator: &mut SchemaGenerator) -> Vec<(&'static str, Vec<Method>)> 
                     params: MethodParams::Schema(gen_schema::<VersionSwitchRequest>(generator)),
                     result: None,
                 },
-                Method {
-                    name: "system.version.cleanup",
-                    desc: "Purge any stale legacy backup directory left by older Version-page builds.",
-                    role: "admin",
-                    params: MethodParams::None,
-                    result: None,
-                },
             ],
         ),
         (

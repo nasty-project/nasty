@@ -76,9 +76,6 @@
 	});
 	let savingNetwork = $state(false);
 	let netDhcp = $state(true);
-	// Legacy single-address vars (used by syncNetworkForm for onMount compat)
-	let netAddress = $state('');
-	let netPrefix = $state('24');
 	let netGateway = $state('');
 	let netNameservers = $state('');
 	let netChanged = $state(false);
@@ -190,14 +187,6 @@
 		if (!network || !network.interfaces.length) return;
 		const iface = network.interfaces[0];
 		netDhcp = iface.ipv4.method === 'dhcp';
-		if (iface.ipv4.addresses.length > 0) {
-			const parts = iface.ipv4.addresses[0].split('/');
-			netAddress = parts[0] ?? '';
-			netPrefix = parts[1] ?? '24';
-		} else {
-			netAddress = '';
-			netPrefix = '24';
-		}
 		netGateway = iface.ipv4.gateway ?? '';
 		netNameservers = network.dns.join(', ');
 		netChanged = false;
@@ -270,39 +259,6 @@
 			'Log level updated'
 		);
 		savingLog = false;
-	}
-
-	async function saveNetwork() {
-		savingNetwork = true;
-		const nameservers = netNameservers
-			.split(/[,\s]+/)
-			.map((s) => s.trim())
-			.filter(Boolean);
-
-		// Build new config from current state + form values
-		const ifaceName = network?.interfaces?.[0]?.name || networkState?.interfaces?.[0]?.name || 'eth0';
-		const ipv4Method = netDhcp ? 'dhcp' : 'static';
-		const ipv4Addresses = netDhcp ? [] : [`${netAddress.trim()}/${netPrefix}`];
-		const ipv4Gateway = netDhcp ? null : (netGateway.trim() || null);
-
-		const payload: NetworkConfig = {
-			interfaces: [{
-				name: ifaceName,
-				enabled: true,
-				ipv4: { method: ipv4Method, addresses: ipv4Addresses, gateway: ipv4Gateway },
-				ipv6: network?.interfaces?.[0]?.ipv6 ?? { method: 'slaac', addresses: [], gateway: null },
-				mtu: network?.interfaces?.[0]?.mtu ?? null,
-			}],
-			dns: nameservers,
-			bonds: network?.bonds ?? [],
-			vlans: network?.vlans ?? [],
-			bridges: network?.bridges ?? [],
-		};
-
-		await applyNetworkUpdate(payload, 'Network configuration applied');
-		networkState = await client.call<NetworkState>('system.network.get');
-		syncNetworkForm();
-		savingNetwork = false;
 	}
 
 	async function loadMetrics() {

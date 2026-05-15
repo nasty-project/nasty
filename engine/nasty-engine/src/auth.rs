@@ -16,7 +16,7 @@ pub struct User {
     pub username: String,
     /// Argon2 password hash. None for users provisioned via OIDC who have never set
     /// a local password; such users can only authenticate through the configured IdP.
-    #[serde(default, deserialize_with = "deserialize_password_hash")]
+    #[serde(default)]
     pub password_hash: Option<String>,
     pub role: Role,
     /// When true, the user must change their password before accessing anything else.
@@ -29,22 +29,6 @@ pub struct User {
     /// never collides with an existing user.
     #[serde(default)]
     pub oidc_issuer: Option<String>,
-}
-
-/// Accept legacy auth.json files where `password_hash` is a plain string (not Option).
-fn deserialize_password_hash<'de, D>(d: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::IntoDeserializer;
-    let v = serde_json::Value::deserialize(d)?;
-    match v {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::String(s) if s.is_empty() => Ok(None),
-        serde_json::Value::String(s) => Ok(Some(s)),
-        other => Option::<String>::deserialize(other.into_deserializer())
-            .map_err(|e: serde_json::Error| serde::de::Error::custom(e.to_string())),
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]

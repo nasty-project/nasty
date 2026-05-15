@@ -218,9 +218,10 @@ pub struct NetworkState {
 }
 
 /// Request shape for `system.network.update`. The `NetworkConfig` fields
-/// are flattened in for backwards compatibility — old clients posting a
-/// bare `NetworkConfig` still parse — and `confirm_within_secs` is the
-/// optional opt-in to the confirm-or-rollback safety net.
+/// are flattened so callers post one flat object instead of wrapping the
+/// config under a `config:` key — that's the WebUI's actual call shape.
+/// `confirm_within_secs` is the optional opt-in to the
+/// confirm-or-rollback safety net.
 #[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
 pub struct UpdateRequest {
     #[serde(flatten)]
