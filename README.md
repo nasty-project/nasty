@@ -32,6 +32,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **Block storage** — iSCSI and NVMe-oF with dedicated targets per volume
 - **Subvolumes** — filesystem and block subvolumes with quotas, compression, and tiering per subvolume
 - **Snapshots** — instant, space-efficient point-in-time copies
+- **Encryption lifecycle** — lock and unlock encrypted filesystems from the WebUI, with a dependents preview that lists every app, VM, share, and backup that would break before you confirm
 - **File browser** — browse, upload, and manage files from the web UI
 - **Backups** — encrypted, deduplicated, incremental backups to local, S3, SFTP, REST, or Backblaze B2 with per-profile schedules and retention
 
@@ -43,20 +44,22 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **[nasty-top](https://github.com/nasty-project/nasty-top)** — standalone TUI for live per-device IO, latency, and tuning
 
 ### Apps & VMs
-- **Apps** — Docker containers and Compose stacks with image pull progress, container inspect, and an `allow_unsafe` escape hatch for stacks that need privileged options
-- **Virtual machines** — QEMU/KVM with VNC console, disk snapshots, and VM cloning (experimental)
+- **Apps** — Docker containers and Compose stacks with image pull progress, container inspect, live per-app resource usage (CPU %, memory, network and disk I/O), and an `allow_unsafe` escape hatch for stacks that need privileged options
+- **Virtual machines** — QEMU/KVM with VNC console, disk snapshots, USB passthrough (editable on existing VMs), bridge selection, and an inline disk-import wizard for qcow2 / raw / vmdk images
+- **Hardware passthrough** — IOMMU group view, USB device inventory, and vfio-pci toggles that survive reboots
 - **Network bridges** — Linux bridges for attaching VMs (and apps) to L2 networks alongside the host
 
 ### System
 - **Web UI** — manage filesystems, subvolumes, snapshots, shares, disks, services, and more
 - **Web terminal** — built-in shell with command cheatsheets and diagnostic tools
 - **Glossary** — built-in help page with storage terms, protocol guidance, and FAQ
+- **Networking** — NetworkManager-based with confirm-or-rollback: edits stage, apply, and auto-revert if you don't confirm in time, so a typo can't lock you out over SSH
 - **Let's Encrypt** — automatic TLS certificates via ACME (TLS-ALPN and DNS challenges)
 - **Tailscale** — built-in VPN with one-click setup
 - **Access control** — local user accounts with role-based permissions, API tokens, and OIDC single sign-on
 - **UPS monitoring** — NUT integration for graceful shutdown on power loss (opt-in)
 - **Atomic updates** — NixOS-based, with one-click rollback to any previous generation
-- **Binary cache** — fast updates via cachix (bcachefs-tools, engine, webui pre-built)
+- **Binary cache** — fast updates via cachix on both x86_64 and aarch64 (engine, webui, bcachefs-tools pre-built — no Rust + npm compile on Pi / Odroid / Rockchip boxes)
 - **Kubernetes integration** — CSI driver for dynamic volume provisioning across all 4 protocols
 
 ## Screenshots
@@ -106,8 +109,8 @@ NASty has three update flavors:
 
 | Flavor | What you get | Description |
 |--------|-------------|-------------|
-| **Mild** | Tagged stable releases (`v0.0.1`) | Stable releases |
-| **Spicy** | Pre-release builds (`s0.0.1`) | Pre-release builds with newer features |
+| **Mild** | Tagged stable releases (`v*`) | Stable releases |
+| **Spicy** | Pre-release builds (`s*`) | Pre-release builds with newer features |
 | **Nasty** | Latest commit on main | Bleeding edge, no guarantees |
 
 Switch flavors from **Settings → Update → Flavor** in the WebUI.
