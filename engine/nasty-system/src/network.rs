@@ -2017,19 +2017,4 @@ mod tests {
         }
     }
 
-    // ── orphan interface detection ────────────────────────────────
-
-    fn live(name: &str) -> LiveInterface {
-        LiveInterface {
-            name: name.to_string(),
-            mac: "00:00:00:00:00:00".to_string(),
-            up: true,
-            speed_mbps: None,
-            carrier: true,
-            ipv4_addresses: Vec::new(),
-            ipv6_addresses: Vec::new(),
-            mtu: 1500,
-            kind: "physical".to_string(),
-        }
-    }
 }
