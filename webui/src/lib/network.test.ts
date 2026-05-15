@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { findOrphanInterfaces, promoteOrphanedMembers, stripInterfaces } from './network';
+import {
+	findOrphanInterfaces,
+	promoteOrphanedMembers,
+	stripInterfaces,
+	validateDnsServer,
+	validateIpv4Address,
+	validateIpv4Cidr,
+	validateIpv6Address,
+	validateIpv6Cidr,
+} from './network';
 import type {
 	BondConfig,
 	BridgeConfig,
@@ -236,5 +245,134 @@ describe('stripInterfaces', () => {
 		// Tolerant: a stale ref shouldn't make us throw.
 		const net = emptyNet({ interfaces: [iface('eth0')] });
 		expect(stripInterfaces(net, ['ghost']).map((i) => i.name)).toEqual(['eth0']);
+	});
+});
+
+describe('validateIpv4Cidr', () => {
+	it('accepts canonical addresses with valid prefixes', () => {
+		expect(validateIpv4Cidr('192.168.1.10/24')).toBeNull();
+		expect(validateIpv4Cidr('10.0.0.1/8')).toBeNull();
+		expect(validateIpv4Cidr('0.0.0.0/0')).toBeNull();
+		expect(validateIpv4Cidr('255.255.255.255/32')).toBeNull();
+	});
+
+	it('treats empty string as null (caller decides if required)', () => {
+		// The form has multiple optional address rows; an empty one is
+		// fine — it just gets filtered out before submit.
+		expect(validateIpv4Cidr('')).toBeNull();
+		expect(validateIpv4Cidr('   ')).toBeNull();
+	});
+
+	it('flags missing CIDR prefix — the discussion #159 trigger case', () => {
+		// The exact mistake HuxyUK reported: pasted an IP, forgot the
+		// netmask, got a server-side error. The hint mentions the
+		// suggested form so the fix is obvious.
+		const err = validateIpv4Cidr('192.168.1.10');
+		expect(err).toMatch(/CIDR prefix/);
+		expect(err).toContain('/24');
+	});
+
+	it('rejects out-of-range octets', () => {
+		expect(validateIpv4Cidr('256.0.0.1/24')).toBeTruthy();
+		expect(validateIpv4Cidr('192.168.300.1/24')).toBeTruthy();
+	});
+
+	it('rejects out-of-range CIDR prefixes', () => {
+		expect(validateIpv4Cidr('192.168.1.10/33')).toMatch(/0-32/);
+		expect(validateIpv4Cidr('192.168.1.10/-1')).toBeTruthy();
+	});
+
+	it('rejects leading-zero octets (often-typoed, ambiguous)', () => {
+		// Some libraries treat "001" as octal; rejecting it both
+		// avoids the ambiguity and catches a common typo.
+		expect(validateIpv4Cidr('192.168.001.1/24')).toBeTruthy();
+	});
+
+	it('rejects garbage and partial addresses', () => {
+		expect(validateIpv4Cidr('not.an.ip.address/24')).toBeTruthy();
+		expect(validateIpv4Cidr('192.168.1/24')).toBeTruthy();
+		expect(validateIpv4Cidr('192.168.1.1.1/24')).toBeTruthy();
+		expect(validateIpv4Cidr('/24')).toBeTruthy();
+	});
+});
+
+describe('validateIpv6Cidr', () => {
+	it('accepts canonical addresses with valid prefixes', () => {
+		expect(validateIpv6Cidr('fd00::1/64')).toBeNull();
+		expect(validateIpv6Cidr('2001:db8::/32')).toBeNull();
+		expect(validateIpv6Cidr('::1/128')).toBeNull();
+		expect(validateIpv6Cidr('::/0')).toBeNull();
+		expect(validateIpv6Cidr(
+			'2001:0db8:85a3:0000:0000:8a2e:0370:7334/64',
+		)).toBeNull();
+	});
+
+	it('flags missing CIDR prefix', () => {
+		const err = validateIpv6Cidr('fd00::1');
+		expect(err).toMatch(/CIDR prefix/);
+		expect(err).toContain('/64');
+	});
+
+	it('rejects multiple :: compression markers', () => {
+		expect(validateIpv6Cidr('fd00::1::2/64')).toBeTruthy();
+	});
+
+	it('rejects out-of-range CIDR prefixes', () => {
+		expect(validateIpv6Cidr('fd00::1/129')).toMatch(/0-128/);
+	});
+
+	it('rejects garbage groups', () => {
+		expect(validateIpv6Cidr('xyzz::1/64')).toBeTruthy();
+		expect(validateIpv6Cidr('fd00:::1/64')).toBeTruthy();
+		expect(validateIpv6Cidr('fd00:1:2:3:4:5:6:7:8/64')).toBeTruthy();
+	});
+});
+
+describe('validateIpv4Address (no CIDR — gateway + DNS)', () => {
+	it('accepts canonical addresses', () => {
+		expect(validateIpv4Address('192.168.1.1')).toBeNull();
+		expect(validateIpv4Address('1.1.1.1')).toBeNull();
+	});
+
+	it('rejects a CIDR suffix — gateways do not take prefixes', () => {
+		// Easy mistake: copy/paste the address row into the gateway
+		// field. We tell the user exactly what's wrong.
+		expect(validateIpv4Address('192.168.1.1/24')).toMatch(/no CIDR/);
+	});
+
+	it('rejects bad addresses', () => {
+		expect(validateIpv4Address('not-an-ip')).toBeTruthy();
+		expect(validateIpv4Address('192.168.1')).toBeTruthy();
+		expect(validateIpv4Address('256.1.1.1')).toBeTruthy();
+	});
+});
+
+describe('validateIpv6Address (no CIDR — v6 gateway)', () => {
+	it('accepts canonical addresses', () => {
+		expect(validateIpv6Address('fe80::1')).toBeNull();
+		expect(validateIpv6Address('::1')).toBeNull();
+		expect(validateIpv6Address('2001:db8::1')).toBeNull();
+	});
+
+	it('rejects a CIDR suffix', () => {
+		expect(validateIpv6Address('fe80::1/64')).toMatch(/no CIDR/);
+	});
+
+	it('rejects garbage', () => {
+		expect(validateIpv6Address('zzzz::1')).toBeTruthy();
+	});
+});
+
+describe('validateDnsServer', () => {
+	it('accepts both v4 and v6 (no CIDR)', () => {
+		expect(validateDnsServer('1.1.1.1')).toBeNull();
+		expect(validateDnsServer('2606:4700:4700::1111')).toBeNull();
+	});
+
+	it('routes by colon presence — v6 if present, v4 otherwise', () => {
+		// Strings with a colon are always treated as v6 attempts so the
+		// error message matches what the user wrote.
+		expect(validateDnsServer('not:a:v6')).toMatch(/IPv6/);
+		expect(validateDnsServer('not.a.v4')).toMatch(/IPv4/);
 	});
 });
