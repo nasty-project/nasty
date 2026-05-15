@@ -41,12 +41,12 @@ impl FirewallRestrictions {
     }
 
     /// Drop every reference to interfaces in `removed` from this
-    /// restrictions config. Used by the migration cleanup pass so a
-    /// pruned-from-`interfaces[]` name doesn't leave dangling
-    /// firewall rules pointing at a now-nonexistent iface (which the
-    /// WebUI also can't unselect because the dropdown source no
-    /// longer offers it). Returns true when the config changed —
-    /// caller decides whether to persist.
+    /// restrictions config. Keeps the firewall in sync when an iface
+    /// disappears from networking.json — without this, dangling rules
+    /// would point at a now-nonexistent iface that the WebUI can't
+    /// unselect because the dropdown source no longer offers it.
+    /// Returns true when the config changed — caller decides whether
+    /// to persist.
     pub fn strip_iface_refs(&mut self, removed: &[String]) -> bool {
         if removed.is_empty() || self.interfaces.is_empty() {
             return false;
@@ -169,12 +169,6 @@ impl Default for FirewallService {
 
 impl FirewallService {
     pub fn new() -> Self {
-        // Restrictions are loaded lazily in `init()` rather than here,
-        // because the migration cleanup pass (run_migration_if_needed)
-        // can rewrite firewall-restrictions.json between AppState
-        // construction and firewall init. Loading at construction
-        // would cache pre-cleanup state and the next user edit would
-        // re-persist the orphans we just stripped.
         Self {
             state: tokio::sync::Mutex::new(FirewallState::default()),
             restrictions: tokio::sync::Mutex::new(FirewallRestrictions::default()),
@@ -182,10 +176,8 @@ impl FirewallService {
     }
 
     /// Initialize firewall with current protocol states.
-    /// Called at engine startup after protocol restore + migration.
+    /// Called at engine startup after protocol restore.
     pub async fn init(&self, enabled_protocols: &[(Protocol, bool)]) {
-        // Load fresh from disk so any migration-time cleanup is
-        // reflected in the in-memory state from the get-go.
         let mut state = self.state.lock().await;
         let mut restrictions = self.restrictions.lock().await;
         *restrictions = FirewallRestrictions::load();

@@ -181,20 +181,6 @@ async fn main() -> anyhow::Result<()> {
     // so a confirm can't race the rollback.
     state.network.restore_pending_revert().await;
 
-    // One-shot migration from the pre-cutover legacy networking stack
-    // to NetworkManager (phase 3b-beta). Idempotent — gated on a
-    // marker file. Runs after restore_pending_revert so any in-flight
-    // rollback from before the upgrade is settled first. Best-effort:
-    // skipped if NM isn't reachable yet, retried next boot.
-    //
-    // Runs BEFORE firewall.init: migration may prune orphaned
-    // interfaces[] entries (issue #96) and strip dangling references
-    // to them from firewall-restrictions.json. Initializing the
-    // firewall after migration means the in-memory restrictions
-    // mirror the cleaned-on-disk state, so the next user edit
-    // doesn't accidentally re-persist the orphans.
-    state.network.run_migration_if_needed().await;
-
     // Backfill project quota IDs on filesystem subvolumes that
     // predate the always-assign change (#176). Without this, those
     // subvolumes have no repquota row, so their `used_bytes` stays
