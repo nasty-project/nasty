@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Primary version path — writable by the update script, not managed by NixOS.
 const VERSION_PATH: &str = "/var/lib/nasty/version";
@@ -1275,10 +1275,15 @@ echo "==> Switch to generation {gen_id} complete!"
             UpdateError::CommandFailed(format!("failed to remove generation {gen_id}: {e}"))
         })?;
 
-        // Clean up the label if any
+        // Clean up the label if any. A persistence failure here
+        // leaves a stale label pointing at a deleted generation —
+        // surface it so the user can match a "phantom label" report
+        // to the underlying save error.
         let mut labels = load_generation_labels().await;
-        if labels.remove(&gen_id).is_some() {
-            let _ = save_generation_labels(&labels).await;
+        if labels.remove(&gen_id).is_some()
+            && let Err(e) = save_generation_labels(&labels).await
+        {
+            warn!("save_generation_labels after delete of gen {gen_id} failed: {e}");
         }
 
         info!("Deleted generation {gen_id}");

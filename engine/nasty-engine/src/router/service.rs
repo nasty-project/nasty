@@ -111,7 +111,14 @@ pub(super) async fn try_route(
                     metadata_target: None,
                     data_replicas: None,
                 };
-                let _ = state.subvolumes.create(create_req, None).await;
+                if let Err(e) = state.subvolumes.create(create_req, None).await {
+                    // Without this log, the path write below succeeds
+                    // but the subvolume actually doesn't exist —
+                    // rest-server then refuses to start with a confusing
+                    // "no such file" error and the user has nothing to
+                    // tie the two together.
+                    tracing::warn!("rest-server storage subvolume create failed: {e}");
+                }
             }
 
             if let Err(e) = tokio::fs::write("/var/lib/nasty/rest-server-path", &path).await {

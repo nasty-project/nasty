@@ -266,7 +266,17 @@ impl ProtocolService {
                 );
                 let mut state = load_state().await;
                 state.set(proto, false);
-                let _ = save_state(&state).await;
+                if let Err(e) = save_state(&state).await {
+                    // The in-memory state shows disabled, but at next
+                    // engine restart we'll re-evaluate from the
+                    // persisted state — so the auto-disable will be
+                    // forgotten and the user will see the protocol
+                    // re-enabling itself.
+                    warn!(
+                        "auto-disable persistence for {} failed: {e}",
+                        proto.display_name()
+                    );
+                }
             }
         }
     }
@@ -330,13 +340,30 @@ impl ProtocolService {
             );
             if let Err(e) = systemctl("start", svc).await {
                 warn!("Failed to start {svc}: {e}");
-                // Roll back: stop any services we already started
+                // Roll back: stop any services we already started.
+                // systemctl() already logs spawn / non-zero failures
+                // internally; this loop just makes sure we attempt
+                // each one even if one of the stops fails.
                 for started_svc in &started {
-                    let _ = systemctl("stop", started_svc).await;
+                    if let Err(stop_err) = systemctl("stop", started_svc).await {
+                        warn!(
+                            "rollback stop of {started_svc} failed: {stop_err}"
+                        );
+                    }
                 }
-                // Roll back persistent state
+                // Roll back persistent state. A failure here means
+                // the protocol stays "enabled" in saved state but the
+                // services aren't actually running — at next engine
+                // start they'll be re-attempted, which is what we want,
+                // but the operator should know the persistence flip
+                // didn't take.
                 state.set(proto, false);
-                let _ = save_state(&state).await;
+                if let Err(save_err) = save_state(&state).await {
+                    warn!(
+                        "rollback persistence for {} failed: {save_err}",
+                        proto.display_name()
+                    );
+                }
                 return Err(format!("Failed to start {}: {e}", proto.display_name()));
             }
             started.push(*svc);

@@ -327,7 +327,15 @@ impl SettingsService {
             let name = name.trim().to_string();
             if !name.is_empty() {
                 settings.hostname = Some(name);
-                let _ = save(&settings).await;
+                if let Err(e) = save(&settings).await {
+                    // The in-memory hostname is set so the running engine
+                    // sees it correctly, but at next startup we'll re-seed
+                    // from /proc — which is fine on a normal box, but on
+                    // a host where /proc/sys/kernel/hostname diverges
+                    // from the persisted name (e.g., systemd hostnamed
+                    // race) we'd silently lose the saved value.
+                    warn!("seed-hostname save failed: {e}");
+                }
             }
         }
         Self {
