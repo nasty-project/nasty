@@ -150,9 +150,72 @@ let
         print("system.health via nginx:", health, file=sys.stderr)
     finally:
         ws.close()
+
+    # ── Session 4: install an app + verify /apps/<name>/ proxy ────
+    # Drives the end-to-end apps-ingress path: engine starts Docker,
+    # pulls (no-op — image is pre-loaded), creates the container,
+    # auto-sets ingress, writes /var/lib/nasty/apps-proxy.conf,
+    # reloads nginx.  We then curl `/apps/smoke/` and check the
+    # marker string the container serves, which proves:
+    #   - the engine's apps lifecycle works end-to-end,
+    #   - nginx's path-stripping `proxy_pass http://host:port/` works
+    #     (request to `/apps/smoke/index.html` reaches the container
+    #     as `/index.html`, not `/apps/smoke/index.html`),
+    #   - the new ingress took effect (nginx reload was honored).
+    import time as _time
+    ws, _ = ws_auth(new_token)
+    try:
+        # Start Docker via the engine.  Spawned task waits up to 30s
+        # for the daemon, so we poll apps.status afterwards.
+        call(ws, "apps.enable", 1, {})
+        deadline = _time.monotonic() + 60
+        while True:
+            status = call(ws, "apps.status", 2)
+            if status.get("running"):
+                break
+            assert _time.monotonic() < deadline, (
+                f"apps subsystem never reached running: {status!r}"
+            )
+            _time.sleep(1)
+
+        # Install the smoke app — image is already in docker daemon
+        # via the `docker load` step in testScript, so the engine's
+        # `pull_image` step is a no-op cache hit.
+        call(ws, "apps.install", 3, {
+            "name": "smoke",
+            "image": "nasty-smoke-app:test",
+            "ports": [{
+                "name": "http",
+                "container_port": 80,
+                "host_port": 18080,
+                "protocol": "tcp",
+            }],
+        })
+    finally:
+        ws.close()
   '';
 
   pythonWithWs = pkgs.python3.withPackages (ps: [ ps.websocket-client ]);
+
+  # Tiny Docker image used by the apps-ingress smoke step.  Boots
+  # busybox httpd against a static `/www/index.html` whose contents
+  # are a known marker string the test asserts on, so we know the
+  # request actually reached the container — and through which path.
+  smokeAppImage = pkgs.dockerTools.buildImage {
+    name = "nasty-smoke-app";
+    tag = "test";
+    copyToRoot = pkgs.buildEnv {
+      name = "nasty-smoke-app-root";
+      paths = [
+        pkgs.busybox
+        (pkgs.writeTextDir "www/index.html" "nasty-smoke-test-OK")
+      ];
+      pathsToLink = [ "/bin" "/www" ];
+    };
+    config = {
+      Cmd = [ "httpd" "-f" "-p" "80" "-h" "/www" ];
+    };
+  };
 in
 
 pkgs.testers.runNixOSTest {
@@ -181,6 +244,18 @@ pkgs.testers.runNixOSTest {
       iscsi.enable = false;
       nvmeof.enable = false;
     };
+
+    # Docker is needed for the apps-ingress assertion.  The engine's
+    # `apps.enable` RPC starts docker.service itself, but the unit has
+    # to exist — wantedBy is cleared so it doesn't race nasty-engine
+    # on boot.
+    virtualisation.docker.enable = true;
+    systemd.services.docker.wantedBy = lib.mkForce [ ];
+    systemd.sockets.docker.wantedBy = lib.mkForce [ ];
+
+    # Stage the smoke-app image tarball into the VM's Nix store so
+    # `docker load` finds it without ever needing network access.
+    system.extraDependencies = [ smokeAppImage ];
 
     # qemu-vm.nix forces timesyncd off; nasty.nix turns it on. Defer to the
     # VM-test infrastructure since clock sync is irrelevant inside a
@@ -296,10 +371,40 @@ pkgs.testers.runNixOSTest {
     # responses come back correlated by id. Exercises router.rs
     # end-to-end — the part unit tests deliberately don't reach.
     # rpc-smoke also opens wss://127.0.0.1/ws through nginx as its
-    # third session, so the proxy's Upgrade / Connection handling
-    # is part of what's being asserted.
+    # third session, and (session 4) installs a Docker app whose
+    # /apps/<name>/ ingress we then assert against below.
+    #
+    # Docker is needed before we can `docker load` the smoke image.
+    # The engine's `apps.enable` RPC would start it too, but the
+    # load step runs from the testScript (host-side), so we bring
+    # it up explicitly first.  Once up, rpc-smoke's `apps.enable`
+    # is a no-op systemctl restart.
+    machine.succeed("systemctl start docker.socket")
+    machine.wait_for_unit("docker.socket")
+    machine.wait_until_succeeds("docker info >/dev/null 2>&1")
+    machine.succeed("docker load -i ${smokeAppImage}")
     machine.succeed(
         f"${pythonWithWs}/bin/python3 ${rpcSmoke} {shlex.quote(login_obj['token'])}"
+    )
+
+    # ── /apps/<name>/ ingress through nginx ───────────────────────
+    # rpc-smoke just installed an app called "smoke" mapped to
+    # host port 18080.  The engine wrote a `location /apps/smoke/`
+    # block to /var/lib/nasty/apps-proxy.conf and reloaded nginx.
+    # Curl both the bare route and a subpath: the marker string in
+    # the response proves nginx's path-stripping `proxy_pass
+    # http://host:port/` actually strips, not just appends.
+    machine.wait_until_succeeds(
+        "curl -ksS https://127.0.0.1/apps/smoke/ | grep -q nasty-smoke-test-OK"
+    )
+    bare = machine.succeed("curl -ksS https://127.0.0.1/apps/smoke/")
+    print(f"=== /apps/smoke/ ===\n{bare}")
+    assert "nasty-smoke-test-OK" in bare, f"unexpected ingress body: {bare!r}"
+
+    subpath = machine.succeed("curl -ksS https://127.0.0.1/apps/smoke/index.html")
+    assert "nasty-smoke-test-OK" in subpath, (
+        f"path-strip regression — /apps/smoke/index.html didn't reach "
+        f"the container's /index.html: {subpath!r}"
     )
   '';
 }
