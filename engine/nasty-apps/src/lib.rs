@@ -711,6 +711,17 @@ pub struct ComposeBind {
 
 pub struct AppsService {
     docker: std::sync::Mutex<Option<Docker>>,
+    /// Previous-sample cache for `apps.stats`, keyed by container ID.
+    /// The Docker stats endpoint needs *two* samples to compute deltas
+    /// (CPU %, network rate, etc.); the natural API for that
+    /// (`one_shot: false`) makes Docker wait internally for a second
+    /// sample, taking 1-2 seconds per call. Instead we ask for a
+    /// single instant frame and remember the previous one here, so
+    /// every poll responds immediately and the delta math is done
+    /// locally.
+    prev_stats: tokio::sync::Mutex<
+        std::collections::HashMap<String, bollard::models::ContainerStatsResponse>,
+    >,
 }
 
 impl Default for AppsService {
@@ -731,6 +742,7 @@ impl AppsService {
         }
         Self {
             docker: std::sync::Mutex::new(docker),
+            prev_stats: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -1317,9 +1329,18 @@ impl AppsService {
 
         // Concurrent fan-out — each per-container call is independent.
         // join_all preserves order so we can zip back to app_name below.
+        //
+        // `one_shot: true` makes Docker emit a single frame *instantly*
+        // with raw cumulative counters. The natural API (`one_shot:
+        // false`) would have Docker wait internally for a second sample
+        // to populate `precpu_stats` so deltas could be computed —
+        // exactly the 1-2 s per call that made the WebUI's 2 s poll
+        // back-to-back saturate, and made the engine look like it was
+        // hung. We do the delta math ourselves by remembering the
+        // previous frame per container (`prev_stats`).
         let stats_opts = StatsOptions {
             stream: false,
-            one_shot: false,
+            one_shot: true,
         };
         let frames = futures_util::future::join_all(targets.iter().map(|(id, _)| {
             let docker = docker.clone();
@@ -1333,9 +1354,25 @@ impl AppsService {
         }))
         .await;
 
+        // Splice in the cached previous frame's CPU counters so
+        // `accumulate_stats` can compute the cpu_delta the same way it
+        // always did. Then update the cache with the current frame for
+        // next poll. On the first call after install there's no previous
+        // frame and CPU % shows as 0 — same behaviour as the second
+        // sample with `one_shot: false`.
+        let mut prev_map = self.prev_stats.lock().await;
         let mut by_app: HashMap<String, AppStats> = HashMap::new();
-        for ((_, app_name), frame) in targets.iter().zip(frames) {
-            let Some(Ok(frame)) = frame else { continue };
+        for ((container_id, app_name), frame) in targets.iter().zip(frames) {
+            let Some(Ok(mut frame)) = frame else { continue };
+            if let Some(prev) = prev_map.get(container_id)
+                && let Some(prev_cpu) = prev.cpu_stats.as_ref()
+            {
+                // `precpu_stats` from the one_shot frame is zero; replace
+                // it with the previous frame's cpu_stats so the
+                // (cpu_delta / sys_delta) calculation has real numbers
+                // to subtract from.
+                frame.precpu_stats = Some(prev_cpu.clone());
+            }
             let entry = by_app.entry(app_name.clone()).or_insert_with(|| AppStats {
                 name: app_name.clone(),
                 cpu_percent: 0.0,
@@ -1347,7 +1384,16 @@ impl AppsService {
                 block_write_bytes: 0,
             });
             accumulate_stats(entry, &frame);
+            prev_map.insert(container_id.clone(), frame);
         }
+
+        // Garbage-collect cache entries for containers that are no
+        // longer in the running set, so the map doesn't grow forever
+        // across the lifetime of the engine as apps come and go.
+        let current_ids: std::collections::HashSet<&str> =
+            targets.iter().map(|(id, _)| id.as_str()).collect();
+        prev_map.retain(|id, _| current_ids.contains(id.as_str()));
+        drop(prev_map);
 
         let mut out: Vec<AppStats> = by_app.into_values().collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
