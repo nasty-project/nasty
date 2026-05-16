@@ -106,3 +106,138 @@ export function stripInterfaces(
 	const drop = new Set(names);
 	return (network.interfaces ?? []).filter((i) => !drop.has(i.name));
 }
+
+// ── Address validation ────────────────────────────────────────
+//
+// Rejects the common mistakes (missing prefix, typoed octet, garbage)
+// before the form is sent to the engine so the user gets an inline
+// hint instead of a server-side error toast — discussion #159 had a
+// real instance where the user forgot the `/24` and only saw the
+// failure after submit. The engine still validates everything via
+// NetworkManager, so these helpers are belt-not-suspenders: catch the
+// obvious mistakes early, defer the obscure ones to NM.
+
+function validIpv4Octets(addr: string): boolean {
+	const parts = addr.split('.');
+	if (parts.length !== 4) return false;
+	for (const p of parts) {
+		if (!/^\d{1,3}$/.test(p)) return false;
+		// Reject leading zeros (e.g. "192.168.001.1") — both ambiguous
+		// (some libs treat them as octal) and a strong typo signal.
+		if (p.length > 1 && p.startsWith('0')) return false;
+		const n = parseInt(p, 10);
+		if (n < 0 || n > 255) return false;
+	}
+	return true;
+}
+
+function validIpv6Body(addr: string): boolean {
+	// At most one '::' compression.
+	const dcolon = (addr.match(/::/g) ?? []).length;
+	if (dcolon > 1) return false;
+	// Reject lone ':' or trailing ':' that isn't part of '::'.
+	if (addr === '') return false;
+	if (addr.startsWith(':') && !addr.startsWith('::')) return false;
+	if (addr.endsWith(':') && !addr.endsWith('::')) return false;
+
+	if (dcolon === 1) {
+		// "a::b" — each side is 0..7 groups, total ≤ 7 (the '::'
+		// itself stands in for at least one zero group).
+		const [left, right] = addr.split('::');
+		const leftGroups = left === '' ? [] : left.split(':');
+		const rightGroups = right === '' ? [] : right.split(':');
+		if (leftGroups.length + rightGroups.length > 7) return false;
+		return [...leftGroups, ...rightGroups].every(validIpv6Group);
+	}
+	// No compression: must be exactly 8 groups.
+	const groups = addr.split(':');
+	if (groups.length !== 8) return false;
+	return groups.every(validIpv6Group);
+}
+
+function validIpv6Group(g: string): boolean {
+	return /^[0-9a-fA-F]{1,4}$/.test(g);
+}
+
+/** Validate an IPv4 address with a CIDR prefix (e.g. "192.168.1.10/24"). */
+export function validateIpv4Cidr(s: string): string | null {
+	const value = s.trim();
+	if (!value) return null; // empty = caller decides whether required
+	const slash = value.indexOf('/');
+	if (slash < 0) {
+		return 'Missing CIDR prefix — try "192.168.1.10/24"';
+	}
+	const addr = value.slice(0, slash);
+	const prefix = value.slice(slash + 1);
+	if (!validIpv4Octets(addr)) {
+		return 'Not a valid IPv4 address';
+	}
+	if (!/^\d{1,2}$/.test(prefix)) {
+		return 'CIDR prefix must be a number 0-32';
+	}
+	const p = parseInt(prefix, 10);
+	if (p < 0 || p > 32) {
+		return 'CIDR prefix out of range (0-32)';
+	}
+	return null;
+}
+
+/** Validate an IPv6 address with a CIDR prefix (e.g. "fd00::1/64"). */
+export function validateIpv6Cidr(s: string): string | null {
+	const value = s.trim();
+	if (!value) return null;
+	const slash = value.indexOf('/');
+	if (slash < 0) {
+		return 'Missing CIDR prefix — try "fd00::1/64"';
+	}
+	const addr = value.slice(0, slash);
+	const prefix = value.slice(slash + 1);
+	if (!validIpv6Body(addr)) {
+		return 'Not a valid IPv6 address';
+	}
+	if (!/^\d{1,3}$/.test(prefix)) {
+		return 'CIDR prefix must be a number 0-128';
+	}
+	const p = parseInt(prefix, 10);
+	if (p < 0 || p > 128) {
+		return 'CIDR prefix out of range (0-128)';
+	}
+	return null;
+}
+
+/** Validate a bare IPv4 address (no CIDR). Used for gateway + DNS. */
+export function validateIpv4Address(s: string): string | null {
+	const value = s.trim();
+	if (!value) return null;
+	if (value.includes('/')) {
+		return 'Plain address only — no CIDR prefix here';
+	}
+	if (!validIpv4Octets(value)) {
+		return 'Not a valid IPv4 address';
+	}
+	return null;
+}
+
+/** Validate a bare IPv6 address (no CIDR). Used for v6 gateway. */
+export function validateIpv6Address(s: string): string | null {
+	const value = s.trim();
+	if (!value) return null;
+	if (value.includes('/')) {
+		return 'Plain address only — no CIDR prefix here';
+	}
+	if (!validIpv6Body(value)) {
+		return 'Not a valid IPv6 address';
+	}
+	return null;
+}
+
+/** Validate a DNS server entry: bare v4 or v6 address. */
+export function validateDnsServer(s: string): string | null {
+	const value = s.trim();
+	if (!value) return null;
+	// IPv6 typically contains ':', IPv4 has dots and no colons.
+	if (value.includes(':')) {
+		return validateIpv6Address(value);
+	}
+	return validateIpv4Address(value);
+}

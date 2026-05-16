@@ -4,7 +4,14 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
 	import { tempUnit } from '$lib/temperature.svelte';
-	import { promoteOrphanedMembers } from '$lib/network';
+	import {
+		promoteOrphanedMembers,
+		validateDnsServer,
+		validateIpv4Address,
+		validateIpv4Cidr,
+		validateIpv6Address,
+		validateIpv6Cidr,
+	} from '$lib/network';
 	import { confirm } from '$lib/confirm.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import type { Settings, SystemInfo, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NetIfStats, IpConfig, InterfaceConfig } from '$lib/types';
@@ -40,7 +47,7 @@
 	let netIpv4Addrs: string[] = $state(['']);
 	let netIpv6Addrs: string[] = $state(['']);
 	// IPv6 form
-	let netIpv6Method: 'slaac' | 'static' | 'dhcp' | 'disabled' = $state('slaac');
+	let netIpv6Method = $state<'slaac' | 'static' | 'dhcp' | 'disabled'>('slaac');
 	let netIpv6Gateway = $state('');
 	// MTU on inline interface form (string so an empty value means "unset")
 	let netMtu = $state('');
@@ -79,6 +86,34 @@
 	let netGateway = $state('');
 	let netNameservers = $state('');
 	let netChanged = $state(false);
+
+	// Per-input validation. Each entry is null when the field is OK
+	// (empty or correctly formed) or a short, fixable error message
+	// when not. Computed reactively so the inline hints update as the
+	// user types. The Save button stays disabled while any field is in
+	// error — mirrors the engine-side validation NM does, but locally
+	// so the user gets a hint *before* submit (discussion #159).
+	const netIpv4AddrErrors = $derived(netIpv4Addrs.map(validateIpv4Cidr));
+	const netGatewayError = $derived(netDhcp ? null : validateIpv4Address(netGateway));
+	const netIpv6AddrErrors = $derived(netIpv6Addrs.map(validateIpv6Cidr));
+	const netIpv6GatewayError = $derived(
+		netIpv6Method === 'static' ? validateIpv6Address(netIpv6Gateway) : null,
+	);
+	const netNameserversErrors = $derived(
+		netNameservers
+			.split(/[,\s]+/)
+			.map((s) => s.trim())
+			.filter(Boolean)
+			.map((s) => ({ value: s, err: validateDnsServer(s) }))
+			.filter((entry) => entry.err !== null),
+	);
+	const netHasErrors = $derived(
+		netIpv4AddrErrors.some((e) => e !== null) ||
+			netGatewayError !== null ||
+			netIpv6AddrErrors.some((e) => e !== null) ||
+			netIpv6GatewayError !== null ||
+			netNameserversErrors.length > 0,
+	);
 
 	// Log level
 	let logFilter = $state('');
@@ -860,10 +895,20 @@
 										{#if !netDhcp}
 											<div class="space-y-1">
 												{#each netIpv4Addrs as addr, i}
-													<div class="flex items-center gap-2">
-														<input bind:value={netIpv4Addrs[i]} placeholder="192.168.1.100/24" oninput={() => netChanged = true} class="flex-1 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
-														{#if netIpv4Addrs.length > 1}
-															<button onclick={() => { netIpv4Addrs = netIpv4Addrs.filter((_, j) => j !== i); netChanged = true; }} class="text-xs text-muted-foreground hover:text-foreground">x</button>
+													<div>
+														<div class="flex items-center gap-2">
+															<input
+																bind:value={netIpv4Addrs[i]}
+																placeholder="192.168.1.100/24"
+																oninput={() => netChanged = true}
+																class="flex-1 rounded-md border bg-background px-2 py-1 font-mono text-sm {netIpv4AddrErrors[i] ? 'border-destructive' : 'border-input'}"
+															/>
+															{#if netIpv4Addrs.length > 1}
+																<button onclick={() => { netIpv4Addrs = netIpv4Addrs.filter((_, j) => j !== i); netChanged = true; }} class="text-xs text-muted-foreground hover:text-foreground">x</button>
+															{/if}
+														</div>
+														{#if netIpv4AddrErrors[i]}
+															<p class="mt-0.5 text-xs text-destructive">{netIpv4AddrErrors[i]}</p>
 														{/if}
 													</div>
 												{/each}
@@ -871,7 +916,16 @@
 											</div>
 											<div class="mt-2">
 												<label for="net-gateway" class="text-xs text-muted-foreground">Gateway</label>
-												<input id="net-gateway" bind:value={netGateway} placeholder="192.168.1.1" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+												<input
+													id="net-gateway"
+													bind:value={netGateway}
+													placeholder="192.168.1.1"
+													oninput={() => netChanged = true}
+													class="mt-1 w-full rounded-md border bg-background px-2 py-1 font-mono text-sm {netGatewayError ? 'border-destructive' : 'border-input'}"
+												/>
+												{#if netGatewayError}
+													<p class="mt-0.5 text-xs text-destructive">{netGatewayError}</p>
+												{/if}
 											</div>
 										{/if}
 									</div>
@@ -889,10 +943,20 @@
 										{#if netIpv6Method === 'static'}
 											<div class="space-y-1">
 												{#each netIpv6Addrs as addr, i}
-													<div class="flex items-center gap-2">
-														<input bind:value={netIpv6Addrs[i]} placeholder="fd00::1/64" oninput={() => netChanged = true} class="flex-1 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
-														{#if netIpv6Addrs.length > 1}
-															<button onclick={() => { netIpv6Addrs = netIpv6Addrs.filter((_, j) => j !== i); netChanged = true; }} class="text-xs text-muted-foreground hover:text-foreground">x</button>
+													<div>
+														<div class="flex items-center gap-2">
+															<input
+																bind:value={netIpv6Addrs[i]}
+																placeholder="fd00::1/64"
+																oninput={() => netChanged = true}
+																class="flex-1 rounded-md border bg-background px-2 py-1 font-mono text-sm {netIpv6AddrErrors[i] ? 'border-destructive' : 'border-input'}"
+															/>
+															{#if netIpv6Addrs.length > 1}
+																<button onclick={() => { netIpv6Addrs = netIpv6Addrs.filter((_, j) => j !== i); netChanged = true; }} class="text-xs text-muted-foreground hover:text-foreground">x</button>
+															{/if}
+														</div>
+														{#if netIpv6AddrErrors[i]}
+															<p class="mt-0.5 text-xs text-destructive">{netIpv6AddrErrors[i]}</p>
 														{/if}
 													</div>
 												{/each}
@@ -900,7 +964,16 @@
 											</div>
 											<div class="mt-2">
 												<label for="net-ipv6-gw" class="text-xs text-muted-foreground">Gateway</label>
-												<input id="net-ipv6-gw" bind:value={netIpv6Gateway} placeholder="fd00::1" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+												<input
+													id="net-ipv6-gw"
+													bind:value={netIpv6Gateway}
+													placeholder="fd00::1"
+													oninput={() => netChanged = true}
+													class="mt-1 w-full rounded-md border bg-background px-2 py-1 font-mono text-sm {netIpv6GatewayError ? 'border-destructive' : 'border-input'}"
+												/>
+												{#if netIpv6GatewayError}
+													<p class="mt-0.5 text-xs text-destructive">{netIpv6GatewayError}</p>
+												{/if}
 											</div>
 										{/if}
 									</div>
@@ -915,16 +988,30 @@
 									<!-- DNS -->
 									<div>
 										<label for="net-dns" class="text-xs text-muted-foreground">DNS Servers</label>
-										<input id="net-dns" bind:value={netNameservers} placeholder="1.1.1.1, 8.8.8.8" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />
+										<input
+											id="net-dns"
+											bind:value={netNameservers}
+											placeholder="1.1.1.1, 8.8.8.8"
+											oninput={() => netChanged = true}
+											class="mt-1 w-full rounded-md border bg-background px-2 py-1 font-mono text-sm {netNameserversErrors.length > 0 ? 'border-destructive' : 'border-input'}"
+										/>
+										{#if netNameserversErrors.length > 0}
+											<p class="mt-0.5 text-xs text-destructive">
+												{netNameserversErrors[0].err} ({netNameserversErrors[0].value})
+											</p>
+										{/if}
 									</div>
 
 									{#if netChanged && !netDhcp}
 										<p class="text-xs text-amber-500">Changing the IP will move your connection to the new address.</p>
 									{/if}
 
-									<Button size="sm" onclick={saveInterfaceConfig} disabled={savingNetwork || !netChanged}>
+									<Button size="sm" onclick={saveInterfaceConfig} disabled={savingNetwork || !netChanged || netHasErrors}>
 										{savingNetwork ? 'Applying\u2026' : 'Apply'}
 									</Button>
+									{#if netChanged && netHasErrors}
+										<p class="text-xs text-destructive">Fix the highlighted fields before applying.</p>
+									{/if}
 								</div>
 							{/if}
 						</div>
