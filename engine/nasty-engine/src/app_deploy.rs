@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::AppState;
 
@@ -101,6 +101,25 @@ impl DeployMessage {
     }
 }
 
+/// Send an error message to the deploy websocket AND log it on the engine.
+///
+/// The websocket-send is best-effort (`let _`) — by the time we report an
+/// error the client may have already navigated away — but the journal
+/// always gets the line so an "it failed and I don't know why" report can
+/// always be diagnosed without re-running. `app` is the deploy name (or
+/// "<unknown>" for the pre-request errors) and `stage` is a short tag
+/// like "pull" or "install" that helps grep across deploy attempts.
+///
+/// This exists because the pre-rule version of this file silently
+/// swallowed install errors when the WS happened to close first — exactly
+/// the failure mode CONTRIBUTING.md's logging rule is meant to prevent.
+async fn report_error(socket: &mut WebSocket, app: &str, stage: &str, msg: &str) {
+    warn!("deploy '{app}' {stage} failed: {msg}");
+    let _ = socket
+        .send(Message::Text(DeployMessage::error(msg).into()))
+        .await;
+}
+
 async fn handle_deploy(
     mut socket: WebSocket,
     state: Arc<AppState>,
@@ -113,11 +132,13 @@ async fn handle_deploy(
         Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
             Ok(r) => r,
             Err(e) => {
-                let _ = socket
-                    .send(Message::Text(
-                        DeployMessage::error(&format!("invalid request: {e}")).into(),
-                    ))
-                    .await;
+                report_error(
+                    &mut socket,
+                    "<unknown>",
+                    "parse-request",
+                    &format!("invalid request: {e}"),
+                )
+                .await;
                 return;
             }
         },
@@ -127,11 +148,7 @@ async fn handle_deploy(
     let token = match pre_auth_token.or_else(|| req.token.clone()) {
         Some(t) => t,
         None => {
-            let _ = socket
-                .send(Message::Text(
-                    DeployMessage::error("missing session").into(),
-                ))
-                .await;
+            report_error(&mut socket, &req.name, "auth", "missing session").await;
             return;
         }
     };
@@ -147,17 +164,17 @@ async fn handle_deploy(
                 &client_ip,
                 &format!("role={:?}", s.role),
             );
-            let _ = socket
-                .send(Message::Text(
-                    DeployMessage::error("forbidden: admin role required").into(),
-                ))
-                .await;
+            report_error(
+                &mut socket,
+                &req.name,
+                "auth",
+                "forbidden: admin role required",
+            )
+            .await;
             return;
         }
         Err(_) => {
-            let _ = socket
-                .send(Message::Text(DeployMessage::error("invalid token").into()))
-                .await;
+            report_error(&mut socket, &req.name, "auth", "invalid token").await;
             return;
         }
     }
@@ -172,11 +189,7 @@ async fn handle_deploy(
         "compose" => deploy_compose(&mut socket, &state, &req).await,
         "pull" => deploy_pull(&mut socket, &state, &req).await,
         _ => {
-            let _ = socket
-                .send(Message::Text(
-                    DeployMessage::error("unknown deploy kind").into(),
-                ))
-                .await;
+            report_error(&mut socket, &req.name, "dispatch", "unknown deploy kind").await;
         }
     }
 }
@@ -185,9 +198,7 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
     let image = match &req.image {
         Some(img) => img.clone(),
         None => {
-            let _ = socket
-                .send(Message::Text(DeployMessage::error("missing image").into()))
-                .await;
+            report_error(socket, &req.name, "validate", "missing image").await;
             return;
         }
     };
@@ -200,11 +211,7 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
         .await;
 
     if let Err(e) = pull_image_with_progress(socket, state, &image).await {
-        let _ = socket
-            .send(Message::Text(
-                DeployMessage::error(&format!("pull failed: {e}")).into(),
-            ))
-            .await;
+        report_error(socket, &req.name, "pull", &format!("pull failed: {e}")).await;
         return;
     }
 
@@ -225,11 +232,13 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
     let mut params: nasty_apps::InstallAppRequest = match serde_json::from_value(install_params) {
         Ok(p) => p,
         Err(e) => {
-            let _ = socket
-                .send(Message::Text(
-                    DeployMessage::error(&format!("invalid params: {e}")).into(),
-                ))
-                .await;
+            report_error(
+                socket,
+                &req.name,
+                "parse-params",
+                &format!("invalid params: {e}"),
+            )
+            .await;
             return;
         }
     };
@@ -265,9 +274,7 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
                 .await;
         }
         Err(e) => {
-            let _ = socket
-                .send(Message::Text(DeployMessage::error(&e.to_string()).into()))
-                .await;
+            report_error(socket, &req.name, "install", &e.to_string()).await;
         }
     }
 }
@@ -276,11 +283,7 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
     let compose_content = match &req.compose_file {
         Some(c) => c.clone(),
         None => {
-            let _ = socket
-                .send(Message::Text(
-                    DeployMessage::error("missing compose_file").into(),
-                ))
-                .await;
+            report_error(socket, &req.name, "validate", "missing compose_file").await;
             return;
         }
     };
@@ -291,11 +294,13 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
     // secret on the host. allow_unsafe relaxes most checks but never permits
     // bind-mounting the engine's state dir or the host root.
     if let Err(e) = validate_compose(&compose_content, &req.name, req.allow_unsafe) {
-        let _ = socket
-            .send(Message::Text(
-                DeployMessage::error(&format!("compose rejected: {e}")).into(),
-            ))
-            .await;
+        report_error(
+            socket,
+            &req.name,
+            "validate",
+            &format!("compose rejected: {e}"),
+        )
+        .await;
         return;
     }
 
@@ -324,29 +329,35 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
 
     // Write compose file
     if let Err(e) = tokio::fs::create_dir_all(&compose_dir).await {
-        let _ = socket
-            .send(Message::Text(
-                DeployMessage::error(&format!("failed to create dir: {e}")).into(),
-            ))
-            .await;
+        report_error(
+            socket,
+            &req.name,
+            "write-compose",
+            &format!("failed to create dir: {e}"),
+        )
+        .await;
         return;
     }
     if let Err(e) = tokio::fs::write(&compose_path, &compose_content).await {
-        let _ = socket
-            .send(Message::Text(
-                DeployMessage::error(&format!("failed to write compose file: {e}")).into(),
-            ))
-            .await;
+        report_error(
+            socket,
+            &req.name,
+            "write-compose",
+            &format!("failed to write compose file: {e}"),
+        )
+        .await;
         return;
     }
     // Persist the unsafe flag next to the compose file so list/get can surface
     // it. Marker is the presence of `allow_unsafe: true` in the JSON file.
     if let Err(e) = write_app_meta(&compose_dir, req.allow_unsafe).await {
-        let _ = socket
-            .send(Message::Text(
-                DeployMessage::error(&format!("failed to write app meta: {e}")).into(),
-            ))
-            .await;
+        report_error(
+            socket,
+            &req.name,
+            "write-meta",
+            &format!("failed to write app meta: {e}"),
+        )
+        .await;
         return;
     }
 
@@ -376,11 +387,13 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
         if !is_update {
             let _ = tokio::fs::remove_dir_all(&compose_dir).await;
         }
-        let _ = socket
-            .send(Message::Text(
-                DeployMessage::error(&format!("invalid compose file: {e}")).into(),
-            ))
-            .await;
+        report_error(
+            socket,
+            &req.name,
+            "validate-compose",
+            &format!("invalid compose file: {e}"),
+        )
+        .await;
         return;
     }
 
@@ -408,11 +421,13 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
                 if !is_update {
                     let _ = tokio::fs::remove_dir_all(&compose_dir).await;
                 }
-                let _ = socket
-                    .send(Message::Text(
-                        DeployMessage::error(&format!("pull failed for {image}: {e}")).into(),
-                    ))
-                    .await;
+                report_error(
+                    socket,
+                    &req.name,
+                    "pull",
+                    &format!("pull failed for {image}: {e}"),
+                )
+                .await;
                 return;
             }
         }
@@ -465,11 +480,13 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
         if !is_update {
             let _ = tokio::fs::remove_dir_all(&compose_dir).await;
         }
-        let _ = socket
-            .send(Message::Text(
-                DeployMessage::error(&format!("deploy failed: {e}")).into(),
-            ))
-            .await;
+        report_error(
+            socket,
+            &req.name,
+            "compose-up",
+            &format!("deploy failed: {e}"),
+        )
+        .await;
         return;
     }
 
@@ -520,11 +537,13 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
         let compose_content = match tokio::fs::read_to_string(&compose_path).await {
             Ok(c) => c,
             Err(e) => {
-                let _ = socket
-                    .send(Message::Text(
-                        DeployMessage::error(&format!("read compose file: {e}")).into(),
-                    ))
-                    .await;
+                report_error(
+                    socket,
+                    &req.name,
+                    "read-compose",
+                    &format!("read compose file: {e}"),
+                )
+                .await;
                 return;
             }
         };
@@ -535,11 +554,13 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
                 ))
                 .await;
             if let Err(e) = pull_image_with_progress(socket, state, &image).await {
-                let _ = socket
-                    .send(Message::Text(
-                        DeployMessage::error(&format!("pull failed for {image}: {e}")).into(),
-                    ))
-                    .await;
+                report_error(
+                    socket,
+                    &req.name,
+                    "pull",
+                    &format!("pull failed for {image}: {e}"),
+                )
+                .await;
                 return;
             }
         }
@@ -566,11 +587,13 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
         )
         .await
         {
-            let _ = socket
-                .send(Message::Text(
-                    DeployMessage::error(&format!("recreate failed: {e}")).into(),
-                ))
-                .await;
+            report_error(
+                socket,
+                &req.name,
+                "compose-recreate",
+                &format!("recreate failed: {e}"),
+            )
+            .await;
             return;
         }
     } else {
@@ -582,9 +605,7 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
                 match state.apps.get_config(&req.name).await {
                     Ok(config) => config.image,
                     Err(e) => {
-                        let _ = socket
-                            .send(Message::Text(DeployMessage::error(&e.to_string()).into()))
-                            .await;
+                        report_error(socket, &req.name, "get-config", &e.to_string()).await;
                         return;
                     }
                 }
@@ -597,11 +618,7 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
             ))
             .await;
         if let Err(e) = pull_image_with_progress(socket, state, &image).await {
-            let _ = socket
-                .send(Message::Text(
-                    DeployMessage::error(&format!("pull failed: {e}")).into(),
-                ))
-                .await;
+            report_error(socket, &req.name, "pull", &format!("pull failed: {e}")).await;
             return;
         }
 
@@ -614,9 +631,7 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
         match state.apps.pull(&req.name).await {
             Ok(_) => {}
             Err(e) => {
-                let _ = socket
-                    .send(Message::Text(DeployMessage::error(&e.to_string()).into()))
-                    .await;
+                report_error(socket, &req.name, "recreate", &e.to_string()).await;
                 return;
             }
         }

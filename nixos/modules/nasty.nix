@@ -88,7 +88,7 @@ in {
 
       logLevel = mkOption {
         type = types.str;
-        default = "nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,tower_http=info";
+        default = "nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,nasty_apps=info,tower_http=info";
         description = "RUST_LOG filter for engine";
       };
     };
