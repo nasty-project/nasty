@@ -274,11 +274,25 @@
 	}));
 
 	let reconnecting = $state(false);
+	// Debounce timer for the reconnect overlay. WebSocket disconnects of
+	// well under a second happen routinely (page navigations, NixOS
+	// activations restarting the engine in ~2s, transient network blips
+	// behind a Caddy reverse_proxy, etc.) and the WS auto-reconnects fast
+	// enough that flashing the full-screen overlay just makes the UI feel
+	// flaky. Only show the overlay if the disconnect persists past this
+	// threshold; if reconnect happens first we cancel the pending state-
+	// change and the user sees nothing.
+	let reconnectingTimer: ReturnType<typeof setTimeout> | null = null;
+	const RECONNECT_OVERLAY_DELAY_MS = 800;
 
 	onMount(() => {
 		tryConnect();
 		const onReconnect = async () => {
 			powering = false;
+			if (reconnectingTimer) {
+				clearTimeout(reconnectingTimer);
+				reconnectingTimer = null;
+			}
 			reconnecting = false;
 			// Check if engine was updated while we were disconnected.
 			// If the commit changed, the WebUI bundle likely changed too — force reload.
@@ -299,7 +313,13 @@
 			// user hits cmd+R.
 			sysInfoRefresh.trigger();
 		};
-		const onDisconnect = () => { reconnecting = true; };
+		const onDisconnect = () => {
+			if (reconnectingTimer) clearTimeout(reconnectingTimer);
+			reconnectingTimer = setTimeout(() => {
+				reconnecting = true;
+				reconnectingTimer = null;
+			}, RECONNECT_OVERLAY_DELAY_MS);
+		};
 		getClient().onReconnect(onReconnect);
 		getClient().onDisconnect(onDisconnect);
 		const tick = setInterval(() => { now = new Date(); }, 1000);
@@ -308,6 +328,7 @@
 		const sshPoll = setInterval(checkSshStatus, 30_000);
 		const backupPoll = setInterval(checkConfigBackup, 30_000);
 		return () => {
+			if (reconnectingTimer) clearTimeout(reconnectingTimer);
 			getClient().offReconnect(onReconnect);
 			getClient().offDisconnect(onDisconnect);
 			getClient().disconnect();
