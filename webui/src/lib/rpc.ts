@@ -28,6 +28,14 @@ export class NastyClient {
 	private reconnectHandlers: (() => void)[] = [];
 	private disconnectHandlers: (() => void)[] = [];
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Exponential reconnect delay — doubles on each failed attempt up to a
+	 *  cap, resets to the floor on a successful auth. The previous version
+	 *  used a fixed 3 s delay, which during a longer outage produced 20
+	 *  attempts per minute — friendlier to spam the server slower and
+	 *  faster to reconnect from a transient blip. */
+	private reconnectDelayMs = 1000;
+	private static readonly RECONNECT_DELAY_FLOOR_MS = 1000;
+	private static readonly RECONNECT_DELAY_CEIL_MS = 30_000;
 	private _authenticated = false;
 	/** Set to true after the first successful auth; cleared by disconnect(). */
 	private _shouldReconnect = false;
@@ -67,6 +75,9 @@ export class NastyClient {
 						const wasReconnect = this._shouldReconnect;
 						this._authenticated = true;
 						this._shouldReconnect = true;
+						// Successful connect — reset the backoff so the next
+						// disconnect retries quickly.
+						this.reconnectDelayMs = NastyClient.RECONNECT_DELAY_FLOOR_MS;
 						this._readyResolve?.();
 						this._readyResolve = null;
 						if (wasReconnect) {
@@ -160,10 +171,20 @@ export class NastyClient {
 		});
 	}
 
-	/** Schedule a reconnection attempt. Deduplicates to avoid multiple timers. */
+	/** Schedule a reconnection attempt. Deduplicates to avoid multiple timers.
+	 *  Uses an exponential backoff: starts at RECONNECT_DELAY_FLOOR_MS, doubles
+	 *  on each failed attempt up to RECONNECT_DELAY_CEIL_MS, and resets to the
+	 *  floor on a successful reconnect (see onmessage). Faster reconnect from
+	 *  transient blips than the old fixed 3 s, and friendlier to the server
+	 *  during a longer outage (a stuck client used to spam ~20 attempts/min). */
 	private _scheduleReconnect() {
 		if (this.reconnectTimer) return; // already scheduled
 		this._readyPromise = new Promise((res) => { this._readyResolve = res; });
+		const delay = this.reconnectDelayMs;
+		this.reconnectDelayMs = Math.min(
+			this.reconnectDelayMs * 2,
+			NastyClient.RECONNECT_DELAY_CEIL_MS,
+		);
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
 			this.connect().catch((err) => {
@@ -182,7 +203,7 @@ export class NastyClient {
 					this._scheduleReconnect();
 				}
 			});
-		}, 3000);
+		}, delay);
 	}
 
 	/** Enable with localStorage.setItem('nasty-debug', '1') then reload */

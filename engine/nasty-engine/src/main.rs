@@ -1855,18 +1855,44 @@ async fn handle_socket(
     let mut event_rx = state.events.subscribe();
     let (mut writer, mut reader) = socket.split();
 
+    // Server-initiated WebSocket-level keepalive. Without this, a client
+    // that vanishes silently (laptop suspended, NAT mapping dropped,
+    // upstream link cut) stays in the engine's WS-task list until the
+    // OS's TCP retransmit timeouts eventually unwind — minutes later.
+    // Pinging every 30 s and dropping the connection if we haven't seen
+    // any traffic in IDLE_TIMEOUT closes dead clients fast, frees their
+    // `event_rx` subscription, and matches what the WebUI client expects
+    // from a healthy proxy (Caddy holds the upgrade open as long as both
+    // ends are talking, so visible ping traffic is what keeps it alive
+    // through every intermediary).
+    const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+    let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
+    ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ping_ticker.tick().await; // skip the immediate first tick
+    let mut last_seen = std::time::Instant::now();
+
     loop {
         tokio::select! {
             msg = reader.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        last_seen = std::time::Instant::now();
                         let response = handle_rpc_request(&text, &state, &session).await;
                         if writer.send(Message::Text(response.into())).await.is_err() {
                             break;
                         }
                     }
+                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Ping(_))) => {
+                        // Axum's tungstenite layer auto-replies to Pings,
+                        // so we just record the heartbeat. Pongs from the
+                        // client confirm they're still listening.
+                        last_seen = std::time::Instant::now();
+                    }
                     Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                    _ => {
+                        last_seen = std::time::Instant::now();
+                    }
                 }
             }
             event = event_rx.recv() => {
@@ -1879,6 +1905,20 @@ async fn handle_socket(
                     if writer.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
+                }
+            }
+            _ = ping_ticker.tick() => {
+                if last_seen.elapsed() > IDLE_TIMEOUT {
+                    info!(
+                        "WebSocket client '{}' idle > {}s, closing",
+                        session.username,
+                        IDLE_TIMEOUT.as_secs()
+                    );
+                    let _ = writer.send(Message::Close(None)).await;
+                    break;
+                }
+                if writer.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
                 }
             }
         }
