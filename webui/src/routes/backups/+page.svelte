@@ -26,7 +26,7 @@
 	let newTargetType: 'local' | 's3' | 'sftp' | 'rest' | 'b2' = $state('local');
 	let newLocalPath = $state('');
 	let newS3Endpoint = $state(''); let newS3Region = $state(''); let newS3Bucket = $state(''); let newS3Key = $state(''); let newS3Secret = $state('');
-	let newSftpHost = $state(''); let newSftpUser = $state(''); let newSftpPath = $state('');
+	let newSftpHost = $state(''); let newSftpUser = $state(''); let newSftpPath = $state(''); let newSftpPort = $state('');
 	let newRestUrl = $state('');
 	let newB2Bucket = $state(''); let newB2Id = $state(''); let newB2Key = $state('');
 	let newPassword = $state('');
@@ -35,6 +35,7 @@
 	let newKeepDaily = $state('7');
 	let newKeepWeekly = $state('4');
 	let newKeepMonthly = $state('6');
+	let newKeepYearly = $state('2');
 
 	// Source picker data
 	let subvolumes: Subvolume[] = $state([]);
@@ -66,6 +67,7 @@
 		newSftpHost = '';
 		newSftpUser = '';
 		newSftpPath = '';
+		newSftpPort = '';
 		newRestUrl = '';
 		newB2Bucket = '';
 		newB2Id = '';
@@ -76,6 +78,7 @@
 		newKeepDaily = '7';
 		newKeepWeekly = '4';
 		newKeepMonthly = '6';
+		newKeepYearly = '2';
 		selectedSources = new Set();
 		schedulePreset = 'daily';
 	}
@@ -138,6 +141,7 @@
 	let editKeepDaily = $state('');
 	let editKeepWeekly = $state('');
 	let editKeepMonthly = $state('');
+	let editKeepYearly = $state('');
 
 	function startEdit(p: BackupProfile) {
 		editId = p.id;
@@ -149,6 +153,7 @@
 		editKeepDaily = (p.retention.keep_daily ?? '').toString();
 		editKeepWeekly = (p.retention.keep_weekly ?? '').toString();
 		editKeepMonthly = (p.retention.keep_monthly ?? '').toString();
+		editKeepYearly = (p.retention.keep_yearly ?? '').toString();
 	}
 
 	async function saveEdit() {
@@ -166,7 +171,7 @@
 				keep_daily: parseInt(editKeepDaily) || null,
 				keep_weekly: parseInt(editKeepWeekly) || null,
 				keep_monthly: parseInt(editKeepMonthly) || null,
-				keep_yearly: profile.retention.keep_yearly,
+				keep_yearly: parseInt(editKeepYearly) || null,
 			},
 		};
 		await withToast(
@@ -214,7 +219,7 @@
 	async function createProfile() {
 		const target = newTargetType === 'local' ? { type: 'local' as const, path: newLocalPath }
 			: newTargetType === 's3' ? { type: 's3' as const, endpoint: newS3Endpoint, region: newS3Region || undefined, bucket: newS3Bucket, access_key: newS3Key, secret_key: newS3Secret }
-			: newTargetType === 'sftp' ? { type: 'sftp' as const, host: newSftpHost, user: newSftpUser, path: newSftpPath }
+			: newTargetType === 'sftp' ? { type: 'sftp' as const, host: newSftpHost, user: newSftpUser, path: newSftpPath, port: parseInt(newSftpPort) || undefined }
 			: newTargetType === 'rest' ? { type: 'rest' as const, url: newRestUrl }
 			: { type: 'b2' as const, bucket: newB2Bucket, account_id: newB2Id, account_key: newB2Key };
 
@@ -230,7 +235,7 @@
 				keep_daily: parseInt(newKeepDaily) || null,
 				keep_weekly: parseInt(newKeepWeekly) || null,
 				keep_monthly: parseInt(newKeepMonthly) || null,
-				keep_yearly: null,
+				keep_yearly: parseInt(newKeepYearly) || null,
 			},
 			password: newPassword,
 			snapshot_before: true,
@@ -463,8 +468,9 @@
 						<div><Label for="bk-s3-sec">Secret Key</Label><Input id="bk-s3-sec" type="password" bind:value={newS3Secret} class="mt-1 font-mono" /></div>
 					</div>
 				{:else if newTargetType === 'sftp'}
-					<div class="grid grid-cols-3 gap-3">
+					<div class="grid grid-cols-4 gap-3">
 						<div><Label for="bk-sftp-h">Host</Label><Input id="bk-sftp-h" bind:value={newSftpHost} placeholder="backup.example.com" class="mt-1 font-mono" /></div>
+						<div><Label for="bk-sftp-port">Port</Label><Input id="bk-sftp-port" type="number" bind:value={newSftpPort} placeholder="22" class="mt-1 font-mono" /></div>
 						<div><Label for="bk-sftp-u">User</Label><Input id="bk-sftp-u" bind:value={newSftpUser} placeholder="backup" class="mt-1 font-mono" /></div>
 						<div><Label for="bk-sftp-p">Path</Label><Input id="bk-sftp-p" bind:value={newSftpPath} placeholder="/backups/nasty" class="mt-1 font-mono" /></div>
 					</div>
@@ -503,11 +509,12 @@
 
 				<div>
 					<Label>Retention</Label>
-					<div class="mt-1 grid grid-cols-4 gap-3">
+					<div class="mt-1 grid grid-cols-5 gap-3">
 						<div><label for="bk-kl" class="text-xs text-muted-foreground">Keep Last</label><Input id="bk-kl" type="number" bind:value={newKeepLast} class="mt-1" /></div>
 						<div><label for="bk-kd" class="text-xs text-muted-foreground">Keep Daily</label><Input id="bk-kd" type="number" bind:value={newKeepDaily} class="mt-1" /></div>
 						<div><label for="bk-kw" class="text-xs text-muted-foreground">Keep Weekly</label><Input id="bk-kw" type="number" bind:value={newKeepWeekly} class="mt-1" /></div>
 						<div><label for="bk-km" class="text-xs text-muted-foreground">Keep Monthly</label><Input id="bk-km" type="number" bind:value={newKeepMonthly} class="mt-1" /></div>
+						<div><label for="bk-ky" class="text-xs text-muted-foreground">Keep Yearly</label><Input id="bk-ky" type="number" bind:value={newKeepYearly} class="mt-1" /></div>
 					</div>
 				</div>
 
@@ -608,11 +615,12 @@
 								</div>
 								<div>
 									<Label>Retention</Label>
-									<div class="mt-1 grid grid-cols-4 gap-3">
+									<div class="mt-1 grid grid-cols-5 gap-3">
 										<div><label for="ed-kl" class="text-xs text-muted-foreground">Keep Last</label><Input id="ed-kl" type="number" bind:value={editKeepLast} class="mt-1" /></div>
 										<div><label for="ed-kd" class="text-xs text-muted-foreground">Keep Daily</label><Input id="ed-kd" type="number" bind:value={editKeepDaily} class="mt-1" /></div>
 										<div><label for="ed-kw" class="text-xs text-muted-foreground">Keep Weekly</label><Input id="ed-kw" type="number" bind:value={editKeepWeekly} class="mt-1" /></div>
 										<div><label for="ed-km" class="text-xs text-muted-foreground">Keep Monthly</label><Input id="ed-km" type="number" bind:value={editKeepMonthly} class="mt-1" /></div>
+										<div><label for="ed-ky" class="text-xs text-muted-foreground">Keep Yearly</label><Input id="ed-ky" type="number" bind:value={editKeepYearly} class="mt-1" /></div>
 									</div>
 								</div>
 								<div class="flex gap-2">
