@@ -25,7 +25,7 @@
 	let newSources = $state('');
 	let newTargetType: 'local' | 's3' | 'sftp' | 'rest' | 'b2' = $state('local');
 	let newLocalPath = $state('');
-	let newS3Endpoint = $state(''); let newS3Bucket = $state(''); let newS3Key = $state(''); let newS3Secret = $state('');
+	let newS3Endpoint = $state(''); let newS3Region = $state(''); let newS3Bucket = $state(''); let newS3Key = $state(''); let newS3Secret = $state('');
 	let newSftpHost = $state(''); let newSftpUser = $state(''); let newSftpPath = $state('');
 	let newRestUrl = $state('');
 	let newB2Bucket = $state(''); let newB2Id = $state(''); let newB2Key = $state('');
@@ -59,6 +59,7 @@
 		newTargetType = 'local';
 		newLocalPath = '';
 		newS3Endpoint = '';
+		newS3Region = '';
 		newS3Bucket = '';
 		newS3Key = '';
 		newS3Secret = '';
@@ -212,7 +213,7 @@
 
 	async function createProfile() {
 		const target = newTargetType === 'local' ? { type: 'local' as const, path: newLocalPath }
-			: newTargetType === 's3' ? { type: 's3' as const, endpoint: newS3Endpoint, bucket: newS3Bucket, access_key: newS3Key, secret_key: newS3Secret }
+			: newTargetType === 's3' ? { type: 's3' as const, endpoint: newS3Endpoint, region: newS3Region || undefined, bucket: newS3Bucket, access_key: newS3Key, secret_key: newS3Secret }
 			: newTargetType === 'sftp' ? { type: 'sftp' as const, host: newSftpHost, user: newSftpUser, path: newSftpPath }
 			: newTargetType === 'rest' ? { type: 'rest' as const, url: newRestUrl }
 			: { type: 'b2' as const, bucket: newB2Bucket, account_id: newB2Id, account_key: newB2Key };
@@ -456,6 +457,7 @@
 				{:else if newTargetType === 's3'}
 					<div class="grid grid-cols-2 gap-3">
 						<div><Label for="bk-s3-ep">Endpoint</Label><Input id="bk-s3-ep" bind:value={newS3Endpoint} placeholder="s3.amazonaws.com" class="mt-1 font-mono" /></div>
+						<div><Label for="bk-s3-rg">Region</Label><Input id="bk-s3-rg" bind:value={newS3Region} placeholder="us-east-1" class="mt-1 font-mono" /></div>
 						<div><Label for="bk-s3-bk">Bucket</Label><Input id="bk-s3-bk" bind:value={newS3Bucket} placeholder="my-backups" class="mt-1 font-mono" /></div>
 						<div><Label for="bk-s3-key">Access Key</Label><Input id="bk-s3-key" bind:value={newS3Key} class="mt-1 font-mono" /></div>
 						<div><Label for="bk-s3-sec">Secret Key</Label><Input id="bk-s3-sec" type="password" bind:value={newS3Secret} class="mt-1 font-mono" /></div>
