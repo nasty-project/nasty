@@ -1369,6 +1369,10 @@ in {
           handle /ws {
             reverse_proxy 127.0.0.1:${toString cfg.engine.port} {
               header_up X-Real-IP {remote_host}
+              transport http {
+                read_timeout 28800s
+                write_timeout 28800s
+              }
             }
           }
 
