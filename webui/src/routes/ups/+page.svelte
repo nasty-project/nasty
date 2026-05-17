@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { NutConfig, UpsStatus } from '$lib/types';
+	import type { NutConfig, NutMode, UpsStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 
 	const client = getClient();
@@ -11,10 +11,15 @@
 	let savingNut = $state(false);
 	let upsStatus: UpsStatus | null = $state(null);
 	let upsStatusInterval: ReturnType<typeof setInterval> | null = null;
+	let nutMode: NutMode = $state('local');
 	let nutDriver = $state('');
 	let nutPort = $state('');
 	let nutUpsName = $state('');
 	let nutDescription = $state('');
+	let nutRemoteHost = $state('');
+	let nutRemotePort = $state('3493');
+	let nutRemoteUsername = $state('');
+	let nutRemotePassword = $state('');
 	let nutShutdownPercent = $state('');
 	let nutShutdownSeconds = $state('');
 	let nutShutdownCommand = $state('');
@@ -30,10 +35,15 @@
 	async function loadNut() {
 		nutConfig = await client.call<NutConfig>('system.nut.config.get');
 		if (nutConfig) {
+			nutMode = nutConfig.mode;
 			nutDriver = nutConfig.driver;
 			nutPort = nutConfig.port;
 			nutUpsName = nutConfig.ups_name;
 			nutDescription = nutConfig.description;
+			nutRemoteHost = nutConfig.remote_host;
+			nutRemotePort = nutConfig.remote_port.toString();
+			nutRemoteUsername = nutConfig.remote_username;
+			nutRemotePassword = nutConfig.remote_password;
 			nutShutdownPercent = nutConfig.shutdown_on_battery_percent.toString();
 			nutShutdownSeconds = nutConfig.shutdown_on_battery_seconds.toString();
 			nutShutdownCommand = nutConfig.shutdown_command;
@@ -46,10 +56,15 @@
 		savingNut = true;
 		await withToast(
 			() => client.call('system.nut.config.update', {
+				mode: nutMode,
 				driver: nutDriver,
 				port: nutPort,
 				ups_name: nutUpsName,
-				description: nutDescription || undefined,
+				description: nutDescription,
+				remote_host: nutRemoteHost,
+				remote_port: parseInt(nutRemotePort) || 3493,
+				remote_username: nutRemoteUsername,
+				remote_password: nutRemotePassword,
 				shutdown_on_battery_percent: parseInt(nutShutdownPercent) || undefined,
 				shutdown_on_battery_seconds: parseInt(nutShutdownSeconds) || undefined,
 				shutdown_command: nutShutdownCommand || undefined,
@@ -188,38 +203,81 @@
 			{/if}
 
 			<section class="rounded-lg border border-border p-5">
-				<h3 class="mb-4 text-sm font-semibold">UPS Hardware</h3>
-				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-					<div>
-						<label for="nut-driver" class="mb-1 block text-xs text-muted-foreground">Driver</label>
-						<select id="nut-driver" bind:value={nutDriver}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm">
-							<option value="usbhid-ups">usbhid-ups (USB HID)</option>
-							<option value="blazer_usb">blazer_usb (Megatec/Q1 USB)</option>
-							<option value="nutdrv_qx">nutdrv_qx (Q* protocol USB)</option>
-							<option value="snmp-ups">snmp-ups (SNMP)</option>
-							<option value="apcsmart">apcsmart (APC Smart serial)</option>
-						</select>
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">NUT driver for your UPS hardware.</p>
-					</div>
-					<div>
-						<label for="nut-port" class="mb-1 block text-xs text-muted-foreground">Port</label>
-						<input id="nut-port" type="text" bind:value={nutPort}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">"auto" for USB, or a device path like /dev/ttyS0.</p>
-					</div>
-					<div>
-						<label for="nut-name" class="mb-1 block text-xs text-muted-foreground">UPS Name</label>
-						<input id="nut-name" type="text" bind:value={nutUpsName}
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-						<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Identifier for upsc (e.g. "ups").</p>
-					</div>
-					<div class="sm:col-span-2 lg:col-span-3">
-						<label for="nut-desc" class="mb-1 block text-xs text-muted-foreground">Description</label>
-						<input id="nut-desc" type="text" bind:value={nutDescription} placeholder="My UPS"
-							class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
-					</div>
+				<h3 class="mb-4 text-sm font-semibold">UPS Source</h3>
+				<div class="mb-4 inline-flex rounded-md border border-input bg-background p-0.5 text-sm">
+					<button type="button"
+						class="rounded px-3 py-1 {nutMode === 'local' ? 'bg-muted font-semibold' : 'text-muted-foreground'}"
+						onclick={() => nutMode = 'local'}>Local UPS</button>
+					<button type="button"
+						class="rounded px-3 py-1 {nutMode === 'remote' ? 'bg-muted font-semibold' : 'text-muted-foreground'}"
+						onclick={() => nutMode = 'remote'}>Remote NUT server</button>
 				</div>
+
+				{#if nutMode === 'local'}
+					<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+						<div>
+							<label for="nut-driver" class="mb-1 block text-xs text-muted-foreground">Driver</label>
+							<select id="nut-driver" bind:value={nutDriver}
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm">
+								<option value="usbhid-ups">usbhid-ups (USB HID)</option>
+								<option value="blazer_usb">blazer_usb (Megatec/Q1 USB)</option>
+								<option value="nutdrv_qx">nutdrv_qx (Q* protocol USB)</option>
+								<option value="snmp-ups">snmp-ups (SNMP)</option>
+								<option value="apcsmart">apcsmart (APC Smart serial)</option>
+							</select>
+							<p class="mt-0.5 text-[0.6rem] text-muted-foreground">NUT driver for your UPS hardware.</p>
+						</div>
+						<div>
+							<label for="nut-port" class="mb-1 block text-xs text-muted-foreground">Port</label>
+							<input id="nut-port" type="text" bind:value={nutPort}
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
+							<p class="mt-0.5 text-[0.6rem] text-muted-foreground">"auto" for USB, or a device path like /dev/ttyS0.</p>
+						</div>
+						<div>
+							<label for="nut-name" class="mb-1 block text-xs text-muted-foreground">UPS Name</label>
+							<input id="nut-name" type="text" bind:value={nutUpsName}
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+							<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Identifier for upsc (e.g. "ups").</p>
+						</div>
+						<div class="sm:col-span-2 lg:col-span-3">
+							<label for="nut-desc" class="mb-1 block text-xs text-muted-foreground">Description</label>
+							<input id="nut-desc" type="text" bind:value={nutDescription} placeholder="My UPS"
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						</div>
+					</div>
+				{:else}
+					<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+						<div class="sm:col-span-2">
+							<label for="nut-rhost" class="mb-1 block text-xs text-muted-foreground">Server host</label>
+							<input id="nut-rhost" type="text" bind:value={nutRemoteHost} placeholder="ups.lan or 10.0.0.5"
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
+							<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Hostname or IP of the existing NUT server (e.g. Ubiquiti UPS, Synology).</p>
+						</div>
+						<div>
+							<label for="nut-rport" class="mb-1 block text-xs text-muted-foreground">Port</label>
+							<input id="nut-rport" type="number" min="1" max="65535" bind:value={nutRemotePort}
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-mono" />
+							<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Default 3493.</p>
+						</div>
+						<div>
+							<label for="nut-rname" class="mb-1 block text-xs text-muted-foreground">UPS Name</label>
+							<input id="nut-rname" type="text" bind:value={nutUpsName}
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+							<p class="mt-0.5 text-[0.6rem] text-muted-foreground">Name the remote upsd uses for the UPS.</p>
+						</div>
+						<div>
+							<label for="nut-ruser" class="mb-1 block text-xs text-muted-foreground">Username</label>
+							<input id="nut-ruser" type="text" bind:value={nutRemoteUsername}
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+							<p class="mt-0.5 text-[0.6rem] text-muted-foreground">As configured in the remote upsd.users.</p>
+						</div>
+						<div>
+							<label for="nut-rpass" class="mb-1 block text-xs text-muted-foreground">Password</label>
+							<input id="nut-rpass" type="password" bind:value={nutRemotePassword}
+								class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" />
+						</div>
+					</div>
+				{/if}
 			</section>
 
 			<section class="rounded-lg border border-border p-5">

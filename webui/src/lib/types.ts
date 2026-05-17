@@ -562,11 +562,18 @@ export interface Settings {
 	telemetry_enabled: boolean;
 }
 
+export type NutMode = 'local' | 'remote';
+
 export interface NutConfig {
+	mode: NutMode;
 	driver: string;
 	port: string;
 	ups_name: string;
 	description: string;
+	remote_host: string;
+	remote_port: number;
+	remote_username: string;
+	remote_password: string;
 	shutdown_on_battery_percent: number;
 	shutdown_on_battery_seconds: number;
 	shutdown_command: string;
