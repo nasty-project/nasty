@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { beforeNavigate, afterNavigate } from '$app/navigation';
 	import { getClient, resetClient } from '$lib/client';
 	import { login as doLogin, logout as doLogout } from '$lib/auth';
 	import { error as showError, isBusy } from '$lib/toast.svelte';
@@ -286,40 +285,7 @@
 	let reconnectingTimer: ReturnType<typeof setTimeout> | null = null;
 	const RECONNECT_OVERLAY_DELAY_MS = 800;
 
-	// ── Debug instrumentation for WS-disconnect investigation ──
-	//
-	// PR #203 brought repeated `code=1001` (browser-initiated "going
-	// away") closes in the engine log, which only fires on a real page
-	// unload — i.e., a *hard* navigation, not a SvelteKit SPA nav. The
-	// sidebar uses plain `<a href>` which SvelteKit should intercept by
-	// default. Either the interception is silently failing OR something
-	// else is closing the WS and we're mis-reading the close code.
-	//
-	// These logs answer that empirically: open dev tools, navigate
-	// around, and the console tells you which path is firing. If
-	// `[nav] beforeNavigate` fires on a sidebar click → SPA nav works,
-	// 1001 must come from elsewhere. If it doesn't fire → SvelteKit
-	// isn't intercepting and we have a real layout-unmount bug.
-	//
-	// Will be removed once the root cause is found. Logged at the
-	// default level so users don't need to enable anything.
-	beforeNavigate((nav) => {
-		console.log('[nav] beforeNavigate', {
-			from: nav.from?.url?.pathname,
-			to: nav.to?.url?.pathname,
-			type: nav.type,
-		});
-	});
-	afterNavigate((nav) => {
-		console.log('[nav] afterNavigate', {
-			from: nav.from?.url?.pathname,
-			to: nav.to?.url?.pathname,
-			type: nav.type,
-		});
-	});
-
 	onMount(() => {
-		console.log('[layout] mounted', new Date().toISOString());
 		tryConnect();
 		const onReconnect = async () => {
 			powering = false;
@@ -362,7 +328,6 @@
 		const sshPoll = setInterval(checkSshStatus, 30_000);
 		const backupPoll = setInterval(checkConfigBackup, 30_000);
 		return () => {
-			console.log('[layout] destroying', new Date().toISOString());
 			if (reconnectingTimer) clearTimeout(reconnectingTimer);
 			getClient().offReconnect(onReconnect);
 			getClient().offDisconnect(onDisconnect);
