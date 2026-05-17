@@ -5,7 +5,7 @@
 	import { formatBytes } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { Filesystem, Subvolume, Snapshot, SubvolumeType, NfsShare, SmbShare, IscsiTarget, NvmeofSubsystem } from '$lib/types';
+	import type { Filesystem, Subvolume, Snapshot, SubvolumeType, NfsShare, SmbShare, IscsiTarget, NvmeofSubsystem, App, AppsStatus, VmStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -217,32 +217,44 @@
 		editingField = null;
 	}
 
-	// Shares linked to the detail subvolume
+	// Consumers linked to the detail subvolume
 	interface LinkedShares {
 		nfs: NfsShare[];
 		smb: SmbShare[];
 		iscsi: IscsiTarget[];
 		nvmeof: NvmeofSubsystem[];
+		apps: App[];
+		vms: VmStatus[];
 	}
-	let detailShares = $state<LinkedShares>({ nfs: [], smb: [], iscsi: [], nvmeof: [] });
-	// All shares loaded once at page level so the overview usage column and
-	// each detail panel can index them without re-fetching.
+	let detailShares = $state<LinkedShares>({ nfs: [], smb: [], iscsi: [], nvmeof: [], apps: [], vms: [] });
+	// All consumers loaded once at page level so the overview usage column
+	// and each detail panel can index them without re-fetching.  Shares,
+	// VMs and the apps roster + apps.storage_path all live here.
 	let allNfs: NfsShare[] = $state([]);
 	let allSmb: SmbShare[] = $state([]);
 	let allIscsi: IscsiTarget[] = $state([]);
 	let allNvmeof: NvmeofSubsystem[] = $state([]);
+	let allVms: VmStatus[] = $state([]);
+	let allApps: App[] = $state([]);
+	let appsStoragePath: string | null = $state(null);
 
 	async function loadShares() {
-		const [nfs, smb, iscsi, nvmeof] = await Promise.allSettled([
+		const [nfs, smb, iscsi, nvmeof, vms, appsList, appsStat] = await Promise.allSettled([
 			client.call<NfsShare[]>('share.nfs.list'),
 			client.call<SmbShare[]>('share.smb.list'),
 			client.call<IscsiTarget[]>('share.iscsi.list'),
 			client.call<NvmeofSubsystem[]>('share.nvmeof.list'),
+			client.call<VmStatus[]>('vm.list'),
+			client.call<App[]>('apps.list'),
+			client.call<AppsStatus>('apps.status'),
 		]);
 		allNfs = nfs.status === 'fulfilled' ? nfs.value : [];
 		allSmb = smb.status === 'fulfilled' ? smb.value : [];
 		allIscsi = iscsi.status === 'fulfilled' ? iscsi.value : [];
 		allNvmeof = nvmeof.status === 'fulfilled' ? nvmeof.value : [];
+		allVms = vms.status === 'fulfilled' ? vms.value : [];
+		allApps = appsList.status === 'fulfilled' ? appsList.value : [];
+		appsStoragePath = appsStat.status === 'fulfilled' ? (appsStat.value.storage_path ?? null) : null;
 	}
 
 	// Tree: find parent chain and children for the selected subvolume
@@ -280,7 +292,8 @@
 
 	const detailShareCount = $derived(
 		detailShares.nfs.length + detailShares.smb.length +
-		detailShares.iscsi.length + detailShares.nvmeof.length
+		detailShares.iscsi.length + detailShares.nvmeof.length +
+		detailShares.apps.length + detailShares.vms.length
 	);
 
 	function svKey(sv: { filesystem: string; name: string }): string {
@@ -299,7 +312,7 @@
 		detailTab = 'info';
 		detailSnapshots = [];
 		nestedSubvolumes = [];
-		detailShares = { nfs: [], smb: [], iscsi: [], nvmeof: [] };
+		detailShares = { nfs: [], smb: [], iscsi: [], nvmeof: [], apps: [], vms: [] };
 
 		// Snapshots and children are per-FS API calls; share lists are
 		// page-level state (loadShares) so we just index them here.
@@ -322,6 +335,12 @@
 				blockDev != null && t.luns.some(l => l.backstore_path === blockDev)),
 			nvmeof: allNvmeof.filter(sub =>
 				blockDev != null && sub.namespaces.some(ns => ns.device_path === blockDev)),
+			apps: appsStoragePath && pathIsUnder(appsStoragePath, svPath) ? allApps : [],
+			vms: allVms.filter(vm =>
+				vm.disks.some(d =>
+					(blockDev != null && d.path === blockDev) || pathIsUnder(d.path, svPath)
+				)
+			),
 		};
 
 		if (childrenResult.status === 'fulfilled') {
@@ -534,18 +553,41 @@
 
 	const mountedFilesystems = $derived(filesystems.filter(p => p.mounted));
 
-	// Per-subvolume usage tally: what shares / system flags reference it.
-	// Keyed by `fs|name`. Recomputed whenever subvolumes or shares change.
+	// Per-subvolume usage tally: what shares / apps / VMs reference it.
+	// Keyed by `fs|name`. Recomputed whenever subvolumes or consumers
+	// change.  `system` is the hint string from SYSTEM_SUBVOLUMES — only
+	// shown when there's no live consumer (otherwise the live count is
+	// the more useful signal).
 	interface SubvolumeUsage {
 		system: string | null;     // SYSTEM_SUBVOLUMES description, or null
 		nfs: number;
 		smb: number;
 		iscsi: number;
 		nvmeof: number;
+		apps: number;
+		vms: number;
 	}
 	const subvolumeUsage = $derived.by(() => {
 		const out = new Map<string, SubvolumeUsage>();
 		for (const sv of subvolumes) {
+			// Apps: the engine has one global apps.storage_path; if it
+			// lives inside this subvolume, all currently-deployed apps
+			// are consuming it.  Per-app bind-mount detection (apps that
+			// mount specific paths outside the default storage) is left
+			// as future work — needs per-app config inspection.
+			const appsHere = appsStoragePath && pathIsUnder(appsStoragePath, sv.path)
+				? allApps.length
+				: 0;
+
+			// VMs: block subvolumes hold raw disks (disk.path == block_device);
+			// filesystem subvolumes typically hold qcow2 files under sv.path.
+			const vmsHere = allVms.filter(vm =>
+				vm.disks.some(d =>
+					(sv.block_device != null && d.path === sv.block_device) ||
+					pathIsUnder(d.path, sv.path)
+				)
+			).length;
+
 			const usage: SubvolumeUsage = {
 				system: SYSTEM_SUBVOLUMES[sv.name] ?? null,
 				nfs: allNfs.filter(s => s.path === sv.path).length,
@@ -556,14 +598,23 @@
 				nvmeof: sv.block_device
 					? allNvmeof.filter(sub => sub.namespaces.some(ns => ns.device_path === sv.block_device)).length
 					: 0,
+				apps: appsHere,
+				vms: vmsHere,
 			};
 			out.set(svKey(sv), usage);
 		}
 		return out;
 	});
 
+	// True when `path` is either exactly `root` or sits below it
+	// (`root/...`).  Used to decide whether a consumer's mount point
+	// falls inside a given subvolume.
+	function pathIsUnder(path: string, root: string): boolean {
+		return path === root || path.startsWith(root.endsWith('/') ? root : root + '/');
+	}
+
 	function usageFor(sv: Subvolume): SubvolumeUsage {
-		return subvolumeUsage.get(svKey(sv)) ?? { system: null, nfs: 0, smb: 0, iscsi: 0, nvmeof: 0 };
+		return subvolumeUsage.get(svKey(sv)) ?? { system: null, nfs: 0, smb: 0, iscsi: 0, nvmeof: 0, apps: 0, vms: 0 };
 	}
 
 	// Pick a ceiling to scale the disk-usage bar against:
@@ -1001,8 +1052,11 @@
 						</td>
 						<td class="p-3">
 							<div class="flex flex-wrap gap-1">
-								{#if usage.system}
-									<Badge class="bg-slate-800 text-slate-300 text-[0.6rem]" title={usage.system}>System</Badge>
+								{#if usage.apps > 0}
+									<Badge class="bg-indigo-950 text-indigo-400 text-[0.6rem]" title="{usage.apps} Docker app{usage.apps === 1 ? '' : 's'} using this subvolume's storage">Apps{usage.apps > 1 ? ` ×${usage.apps}` : ''}</Badge>
+								{/if}
+								{#if usage.vms > 0}
+									<Badge class="bg-rose-950 text-rose-400 text-[0.6rem]" title="{usage.vms} VM{usage.vms === 1 ? '' : 's'} with a disk on this subvolume">VMs{usage.vms > 1 ? ` ×${usage.vms}` : ''}</Badge>
 								{/if}
 								{#if usage.nfs > 0}
 									<Badge class="bg-green-950 text-green-400 text-[0.6rem]" title="{usage.nfs} NFS share{usage.nfs === 1 ? '' : 's'}">NFS{usage.nfs > 1 ? ` ×${usage.nfs}` : ''}</Badge>
@@ -1016,7 +1070,10 @@
 								{#if usage.nvmeof > 0}
 									<Badge class="bg-cyan-950 text-cyan-400 text-[0.6rem]" title="{usage.nvmeof} NVMe-oF subsystem{usage.nvmeof === 1 ? '' : 's'}">NVMe-oF{usage.nvmeof > 1 ? ` ×${usage.nvmeof}` : ''}</Badge>
 								{/if}
-								{#if !usage.system && usage.nfs === 0 && usage.smb === 0 && usage.iscsi === 0 && usage.nvmeof === 0}
+								{#if usage.system && usage.apps === 0 && usage.vms === 0 && usage.nfs === 0 && usage.smb === 0 && usage.iscsi === 0 && usage.nvmeof === 0}
+									<Badge class="bg-slate-800 text-slate-300 text-[0.6rem]" title={usage.system}>System</Badge>
+								{/if}
+								{#if !usage.system && usage.apps === 0 && usage.vms === 0 && usage.nfs === 0 && usage.smb === 0 && usage.iscsi === 0 && usage.nvmeof === 0}
 									<span class="text-xs text-muted-foreground">—</span>
 								{/if}
 							</div>
@@ -1065,7 +1122,7 @@
 							<div class="p-4">
 								<!-- Tabs -->
 								<div class="mb-4 flex border-b border-border">
-									{#each [['info', 'Info'], ['snapshots', `Snapshots (${detailSv.snapshots.length})`], ['shares', `Shares${detailShareCount > 0 ? ` (${detailShareCount})` : ''}`], ['browse', 'Browse'], ['properties', 'Properties']] as [key, label]}
+									{#each [['info', 'Info'], ['snapshots', `Snapshots (${detailSv.snapshots.length})`], ['shares', `Used by${detailShareCount > 0 ? ` (${detailShareCount})` : ''}`], ['browse', 'Browse'], ['properties', 'Properties']] as [key, label]}
 										<button
 											onclick={() => detailTab = key as typeof detailTab}
 											class="px-3 py-1.5 text-xs font-medium transition-colors {detailTab === key
@@ -1210,9 +1267,23 @@
 
 								{:else if detailTab === 'shares'}
 									{#if detailShareCount === 0}
-										<p class="text-sm text-muted-foreground">No shares linked to this subvolume.</p>
+										<p class="text-sm text-muted-foreground">Nothing is using this subvolume.</p>
 									{:else}
 										<div class="space-y-1.5">
+											{#each detailShares.apps as app}
+												<div class="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+													<Badge class="bg-indigo-950 text-indigo-400 text-[0.6rem]">App</Badge>
+													<span class="text-sm">{app.name}</span>
+													<span class="text-xs text-muted-foreground">{app.status}</span>
+												</div>
+											{/each}
+											{#each detailShares.vms as vm}
+												<div class="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+													<Badge class="bg-rose-950 text-rose-400 text-[0.6rem]">VM</Badge>
+													<span class="text-sm">{vm.name}</span>
+													<span class="text-xs text-muted-foreground">{vm.running ? 'running' : 'stopped'}</span>
+												</div>
+											{/each}
 											{#each detailShares.nfs as share}
 												<div class="flex items-center gap-2 rounded-md border border-border px-3 py-2">
 													<Badge class="bg-green-950 text-green-400 text-[0.6rem]">NFS</Badge>
