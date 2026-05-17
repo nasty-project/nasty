@@ -296,7 +296,7 @@
 	// out of the compose YAML. Auto-defaults to the first TCP port,
 	// follows user-picks until the port disappears from the compose,
 	// at which point it falls back to the new first-TCP. UDP ports
-	// are excluded — nginx's proxy_pass is TCP-only.
+	// are excluded — Caddy's reverse_proxy handles HTTP/TCP only.
 	let composeTcpPorts = $state<{ host_port: number; container_port: number; line: number }[]>([]);
 	let newIngressPort = $state<number | null>(null);
 	$effect(() => {
@@ -1456,7 +1456,7 @@
 									{/each}
 								</select>
 								<p class="mt-1.5 text-muted-foreground">
-									Which TCP port <code>/apps/{composeName || '<name>'}/</code> proxies to. UDP ports are excluded — nginx is TCP-only.
+									Which TCP port <code>/apps/{composeName || '<name>'}/</code> proxies to. UDP ports are excluded — Caddy's reverse_proxy is HTTP-only.
 								</p>
 							</div>
 						{/if}

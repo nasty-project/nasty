@@ -200,6 +200,15 @@ async fn main() -> anyhow::Result<()> {
     // row. Best-effort; failures are logged and don't block startup.
     state.subvolumes.reconcile_project_ids().await;
 
+    // Push the engine-known set of app ingresses into Caddy's
+    // admin-API config.  Caddy holds these in memory, so a fresh
+    // boot or `systemctl restart caddy` would otherwise drop every
+    // `/apps/<name>/` route.  Also folds in the v0.0.7 → v0.0.8
+    // recovery: when no live containers exist but the nginx-era
+    // /var/lib/nasty/apps-proxy.conf does, the rules are parsed
+    // from there.
+    state.apps.reconcile_app_routes().await;
+
     // Initialize firewall based on current protocol states
     {
         use nasty_system::protocol::Protocol;
@@ -222,38 +231,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Pre-warm caches so first page loads are fast.
-    // Runs before sd_notify_ready() — nginx won't serve until this completes.
+    // Runs before sd_notify_ready() — Caddy won't serve until this completes.
     info!("Warming caches...");
     let t0 = std::time::Instant::now();
     state.system.info().await;
     info!("Caches warm in {}ms", t0.elapsed().as_millis());
 
-    // Check ACME cert renewal on startup and daily thereafter. The
-    // observer spawn logs if the loop ever exits — either cleanly
-    // (which would be a bug; this loop is meant to run forever) or
-    // with a panic (which would silently kill cert renewal until the
-    // next engine restart, with no log connecting "my cert expired"
-    // to the original failure).
-    let acme_loop = tokio::spawn(async {
+    // Seed the cached ACME status from whatever cert Caddy is already
+    // serving so the WebUI shows the issuer/expiry on first page load
+    // instead of after the user clicks anything. Renewal itself runs
+    // inside Caddy now — no daily cron from us, so no long-running
+    // loop to wrap with the observer pattern used elsewhere.
+    tokio::spawn(async {
         nasty_system::settings::check_acme_renewal().await;
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-        interval.tick().await; // skip first immediate tick
-        loop {
-            interval.tick().await;
-            nasty_system::settings::check_acme_renewal().await;
-        }
-    });
-    tokio::spawn(async move {
-        match acme_loop.await {
-            Ok(()) => tracing::error!(
-                "ACME renewal loop exited unexpectedly — cert renewal will not happen \
-                 until next engine restart"
-            ),
-            Err(e) => tracing::error!(
-                "ACME renewal loop panicked / cancelled: {e} — cert renewal will not \
-                 happen until next engine restart"
-            ),
-        }
     });
 
     // Build the OIDC client if SSO is configured. Failures are logged, not
@@ -328,10 +318,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .with_state(state);
 
-    // 127.0.0.1 only — nginx proxies https://nas:443/ → http://127.0.0.1:2137/.
+    // 127.0.0.1 only — Caddy proxies https://nas:443/ → http://127.0.0.1:2137/.
     // Direct LAN access to the engine port would bypass TLS, the security
-    // headers, and the nginx-only X-Real-IP plumbing the session-IP-binding
-    // depends on.
+    // headers, and the reverse-proxy X-Real-IP plumbing the session-IP-binding
+    // depends on (Caddy sets X-Real-IP from `{remote_host}` on every /api/* and
+    // /ws handler — see services.caddy in nasty.nix).
     let addr = SocketAddr::from(([127, 0, 0, 1], 2137));
     info!("NASty Engine v{version} (built: {built})");
     info!("Listening on {addr}");
@@ -1871,6 +1862,15 @@ async fn handle_socket(
     ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ping_ticker.tick().await; // skip the immediate first tick
     let mut last_seen = std::time::Instant::now();
+    let connected_at = std::time::Instant::now();
+    // Captures *why* the WS closed so the disconnect log line below
+    // says more than just "disconnected" — distinguishes client-side
+    // close (with code/reason), TCP-level stream end, server-side idle
+    // timeout, and engine-initiated drops after a failed write. Set on
+    // every `break` path; if a future change adds a break without
+    // setting this, the fallback below makes that loud rather than
+    // silent.
+    let disconnect_reason: String;
 
     loop {
         tokio::select! {
@@ -1880,6 +1880,7 @@ async fn handle_socket(
                         last_seen = std::time::Instant::now();
                         let response = handle_rpc_request(&text, &state, &session).await;
                         if writer.send(Message::Text(response.into())).await.is_err() {
+                            disconnect_reason = "write failed (socket closed)".to_string();
                             break;
                         }
                     }
@@ -1889,7 +1890,24 @@ async fn handle_socket(
                         // client confirm they're still listening.
                         last_seen = std::time::Instant::now();
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        match frame {
+                            Some(f) => disconnect_reason = format!(
+                                "client close (code={}, reason={:?})",
+                                f.code, f.reason
+                            ),
+                            None => disconnect_reason = "client close (no frame)".to_string(),
+                        }
+                        break;
+                    }
+                    None => {
+                        disconnect_reason = "stream ended (TCP close)".to_string();
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        disconnect_reason = format!("read error: {e}");
+                        break;
+                    }
                     _ => {
                         last_seen = std::time::Instant::now();
                     }
@@ -1903,28 +1921,34 @@ async fn handle_socket(
                     );
                     let text = serde_json::to_string(&notification).unwrap();
                     if writer.send(Message::Text(text.into())).await.is_err() {
+                        disconnect_reason = "event-write failed (socket closed)".to_string();
                         break;
                     }
                 }
             }
             _ = ping_ticker.tick() => {
                 if last_seen.elapsed() > IDLE_TIMEOUT {
-                    info!(
-                        "WebSocket client '{}' idle > {}s, closing",
-                        session.username,
+                    disconnect_reason = format!(
+                        "server idle timeout ({}s no traffic)",
                         IDLE_TIMEOUT.as_secs()
                     );
                     let _ = writer.send(Message::Close(None)).await;
                     break;
                 }
                 if writer.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    disconnect_reason = "ping-write failed (socket closed)".to_string();
                     break;
                 }
             }
         }
     }
 
-    info!("WebSocket client '{}' disconnected", session.username);
+    info!(
+        "WebSocket client '{}' disconnected after {:?}: {}",
+        session.username,
+        connected_at.elapsed(),
+        disconnect_reason
+    );
 }
 
 /// Pick the right auth path for a WebSocket connection. If the upgrade

@@ -29,7 +29,7 @@ ssh -p 2222 root@localhost
 systemctl status nasty-engine
 journalctl -u nasty-engine --no-pager -n 20
 
-# 2. Check nginx/TLS is working
+# 2. Check Caddy/TLS is working
 curl -k https://localhost/health
 
 # 3. Check self-signed cert was generated
@@ -126,8 +126,8 @@ ls -la /var/lib/nasty/
 ```bash
 # Check engine is listening
 ss -tlnp | grep 2137
-# Check nginx is proxying
-journalctl -u nginx -f
+# Check Caddy is proxying
+journalctl -u caddy -f
 ```
 
 ### Self-signed cert issues
@@ -135,7 +135,7 @@ journalctl -u nginx -f
 # Regenerate cert
 rm /var/lib/nasty/tls/*.pem
 systemctl restart nasty-selfsigned-cert
-systemctl restart nginx
+systemctl restart caddy
 ```
 
 ### Pool operations fail

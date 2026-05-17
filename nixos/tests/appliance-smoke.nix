@@ -1,4 +1,4 @@
-# Boots the full NASty appliance (engine + nginx + supporting services) in a
+# Boots the full NASty appliance (engine + Caddy + supporting services) in a
 # QEMU VM, waits for the engine to come up, and exercises both halves of the
 # WebUI ↔ engine boundary that unit tests can't reach:
 #   - HTTP: /health, /api/login (good + bad creds), /api/auth/check
@@ -126,18 +126,17 @@ let
     finally:
         ws.close()
 
-    # ── Session 3: same RPC through the nginx proxy on 443 ────────
+    # ── Session 3: same RPC through the Caddy proxy on 443 ────────
     # Earlier sessions hit the engine on its loopback port directly,
-    # which skips nginx entirely.  This one goes through nginx end
+    # which skips Caddy entirely.  This one goes through Caddy end
     # to end so the proxy's WebSocket-upgrade handling is part of
-    # what's being asserted.  If a future proxy swap (or nginx
-    # config change) breaks Upgrade / Connection forwarding, the
-    # engine stays reachable on 2137 but the WebUI breaks — this
-    # catches that.
+    # what's being asserted.  If a Caddyfile change breaks
+    # Upgrade / Connection forwarding, the engine stays reachable
+    # on 2137 but the WebUI breaks — this catches that.
     #
     # Sessions are bound to the client IP the engine sees, so a
-    # token issued direct to :2137 isn't valid through nginx (and
-    # vice versa).  Login + WS therefore share the nginx path.
+    # token issued direct to :2137 isn't valid through Caddy (and
+    # vice versa).  Login + WS therefore share the proxy path.
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -147,21 +146,21 @@ let
     ws, _ = ws_auth(proxy_token, url="wss://127.0.0.1/ws", sslopt=SSL_OPTS)
     try:
         health = call(ws, "system.health", 1)
-        print("system.health via nginx:", health, file=sys.stderr)
+        print("system.health via Caddy:", health, file=sys.stderr)
     finally:
         ws.close()
 
     # ── Session 4: install an app + verify /apps/<name>/ proxy ────
     # Drives the end-to-end apps-ingress path: engine starts Docker,
     # pulls (no-op — image is pre-loaded), creates the container,
-    # auto-sets ingress, writes /var/lib/nasty/apps-proxy.conf,
-    # reloads nginx.  We then curl `/apps/smoke/` and check the
-    # marker string the container serves, which proves:
+    # auto-sets ingress (which POSTs a route to Caddy's admin API
+    # at 127.0.0.1:2019).  We then curl `/apps/smoke/` and check
+    # the marker string the container serves, which proves:
     #   - the engine's apps lifecycle works end-to-end,
-    #   - nginx's path-stripping `proxy_pass http://host:port/` works
-    #     (request to `/apps/smoke/index.html` reaches the container
-    #     as `/index.html`, not `/apps/smoke/index.html`),
-    #   - the new ingress took effect (nginx reload was honored).
+    #   - Caddy's `handle_path` strip-prefix routing works
+    #     (request to `/apps/smoke/index.html` reaches the
+    #     container as `/index.html`, not `/apps/smoke/index.html`),
+    #   - the admin-API route took effect immediately, no reload.
     import time as _time
     ws, _ = ws_auth(new_token)
     try:
@@ -276,7 +275,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("nasty-engine.service")
 
     # ── /health (no auth) ───────────────────────────────────────────
-    # Hit the engine directly on its loopback port to skip TLS / nginx.
+    # Hit the engine directly on its loopback port to skip TLS / Caddy.
     machine.wait_until_succeeds("curl -fsS http://127.0.0.1:2137/health")
     health = machine.succeed("curl -fsS http://127.0.0.1:2137/health")
     print(f"=== /health ===\n{health}")
@@ -320,9 +319,9 @@ pkgs.testers.runNixOSTest {
     # Same endpoint without a cookie should be rejected.
     machine.fail("curl -fsS http://127.0.0.1:2137/api/auth/check")
 
-    # ── HTTPS through nginx ────────────────────────────────────────
+    # ── HTTPS through Caddy ────────────────────────────────────────
     # Everything above talked to the engine on 2137 directly, which
-    # skips the nginx vhost entirely.  Now exercise the same proxy
+    # skips the Caddy vhost entirely.  Now exercise the same proxy
     # path the WebUI loads through — `https://127.0.0.1/` with the
     # self-signed cert.  This is what'll catch a future proxy-config
     # regression that leaves the engine reachable on 2137 but breaks
@@ -334,19 +333,19 @@ pkgs.testers.runNixOSTest {
     # got real HTML back through the proxy, not an error page.
     body_lc = body.lstrip().lower()
     assert body_lc.startswith("<!doctype html>") or "<html" in body_lc, (
-        f"WebUI response through nginx doesn't look like HTML: {body[:200]!r}"
+        f"WebUI response through Caddy doesn't look like HTML: {body[:200]!r}"
     )
 
-    # The /health endpoint should also be reachable through nginx, not
+    # The /health endpoint should also be reachable through Caddy, not
     # just on the engine loopback.
-    health_via_nginx = machine.succeed("curl -ksS https://127.0.0.1/health")
-    print(f"=== /health via nginx ===\n{health_via_nginx}")
-    assert json.loads(health_via_nginx)["status"] == "ok", (
-        f"unexpected health via nginx: {health_via_nginx!r}"
+    health_via_caddy = machine.succeed("curl -ksS https://127.0.0.1/health")
+    print(f"=== /health via Caddy ===\n{health_via_caddy}")
+    assert json.loads(health_via_caddy)["status"] == "ok", (
+        f"unexpected health via Caddy: {health_via_caddy!r}"
     )
 
     # ── Security headers on the WebUI response ─────────────────────
-    # These are the headers nasty.nix's nginx vhost adds — every one
+    # These are the headers nasty.nix's Caddy vhost adds — every one
     # of them is a hardening assertion we don't want to silently lose
     # in a future proxy refactor.  Match prefix-only so a Caddy port
     # that ships slightly different values (e.g. `max-age=63072000`
@@ -370,7 +369,7 @@ pkgs.testers.runNixOSTest {
     # auth with the token from /api/login, send a few requests, check
     # responses come back correlated by id. Exercises router.rs
     # end-to-end — the part unit tests deliberately don't reach.
-    # rpc-smoke also opens wss://127.0.0.1/ws through nginx as its
+    # rpc-smoke also opens wss://127.0.0.1/ws through Caddy as its
     # third session, and (session 4) installs a Docker app whose
     # /apps/<name>/ ingress we then assert against below.
     #
@@ -387,12 +386,12 @@ pkgs.testers.runNixOSTest {
         f"${pythonWithWs}/bin/python3 ${rpcSmoke} {shlex.quote(login_obj['token'])}"
     )
 
-    # ── /apps/<name>/ ingress through nginx ───────────────────────
+    # ── /apps/<name>/ ingress through Caddy ───────────────────────
     # rpc-smoke just installed an app called "smoke" mapped to
     # host port 18080.  The engine wrote a `location /apps/smoke/`
-    # block to /var/lib/nasty/apps-proxy.conf and reloaded nginx.
+    # block via the Caddy admin API at 127.0.0.1:2019.
     # Curl both the bare route and a subpath: the marker string in
-    # the response proves nginx's path-stripping `proxy_pass
+    # the response proves Caddy's `handle_path` strip-prefix
     # http://host:port/` actually strips, not just appends.
     machine.wait_until_succeeds(
         "curl -ksS https://127.0.0.1/apps/smoke/ | grep -q nasty-smoke-test-OK"

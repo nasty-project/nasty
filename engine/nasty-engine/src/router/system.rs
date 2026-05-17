@@ -89,7 +89,7 @@ pub(super) async fn try_route(
             let units = vec![
                 "nasty-engine",
                 "nasty-metrics",
-                "nginx",
+                "caddy",
                 "nfs-server",
                 "samba-smbd",
                 "samba-nmbd",

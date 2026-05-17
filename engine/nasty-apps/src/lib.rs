@@ -28,8 +28,11 @@ use thiserror::Error;
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
+mod caddy;
+
+use caddy::{AppRoute, CaddyApi};
+
 const STATE_PATH: &str = "/var/lib/nasty/apps-enabled";
-const PROXY_CONF: &str = "/var/lib/nasty/apps-proxy.conf";
 const COMPOSE_DIR: &str = "/var/lib/nasty/apps";
 const DOCKER_SERVICE: &str = "docker.service";
 
@@ -610,7 +613,7 @@ pub struct CheckPortsRequest {
 pub struct PortConflict {
     /// The port that has a conflict.
     pub port: u16,
-    /// What is using this port (e.g. "nginx", "app:plex").
+    /// What is using this port (e.g. "caddy", "app:plex").
     pub used_by: String,
 }
 
@@ -1156,11 +1159,11 @@ impl AppsService {
         }
 
         // Auto-create ingress for the first TCP port. UDP can't serve
-        // HTTP (nginx's `proxy_pass` is TCP-only), so a UDP port is
-        // never a valid ingress target — picking it would publish a
-        // dead /apps/<name>/ route. If the app exposes only UDP, no
-        // ingress is created; the user can still reach the container
-        // directly on the LAN.
+        // HTTP (Caddy's `reverse_proxy`, like every other HTTP proxy,
+        // is TCP-only), so a UDP port is never a valid ingress target
+        // — picking it would publish a dead /apps/<name>/ route. If
+        // the app exposes only UDP, no ingress is created; the user
+        // can still reach the container directly on the LAN.
         if let Some(first_port) = req
             .ports
             .iter()
@@ -2206,61 +2209,149 @@ impl AppsService {
     }
 
     // ── Ingress management ──────────────────────────────────
+    //
+    // Per-app `/apps/<name>/` ingress lives in Caddy's admin-API
+    // config — POST to install, DELETE by `@id` to remove.  The
+    // engine doesn't keep its own source-of-truth file; what Caddy
+    // has IS the truth.  See `engine/nasty-apps/src/caddy.rs`.
 
     pub async fn ingress_list(&self) -> Result<Vec<AppIngress>, AppsError> {
-        let content = tokio::fs::read_to_string(PROXY_CONF)
+        let routes = CaddyApi::new()
+            .list_app_routes()
             .await
-            .unwrap_or_default();
-        let mut rules = Vec::new();
-        for line in content.lines() {
-            if let Some(comment) = line.strip_prefix("# app:") {
-                let parts: Vec<&str> = comment.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let name = parts[0].to_string();
-                    if let Some(port_str) = parts[1].strip_prefix("port:")
-                        && let Ok(port) = port_str.parse::<u16>()
-                    {
-                        rules.push(AppIngress {
-                            path: format!("/apps/{name}/"),
-                            name,
-                            host_port: port,
-                        });
-                    }
-                }
+            .map_err(AppsError::CommandFailed)?;
+        Ok(routes
+            .into_iter()
+            .map(|r| AppIngress {
+                path: format!("/apps/{}/", r.name),
+                name: r.name,
+                host_port: r.host_port,
+            })
+            .collect())
+    }
+
+    /// At engine startup, push the engine-known ingress set to Caddy.
+    /// Caddy's admin-API config is in-memory — on `systemctl restart
+    /// caddy` (or a fresh boot where Caddy comes up before the engine
+    /// has had a chance to reapply) our routes vanish.  This pass
+    /// makes Docker / labelled-container state the source of truth
+    /// and pushes the resulting set to Caddy.
+    ///
+    /// Also folds in the v0.0.7 → v0.0.8 migration: if the engine
+    /// has no live containers (e.g. apps service was never enabled)
+    /// but the legacy `/var/lib/nasty/apps-proxy.conf` exists with
+    /// `# app:X port:Y` comments from the nginx era, recover the
+    /// list from there.  Once Caddy has routes, future installs
+    /// keep them in sync directly.
+    ///
+    /// Best-effort: log and continue on failure.  Engine startup
+    /// must not block on Caddy being healthy.
+    pub async fn reconcile_app_routes(&self) {
+        let api = CaddyApi::new();
+        if let Err(e) = api.wait_ready(30).await {
+            warn!(
+                "apps: Caddy admin API not ready ({e}); skipping ingress \
+                 reconcile — apps will keep working but `/apps/<name>/` \
+                 routes won't until the next engine restart"
+            );
+            return;
+        }
+
+        let desired = self.compute_desired_routes().await;
+        if desired.is_empty() {
+            info!("apps: no ingress routes to reconcile");
+            return;
+        }
+        info!(
+            "apps: reconciling {} ingress route(s) into Caddy",
+            desired.len()
+        );
+        if let Err(e) = api.replace_app_routes(&desired).await {
+            warn!("apps: ingress reconcile failed: {e}");
+        }
+    }
+
+    /// Source-of-truth resolver for what app ingresses should exist.
+    /// Prefer live state (managed containers from Docker); fall back
+    /// to the legacy nginx-era file on first-boot-after-upgrade.
+    async fn compute_desired_routes(&self) -> Vec<AppRoute> {
+        const LEGACY_PROXY_CONF: &str = "/var/lib/nasty/apps-proxy.conf";
+
+        // Live state: ask Docker about labelled containers with a
+        // TCP port mapping, then look up the host port for each.
+        if let Ok(apps) = self.list().await {
+            let mut routes = Vec::new();
+            for app in apps {
+                let Some(port) = app
+                    .ports
+                    .iter()
+                    .find(|p| p.protocol.eq_ignore_ascii_case("tcp"))
+                    .map(|p| p.host_port)
+                else {
+                    continue;
+                };
+                routes.push(AppRoute {
+                    name: app.name,
+                    host_port: port,
+                });
+            }
+            if !routes.is_empty() {
+                return routes;
             }
         }
-        Ok(rules)
+
+        // Legacy file fallback: v0.0.7 → v0.0.8 upgrade where
+        // Docker is up but apps haven't been re-listed yet, or
+        // an installation method that bypassed the apps service.
+        if let Ok(legacy) = tokio::fs::read_to_string(LEGACY_PROXY_CONF).await {
+            let rules = parse_ingress_comments(&legacy);
+            if !rules.is_empty() {
+                info!(
+                    "apps: recovered {} ingress rule(s) from legacy {}",
+                    rules.len(),
+                    LEGACY_PROXY_CONF
+                );
+                return rules
+                    .into_iter()
+                    .map(|r| AppRoute {
+                        name: r.name,
+                        host_port: r.host_port,
+                    })
+                    .collect();
+            }
+        }
+        Vec::new()
     }
 
     pub async fn ingress_set(&self, req: SetIngressRequest) -> Result<AppIngress, AppsError> {
-        let mut rules = self.ingress_list().await?;
-        rules.retain(|r| r.name != req.name);
-
-        rules.push(AppIngress {
+        let route = AppRoute {
             name: req.name.clone(),
             host_port: req.host_port,
-            path: format!("/apps/{}/", req.name),
-        });
-
-        self.write_proxy_conf(&rules).await?;
-        reload_nginx().await;
-
+        };
+        CaddyApi::new()
+            .set_app_route(&route)
+            .await
+            .map_err(AppsError::CommandFailed)?;
         info!("Ingress set for '{}' -> port {}", req.name, req.host_port);
-        Ok(rules.into_iter().find(|r| r.name == req.name).unwrap())
+        Ok(AppIngress {
+            path: format!("/apps/{}/", req.name),
+            name: req.name,
+            host_port: req.host_port,
+        })
     }
 
     pub async fn ingress_remove(&self, name: &str) -> Result<(), AppsError> {
-        let mut rules = self.ingress_list().await?;
-        let before = rules.len();
-        rules.retain(|r| r.name != name);
-
-        if rules.len() == before {
+        // Check existence first so the API contract (404 on
+        // unknown) stays the same — caddy's DELETE is idempotent
+        // by design (404 → Ok).
+        let existing = self.ingress_list().await?;
+        if !existing.iter().any(|r| r.name == name) {
             return Err(AppsError::AppNotFound(name.to_string()));
         }
-
-        self.write_proxy_conf(&rules).await?;
-        reload_nginx().await;
-
+        CaddyApi::new()
+            .remove_app_route(name)
+            .await
+            .map_err(AppsError::CommandFailed)?;
         info!("Ingress removed for '{name}'");
         Ok(())
     }
@@ -2940,27 +3031,6 @@ impl AppsService {
             )),
         }
     }
-
-    async fn write_proxy_conf(&self, rules: &[AppIngress]) -> Result<(), AppsError> {
-        let mut conf = String::from("# Auto-generated by NASty engine — do not edit\n");
-        for rule in rules {
-            conf.push_str(&format!(
-                "# app:{} port:{}\nlocation /apps/{}/ {{\n\
-                 \x20   proxy_pass http://127.0.0.1:{}/;\n\
-                 \x20   proxy_set_header Host $host;\n\
-                 \x20   proxy_set_header X-Real-IP $remote_addr;\n\
-                 \x20   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
-                 \x20   proxy_set_header X-Forwarded-Proto $scheme;\n\
-                 \x20   proxy_http_version 1.1;\n\
-                 \x20   proxy_set_header Upgrade $http_upgrade;\n\
-                 \x20   proxy_set_header Connection \"upgrade\";\n\
-                 }}\n\n",
-                rule.name, rule.host_port, rule.name, rule.host_port
-            ));
-        }
-        tokio::fs::write(PROXY_CONF, &conf).await?;
-        Ok(())
-    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -3005,8 +3075,34 @@ async fn find_container_shell(container: &str) -> Option<&'static str> {
     None
 }
 
-async fn reload_nginx() {
-    nasty_common::cmd::try_run("systemctl", &["reload", "nginx"]).await;
+/// Pull `AppIngress` rules out of a proxy-config file's `# app:X port:Y`
+/// comments.  Same parser for the legacy nginx-era `apps-proxy.conf`
+/// and the current `apps-proxy.caddy`, since `write_proxy_conf` emits
+/// the same comment header for both formats.
+fn parse_ingress_comments(content: &str) -> Vec<AppIngress> {
+    let mut rules = Vec::new();
+    for line in content.lines() {
+        let Some(comment) = line.strip_prefix("# app:") else {
+            continue;
+        };
+        let parts: Vec<&str> = comment.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let name = parts[0].to_string();
+        let Some(port_str) = parts[1].strip_prefix("port:") else {
+            continue;
+        };
+        let Ok(port) = port_str.parse::<u16>() else {
+            continue;
+        };
+        rules.push(AppIngress {
+            path: format!("/apps/{name}/"),
+            name,
+            host_port: port,
+        });
+    }
+    rules
 }
 
 /// One row parsed from `ss -tlnp` output.

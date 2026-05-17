@@ -492,10 +492,10 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
 
     // Pick the ingress host port: caller's choice if it's actually a
     // published TCP port on the resulting app, else the first TCP port.
-    // UDP can't serve HTTP — nginx's proxy_pass is TCP-only — so we
-    // never auto-assign a UDP port even if the compose only publishes
-    // UDP. The user can still reach the container directly on the LAN
-    // in that edge case.
+    // UDP can't serve HTTP — Caddy's reverse_proxy (like every HTTP
+    // proxy) is TCP-only — so we never auto-assign a UDP port even
+    // if the compose only publishes UDP. The user can still reach the
+    // container directly on the LAN in that edge case.
     if let Ok(app) = state.apps.get(&req.name).await {
         let tcp = |p: &nasty_apps::MappedPort| p.protocol.eq_ignore_ascii_case("tcp");
         let chosen = req

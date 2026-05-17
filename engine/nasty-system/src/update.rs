@@ -376,12 +376,16 @@ impl UpdateService {
             r#"#!/bin/bash
 set -euo pipefail
 export PATH="/run/current-system/sw/bin:$PATH"
-_nginx_conf() {{
-    grep -o "/nix/store/[^' ]*nginx\.conf" \
-        /run/current-system/etc/systemd/system/nginx.service 2>/dev/null | head -1 || true
+_proxy_conf() {{
+    # Resolve the active Caddyfile via the etc-symlink the Caddy
+    # NixOS module sets up.  Each generation has its own /etc/caddy/
+    # tree, so the resolved path doubles as a generation identity —
+    # comparing it before/after a rebuild tells us whether the WebUI
+    # closure (or anything else in the Caddyfile) changed.
+    readlink -f /run/current-system/etc/caddy/Caddyfile 2>/dev/null || true
 }}
-_NGINX_CONF_BEFORE=$(_nginx_conf)
-WEBUI_BEFORE=$([ -n "$_NGINX_CONF_BEFORE" ] && grep 'nasty-webui' "$_NGINX_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
+_PROXY_CONF_BEFORE=$(_proxy_conf)
+WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
 echo "false" > {UPDATE_WEBUI_CHANGED}
 
 echo "==> Updating local system flake..."
@@ -406,8 +410,8 @@ if [ "$_RC" -ne 0 ]; then
     exit "$_RC"
 fi
 
-_NGINX_CONF_AFTER=$(_nginx_conf)
-WEBUI_AFTER=$([ -n "$_NGINX_CONF_AFTER" ] && grep 'nasty-webui' "$_NGINX_CONF_AFTER" 2>/dev/null | head -1 || echo "")
+_PROXY_CONF_AFTER=$(_proxy_conf)
+WEBUI_AFTER=$([ -n "$_PROXY_CONF_AFTER" ] && grep 'nasty-webui' "$_PROXY_CONF_AFTER" 2>/dev/null | head -1 || echo "")
 if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
     echo "true" > {UPDATE_WEBUI_CHANGED}
 fi
@@ -636,17 +640,21 @@ echo "==> Update complete!"
             r#"#!/bin/bash
 set -euo pipefail
 export PATH="/run/current-system/sw/bin:$PATH"
-# Capture current webui store path before rebuild so we can detect if it changed.
-# Read from /run/current-system/etc/systemd/system/nginx.service — the unit file
-# uses single-quoted paths so the regex terminates cleanly at the closing quote.
-# After nixos-rebuild switch the /run/current-system symlink is updated before we
-# read the AFTER value, so we always compare old vs new closure.
-_nginx_conf() {{
-    grep -o "/nix/store/[^' ]*nginx\.conf" \
-        /run/current-system/etc/systemd/system/nginx.service 2>/dev/null | head -1 || true
+# Capture the active Caddyfile store path before rebuild so we can
+# detect whether the WebUI closure changed.  After nixos-rebuild
+# switch the /run/current-system symlink updates atomically before
+# we read the AFTER value, so the BEFORE/AFTER comparison always
+# spans old vs new closure.
+_proxy_conf() {{
+    # Resolve the active Caddyfile via the etc-symlink the Caddy
+    # NixOS module sets up.  Each generation has its own /etc/caddy/
+    # tree, so the resolved path doubles as a generation identity —
+    # comparing it before/after a rebuild tells us whether the WebUI
+    # closure (or anything else in the Caddyfile) changed.
+    readlink -f /run/current-system/etc/caddy/Caddyfile 2>/dev/null || true
 }}
-_NGINX_CONF_BEFORE=$(_nginx_conf)
-WEBUI_BEFORE=$([ -n "$_NGINX_CONF_BEFORE" ] && grep 'nasty-webui' "$_NGINX_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
+_PROXY_CONF_BEFORE=$(_proxy_conf)
+WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
 echo "==> Updating local system flake..."
 cd {LOCAL_REPO}
 {update_step}
@@ -671,8 +679,8 @@ fi
 
 # Detect if the webui store path changed so the frontend knows whether to prompt a reload.
 # /run/current-system now points to the newly activated closure.
-_NGINX_CONF_AFTER=$(_nginx_conf)
-WEBUI_AFTER=$([ -n "$_NGINX_CONF_AFTER" ] && grep 'nasty-webui' "$_NGINX_CONF_AFTER" 2>/dev/null | head -1 || echo "")
+_PROXY_CONF_AFTER=$(_proxy_conf)
+WEBUI_AFTER=$([ -n "$_PROXY_CONF_AFTER" ] && grep 'nasty-webui' "$_PROXY_CONF_AFTER" 2>/dev/null | head -1 || echo "")
 if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
     echo "true" > {UPDATE_WEBUI_CHANGED}
 else
@@ -908,12 +916,16 @@ echo "==> Update complete!"
             r#"#!/bin/bash
 set -euo pipefail
 export PATH="/run/current-system/sw/bin:$PATH"
-_nginx_conf() {{
-    grep -o "/nix/store/[^' ]*nginx\.conf" \
-        /run/current-system/etc/systemd/system/nginx.service 2>/dev/null | head -1 || true
+_proxy_conf() {{
+    # Resolve the active Caddyfile via the etc-symlink the Caddy
+    # NixOS module sets up.  Each generation has its own /etc/caddy/
+    # tree, so the resolved path doubles as a generation identity —
+    # comparing it before/after a rebuild tells us whether the WebUI
+    # closure (or anything else in the Caddyfile) changed.
+    readlink -f /run/current-system/etc/caddy/Caddyfile 2>/dev/null || true
 }}
-_NGINX_CONF_BEFORE=$(_nginx_conf)
-WEBUI_BEFORE=$([ -n "$_NGINX_CONF_BEFORE" ] && grep 'nasty-webui' "$_NGINX_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
+_PROXY_CONF_BEFORE=$(_proxy_conf)
+WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
 echo "false" > {UPDATE_WEBUI_CHANGED}
 
 echo "==> Updating local system flake..."
@@ -942,8 +954,8 @@ if [ "$LOCK_BEFORE" != "$LOCK_AFTER" ]; then
         echo "--- end journal dump ---"
         exit "$RC"
     fi
-    _NGINX_CONF_AFTER=$(_nginx_conf)
-    WEBUI_AFTER=$([ -n "$_NGINX_CONF_AFTER" ] && grep 'nasty-webui' "$_NGINX_CONF_AFTER" 2>/dev/null | head -1 || echo "")
+    _PROXY_CONF_AFTER=$(_proxy_conf)
+    WEBUI_AFTER=$([ -n "$_PROXY_CONF_AFTER" ] && grep 'nasty-webui' "$_PROXY_CONF_AFTER" 2>/dev/null | head -1 || echo "")
     if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
         echo "true" > {UPDATE_WEBUI_CHANGED}
     fi

@@ -185,7 +185,7 @@
 					uploadProgress = Math.round((e.loaded / e.total) * 100);
 				}
 			};
-			xhr.timeout = 3600_000; // 1 hour, matching nginx proxy timeouts
+			xhr.timeout = 3600_000; // 1 hour, matching Caddy reverse_proxy timeouts
 
 			await new Promise<void>((resolve, reject) => {
 				xhr.ontimeout = () => reject(new Error('Upload timed out'));
