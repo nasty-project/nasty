@@ -76,12 +76,35 @@
 				resolve(false);
 			};
 
-			ws.onclose = () => {
-				if (!deployDone && !deployError) {
-					deployError = 'Connection closed unexpectedly';
-					deploying = false;
-					resolve(false);
-				}
+			ws.onclose = async () => {
+				if (deployDone || deployError) return;
+				// WS closed without a 'done' or 'error' message. The
+				// install/uninstall the engine kicked off may have
+				// finished anyway — the deploy stream is just the
+				// progress channel, not the source of truth. Query
+				// apps.list to see what actually happened before
+				// declaring failure, otherwise a transient WS blip
+				// during the docker create_container step shows a red
+				// "Connection closed unexpectedly" modal even though
+				// the container is up and running.
+				const expectedName = (params.name as string) ?? '';
+				try {
+					const list = await client.call<App[]>('apps.list');
+					const installed = list.some(a => a.name === expectedName);
+					if (installed) {
+						// The app exists — install must have completed
+						// server-side after the WS dropped. Treat as
+						// success so the modal closes cleanly.
+						deployDone = true;
+						deploying = false;
+						deployLog = [...deployLog, '(connection dropped, but app is installed — treating as success)'];
+						resolve(true);
+						return;
+					}
+				} catch { /* fall through to the error path */ }
+				deployError = 'Connection closed unexpectedly';
+				deploying = false;
+				resolve(false);
 			};
 		});
 	}
@@ -855,7 +878,33 @@
 	async function removeApp(name: string) {
 		if (!await confirm(`Remove app "${name}"?`, 'The app and its containers will be deleted. Persistent data on the filesystem is preserved.')) return;
 		await withToast(
-			() => client.call('apps.remove', { name }),
+			async () => {
+				try {
+					await client.call('apps.remove', { name });
+				} catch (e: unknown) {
+					// The remove RPC takes a few seconds (docker stop + rm
+					// + ingress detach) and can land on a brief WS blip,
+					// at which point the call rejects with "WebSocket
+					// disconnected" even though the server-side work is
+					// in flight and usually completes. Verify the actual
+					// state after a reconnect before surfacing the
+					// failure — re-issuing apps.remove is idempotent if
+					// the engine already finished (returns AppNotFound
+					// → we treat that as success too).
+					const msg = e instanceof Error ? e.message :
+						(typeof e === 'object' && e !== null && 'message' in e) ?
+						String((e as { message: unknown }).message) : String(e);
+					if (msg !== 'WebSocket disconnected') throw e;
+					// Wait for the client to reconnect (its internal
+					// _readyPromise resolves on next successful auth),
+					// then verify by listing apps.
+					try {
+						const list = await client.call<App[]>('apps.list');
+						if (!list.some(a => a.name === name)) return;
+					} catch { /* fall through */ }
+					throw e;
+				}
+			},
 			'App removed'
 		);
 		await refresh();
