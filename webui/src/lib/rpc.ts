@@ -55,10 +55,12 @@ export class NastyClient {
 	 *  or `{error: ...}`. */
 	connect(): Promise<AuthResult> {
 		return new Promise((resolve, reject) => {
+			console.log('[ws] connecting', this.url, new Date().toISOString());
 			this.ws = new WebSocket(this.url);
 			let authResolved = false;
 
 			this.ws.onopen = () => {
+				console.log('[ws] open', new Date().toISOString());
 				// Cookie auth: nothing to send on open. Server speaks first.
 			};
 
@@ -107,7 +109,13 @@ export class NastyClient {
 				}
 			};
 
-			this.ws.onclose = () => {
+			this.ws.onclose = (ev) => {
+				console.log('[ws] close', {
+					code: ev.code,
+					reason: ev.reason,
+					wasClean: ev.wasClean,
+					ts: new Date().toISOString(),
+				});
 				this._authenticated = false;
 				// Reject all pending calls so awaiting code doesn't hang forever
 				for (const pending of this.pending.values()) {
