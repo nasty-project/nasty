@@ -1313,6 +1313,15 @@ in {
           # saw on the /api/login that issued the token (see /ws
           # comment below).
           #
+          # `stream_close_delay 30m` keeps each handler instance
+          # alive for 30 min after a Caddy config reload, so the
+          # admin-API mutations the engine performs for app ingress
+          # (PUT/DELETE routes on every install/remove) don't kill
+          # every active WS in the WebUI.  Caddy's reload model is
+          # all-or-nothing — there's no in-place route patch — so
+          # this is the supported mitigation until upstream
+          # caddyserver/caddy#7222 (`stream_detached`) lands.
+          #
           # The final `/ws/*` block is a catch-all for any future
           # engine WS route that might be added without a
           # corresponding nasty.nix update — without it, a new
@@ -1329,6 +1338,7 @@ in {
                 read_timeout 28800s
                 write_timeout 28800s
               }
+              stream_close_delay 30m
             }
           }
           handle /ws/vm/* {
@@ -1338,6 +1348,7 @@ in {
                 read_timeout 28800s
                 write_timeout 28800s
               }
+              stream_close_delay 30m
             }
           }
           handle /ws/apps/deploy {
@@ -1347,6 +1358,7 @@ in {
                 read_timeout 28800s
                 write_timeout 28800s
               }
+              stream_close_delay 30m
             }
           }
           handle /ws/system/logs {
@@ -1356,6 +1368,7 @@ in {
                 read_timeout 28800s
                 write_timeout 28800s
               }
+              stream_close_delay 30m
             }
           }
 
@@ -1373,6 +1386,7 @@ in {
                 read_timeout 28800s
                 write_timeout 28800s
               }
+              stream_close_delay 30m
             }
           }
 
@@ -1386,6 +1400,7 @@ in {
                 read_timeout 28800s
                 write_timeout 28800s
               }
+              stream_close_delay 30m
             }
           }
 

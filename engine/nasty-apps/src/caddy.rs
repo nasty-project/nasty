@@ -301,7 +301,14 @@ fn build_route_json(route: &AppRoute) -> Value {
                                     "X-Real-Ip": ["{http.request.remote.host}"]
                                 }
                             }
-                        }
+                        },
+                        // Mirrors the Caddyfile's `stream_close_delay 30m`
+                        // on the static WS handlers — every other app
+                        // install/remove triggers a Caddy config reload
+                        // (this very admin API call), and without the
+                        // delay any WS the app itself exposes would die
+                        // on every neighbouring app's lifecycle event.
+                        "stream_close_delay": "30m",
                     }
                 ]
             }]
