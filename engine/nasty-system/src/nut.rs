@@ -10,21 +10,55 @@ const NUT_CONF_DIR: &str = "/var/lib/nasty/nut";
 
 // ── Config structs ───────────────────────────────────────────
 
-/// NUT (Network UPS Tools) configuration for a locally connected UPS.
+/// Where the UPS lives.  `Local` runs the full NUT stack
+/// (driver + upsd + upsmon) against a USB/serial UPS connected to
+/// this host.  `Remote` runs only upsmon and points it at an
+/// already-running NUT server elsewhere (e.g. a Ubiquiti UPS, a
+/// Synology, a neighbouring NASty).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NutMode {
+    #[default]
+    Local,
+    Remote,
+}
+
+/// NUT (Network UPS Tools) configuration.  In `local` mode the
+/// `driver`/`port` fields describe the attached UPS; in `remote`
+/// mode they're ignored and `remote_*` fields describe the upstream
+/// NUT server.  `ups_name` is reused in both modes — locally it's
+/// the name we expose, remotely it's the name the upstream uses.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NutConfig {
+    /// Whether the UPS is attached locally or monitored over the network.
+    #[serde(default)]
+    pub mode: NutMode,
     /// NUT driver name (e.g. `usbhid-ups`, `blazer_usb`, `snmp-ups`).
+    /// Local mode only.
     #[serde(default = "default_driver")]
     pub driver: String,
     /// Device port. `auto` for USB auto-detection, or a path like `/dev/ttyS0`.
+    /// Local mode only.
     #[serde(default = "default_port")]
     pub port: String,
     /// UPS identifier used by upsc/upsd (e.g. `ups`).
     #[serde(default = "default_ups_name")]
     pub ups_name: String,
-    /// Human-readable description.
+    /// Human-readable description.  Local mode only.
     #[serde(default)]
     pub description: String,
+    /// Hostname or IP of the remote NUT server.  Remote mode only.
+    #[serde(default)]
+    pub remote_host: String,
+    /// Port the remote NUT server listens on (default 3493).  Remote mode only.
+    #[serde(default = "default_remote_port")]
+    pub remote_port: u16,
+    /// Username configured in the remote upsd.users.  Remote mode only.
+    #[serde(default)]
+    pub remote_username: String,
+    /// Password configured in the remote upsd.users.  Remote mode only.
+    #[serde(default)]
+    pub remote_password: String,
     /// Initiate shutdown when battery drops below this percentage.
     #[serde(default = "default_shutdown_percent")]
     pub shutdown_on_battery_percent: u32,
@@ -45,6 +79,9 @@ fn default_port() -> String {
 fn default_ups_name() -> String {
     "ups".into()
 }
+fn default_remote_port() -> u16 {
+    3493
+}
 fn default_shutdown_percent() -> u32 {
     20
 }
@@ -58,10 +95,15 @@ fn default_shutdown_command() -> String {
 impl Default for NutConfig {
     fn default() -> Self {
         Self {
+            mode: NutMode::default(),
             driver: default_driver(),
             port: default_port(),
             ups_name: default_ups_name(),
             description: String::new(),
+            remote_host: String::new(),
+            remote_port: default_remote_port(),
+            remote_username: String::new(),
+            remote_password: String::new(),
             shutdown_on_battery_percent: default_shutdown_percent(),
             shutdown_on_battery_seconds: default_shutdown_seconds(),
             shutdown_command: default_shutdown_command(),
@@ -72,10 +114,15 @@ impl Default for NutConfig {
 /// Partial update for NUT configuration.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NutConfigUpdate {
+    pub mode: Option<NutMode>,
     pub driver: Option<String>,
     pub port: Option<String>,
     pub ups_name: Option<String>,
     pub description: Option<String>,
+    pub remote_host: Option<String>,
+    pub remote_port: Option<u16>,
+    pub remote_username: Option<String>,
+    pub remote_password: Option<String>,
     pub shutdown_on_battery_percent: Option<u32>,
     pub shutdown_on_battery_seconds: Option<u32>,
     pub shutdown_command: Option<String>,
@@ -127,6 +174,9 @@ impl NutService {
     pub async fn update_config(&self, update: NutConfigUpdate) -> Result<NutConfig, String> {
         let mut config = self.state.write().await;
 
+        if let Some(v) = update.mode {
+            config.mode = v;
+        }
         if let Some(v) = update.driver {
             config.driver = v;
         }
@@ -142,6 +192,18 @@ impl NutService {
         if let Some(v) = update.description {
             config.description = v;
         }
+        if let Some(v) = update.remote_host {
+            config.remote_host = v;
+        }
+        if let Some(v) = update.remote_port {
+            config.remote_port = v;
+        }
+        if let Some(v) = update.remote_username {
+            config.remote_username = v;
+        }
+        if let Some(v) = update.remote_password {
+            config.remote_password = v;
+        }
         if let Some(v) = update.shutdown_on_battery_percent {
             if v > 100 {
                 return Err("shutdown_on_battery_percent must be 0-100".into());
@@ -155,6 +217,11 @@ impl NutService {
             config.shutdown_command = v;
         }
 
+        if config.mode == NutMode::Remote && config.remote_host.is_empty() {
+            return Err("remote_host is required when mode = remote".into());
+        }
+        let new_mode = config.mode;
+
         save(&config).await.map_err(|e| e.to_string())?;
 
         // Regenerate config files so next restart picks them up.
@@ -162,12 +229,12 @@ impl NutService {
         if let Err(e) = write_config_files(&config).await {
             warn!("Failed to write NUT config files: {e}");
         }
-        if is_nut_running().await {
+        if is_nut_enabled().await {
             // Spawn restart in background — some drivers (nutdrv_qx) take 20-30s
             // to probe USB and we don't want the API call to block/timeout.
             // restart_nut_services() logs per-service errors itself; the spawn
             // wrapper just guards against a task-panic vanishing into nothing.
-            let h = tokio::spawn(async { restart_nut_services().await });
+            let h = tokio::spawn(async move { reconcile_nut_services(new_mode).await });
             tokio::spawn(async move {
                 if let Err(e) = h.await {
                     warn!("NUT restart task panicked / cancelled: {e}");
@@ -178,10 +245,18 @@ impl NutService {
         Ok(config.clone())
     }
 
-    /// Read live UPS status via `upsc`.
+    /// Read live UPS status via `upsc`.  In local mode talks to the
+    /// local upsd; in remote mode talks to the upstream NUT server.
     pub async fn status(&self) -> UpsStatus {
         let config = self.state.read().await;
-        read_ups_status(&config.ups_name).await
+        let target = match config.mode {
+            NutMode::Local => format!("{}@localhost", config.ups_name),
+            NutMode::Remote => format!(
+                "{}@{}:{}",
+                config.ups_name, config.remote_host, config.remote_port
+            ),
+        };
+        read_ups_status(&target).await
     }
 
     /// Write NUT config files. Called before starting services.
@@ -198,6 +273,19 @@ pub async fn write_config_files(config: &NutConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to create {NUT_CONF_DIR}: {e}"))?;
 
+    match config.mode {
+        NutMode::Local => write_local_configs(config).await?,
+        NutMode::Remote => write_remote_configs(config).await?,
+    }
+
+    info!(
+        "NUT config files written to {NUT_CONF_DIR} (mode={:?})",
+        config.mode
+    );
+    Ok(())
+}
+
+async fn write_local_configs(config: &NutConfig) -> Result<(), String> {
     // ups.conf
     let ups_conf = format!(
         "[{name}]\n  driver = {driver}\n  port = {port}\n  desc = \"{desc}\"\n",
@@ -233,8 +321,39 @@ pub async fn write_config_files(config: &NutConfig) -> Result<(), String> {
         cmd = config.shutdown_command,
     );
     write_file("upsmon.conf", &upsmon_conf).await?;
+    Ok(())
+}
 
-    info!("NUT config files written to {NUT_CONF_DIR}");
+async fn write_remote_configs(config: &NutConfig) -> Result<(), String> {
+    // In remote mode we don't run upsd or any driver — only upsmon,
+    // pointed at the upstream NUT server in `secondary` role
+    // (modern NUT name; replaces the deprecated `slave`).  Credentials
+    // come from the remote upsd.users; we never see them here.
+    //
+    // Stale ups.conf/upsd.conf/upsd.users from a prior local-mode
+    // session are left in place — nut-driver and nut-server aren't
+    // started in remote mode, so they don't get read.
+    let upsmon_conf = format!(
+        concat!(
+            "MONITOR {name}@{host}:{port} 1 {user} {pass} secondary\n",
+            "SHUTDOWNCMD \"{cmd}\"\n",
+            "MINSUPPLIES 1\n",
+            "POLLFREQ 5\n",
+            "POLLFREQALERT 5\n",
+            "HOSTSYNC 15\n",
+            "DEADTIME 15\n",
+            "RBWARNTIME 43200\n",
+            "NOCOMMWARNTIME 300\n",
+            "FINALDELAY 5\n",
+        ),
+        name = config.ups_name,
+        host = config.remote_host,
+        port = config.remote_port,
+        user = config.remote_username,
+        pass = config.remote_password,
+        cmd = config.shutdown_command,
+    );
+    write_file("upsmon.conf", &upsmon_conf).await?;
     Ok(())
 }
 
@@ -246,8 +365,10 @@ async fn write_file(name: &str, content: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to write {path}: {e}"))?;
 
-    // upsd.users contains credentials — restrict to owner-only
-    if name == "upsd.users" {
+    // upsd.users (local upsd creds) and upsmon.conf (the MONITOR line
+    // embeds either local upsd creds or the remote NUT server's creds)
+    // both contain plaintext passwords — restrict to owner+group.
+    if name == "upsd.users" || name == "upsmon.conf" {
         tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
             .await
             .map_err(|e| format!("failed to set permissions on {path}: {e}"))?;
@@ -258,10 +379,9 @@ async fn write_file(name: &str, content: &str) -> Result<(), String> {
 
 // ── Status reading ───────────────────────────────────────────
 
-async fn read_ups_status(ups_name: &str) -> UpsStatus {
-    let target = format!("{ups_name}@localhost");
+async fn read_ups_status(target: &str) -> UpsStatus {
     let output = tokio::process::Command::new("upsc")
-        .arg(&target)
+        .arg(target)
         .env("NUT_CONFPATH", NUT_CONF_DIR)
         .output()
         .await;
@@ -314,22 +434,92 @@ async fn read_ups_status(ups_name: &str) -> UpsStatus {
 
 // ── Service control helpers ──────────────────────────────────
 
-async fn is_nut_running() -> bool {
-    tokio::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", "nut-server.service"])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// All systemd units the NUT stack could ever own.  The actual set
+/// that *should* run depends on mode — see [`services_for_mode`].
+const ALL_NUT_SERVICES: &[&str] = &[
+    "nut-driver.service",
+    "nut-server.service",
+    "nut-monitor.service",
+];
+
+/// Which systemd units should be running for a given mode.
+/// Used by protocol.rs at start/stop time and by [`reconcile_nut_services`]
+/// after a config change.
+pub fn services_for_mode(mode: NutMode) -> &'static [&'static str] {
+    match mode {
+        NutMode::Local => ALL_NUT_SERVICES,
+        NutMode::Remote => &["nut-monitor.service"],
+    }
 }
 
-async fn restart_nut_services() {
-    info!("Restarting NUT services after config change");
-    for svc in &[
-        "nut-monitor.service",
-        "nut-server.service",
-        "nut-driver.service",
-    ] {
+/// Read mode from disk synchronously (blocking).  Called from
+/// protocol.rs, which needs the unit list before it can await
+/// anything.  Falls back to Local on any error so a missing or
+/// corrupt nut.json doesn't disable monitoring entirely.
+pub fn mode_sync() -> NutMode {
+    match std::fs::read_to_string(STATE_PATH) {
+        Ok(content) => serde_json::from_str::<NutConfig>(&content)
+            .map(|c| c.mode)
+            .unwrap_or_default(),
+        Err(_) => NutMode::default(),
+    }
+}
+
+/// The systemd unit whose "active" state tells us the NUT protocol
+/// is healthy in the current mode.  upsd is local-only; upsmon runs
+/// in both modes and is the right canary.
+pub fn status_unit(mode: NutMode) -> &'static str {
+    match mode {
+        NutMode::Local => "nut-server.service",
+        NutMode::Remote => "nut-monitor.service",
+    }
+}
+
+async fn is_nut_enabled() -> bool {
+    // "Any NUT-stack service is currently active" — used to decide
+    // whether to restart after a config update.  We can't just check
+    // one specific unit because the set depends on mode and the
+    // user might be flipping that very setting.
+    for svc in ALL_NUT_SERVICES {
+        let ok = tokio::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", svc])
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
+async fn reconcile_nut_services(mode: NutMode) {
+    let want: std::collections::HashSet<&str> = services_for_mode(mode).iter().copied().collect();
+    info!("Reconciling NUT services for mode={mode:?}: want {want:?}");
+
+    // Stop any service that should NOT be running in this mode.
+    for svc in ALL_NUT_SERVICES {
+        if want.contains(svc) {
+            continue;
+        }
+        match tokio::process::Command::new("systemctl")
+            .args(["stop", svc])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => warn!(
+                "systemctl stop {svc} exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => warn!("systemctl stop {svc} failed to spawn: {e}"),
+        }
+    }
+
+    // Restart (or start) every service that should be running.
+    for svc in services_for_mode(mode) {
         match tokio::process::Command::new("systemctl")
             .args(["restart", svc])
             .output()

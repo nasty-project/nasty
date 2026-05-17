@@ -92,11 +92,12 @@ impl Protocol {
             ],
             Protocol::Iscsi => &["target.service"],
             Protocol::Nvmeof => &[], // configfs-based, no daemon
-            Protocol::Nut => &[
-                "nut-driver.service",
-                "nut-server.service",
-                "nut-monitor.service",
-            ],
+            // NUT runs a different subset of services in local vs
+            // remote modes — see `nut::services_for_mode`.  Remote
+            // mode only needs upsmon; upsd/driver have nothing local
+            // to talk to.  We read the mode synchronously here so
+            // start/stop sequencing in this trait stays sync.
+            Protocol::Nut => crate::nut::services_for_mode(crate::nut::mode_sync()),
             Protocol::Ssh => &["sshd.service"],
             Protocol::Avahi => &["avahi-daemon.service"],
             Protocol::Smart => &["smartd.service"],
@@ -417,7 +418,12 @@ async fn is_protocol_running(proto: Protocol) -> bool {
             // NVMe-oF is "running" if nvmet configfs is available
             std::path::Path::new("/sys/kernel/config/nvmet").exists()
         }
-        Protocol::Nut => systemctl_is_active("nut-server.service").await,
+        Protocol::Nut => {
+            // Pick the canary unit based on mode — upsd doesn't run
+            // in remote mode, so checking nut-server there would
+            // always report "down" even though monitoring is healthy.
+            systemctl_is_active(crate::nut::status_unit(crate::nut::mode_sync())).await
+        }
         Protocol::Ssh => systemctl_is_active("sshd.service").await,
         Protocol::Avahi => systemctl_is_active("avahi-daemon.service").await,
         Protocol::Smart => systemctl_is_active("smartd.service").await,
