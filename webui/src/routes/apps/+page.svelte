@@ -1701,9 +1701,18 @@
 							<div class="flex items-center gap-1.5">
 								{#if primaryPort(app)}
 									{@const pp = primaryPort(app)!}
-									<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20" title="Reverse proxy target: {pp.host_port}">
-										Open
-									</a>
+									{#if getIngress(app.name)}
+										<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20" title="Reverse proxy target: {pp.host_port}">
+											Open
+										</a>
+									{:else if app.proxy_disabled_reason}
+										<!-- Engine probe disabled the reverse-proxy ingress because the app emits
+										     absolute root-path assets (haze-class apps). Tooltip carries the reason so
+										     the user understands why only the direct-port link is offered. -->
+										<span class="inline-flex items-center whitespace-nowrap rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-500 cursor-help" title={app.proxy_disabled_reason}>
+											Direct port only
+										</span>
+									{/if}
 									<a href="http://{window.location.hostname}:{pp.host_port}" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted" title="Direct port access (LAN)">
 										:{pp.host_port}
 									</a>

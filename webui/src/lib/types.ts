@@ -960,6 +960,12 @@ export interface App {
 	ports?: MappedPort[];
 	/** True if deployed with allow_unsafe (elevated privileges). */
 	unsafe_mode?: boolean;
+	/** Human-readable reason the reverse-proxy ingress was disabled at
+	 * install time (engine post-install probe detected absolute root-path
+	 * assets that the path-prefix proxy can't route). When present, the
+	 * apps list shows a "Direct port only" badge with this as a tooltip
+	 * and hides the "Open" link. */
+	proxy_disabled_reason?: string | null;
 }
 
 export interface AppContainer {
