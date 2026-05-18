@@ -3730,30 +3730,22 @@ async fn inspect_image_metadata(image: &str) -> Result<ImageMetadata, String> {
     let (registry, repo, tag) = parse_image_ref(image);
     let client = reqwest::Client::new();
 
-    // Get auth token for Docker Hub
-    let token = if registry == "registry-1.docker.io" {
-        let token_url = format!(
-            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:pull",
-            repo
-        );
-        let resp: serde_json::Value = client
-            .get(&token_url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
-        resp["token"].as_str().map(String::from)
-    } else {
-        None
-    };
-
     let registry_url = if registry.starts_with("http") {
         registry.clone()
     } else {
         format!("https://{registry}")
     };
+
+    // Fetch an anonymous bearer token for registries that require one even
+    // for public images. We previously hard-coded the Docker Hub flow
+    // (auth.docker.io / service=registry.docker.io), which meant any
+    // ghcr.io / quay.io / etc. image silently 401'd — the unauth response
+    // came back as an error JSON without `config.digest`, and the user
+    // saw "no config digest in manifest" with no ports prefilled. This
+    // generalises to any registry that publishes the standard Bearer
+    // realm at `https://<registry>/token?…`, which is what Docker Hub,
+    // ghcr.io, and quay.io all do.
+    let token = fetch_registry_token(&client, &registry, &repo).await;
 
     // Fetch manifest. Accept both single-arch manifests and multi-arch
     // manifest lists / OCI indexes; for the latter we pick the linux/amd64
@@ -3873,6 +3865,47 @@ async fn inspect_image_metadata(image: &str) -> Result<ImageMetadata, String> {
         volumes,
         user,
     })
+}
+
+/// Ask a registry for an anonymous pull token. Best-effort: returns
+/// `None` if the registry isn't one we know how to talk to or the token
+/// endpoint doesn't respond. The caller then makes the manifest request
+/// without auth, which works for genuinely open registries and produces
+/// a clearer 401 for ones that need auth we don't have.
+///
+/// Each registry hosts its own token endpoint at a different path; we
+/// keep a small table rather than chasing `WWW-Authenticate` headers
+/// from a 401 (which would be the technically correct approach but
+/// doubles the round-trips for the common case).
+async fn fetch_registry_token(
+    client: &reqwest::Client,
+    registry: &str,
+    repo: &str,
+) -> Option<String> {
+    let token_url = match registry {
+        "registry-1.docker.io" => format!(
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
+        ),
+        "ghcr.io" => format!("https://ghcr.io/token?service=ghcr.io&scope=repository:{repo}:pull"),
+        "quay.io" => {
+            format!("https://quay.io/v2/auth?service=quay.io&scope=repository:{repo}:pull")
+        }
+        _ => return None,
+    };
+    let resp: serde_json::Value = client
+        .get(&token_url)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    // Both `token` and `access_token` are seen in the wild — ghcr returns
+    // `token`, some Docker Hub flows have returned `access_token`. Try both.
+    resp["token"]
+        .as_str()
+        .or_else(|| resp["access_token"].as_str())
+        .map(String::from)
 }
 
 async fn fetch_manifest_json(
