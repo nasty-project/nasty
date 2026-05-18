@@ -996,7 +996,12 @@ export interface AppConfig {
 	name: string;
 	image: string;
 	ports: { name: string; container_port: number; host_port: number | null; protocol: string }[];
-	env: { name: string; value: string }[];
+	/** `is_image_default: true` means the row's value matches the image's
+	 * own `Config.Env` default for that key — the user didn't set it.
+	 * Edit greys these rows out with an "Override" button so the user
+	 * sees what the image provides without being misled into thinking
+	 * they own it. Only present when the engine recognised the default. */
+	env: { name: string; value: string; is_image_default?: boolean }[];
 	volumes: { name: string; mount_path: string; host_path: string }[];
 	cpu_limit: string | null;
 	memory_limit: string | null;
