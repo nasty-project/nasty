@@ -61,7 +61,7 @@
     engine = {
       package = nasty-engine;
       port = 2137;
-      logLevel = "nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,tower_http=info";
+      logLevel = "nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,nasty_apps=info,tower_http=info";
     };
 
     webui = {
