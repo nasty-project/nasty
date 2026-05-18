@@ -1008,6 +1008,16 @@ export interface ImageInspectResult {
 	ports: { name: string; container_port: number; host_port: number | null; protocol: string }[];
 	volumes: { name: string; mount_path: string; host_path: string }[];
 	user?: string | null;
+	/** Curated recipe for serving this image under /apps/<name>/. When
+	 * present, the install form offers an "Apply" button that appends
+	 * the recipe's env entries (with `{name}`/`{host}`/`{scheme}`
+	 * placeholders substituted) — see SubPathRecipe in nasty-apps. */
+	subpath_recipe?: SubPathRecipe | null;
+}
+
+export interface SubPathRecipe {
+	display_name: string;
+	env: { name: string; value: string }[];
 }
 
 export interface AppIngress {
