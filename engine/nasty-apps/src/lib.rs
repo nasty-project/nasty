@@ -396,9 +396,7 @@ fn parse_image_user(user_field: &str) -> Option<(u32, u32)> {
     }
     // Numeric path.
     if let Ok(uid) = u_part.parse::<u32>() {
-        let gid = g_part
-            .and_then(|g| g.parse::<u32>().ok())
-            .unwrap_or(uid);
+        let gid = g_part.and_then(|g| g.parse::<u32>().ok()).unwrap_or(uid);
         return Some((uid, gid));
     }
     // Named user — resolve via a small well-known table. We deliberately
@@ -3765,12 +3763,16 @@ async fn inspect_image_metadata(image: &str) -> Result<ImageMetadata, String> {
     let manifest = match manifest["manifests"].as_array() {
         Some(entries) => {
             // Multi-arch list: pick linux/amd64 (matches NASty's target).
-            let chosen = entries.iter().find(|m| {
-                m["platform"]["os"].as_str() == Some("linux")
-                    && m["platform"]["architecture"].as_str() == Some("amd64")
-            }).or_else(|| entries.first())
-            .ok_or("manifest list is empty")?;
-            let digest = chosen["digest"].as_str()
+            let chosen = entries
+                .iter()
+                .find(|m| {
+                    m["platform"]["os"].as_str() == Some("linux")
+                        && m["platform"]["architecture"].as_str() == Some("amd64")
+                })
+                .or_else(|| entries.first())
+                .ok_or("manifest list is empty")?;
+            let digest = chosen["digest"]
+                .as_str()
                 .ok_or("manifest list entry missing digest")?;
             let sub_url = format!("{registry_url}/v2/{repo}/manifests/{digest}");
             fetch_manifest_json(&client, &sub_url, token.as_deref()).await?
@@ -3866,7 +3868,11 @@ async fn inspect_image_metadata(image: &str) -> Result<ImageMetadata, String> {
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
-    Ok(ImageMetadata { ports, volumes, user })
+    Ok(ImageMetadata {
+        ports,
+        volumes,
+        user,
+    })
 }
 
 async fn fetch_manifest_json(
