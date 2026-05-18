@@ -390,6 +390,12 @@
 	const client = getClient();
 	let startupPoll: ReturnType<typeof setInterval> | null = null;
 	let statsPoll: ReturnType<typeof setInterval> | null = null;
+	/** Idle poll for the apps list itself. Without this, the page only
+	 * refreshes apps.list after a user action — so a container that
+	 * crashes, or an install kicked off via another browser tab, leaves
+	 * the page silently stale until the user reloads. Lighter cadence
+	 * than the 2s stats poll: list cardinality changes are rare. */
+	let listPoll: ReturnType<typeof setInterval> | null = null;
 	const APP_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
 
 	function isValidAppName(name: string): boolean {
@@ -635,13 +641,17 @@
 		await Promise.all([refresh(), loadFilesystems()]);
 		loading = false;
 		if (status?.enabled && !status?.running) startStartupPolling();
-		if (status?.enabled && status?.running) startStatsPolling();
+		if (status?.enabled && status?.running) {
+			startStatsPolling();
+			startListPolling();
+		}
 		document.addEventListener('visibilitychange', onVisibilityChange);
 	});
 
 	onDestroy(() => {
 		stopStartupPolling();
 		stopStatsPolling();
+		stopListPolling();
 		document.removeEventListener('visibilitychange', onVisibilityChange);
 	});
 
@@ -681,6 +691,29 @@
 		}
 	}
 
+	/** Poll apps.list (+ status + ingresses) so the table reflects out-of-band
+	 * changes — a container crashing on its own, an install kicked off from
+	 * another tab, or our own deploy where the WS finished but the post-install
+	 * ingress probe was still tightening things up server-side. 5s is the same
+	 * pace as the existing startup poll and far enough below the cost of an
+	 * apps.list call (one Docker API request + a few manifest reads) that
+	 * the daemon won't notice.
+	 *
+	 * Paused while the tab is hidden — see onVisibilityChange — for the same
+	 * reason stats polling pauses: a hidden tab issuing polls every 5s earns
+	 * no useful information and just costs CPU on the box. */
+	function startListPolling() {
+		stopListPolling();
+		listPoll = setInterval(() => { void refresh(); }, 5000);
+	}
+
+	function stopListPolling() {
+		if (listPoll) {
+			clearInterval(listPoll);
+			listPoll = null;
+		}
+	}
+
 	async function refreshStats() {
 		if (document.hidden) return;
 		try {
@@ -694,8 +727,14 @@
 	function onVisibilityChange() {
 		if (document.hidden) {
 			stopStatsPolling();
+			stopListPolling();
 		} else if (status?.enabled && status?.running) {
 			startStatsPolling();
+			startListPolling();
+			// Tab just came back — refresh once immediately so the user
+			// doesn't stare at stale data for up to 5s waiting for the
+			// next interval tick.
+			void refresh();
 		}
 	}
 
@@ -716,9 +755,16 @@
 			if (status.enabled && status.running) {
 				await loadIngresses();
 				if (!statsPoll) startStatsPolling();
+				// Also lift the idle list-poll here so Docker coming up
+				// after the page loaded (e.g. user enabled apps from this
+				// session) kicks polling on without needing a manual reload.
+				// Skip when the tab's hidden — onVisibilityChange will lift
+				// it when the user comes back.
+				if (!listPoll && !document.hidden) startListPolling();
 			} else {
 				ingresses = [];
 				stopStatsPolling();
+				stopListPolling();
 				appStats = {};
 			}
 		} catch { /* ignore */ }
