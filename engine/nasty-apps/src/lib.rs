@@ -699,6 +699,42 @@ pub struct ImageInspectResult {
     /// chowned to that identity by the install pipeline. `None` = root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Known recipe for configuring this image to serve under
+    /// `/apps/<name>/` behind NASty's path-prefix reverse proxy. When
+    /// present, the WebUI offers an "Apply" button that appends the
+    /// recipe's env entries to the form (the user can still edit them).
+    /// Catches apps that *could* run behind a sub-path but only with
+    /// specific env vars set — e.g. Grafana needs `GF_SERVER_ROOT_URL`
+    /// plus `GF_SERVER_SERVE_FROM_SUB_PATH=true`; without those, our
+    /// post-install probe would (correctly) disable ingress and the
+    /// user would only see the direct-port link, even though a one-line
+    /// env change would have made the proxy work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subpath_recipe: Option<SubPathRecipe>,
+}
+
+/// A small curated mapping of "set these env vars to make this image
+/// serve under `/apps/<name>/`". Hand-curated rather than heuristic —
+/// the value formats differ wildly across apps (Grafana takes a URL
+/// with `%(protocol)s`/`%(domain)s` placeholders; Vaultwarden takes a
+/// bare full URL; etc.) so guessing risks setting something that breaks
+/// the app in non-obvious ways. The WebUI shows the recipe behind an
+/// opt-in button so the user always confirms before it's applied.
+///
+/// Templates: `{name}` is substituted with the App Name field on the
+/// engine side; `{host}` and `{scheme}` are substituted in the WebUI
+/// from `window.location` (the engine can't know which IP/hostname the
+/// user reaches NASty on). Both forms are surfaced as editable env
+/// rows so the user can adjust before installing.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SubPathRecipe {
+    /// Short label shown next to the "Apply" button (e.g. "Grafana
+    /// sub-path mode"). Not the env var key — purely human-readable.
+    pub display_name: String,
+    /// Env vars to add to the install form when the user applies this
+    /// recipe. Values may contain `{name}`, `{host}`, `{scheme}` —
+    /// see template note above.
+    pub env: Vec<AppEnv>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2862,6 +2898,7 @@ impl AppsService {
             ports: meta.ports,
             volumes: meta.volumes,
             user: meta.user,
+            subpath_recipe: meta.subpath_recipe,
         })
     }
 
@@ -3724,6 +3761,61 @@ struct ImageMetadata {
     ports: Vec<AppPort>,
     volumes: Vec<AppVolume>,
     user: Option<String>,
+    subpath_recipe: Option<SubPathRecipe>,
+}
+
+/// Look up a sub-path recipe for the given normalized image repo (e.g.
+/// `grafana/grafana`, `vaultwarden/server`, `library/redis`). Matching
+/// on the repo path rather than the full image ref means tagged
+/// variants (`grafana/grafana:11.5`), the OCI registry prefix, and
+/// the `:latest` shortcut all share the same recipe.
+///
+/// Keep this table small and audited: every entry is a vouched-for
+/// recipe with values verified against the upstream's own docs. When
+/// in doubt, *don't* add an entry — leaving an app to fall through to
+/// `probe_proxy_compat` (which disables ingress with a clear reason)
+/// is strictly safer than guessing env values that might
+/// silently break the app behind the scenes.
+fn match_subpath_recipe(repo: &str) -> Option<SubPathRecipe> {
+    match repo {
+        // Grafana: serves correctly behind a sub-path when both vars
+        // are set. Using `%(protocol)s`/`%(domain)s` lets Grafana fill
+        // in scheme + host from its own [server] section at render
+        // time, so the recipe doesn't have to know the operator's
+        // hostname. `serve_from_sub_path` is the toggle that actually
+        // makes Grafana strip the prefix when matching internal routes.
+        // Source: https://grafana.com/tutorials/run-grafana-behind-a-proxy/
+        "grafana/grafana" | "grafana/grafana-oss" | "grafana/grafana-enterprise" => {
+            Some(SubPathRecipe {
+                display_name: "Grafana sub-path mode".to_string(),
+                env: vec![
+                    AppEnv {
+                        name: "GF_SERVER_ROOT_URL".to_string(),
+                        value: "%(protocol)s://%(domain)s/apps/{name}/".to_string(),
+                    },
+                    AppEnv {
+                        name: "GF_SERVER_SERVE_FROM_SUB_PATH".to_string(),
+                        value: "true".to_string(),
+                    },
+                ],
+            })
+        }
+        // Vaultwarden: DOMAIN is the *full* URL (scheme + host + path,
+        // no trailing slash). It's used for CSRF/origin checks and
+        // WebAuthn rpId, so it has to match exactly what the browser
+        // sees — that's why we template both scheme and host and let
+        // the WebUI fill them in from window.location rather than
+        // hard-coding http://. Source:
+        // https://github.com/dani-garcia/vaultwarden/wiki/Proxy-examples
+        "vaultwarden/server" => Some(SubPathRecipe {
+            display_name: "Vaultwarden sub-path mode".to_string(),
+            env: vec![AppEnv {
+                name: "DOMAIN".to_string(),
+                value: "{scheme}://{host}/apps/{name}".to_string(),
+            }],
+        }),
+        _ => None,
+    }
 }
 
 async fn inspect_image_metadata(image: &str) -> Result<ImageMetadata, String> {
@@ -3860,10 +3952,19 @@ async fn inspect_image_metadata(image: &str) -> Result<ImageMetadata, String> {
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
+    // ── Sub-path recipe ──────────────────────────────────────
+    // Look up by repo (e.g. `grafana/grafana`). The `library/` prefix
+    // that parse_image_ref adds for bare Docker Hub images is stripped
+    // back out here so a hypothetical `library/foo` recipe wouldn't be
+    // necessary (it'd just be `foo` in the table).
+    let lookup_repo = repo.strip_prefix("library/").unwrap_or(&repo);
+    let subpath_recipe = match_subpath_recipe(lookup_repo);
+
     Ok(ImageMetadata {
         ports,
         volumes,
         user,
+        subpath_recipe,
     })
 }
 
@@ -4475,5 +4576,77 @@ services:
         // None so install() leaves the dir root-owned and warns.
         assert_eq!(parse_image_user("plex"), None);
         assert_eq!(parse_image_user("ubuntu"), None);
+    }
+
+    // ── match_subpath_recipe ──
+
+    use super::match_subpath_recipe;
+
+    #[test]
+    fn subpath_recipe_grafana_all_variants() {
+        // grafana, grafana-oss, grafana-enterprise are the three image
+        // names Grafana ships; all need the same env to serve under a
+        // sub-path.
+        for repo in [
+            "grafana/grafana",
+            "grafana/grafana-oss",
+            "grafana/grafana-enterprise",
+        ] {
+            let r = match_subpath_recipe(repo).unwrap_or_else(|| panic!("no recipe for {repo}"));
+            assert_eq!(r.display_name, "Grafana sub-path mode");
+            let keys: Vec<_> = r.env.iter().map(|e| e.name.as_str()).collect();
+            assert!(
+                keys.contains(&"GF_SERVER_ROOT_URL"),
+                "missing GF_SERVER_ROOT_URL for {repo}"
+            );
+            assert!(
+                keys.contains(&"GF_SERVER_SERVE_FROM_SUB_PATH"),
+                "missing GF_SERVER_SERVE_FROM_SUB_PATH for {repo}"
+            );
+            let root = r
+                .env
+                .iter()
+                .find(|e| e.name == "GF_SERVER_ROOT_URL")
+                .unwrap();
+            // Must contain the {name} placeholder so the WebUI can
+            // substitute the app name (otherwise a Grafana installed as
+            // "grafana-prod" would still emit /apps/grafana/ URLs).
+            assert!(
+                root.value.contains("{name}"),
+                "GF_SERVER_ROOT_URL missing {{name}} placeholder"
+            );
+        }
+    }
+
+    #[test]
+    fn subpath_recipe_vaultwarden() {
+        let r = match_subpath_recipe("vaultwarden/server").expect("vaultwarden recipe missing");
+        assert_eq!(r.display_name, "Vaultwarden sub-path mode");
+        assert_eq!(r.env.len(), 1);
+        assert_eq!(r.env[0].name, "DOMAIN");
+        // Both {scheme} and {host} placeholders are required so the
+        // WebUI can render the exact origin the browser sees (Vaultwarden
+        // CSRF-checks against DOMAIN).
+        assert!(r.env[0].value.contains("{scheme}"));
+        assert!(r.env[0].value.contains("{host}"));
+        assert!(r.env[0].value.contains("{name}"));
+        // Trailing slash must NOT be present — Vaultwarden docs are
+        // explicit on this, and a trailing slash breaks the CSRF check.
+        assert!(!r.env[0].value.ends_with('/'));
+    }
+
+    #[test]
+    fn subpath_recipe_unknown_returns_none() {
+        // Unknown apps fall through to the post-install proxy probe
+        // (probe_proxy_compat) — never silently guess.
+        assert_eq!(
+            match_subpath_recipe("library/redis").map(|r| r.display_name),
+            None
+        );
+        assert_eq!(
+            match_subpath_recipe("ghcr.io/consi/haze").map(|r| r.display_name),
+            None
+        );
+        assert_eq!(match_subpath_recipe("").map(|r| r.display_name), None);
     }
 }

@@ -4,7 +4,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, AppStats, MappedPort, PruneResult } from '$lib/types';
+	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, AppStats, MappedPort, PruneResult, SubPathRecipe } from '$lib/types';
 	import { formatBytes } from '$lib/format';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -278,6 +278,12 @@
 	/** Inline status from the last apps.inspect_image call so the user sees
 	 *  why ports weren't auto-detected (image unreachable, no EXPOSE, etc.). */
 	let inspectMsg: string | null = $state(null);
+	/** Curated recipe for serving this image under /apps/<name>/, if the
+	 *  engine recognised the image. Surfaced as an "Apply <Name> sub-path
+	 *  mode" button next to the Environment Variables section — clicking
+	 *  it appends the recipe's env entries to newEnvs with `{name}`,
+	 *  `{host}`, `{scheme}` placeholders substituted. */
+	let subpathRecipe = $state<SubPathRecipe | null>(null);
 
 	// Port conflict state
 	let portConflicts = $state<{ port: number; used_by: string }[]>([]);
@@ -429,6 +435,10 @@
 				const userMsg = `Image runs as ${result.user} — auto-created volume dirs will be chowned to that identity.`;
 				inspectMsg = inspectMsg ? `${inspectMsg} ${userMsg}` : userMsg;
 			}
+			// Stash any sub-path recipe so the UI can render the
+			// "Apply <recipe> sub-path mode" button. We don't auto-apply;
+			// the user opts in so they see what's being added.
+			subpathRecipe = result.subpath_recipe ?? null;
 		} catch (e) {
 			// Registry unreachable / image not found / private without auth.
 			// Surface inline so the user knows to fall back to manual entry.
@@ -437,6 +447,35 @@
 		}
 		inspecting = false;
 		checkPortConflicts();
+	}
+
+	/** Apply the engine-supplied sub-path recipe to the install form.
+	 * Substitutes `{name}` with the App Name field, and `{host}`/`{scheme}`
+	 * with what the browser sees right now — so Vaultwarden's `DOMAIN`
+	 * matches the origin the user will type into their browser (CSRF
+	 * checks rely on exact match). Appends entries to newEnvs rather
+	 * than overwriting, and skips keys the user has already set so the
+	 * user's manual config wins. After apply, clear the recipe state
+	 * so the button doesn't re-trigger on every keystroke.
+	 */
+	function applySubpathRecipe() {
+		if (!subpathRecipe) return;
+		const host = window.location.host;
+		const scheme = window.location.protocol.replace(/:$/, '');
+		const existing = new Set(newEnvs.map(e => e.name));
+		const additions = subpathRecipe.env
+			.filter(e => !existing.has(e.name))
+			.map(e => ({
+				name: e.name,
+				value: e.value
+					.replaceAll('{name}', newName || 'app')
+					.replaceAll('{host}', host)
+					.replaceAll('{scheme}', scheme),
+			}));
+		if (additions.length > 0) {
+			newEnvs = [...newEnvs, ...additions];
+		}
+		subpathRecipe = null;
 	}
 
 	function checkPortConflicts(excludeApp?: string) {
@@ -885,6 +924,7 @@
 		newMemoryLimit = '';
 		newAllowUnsafe = false;
 		lastInspectedImage = '';
+		subpathRecipe = null;
 	}
 
 	function cancelEdit() {
@@ -1342,6 +1382,17 @@
 						<Label>Environment Variables</Label>
 						<Button size="xs" variant="outline" onclick={addEnv}>+ Add</Button>
 					</div>
+					{#if subpathRecipe}
+						<!-- Engine recognised this image as one with a known sub-path recipe
+						     (Grafana, Vaultwarden, ...). Show the recipe behind an opt-in
+						     button so the user confirms before any env vars are added —
+						     the values are templated against window.location at click time
+						     so they match the origin the browser actually uses. -->
+						<div class="mt-1 flex items-center gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1.5 text-xs">
+							<span class="text-blue-400">Reverse-proxy at <code>/apps/{newName || '&lt;name&gt;'}/</code> supported.</span>
+							<Button size="xs" variant="outline" onclick={applySubpathRecipe}>Apply {subpathRecipe.display_name}</Button>
+						</div>
+					{/if}
 					{#each newEnvs as env, i}
 						<div class="grid grid-cols-[1fr_1fr_auto] gap-2 mt-1 items-center">
 							<Input bind:value={env.name} placeholder="Name" class="h-8 text-xs" />
