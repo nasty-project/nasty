@@ -371,6 +371,189 @@ fn validate_chown_target(host_path: &str) -> Result<(), AppsError> {
     Ok(())
 }
 
+/// Parse a Docker image `User` field (e.g. `1000`, `1000:1000`, `nonroot`,
+/// `nonroot:nonroot`) into a numeric (uid, gid). Returns `None` when the
+/// image runs as root or we can't resolve a named user without reading
+/// the image's `/etc/passwd` — see the well-known-names table below for
+/// the named users we *can* resolve cheaply.
+///
+/// Used both by the simple-install chown step and (planned) as a fallback
+/// for compose deploys whose service has no explicit `user:` field. The
+/// compose path's existing logic in `extract_compose_binds` only reads
+/// numeric users from the YAML; this is image-level fallback.
+fn parse_image_user(user_field: &str) -> Option<(u32, u32)> {
+    let s = user_field.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (u_part, g_part) = match s.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (s, None),
+    };
+    // root → no chown needed (root can always write).
+    if u_part == "0" || u_part == "root" {
+        return None;
+    }
+    // Numeric path.
+    if let Ok(uid) = u_part.parse::<u32>() {
+        let gid = g_part
+            .and_then(|g| g.parse::<u32>().ok())
+            .unwrap_or(uid);
+        return Some((uid, gid));
+    }
+    // Named user — resolve via a small well-known table. We deliberately
+    // don't `docker create` a temp container to read /etc/passwd: that
+    // adds a side-effect on Docker state for what should be a pure
+    // metadata lookup. Apps using non-well-known named users still work
+    // if the operator pre-creates a host_path with correct ownership and
+    // re-deploys with that host_path filled in.
+    let uid = well_known_user_uid(u_part)?;
+    let gid = match g_part {
+        None => uid,
+        Some(g) => g
+            .parse::<u32>()
+            .ok()
+            .or_else(|| well_known_user_uid(g))
+            .unwrap_or(uid),
+    };
+    Some((uid, gid))
+}
+
+/// Maps a small set of conventional named users to their canonical UIDs.
+/// Currently just `nonroot` (the distroless convention, UID 65532) — the
+/// case that brought us here via the haze launch.
+fn well_known_user_uid(name: &str) -> Option<u32> {
+    match name {
+        "nonroot" => Some(65532),
+        _ => None,
+    }
+}
+
+/// Look up the image's `Config.User` via the local Docker daemon and
+/// translate it through [`parse_image_user`]. Returns `None` when the
+/// image runs as root, the User field is unset/unresolvable, or the
+/// local inspect itself fails (the install will still proceed; we'll
+/// just leave the auto-created volume dirs root-owned and the container
+/// may or may not work depending on its expectations).
+async fn resolve_image_chown_target(docker: &Docker, image: &str) -> Option<(u32, u32)> {
+    let inspected = match docker.inspect_image(image).await {
+        Ok(i) => i,
+        Err(e) => {
+            warn!("apps: inspect_image({image}) failed: {e} — skipping auto-chown");
+            return None;
+        }
+    };
+    let user_field = inspected.config?.user?;
+    let resolved = parse_image_user(&user_field);
+    if resolved.is_none() && !user_field.is_empty() && user_field != "root" && user_field != "0" {
+        // Surface the case where we have a User but couldn't translate it.
+        // Without this hint the operator just sees the container fail to
+        // write and has to guess what went wrong.
+        warn!(
+            "apps: image {image} runs as '{user_field}' which isn't numeric or in the \
+             well-known table — auto-created volume dirs will be root-owned. \
+             Re-deploy with a pre-chowned host_path to fix."
+        );
+    }
+    resolved
+}
+
+/// Poll the just-started container for a short grace window and report
+/// crash-loop conditions back to the caller. Returns `Some(reason)` when
+/// the container exited (with the exit code), is actively cycling
+/// (`RestartCount > 0`), or is dead — all of which mean the install
+/// should be rolled back. Returns `None` when the container is running
+/// at the end of the window, which is the happy path.
+///
+/// The 5s window is enough to catch fast-failures (bad env vars, missing
+/// permissions on a bind mount, image entrypoint bombing out) without
+/// false-positiving slow-starters: a real app should at minimum survive
+/// past its argv parsing in 5 seconds.
+async fn detect_install_crash(docker: &Docker, cname: &str) -> Option<String> {
+    const GRACE_TICKS: u32 = 10;
+    const TICK_MS: u64 = 500;
+    for _ in 0..GRACE_TICKS {
+        tokio::time::sleep(std::time::Duration::from_millis(TICK_MS)).await;
+        let inspect = match docker.inspect_container(cname, None).await {
+            Ok(i) => i,
+            // Inspect failures during startup are transient enough that
+            // bailing here would over-rollback; just try again next tick.
+            Err(_) => continue,
+        };
+        // `restart_count` lives on the inspect response itself, not on the
+        // nested `state` struct (it counts restarts across the container's
+        // lifetime, not the current state's lifetime).
+        let restart_count = inspect.restart_count.unwrap_or(0);
+        let Some(state) = inspect.state else { continue };
+        let status = state.status.map(|s| format!("{s:?}").to_lowercase());
+        match status.as_deref() {
+            Some("exited") | Some("dead") => {
+                let exit_code = state.exit_code.unwrap_or(-1);
+                let tail = recent_logs(docker, cname, 20).await;
+                return Some(format!(
+                    "exited with status {exit_code}; recent logs:\n{tail}"
+                ));
+            }
+            Some("restarting") if restart_count >= 1 => {
+                let tail = recent_logs(docker, cname, 20).await;
+                return Some(format!(
+                    "container is in restart loop ({restart_count} restarts so far); recent logs:\n{tail}"
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Fetch the last N log lines from a container, joined as a single string.
+/// Best-effort: returns `(no logs)` on any failure so callers can embed
+/// the result in error messages without further error handling.
+async fn recent_logs(docker: &Docker, cname: &str, tail: u32) -> String {
+    use bollard::query_parameters::LogsOptions;
+    let opts = LogsOptions {
+        stdout: true,
+        stderr: true,
+        tail: tail.to_string(),
+        ..Default::default()
+    };
+    let mut stream = docker.logs(cname, Some(opts));
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(c) => buf.push_str(&String::from_utf8_lossy(c.as_ref())),
+            Err(_) => break,
+        }
+    }
+    if buf.trim().is_empty() {
+        "(no logs)".to_string()
+    } else {
+        buf
+    }
+}
+
+/// chown a path to the given uid/gid. Async wrapper around libc::chown
+/// via spawn_blocking so we don't shell out for a single syscall.
+async fn chown_path(path: &str, uid: u32, gid: u32) -> Result<(), AppsError> {
+    let p = path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let c_path = std::ffi::CString::new(p.as_str())
+            .map_err(|e| AppsError::CommandFailed(format!("path contains NUL: {e}")))?;
+        // SAFETY: c_path is a valid C string for the lifetime of the call;
+        // uid/gid are passed by value; chown is async-signal-safe.
+        let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+        if rc != 0 {
+            return Err(AppsError::CommandFailed(format!(
+                "chown({p}, {uid}, {gid}): {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppsError::CommandFailed(format!("chown task join error: {e}")))?
+}
+
 // ── Types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -506,6 +689,18 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImageInspectResult {
     pub ports: Vec<AppPort>,
+    /// Bind-mount paths the image declares via `VOLUME` in its Dockerfile.
+    /// The WebUI installer prefills these as Volume rows so the user
+    /// doesn't have to know that e.g. ghcr.io/consi/haze needs
+    /// `/var/lib/haze` to be persistent for SQLite to work.
+    #[serde(default)]
+    pub volumes: Vec<AppVolume>,
+    /// Image's runtime user as declared in `Config.User`. May be numeric
+    /// (`1000` / `1000:1000`) or named (`nonroot:nonroot`). The WebUI
+    /// surfaces this so the user knows the host volume dirs will be
+    /// chowned to that identity by the install pipeline. `None` = root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1017,6 +1212,15 @@ impl AppsService {
         // Pull the image first
         self.pull_image(&req.image).await?;
 
+        // Resolve the image's runtime user → numeric uid/gid for chowning
+        // auto-created volume dirs. Without this, dirs we mkdir below are
+        // root-owned and a non-root container (e.g. distroless `nonroot`)
+        // can't open files inside them — see haze, which crash-looped on
+        // "unable to open database file" because it runs as nonroot:nonroot
+        // (UID 65532) but /var/lib/haze was root-owned. Returns None when
+        // the image runs as root or we can't resolve a named user.
+        let chown_target = resolve_image_chown_target(&self.docker()?, &req.image).await;
+
         // Build port bindings — default host_port to container_port if not specified
         let used_ports = self.used_host_ports().await;
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
@@ -1045,7 +1249,7 @@ impl AppsService {
         let storage_path = Self::load_config().storage_path;
         let mut binds = Vec::new();
         for v in &req.volumes {
-            let host_path = if v.host_path.is_empty() {
+            let (host_path, auto_created) = if v.host_path.is_empty() {
                 // Auto-generate path under apps storage
                 let base = storage_path
                     .as_deref()
@@ -1057,13 +1261,28 @@ impl AppsService {
                 // root-owned dir — either way, a logged failure now is
                 // way easier to debug than the resulting "container
                 // exits immediately" report later.
-                if let Err(e) = tokio::fs::create_dir_all(&path).await {
-                    warn!("apps volume: create_dir_all({path}) failed: {e}");
+                let mut created = false;
+                match tokio::fs::create_dir_all(&path).await {
+                    Ok(()) => created = true,
+                    Err(e) => warn!("apps volume: create_dir_all({path}) failed: {e}"),
                 }
-                path
+                (path, created)
             } else {
-                v.host_path.clone()
+                (v.host_path.clone(), false)
             };
+            // Chown the auto-created dir to the image's runtime uid:gid.
+            // We deliberately skip user-supplied host_paths — the user
+            // already owns those and we shouldn't mutate ownership of a
+            // pre-existing path on the operator's behalf.
+            if auto_created
+                && let Some((uid, gid)) = chown_target
+                && let Err(e) = chown_path(&host_path, uid, gid).await
+            {
+                warn!(
+                    "apps volume: chown({host_path}, {uid}:{gid}) failed: {e} \
+                     — the container may not be able to write to this volume"
+                );
+            }
             binds.push(format!("{}:{}:rw", host_path, v.mount_path));
         }
 
@@ -1135,6 +1354,33 @@ impl AppsService {
                 None::<bollard::query_parameters::StartContainerOptions>,
             )
             .await?;
+
+        // Watch for an immediate crash loop. Without this the RPC returns
+        // success the instant Docker accepts `start_container`, even when
+        // the container exits 200ms later and starts cycling — the user
+        // then sees "Installed" in the WebUI and only finds out the app
+        // is broken by noticing the "restarting" status badge later.
+        // Rolling back on early crash keeps the install transactional:
+        // either it's healthy or you're back to a clean slate.
+        if let Some(reason) = detect_install_crash(&self.docker()?, &cname).await {
+            warn!(
+                "Install '{}' crash-looped within startup grace window: {reason} — rolling back",
+                req.name
+            );
+            let _ = self
+                .docker()?
+                .remove_container(
+                    &cname,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+            return Err(AppsError::DockerFailed(format!(
+                "container exited shortly after start: {reason}"
+            )));
+        }
 
         info!("Installed app '{}' (image: {})", req.name, req.image);
 
@@ -1242,17 +1488,14 @@ impl AppsService {
             return Err(AppsError::AppNotFound(name.to_string()));
         }
 
-        // Stop and remove
-        let _ = self
-            .docker()?
-            .stop_container(
-                &cname,
-                Some(StopContainerOptions {
-                    t: Some(10),
-                    signal: None,
-                }),
-            )
-            .await;
+        // Force-remove. The previous version did a graceful `stop_container`
+        // with t=10s first, but `remove_container(force: true)` already
+        // does SIGKILL+remove in one call — chaining stop in front just
+        // added a 10s SIGTERM grace that the user already opted out of by
+        // pressing Remove (they want it gone, not gracefully shut down).
+        // The webui's RPC timeout fires at ~10s, so the old code reliably
+        // tripped "request timed out" toasts on every Remove of a healthy
+        // container that ignores SIGTERM.
         self.docker()?
             .remove_container(
                 &cname,
@@ -2614,10 +2857,14 @@ impl AppsService {
     // ── Image inspection ────────────────────────────────────
 
     pub async fn inspect_image(&self, image: &str) -> Result<ImageInspectResult, AppsError> {
-        let ports = inspect_image_ports(image)
+        let meta = inspect_image_metadata(image)
             .await
             .map_err(|e| AppsError::CommandFailed(format!("image inspect failed: {e}")))?;
-        Ok(ImageInspectResult { ports })
+        Ok(ImageInspectResult {
+            ports: meta.ports,
+            volumes: meta.volumes,
+            user: meta.user,
+        })
     }
 
     // ── Restore on boot ─────────────────────────────────────
@@ -3475,7 +3722,13 @@ fn parse_image_ref(image: &str) -> (String, String, String) {
     }
 }
 
-async fn inspect_image_ports(image: &str) -> Result<Vec<AppPort>, String> {
+struct ImageMetadata {
+    ports: Vec<AppPort>,
+    volumes: Vec<AppVolume>,
+    user: Option<String>,
+}
+
+async fn inspect_image_metadata(image: &str) -> Result<ImageMetadata, String> {
     let (registry, repo, tag) = parse_image_ref(image);
     let client = reqwest::Client::new();
 
@@ -3504,22 +3757,26 @@ async fn inspect_image_ports(image: &str) -> Result<Vec<AppPort>, String> {
         format!("https://{registry}")
     };
 
-    // Fetch manifest
+    // Fetch manifest. Accept both single-arch manifests and multi-arch
+    // manifest lists / OCI indexes; for the latter we pick the linux/amd64
+    // entry and re-fetch its manifest.
     let manifest_url = format!("{registry_url}/v2/{repo}/manifests/{tag}");
-    let mut req = client.get(&manifest_url).header(
-        "Accept",
-        "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
-    );
-    if let Some(ref t) = token {
-        req = req.bearer_auth(t);
-    }
-    let manifest: serde_json::Value = req
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    let manifest = fetch_manifest_json(&client, &manifest_url, token.as_deref()).await?;
+    let manifest = match manifest["manifests"].as_array() {
+        Some(entries) => {
+            // Multi-arch list: pick linux/amd64 (matches NASty's target).
+            let chosen = entries.iter().find(|m| {
+                m["platform"]["os"].as_str() == Some("linux")
+                    && m["platform"]["architecture"].as_str() == Some("amd64")
+            }).or_else(|| entries.first())
+            .ok_or("manifest list is empty")?;
+            let digest = chosen["digest"].as_str()
+                .ok_or("manifest list entry missing digest")?;
+            let sub_url = format!("{registry_url}/v2/{repo}/manifests/{digest}");
+            fetch_manifest_json(&client, &sub_url, token.as_deref()).await?
+        }
+        None => manifest,
+    };
 
     let config_digest = manifest["config"]["digest"]
         .as_str()
@@ -3539,7 +3796,7 @@ async fn inspect_image_ports(image: &str) -> Result<Vec<AppPort>, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // Parse ExposedPorts
+    // ── ExposedPorts ──────────────────────────────────────────
     let exposed = config["config"]["ExposedPorts"]
         .as_object()
         .or_else(|| config["container_config"]["ExposedPorts"].as_object());
@@ -3569,9 +3826,70 @@ async fn inspect_image_ports(image: &str) -> Result<Vec<AppPort>, String> {
             }
         }
     }
-
     ports.sort_by_key(|p| p.container_port);
-    Ok(ports)
+
+    // ── Volumes ───────────────────────────────────────────────
+    // `VOLUME /var/lib/haze` in the Dockerfile lands here. The WebUI
+    // prefills these as Volume rows so the user doesn't have to know which
+    // paths the image needs to be persistent — which is the exact gap that
+    // had haze crash-looping on an empty install (SQLite couldn't open
+    // /var/lib/haze/haze.sqlite because the path lived on the writable layer
+    // owned by root, not on a bind mount).
+    let declared_volumes = config["config"]["Volumes"]
+        .as_object()
+        .or_else(|| config["container_config"]["Volumes"].as_object());
+    let mut volumes = Vec::new();
+    if let Some(vol_map) = declared_volumes {
+        for (mount_path, _) in vol_map {
+            // Synthesize a friendly name from the last path segment
+            // (e.g. /var/lib/haze → "haze", /data → "data").
+            let name = mount_path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("data")
+                .to_string();
+            volumes.push(AppVolume {
+                name,
+                mount_path: mount_path.clone(),
+                host_path: String::new(),
+            });
+        }
+    }
+    volumes.sort_by(|a, b| a.mount_path.cmp(&b.mount_path));
+
+    // ── User ──────────────────────────────────────────────────
+    let user = config["config"]["User"]
+        .as_str()
+        .or_else(|| config["container_config"]["User"].as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
+    Ok(ImageMetadata { ports, volumes, user })
+}
+
+async fn fetch_manifest_json(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut req = client.get(url).header(
+        "Accept",
+        "application/vnd.oci.image.index.v1+json, \
+         application/vnd.docker.distribution.manifest.list.v2+json, \
+         application/vnd.oci.image.manifest.v1+json, \
+         application/vnd.docker.distribution.manifest.v2+json",
+    );
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    req.send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -4062,5 +4380,61 @@ services:
     #[test]
     fn parse_ss_garbage_returns_none() {
         assert!(parse_ss_listener_line("not ss output").is_none());
+    }
+
+    // ── parse_image_user ──
+
+    use super::parse_image_user;
+
+    #[test]
+    fn parse_image_user_empty_is_none() {
+        assert_eq!(parse_image_user(""), None);
+        assert_eq!(parse_image_user("   "), None);
+    }
+
+    #[test]
+    fn parse_image_user_root_is_none() {
+        // Both spellings — chowning to root is always a no-op so we
+        // shouldn't bother walking the dir.
+        assert_eq!(parse_image_user("root"), None);
+        assert_eq!(parse_image_user("0"), None);
+        assert_eq!(parse_image_user("0:0"), None);
+    }
+
+    #[test]
+    fn parse_image_user_numeric_uid_only() {
+        // No group → gid defaults to uid (matches docker's behaviour
+        // when only User is set in a Dockerfile).
+        assert_eq!(parse_image_user("1000"), Some((1000, 1000)));
+    }
+
+    #[test]
+    fn parse_image_user_numeric_uid_gid() {
+        assert_eq!(parse_image_user("1000:2000"), Some((1000, 2000)));
+        assert_eq!(parse_image_user("65532:65532"), Some((65532, 65532)));
+    }
+
+    #[test]
+    fn parse_image_user_named_nonroot() {
+        // Well-known distroless convention — the specific case that
+        // brought us here via haze. Both bare and uid:gid spellings
+        // resolve to 65532.
+        assert_eq!(parse_image_user("nonroot"), Some((65532, 65532)));
+        assert_eq!(parse_image_user("nonroot:nonroot"), Some((65532, 65532)));
+    }
+
+    #[test]
+    fn parse_image_user_named_mixed_uid_gid() {
+        // Mix-and-match: numeric uid + named group, or vice versa.
+        assert_eq!(parse_image_user("65532:nonroot"), Some((65532, 65532)));
+        assert_eq!(parse_image_user("nonroot:65532"), Some((65532, 65532)));
+    }
+
+    #[test]
+    fn parse_image_user_unknown_named_is_none() {
+        // No well-known table entry → we refuse to guess, returning
+        // None so install() leaves the dir root-owned and warns.
+        assert_eq!(parse_image_user("plex"), None);
+        assert_eq!(parse_image_user("ubuntu"), None);
     }
 }

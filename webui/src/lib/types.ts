@@ -1000,6 +1000,8 @@ export interface AppConfig {
 
 export interface ImageInspectResult {
 	ports: { name: string; container_port: number; host_port: number | null; protocol: string }[];
+	volumes: { name: string; mount_path: string; host_path: string }[];
+	user?: string | null;
 }
 
 export interface AppIngress {

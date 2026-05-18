@@ -410,6 +410,25 @@
 				// set the internal port manually below.
 				inspectMsg = 'Image declares no exposed ports — set the internal port manually.';
 			}
+			// Prefill VOLUME declarations from the image so single-image apps
+			// that need persistent storage (e.g. haze's /var/lib/haze for
+			// SQLite) don't get installed with a writable-layer-only mount
+			// and crash-loop on first write. Only seed when the user hasn't
+			// already added rows manually.
+			if (result.volumes && result.volumes.length > 0 && newVolumes.length === 0) {
+				newVolumes = result.volumes.map(v => ({
+					name: v.name,
+					mount_path: v.mount_path,
+					host_path: v.host_path ?? '',
+				}));
+			}
+			// Surface the runtime user so the operator knows what UID the
+			// auto-created volume dirs will be chowned to. Most images
+			// running as root won't have this field set.
+			if (result.user) {
+				const userMsg = `Image runs as ${result.user} — auto-created volume dirs will be chowned to that identity.`;
+				inspectMsg = inspectMsg ? `${inspectMsg} ${userMsg}` : userMsg;
+			}
 		} catch (e) {
 			// Registry unreachable / image not found / private without auth.
 			// Surface inline so the user knows to fall back to manual entry.
@@ -1690,7 +1709,8 @@
 									</a>
 								{/if}
 								{#if status?.running}
-									{#if app.status === 'running'}
+									<!-- Stop also for "restarting" — that is the crash-loop state, and Start would be a no-op. -->
+									{#if app.status === 'running' || app.status === 'restarting'}
 										<Button variant="outline" size="xs" onclick={() => stopApp(app.name)}>Stop</Button>
 									{:else}
 										<Button variant="outline" size="xs" onclick={() => startApp(app.name)}>Start</Button>
