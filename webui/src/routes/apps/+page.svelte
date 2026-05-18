@@ -262,7 +262,12 @@
 	let newName = $state('');
 	let newImage = $state('');
 	let newPorts = $state<{ name: string; container_port: number; host_port: string; protocol: string }[]>([]);
-	let newEnvs = $state<{ name: string; value: string }[]>([]);
+	/** `is_image_default` = the row's value came from the image's own
+	 * `Config.Env` (not set by the user). Greyed out in Edit, shown with
+	 * an "Override" button that flips `overriding` to true and makes the
+	 * row editable — only overridden rows end up in updateApp's req.env,
+	 * so the user's override list stays clean of image internals. */
+	let newEnvs = $state<{ name: string; value: string; is_image_default?: boolean; overriding?: boolean }[]>([]);
 	let newVolumes = $state<{ name: string; mount_path: string; host_path: string }[]>([]);
 	/** Index into `newVolumes` of the row whose host_path picker is
 	 * currently open; null when no picker is up. */
@@ -866,7 +871,13 @@
 			}));
 		}
 		if (newEnvs.length > 0) {
-			params.env = newEnvs.filter(e => e.name);
+			// Same image-default filter as updateApp — symmetric so an
+			// install path that somehow seeded image-default rows (e.g.
+			// re-using Edit state, or a future paste-from-running flow)
+			// wouldn't quietly pin those values either.
+			params.env = newEnvs
+				.filter(e => e.name && (!e.is_image_default || e.overriding))
+				.map(e => ({ name: e.name, value: e.value }));
 		}
 		if (newVolumes.length > 0) {
 			params.volumes = newVolumes.filter(v => v.name && v.mount_path).map(v => ({
@@ -907,7 +918,12 @@
 			host_port: p.host_port?.toString() ?? '',
 			protocol: p.protocol,
 		}));
-		newEnvs = config.env.map(e => ({ name: e.name, value: e.value }));
+		newEnvs = config.env.map(e => ({
+			name: e.name,
+			value: e.value,
+			is_image_default: e.is_image_default ?? false,
+			overriding: false,
+		}));
 		newVolumes = config.volumes.map(v => ({ name: v.name, mount_path: v.mount_path, host_path: v.host_path }));
 		newCpuLimit = config.cpu_limit ?? '';
 		newMemoryLimit = config.memory_limit ?? '';
@@ -931,7 +947,13 @@
 			}));
 		}
 		if (newEnvs.length > 0) {
-			params.env = newEnvs.filter(e => e.name);
+			// Drop image-default rows unless the user explicitly clicked
+			// Override on them. Without this, every Edit + Save would
+			// pin all image defaults into req.env — silently masking
+			// any future upstream change to those defaults.
+			params.env = newEnvs
+				.filter(e => e.name && (!e.is_image_default || e.overriding))
+				.map(e => ({ name: e.name, value: e.value }));
 		}
 		if (newVolumes.length > 0) {
 			params.volumes = newVolumes.filter(v => v.name && v.mount_path).map(v => ({
@@ -1440,10 +1462,24 @@
 						</div>
 					{/if}
 					{#each newEnvs as env, i}
-						<div class="grid grid-cols-[1fr_1fr_auto] gap-2 mt-1 items-center">
-							<Input bind:value={env.name} placeholder="Name" class="h-8 text-xs" />
-							<Input bind:value={env.value} placeholder="Value" class="h-8 text-xs" />
-							<Button size="xs" variant="ghost" onclick={() => removeEnv(i)}>x</Button>
+						{@const greyed = env.is_image_default && !env.overriding}
+						<div class="grid grid-cols-[1fr_1fr_auto] gap-2 mt-1 items-center" title={greyed ? "Image default — click Override to change." : ""}>
+							<Input bind:value={env.name} placeholder="Name" class="h-8 text-xs {greyed ? 'opacity-60' : ''}" disabled={greyed} />
+							<Input bind:value={env.value} placeholder="Value" class="h-8 text-xs {greyed ? 'opacity-60' : ''}" disabled={greyed} />
+							{#if env.is_image_default && !env.overriding}
+								<!-- Image-default rows show Override (not "x") — removing an image-default
+								     would be a no-op since Docker still injects it from the image. Override
+								     flips the row to user-owned so updateApp pins this exact value. -->
+								<Button size="xs" variant="outline" onclick={() => { env.overriding = true; }}>Override</Button>
+							{:else if env.is_image_default && env.overriding}
+								<!-- Reverting drops the explicit override; Docker falls back to
+								     whatever the image declares (including any future upstream
+								     change). The typed value stays in the input but is ignored
+								     on save — the greyed appearance signals "won't be saved". -->
+								<Button size="xs" variant="ghost" onclick={() => { env.overriding = false; }} title="Revert to image default on save">↺</Button>
+							{:else}
+								<Button size="xs" variant="ghost" onclick={() => removeEnv(i)}>x</Button>
+							{/if}
 						</div>
 					{/each}
 				</div>

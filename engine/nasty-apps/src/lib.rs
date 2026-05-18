@@ -1030,6 +1030,16 @@ fn default_tcp() -> String {
 pub struct AppEnv {
     pub name: String,
     pub value: String,
+    /// Set by `apps.config` when this entry's value matches the image's
+    /// own `Config.Env` default for the same key — i.e. the user didn't
+    /// set it explicitly, it just came along with the image. The WebUI
+    /// greys these rows out in Edit and shows an "Override" button so
+    /// the user sees what the image provides without being misled into
+    /// thinking they own it. Always `false` when the WebUI submits env
+    /// back to the engine (install/update) — the engine doesn't read
+    /// this field for create_container; it's purely an Edit-side hint.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_image_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2301,16 +2311,50 @@ impl AppsService {
         }
         ports.sort_by_key(|p| p.container_port);
 
-        // Parse env
+        // Parse env. The container's `Config.Env` is `image defaults
+        // + values we passed at create_container` with no marker for
+        // which is which — so we inspect the image's own Config.Env
+        // here and tag every row that matches a default with
+        // `is_image_default: true`. The WebUI then renders those rows
+        // greyed out with an "Override" button instead of an "x",
+        // so the user can see what the image provides and only opts
+        // into overriding what they actually want to change.
+        //
+        // If the image inspect fails we fall back to flagging nothing
+        // — the Edit form will look like the pre-fix behaviour (image
+        // defaults shown as user-set), which is at worst noisy. The
+        // failure is logged so it's grep-able.
+        let image_env_defaults: HashMap<String, String> =
+            match self.docker()?.inspect_image(&image).await {
+                Ok(img) => img
+                    .config
+                    .and_then(|c| c.env)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|e| {
+                        e.split_once('=')
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                    })
+                    .collect(),
+                Err(e) => {
+                    warn!(
+                        "apps.get_config: image inspect for '{image}' failed: {e} \
+                         — Edit will not distinguish image-default env entries"
+                    );
+                    HashMap::new()
+                }
+            };
         let env: Vec<AppEnv> = config
             .env
             .unwrap_or_default()
             .iter()
             .filter_map(|e| {
                 let (k, v) = e.split_once('=')?;
+                let is_image_default = image_env_defaults.get(k).map(|d| d == v).unwrap_or(false);
                 Some(AppEnv {
                     name: k.to_string(),
                     value: v.to_string(),
+                    is_image_default,
                 })
             })
             .collect();
@@ -4076,10 +4120,12 @@ fn match_subpath_recipe(repo: &str) -> Option<SubPathRecipe> {
                     AppEnv {
                         name: "GF_SERVER_ROOT_URL".to_string(),
                         value: "%(protocol)s://%(domain)s/apps/{name}/".to_string(),
+                        is_image_default: false,
                     },
                     AppEnv {
                         name: "GF_SERVER_SERVE_FROM_SUB_PATH".to_string(),
                         value: "true".to_string(),
+                        is_image_default: false,
                     },
                 ],
             })
@@ -4096,6 +4142,7 @@ fn match_subpath_recipe(repo: &str) -> Option<SubPathRecipe> {
             env: vec![AppEnv {
                 name: "DOMAIN".to_string(),
                 value: "{scheme}://{host}/apps/{name}".to_string(),
+                is_image_default: false,
             }],
         }),
         _ => None,
