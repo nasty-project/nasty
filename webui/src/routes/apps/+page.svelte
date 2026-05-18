@@ -223,7 +223,22 @@
 			} else if ((t === '-v' || t === '--volume') && i + 1 < tokens.length) {
 				const parts = tokens[++i].split(':');
 				if (parts.length >= 2) {
-					volumes.push({ name: `vol-${volumes.length}`, host_path: expandShellVars(parts[0]), mount_path: parts[1] });
+					// `-v src:dest`: src is a *bind mount* only when it's an
+					// absolute host path (Docker rule — anything else, like
+					// `haze-data:/var/lib/haze`, is a Docker named volume).
+					// For named volumes we want NASty's auto-managed storage
+					// instead — leave host_path empty, the install pipeline
+					// auto-creates a chowned dir under /fs/<x>/apps/<name>/.
+					// Without this branch the parser was stuffing the volume
+					// name (`haze-data`) into host_path, which the engine
+					// then rejects as not under /fs/.
+					const src = parts[0];
+					const isBindMount = src.startsWith('/');
+					volumes.push({
+						name: isBindMount ? `vol-${volumes.length}` : src,
+						host_path: isBindMount ? expandShellVars(src) : '',
+						mount_path: parts[1],
+					});
 				}
 			} else if (t === '-d' || t === '--detach' || t === '--restart' || t === '--restart=always' || t.startsWith('--restart=')) {
 				// skip flags we handle implicitly
