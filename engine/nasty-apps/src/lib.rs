@@ -2884,9 +2884,30 @@ impl AppsService {
 
         // Live state: ask Docker about labelled containers with a
         // TCP port mapping, then look up the host port for each.
+        // If we successfully enumerated *any* managed apps, treat the
+        // resulting route set as authoritative — even when it's empty
+        // after filtering (e.g. all apps have proxy_disabled_reason
+        // set). Falling back to the legacy file in that case would
+        // resurrect routes the probe explicitly killed.
         if let Ok(apps) = self.list().await {
+            let saw_managed_apps = !apps.is_empty();
             let mut routes = Vec::new();
             for app in apps {
+                // Skip apps whose post-install probe disabled the
+                // reverse proxy (haze-class apps that emit absolute
+                // root-path assets). Without this check, every engine
+                // restart re-added the ingress the probe killed —
+                // user installs haze, ingress disabled, restart engine,
+                // ingress is back, /apps/haze/ goes blank again until
+                // someone notices and re-removes it. The manifest is
+                // the source of truth; honour it.
+                if app.proxy_disabled_reason.is_some() {
+                    info!(
+                        "apps: '{}' has proxy_disabled_reason — skipping ingress reconcile",
+                        app.name
+                    );
+                    continue;
+                }
                 let Some(port) = app
                     .ports
                     .iter()
@@ -2900,7 +2921,7 @@ impl AppsService {
                     host_port: port,
                 });
             }
-            if !routes.is_empty() {
+            if saw_managed_apps {
                 return routes;
             }
         }
