@@ -1087,7 +1087,21 @@
 	}
 
 	async function openShell(name: string) {
-		const cmd = await client.call<string>('apps.exec_command', { name });
+		// apps.exec_command errors when the container has no shell (scratch
+		// or distroless images — haze is the canonical case). Without the
+		// try/catch the rejected promise silently swallowed the click: no
+		// goto, no toast, the user just saw nothing happen. Surface the
+		// engine's message so the operator knows *why* Shell didn't work.
+		let cmd: string;
+		try {
+			cmd = await client.call<string>('apps.exec_command', { name });
+		} catch (e) {
+			const msg = e instanceof Error ? e.message :
+				(typeof e === 'object' && e !== null && 'message' in e) ?
+				String((e as { message: unknown }).message) : String(e);
+			await withToast(async () => { throw new Error(msg); }, '');
+			return;
+		}
 		// Navigate to terminal with pre-filled command
 		goto(`/terminal?cmd=${encodeURIComponent(cmd)}`);
 	}
