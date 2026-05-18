@@ -552,6 +552,244 @@ async fn chown_path(path: &str, uid: u32, gid: u32) -> Result<(), AppsError> {
     .map_err(|e| AppsError::CommandFailed(format!("chown task join error: {e}")))?
 }
 
+// ── Reverse-proxy compatibility probe ───────────────────────────
+
+/// Result of [`probe_proxy_compat`]. The probe answers a narrow question:
+/// "if the user clicks the WebUI's `Open` button (which goes to
+/// `/apps/<name>/` via Caddy), will their browser render the app or just
+/// a blank page because the upstream's HTML emits absolute root-relative
+/// asset paths?"
+pub enum ProxyCompat {
+    /// The probed HTML doesn't reference absolute root-path assets, or
+    /// it does and a sampled asset's Content-Type matches what the
+    /// browser would expect. Ingress works.
+    Ok,
+    /// The HTML references an absolute root-path asset (e.g.
+    /// `/assets/index.js`) that, fetched through the proxy, comes back
+    /// as `text/html` — the signature of the NASty WebUI SPA fallback
+    /// catching what the upstream expected to be a JS/CSS/image asset.
+    /// The browser refuses to execute HTML as a JS module and the page
+    /// renders blank. Caught with haze, whose HTML is full of absolute
+    /// asset paths and which has no `--base-path`-style config.
+    Broken {
+        /// One example absolute path the upstream's HTML emitted that
+        /// the proxy returned as HTML. Shown to the user as a hint
+        /// (e.g. `/assets/index-Xy.js`).
+        sample_path: String,
+        /// Content-Type the proxy actually returned for that path.
+        /// Usually `text/html; charset=utf-8`.
+        content_type: String,
+    },
+    /// Probe didn't reach a usable answer — container slow to respond,
+    /// non-HTML root, network error inside Caddy. Don't touch ingress
+    /// either way (silence is safer than guessing).
+    Unknown,
+}
+
+impl ProxyCompat {
+    /// Returns the human-readable reason when this is `Broken`. Used by
+    /// install() to persist the reason into the manifest and surface
+    /// it in the apps list as a "direct-port only" hint.
+    pub fn broken_reason(&self) -> Option<String> {
+        match self {
+            ProxyCompat::Broken {
+                sample_path,
+                content_type,
+            } => Some(format!(
+                "app emits absolute root-path assets that don't route through \
+                 /apps/<name>/ (sample: {sample_path} returned {content_type})"
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Probe whether path-prefix reverse proxying actually works for an app.
+///
+/// Algorithm:
+///   1. Fetch `https://127.0.0.1/apps/<name>/` (the route that Caddy just
+///      learned about) with up to 3 retries — the container may still be
+///      initialising. Cert validation is off because the appliance's TLS
+///      cert is self-signed on first boot.
+///   2. Find an absolute-path asset reference in the returned HTML that
+///      isn't already under `/apps/<name>/`. Static `href=` / `src=`
+///      attributes only; that's good enough to catch the haze-class
+///      case where every CSS/JS/icon URL starts with a bare slash.
+///   3. Re-fetch that asset through the proxy. If the response's
+///      Content-Type is `text/html`, NASty's WebUI SPA fallback caught
+///      the request instead of the upstream — the page will render
+///      blank in a real browser, so report `Broken`.
+///
+/// Probing on `127.0.0.1` rather than the LAN IP avoids depending on
+/// hostname resolution, and keeps the request inside the box where
+/// Caddy is guaranteed to be reachable.
+async fn probe_proxy_compat(app_name: &str) -> ProxyCompat {
+    let client = match reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(5))
+        // We follow up to one redirect — Caddy issues 301 http→https
+        // when probing the bare HTTP port, but we go straight to https
+        // below so this is mostly defensive.
+        .redirect(reqwest::redirect::Policy::limited(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return ProxyCompat::Unknown,
+    };
+
+    let root_url = format!("https://127.0.0.1/apps/{app_name}/");
+    let prefix = format!("/apps/{app_name}/");
+
+    let mut html: Option<String> = None;
+    for _ in 0..3 {
+        let resp = match client.get(&root_url).send().await {
+            Ok(r) => r,
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if !content_type.starts_with("text/html") {
+            // Non-HTML root: the app is an API or an asset server, not
+            // a browser-target SPA. Nothing for us to validate.
+            return ProxyCompat::Ok;
+        }
+        match resp.text().await {
+            Ok(body) => {
+                html = Some(body);
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    let Some(html) = html else {
+        return ProxyCompat::Unknown;
+    };
+
+    let Some(asset_path) = find_absolute_asset_path(&html, &prefix) else {
+        return ProxyCompat::Ok;
+    };
+
+    let asset_url = format!("https://127.0.0.1{asset_path}");
+    let asset_resp = match client.get(&asset_url).send().await {
+        Ok(r) => r,
+        Err(_) => return ProxyCompat::Unknown,
+    };
+    let content_type = asset_resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if content_type.starts_with("text/html") {
+        ProxyCompat::Broken {
+            sample_path: asset_path,
+            content_type,
+        }
+    } else {
+        ProxyCompat::Ok
+    }
+}
+
+/// Scan HTML for `href="/…"` and `src="/…"` attributes referring to
+/// absolute paths from the domain root, and return the first one that
+/// doesn't already live under `prefix`. Intentionally a hand-rolled scan
+/// rather than a full HTML parser — we only need to find one example to
+/// then verify dynamically, and adding `scraper`/`html5ever` for this
+/// would dwarf the rest of the function.
+fn find_absolute_asset_path(html: &str, prefix: &str) -> Option<String> {
+    for attr in ["href=", "src="] {
+        let mut idx = 0;
+        while let Some(pos) = html[idx..].find(attr) {
+            let abs = idx + pos + attr.len();
+            let bytes = html.as_bytes();
+            if abs >= bytes.len() {
+                break;
+            }
+            let quote = bytes[abs];
+            if quote != b'"' && quote != b'\'' {
+                idx = abs;
+                continue;
+            }
+            let value_start = abs + 1;
+            let end_rel = match html[value_start..].find(quote as char) {
+                Some(e) => e,
+                None => break,
+            };
+            let value = &html[value_start..value_start + end_rel];
+            idx = value_start + end_rel + 1;
+            // Skip protocol-relative URLs, fragment-only, or non-absolute
+            // paths — only `/foo` style references are the failure mode
+            // we're hunting.
+            if !value.starts_with('/') || value.starts_with("//") {
+                continue;
+            }
+            // Drop query and fragment before comparing — `?v=1` and `#x`
+            // wouldn't change which file the proxy serves.
+            let path: &str = value.split(['?', '#']).next().unwrap_or(value);
+            if path.starts_with(prefix) {
+                continue;
+            }
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+/// Persist a `proxy_disabled_reason` into the per-app manifest JSON so
+/// the apps list can surface it later as a "direct-port only" badge.
+/// Read-modify-write of `/var/lib/nasty/apps/<name>.json` — the file is
+/// already written at install time with the rest of the manifest, so
+/// we re-read, splice in the new field, and re-write.
+async fn save_proxy_disabled_reason(app_name: &str, reason: &str) -> Result<(), AppsError> {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let mut manifest: serde_json::Value = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(s) => serde_json::from_str(&s)
+            .map_err(|e| AppsError::CommandFailed(format!("manifest parse: {e}")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(AppsError::CommandFailed(format!("manifest read: {e}"))),
+    };
+    let map = match manifest.as_object_mut() {
+        Some(m) => m,
+        None => return Err(AppsError::CommandFailed("manifest not an object".into())),
+    };
+    map.insert(
+        "proxy_disabled_reason".to_string(),
+        serde_json::Value::String(reason.to_string()),
+    );
+    tokio::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .await
+    .map_err(|e| AppsError::CommandFailed(format!("manifest write: {e}")))?;
+    Ok(())
+}
+
+/// Read `proxy_disabled_reason` from an app's manifest. Returns `None`
+/// when the manifest is missing, unparseable, or simply has no such
+/// field — all of which are the "no hint to surface" cases for the
+/// WebUI. Errors don't bubble up; the apps list is best-effort here.
+async fn load_proxy_disabled_reason(app_name: &str) -> Option<String> {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let content = tokio::fs::read_to_string(&manifest_path).await.ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    parsed
+        .get("proxy_disabled_reason")?
+        .as_str()
+        .map(String::from)
+}
+
 // ── Types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -618,6 +856,14 @@ pub struct App {
     /// outside the standard sandbox). Surfaced as a badge in the WebUI.
     #[serde(default)]
     pub unsafe_mode: bool,
+    /// Human-readable reason the reverse-proxy ingress was disabled for
+    /// this app — set when the post-install probe detects that the
+    /// upstream emits absolute root-path assets that path-prefix proxying
+    /// can't route (haze-class apps). The WebUI hides the "Open" button
+    /// when this is set and surfaces the text as a tooltip explaining
+    /// why only the direct host-port link is offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1429,6 +1675,33 @@ impl AppsService {
                 .await
             {
                 warn!("Failed to auto-create ingress for '{}': {e}", req.name);
+            } else if let Some(reason) = probe_proxy_compat(&req.name).await.broken_reason() {
+                // The app's HTML emits absolute root-relative paths (e.g.
+                // /assets/index.js). Loaded via /apps/<name>/, those asset
+                // requests miss the proxy entirely and hit NASty's WebUI
+                // SPA fallback — the user sees a blank page. Caught with
+                // haze, which has no --base-path config and so can't be
+                // made to work behind a path prefix. Pull the ingress so
+                // the WebUI's "Open" button doesn't link to a dead page,
+                // and record the reason in the manifest so the apps list
+                // can surface it as a "direct-port only" hint.
+                warn!(
+                    "apps: '{}' is not compatible with path-prefix reverse proxy ({reason}) — \
+                     removing ingress; access via the direct host port instead",
+                    req.name
+                );
+                if let Err(e) = self.ingress_remove(&req.name).await {
+                    warn!(
+                        "ingress_remove({}) after proxy-compat probe failed: {e}",
+                        req.name
+                    );
+                }
+                if let Err(e) = save_proxy_disabled_reason(&req.name, &reason).await {
+                    warn!(
+                        "could not persist proxy_disabled_reason for '{}': {e}",
+                        req.name
+                    );
+                }
             }
         }
 
@@ -1693,6 +1966,7 @@ impl AppsService {
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                         .and_then(|v| v.get("allow_unsafe").and_then(|b| b.as_bool()))
                         .unwrap_or(false);
+                    let proxy_disabled_reason = load_proxy_disabled_reason(&name).await;
                     apps.push(App {
                         name,
                         image,
@@ -1702,6 +1976,7 @@ impl AppsService {
                         containers: Vec::new(),
                         ports: Vec::new(),
                         unsafe_mode,
+                        proxy_disabled_reason,
                     });
                 }
             } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -1738,6 +2013,10 @@ impl AppsService {
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
                 if !app_name.is_empty() {
+                    let proxy_disabled_reason = manifest
+                        .get("proxy_disabled_reason")
+                        .and_then(|s| s.as_str())
+                        .map(String::from);
                     apps.push(App {
                         name: app_name,
                         image,
@@ -1747,6 +2026,7 @@ impl AppsService {
                         containers: Vec::new(),
                         ports: Vec::new(),
                         unsafe_mode,
+                        proxy_disabled_reason,
                     });
                 }
             }
@@ -1793,6 +2073,7 @@ impl AppsService {
                 .map(|v| v == "true")
                 .unwrap_or(false);
 
+            let proxy_disabled_reason = load_proxy_disabled_reason(&app_name).await;
             apps.push(App {
                 name: app_name,
                 image: c.image.as_deref().unwrap_or("").to_string(),
@@ -1802,6 +2083,7 @@ impl AppsService {
                 containers: vec![],
                 ports: extract_ports(c),
                 unsafe_mode,
+                proxy_disabled_reason,
             });
         }
 
@@ -1892,6 +2174,7 @@ impl AppsService {
                     .unwrap_or(false);
 
                 seen_names.insert(name.clone());
+                let proxy_disabled_reason = load_proxy_disabled_reason(&name).await;
                 apps.push(App {
                     name,
                     image: primary_image,
@@ -1901,6 +2184,7 @@ impl AppsService {
                     containers,
                     ports: all_ports,
                     unsafe_mode,
+                    proxy_disabled_reason,
                 });
             }
         }
@@ -4475,5 +4759,69 @@ services:
         // None so install() leaves the dir root-owned and warns.
         assert_eq!(parse_image_user("plex"), None);
         assert_eq!(parse_image_user("ubuntu"), None);
+    }
+
+    // ── find_absolute_asset_path ──
+
+    use super::find_absolute_asset_path;
+
+    #[test]
+    fn absolute_asset_found_in_link_href() {
+        // The exact failure mode from haze: <link href="/favicon.svg"> in
+        // HTML served at /apps/haze/. We should pick up `/favicon.svg`
+        // because it's an absolute path outside the prefix.
+        let html = r#"<link rel="icon" href="/favicon.svg"><script src="/assets/a.js"></script>"#;
+        assert_eq!(
+            find_absolute_asset_path(html, "/apps/haze/"),
+            Some("/favicon.svg".to_string())
+        );
+    }
+
+    #[test]
+    fn relative_paths_are_ok() {
+        // Apps that emit relative or prefix-scoped asset paths can serve
+        // happily behind /apps/<name>/, so we shouldn't flag them.
+        let html = r#"<link href="./style.css"><script src="assets/a.js"></script>"#;
+        assert_eq!(find_absolute_asset_path(html, "/apps/haze/"), None);
+    }
+
+    #[test]
+    fn paths_already_under_prefix_are_ok() {
+        // If the upstream is smart enough to honour a base-path config and
+        // already emits paths under our prefix, the proxy works as-is.
+        let html =
+            r#"<link href="/apps/grafana/public/style.css"><script src="/apps/grafana/main.js">"#;
+        assert_eq!(find_absolute_asset_path(html, "/apps/grafana/"), None);
+    }
+
+    #[test]
+    fn protocol_relative_urls_are_ok() {
+        // `//cdn.example.com/foo` is an external URL the browser fetches
+        // straight from the CDN — not routed through our proxy, so it
+        // can't fail the way the haze case does.
+        let html = r#"<script src="//cdn.example.com/lib.js"></script>"#;
+        assert_eq!(find_absolute_asset_path(html, "/apps/x/"), None);
+    }
+
+    #[test]
+    fn query_and_fragment_are_stripped_for_comparison() {
+        // `/main.js?v=1#x` is the same file as `/main.js`, so the prefix
+        // check has to operate on the path part.
+        let html = r#"<script src="/main.js?v=1#x"></script>"#;
+        assert_eq!(
+            find_absolute_asset_path(html, "/apps/foo/"),
+            Some("/main.js".to_string())
+        );
+    }
+
+    #[test]
+    fn single_quoted_attributes_work() {
+        // HTML allows both quote styles; the scanner has to track which
+        // quote opened the value to close on the same one.
+        let html = "<script src='/main.js'></script>";
+        assert_eq!(
+            find_absolute_asset_path(html, "/apps/foo/"),
+            Some("/main.js".to_string())
+        );
     }
 }
