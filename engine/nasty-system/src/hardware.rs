@@ -528,7 +528,14 @@ fn collect_kv<'a, I: Iterator<Item = &'a str>>(lines: I) -> HashMap<String, Stri
 }
 
 /// `"16 GB"` → 17179869184; `"8192 MB"` → 8589934592. Returns 0 on
-/// `"No Module Installed"` or any unrecognized format.
+/// `"No Module Installed"` or any unrecognized format. Accepts both
+/// decimal-prefix (`KB`/`MB`/`GB`/`TB`) and binary-prefix (`KiB`/`MiB`/
+/// `GiB`/`TiB`) spellings — different dmidecode versions emit one or
+/// the other, and the values are 1024-based in both cases (DMI table
+/// sizes are always powers of two). The Hardware page silently showed
+/// "0 B / 0 of N slots populated" on machines where dmidecode emits
+/// the IEC form because the old match arms only covered the decimal
+/// spellings.
 fn parse_dmi_size(s: &str) -> u64 {
     let trimmed = s.trim();
     if trimmed.eq_ignore_ascii_case("No Module Installed") {
@@ -539,10 +546,10 @@ fn parse_dmi_size(s: &str) -> u64 {
         return 0;
     };
     match parts.next().unwrap_or("").to_ascii_lowercase().as_str() {
-        "kb" => num * 1024,
-        "mb" => num * 1024 * 1024,
-        "gb" => num * 1024 * 1024 * 1024,
-        "tb" => num * 1024_u64.pow(4),
+        "kb" | "kib" => num * 1024,
+        "mb" | "mib" => num * 1024 * 1024,
+        "gb" | "gib" => num * 1024 * 1024 * 1024,
+        "tb" | "tib" => num * 1024_u64.pow(4),
         _ => 0,
     }
 }
@@ -747,6 +754,24 @@ Device:\tCometLake-S cAVS [a3f0]
         assert_eq!(parse_dmi_size("8192 MB"), 8192 * 1024 * 1024);
         assert_eq!(parse_dmi_size("64 KB"), 64 * 1024);
         assert_eq!(parse_dmi_size("1 TB"), 1024_u64.pow(4));
+    }
+
+    #[test]
+    fn parse_dmi_size_handles_iec_binary_prefixes() {
+        // Newer dmidecode versions emit "32 GiB" instead of "32 GB" for
+        // Memory Device entries. Same 1024-based value either way (DMI
+        // sizes are always powers of two), so the parser has to accept
+        // both spellings. Without this the Hardware page silently shows
+        // "0 B / 0 of N slots populated" on those machines — the
+        // unit-suffix match falls through to the catch-all and we
+        // return 0. Reported live on an Odroid H3 with `Size: 32 GiB`.
+        assert_eq!(parse_dmi_size("32 GiB"), 32 * 1024 * 1024 * 1024);
+        assert_eq!(parse_dmi_size("8 GiB"), 8 * 1024 * 1024 * 1024);
+        assert_eq!(parse_dmi_size("4096 MiB"), 4096 * 1024 * 1024);
+        assert_eq!(parse_dmi_size("64 KiB"), 64 * 1024);
+        assert_eq!(parse_dmi_size("2 TiB"), 2 * 1024_u64.pow(4));
+        // Case-insensitive — some printers use mixed case.
+        assert_eq!(parse_dmi_size("16 gib"), 16 * 1024 * 1024 * 1024);
     }
 
     #[test]
