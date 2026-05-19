@@ -95,6 +95,12 @@
 
 	let wizardStep: 0 | 1 | 2 | 3 = $state(0); // 0=hidden
 	let newName = $state('');
+	/** Per-form "tried" flags. Amber required-field decoration is gated
+	 * on these so each form opens clean and only flags missing fields
+	 * after the operator clicks the submit / next button at least once. */
+	let createTried = $state(false);
+	let snapTried = $state(false);
+	let cloneTried = $state(false);
 	let newType: SubvolumeType = $state('filesystem');
 	let newVolsize = $state('');
 	let newCompression = $state('');
@@ -494,7 +500,9 @@
 	}
 
 	async function createSnapshot() {
-		if (!showSnap || !snapName) return;
+		if (!showSnap) return;
+		if (!snapName) { snapTried = true; return; }
+		snapTried = false;
 		const src = showSnap;
 		const ok = await withToast(
 			() => client.call('snapshot.create', {
@@ -508,6 +516,7 @@
 		if (ok !== undefined) {
 			showSnap = null;
 			snapName = '';
+			snapTried = false;
 		}
 		await refresh();
 		// Update detail view so tab count reflects the new snapshot
@@ -518,7 +527,9 @@
 	}
 
 	async function cloneSubvolume() {
-		if (!showClone || !cloneName) return;
+		if (!showClone) return;
+		if (!cloneName) { cloneTried = true; return; }
+		cloneTried = false;
 		const src = showClone;
 		const ok = src.snapshot
 			? await withToast(() =>
@@ -540,6 +551,7 @@
 		if (ok !== undefined) {
 			showClone = null;
 			cloneName = '';
+			cloneTried = false;
 			await refresh();
 			// Reopen detail if we cloned the detail subvolume
 			if (detailSv) {
@@ -776,8 +788,8 @@
 			{#if wizardStep === 1}
 			{#if mountedFilesystems.length > 1}
 				<div class="mb-4">
-					<Label for="sv-filesystem">Filesystem {#if !newFilesystem}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-					<select id="sv-filesystem" bind:value={newFilesystem} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!newFilesystem)}">
+					<Label for="sv-filesystem">Filesystem {#if !newFilesystem && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<select id="sv-filesystem" bind:value={newFilesystem} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!newFilesystem, createTried)}">
 						{#each mountedFilesystems as p}
 							<option value={p.name}>{p.name}</option>
 						{/each}
@@ -785,8 +797,8 @@
 				</div>
 			{/if}
 			<div class="mb-4">
-				<Label for="sv-name">Name {#if !newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="sv-name" bind:value={newName} placeholder="documents or projects/web" class="mt-1 {requiredFieldCls(!newName)}" />
+				<Label for="sv-name">Name {#if !newName && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="sv-name" bind:value={newName} placeholder="documents or projects/web" class="mt-1 {requiredFieldCls(!newName, createTried)}" />
 				<p class="mt-1 text-xs text-muted-foreground">Use <span class="font-mono">/</span> for nested subvolumes (e.g. projects/web)</p>
 			</div>
 			<div class="mb-4">
@@ -801,7 +813,7 @@
 				<Input id="sv-comments" bind:value={newComments} placeholder="Optional description" class="mt-1" />
 			</div>
 			<div class="flex gap-2">
-				<Button size="sm" onclick={() => wizardStep = 2} disabled={!newName || !newFilesystem}>Next: Storage →</Button>
+				<Button size="sm" onclick={() => { if (!newName || !newFilesystem) { createTried = true; return; } createTried = false; wizardStep = 2; }}>Next: Storage →</Button>
 			</div>
 
 			<!-- Step 2: Storage -->
@@ -1485,11 +1497,11 @@
 			<p class="text-sm text-muted-foreground">Create a read-only point-in-time copy.</p>
 		</Dialog.Header>
 		<div class="mb-4">
-			<Label for="snap-name">Snapshot Name {#if !snapName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-			<Input id="snap-name" bind:value={snapName} placeholder="snap-2026-03-12" class="mt-1 {requiredFieldCls(!snapName)}" />
+			<Label for="snap-name">Snapshot Name {#if !snapName && snapTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="snap-name" bind:value={snapName} placeholder="snap-2026-03-12" class="mt-1 {requiredFieldCls(!snapName, snapTried)}" />
 		</div>
 		<Dialog.Footer>
-			<Button size="sm" onclick={createSnapshot} disabled={!snapName}>Create</Button>
+			<Button size="sm" onclick={createSnapshot}>Create</Button>
 			<Button variant="secondary" size="sm" onclick={() => showSnap = null}>Cancel</Button>
 		</Dialog.Footer>
 	</Dialog.Content>
@@ -1502,11 +1514,11 @@
 			<p class="text-sm text-muted-foreground">Create a writable copy (COW — instant, shares data until modified).</p>
 		</Dialog.Header>
 		<div class="mb-4">
-			<Label for="clone-name">Clone Name {#if !cloneName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-			<Input id="clone-name" bind:value={cloneName} placeholder="my-clone" class="mt-1 {requiredFieldCls(!cloneName)}" />
+			<Label for="clone-name">Clone Name {#if !cloneName && cloneTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="clone-name" bind:value={cloneName} placeholder="my-clone" class="mt-1 {requiredFieldCls(!cloneName, cloneTried)}" />
 		</div>
 		<Dialog.Footer>
-			<Button size="sm" onclick={cloneSubvolume} disabled={!cloneName}>Create</Button>
+			<Button size="sm" onclick={cloneSubvolume}>Create</Button>
 			<Button variant="secondary" size="sm" onclick={() => showClone = null}>Cancel</Button>
 		</Dialog.Footer>
 	</Dialog.Content>

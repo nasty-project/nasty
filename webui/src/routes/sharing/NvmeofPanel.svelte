@@ -23,6 +23,28 @@
 
 	$effect(() => { if (nvme.showCreate || nvme.addNsSubsys) nvmeLoadSubvolumes(); });
 
+	// Per-form "tried" flags — defer amber required-field decoration
+	// until each submit button is clicked at least once.
+	let createTried = $state(false);
+	let addNsTried = $state(false);
+	let addHostTried = $state(false);
+
+	async function nvmeCreateGuarded() {
+		if (!nvme.newName || !nvme.newDevice) { createTried = true; return; }
+		createTried = false;
+		await nvmeCreate();
+	}
+	async function nvmeAddNamespaceGuarded() {
+		if (!nvme.addNsDevice) { addNsTried = true; return; }
+		addNsTried = false;
+		await nvmeAddNamespace();
+	}
+	async function nvmeAddHostGuarded() {
+		if (!nvme.addHostNqn) { addHostTried = true; return; }
+		addHostTried = false;
+		await nvmeAddHost();
+	}
+
 	const nvmeFiltered = $derived(
 		nvme.search.trim()
 			? nvme.subsystems.filter(s => s.nqn.toLowerCase().includes(nvme.search.toLowerCase()))
@@ -46,8 +68,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
 			<div class="mb-4">
-				<Label for="nvme-device">Block Subvolume {#if !nvme.newDevice}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<select id="nvme-device" bind:value={nvme.newDevice} onchange={nvmeOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!nvme.newDevice)}">
+				<Label for="nvme-device">Block Subvolume {#if !nvme.newDevice && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<select id="nvme-device" bind:value={nvme.newDevice} onchange={nvmeOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!nvme.newDevice, createTried)}">
 					<option value="">Select a block subvolume...</option>
 					{#each nvme.blockSubvolumes as sv}
 						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -58,8 +80,8 @@
 				{/if}
 			</div>
 			<div class="mb-4">
-				<Label for="nvme-name">Share Name {#if !nvme.newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="nvme-name" bind:value={nvme.newName} placeholder="faststore" class="mt-1 {requiredFieldCls(!nvme.newName)}" />
+				<Label for="nvme-name">Share Name {#if !nvme.newName && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="nvme-name" bind:value={nvme.newName} placeholder="faststore" class="mt-1 {requiredFieldCls(!nvme.newName, createTried)}" />
 				<span class="mt-1 block text-xs text-muted-foreground">NQN: nqn.2137.com.nasty:{nvme.newName || '...'}</span>
 			</div>
 			<div class="grid grid-cols-2 gap-4 mb-4">
@@ -72,7 +94,7 @@
 					<Input id="nvme-port" type="number" bind:value={nvme.newPort} class="mt-1" />
 				</div>
 			</div>
-			<Button onclick={nvmeCreate} disabled={!nvme.newName || !nvme.newDevice}>Create</Button>
+			<Button onclick={nvmeCreateGuarded}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -136,8 +158,8 @@
 									{#if nvme.addNsSubsys === subsys.id}
 										<div class="mt-3 rounded border p-3">
 											<div class="mb-2">
-												<Label class="text-xs">Block Device {#if !nvme.addNsDevice}<span class="text-amber-500">required</span>{/if}</Label>
-												<select bind:value={nvme.addNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs {requiredFieldCls(!nvme.addNsDevice)}">
+												<Label class="text-xs">Block Device {#if !nvme.addNsDevice && addNsTried}<span class="text-amber-500">required</span>{/if}</Label>
+												<select bind:value={nvme.addNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs {requiredFieldCls(!nvme.addNsDevice, addNsTried)}">
 													<option value="">Select...</option>
 													{#each nvme.blockSubvolumes as sv}
 														<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -145,8 +167,8 @@
 												</select>
 											</div>
 											<div class="flex gap-2">
-												<Button size="xs" onclick={nvmeAddNamespace} disabled={!nvme.addNsDevice}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { nvme.addNsSubsys = ''; }}>Cancel</Button>
+												<Button size="xs" onclick={nvmeAddNamespaceGuarded}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { nvme.addNsSubsys = ''; addNsTried = false; }}>Cancel</Button>
 											</div>
 										</div>
 									{:else}
@@ -225,12 +247,12 @@
 									{#if nvme.addHostSubsys === subsys.id}
 										<div class="mt-3 rounded border p-3">
 											<div class="mb-2">
-												<Label class="text-xs">Host NQN {#if !nvme.addHostNqn}<span class="text-amber-500">required</span>{/if}</Label>
-												<Input bind:value={nvme.addHostNqn} placeholder="nqn.2024-01.com.client:host1" class="mt-1 h-8 text-xs {requiredFieldCls(!nvme.addHostNqn)}" />
+												<Label class="text-xs">Host NQN {#if !nvme.addHostNqn && addHostTried}<span class="text-amber-500">required</span>{/if}</Label>
+												<Input bind:value={nvme.addHostNqn} placeholder="nqn.2024-01.com.client:host1" class="mt-1 h-8 text-xs {requiredFieldCls(!nvme.addHostNqn, addHostTried)}" />
 											</div>
 											<div class="flex gap-2">
-												<Button size="xs" onclick={nvmeAddHost} disabled={!nvme.addHostNqn}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { nvme.addHostSubsys = ''; }}>Cancel</Button>
+												<Button size="xs" onclick={nvmeAddHostGuarded}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { nvme.addHostSubsys = ''; addHostTried = false; }}>Cancel</Button>
 											</div>
 										</div>
 									{:else}

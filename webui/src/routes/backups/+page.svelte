@@ -24,6 +24,9 @@
 	// Create form
 	let newName = $state('');
 	let newSources = $state('');
+	/** Has Create been clicked at least once on this open form? Gates
+	 * the amber required-field decoration so the form opens clean. */
+	let createTried = $state(false);
 	let newTargetType: 'local' | 's3' | 'sftp' | 'rest' | 'b2' = $state('local');
 	let newLocalPath = $state('');
 	let newS3Endpoint = $state(''); let newS3Region = $state(''); let newS3Bucket = $state(''); let newS3Key = $state(''); let newS3Secret = $state('');
@@ -58,6 +61,7 @@
 	function resetCreateForm() {
 		newName = '';
 		newSources = '';
+		createTried = false;
 		newTargetType = 'local';
 		newLocalPath = '';
 		newS3Endpoint = '';
@@ -218,6 +222,8 @@
 	}
 
 	async function createProfile() {
+		if (!newName || !newSources || !newPassword) { createTried = true; return; }
+		createTried = false;
 		const target = newTargetType === 'local' ? { type: 'local' as const, path: newLocalPath }
 			: newTargetType === 's3' ? { type: 's3' as const, endpoint: newS3Endpoint, region: newS3Region || undefined, bucket: newS3Bucket, access_key: newS3Key, secret_key: newS3Secret }
 			: newTargetType === 'sftp' ? { type: 'sftp' as const, host: newSftpHost, user: newSftpUser, path: newSftpPath, port: parseInt(newSftpPort) || undefined }
@@ -381,12 +387,12 @@
 				<h3 class="text-lg font-semibold">New Backup Profile</h3>
 
 				<div>
-					<Label for="bk-name">Name {#if !newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-					<Input id="bk-name" bind:value={newName} placeholder="Daily offsite" class="mt-1 max-w-sm {requiredFieldCls(!newName)}" />
+					<Label for="bk-name">Name {#if !newName && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<Input id="bk-name" bind:value={newName} placeholder="Daily offsite" class="mt-1 max-w-sm {requiredFieldCls(!newName, createTried)}" />
 				</div>
 
 				<div>
-					<Label>Sources {#if !newSources}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<Label>Sources {#if !newSources && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
 					<div class="mt-1 space-y-1">
 						<!-- System config -->
 						<label class="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/30 {selectedSources.has('/var/lib/nasty') ? 'bg-muted/20' : ''}">
@@ -486,8 +492,8 @@
 				{/if}
 
 				<div>
-					<Label for="bk-pass">Encryption Password {#if !newPassword}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-					<Input id="bk-pass" type="password" bind:value={newPassword} placeholder="strong-password" class="mt-1 {requiredFieldCls(!newPassword)}" />
+					<Label for="bk-pass">Encryption Password {#if !newPassword && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<Input id="bk-pass" type="password" bind:value={newPassword} placeholder="strong-password" class="mt-1 {requiredFieldCls(!newPassword, createTried)}" />
 					<p class="mt-1 text-xs text-muted-foreground">Used to encrypt the backup repository. Store this safely — losing it means losing access to backups.</p>
 				</div>
 
@@ -519,7 +525,10 @@
 					</div>
 				</div>
 
-				<Button onclick={createProfile} disabled={!newName || !newSources || !newPassword}>Create</Button>
+				<!-- Stays enabled so clicking Create triggers the amber decoration
+				     on whichever required field is missing. The handler validates
+				     before calling the server. -->
+				<Button onclick={createProfile}>Create</Button>
 			</CardContent>
 		</Card>
 	{/if}

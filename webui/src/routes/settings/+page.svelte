@@ -65,6 +65,7 @@
 	// VLAN form
 	let showVlanForm = $state(false);
 	let vlanParent = $state('');
+	let vlanTried = $state(false);
 	let vlanId = $state(100);
 	let vlanMtu = $state('');
 	// Bridge form
@@ -456,7 +457,9 @@
 	}
 
 	async function createVlan() {
-		if (!vlanParent || vlanId < 1 || vlanId > 4094 || !network) return;
+		if (!vlanParent) { vlanTried = true; return; }
+		if (vlanId < 1 || vlanId > 4094 || !network) return;
+		vlanTried = false;
 		const mtu = parseMtu(vlanMtu);
 		const payload: NetworkConfig = {
 			interfaces: network.interfaces || [],
@@ -467,7 +470,7 @@
 		};
 		await applyNetworkUpdate(payload, `VLAN ${vlanParent}.${vlanId} created`);
 		networkState = await client.call<NetworkState>('system.network.get');
-		showVlanForm = false; vlanParent = ''; vlanId = 100; vlanMtu = '';
+		showVlanForm = false; vlanParent = ''; vlanId = 100; vlanMtu = ''; vlanTried = false;
 	}
 
 	async function refreshNetworkState() {
@@ -1106,8 +1109,8 @@
 					<p class="text-xs text-muted-foreground">Tag traffic on a physical interface with a VLAN ID.</p>
 					<div class="grid grid-cols-2 gap-3">
 						<div>
-							<label for="vlan-parent" class="text-xs text-muted-foreground">Parent Interface {#if !vlanParent}<span class="text-amber-500">required</span>{/if}</label>
-							<select id="vlan-parent" bind:value={vlanParent} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm {requiredFieldCls(!vlanParent)}">
+							<label for="vlan-parent" class="text-xs text-muted-foreground">Parent Interface {#if !vlanParent && vlanTried}<span class="text-amber-500">required</span>{/if}</label>
+							<select id="vlan-parent" bind:value={vlanParent} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm {requiredFieldCls(!vlanParent, vlanTried)}">
 								<option value="">Select...</option>
 								{#if networkState}
 									{#each networkState.interfaces.filter(i => i.kind === 'physical' || i.kind === 'bond') as iface}
@@ -1125,7 +1128,7 @@
 						<label for="vlan-mtu" class="text-xs text-muted-foreground">MTU (optional)</label>
 						<input id="vlan-mtu" type="number" min="68" max="65535" bind:value={vlanMtu} placeholder="default (1500), 9000 for jumbo frames" class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
 					</div>
-					<Button size="sm" onclick={createVlan} disabled={!vlanParent}>Create VLAN</Button>
+					<Button size="sm" onclick={createVlan}>Create VLAN</Button>
 				</div>
 			{/if}
 

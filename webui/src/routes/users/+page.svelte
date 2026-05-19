@@ -60,6 +60,14 @@
 	let expandedGroup = $state<string | null>(null);
 	let addMemberGroup = $state<string | null>(null);
 	let addMemberUser = $state('');
+	// Per-form "tried" flags. Amber required-field decoration only kicks
+	// in after the operator clicks the submit button at least once on
+	// each form, so a freshly-opened dialog isn't lit up like an alarm.
+	let createUserTried = $state(false);
+	let changePwTried = $state(false);
+	let sysPwTried = $state(false);
+	let newGroupTried = $state(false);
+	let newTokenTried = $state(false);
 
 	// ── Single Sign-On (OIDC) ──────────────────────────────────
 	type OidcRoleMapping = { group: string; role: string };
@@ -163,8 +171,10 @@
 	}
 
 	async function createUser() {
-		if (!newUsername || !newPassword) return;
-		if (newPassword !== newPasswordConfirm) return;
+		if (!newUsername || !newPassword || !newPasswordConfirm) { createUserTried = true; return; }
+		if (newPassword.length < 8) { createUserTried = true; return; }
+		if (newPassword !== newPasswordConfirm) { createUserTried = true; return; }
+		createUserTried = false;
 		const ok = await withToast(
 			() => client.call('auth.create_user', {
 				username: newUsername,
@@ -179,6 +189,7 @@
 			newPassword = '';
 			newPasswordConfirm = '';
 			newRole = 'readonly';
+			createUserTried = false;
 			await refresh();
 		}
 	}
@@ -193,8 +204,11 @@
 	}
 
 	async function changePassword() {
-		if (!pwUser || !pwNew) return;
-		if (pwNew !== pwConfirm) return;
+		if (!pwUser) return;
+		if (!pwNew || !pwConfirm) { changePwTried = true; return; }
+		if (pwNew.length < 8) { changePwTried = true; return; }
+		if (pwNew !== pwConfirm) { changePwTried = true; return; }
+		changePwTried = false;
 		const ok = await withToast(
 			() => client.call('auth.change_password', {
 				username: pwUser,
@@ -206,11 +220,13 @@
 			pwUser = null;
 			pwNew = '';
 			pwConfirm = '';
+			changePwTried = false;
 		}
 	}
 
 	async function createToken() {
-		if (!newTokenName) return;
+		if (!newTokenName) { newTokenTried = true; return; }
+		newTokenTried = false;
 		const expires_in_secs = newTokenExpiry ? parseInt(newTokenExpiry) : null;
 		const allowed_ips = newTokenAllowedIPs.trim()
 			? newTokenAllowedIPs.split(',').map(ip => ip.trim()).filter(Boolean)
@@ -230,6 +246,7 @@
 			showCreateToken = false;
 			newTokenName = '';
 			newTokenRole = 'operator';
+			newTokenTried = false;
 			newTokenFs = '';
 			newTokenExpiry = '';
 			newTokenAllowedIPs = '';
@@ -254,7 +271,8 @@
 	}
 
 	async function createGroup() {
-		if (!newGroupName.trim()) return;
+		if (!newGroupName.trim()) { newGroupTried = true; return; }
+		newGroupTried = false;
 		const ok = await withToast(
 			() => client.call('smb.group.create', { name: newGroupName.trim() }),
 			`Group "${newGroupName}" created`
@@ -262,6 +280,7 @@
 		if (ok !== undefined) {
 			showCreateGroup = false;
 			newGroupName = '';
+			newGroupTried = false;
 			await refresh();
 		}
 	}
@@ -324,7 +343,10 @@
 	}
 
 	async function changeSysPassword() {
-		if (!sysPwUser || !sysPwNew || sysPwNew !== sysPwConfirm) return;
+		if (!sysPwUser) return;
+		if (!sysPwNew || !sysPwConfirm) { sysPwTried = true; return; }
+		if (sysPwNew !== sysPwConfirm) { sysPwTried = true; return; }
+		sysPwTried = false;
 		await withToast(
 			() => client.call('smb.user.set_password', { username: sysPwUser, password: sysPwNew }),
 			`Password changed for "${sysPwUser}"`
@@ -332,6 +354,7 @@
 		sysPwUser = null;
 		sysPwNew = '';
 		sysPwConfirm = '';
+		sysPwTried = false;
 	}
 
 	function formatDate(ts: number): string {
@@ -376,19 +399,19 @@
 			{@const newUserPwTooShort = !!newPassword && newPassword.length < 8}
 			{@const newUserPwMismatch = !!newPasswordConfirm && newPassword !== newPasswordConfirm}
 			<div class="mb-4">
-				<Label for="new-username">Username {#if !newUsername}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="new-username" bind:value={newUsername} placeholder="johndoe" autocomplete="off" class="mt-1 {requiredFieldCls(!newUsername)}" />
+				<Label for="new-username">Username {#if !newUsername && createUserTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="new-username" bind:value={newUsername} placeholder="johndoe" autocomplete="off" class="mt-1 {requiredFieldCls(!newUsername, createUserTried)}" />
 			</div>
 			<div class="mb-4">
-				<Label for="new-password">Password {#if !newPassword}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="new-password" type="password" bind:value={newPassword} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1 {requiredFieldCls(!newPassword || newUserPwTooShort)}" />
+				<Label for="new-password">Password {#if !newPassword && createUserTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="new-password" type="password" bind:value={newPassword} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1 {requiredFieldCls(!newPassword, createUserTried) || requiredFieldCls(newUserPwTooShort)}" />
 				{#if newUserPwTooShort}
 					<span class="mt-1 block text-xs text-destructive">At least 8 characters required</span>
 				{/if}
 			</div>
 			<div class="mb-4">
-				<Label for="new-password-confirm">Confirm Password {#if !newPasswordConfirm}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="new-password-confirm" type="password" bind:value={newPasswordConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!newPasswordConfirm || newUserPwMismatch)}" />
+				<Label for="new-password-confirm">Confirm Password {#if !newPasswordConfirm && createUserTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="new-password-confirm" type="password" bind:value={newPasswordConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!newPasswordConfirm, createUserTried) || requiredFieldCls(newUserPwMismatch)}" />
 				{#if newUserPwMismatch}
 					<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 				{/if}
@@ -401,9 +424,9 @@
 					<option value="operator">Operator</option>
 				</select>
 			</div>
-			<Button onclick={createUser} disabled={!newUsername || !newPassword || newPassword.length < 8 || newPassword !== newPasswordConfirm}>
-				Create
-			</Button>
+			<!-- Stays enabled; createUser validates and triggers the amber
+			     decoration on a missing-field click. -->
+			<Button onclick={createUser}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -582,18 +605,18 @@
 		</Dialog.Header>
 		{@const sysPwMismatch = !!sysPwConfirm && sysPwNew !== sysPwConfirm}
 		<div class="mb-4">
-			<Label for="sys-pw-new">New Password {#if !sysPwNew}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-			<Input id="sys-pw-new" type="password" bind:value={sysPwNew} autocomplete="new-password" class="mt-1 {requiredFieldCls(!sysPwNew)}" />
+			<Label for="sys-pw-new">New Password {#if !sysPwNew && sysPwTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="sys-pw-new" type="password" bind:value={sysPwNew} autocomplete="new-password" class="mt-1 {requiredFieldCls(!sysPwNew, sysPwTried)}" />
 		</div>
 		<div class="mb-4">
-			<Label for="sys-pw-confirm">Confirm Password {#if !sysPwConfirm}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-			<Input id="sys-pw-confirm" type="password" bind:value={sysPwConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!sysPwConfirm || sysPwMismatch)}" />
+			<Label for="sys-pw-confirm">Confirm Password {#if !sysPwConfirm && sysPwTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="sys-pw-confirm" type="password" bind:value={sysPwConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!sysPwConfirm, sysPwTried) || requiredFieldCls(sysPwMismatch)}" />
 			{#if sysPwMismatch}
 				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 			{/if}
 		</div>
 		<Dialog.Footer>
-			<Button size="sm" onclick={changeSysPassword} disabled={!sysPwNew || sysPwNew !== sysPwConfirm}>
+			<Button size="sm" onclick={changeSysPassword}>
 				Change Password
 			</Button>
 			<Button variant="secondary" size="sm" onclick={() => sysPwUser = null}>Cancel</Button>
@@ -617,10 +640,10 @@
 	<Card class="mb-4 max-w-md">
 		<CardContent class="pt-4 space-y-3">
 			<div>
-				<Label for="group-name">Group Name {#if !newGroupName.trim()}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="group-name" bind:value={newGroupName} placeholder="e.g. engineering" class="mt-1 {requiredFieldCls(!newGroupName.trim())}" />
+				<Label for="group-name">Group Name {#if !newGroupName.trim() && newGroupTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="group-name" bind:value={newGroupName} placeholder="e.g. engineering" class="mt-1 {requiredFieldCls(!newGroupName.trim(), newGroupTried)}" />
 			</div>
-			<Button size="sm" onclick={createGroup} disabled={!newGroupName.trim()}>Create</Button>
+			<Button size="sm" onclick={createGroup}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -706,8 +729,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New API Token</h3>
 			<div class="mb-4">
-				<Label for="token-name">Name {#if !newTokenName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="token-name" bind:value={newTokenName} placeholder="e.g. k8s-cluster" autocomplete="off" class="mt-1 {requiredFieldCls(!newTokenName)}" />
+				<Label for="token-name">Name {#if !newTokenName && newTokenTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="token-name" bind:value={newTokenName} placeholder="e.g. k8s-cluster" autocomplete="off" class="mt-1 {requiredFieldCls(!newTokenName, newTokenTried)}" />
 			</div>
 			<div class="mb-4">
 				<Label for="token-role">Role</Label>
@@ -743,7 +766,7 @@
 				<Input id="token-ips" bind:value={newTokenAllowedIPs} placeholder="e.g. 10.10.10.100, 192.168.1.50" autocomplete="off" class="mt-1" />
 				<span class="mt-1 block text-xs text-muted-foreground">Comma-separated. Leave empty to allow any IP.</span>
 			</div>
-			<Button onclick={createToken} disabled={!newTokenName}>Create Token</Button>
+			<Button onclick={createToken}>Create Token</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -803,21 +826,21 @@
 		{@const pwTooShort = !!pwNew && pwNew.length < 8}
 		{@const pwMismatch = !!pwConfirm && pwNew !== pwConfirm}
 		<div class="mb-4">
-			<Label for="pw-new">New Password {#if !pwNew}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-			<Input id="pw-new" type="password" bind:value={pwNew} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwNew || pwTooShort)}" />
+			<Label for="pw-new">New Password {#if !pwNew && changePwTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="pw-new" type="password" bind:value={pwNew} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwNew, changePwTried) || requiredFieldCls(pwTooShort)}" />
 			{#if pwTooShort}
 				<span class="mt-1 block text-xs text-destructive">At least 8 characters required</span>
 			{/if}
 		</div>
 		<div class="mb-4">
-			<Label for="pw-confirm">Confirm Password {#if !pwConfirm}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-			<Input id="pw-confirm" type="password" bind:value={pwConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwConfirm || pwMismatch)}" />
+			<Label for="pw-confirm">Confirm Password {#if !pwConfirm && changePwTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="pw-confirm" type="password" bind:value={pwConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwConfirm, changePwTried) || requiredFieldCls(pwMismatch)}" />
 			{#if pwMismatch}
 				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 			{/if}
 		</div>
 		<Dialog.Footer>
-			<Button size="sm" onclick={changePassword} disabled={!pwNew || pwNew.length < 8 || pwNew !== pwConfirm}>
+			<Button size="sm" onclick={changePassword}>
 				Change Password
 			</Button>
 			<Button variant="secondary" size="sm" onclick={() => pwUser = null}>Cancel</Button>

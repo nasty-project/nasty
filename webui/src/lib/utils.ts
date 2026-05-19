@@ -15,14 +15,21 @@ export type WithElementRef<T, U extends HTMLElement = HTMLElement> = T & { ref?:
 /**
  * Tailwind class string that highlights a form input as "needs filling
  * in before submit will work". Used on required fields across the
- * WebUI so a disabled submit button gives the operator a per-input
- * signal as to *which* fields are blocking — not just a greyed button
- * with no explanation. Pass `true` when the value is empty or fails
- * its inline validation; the consumer is responsible for picking what
- * "empty" means (trim, falsy, etc.). Returns `''` when no decoration
- * is wanted so callers can inline it in a class= attribute without
- * a wrapping conditional.
+ * WebUI so a submit attempt with a missing field gives the operator a
+ * per-input signal as to *which* fields are blocking — instead of a
+ * silent greyed button.
+ *
+ * `tried` defers the decoration until the operator has tried to
+ * submit at least once. Without that gate, every form opens with
+ * every required field lit up amber which reads like an alarm before
+ * the operator has done anything (reported). The expected pattern is
+ * "clean on open → amber after a failed Install click → clean again
+ * once filled in". Default is `true` so call sites that want the
+ * always-on behaviour don't have to pass it.
+ *
+ * `missing` is computed by the call site — the helper doesn't model
+ * what "missing" means (trim? falsy? mismatch? wrong format?).
  */
-export function requiredFieldCls(missing: boolean): string {
-	return missing ? "border-amber-500 ring-1 ring-amber-500/50" : "";
+export function requiredFieldCls(missing: boolean, tried: boolean = true): string {
+	return tried && missing ? "border-amber-500 ring-1 ring-amber-500/50" : "";
 }
