@@ -1559,10 +1559,23 @@
 							</div>
 						</div>
 					{:else}
-						<button
+						<!-- Discoverable button instead of a quiet link: pre-#232 it
+						     was a small underlined text line that operators routinely
+						     missed (rendered like a paragraph, not a button) and
+						     filled the form by hand. Outline + clipboard glyph make
+						     it scan as an action affordance at a glance. -->
+						<Button
+							variant="outline"
+							size="sm"
+							class="mb-4 gap-2"
 							onclick={() => showPasteDocker = true}
-							class="mb-4 text-xs text-primary hover:underline"
-						>Paste a docker run command</button>
+						>
+							<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/>
+								<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+							</svg>
+							Paste a <code class="font-mono">docker run</code> command
+						</Button>
 					{/if}
 				{/if}
 
@@ -1637,7 +1650,7 @@
 						     the values are templated against window.location at click time
 						     so they match the origin the browser actually uses. -->
 						<div class="mt-1 flex items-center gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1.5 text-xs">
-							<span class="text-blue-400">Reverse-proxy at <code>/apps/{newName || '&lt;name&gt;'}/</code> supported.</span>
+							<span class="text-blue-400">Reverse-proxy at <code>/apps/{newName || '<name>'}/</code> supported.</span>
 							<Button size="xs" variant="outline" onclick={applySubpathRecipe}>Apply {subpathRecipe.display_name}</Button>
 						</div>
 					{/if}
@@ -1716,7 +1729,7 @@
 						<p class="mt-1 text-xs text-amber-500">⚠ {newSubdomainConflict}</p>
 					{:else}
 						<p class="mt-1 text-[0.65rem] text-muted-foreground">
-							Leave empty to serve under <code>/apps/{newName || '&lt;name&gt;'}/</code>.
+							Leave empty to serve under <code>/apps/{newName || '<name>'}/</code>.
 							Set an FQDN to serve at its own root — required for apps that emit
 							absolute paths (haze, jellyfin). Caddy uses the existing TLS/ACME
 							config; the operator points DNS at NASty.
