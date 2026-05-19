@@ -224,6 +224,14 @@ pub(super) async fn try_route(
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
         },
+        // Every route Caddy is serving (engine-owned + static), powering
+        // the Ingress overview page so the operator can see at a glance
+        // what's exposed and where each row came from — without shelling
+        // in to read the live Caddy config.
+        "apps.caddy.routes" => match state.apps.list_caddy_routes().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
         "apps.ingress.set" => match parse_params(req) {
             Ok(p) => match state.apps.ingress_set(p).await {
                 Ok(v) => ok(req, v),
