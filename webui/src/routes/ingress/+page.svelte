@@ -73,6 +73,37 @@
 			default:          return { class: 'bg-muted text-muted-foreground border-border', label: kind };
 		}
 	}
+
+	/** Visual styling for the per-row Cert badge. Colour follows
+	 * expires_in_days: red when ≤ 7 (or already expired), amber when ≤ 30,
+	 * green otherwise. The badge tooltip carries the full issuer +
+	 * expires-on string so the operator doesn't have to guess from the
+	 * colour alone. */
+	function certBadge(c: import('$lib/types').HostCert): { class: string; label: string; title: string } {
+		const d = c.expires_in_days;
+		let cls = 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30';
+		let label = 'valid';
+		if (d === null || d === undefined) {
+			cls = 'bg-muted text-muted-foreground border-border';
+			label = 'cert';
+		} else if (d < 0) {
+			cls = 'bg-red-500/15 text-red-400 border-red-500/30';
+			label = 'expired';
+		} else if (d <= 7) {
+			cls = 'bg-red-500/15 text-red-400 border-red-500/30';
+			label = `${d}d`;
+		} else if (d <= 30) {
+			cls = 'bg-amber-500/15 text-amber-400 border-amber-500/30';
+			label = `${d}d`;
+		} else {
+			label = `${d}d`;
+		}
+		const parts: string[] = [];
+		if (c.issuer) parts.push(`Issuer: ${c.issuer}`);
+		if (c.expires) parts.push(`Expires: ${c.expires}`);
+		if (c.path) parts.push(`File: ${c.path}`);
+		return { class: cls, label, title: parts.join('\n') };
+	}
 </script>
 
 <svelte:head><title>Ingress · NASty</title></svelte:head>
@@ -111,6 +142,7 @@
 							<th class="p-2 text-left text-xs uppercase text-muted-foreground">Value</th>
 							<th class="p-2 text-left text-xs uppercase text-muted-foreground">Handler</th>
 							<th class="p-2 text-left text-xs uppercase text-muted-foreground">Upstream</th>
+							<th class="p-2 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Cert</th>
 							<th class="p-2 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Source</th>
 							<th class="p-2 text-left text-xs uppercase text-muted-foreground">App</th>
 						</tr>
@@ -127,6 +159,20 @@
 								<td class="p-2 text-xs text-muted-foreground">{r.handler_kind}</td>
 								<td class="p-2 font-mono text-xs">
 									{#if r.upstream}{r.upstream}{:else}<span class="text-muted-foreground">—</span>{/if}
+								</td>
+								<td class="p-2 whitespace-nowrap">
+									{#if r.cert}
+										{@const cb = certBadge(r.cert)}
+										<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[0.65rem] cursor-help {cb.class}" title={cb.title}>{cb.label}</span>
+									{:else if r.match_kind === "host"}
+										<!-- Host route with no cert on disk yet — auto-HTTPS issues
+										     asynchronously on first request, so a freshly-set ingress can
+										     spend a few seconds in this state. Surface it as "pending"
+										     rather than a hard failure so the operator doesn't panic. -->
+										<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[0.65rem] bg-muted text-muted-foreground border-border" title="No cert on disk yet — Caddy issues asynchronously on first request.">pending</span>
+									{:else}
+										<span class="text-muted-foreground">—</span>
+									{/if}
 								</td>
 								<td class="p-2">
 									<span class="inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[0.65rem] {sb.class}">{sb.label}</span>

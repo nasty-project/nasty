@@ -228,8 +228,32 @@ pub(super) async fn try_route(
         // the Ingress overview page so the operator can see at a glance
         // what's exposed and where each row came from — without shelling
         // in to read the live Caddy config.
+        //
+        // We enrich host-match rows with their on-disk cert info here
+        // (rather than inside nasty-apps' walker) because the cert
+        // directory lives in nasty-system's domain — nasty-apps doesn't
+        // depend on nasty-system, and reaching across crates just for
+        // a single optional field would invert the dep graph.
         "apps.caddy.routes" => match state.apps.list_caddy_routes().await {
-            Ok(v) => ok(req, v),
+            Ok(mut rows) => {
+                for row in &mut rows {
+                    if row.match_kind != "host" {
+                        continue;
+                    }
+                    if let Some(info) =
+                        nasty_system::settings::cert_info_for_host(&row.match_value).await
+                    {
+                        row.cert = Some(nasty_apps::HostCert {
+                            issuer: info.issuer,
+                            issued: info.issued,
+                            expires: info.expires,
+                            expires_in_days: info.expires_in_days,
+                            path: info.path,
+                        });
+                    }
+                }
+                ok(req, rows)
+            }
             Err(e) => err(req, e),
         },
         "apps.ingress.set" => match parse_params(req) {
