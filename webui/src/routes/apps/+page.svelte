@@ -1218,15 +1218,60 @@
 	let switchingIngressFor = $state<string | null>(null);
 
 	/** Re-point an app's ingress at the given host port. Used by the
-	 * port chips when the user clicks a non-current TCP port. */
+	 * port chips when the user clicks a non-current TCP port. Preserves
+	 * subdomain mode if the current ingress already had one. */
 	async function setIngressPort(appName: string, hostPort: number) {
 		switchingIngressFor = appName;
 		try {
+			const current = getIngress(appName);
 			await withToast(
-				() => client.call('apps.ingress.set', { name: appName, host_port: hostPort }),
+				() => client.call('apps.ingress.set', {
+					name: appName,
+					host_port: hostPort,
+					// Sticky: switching the host port shouldn't drop a
+					// subdomain choice the operator already made.
+					subdomain: current?.subdomain ?? null,
+				}),
 				`Ingress for ${appName} → :${hostPort}`
 			);
 			await loadIngresses();
+		} finally {
+			switchingIngressFor = null;
+		}
+	}
+
+	// ── Subdomain mode dialog ─────────────────────────────────
+	/** Per-app modal opened by the "···" menu's "Subdomain" item.
+	 * `null` = closed; otherwise carries the app name being edited
+	 * (host_port is read from the current ingress at submit time). */
+	let subdomainDialog = $state<{ appName: string; value: string } | null>(null);
+
+	function openSubdomainDialog(appName: string) {
+		const current = getIngress(appName);
+		subdomainDialog = { appName, value: current?.subdomain ?? '' };
+	}
+
+	async function saveSubdomain() {
+		if (!subdomainDialog) return;
+		const { appName, value } = subdomainDialog;
+		const current = getIngress(appName);
+		if (!current) {
+			subdomainDialog = null;
+			return;
+		}
+		const subdomain = value.trim() || null;
+		switchingIngressFor = appName;
+		try {
+			await withToast(
+				() => client.call('apps.ingress.set', {
+					name: appName,
+					host_port: current.host_port,
+					subdomain,
+				}),
+				subdomain ? `Ingress for ${appName} → ${subdomain}` : `Ingress for ${appName} → /apps/${appName}/`
+			);
+			await loadIngresses();
+			subdomainDialog = null;
 		} finally {
 			switchingIngressFor = null;
 		}
@@ -1863,8 +1908,15 @@
 							<div class="flex items-center gap-1.5">
 								{#if primaryPort(app)}
 									{@const pp = primaryPort(app)!}
-									{#if getIngress(app.name)}
-										<a href="/apps/{app.name}/" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20" title="Reverse proxy target: {pp.host_port}">
+									{@const ing = getIngress(app.name)}
+									{#if ing}
+										{@const openHref = ing.subdomain
+											? `${window.location.protocol}//${ing.subdomain}/`
+											: `/apps/${app.name}/`}
+										{@const openTitle = ing.subdomain
+											? `Reverse proxy: ${ing.subdomain} → :${pp.host_port}`
+											: `Reverse proxy target: ${pp.host_port}`}
+										<a href={openHref} target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-500/20" title={openTitle}>
 											Open
 										</a>
 									{:else if app.proxy_disabled_reason}
@@ -1896,6 +1948,12 @@
 													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; openShell(app.name); }}>Shell</button>
 												{/if}
 												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; pullApp(app.name); }}>Pull image</button>
+												{#if getIngress(app.name)}
+													<!-- Only meaningful when ingress exists. Path-prefix mode is fine
+													     for most apps; this lets the operator opt into subdomain mode
+													     for things that emit absolute root-path assets (haze-class). -->
+													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; openSubdomainDialog(app.name); }}>Subdomain…</button>
+												{/if}
 												{#if app.kind === 'simple'}
 													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; inspectApp(app.name); }}>Inspect</button>
 												{/if}
@@ -1939,6 +1997,26 @@
 			</tbody>
 		</table>
 	{/if}
+{/if}
+
+<!-- Subdomain ingress dialog (per-app "···" → "Subdomain…") -->
+{#if subdomainDialog}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<div class="w-[90vw] max-w-md rounded-lg border border-border bg-[#0f1117] p-5 shadow-2xl">
+			<h3 class="mb-1 text-base font-semibold">Reverse-proxy ingress for <code class="text-blue-400">{subdomainDialog.appName}</code></h3>
+			<p class="mb-3 text-xs text-muted-foreground">
+				Empty = serve at <code>/apps/{subdomainDialog.appName}/</code> (path-prefix mode, the default).
+				Set a fully-qualified hostname to serve the app at its own root — works for apps that emit absolute paths (haze, jellyfin, etc.).
+				Caddy uses the existing TLS/ACME config; the operator needs DNS for the hostname to resolve to NASty.
+			</p>
+			<Label class="text-xs">Subdomain</Label>
+			<Input bind:value={subdomainDialog.value} placeholder="jellyfin.example.com" class="mt-1" />
+			<div class="mt-4 flex justify-end gap-2">
+				<Button variant="outline" size="sm" onclick={() => { subdomainDialog = null; }}>Cancel</Button>
+				<Button size="sm" onclick={saveSubdomain} disabled={switchingIngressFor === subdomainDialog.appName}>Save</Button>
+			</div>
+		</div>
+	</div>
 {/if}
 
 <!-- Volume host-path picker (simple installer Volume rows) -->

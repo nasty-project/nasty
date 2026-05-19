@@ -26,11 +26,25 @@ const ROUTE_ID_PREFIX: &str = "nasty-app-";
 /// One ingress rule, ready to be turned into a Caddy route object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppRoute {
-    /// App name — used both as `/apps/<name>/` path and `@id` suffix.
+    /// App name — used as `@id` suffix and as path-prefix segment when
+    /// `subdomain` is None.
     pub name: String,
     /// Host port the app's container listens on (Docker port mapping
     /// to 127.0.0.1).
     pub host_port: u16,
+    /// Fully-qualified hostname to serve the app under (e.g.
+    /// `jellyfin.example.com`). When set, the emitted Caddy route
+    /// matches by host instead of by `/apps/<name>/` path prefix and
+    /// drops the strip-prefix handler — the app sees itself rooted
+    /// at `/`, which is what most upstream apps assume and what the
+    /// post-install probe in #219 had to disable ingress for when
+    /// the path-prefix mode broke their absolute-path assets.
+    ///
+    /// Caddy's automatic HTTPS picks up the new hostname from the
+    /// match block; the operator's existing ACME config (wildcard
+    /// via DNS-01, or per-name via HTTP-01/TLS-ALPN-01) handles cert
+    /// acquisition. V1 doesn't add per-app ACME knobs.
+    pub subdomain: Option<String>,
 }
 
 /// Caddy admin-API HTTP client.  Cheap to construct — internally
@@ -169,6 +183,7 @@ impl CaddyApi {
                 out.push(AppRoute {
                     name: name.to_string(),
                     host_port: port,
+                    subdomain: extract_route_host(&route),
                 });
             }
         }
@@ -281,40 +296,71 @@ impl CaddyApi {
 /// { header_up X-Real-IP {http.request.remote.host} } }` as produced
 /// by `caddy adapt`, with `@id` so we can delete it by ID later.
 fn build_route_json(route: &AppRoute) -> Value {
+    // Subdomain mode matches by host and serves the app at its own root
+    // — no path prefix to strip, no risk of the absolute-asset-path
+    // failure that the post-install probe in #219 catches for path-prefix
+    // mode. Path-prefix mode keeps the strip-prefix handler so the
+    // upstream sees clean URLs (`/api/...` rather than `/apps/foo/api/...`).
+    let reverse_proxy = json!({
+        "handler": "reverse_proxy",
+        "upstreams": [{"dial": format!("127.0.0.1:{}", route.host_port)}],
+        "headers": {
+            "request": {
+                "set": {
+                    "X-Real-Ip": ["{http.request.remote.host}"]
+                }
+            }
+        },
+        // Mirrors the Caddyfile's `stream_close_delay 30m` on the static
+        // WS handlers — every other app install/remove triggers a Caddy
+        // config reload (this very admin API call), and without the
+        // delay any WS the app itself exposes would die on every
+        // neighbouring app's lifecycle event.
+        "stream_close_delay": "30m",
+    });
+
+    let (match_block, inner_handles) = match &route.subdomain {
+        Some(host) => (json!([{"host": [host]}]), json!([reverse_proxy])),
+        None => (
+            json!([{"path": [format!("/apps/{}/*", route.name)]}]),
+            json!([
+                {
+                    "handler": "rewrite",
+                    "strip_path_prefix": format!("/apps/{}", route.name),
+                },
+                reverse_proxy,
+            ]),
+        ),
+    };
+
     json!({
         "@id": format!("{ROUTE_ID_PREFIX}{}", route.name),
-        "match": [{"path": [format!("/apps/{}/*", route.name)]}],
+        "match": match_block,
         "handle": [{
             "handler": "subroute",
             "routes": [{
-                "handle": [
-                    {
-                        "handler": "rewrite",
-                        "strip_path_prefix": format!("/apps/{}", route.name),
-                    },
-                    {
-                        "handler": "reverse_proxy",
-                        "upstreams": [{"dial": format!("127.0.0.1:{}", route.host_port)}],
-                        "headers": {
-                            "request": {
-                                "set": {
-                                    "X-Real-Ip": ["{http.request.remote.host}"]
-                                }
-                            }
-                        },
-                        // Mirrors the Caddyfile's `stream_close_delay 30m`
-                        // on the static WS handlers — every other app
-                        // install/remove triggers a Caddy config reload
-                        // (this very admin API call), and without the
-                        // delay any WS the app itself exposes would die
-                        // on every neighbouring app's lifecycle event.
-                        "stream_close_delay": "30m",
-                    }
-                ]
+                "handle": inner_handles,
             }]
         }],
         "terminal": true
     })
+}
+
+/// Pull the first hostname out of the route's `match[].host[]` array,
+/// if any. Returns None for path-prefix routes (their match block has
+/// `path` instead of `host`). Used by `list_app_routes` to round-trip
+/// subdomain mode back into `AppRoute.subdomain` so the reconcile pass
+/// can rebuild Caddy routes in the same mode after a restart.
+fn extract_route_host(route: &Value) -> Option<String> {
+    let matches = route.get("match")?.as_array()?;
+    for m in matches {
+        if let Some(hosts) = m.get("host").and_then(Value::as_array)
+            && let Some(first) = hosts.first().and_then(Value::as_str)
+        {
+            return Some(first.to_string());
+        }
+    }
+    None
 }
 
 /// Walk a route JSON value to find the reverse_proxy upstream port.
@@ -351,6 +397,7 @@ mod tests {
         let r = AppRoute {
             name: "foo".into(),
             host_port: 18080,
+            subdomain: None,
         };
         let v = build_route_json(&r);
         assert_eq!(v["@id"], "nasty-app-foo");
@@ -365,10 +412,33 @@ mod tests {
     }
 
     #[test]
+    fn build_route_json_subdomain_mode_matches_by_host() {
+        // Subdomain mode: match block carries `host`, not `path`; no
+        // strip_path_prefix handler (app is at root). Caddy's automatic
+        // HTTPS picks up the hostname from the match block.
+        let r = AppRoute {
+            name: "jellyfin".into(),
+            host_port: 8096,
+            subdomain: Some("jellyfin.example.com".into()),
+        };
+        let v = build_route_json(&r);
+        assert_eq!(v["@id"], "nasty-app-jellyfin");
+        assert_eq!(v["match"][0]["host"][0], "jellyfin.example.com");
+        assert!(v["match"][0].get("path").is_none());
+        let inner_handle = &v["handle"][0]["routes"][0]["handle"];
+        // First (and only) handler is the reverse_proxy — no rewrite
+        // in front of it.
+        assert_eq!(inner_handle[0]["handler"], "reverse_proxy");
+        assert!(inner_handle.as_array().unwrap().len() == 1);
+        assert_eq!(inner_handle[0]["upstreams"][0]["dial"], "127.0.0.1:8096");
+    }
+
+    #[test]
     fn extract_upstream_port_roundtrips_through_build() {
         let r = AppRoute {
             name: "bar".into(),
             host_port: 9999,
+            subdomain: None,
         };
         let v = build_route_json(&r);
         assert_eq!(extract_upstream_port(&v), Some(9999));
@@ -384,5 +454,33 @@ mod tests {
             "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:2137"}]}]
         });
         assert_eq!(extract_upstream_port(&v), None);
+    }
+
+    #[test]
+    fn extract_route_host_roundtrips_through_build_subdomain() {
+        // List → set round trip in subdomain mode must preserve the
+        // hostname so reconcile_app_routes can rebuild the same Caddy
+        // shape after an engine restart.
+        let r = AppRoute {
+            name: "vault".into(),
+            host_port: 11000,
+            subdomain: Some("vault.example.com".into()),
+        };
+        let v = build_route_json(&r);
+        assert_eq!(extract_route_host(&v), Some("vault.example.com".into()));
+        assert_eq!(extract_upstream_port(&v), Some(11000));
+    }
+
+    #[test]
+    fn extract_route_host_returns_none_for_path_mode() {
+        // Path-prefix mode has no host match — the helper must say
+        // None so `list_app_routes` round-trips `subdomain: None`.
+        let r = AppRoute {
+            name: "foo".into(),
+            host_port: 1234,
+            subdomain: None,
+        };
+        let v = build_route_json(&r);
+        assert_eq!(extract_route_host(&v), None);
     }
 }

@@ -1047,4 +1047,10 @@ export interface AppIngress {
 	name: string;
 	host_port: number;
 	path: string;
+	/** Fully-qualified hostname when the app is served in subdomain mode
+	 * (Caddy matches the route by host instead of path prefix). Set via
+	 * apps.ingress.set. When present, the Open button links to
+	 * https://<subdomain>/ rather than /apps/<name>/. Omitted/null =
+	 * path-prefix mode, the historical default. */
+	subdomain?: string | null;
 }

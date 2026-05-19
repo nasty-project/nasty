@@ -508,6 +508,9 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
                 .ingress_set(nasty_apps::SetIngressRequest {
                     name: req.name.clone(),
                     host_port: p.host_port,
+                    // Compose-deploy auto-ingress always uses path-prefix;
+                    // subdomain is an explicit opt-in via apps.ingress.set.
+                    subdomain: None,
                 })
                 .await;
         }

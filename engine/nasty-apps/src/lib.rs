@@ -790,6 +790,107 @@ async fn load_proxy_disabled_reason(app_name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Persist (or clear) the per-app `ingress_subdomain` in the manifest.
+/// Pass `Some(host)` to record subdomain mode, `None` to drop the field
+/// entirely (used by `ingress_remove` so the next tenant of the same
+/// name doesn't inherit a stale subdomain). Mirrors
+/// `save_proxy_disabled_reason` — read-modify-write of the same JSON.
+async fn save_ingress_subdomain(app_name: &str, subdomain: Option<&str>) -> Result<(), AppsError> {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let mut manifest: serde_json::Value = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(s) => serde_json::from_str(&s)
+            .map_err(|e| AppsError::CommandFailed(format!("manifest parse: {e}")))?,
+        // Compose apps don't have a flat manifest; we silently no-op
+        // in that case rather than create a stub that masks the real
+        // compose dir layout. V1 subdomain mode is simple-only anyway.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(AppsError::CommandFailed(format!("manifest read: {e}"))),
+    };
+    let map = match manifest.as_object_mut() {
+        Some(m) => m,
+        None => return Err(AppsError::CommandFailed("manifest not an object".into())),
+    };
+    match subdomain {
+        Some(s) => {
+            map.insert(
+                "ingress_subdomain".to_string(),
+                serde_json::Value::String(s.to_string()),
+            );
+        }
+        None => {
+            map.remove("ingress_subdomain");
+        }
+    }
+    tokio::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .await
+    .map_err(|e| AppsError::CommandFailed(format!("manifest write: {e}")))?;
+    Ok(())
+}
+
+/// Read `ingress_subdomain` from an app's manifest. Returns `None` when
+/// the manifest is missing, unparseable, has no such field, or carries
+/// an empty string — same "best-effort, default to path-prefix" failure
+/// mode the rest of the apps list reconcile uses.
+async fn load_ingress_subdomain(app_name: &str) -> Option<String> {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let content = tokio::fs::read_to_string(&manifest_path).await.ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    parsed
+        .get("ingress_subdomain")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Validate a subdomain hostname before we hand it to Caddy. RFC 1123-ish:
+/// labels are 1–63 chars of `[A-Za-z0-9-]`, no leading/trailing hyphen,
+/// dots between labels, total length ≤ 253. Reject anything else upfront
+/// so the operator gets a clear error rather than a cryptic Caddy 4xx.
+fn validate_subdomain(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("subdomain must not be empty".into());
+    }
+    if host.len() > 253 {
+        return Err(format!("subdomain too long ({} > 253 chars)", host.len()));
+    }
+    // Require at least one dot — a single-label hostname (`jellyfin`)
+    // would still route, but the cert story falls apart (no TLD = no
+    // ACME) and it's almost certainly a user typo. Caddy itself will
+    // serve them but the UX is bad enough that we'd rather reject and
+    // surface a clear message.
+    if !host.contains('.') {
+        return Err(format!(
+            "subdomain '{host}' must be a fully-qualified hostname (contain at least one dot)"
+        ));
+    }
+    for label in host.split('.') {
+        if label.is_empty() {
+            return Err(format!("subdomain '{host}' has an empty label"));
+        }
+        if label.len() > 63 {
+            return Err(format!(
+                "subdomain '{host}' has a label longer than 63 chars: '{label}'"
+            ));
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(format!(
+                "subdomain '{host}' label '{label}' may not start or end with '-'"
+            ));
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(format!(
+                "subdomain '{host}' label '{label}' contains invalid characters \
+                 (only A-Z, a-z, 0-9, '-' allowed)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── Types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1071,8 +1172,18 @@ pub struct AppIngress {
     pub name: String,
     /// Host port to proxy to.
     pub host_port: u16,
-    /// URL path prefix (e.g. "/apps/plex/").
+    /// URL path prefix (e.g. "/apps/plex/"). Always set; in subdomain
+    /// mode it's purely informational (the WebUI prefers the
+    /// `subdomain`-derived URL for the Open button) since the app
+    /// answers at root under the configured hostname.
     pub path: String,
+    /// Fully-qualified hostname the app is served under when subdomain
+    /// mode is on (e.g. `jellyfin.example.com`). When set, Caddy
+    /// matches the route by `host` rather than path-prefix, and the
+    /// app sees itself rooted at `/` — sidestepping the absolute-asset
+    /// failure mode that #219's probe disables path-prefix ingress for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdomain: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1081,6 +1192,14 @@ pub struct SetIngressRequest {
     pub name: String,
     /// Host port to proxy to.
     pub host_port: u16,
+    /// Opt into subdomain mode by providing a fully-qualified hostname
+    /// (e.g. `jellyfin.example.com`). When set, the engine emits a
+    /// host-matching Caddy route instead of the default
+    /// `/apps/<name>/` path-prefix route, and persists the choice in
+    /// the app manifest so engine restarts preserve it. Set to `null`
+    /// or omit to use path-prefix mode (the historical default).
+    #[serde(default)]
+    pub subdomain: Option<String>,
 }
 
 // ── Port check types ──────────────────────────────────────────
@@ -1717,6 +1836,13 @@ impl AppsService {
                 .ingress_set(SetIngressRequest {
                     name: req.name.clone(),
                     host_port,
+                    // Install pipeline always uses path-prefix mode for
+                    // its auto-created ingress. The operator opts into
+                    // subdomain mode later via the WebUI / explicit
+                    // apps.ingress.set call — the install form doesn't
+                    // know enough about the operator's DNS / TLS setup
+                    // to pick a subdomain name on their behalf.
+                    subdomain: None,
                 })
                 .await
             {
@@ -2668,6 +2794,7 @@ impl AppsService {
                 .ingress_set(SetIngressRequest {
                     name: req.name.clone(),
                     host_port: first_port.host_port,
+                    subdomain: None,
                 })
                 .await;
         }
@@ -2831,6 +2958,7 @@ impl AppsService {
                 path: format!("/apps/{}/", r.name),
                 name: r.name,
                 host_port: r.host_port,
+                subdomain: r.subdomain,
             })
             .collect())
     }
@@ -2916,9 +3044,18 @@ impl AppsService {
                 else {
                     continue;
                 };
+                // Persist the subdomain mode across engine restarts by
+                // reading it back from the manifest. Without this, the
+                // reconcile pass rebuilds every route in path-prefix mode
+                // and silently downgrades user-chosen subdomain ingresses
+                // on every restart — the same "ingress comes back from
+                // the dead after a reboot" trap that proxy_disabled_reason
+                // had before #225 honoured the manifest.
+                let subdomain = load_ingress_subdomain(&app.name).await;
                 routes.push(AppRoute {
                     name: app.name,
                     host_port: port,
+                    subdomain,
                 });
             }
             if saw_managed_apps {
@@ -2942,6 +3079,9 @@ impl AppsService {
                     .map(|r| AppRoute {
                         name: r.name,
                         host_port: r.host_port,
+                        // Legacy nginx-era config doesn't encode subdomain
+                        // mode — recovered routes default to path-prefix.
+                        subdomain: None,
                     })
                     .collect();
             }
@@ -2950,19 +3090,50 @@ impl AppsService {
     }
 
     pub async fn ingress_set(&self, req: SetIngressRequest) -> Result<AppIngress, AppsError> {
+        // Treat "" as None — the WebUI submits an empty string when
+        // the operator clears the field rather than omitting it.
+        let subdomain = req
+            .subdomain
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(ref host) = subdomain {
+            validate_subdomain(host).map_err(AppsError::CommandFailed)?;
+        }
         let route = AppRoute {
             name: req.name.clone(),
             host_port: req.host_port,
+            subdomain: subdomain.clone(),
         };
         CaddyApi::new()
             .set_app_route(&route)
             .await
             .map_err(AppsError::CommandFailed)?;
-        info!("Ingress set for '{}' -> port {}", req.name, req.host_port);
+        // Persist subdomain choice so the reconcile path
+        // (engine restart) rebuilds the same Caddy shape rather than
+        // silently downgrading to path-prefix mode.
+        if let Err(e) = save_ingress_subdomain(&req.name, subdomain.as_deref()).await {
+            warn!(
+                "Could not persist ingress_subdomain for '{}': {e} — \
+                 the route is set in Caddy but may revert on engine restart",
+                req.name
+            );
+        }
+        info!(
+            "Ingress set for '{}' -> port {} (mode: {})",
+            req.name,
+            req.host_port,
+            match subdomain {
+                Some(ref h) => h.as_str(),
+                None => "/apps/<name>/",
+            }
+        );
         Ok(AppIngress {
             path: format!("/apps/{}/", req.name),
             name: req.name,
             host_port: req.host_port,
+            subdomain,
         })
     }
 
@@ -2978,6 +3149,12 @@ impl AppsService {
             .remove_app_route(name)
             .await
             .map_err(AppsError::CommandFailed)?;
+        // Clear the persisted subdomain so the next install / ingress_set
+        // on the same name starts from path-prefix default rather than
+        // inheriting whatever the previous tenant had.
+        if let Err(e) = save_ingress_subdomain(name, None).await {
+            warn!("ingress_remove: could not clear ingress_subdomain for '{name}': {e}");
+        }
         info!("Ingress removed for '{name}'");
         Ok(())
     }
@@ -3731,6 +3908,8 @@ fn parse_ingress_comments(content: &str) -> Vec<AppIngress> {
             path: format!("/apps/{name}/"),
             name,
             host_port: port,
+            // Legacy nginx-era format never recorded subdomain mode.
+            subdomain: None,
         });
     }
     rules
@@ -5064,5 +5243,53 @@ services:
             None
         );
         assert_eq!(match_subpath_recipe("").map(|r| r.display_name), None);
+    }
+
+    // ── validate_subdomain ──
+
+    use super::validate_subdomain;
+
+    #[test]
+    fn validate_subdomain_accepts_normal_fqdns() {
+        // The common-case operator input — anything with a dot and
+        // hyphens-not-at-edges should pass. Caddy will pick up the
+        // hostname from the match block and obtain a cert via the
+        // operator's existing ACME config.
+        assert!(validate_subdomain("jellyfin.example.com").is_ok());
+        assert!(validate_subdomain("vault.nasty.local").is_ok());
+        assert!(validate_subdomain("grafana-prod.lab.example.com").is_ok());
+        assert!(validate_subdomain("a.b").is_ok());
+    }
+
+    #[test]
+    fn validate_subdomain_rejects_single_label() {
+        // No dot → likely a user typo. Caddy would technically serve
+        // it but the cert story collapses (no TLD = no ACME), so we
+        // reject and surface a clear message.
+        let err = validate_subdomain("jellyfin").unwrap_err();
+        assert!(err.contains("fully-qualified"), "msg was: {err}");
+    }
+
+    #[test]
+    fn validate_subdomain_rejects_empty_and_garbage() {
+        assert!(validate_subdomain("").is_err());
+        assert!(validate_subdomain("a..b").is_err()); // empty label
+        assert!(validate_subdomain("foo.example.com.").is_err()); // trailing-dot empty label
+        assert!(validate_subdomain("-foo.example.com").is_err()); // leading hyphen
+        assert!(validate_subdomain("foo-.example.com").is_err()); // trailing hyphen
+        assert!(validate_subdomain("foo bar.example.com").is_err()); // space
+        assert!(validate_subdomain("foo_bar.example.com").is_err()); // underscore
+        assert!(validate_subdomain("foo.example.com:8080").is_err()); // port suffix
+        assert!(validate_subdomain("http://foo.example.com").is_err()); // scheme
+    }
+
+    #[test]
+    fn validate_subdomain_rejects_too_long() {
+        // 64-char label
+        let too_long_label = format!("{}.example.com", "a".repeat(64));
+        assert!(validate_subdomain(&too_long_label).is_err());
+        // 254-char total
+        let too_long_total = format!("{}.example.com", "a".repeat(254 - ".example.com".len()));
+        assert!(validate_subdomain(&too_long_total).is_err());
     }
 }
