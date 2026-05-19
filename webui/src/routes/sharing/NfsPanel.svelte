@@ -4,6 +4,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import {
 		nfs,
 		nfsToggleSort,
@@ -107,8 +108,8 @@
 							{#if nfs.addClientShare === share.id}
 								<div class="flex items-end gap-2">
 									<div>
-										<Label class="text-xs">Host / Network</Label>
-										<Input bind:value={nfs.addClientHost} placeholder="192.168.1.0/24" class="mt-1 h-8 w-44 text-xs" />
+										<Label class="text-xs">Host / Network {#if !nfs.addClientHost}<span class="text-amber-500">required</span>{/if}</Label>
+										<Input bind:value={nfs.addClientHost} placeholder="192.168.1.0/24" class="mt-1 h-8 w-44 text-xs {requiredFieldCls(!nfs.addClientHost)}" />
 									</div>
 									<div>
 										<Label class="text-xs">Options</Label>

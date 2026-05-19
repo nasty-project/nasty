@@ -5,6 +5,7 @@
 	import { formatBytes } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import type { Filesystem, Subvolume, SubvolumeDependents, Snapshot, SubvolumeType, NfsShare, SmbShare, IscsiTarget, NvmeofSubsystem, App, AppsStatus, VmStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -775,8 +776,8 @@
 			{#if wizardStep === 1}
 			{#if mountedFilesystems.length > 1}
 				<div class="mb-4">
-					<Label for="sv-filesystem">Filesystem</Label>
-					<select id="sv-filesystem" bind:value={newFilesystem} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+					<Label for="sv-filesystem">Filesystem {#if !newFilesystem}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<select id="sv-filesystem" bind:value={newFilesystem} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!newFilesystem)}">
 						{#each mountedFilesystems as p}
 							<option value={p.name}>{p.name}</option>
 						{/each}
@@ -784,8 +785,8 @@
 				</div>
 			{/if}
 			<div class="mb-4">
-				<Label for="sv-name">Name</Label>
-				<Input id="sv-name" bind:value={newName} placeholder="documents or projects/web" class="mt-1" />
+				<Label for="sv-name">Name {#if !newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="sv-name" bind:value={newName} placeholder="documents or projects/web" class="mt-1 {requiredFieldCls(!newName)}" />
 				<p class="mt-1 text-xs text-muted-foreground">Use <span class="font-mono">/</span> for nested subvolumes (e.g. projects/web)</p>
 			</div>
 			<div class="mb-4">
@@ -1484,8 +1485,8 @@
 			<p class="text-sm text-muted-foreground">Create a read-only point-in-time copy.</p>
 		</Dialog.Header>
 		<div class="mb-4">
-			<Label for="snap-name">Snapshot Name</Label>
-			<Input id="snap-name" bind:value={snapName} placeholder="snap-2026-03-12" class="mt-1" />
+			<Label for="snap-name">Snapshot Name {#if !snapName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="snap-name" bind:value={snapName} placeholder="snap-2026-03-12" class="mt-1 {requiredFieldCls(!snapName)}" />
 		</div>
 		<Dialog.Footer>
 			<Button size="sm" onclick={createSnapshot} disabled={!snapName}>Create</Button>
@@ -1501,8 +1502,8 @@
 			<p class="text-sm text-muted-foreground">Create a writable copy (COW — instant, shares data until modified).</p>
 		</Dialog.Header>
 		<div class="mb-4">
-			<Label for="clone-name">Clone Name</Label>
-			<Input id="clone-name" bind:value={cloneName} placeholder="my-clone" class="mt-1" />
+			<Label for="clone-name">Clone Name {#if !cloneName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="clone-name" bind:value={cloneName} placeholder="my-clone" class="mt-1 {requiredFieldCls(!cloneName)}" />
 		</div>
 		<Dialog.Footer>
 			<Button size="sm" onclick={cloneSubvolume} disabled={!cloneName}>Create</Button>

@@ -5,6 +5,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import {
 		nvme,
 		nvmeToggleSort,
@@ -45,8 +46,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
 			<div class="mb-4">
-				<Label for="nvme-device">Block Subvolume</Label>
-				<select id="nvme-device" bind:value={nvme.newDevice} onchange={nvmeOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+				<Label for="nvme-device">Block Subvolume {#if !nvme.newDevice}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<select id="nvme-device" bind:value={nvme.newDevice} onchange={nvmeOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!nvme.newDevice)}">
 					<option value="">Select a block subvolume...</option>
 					{#each nvme.blockSubvolumes as sv}
 						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -57,8 +58,8 @@
 				{/if}
 			</div>
 			<div class="mb-4">
-				<Label for="nvme-name">Share Name</Label>
-				<Input id="nvme-name" bind:value={nvme.newName} placeholder="faststore" class="mt-1" />
+				<Label for="nvme-name">Share Name {#if !nvme.newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="nvme-name" bind:value={nvme.newName} placeholder="faststore" class="mt-1 {requiredFieldCls(!nvme.newName)}" />
 				<span class="mt-1 block text-xs text-muted-foreground">NQN: nqn.2137.com.nasty:{nvme.newName || '...'}</span>
 			</div>
 			<div class="grid grid-cols-2 gap-4 mb-4">
@@ -135,8 +136,8 @@
 									{#if nvme.addNsSubsys === subsys.id}
 										<div class="mt-3 rounded border p-3">
 											<div class="mb-2">
-												<Label class="text-xs">Block Device</Label>
-												<select bind:value={nvme.addNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+												<Label class="text-xs">Block Device {#if !nvme.addNsDevice}<span class="text-amber-500">required</span>{/if}</Label>
+												<select bind:value={nvme.addNsDevice} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs {requiredFieldCls(!nvme.addNsDevice)}">
 													<option value="">Select...</option>
 													{#each nvme.blockSubvolumes as sv}
 														<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -224,8 +225,8 @@
 									{#if nvme.addHostSubsys === subsys.id}
 										<div class="mt-3 rounded border p-3">
 											<div class="mb-2">
-												<Label class="text-xs">Host NQN</Label>
-												<Input bind:value={nvme.addHostNqn} placeholder="nqn.2024-01.com.client:host1" class="mt-1 h-8 text-xs" />
+												<Label class="text-xs">Host NQN {#if !nvme.addHostNqn}<span class="text-amber-500">required</span>{/if}</Label>
+												<Input bind:value={nvme.addHostNqn} placeholder="nqn.2024-01.com.client:host1" class="mt-1 h-8 text-xs {requiredFieldCls(!nvme.addHostNqn)}" />
 											</div>
 											<div class="flex gap-2">
 												<Button size="xs" onclick={nvmeAddHost} disabled={!nvme.addHostNqn}>Add</Button>

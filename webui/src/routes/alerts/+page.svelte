@@ -3,6 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import { tempUnit, cToF, tempUnitLabel } from '$lib/temperature.svelte';
 	import type { AlertRule, ActiveAlert, AlertMetric, AlertCondition, AlertSeverity } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
@@ -154,8 +155,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Alert Rule</h3>
 			<div class="mb-4">
-				<Label for="rule-name">Name</Label>
-				<Input id="rule-name" bind:value={newName} placeholder="My alert rule" class="mt-1" />
+				<Label for="rule-name">Name {#if !newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="rule-name" bind:value={newName} placeholder="My alert rule" class="mt-1 {requiredFieldCls(!newName)}" />
 			</div>
 			<div class="mb-4 flex gap-4">
 				<div class="flex-1">

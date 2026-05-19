@@ -4,6 +4,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import type { VmStatus, VmCapabilities, Subvolume, FsDependents, NetworkState, UsbPassthrough, HardwareSummary, UsbDevice } from '$lib/types';
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { Button } from '$lib/components/ui/button';
@@ -1050,8 +1051,8 @@
 			<!-- Step 1: General -->
 			{:else if wizardStep === 1}
 			<div class="mb-4">
-				<Label for="vm-name">Name</Label>
-				<Input id="vm-name" bind:value={newName} placeholder="my-vm" class="mt-1" />
+				<Label for="vm-name">Name {#if !newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="vm-name" bind:value={newName} placeholder="my-vm" class="mt-1 {requiredFieldCls(!newName)}" />
 			</div>
 			<div class="mb-4">
 				<Label for="vm-desc">Description</Label>

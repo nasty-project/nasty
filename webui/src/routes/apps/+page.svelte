@@ -4,6 +4,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, AppStats, MappedPort, PruneResult, SubPathRecipe } from '$lib/types';
 	import { formatBytes } from '$lib/format';
 	import { Button } from '$lib/components/ui/button';
@@ -1579,18 +1580,21 @@
 					{/if}
 				{/if}
 
+				{@const appNameMissing = !editingApp && !newName}
+				{@const appNameInvalid = !!newName && !isValidAppName(newName)}
+				{@const imageMissing = !editingApp && !newImage}
 				<div class="mb-4">
-					<Label for="app-name">App Name</Label>
-					<Input id="app-name" value={newName} oninput={(e) => { newName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="whoami" class="mt-1" disabled={!!editingApp} />
-					{#if newName && !isValidAppName(newName)}
+					<Label for="app-name">App Name {#if appNameMissing}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<Input id="app-name" value={newName} oninput={(e) => { newName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="whoami" class="mt-1 {requiredFieldCls(appNameMissing || appNameInvalid)}" disabled={!!editingApp} />
+					{#if appNameInvalid}
 						<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, dots. Max 53 chars.</span>
 					{:else}
 						<span class="mt-1 block text-xs text-muted-foreground">Must be DNS-safe (lowercase, no spaces).</span>
 					{/if}
 				</div>
 				<div class="mb-4">
-					<Label for="app-image">Container Image</Label>
-					<Input id="app-image" bind:value={newImage} placeholder="traefik/whoami:latest" class="mt-1" onblur={inspectImage} />
+					<Label for="app-image">Container Image {#if imageMissing}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<Input id="app-image" bind:value={newImage} placeholder="traefik/whoami:latest" class="mt-1 {requiredFieldCls(imageMissing)}" onblur={inspectImage} />
 					{#if inspecting}
 						<span class="mt-1 block text-xs text-muted-foreground">Detecting exposed ports...</span>
 					{:else if inspectMsg}
@@ -1766,24 +1770,27 @@
 					<Button variant="secondary" onclick={cancelEdit}>Cancel</Button>
 				</div>
 				{:else if installMode === 'compose' && (showCompose || editingCompose)}
+				{@const composeNameMissing = !editingCompose && !composeName}
+				{@const composeNameInvalid = !!composeName && !isValidAppName(composeName)}
+				{@const composeContentMissing = !composeContent.trim()}
 				<!-- Compose form: two columns at lg+ — form on the left, warnings + ingress picker on the right. -->
 				<div class="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
 					<div>
 						<div class="mb-4">
-							<Label for="compose-name">App Name</Label>
-							<Input id="compose-name" value={composeName} oninput={(e) => { composeName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="my-stack" class="mt-1" disabled={!!editingCompose} />
-							{#if composeName && !isValidAppName(composeName)}
+							<Label for="compose-name">App Name {#if composeNameMissing}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+							<Input id="compose-name" value={composeName} oninput={(e) => { composeName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="my-stack" class="mt-1 {requiredFieldCls(composeNameMissing || composeNameInvalid)}" disabled={!!editingCompose} />
+							{#if composeNameInvalid}
 								<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, dots. Max 53 chars.</span>
 							{/if}
 						</div>
 						<div class="mb-4">
-							<Label for="compose-file">docker-compose.yml</Label>
+							<Label for="compose-file">docker-compose.yml {#if composeContentMissing}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
 							<CodeEditor
 								bind:value={composeContent}
 								lang="yaml"
 								errorLines={composeErrorLines}
 								oninput={checkComposeConflicts}
-								class="mt-1 h-96"
+								class="mt-1 h-96 {composeContentMissing ? 'ring-1 ring-amber-500/50 rounded-md' : ''}"
 							/>
 						</div>
 						<!-- Allow unsafe — opt out of strict compose sandbox -->
