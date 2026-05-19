@@ -143,6 +143,7 @@ fn is_read_only(method: &str) -> bool {
                 | "bcachefs.usage"
                 | "service.protocol.list"
                 | "subvolume.list_all"
+                | "subvolume.list_dependents"
                 | "subvolume.find_by_property"
                 | "subvolume.children"
                 | "smb.user.list"

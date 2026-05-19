@@ -5,7 +5,7 @@
 	import { formatBytes } from '$lib/format';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { Filesystem, Subvolume, Snapshot, SubvolumeType, NfsShare, SmbShare, IscsiTarget, NvmeofSubsystem, App, AppsStatus, VmStatus } from '$lib/types';
+	import type { Filesystem, Subvolume, SubvolumeDependents, Snapshot, SubvolumeType, NfsShare, SmbShare, IscsiTarget, NvmeofSubsystem, App, AppsStatus, VmStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -237,9 +237,17 @@
 	let allVms: VmStatus[] = $state([]);
 	let allApps: App[] = $state([]);
 	let appsStoragePath: string | null = $state(null);
+	/** Engine-computed per-subvolume usage. Source of truth for the
+	 * Usage column — see `subvolume.list_dependents` in
+	 * nasty-engine/src/subvolume_dependents.rs. The local consumer
+	 * lists above (allNfs/allSmb/...) are kept for the detail pane,
+	 * which still wants full entity objects for drilldown, but
+	 * counts/names in the table proper come from this server-side
+	 * compute. Keyed by subvolume path for O(1) lookup per row. */
+	let dependentsByPath = $state(new Map<string, SubvolumeDependents>());
 
 	async function loadShares() {
-		const [nfs, smb, iscsi, nvmeof, vms, appsList, appsStat] = await Promise.allSettled([
+		const [nfs, smb, iscsi, nvmeof, vms, appsList, appsStat, deps] = await Promise.allSettled([
 			client.call<NfsShare[]>('share.nfs.list'),
 			client.call<SmbShare[]>('share.smb.list'),
 			client.call<IscsiTarget[]>('share.iscsi.list'),
@@ -247,6 +255,7 @@
 			client.call<VmStatus[]>('vm.list'),
 			client.call<App[]>('apps.list'),
 			client.call<AppsStatus>('apps.status'),
+			client.call<SubvolumeDependents[]>('subvolume.list_dependents'),
 		]);
 		allNfs = nfs.status === 'fulfilled' ? nfs.value : [];
 		allSmb = smb.status === 'fulfilled' ? smb.value : [];
@@ -255,6 +264,11 @@
 		allVms = vms.status === 'fulfilled' ? vms.value : [];
 		allApps = appsList.status === 'fulfilled' ? appsList.value : [];
 		appsStoragePath = appsStat.status === 'fulfilled' ? (appsStat.value.storage_path ?? null) : null;
+		const next = new Map<string, SubvolumeDependents>();
+		if (deps.status === 'fulfilled') {
+			for (const d of deps.value) next.set(d.path, d);
+		}
+		dependentsByPath = next;
 	}
 
 	// Tree: find parent chain and children for the selected subvolume
@@ -566,42 +580,26 @@
 		nvmeof: number;
 		apps: number;
 		vms: number;
+		backups: number;
 	}
+	// Counts come from `subvolume.list_dependents` (engine-side, matches
+	// `fs.dependents` patterns including longest-prefix path attribution
+	// for nested subvolumes). The `system` badge stays client-side because
+	// it's a static SYSTEM_SUBVOLUMES table, not engine-derived state.
 	const subvolumeUsage = $derived.by(() => {
 		const out = new Map<string, SubvolumeUsage>();
 		for (const sv of subvolumes) {
-			// Apps: the engine has one global apps.storage_path; if it
-			// lives inside this subvolume, all currently-deployed apps
-			// are consuming it.  Per-app bind-mount detection (apps that
-			// mount specific paths outside the default storage) is left
-			// as future work — needs per-app config inspection.
-			const appsHere = appsStoragePath && pathIsUnder(appsStoragePath, sv.path)
-				? allApps.length
-				: 0;
-
-			// VMs: block subvolumes hold raw disks (disk.path == block_device);
-			// filesystem subvolumes typically hold qcow2 files under sv.path.
-			const vmsHere = allVms.filter(vm =>
-				vm.disks.some(d =>
-					(sv.block_device != null && d.path === sv.block_device) ||
-					pathIsUnder(d.path, sv.path)
-				)
-			).length;
-
-			const usage: SubvolumeUsage = {
+			const d = dependentsByPath.get(sv.path);
+			out.set(svKey(sv), {
 				system: SYSTEM_SUBVOLUMES[sv.name] ?? null,
-				nfs: allNfs.filter(s => s.path === sv.path).length,
-				smb: allSmb.filter(s => s.path === sv.path).length,
-				iscsi: sv.block_device
-					? allIscsi.filter(t => t.luns.some(l => l.backstore_path === sv.block_device)).length
-					: 0,
-				nvmeof: sv.block_device
-					? allNvmeof.filter(sub => sub.namespaces.some(ns => ns.device_path === sv.block_device)).length
-					: 0,
-				apps: appsHere,
-				vms: vmsHere,
-			};
-			out.set(svKey(sv), usage);
+				nfs: d?.nfs_shares.length ?? 0,
+				smb: d?.smb_shares.length ?? 0,
+				iscsi: d?.iscsi_targets.length ?? 0,
+				nvmeof: d?.nvmeof_subsystems.length ?? 0,
+				apps: d?.apps.length ?? 0,
+				vms: d?.vms.length ?? 0,
+				backups: d?.backup_jobs.length ?? 0,
+			});
 		}
 		return out;
 	});
@@ -614,7 +612,7 @@
 	}
 
 	function usageFor(sv: Subvolume): SubvolumeUsage {
-		return subvolumeUsage.get(svKey(sv)) ?? { system: null, nfs: 0, smb: 0, iscsi: 0, nvmeof: 0, apps: 0, vms: 0 };
+		return subvolumeUsage.get(svKey(sv)) ?? { system: null, nfs: 0, smb: 0, iscsi: 0, nvmeof: 0, apps: 0, vms: 0, backups: 0 };
 	}
 
 	// Pick a ceiling to scale the disk-usage bar against:
@@ -1070,10 +1068,13 @@
 								{#if usage.nvmeof > 0}
 									<Badge class="bg-cyan-950 text-cyan-400 text-[0.6rem]" title="{usage.nvmeof} NVMe-oF subsystem{usage.nvmeof === 1 ? '' : 's'}">NVMe-oF{usage.nvmeof > 1 ? ` ×${usage.nvmeof}` : ''}</Badge>
 								{/if}
-								{#if usage.system && usage.apps === 0 && usage.vms === 0 && usage.nfs === 0 && usage.smb === 0 && usage.iscsi === 0 && usage.nvmeof === 0}
+								{#if usage.backups > 0}
+									<Badge class="bg-teal-950 text-teal-400 text-[0.6rem]" title="{usage.backups} backup job{usage.backups === 1 ? '' : 's'} reading from this subvolume">Backups{usage.backups > 1 ? ` ×${usage.backups}` : ''}</Badge>
+								{/if}
+								{#if usage.system && usage.apps === 0 && usage.vms === 0 && usage.nfs === 0 && usage.smb === 0 && usage.iscsi === 0 && usage.nvmeof === 0 && usage.backups === 0}
 									<Badge class="bg-slate-800 text-slate-300 text-[0.6rem]" title={usage.system}>System</Badge>
 								{/if}
-								{#if !usage.system && usage.apps === 0 && usage.vms === 0 && usage.nfs === 0 && usage.smb === 0 && usage.iscsi === 0 && usage.nvmeof === 0}
+								{#if !usage.system && usage.apps === 0 && usage.vms === 0 && usage.nfs === 0 && usage.smb === 0 && usage.iscsi === 0 && usage.nvmeof === 0 && usage.backups === 0}
 									<span class="text-xs text-muted-foreground">—</span>
 								{/if}
 							</div>

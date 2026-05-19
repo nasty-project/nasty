@@ -25,6 +25,23 @@ pub(super) async fn try_route(
                 Err(e) => err(req, e),
             }
         }
+        // Aggregate "what depends on each subvolume" — same shape as
+        // fs.dependents but one level deeper. Read-only batched call:
+        // the Subvolumes page's Usage column wants the value for every
+        // row at once, so we walk each downstream service once and
+        // bucket references by owning subvolume rather than paying
+        // service-fanout N times.
+        "subvolume.list_dependents" => {
+            let all = crate::subvolume_dependents::find_all_subvolume_dependents(state).await;
+            // Apply the same scope guard as subvolume.list_all — a
+            // filesystem-scoped session shouldn't see usage data for
+            // subvolumes on other filesystems.
+            let filtered = match session.filesystem.as_deref() {
+                Some(fs) => all.into_iter().filter(|d| d.filesystem == fs).collect(),
+                None => all,
+            };
+            ok(req, filtered)
+        }
         "subvolume.list" => match require_str(req, "filesystem") {
             Ok(fs_name) => {
                 if session.filesystem.as_deref().is_some_and(|p| p != fs_name) {
