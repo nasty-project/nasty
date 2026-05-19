@@ -1109,6 +1109,20 @@ pub struct InstallAppRequest {
     /// still rejected even with this set.
     #[serde(default)]
     pub allow_unsafe: bool,
+    /// Optional FQDN to serve the app at via subdomain mode (e.g.
+    /// `jellyfin.example.com`). When set, the install pipeline emits a
+    /// host-matching Caddy route instead of the default path-prefix
+    /// route, and skips the post-install probe (subdomain mode roots
+    /// the app at `/`, so the absolute-asset-path failure mode the
+    /// probe catches can't happen). Empty/omitted = path-prefix
+    /// behaviour, the historical default.
+    ///
+    /// Conflict detection happens at the engine-binary layer before
+    /// install runs (see deploy_simple in app_deploy.rs) so the
+    /// operator doesn't pay for an image pull just to discover the
+    /// hostname is taken.
+    #[serde(default)]
+    pub subdomain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1833,21 +1847,33 @@ impl AppsService {
                     .await
                     .unwrap_or(first_port.container_port)
             };
+            // Operator can opt into subdomain mode at install time via
+            // the install form's "Subdomain (optional)" field; absence
+            // (None / empty) keeps path-prefix mode as the historical
+            // default. Conflict detection runs upstream in
+            // deploy_simple — see app_deploy.rs.
+            let install_subdomain = req
+                .subdomain
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let chose_subdomain = install_subdomain.is_some();
             if let Err(e) = self
                 .ingress_set(SetIngressRequest {
                     name: req.name.clone(),
                     host_port,
-                    // Install pipeline always uses path-prefix mode for
-                    // its auto-created ingress. The operator opts into
-                    // subdomain mode later via the WebUI / explicit
-                    // apps.ingress.set call — the install form doesn't
-                    // know enough about the operator's DNS / TLS setup
-                    // to pick a subdomain name on their behalf.
-                    subdomain: None,
+                    subdomain: install_subdomain,
                 })
                 .await
             {
                 warn!("Failed to auto-create ingress for '{}': {e}", req.name);
+            } else if chose_subdomain {
+                // Subdomain mode roots the app at `/`, so the absolute-
+                // asset-path failure the probe catches can't happen. Skip
+                // the probe — running it would hit the subdomain URL
+                // (instead of /apps/<name>/), see an Ok answer, and waste
+                // a few seconds doing nothing useful.
             } else if let Some(reason) = probe_proxy_compat(&req.name).await.broken_reason() {
                 // The app's HTML emits absolute root-relative paths (e.g.
                 // /assets/index.js). Loaded via /apps/<name>/, those asset
@@ -3745,6 +3771,12 @@ impl AppsService {
                 )
                 .await;
 
+            // Preserve subdomain mode across pull-and-reinstall. AppConfig
+            // doesn't carry the ingress shape (it lives separately) so we
+            // read it back from the manifest here — without this, every
+            // `apps.pull` would silently downgrade a subdomain-mode ingress
+            // to path-prefix.
+            let existing_subdomain = load_ingress_subdomain(name).await;
             let req = InstallAppRequest {
                 name: name.to_string(),
                 image,
@@ -3754,6 +3786,7 @@ impl AppsService {
                 cpu_limit: config.cpu_limit,
                 memory_limit: config.memory_limit,
                 allow_unsafe: config.allow_unsafe,
+                subdomain: existing_subdomain,
             };
             return self.install(req).await;
         }
