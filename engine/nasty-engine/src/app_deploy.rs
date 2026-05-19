@@ -203,6 +203,43 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
         }
     };
 
+    // Parse install params + subdomain conflict check up front, *before*
+    // the pull, so the operator doesn't sit through a 60-second image
+    // download just to discover the chosen hostname is already taken.
+    // Same conflict logic the apps.ingress.set RPC runs in #231.
+    let install_params = req.install_params.clone().unwrap_or(serde_json::json!({}));
+    let mut params: nasty_apps::InstallAppRequest = match serde_json::from_value(install_params) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(
+                socket,
+                &req.name,
+                "parse-params",
+                &format!("invalid params: {e}"),
+            )
+            .await;
+            return;
+        }
+    };
+    params.name = req.name.clone();
+    params.image = image.clone();
+    // Top-level flag wins over anything embedded in install_params, so the
+    // privileged-deploy decision is plainly visible in the deploy request.
+    params.allow_unsafe = req.allow_unsafe;
+    if let Some(ref s) = params.subdomain
+        && let Some(reason) =
+            crate::ingress_conflict::find_subdomain_conflict(state, &params.name, s).await
+    {
+        report_error(
+            socket,
+            &req.name,
+            "validate",
+            &format!("subdomain conflict: {reason}"),
+        )
+        .await;
+        return;
+    }
+
     // Step 1: Pull image via bollard with structured progress
     let _ = socket
         .send(Message::Text(
@@ -227,26 +264,6 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
             DeployMessage::log("Creating container...").into(),
         ))
         .await;
-
-    let install_params = req.install_params.clone().unwrap_or(serde_json::json!({}));
-    let mut params: nasty_apps::InstallAppRequest = match serde_json::from_value(install_params) {
-        Ok(p) => p,
-        Err(e) => {
-            report_error(
-                socket,
-                &req.name,
-                "parse-params",
-                &format!("invalid params: {e}"),
-            )
-            .await;
-            return;
-        }
-    };
-    params.name = req.name.clone();
-    params.image = image;
-    // Top-level flag wins over anything embedded in install_params, so the
-    // privileged-deploy decision is plainly visible in the deploy request.
-    params.allow_unsafe = req.allow_unsafe;
 
     if req.allow_unsafe {
         crate::auth::audit(

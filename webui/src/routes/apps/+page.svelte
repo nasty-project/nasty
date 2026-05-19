@@ -289,6 +289,15 @@
 	let volumePickerIndex = $state<number | null>(null);
 	let newCpuLimit = $state('');
 	let newMemoryLimit = $state('');
+	/** Optional FQDN for subdomain-mode ingress at install time
+	 * (`jellyfin.example.com`). Empty = path-prefix mode, the default.
+	 * Live-checked against engine conflict state below as the operator
+	 * types so a hostname that's already in use surfaces immediately. */
+	let newSubdomain = $state('');
+	/** Engine-reported conflict for `newSubdomain`; '' when clear. */
+	let newSubdomainConflict = $state('');
+	let newSubdomainCheckSeq = 0;
+	let newSubdomainCheckTimer: ReturnType<typeof setTimeout> | null = null;
 	/** Opt out of the strict bind-mount sandbox for simple apps. Persisted per-app. */
 	let newAllowUnsafe = $state(false);
 	/** Same flag, separate state for the compose dialog. */
@@ -903,6 +912,12 @@
 		}
 		if (newCpuLimit) params.cpu_limit = newCpuLimit;
 		if (newMemoryLimit) params.memory_limit = newMemoryLimit;
+		// Subdomain-mode opt-in. Engine validates again (and re-checks
+		// for conflicts on its own) so this is just passthrough — if the
+		// operator typed a hostname that became taken between the live
+		// conflict check and Save, install fails with a clear error.
+		const subdomainTrimmed = newSubdomain.trim();
+		if (subdomainTrimmed) params.subdomain = subdomainTrimmed;
 
 		const ok = await streamDeploy({
 			kind: 'simple',
@@ -1006,8 +1021,41 @@
 		newCpuLimit = '';
 		newMemoryLimit = '';
 		newAllowUnsafe = false;
+		newSubdomain = '';
+		newSubdomainConflict = '';
 		lastInspectedImage = '';
 		subpathRecipe = null;
+	}
+
+	/** Debounced 300ms check of the install-form Subdomain field against
+	 * engine state (other apps' subdomains + the WebUI hostname). Mirrors
+	 * the per-app dialog's check from #231 — same RPC, same sequence guard
+	 * so a stale slow response can't overwrite a fresh fast one. The
+	 * `name` we send is the install form's appName so the engine's
+	 * self-exclusion lines up with what install() will register. */
+	function scheduleNewSubdomainConflictCheck() {
+		if (newSubdomainCheckTimer) clearTimeout(newSubdomainCheckTimer);
+		const trimmed = newSubdomain.trim();
+		if (!trimmed) {
+			newSubdomainConflict = '';
+			return;
+		}
+		newSubdomainCheckSeq += 1;
+		const seq = newSubdomainCheckSeq;
+		const appName = (newName || '').trim().toLowerCase();
+		newSubdomainCheckTimer = setTimeout(async () => {
+			try {
+				const reason = await client.call<string>('apps.ingress.check_conflict', {
+					name: appName,
+					subdomain: trimmed,
+				});
+				if (seq === newSubdomainCheckSeq) {
+					newSubdomainConflict = reason ?? '';
+				}
+			} catch {
+				/* leave the previous result rather than flashing "no conflict" */
+			}
+		}, 300);
 	}
 
 	function cancelEdit() {
@@ -1244,7 +1292,7 @@
 	/** Per-app modal opened by the "···" menu's "Subdomain" item.
 	 * `null` = closed; otherwise carries the app name being edited
 	 * (host_port is read from the current ingress at submit time). */
-	let subdomainDialog = $state<{ appName: string; value: string } | null>(null);
+	let subdomainDialog = $state<{ appName: string; value: string; host_port: number } | null>(null);
 	/** Live conflict-check feedback for the subdomain input. Empty
 	 * string when the value is fine, non-empty when the engine detected
 	 * a conflict (another app already using it, or the WebUI hostname).
@@ -1255,7 +1303,16 @@
 
 	function openSubdomainDialog(appName: string) {
 		const current = getIngress(appName);
-		subdomainDialog = { appName, value: current?.subdomain ?? '' };
+		// When no ingress exists (e.g. the post-install probe disabled
+		// one for a haze-class app), fall back to the app's first TCP
+		// port so saveSubdomain can synthesise a fresh ingress. Without
+		// this fallback the dialog used to be hidden entirely from the
+		// menu — operators of probe-disabled apps had no UI path to
+		// rescue them into subdomain mode.
+		const app = apps.find(a => a.name === appName);
+		const fallbackPort = app?.ports?.find(p => p.protocol?.toLowerCase() === 'tcp')?.host_port;
+		const host_port = current?.host_port ?? fallbackPort ?? 0;
+		subdomainDialog = { appName, value: current?.subdomain ?? '', host_port };
 		subdomainConflict = '';
 	}
 
@@ -1292,19 +1349,29 @@
 
 	async function saveSubdomain() {
 		if (!subdomainDialog) return;
-		const { appName, value } = subdomainDialog;
+		const { appName, value, host_port } = subdomainDialog;
 		const current = getIngress(appName);
-		if (!current) {
+		const subdomain = value.trim() || null;
+		// No-op guard for the haze-class case: app has no current ingress
+		// (probe disabled it) AND operator saved with an empty subdomain.
+		// Creating a path-prefix ingress in that scenario would just be
+		// killed by the probe again, leaving the operator confused. Close
+		// the dialog silently — saving with a non-empty subdomain still
+		// creates the ingress, which is the actual rescue path.
+		if (!current && !subdomain) {
 			subdomainDialog = null;
 			return;
 		}
-		const subdomain = value.trim() || null;
+		if (host_port === 0) {
+			subdomainDialog = null;
+			return;
+		}
 		switchingIngressFor = appName;
 		try {
 			await withToast(
 				() => client.call('apps.ingress.set', {
 					name: appName,
-					host_port: current.host_port,
+					host_port,
 					subdomain,
 				}),
 				subdomain ? `Ingress for ${appName} → ${subdomain}` : `Ingress for ${appName} → /apps/${appName}/`
@@ -1633,6 +1700,30 @@
 					</div>
 				</div>
 
+				<!-- Subdomain (optional) — opt into subdomain-mode ingress from
+				     day one. Empty = path-prefix mode + post-install probe (the
+				     historical default). Non-empty = host-match Caddy route +
+				     probe skipped. Live conflict check below. -->
+				<div class="mb-4">
+					<Label>Subdomain <span class="text-muted-foreground font-normal">(optional)</span></Label>
+					<Input
+						bind:value={newSubdomain}
+						oninput={scheduleNewSubdomainConflictCheck}
+						placeholder="jellyfin.example.com"
+						class="mt-1 h-8 text-xs {newSubdomainConflict ? 'border-amber-500 ring-1 ring-amber-500/50' : ''}"
+					/>
+					{#if newSubdomainConflict}
+						<p class="mt-1 text-xs text-amber-500">⚠ {newSubdomainConflict}</p>
+					{:else}
+						<p class="mt-1 text-[0.65rem] text-muted-foreground">
+							Leave empty to serve under <code>/apps/{newName || '&lt;name&gt;'}/</code>.
+							Set an FQDN to serve at its own root — required for apps that emit
+							absolute paths (haze, jellyfin). Caddy uses the existing TLS/ACME
+							config; the operator points DNS at NASty.
+						</p>
+					{/if}
+				</div>
+
 				<!-- Allow unsafe — opt out of strict bind-mount sandbox -->
 				<div class="mb-4 rounded-md border border-border p-3">
 					<label class="flex items-start gap-2 cursor-pointer">
@@ -1657,7 +1748,7 @@
 					{#if editingApp}
 						<Button onclick={updateApp} disabled={!newImage}>Save</Button>
 					{:else}
-						<Button onclick={install} disabled={!newName || !newImage || !isValidAppName(newName)}>Install</Button>
+						<Button onclick={install} disabled={!newName || !newImage || !isValidAppName(newName) || !!newSubdomainConflict}>Install</Button>
 					{/if}
 					<Button variant="secondary" onclick={cancelEdit}>Cancel</Button>
 				</div>
@@ -1987,10 +2078,11 @@
 													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; openShell(app.name); }}>Shell</button>
 												{/if}
 												<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; pullApp(app.name); }}>Pull image</button>
-												{#if getIngress(app.name)}
-													<!-- Only meaningful when ingress exists. Path-prefix mode is fine
-													     for most apps; this lets the operator opt into subdomain mode
-													     for things that emit absolute root-path assets (haze-class). -->
+												{#if app.ports?.some(p => p.protocol?.toLowerCase() === 'tcp')}
+													<!-- Always shown for apps with a TCP port. Lets the operator
+													     opt into / out of subdomain mode regardless of whether the
+													     current ingress is path-prefix, subdomain, or absent (the
+													     post-install probe disabled it for a haze-class app). -->
 													<button class="w-full px-3 py-1.5 text-left text-xs hover:bg-muted" onclick={() => { expanded[`menu-${app.name}`] = false; openSubdomainDialog(app.name); }}>Subdomain…</button>
 												{/if}
 												{#if app.kind === 'simple'}
