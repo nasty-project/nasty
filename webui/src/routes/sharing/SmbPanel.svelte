@@ -25,6 +25,16 @@
 
 	const client = getClient();
 
+	/** Gates the amber required-field decoration on the SMB create form
+	 * until the operator has clicked Create at least once with a missing
+	 * field. Without it the form opens "alarmed" before any input. */
+	let createTried = $state(false);
+	async function smbCreateGuarded() {
+		if (!smb.newName || !smb.newSubvolume) { createTried = true; return; }
+		createTried = false;
+		await smbCreate();
+	}
+
 	$effect(() => { if (smb.showCreate) smbLoadSubvolumes(); });
 
 	const smbFiltered = $derived(
@@ -57,8 +67,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
 			<div class="mb-4">
-				<Label for="smb-subvol">Subvolume {#if !smb.newSubvolume}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<select id="smb-subvol" bind:value={smb.newSubvolume} onchange={smbOnSubvolumeSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!smb.newSubvolume)}">
+				<Label for="smb-subvol">Subvolume {#if !smb.newSubvolume && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<select id="smb-subvol" bind:value={smb.newSubvolume} onchange={smbOnSubvolumeSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!smb.newSubvolume, createTried)}">
 					<option value="">Select a subvolume...</option>
 					{#each smb.subvolumes as sv}
 						<option value={sv.path}>{sv.filesystem}/{sv.name} ({sv.path})</option>
@@ -70,8 +80,8 @@
 				{/if}
 			</div>
 			<div class="mb-4">
-				<Label for="smb-name">Share Name {#if !smb.newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="smb-name" bind:value={smb.newName} placeholder="documents" class="mt-1 {requiredFieldCls(!smb.newName)}" />
+				<Label for="smb-name">Share Name {#if !smb.newName && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="smb-name" bind:value={smb.newName} placeholder="documents" class="mt-1 {requiredFieldCls(!smb.newName, createTried)}" />
 				<span class="mt-1 block text-xs text-muted-foreground">Name visible to network clients</span>
 			</div>
 			<div class="mb-4">
@@ -86,7 +96,7 @@
 					<input type="checkbox" bind:checked={smb.newGuestOk} class="h-4 w-4" /> Allow guests
 				</label>
 			</div>
-			<Button onclick={smbCreate} disabled={!smb.newName || !smb.newSubvolume}>Create</Button>
+			<Button onclick={smbCreateGuarded}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}

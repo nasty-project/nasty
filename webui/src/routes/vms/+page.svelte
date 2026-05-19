@@ -43,6 +43,10 @@
 
 	// Create form
 	let newName = $state('');
+	/** True after the operator clicks Next/Create on the wizard with
+	 * an empty Name — gates the amber decoration so the form opens
+	 * clean and only flags the missing field after a submit attempt. */
+	let vmNameTried = $state(false);
 	let newCpus = $state(1);
 	let newMemory = $state(1024);
 	let newDisk = $state('');
@@ -96,6 +100,7 @@
 	 * automatically. */
 	function resetCreateForm() {
 		newName = '';
+		vmNameTried = false;
 		newCpus = 1;
 		newMemory = 1024;
 		newDisk = '';
@@ -616,7 +621,8 @@
 	}
 
 	async function create() {
-		if (!newName) return;
+		if (!newName) { vmNameTried = true; return; }
+		vmNameTried = false;
 
 		let diskPath = newDisk;
 
@@ -1051,8 +1057,8 @@
 			<!-- Step 1: General -->
 			{:else if wizardStep === 1}
 			<div class="mb-4">
-				<Label for="vm-name">Name {#if !newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="vm-name" bind:value={newName} placeholder="my-vm" class="mt-1 {requiredFieldCls(!newName)}" />
+				<Label for="vm-name">Name {#if !newName && vmNameTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="vm-name" bind:value={newName} placeholder="my-vm" class="mt-1 {requiredFieldCls(!newName, vmNameTried)}" />
 			</div>
 			<div class="mb-4">
 				<Label for="vm-desc">Description</Label>
@@ -1063,7 +1069,7 @@
 				<Label for="vm-autostart">Auto-start on NASty boot</Label>
 			</div>
 			<div class="flex gap-2">
-				<Button size="sm" onclick={() => wizardStep = 2} disabled={!newName}>Next: System →</Button>
+				<Button size="sm" onclick={() => { if (!newName) { vmNameTried = true; return; } vmNameTried = false; wizardStep = 2; }}>Next: System →</Button>
 			</div>
 
 			<!-- Step 2: System -->
@@ -1378,7 +1384,7 @@
 			</div>
 			<div class="flex gap-2">
 				<Button variant="secondary" size="sm" onclick={() => wizardStep = 5}>← Back</Button>
-				<Button size="sm" onclick={create} disabled={!newName}>Create VM</Button>
+				<Button size="sm" onclick={create}>Create VM</Button>
 			</div>
 			{/if}
 		</CardContent>

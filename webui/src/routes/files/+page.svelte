@@ -123,6 +123,7 @@
 	// Mkdir state
 	let showMkdir = $state(false);
 	let newDirName = $state('');
+	let mkdirTried = $state(false);
 
 	// Delete confirmation
 	let deleteTarget: FileEntry | null = $state(null);
@@ -130,6 +131,7 @@
 	// Rename inline
 	let renameTarget: FileEntry | null = $state(null);
 	let renameValue = $state('');
+	let renameTried = $state(false);
 
 	// Edit (text files in the preview modal)
 	let editing = $state(false);
@@ -248,7 +250,8 @@
 	}
 
 	async function createDir() {
-		if (!newDirName.trim()) return;
+		if (!newDirName.trim()) { mkdirTried = true; return; }
+		mkdirTried = false;
 		const path = currentPath ? `${currentPath}/${newDirName.trim()}` : newDirName.trim();
 		const res = await fetch(`/api/files/mkdir?path=${encodeURIComponent(path)}`, {
 			method: 'POST',
@@ -260,6 +263,7 @@
 		}
 		showMkdir = false;
 		newDirName = '';
+		mkdirTried = false;
 		await browse(currentPath);
 	}
 
@@ -286,9 +290,10 @@
 		if (!renameTarget) return;
 		const newName = renameValue.trim();
 		if (!newName || newName === renameTarget.name) {
-			renameTarget = null;
+			renameTried = true;
 			return;
 		}
+		renameTried = false;
 		if (newName.includes('/')) {
 			alert('Name cannot contain slashes — use this directory only.');
 			return;
@@ -307,6 +312,7 @@
 		}
 		renameTarget = null;
 		renameValue = '';
+		renameTried = false;
 		await browse(currentPath);
 	}
 
@@ -399,9 +405,9 @@
 {#if showMkdir}
 	<div class="mb-4 flex items-center gap-2">
 		<input type="text" bind:value={newDirName} placeholder="Folder name"
-			class="h-9 w-64 rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!newDirName.trim())}"
+			class="h-9 w-64 rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!newDirName.trim(), mkdirTried)}"
 			onkeydown={(e) => { if (e.key === 'Enter') createDir(); if (e.key === 'Escape') showMkdir = false; }} />
-		<Button size="sm" onclick={createDir} disabled={!newDirName.trim()}>Create</Button>
+		<Button size="sm" onclick={createDir}>Create</Button>
 		<Button variant="secondary" size="sm" onclick={() => showMkdir = false}>Cancel</Button>
 	</div>
 {/if}
@@ -503,12 +509,12 @@
 				<input
 					type="text"
 					bind:value={renameValue}
-					class="mb-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm font-mono {requiredFieldCls(!renameValue.trim() || renameValue === renameTarget.name)}"
+					class="mb-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm font-mono {requiredFieldCls(!renameValue.trim() || renameValue === renameTarget.name, renameTried)}"
 					onkeydown={(e) => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') renameTarget = null; }}
 					autofocus
 				/>
 				<div class="flex gap-2">
-					<Button onclick={confirmRename} disabled={!renameValue.trim() || renameValue === renameTarget.name}>Rename</Button>
+					<Button onclick={confirmRename}>Rename</Button>
 					<Button variant="secondary" onclick={() => { renameTarget = null; renameValue = ''; }}>Cancel</Button>
 				</div>
 			</CardContent>

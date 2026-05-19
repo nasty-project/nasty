@@ -20,6 +20,28 @@
 
 	$effect(() => { if (iscsi.showCreate || iscsi.addLunTarget) iscsiLoadSubvolumes(); });
 
+	// Per-form "tried" flags — defer amber required-field decoration
+	// until each submit button is clicked at least once.
+	let createTried = $state(false);
+	let addLunTried = $state(false);
+	let addAclTried = $state(false);
+
+	async function iscsiCreateGuarded() {
+		if (!iscsi.newName || !iscsi.newDevice) { createTried = true; return; }
+		createTried = false;
+		await iscsiCreate();
+	}
+	async function iscsiAddLunGuarded() {
+		if (!iscsi.addLunPath) { addLunTried = true; return; }
+		addLunTried = false;
+		await iscsiAddLun();
+	}
+	async function iscsiAddAclGuarded() {
+		if (!iscsi.addAclIqn) { addAclTried = true; return; }
+		addAclTried = false;
+		await iscsiAddAcl();
+	}
+
 	const iscsiFiltered = $derived(
 		iscsi.search.trim()
 			? iscsi.targets.filter(t =>
@@ -45,8 +67,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Target</h3>
 			<div class="mb-4">
-				<Label for="iscsi-device">Block Subvolume {#if !iscsi.newDevice}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<select id="iscsi-device" bind:value={iscsi.newDevice} onchange={iscsiOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!iscsi.newDevice)}">
+				<Label for="iscsi-device">Block Subvolume {#if !iscsi.newDevice && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<select id="iscsi-device" bind:value={iscsi.newDevice} onchange={iscsiOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!iscsi.newDevice, createTried)}">
 					<option value="">Select a block subvolume...</option>
 					{#each iscsi.blockSubvolumes as sv}
 						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -57,11 +79,11 @@
 				{/if}
 			</div>
 			<div class="mb-4">
-				<Label for="iscsi-name">Target Name {#if !iscsi.newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="iscsi-name" bind:value={iscsi.newName} placeholder="dbserver" class="mt-1 {requiredFieldCls(!iscsi.newName)}" />
+				<Label for="iscsi-name">Target Name {#if !iscsi.newName && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="iscsi-name" bind:value={iscsi.newName} placeholder="dbserver" class="mt-1 {requiredFieldCls(!iscsi.newName, createTried)}" />
 				<span class="mt-1 block text-xs text-muted-foreground">IQN: iqn.2137-01.com.nasty:{iscsi.newName || '...'}</span>
 			</div>
-			<Button onclick={iscsiCreate} disabled={!iscsi.newName || !iscsi.newDevice}>Create</Button>
+			<Button onclick={iscsiCreateGuarded}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}
@@ -140,8 +162,8 @@
 									{#if iscsi.addLunTarget === target.id}
 										<div class="mt-3 rounded border p-3">
 											<div class="mb-2">
-												<Label class="text-xs">Block Device or Subvolume {#if !iscsi.addLunPath}<span class="text-amber-500">required</span>{/if}</Label>
-												<select bind:value={iscsi.addLunPath} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs {requiredFieldCls(!iscsi.addLunPath)}">
+												<Label class="text-xs">Block Device or Subvolume {#if !iscsi.addLunPath && addLunTried}<span class="text-amber-500">required</span>{/if}</Label>
+												<select bind:value={iscsi.addLunPath} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs {requiredFieldCls(!iscsi.addLunPath, addLunTried)}">
 													<option value="">Select...</option>
 													{#each iscsi.blockSubvolumes as sv}
 														<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -157,8 +179,8 @@
 												</select>
 											</div>
 											<div class="flex gap-2">
-												<Button size="xs" onclick={iscsiAddLun} disabled={!iscsi.addLunPath}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { iscsi.addLunTarget = ''; }}>Cancel</Button>
+												<Button size="xs" onclick={iscsiAddLunGuarded}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { iscsi.addLunTarget = ''; addLunTried = false; }}>Cancel</Button>
 											</div>
 										</div>
 									{:else}
@@ -187,8 +209,8 @@
 									{#if iscsi.addAclTarget === target.id}
 										<div class="mt-3 rounded border p-3">
 											<div class="mb-2">
-												<Label class="text-xs">Initiator IQN {#if !iscsi.addAclIqn}<span class="text-amber-500">required</span>{/if}</Label>
-												<Input bind:value={iscsi.addAclIqn} placeholder="iqn.2024-01.com.client:initiator1" class="mt-1 h-8 text-xs {requiredFieldCls(!iscsi.addAclIqn)}" />
+												<Label class="text-xs">Initiator IQN {#if !iscsi.addAclIqn && addAclTried}<span class="text-amber-500">required</span>{/if}</Label>
+												<Input bind:value={iscsi.addAclIqn} placeholder="iqn.2024-01.com.client:initiator1" class="mt-1 h-8 text-xs {requiredFieldCls(!iscsi.addAclIqn, addAclTried)}" />
 											</div>
 											<div class="grid grid-cols-2 gap-2 mb-2">
 												<div>
@@ -201,8 +223,8 @@
 												</div>
 											</div>
 											<div class="flex gap-2">
-												<Button size="xs" onclick={iscsiAddAcl} disabled={!iscsi.addAclIqn}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { iscsi.addAclTarget = ''; }}>Cancel</Button>
+												<Button size="xs" onclick={iscsiAddAclGuarded}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { iscsi.addAclTarget = ''; addAclTried = false; }}>Cancel</Button>
 											</div>
 										</div>
 									{:else}

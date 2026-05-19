@@ -36,7 +36,14 @@
 	let showInlineGroupCreate = $state(false);
 	let inlineGroupName = $state('');
 
+	// Per-form "tried" flags — defer amber required-field decoration
+	// until each submit button is clicked at least once.
+	let createUserTried = $state(false);
+	let createGroupTried = $state(false);
+
 	async function createInlineGroup() {
+		if (!inlineGroupName.trim()) { createGroupTried = true; return; }
+		createGroupTried = false;
 		await withToast(
 			() => client.call('smb.group.create', { name: inlineGroupName.trim() }),
 			`Group "${inlineGroupName}" created`
@@ -48,6 +55,9 @@
 	}
 
 	async function createInlineUser() {
+		if (!inlineUsername || !inlinePassword || !inlinePasswordConfirm) { createUserTried = true; return; }
+		if (inlinePassword !== inlinePasswordConfirm) { createUserTried = true; return; }
+		createUserTried = false;
 		const ok = await withToast(
 			() => client.call('smb.user.create', { username: inlineUsername, password: inlinePassword }),
 			`User "${inlineUsername}" created`
@@ -120,16 +130,16 @@
 					<h3 class="mb-4 text-lg font-semibold">New System User</h3>
 					{@const inlinePwMismatch = !!inlinePasswordConfirm && inlinePassword !== inlinePasswordConfirm}
 					<div class="mb-4">
-						<Label for="inline-username">Username {#if !inlineUsername}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-						<Input id="inline-username" bind:value={inlineUsername} placeholder="johndoe" autocomplete="off" class="mt-1 {requiredFieldCls(!inlineUsername)}" />
+						<Label for="inline-username">Username {#if !inlineUsername && createUserTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+						<Input id="inline-username" bind:value={inlineUsername} placeholder="johndoe" autocomplete="off" class="mt-1 {requiredFieldCls(!inlineUsername, createUserTried)}" />
 					</div>
 					<div class="mb-4">
-						<Label for="inline-password">Password {#if !inlinePassword}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-						<Input id="inline-password" type="password" bind:value={inlinePassword} autocomplete="new-password" class="mt-1 {requiredFieldCls(!inlinePassword)}" />
+						<Label for="inline-password">Password {#if !inlinePassword && createUserTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+						<Input id="inline-password" type="password" bind:value={inlinePassword} autocomplete="new-password" class="mt-1 {requiredFieldCls(!inlinePassword, createUserTried)}" />
 					</div>
 					<div class="mb-4">
-						<Label for="inline-password-confirm">Confirm Password {#if !inlinePasswordConfirm}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-						<Input id="inline-password-confirm" type="password" bind:value={inlinePasswordConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!inlinePasswordConfirm || inlinePwMismatch)}" />
+						<Label for="inline-password-confirm">Confirm Password {#if !inlinePasswordConfirm && createUserTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+						<Input id="inline-password-confirm" type="password" bind:value={inlinePasswordConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!inlinePasswordConfirm, createUserTried) || requiredFieldCls(inlinePwMismatch)}" />
 						{#if inlinePwMismatch}
 							<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 						{/if}
@@ -152,9 +162,9 @@
 							{/each}
 							{#if showInlineGroupCreate}
 								<div class="flex items-center gap-1.5">
-									<Input bind:value={inlineGroupName} placeholder="Group name" class="h-7 w-32 text-xs {requiredFieldCls(!inlineGroupName.trim())}" />
-									<Button size="xs" disabled={!inlineGroupName.trim()} onclick={createInlineGroup}>Create</Button>
-									<Button size="xs" variant="secondary" onclick={() => showInlineGroupCreate = false}>Cancel</Button>
+									<Input bind:value={inlineGroupName} placeholder="Group name" class="h-7 w-32 text-xs {requiredFieldCls(!inlineGroupName.trim(), createGroupTried)}" />
+									<Button size="xs" onclick={createInlineGroup}>Create</Button>
+									<Button size="xs" variant="secondary" onclick={() => { showInlineGroupCreate = false; createGroupTried = false; }}>Cancel</Button>
 								</div>
 							{:else}
 								<Button size="sm" onclick={() => showInlineGroupCreate = true}>Create Group</Button>
@@ -162,10 +172,10 @@
 						</div>
 					</div>
 					<div class="flex gap-2">
-						<Button onclick={createInlineUser} disabled={!inlineUsername || !inlinePassword || inlinePassword !== inlinePasswordConfirm}>
+						<Button onclick={createInlineUser} disabled={inlinePwMismatch}>
 							Create & Add
 						</Button>
-						<Button variant="secondary" onclick={() => { showInlineUserCreate = false; }}>Cancel</Button>
+						<Button variant="secondary" onclick={() => { showInlineUserCreate = false; createUserTried = false; }}>Cancel</Button>
 					</div>
 				</CardContent>
 			</Card>

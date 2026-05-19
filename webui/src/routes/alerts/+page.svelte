@@ -18,6 +18,7 @@
 	let showCreate = $state(false);
 
 	let newName = $state('');
+	let createTried = $state(false);
 	let newMetric = $state<AlertMetric>('fs_usage_percent');
 	let newCondition = $state<AlertCondition>('above');
 	let newThreshold = $state(80);
@@ -76,7 +77,8 @@
 	}
 
 	async function createRule() {
-		if (!newName) return;
+		if (!newName) { createTried = true; return; }
+		createTried = false;
 		// disk_temperature thresholds are stored in Celsius. If the user is
 		// viewing Fahrenheit, the value typed in the input is in °F — convert
 		// before sending so the alert evaluator sees the canonical unit.
@@ -99,6 +101,7 @@
 		if (ok !== undefined) {
 			showCreate = false;
 			newName = '';
+			createTried = false;
 			newThreshold = 80;
 			await refresh();
 		}
@@ -155,8 +158,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Alert Rule</h3>
 			<div class="mb-4">
-				<Label for="rule-name">Name {#if !newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="rule-name" bind:value={newName} placeholder="My alert rule" class="mt-1 {requiredFieldCls(!newName)}" />
+				<Label for="rule-name">Name {#if !newName && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="rule-name" bind:value={newName} placeholder="My alert rule" class="mt-1 {requiredFieldCls(!newName, createTried)}" />
 			</div>
 			<div class="mb-4 flex gap-4">
 				<div class="flex-1">
@@ -189,7 +192,7 @@
 					</select>
 				</div>
 			</div>
-			<Button onclick={createRule} disabled={!newName}>Create</Button>
+			<Button onclick={createRule}>Create</Button>
 		</CardContent>
 	</Card>
 {/if}

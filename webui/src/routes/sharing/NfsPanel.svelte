@@ -17,6 +17,18 @@
 
 	$effect(() => { if (nfs.showCreate) nfsLoadSubvolumes(); });
 
+	/** Per-panel "tried Add" flag — defers the amber required-field
+	 * decoration until the operator has clicked Add at least once
+	 * with the host field empty. Reset when the Add Client panel
+	 * collapses (showAddClientShare is cleared elsewhere). */
+	let addClientTried = $state(false);
+
+	async function nfsAddClickHost(share: Parameters<typeof nfsAddClient>[0]) {
+		if (!nfs.addClientHost) { addClientTried = true; return; }
+		addClientTried = false;
+		await nfsAddClient(share);
+	}
+
 	const nfsFiltered = $derived(
 		nfs.search.trim()
 			? nfs.shares.filter(s =>
@@ -108,15 +120,15 @@
 							{#if nfs.addClientShare === share.id}
 								<div class="flex items-end gap-2">
 									<div>
-										<Label class="text-xs">Host / Network {#if !nfs.addClientHost}<span class="text-amber-500">required</span>{/if}</Label>
-										<Input bind:value={nfs.addClientHost} placeholder="192.168.1.0/24" class="mt-1 h-8 w-44 text-xs {requiredFieldCls(!nfs.addClientHost)}" />
+										<Label class="text-xs">Host / Network {#if !nfs.addClientHost && addClientTried}<span class="text-amber-500">required</span>{/if}</Label>
+										<Input bind:value={nfs.addClientHost} placeholder="192.168.1.0/24" class="mt-1 h-8 w-44 text-xs {requiredFieldCls(!nfs.addClientHost, addClientTried)}" />
 									</div>
 									<div>
 										<Label class="text-xs">Options</Label>
 										<Input bind:value={nfs.addClientOptions} class="mt-1 h-8 w-56 text-xs" />
 									</div>
-									<Button size="xs" onclick={() => nfsAddClient(share)} disabled={!nfs.addClientHost}>Add</Button>
-									<Button variant="secondary" size="xs" onclick={() => { nfs.addClientShare = null; nfs.addClientHost = ''; }}>Cancel</Button>
+									<Button size="xs" onclick={() => nfsAddClickHost(share)}>Add</Button>
+									<Button variant="secondary" size="xs" onclick={() => { nfs.addClientShare = null; nfs.addClientHost = ''; addClientTried = false; }}>Cancel</Button>
 								</div>
 								{#if nfs.addClientOptions.includes('no_root_squash')}
 									<p class="mt-1 text-xs text-yellow-500">Warning: <code>no_root_squash</code> disables quota enforcement for root NFS clients.</p>

@@ -303,6 +303,13 @@
 	let newAllowUnsafe = $state(false);
 	/** Same flag, separate state for the compose dialog. */
 	let composeAllowUnsafe = $state(false);
+	/** Has the operator clicked Install / Deploy on this form at least
+	 * once? Gates the amber required-field decoration so a fresh form
+	 * opens clean rather than lit up with "required" everywhere. Set
+	 * true by the submit handlers when a required field is empty;
+	 * cleared by resetForm / cancelCompose. */
+	let installTried = $state(false);
+	let composeTried = $state(false);
 	let inspecting = $state(false);
 	let lastInspectedImage = '';
 	/** Inline status from the last apps.inspect_image call so the user sees
@@ -876,7 +883,12 @@
 	}
 
 	async function install() {
-		if (!newName || !newImage) return;
+		// Flip the "tried" gate before bailing on missing fields so the
+		// amber required-field decoration shows up exactly when the
+		// operator expects: after they clicked Install and it didn't
+		// proceed, never before.
+		if (!newName || !newImage) { installTried = true; return; }
+		installTried = false;
 		if (!await waitForDocker()) return;
 		const appName = newName.toLowerCase();
 		if (!isValidAppName(appName)) {
@@ -1024,6 +1036,7 @@
 		newAllowUnsafe = false;
 		newSubdomain = '';
 		newSubdomainConflict = '';
+		installTried = false;
 		lastInspectedImage = '';
 		subpathRecipe = null;
 	}
@@ -1185,7 +1198,8 @@
 
 	// Compose functions
 	async function installCompose() {
-		if (!composeName || !composeContent.trim()) return;
+		if (!composeName || !composeContent.trim()) { composeTried = true; return; }
+		composeTried = false;
 		if (!await waitForDocker()) return;
 		const name = composeName.toLowerCase();
 		if (!isValidAppName(name)) {
@@ -1202,7 +1216,7 @@
 		if (ok) {
 			showCompose = false;
 			editingCompose = null;
-			composeName = ''; composeContent = '';
+			composeName = ''; composeContent = ''; composeTried = false;
 			composeAllowUnsafe = false;
 		}
 		await refresh();
@@ -1236,7 +1250,7 @@
 		volumeMismatches = [];
 		composeTcpPorts = [];
 		newIngressPort = null;
-		composeName = ''; composeContent = '';
+		composeName = ''; composeContent = ''; composeTried = false;
 		composeAllowUnsafe = false;
 	}
 
@@ -1580,9 +1594,14 @@
 					{/if}
 				{/if}
 
-				{@const appNameMissing = !editingApp && !newName}
+				<!-- "Missing required" decoration is gated on installTried so the
+				     form opens clean and only goes amber after the operator
+				     hits Install with an empty field. The invalid-format
+				     check stays always-on (user just typed something wrong,
+				     they want to know immediately). -->
+				{@const appNameMissing = !editingApp && !newName && installTried}
 				{@const appNameInvalid = !!newName && !isValidAppName(newName)}
-				{@const imageMissing = !editingApp && !newImage}
+				{@const imageMissing = !editingApp && !newImage && installTried}
 				<div class="mb-4">
 					<Label for="app-name">App Name {#if appNameMissing}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
 					<Input id="app-name" value={newName} oninput={(e) => { newName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="whoami" class="mt-1 {requiredFieldCls(appNameMissing || appNameInvalid)}" disabled={!!editingApp} />
@@ -1765,14 +1784,22 @@
 					{#if editingApp}
 						<Button onclick={updateApp} disabled={!newImage}>Save</Button>
 					{:else}
-						<Button onclick={install} disabled={!newName || !newImage || !isValidAppName(newName) || !!newSubdomainConflict}>Install</Button>
+						<!-- Install stays enabled even when required fields are empty
+						     so clicking it triggers the amber decoration. Real
+						     blockers (invalid name format, subdomain conflict) keep
+						     it disabled — those are user-correctable but should never
+						     reach the server. -->
+						<Button onclick={install} disabled={(!!newName && !isValidAppName(newName)) || !!newSubdomainConflict}>Install</Button>
 					{/if}
 					<Button variant="secondary" onclick={cancelEdit}>Cancel</Button>
 				</div>
 				{:else if installMode === 'compose' && (showCompose || editingCompose)}
-				{@const composeNameMissing = !editingCompose && !composeName}
+				<!-- composeTried gates the amber treatment so the form opens
+				     clean. composeNameInvalid stays always-on because that's
+				     "you typed something invalid", not "you forgot a field". -->
+				{@const composeNameMissing = !editingCompose && !composeName && composeTried}
 				{@const composeNameInvalid = !!composeName && !isValidAppName(composeName)}
-				{@const composeContentMissing = !composeContent.trim()}
+				{@const composeContentMissing = !composeContent.trim() && composeTried}
 				<!-- Compose form: two columns at lg+ — form on the left, warnings + ingress picker on the right. -->
 				<div class="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
 					<div>
@@ -1815,7 +1842,7 @@
 							{/if}
 						</div>
 						<div class="flex gap-2">
-							<Button onclick={installCompose} disabled={!composeName || !composeContent.trim() || (!editingCompose && !isValidAppName(composeName))}>
+							<Button onclick={installCompose} disabled={!editingCompose && !!composeName && !isValidAppName(composeName)}>
 								{editingCompose ? 'Update' : 'Deploy'}
 							</Button>
 							<Button variant="secondary" onclick={cancelCompose}>Cancel</Button>
