@@ -256,13 +256,48 @@ pub(super) async fn try_route(
             }
             Err(e) => err(req, e),
         },
-        "apps.ingress.set" => match parse_params(req) {
-            Ok(p) => match state.apps.ingress_set(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
+        "apps.ingress.set" => match parse_params::<nasty_apps::SetIngressRequest>(req) {
+            Ok(p) => {
+                // Gate the set on a subdomain-conflict check — catches the
+                // "two apps claim the same hostname" / "app subdomain ==
+                // WebUI hostname" cases that Caddy would silently let the
+                // most recent one win. Empty subdomain (path-prefix mode)
+                // short-circuits past the check inside find_subdomain_conflict.
+                let conflict = match &p.subdomain {
+                    Some(s) => {
+                        crate::ingress_conflict::find_subdomain_conflict(state, &p.name, s).await
+                    }
+                    None => None,
+                };
+                if let Some(reason) = conflict {
+                    err(req, format!("subdomain conflict: {reason}"))
+                } else {
+                    match state.apps.ingress_set(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+            }
             Err(e) => invalid(req, e),
         },
+        // Best-effort lookup used by the WebUI's subdomain dialog to
+        // surface a live "in use by X" hint as the operator types,
+        // before they click Save. Returns the conflict reason or an
+        // empty string when the choice is clear. Read-only.
+        "apps.ingress.check_conflict" => 'arm: {
+            let name = match require_str(req, "name") {
+                Ok(s) => s,
+                Err(r) => break 'arm r,
+            };
+            let subdomain = match require_str(req, "subdomain") {
+                Ok(s) => s,
+                Err(r) => break 'arm r,
+            };
+            let reason = crate::ingress_conflict::find_subdomain_conflict(state, name, subdomain)
+                .await
+                .unwrap_or_default();
+            ok(req, reason)
+        }
         "apps.ingress.remove" => match require_str(req, "name") {
             Ok(name) => match state.apps.ingress_remove(name).await {
                 Ok(()) => ok(req, "ok"),

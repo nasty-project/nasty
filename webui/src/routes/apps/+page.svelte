@@ -1245,10 +1245,49 @@
 	 * `null` = closed; otherwise carries the app name being edited
 	 * (host_port is read from the current ingress at submit time). */
 	let subdomainDialog = $state<{ appName: string; value: string } | null>(null);
+	/** Live conflict-check feedback for the subdomain input. Empty
+	 * string when the value is fine, non-empty when the engine detected
+	 * a conflict (another app already using it, or the WebUI hostname).
+	 * Save remains gated server-side too — this is just for fast feedback. */
+	let subdomainConflict = $state('');
+	let subdomainCheckSeq = 0;
+	let subdomainCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function openSubdomainDialog(appName: string) {
 		const current = getIngress(appName);
 		subdomainDialog = { appName, value: current?.subdomain ?? '' };
+		subdomainConflict = '';
+	}
+
+	/** Debounced conflict check — runs 300ms after the operator stops
+	 * typing so we don't fire an RPC on every keystroke. Sequence number
+	 * guards against an older-but-slower response overwriting a newer
+	 * answer. */
+	function scheduleSubdomainConflictCheck() {
+		if (subdomainCheckTimer) clearTimeout(subdomainCheckTimer);
+		const dialog = subdomainDialog;
+		if (!dialog) return;
+		const trimmed = dialog.value.trim();
+		if (!trimmed) {
+			subdomainConflict = '';
+			return;
+		}
+		subdomainCheckSeq += 1;
+		const seq = subdomainCheckSeq;
+		subdomainCheckTimer = setTimeout(async () => {
+			try {
+				const reason = await client.call<string>('apps.ingress.check_conflict', {
+					name: dialog.appName,
+					subdomain: trimmed,
+				});
+				if (seq === subdomainCheckSeq) {
+					subdomainConflict = reason ?? '';
+				}
+			} catch {
+				// Network glitch — leave the previous result rather than
+				// flashing a misleading "no conflict" when we can't tell.
+			}
+		}, 300);
 	}
 
 	async function saveSubdomain() {
@@ -2010,10 +2049,23 @@
 				Caddy uses the existing TLS/ACME config; the operator needs DNS for the hostname to resolve to NASty.
 			</p>
 			<Label class="text-xs">Subdomain</Label>
-			<Input bind:value={subdomainDialog.value} placeholder="jellyfin.example.com" class="mt-1" />
+			<Input
+				bind:value={subdomainDialog.value}
+				oninput={scheduleSubdomainConflictCheck}
+				placeholder="jellyfin.example.com"
+				class="mt-1 {subdomainConflict ? 'border-amber-500 ring-1 ring-amber-500/50' : ''}"
+			/>
+			{#if subdomainConflict}
+				<!-- Engine-side check: another engine app already claims this
+				     hostname, or it matches NASty's own WebUI hostname (would
+				     shadow the management interface). Save stays gated server-
+				     side too — this is just fast feedback so the operator
+				     doesn't get a surprise toast after clicking. -->
+				<p class="mt-1 text-xs text-amber-500">⚠ {subdomainConflict}</p>
+			{/if}
 			<div class="mt-4 flex justify-end gap-2">
 				<Button variant="outline" size="sm" onclick={() => { subdomainDialog = null; }}>Cancel</Button>
-				<Button size="sm" onclick={saveSubdomain} disabled={switchingIngressFor === subdomainDialog.appName}>Save</Button>
+				<Button size="sm" onclick={saveSubdomain} disabled={switchingIngressFor === subdomainDialog.appName || !!subdomainConflict}>Save</Button>
 			</div>
 		</div>
 	</div>

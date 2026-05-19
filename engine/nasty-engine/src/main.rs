@@ -20,6 +20,7 @@ mod auth;
 mod auth_oidc;
 mod fs_dependents;
 mod fs_lock;
+mod ingress_conflict;
 mod log_stream;
 mod router;
 mod subvolume_dependents;
