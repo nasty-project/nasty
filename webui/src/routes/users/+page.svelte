@@ -3,6 +3,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Filesystem, SmbGroup } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -372,18 +373,23 @@
 	<Card class="mb-6 max-w-md">
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New User</h3>
+			{@const newUserPwTooShort = !!newPassword && newPassword.length < 8}
+			{@const newUserPwMismatch = !!newPasswordConfirm && newPassword !== newPasswordConfirm}
 			<div class="mb-4">
-				<Label for="new-username">Username</Label>
-				<Input id="new-username" bind:value={newUsername} placeholder="johndoe" autocomplete="off" class="mt-1" />
+				<Label for="new-username">Username {#if !newUsername}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="new-username" bind:value={newUsername} placeholder="johndoe" autocomplete="off" class="mt-1 {requiredFieldCls(!newUsername)}" />
 			</div>
 			<div class="mb-4">
-				<Label for="new-password">Password</Label>
-				<Input id="new-password" type="password" bind:value={newPassword} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1" />
+				<Label for="new-password">Password {#if !newPassword}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="new-password" type="password" bind:value={newPassword} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1 {requiredFieldCls(!newPassword || newUserPwTooShort)}" />
+				{#if newUserPwTooShort}
+					<span class="mt-1 block text-xs text-destructive">At least 8 characters required</span>
+				{/if}
 			</div>
 			<div class="mb-4">
-				<Label for="new-password-confirm">Confirm Password</Label>
-				<Input id="new-password-confirm" type="password" bind:value={newPasswordConfirm} autocomplete="new-password" class="mt-1" />
-				{#if newPasswordConfirm && newPassword !== newPasswordConfirm}
+				<Label for="new-password-confirm">Confirm Password {#if !newPasswordConfirm}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="new-password-confirm" type="password" bind:value={newPasswordConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!newPasswordConfirm || newUserPwMismatch)}" />
+				{#if newUserPwMismatch}
 					<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 				{/if}
 			</div>
@@ -574,14 +580,15 @@
 		<Dialog.Header>
 			<Dialog.Title>Change Password for "{sysPwUser}"</Dialog.Title>
 		</Dialog.Header>
+		{@const sysPwMismatch = !!sysPwConfirm && sysPwNew !== sysPwConfirm}
 		<div class="mb-4">
-			<Label for="sys-pw-new">New Password</Label>
-			<Input id="sys-pw-new" type="password" bind:value={sysPwNew} autocomplete="new-password" class="mt-1" />
+			<Label for="sys-pw-new">New Password {#if !sysPwNew}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="sys-pw-new" type="password" bind:value={sysPwNew} autocomplete="new-password" class="mt-1 {requiredFieldCls(!sysPwNew)}" />
 		</div>
 		<div class="mb-4">
-			<Label for="sys-pw-confirm">Confirm Password</Label>
-			<Input id="sys-pw-confirm" type="password" bind:value={sysPwConfirm} autocomplete="new-password" class="mt-1" />
-			{#if sysPwConfirm && sysPwNew !== sysPwConfirm}
+			<Label for="sys-pw-confirm">Confirm Password {#if !sysPwConfirm}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="sys-pw-confirm" type="password" bind:value={sysPwConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!sysPwConfirm || sysPwMismatch)}" />
+			{#if sysPwMismatch}
 				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 			{/if}
 		</div>
@@ -610,8 +617,8 @@
 	<Card class="mb-4 max-w-md">
 		<CardContent class="pt-4 space-y-3">
 			<div>
-				<Label for="group-name">Group Name</Label>
-				<Input id="group-name" bind:value={newGroupName} placeholder="e.g. engineering" class="mt-1" />
+				<Label for="group-name">Group Name {#if !newGroupName.trim()}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="group-name" bind:value={newGroupName} placeholder="e.g. engineering" class="mt-1 {requiredFieldCls(!newGroupName.trim())}" />
 			</div>
 			<Button size="sm" onclick={createGroup} disabled={!newGroupName.trim()}>Create</Button>
 		</CardContent>
@@ -699,8 +706,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New API Token</h3>
 			<div class="mb-4">
-				<Label for="token-name">Name</Label>
-				<Input id="token-name" bind:value={newTokenName} placeholder="e.g. k8s-cluster" autocomplete="off" class="mt-1" />
+				<Label for="token-name">Name {#if !newTokenName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="token-name" bind:value={newTokenName} placeholder="e.g. k8s-cluster" autocomplete="off" class="mt-1 {requiredFieldCls(!newTokenName)}" />
 			</div>
 			<div class="mb-4">
 				<Label for="token-role">Role</Label>
@@ -793,14 +800,19 @@
 		<Dialog.Header>
 			<Dialog.Title>Change Password for "{pwUser}"</Dialog.Title>
 		</Dialog.Header>
+		{@const pwTooShort = !!pwNew && pwNew.length < 8}
+		{@const pwMismatch = !!pwConfirm && pwNew !== pwConfirm}
 		<div class="mb-4">
-			<Label for="pw-new">New Password</Label>
-			<Input id="pw-new" type="password" bind:value={pwNew} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1" />
+			<Label for="pw-new">New Password {#if !pwNew}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="pw-new" type="password" bind:value={pwNew} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwNew || pwTooShort)}" />
+			{#if pwTooShort}
+				<span class="mt-1 block text-xs text-destructive">At least 8 characters required</span>
+			{/if}
 		</div>
 		<div class="mb-4">
-			<Label for="pw-confirm">Confirm Password</Label>
-			<Input id="pw-confirm" type="password" bind:value={pwConfirm} autocomplete="new-password" class="mt-1" />
-			{#if pwConfirm && pwNew !== pwConfirm}
+			<Label for="pw-confirm">Confirm Password {#if !pwConfirm}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="pw-confirm" type="password" bind:value={pwConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwConfirm || pwMismatch)}" />
+			{#if pwMismatch}
 				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 			{/if}
 		</div>

@@ -5,6 +5,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil } from '@lucide/svelte';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 
 	interface FileEntry {
 		name: string;
@@ -398,7 +399,7 @@
 {#if showMkdir}
 	<div class="mb-4 flex items-center gap-2">
 		<input type="text" bind:value={newDirName} placeholder="Folder name"
-			class="h-9 w-64 rounded-md border border-input bg-transparent px-3 text-sm"
+			class="h-9 w-64 rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!newDirName.trim())}"
 			onkeydown={(e) => { if (e.key === 'Enter') createDir(); if (e.key === 'Escape') showMkdir = false; }} />
 		<Button size="sm" onclick={createDir} disabled={!newDirName.trim()}>Create</Button>
 		<Button variant="secondary" size="sm" onclick={() => showMkdir = false}>Cancel</Button>
@@ -502,7 +503,7 @@
 				<input
 					type="text"
 					bind:value={renameValue}
-					class="mb-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm font-mono"
+					class="mb-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm font-mono {requiredFieldCls(!renameValue.trim() || renameValue === renameTarget.name)}"
 					onkeydown={(e) => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') renameTarget = null; }}
 					autofocus
 				/>

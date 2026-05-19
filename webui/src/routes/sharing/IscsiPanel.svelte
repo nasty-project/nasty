@@ -4,6 +4,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import {
 		iscsi,
 		iscsiToggleSort,
@@ -44,8 +45,8 @@
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Target</h3>
 			<div class="mb-4">
-				<Label for="iscsi-device">Block Subvolume</Label>
-				<select id="iscsi-device" bind:value={iscsi.newDevice} onchange={iscsiOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+				<Label for="iscsi-device">Block Subvolume {#if !iscsi.newDevice}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<select id="iscsi-device" bind:value={iscsi.newDevice} onchange={iscsiOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!iscsi.newDevice)}">
 					<option value="">Select a block subvolume...</option>
 					{#each iscsi.blockSubvolumes as sv}
 						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -56,8 +57,8 @@
 				{/if}
 			</div>
 			<div class="mb-4">
-				<Label for="iscsi-name">Target Name</Label>
-				<Input id="iscsi-name" bind:value={iscsi.newName} placeholder="dbserver" class="mt-1" />
+				<Label for="iscsi-name">Target Name {#if !iscsi.newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+				<Input id="iscsi-name" bind:value={iscsi.newName} placeholder="dbserver" class="mt-1 {requiredFieldCls(!iscsi.newName)}" />
 				<span class="mt-1 block text-xs text-muted-foreground">IQN: iqn.2137-01.com.nasty:{iscsi.newName || '...'}</span>
 			</div>
 			<Button onclick={iscsiCreate} disabled={!iscsi.newName || !iscsi.newDevice}>Create</Button>
@@ -139,8 +140,8 @@
 									{#if iscsi.addLunTarget === target.id}
 										<div class="mt-3 rounded border p-3">
 											<div class="mb-2">
-												<Label class="text-xs">Block Device or Subvolume</Label>
-												<select bind:value={iscsi.addLunPath} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+												<Label class="text-xs">Block Device or Subvolume {#if !iscsi.addLunPath}<span class="text-amber-500">required</span>{/if}</Label>
+												<select bind:value={iscsi.addLunPath} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs {requiredFieldCls(!iscsi.addLunPath)}">
 													<option value="">Select...</option>
 													{#each iscsi.blockSubvolumes as sv}
 														<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -186,8 +187,8 @@
 									{#if iscsi.addAclTarget === target.id}
 										<div class="mt-3 rounded border p-3">
 											<div class="mb-2">
-												<Label class="text-xs">Initiator IQN</Label>
-												<Input bind:value={iscsi.addAclIqn} placeholder="iqn.2024-01.com.client:initiator1" class="mt-1 h-8 text-xs" />
+												<Label class="text-xs">Initiator IQN {#if !iscsi.addAclIqn}<span class="text-amber-500">required</span>{/if}</Label>
+												<Input bind:value={iscsi.addAclIqn} placeholder="iqn.2024-01.com.client:initiator1" class="mt-1 h-8 text-xs {requiredFieldCls(!iscsi.addAclIqn)}" />
 											</div>
 											<div class="grid grid-cols-2 gap-2 mb-2">
 												<div>

@@ -4,6 +4,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
 	import { tempUnit } from '$lib/temperature.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import {
 		promoteOrphanedMembers,
 		validateDnsServer,
@@ -1105,8 +1106,8 @@
 					<p class="text-xs text-muted-foreground">Tag traffic on a physical interface with a VLAN ID.</p>
 					<div class="grid grid-cols-2 gap-3">
 						<div>
-							<label for="vlan-parent" class="text-xs text-muted-foreground">Parent Interface</label>
-							<select id="vlan-parent" bind:value={vlanParent} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm">
+							<label for="vlan-parent" class="text-xs text-muted-foreground">Parent Interface {#if !vlanParent}<span class="text-amber-500">required</span>{/if}</label>
+							<select id="vlan-parent" bind:value={vlanParent} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm {requiredFieldCls(!vlanParent)}">
 								<option value="">Select...</option>
 								{#if networkState}
 									{#each networkState.interfaces.filter(i => i.kind === 'physical' || i.kind === 'bond') as iface}

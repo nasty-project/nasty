@@ -7,6 +7,7 @@
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import type { SmbGroup } from '$lib/types';
 	import { smb } from '$lib/sharing/smb.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 
 	interface Props {
 		name: string;
@@ -117,18 +118,19 @@
 			<Card class="mt-3 max-w-md">
 				<CardContent class="pt-4">
 					<h3 class="mb-4 text-lg font-semibold">New System User</h3>
+					{@const inlinePwMismatch = !!inlinePasswordConfirm && inlinePassword !== inlinePasswordConfirm}
 					<div class="mb-4">
-						<Label for="inline-username">Username</Label>
-						<Input id="inline-username" bind:value={inlineUsername} placeholder="johndoe" autocomplete="off" class="mt-1" />
+						<Label for="inline-username">Username {#if !inlineUsername}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+						<Input id="inline-username" bind:value={inlineUsername} placeholder="johndoe" autocomplete="off" class="mt-1 {requiredFieldCls(!inlineUsername)}" />
 					</div>
 					<div class="mb-4">
-						<Label for="inline-password">Password</Label>
-						<Input id="inline-password" type="password" bind:value={inlinePassword} autocomplete="new-password" class="mt-1" />
+						<Label for="inline-password">Password {#if !inlinePassword}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+						<Input id="inline-password" type="password" bind:value={inlinePassword} autocomplete="new-password" class="mt-1 {requiredFieldCls(!inlinePassword)}" />
 					</div>
 					<div class="mb-4">
-						<Label for="inline-password-confirm">Confirm Password</Label>
-						<Input id="inline-password-confirm" type="password" bind:value={inlinePasswordConfirm} autocomplete="new-password" class="mt-1" />
-						{#if inlinePasswordConfirm && inlinePassword !== inlinePasswordConfirm}
+						<Label for="inline-password-confirm">Confirm Password {#if !inlinePasswordConfirm}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+						<Input id="inline-password-confirm" type="password" bind:value={inlinePasswordConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!inlinePasswordConfirm || inlinePwMismatch)}" />
+						{#if inlinePwMismatch}
 							<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
 						{/if}
 					</div>
@@ -150,7 +152,7 @@
 							{/each}
 							{#if showInlineGroupCreate}
 								<div class="flex items-center gap-1.5">
-									<Input bind:value={inlineGroupName} placeholder="Group name" class="h-7 w-32 text-xs" />
+									<Input bind:value={inlineGroupName} placeholder="Group name" class="h-7 w-32 text-xs {requiredFieldCls(!inlineGroupName.trim())}" />
 									<Button size="xs" disabled={!inlineGroupName.trim()} onclick={createInlineGroup}>Create</Button>
 									<Button size="xs" variant="secondary" onclick={() => showInlineGroupCreate = false}>Cancel</Button>
 								</div>

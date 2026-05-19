@@ -4,6 +4,7 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
+	import { requiredFieldCls } from '$lib/utils';
 	import { formatBytes } from '$lib/format';
 	import type { BackupProfile, BackupSnapshot, BackupStatus, Subvolume, Filesystem } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
@@ -380,12 +381,12 @@
 				<h3 class="text-lg font-semibold">New Backup Profile</h3>
 
 				<div>
-					<Label for="bk-name">Name</Label>
-					<Input id="bk-name" bind:value={newName} placeholder="Daily offsite" class="mt-1 max-w-sm" />
+					<Label for="bk-name">Name {#if !newName}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<Input id="bk-name" bind:value={newName} placeholder="Daily offsite" class="mt-1 max-w-sm {requiredFieldCls(!newName)}" />
 				</div>
 
 				<div>
-					<Label>Sources</Label>
+					<Label>Sources {#if !newSources}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
 					<div class="mt-1 space-y-1">
 						<!-- System config -->
 						<label class="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/30 {selectedSources.has('/var/lib/nasty') ? 'bg-muted/20' : ''}">
@@ -485,8 +486,8 @@
 				{/if}
 
 				<div>
-					<Label for="bk-pass">Encryption Password</Label>
-					<Input id="bk-pass" type="password" bind:value={newPassword} placeholder="strong-password" class="mt-1" />
+					<Label for="bk-pass">Encryption Password {#if !newPassword}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<Input id="bk-pass" type="password" bind:value={newPassword} placeholder="strong-password" class="mt-1 {requiredFieldCls(!newPassword)}" />
 					<p class="mt-1 text-xs text-muted-foreground">Used to encrypt the backup repository. Store this safely — losing it means losing access to backups.</p>
 				</div>
 
