@@ -30,8 +30,8 @@ use tracing::{error, info, warn};
 
 mod caddy;
 
-pub use caddy::CaddyRouteSummary;
 use caddy::{AppRoute, CaddyApi};
+pub use caddy::{CaddyRouteSummary, HostCert};
 
 const STATE_PATH: &str = "/var/lib/nasty/apps-enabled";
 const COMPOSE_DIR: &str = "/var/lib/nasty/apps";

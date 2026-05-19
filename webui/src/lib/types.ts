@@ -1071,4 +1071,21 @@ export interface CaddyRouteSummary {
 	app_name: string | null;
 	/** Caddy server name ("srv0" | "srv1" | …) for grouping. */
 	server: string;
+	/** On-disk certificate Caddy currently serves for this route's host.
+	 * Populated only for host-match rows that have a cert in Caddy's data
+	 * directory. Absent = no cert yet (pending / Caddy hasn't issued one)
+	 * or not applicable (path / catch-all routes). */
+	cert?: HostCert | null;
+}
+
+/** Subset of the per-host certificate Caddy serves, surfaced on the
+ * Ingress overview row for the corresponding host-match route. */
+export interface HostCert {
+	issuer: string | null;
+	issued: string | null;
+	expires: string | null;
+	/** Days until expiry from now; negative = expired. Used by the WebUI
+	 * to colour the badge — red ≤ 7, amber ≤ 30, green otherwise. */
+	expires_in_days: number | null;
+	path: string;
 }

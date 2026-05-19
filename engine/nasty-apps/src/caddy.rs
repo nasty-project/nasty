@@ -87,6 +87,34 @@ pub struct CaddyRouteSummary {
     /// by listener — the HTTP-to-HTTPS redirect lives on a different
     /// server and shouldn't be lumped in with the HTTPS routes.
     pub server: String,
+    /// On-disk certificate Caddy currently serves for this route's host.
+    /// Populated by the engine binary after `list_all_route_summaries`
+    /// returns — nasty-apps doesn't have access to the cert directory
+    /// or PEM parser. `None` for non-host routes (`path` / `catch_all`)
+    /// and for host routes Caddy hasn't issued a cert for yet (the
+    /// "pending" state — auto-HTTPS issues asynchronously on first
+    /// request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<HostCert>,
+}
+
+/// Subset of `nasty_system::settings::HostCertInfo` re-shaped for the
+/// Ingress overview wire format. Defined here (rather than re-using
+/// the nasty-system type directly) so `nasty-apps` doesn't grow a dep
+/// on `nasty-system` just for the field — the engine binary copies the
+/// fields across when enriching.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HostCert {
+    pub issuer: Option<String>,
+    pub issued: Option<String>,
+    pub expires: Option<String>,
+    /// Days until expiry from now; negative = expired. Lets the WebUI
+    /// colour the badge (red ≤ 7, amber ≤ 30, green otherwise) without
+    /// parsing the RFC-2822 expires string client-side.
+    pub expires_in_days: Option<i64>,
+    /// On-disk path; surfaced as a tooltip in the WebUI for debugging
+    /// "which cert is this actually serving" questions.
+    pub path: String,
 }
 
 /// Caddy admin-API HTTP client.  Cheap to construct — internally
@@ -534,6 +562,11 @@ fn summarise_route(server: &str, route: &Value) -> CaddyRouteSummary {
         source: source.to_string(),
         app_name,
         server: server.to_string(),
+        // `cert` is left None here — the cert directory lives outside
+        // this crate's blast radius. The engine binary (which depends on
+        // nasty-system) enriches host-match rows after the walker
+        // returns. See `list_caddy_routes` in nasty-engine/src/router/apps.rs.
+        cert: None,
     }
 }
 

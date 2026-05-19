@@ -901,6 +901,89 @@ struct CertInfo {
     issuer: Option<String>,
 }
 
+/// Per-host certificate details for the Ingress overview page. Returned
+/// by [`cert_info_for_host`] for each `host`-matching Caddy route so the
+/// WebUI can render an expiry/issuer badge per row.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct HostCertInfo {
+    /// Issuer CN (e.g. `R10`, `Let's Encrypt Authority X3`) or O when no
+    /// CN is present. None when the PEM didn't parse — surfaced as a
+    /// "cert present but unreadable" hint to the WebUI.
+    pub issuer: Option<String>,
+    /// `not_before` from the cert, RFC 2822 string.
+    pub issued: Option<String>,
+    /// `not_after`, RFC 2822 string.
+    pub expires: Option<String>,
+    /// Days until expiry from now (negative when expired). Lets the
+    /// WebUI colour the badge — red when ≤ 7, amber when ≤ 30, green
+    /// otherwise — without parsing dates client-side.
+    pub expires_in_days: Option<i64>,
+    /// Absolute path the cert was read from. Diagnostic; the WebUI
+    /// uses it as a tooltip when the operator hovers the badge.
+    pub path: String,
+}
+
+/// Locate and read the cert Caddy serves for `host`. Walks
+/// `/var/lib/caddy/.local/share/caddy/certificates/<endpoint>/...`
+/// across every issuer endpoint, and matches either:
+///   - directly by hostname (`example.com/example.com.crt`), or
+///   - by an enclosing wildcard cert
+///     (`wildcard_.example.com/wildcard_.example.com.crt` covers
+///     `<anything>.example.com`).
+///
+/// Returns `None` when no cert is on disk yet — Caddy auto-HTTPS issues
+/// asynchronously on first request, so a freshly-set ingress can spend
+/// a few seconds with no cert. The WebUI renders that as "pending"
+/// rather than treating it as a hard failure.
+pub async fn cert_info_for_host(host: &str) -> Option<HostCertInfo> {
+    let path = locate_cert_for_host(host).await?;
+    let info = read_cert_info(&path).await;
+    // Convert `expires` (RFC 2822) to days-from-now. Parse failure is
+    // benign — the caller still sees `expires` as a string, just no
+    // colour-coding. We use chrono since it's already in the deps.
+    let expires_in_days = info.expires.as_deref().and_then(|s| {
+        let parsed = chrono::DateTime::parse_from_rfc2822(s).ok()?;
+        let secs = parsed.timestamp() - chrono::Utc::now().timestamp();
+        Some(secs / 86_400)
+    });
+    Some(HostCertInfo {
+        issuer: info.issuer,
+        issued: info.issued,
+        expires: info.expires,
+        expires_in_days,
+        path,
+    })
+}
+
+async fn locate_cert_for_host(host: &str) -> Option<String> {
+    let base = format!("{CADDY_DATA_DIR}/.local/share/caddy/certificates");
+    let mut endpoints = tokio::fs::read_dir(&base).await.ok()?;
+    while let Ok(Some(ep)) = endpoints.next_entry().await {
+        // Direct match: <endpoint>/<host>/<host>.crt
+        let direct = ep.path().join(host).join(format!("{host}.crt"));
+        if tokio::fs::metadata(&direct).await.is_ok() {
+            return Some(direct.to_string_lossy().into_owned());
+        }
+        // Wildcard match: walk subdirs named `wildcard_.<suffix>` and
+        // check whether `host` ends in `.<suffix>`. Cert filename
+        // mirrors the dir name so we don't have to guess.
+        if let Ok(mut subdirs) = tokio::fs::read_dir(ep.path()).await {
+            while let Ok(Some(sd)) = subdirs.next_entry().await {
+                let name = sd.file_name().to_string_lossy().into_owned();
+                if let Some(suffix) = name.strip_prefix("wildcard_.")
+                    && host.ends_with(&format!(".{suffix}"))
+                {
+                    let candidate = sd.path().join(format!("{name}.crt"));
+                    if tokio::fs::metadata(&candidate).await.is_ok() {
+                        return Some(candidate.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Read certificate details from a PEM file.
 async fn read_cert_info(cert_path: &str) -> CertInfo {
     let mut info = CertInfo {
