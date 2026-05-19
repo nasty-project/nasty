@@ -22,6 +22,7 @@ mod fs_dependents;
 mod fs_lock;
 mod log_stream;
 mod router;
+mod subvolume_dependents;
 mod telemetry;
 mod terminal;
 mod vm_console;

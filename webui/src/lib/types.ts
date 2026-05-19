@@ -116,6 +116,24 @@ export interface PassthroughConfig {
  * before destructive operations like Lock — the WebUI lists these
  * so the user sees what will break before they confirm. Empty
  * arrays serialize as `[]` so consumers can render unconditionally. */
+/** Per-subvolume version of FsDependents. Returned by `subvolume.list_dependents`
+ * (batched: all subvolumes in one call). Powers the Usage column on the
+ * Subvolumes page so the operator sees at a glance what an unsafe rm/destroy
+ * would take with it — apps, VMs, shares, backup jobs that live on or are
+ * backed by this subvolume. */
+export interface SubvolumeDependents {
+	filesystem: string;
+	name: string;
+	path: string;
+	apps: string[];
+	vms: string[];
+	backup_jobs: string[];
+	nfs_shares: string[];
+	smb_shares: string[];
+	iscsi_targets: string[];
+	nvmeof_subsystems: string[];
+}
+
 export interface FsDependents {
 	filesystem: string;
 	mounted: boolean;
