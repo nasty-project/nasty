@@ -30,6 +30,7 @@ use tracing::{error, info, warn};
 
 mod caddy;
 
+pub use caddy::CaddyRouteSummary;
 use caddy::{AppRoute, CaddyApi};
 
 const STATE_PATH: &str = "/var/lib/nasty/apps-enabled";
@@ -2961,6 +2962,18 @@ impl AppsService {
                 subdomain: r.subdomain,
             })
             .collect())
+    }
+
+    /// Every route Caddy is serving — engine-owned app ingresses plus
+    /// the Caddyfile-baked WebUI / API / WS routes — for the Ingress
+    /// overview page. Read-only; no per-row mutation, the operator
+    /// changes app routes through `apps.ingress.set` and static routes
+    /// through the NixOS config.
+    pub async fn list_caddy_routes(&self) -> Result<Vec<CaddyRouteSummary>, AppsError> {
+        CaddyApi::new()
+            .list_all_route_summaries()
+            .await
+            .map_err(AppsError::CommandFailed)
     }
 
     /// At engine startup, push the engine-known ingress set to Caddy.

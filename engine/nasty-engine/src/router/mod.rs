@@ -176,6 +176,7 @@ fn is_read_only(method: &str) -> bool {
                 | "notifications.config.get"
                 | "apps.config"
                 | "apps.inspect_image"
+                | "apps.caddy.routes"
                 | "bcachefs.timestats"
                 | "bcachefs.top"
                 | "backup.profile.list"

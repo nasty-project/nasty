@@ -1054,3 +1054,21 @@ export interface AppIngress {
 	 * path-prefix mode, the historical default. */
 	subdomain?: string | null;
 }
+
+/** One row in the Ingress overview page — every route Caddy is serving,
+ * engine-owned or static. Returned by `apps.caddy.routes`. Read-only:
+ * engine-owned rows are edited through the Apps page (apps.ingress.set);
+ * static rows are baked into the Caddyfile via NixOS. */
+export interface CaddyRouteSummary {
+	/** "host" | "path" | "catch_all" | "other" */
+	match_kind: string;
+	match_value: string;
+	upstream: string | null;
+	/** "reverse_proxy" | "file_server" | "static_response" | "rewrite" | "other" | "unknown" */
+	handler_kind: string;
+	/** "engine-app" | "static" */
+	source: string;
+	app_name: string | null;
+	/** Caddy server name ("srv0" | "srv1" | …) for grouping. */
+	server: string;
+}

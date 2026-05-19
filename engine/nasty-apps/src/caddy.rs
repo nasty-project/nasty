@@ -14,6 +14,8 @@
 
 use std::time::Duration;
 
+use schemars::JsonSchema;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
@@ -45,6 +47,46 @@ pub struct AppRoute {
     /// via DNS-01, or per-name via HTTP-01/TLS-ALPN-01) handles cert
     /// acquisition. V1 doesn't add per-app ACME knobs.
     pub subdomain: Option<String>,
+}
+
+/// One row in the Ingress overview page — every route Caddy is serving,
+/// engine-owned or static. Walked out of the admin API by
+/// `CaddyApi::list_all_route_summaries`; consumed via the
+/// `apps.caddy.routes` RPC. Read-only; the WebUI uses this to answer
+/// "did my subdomain actually wire up?" / "what's exposed at /api/*?"
+/// without making the operator shell in and read the live Caddy config.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CaddyRouteSummary {
+    /// "host", "path", or "catch_all". The WebUI groups by this so the
+    /// operator sees host-match (subdomain) routes separately from
+    /// path-prefix routes.
+    pub match_kind: String,
+    /// Human-readable match value:
+    /// - host_match: the hostname (`jellyfin.example.com`)
+    /// - path_match: the first path glob (`/apps/haze/*`)
+    /// - catch_all: `(any)` so the WebUI doesn't have to special-case
+    ///   the empty string
+    pub match_value: String,
+    /// Reverse-proxy upstream (e.g. `127.0.0.1:4420`) when the route
+    /// ends in a `reverse_proxy` handler. `None` for `file_server`,
+    /// `static_response`, etc. — `handler_kind` carries that detail.
+    pub upstream: Option<String>,
+    /// Dominant handler kind, in display order: `reverse_proxy`,
+    /// `file_server`, `static_response`, `rewrite`, or `other`. The
+    /// WebUI uses this to render a meaningful "handler" column for
+    /// rows whose upstream is None.
+    pub handler_kind: String,
+    /// `engine-app` when the route's `@id` carries the `nasty-app-`
+    /// prefix (owned by AppsService::ingress_set); `static` for
+    /// anything else (the Caddyfile-baked WebUI / API / WS routes).
+    pub source: String,
+    /// App name when `source` is `engine-app`; `None` otherwise.
+    /// Lets the WebUI link the row back to the Apps page.
+    pub app_name: Option<String>,
+    /// Caddy server name (`srv0`, `srv1`, ...) so the WebUI can group
+    /// by listener — the HTTP-to-HTTPS redirect lives on a different
+    /// server and shouldn't be lumped in with the HTTPS routes.
+    pub server: String,
 }
 
 /// Caddy admin-API HTTP client.  Cheap to construct — internally
@@ -185,6 +227,48 @@ impl CaddyApi {
                     host_port: port,
                     subdomain: extract_route_host(&route),
                 });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Walk every Caddy server's route list and produce one
+    /// `CaddyRouteSummary` per route. Used by the Ingress overview
+    /// page so the operator can see everything Caddy is serving —
+    /// engine-owned app ingresses, the Caddyfile-baked WebUI / API /
+    /// WS routes, and the HTTP-to-HTTPS redirect on the alt server.
+    ///
+    /// Best-effort per row: a route whose JSON shape doesn't match
+    /// our expectations contributes a `(unknown)` summary rather than
+    /// being dropped silently — the operator should be able to tell
+    /// "Caddy has a thing here we don't understand" apart from "Caddy
+    /// has nothing here".
+    pub async fn list_all_route_summaries(&self) -> Result<Vec<CaddyRouteSummary>, String> {
+        let url = format!("{}/config/apps/http/servers/", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("GET {url}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("GET {url}: status {}", resp.status()));
+        }
+        let servers: serde_json::Map<String, Value> =
+            resp.json().await.map_err(|e| format!("parse {url}: {e}"))?;
+
+        let mut out = Vec::new();
+        let mut server_names: Vec<&String> = servers.keys().collect();
+        server_names.sort();
+        for name in server_names {
+            let Some(routes) = servers.get(name).and_then(|s| s.get("routes")) else {
+                continue;
+            };
+            let Some(routes) = routes.as_array() else {
+                continue;
+            };
+            for route in routes {
+                out.push(summarise_route(name, route));
             }
         }
         Ok(out)
@@ -388,6 +472,147 @@ fn extract_upstream_port(route: &Value) -> Option<u16> {
     None
 }
 
+/// Convert one raw Caddy route into the summary the Ingress overview page
+/// renders. Best-effort: unfamiliar shapes contribute `(unknown)` rather
+/// than being dropped so the operator can tell "Caddy has a thing here"
+/// from "Caddy has nothing here". Free function (not a method) so the
+/// match-by-row unit tests don't have to spin up a CaddyApi.
+fn summarise_route(server: &str, route: &Value) -> CaddyRouteSummary {
+    // ── Source attribution from @id ───────────────────────────
+    let id = route.get("@id").and_then(Value::as_str);
+    let app_name = id
+        .and_then(|s| s.strip_prefix(ROUTE_ID_PREFIX))
+        .map(String::from);
+    let source = if app_name.is_some() {
+        "engine-app"
+    } else {
+        "static"
+    };
+
+    // ── Match block: pick the first matcher we recognise. ─────
+    // Real-world Caddy routes can have multiple alternatives in the
+    // match array (an OR). We surface the first one; that matches the
+    // route-id-keyed UX (one row per route) and avoids the table
+    // exploding for every alternative spelling.
+    let (match_kind, match_value) = match route.get("match").and_then(Value::as_array) {
+        None => ("catch_all".to_string(), "(any)".to_string()),
+        Some(arr) if arr.is_empty() => ("catch_all".to_string(), "(any)".to_string()),
+        Some(arr) => {
+            let first = &arr[0];
+            // An empty matcher object (`{}`) is Caddy's catch-all.
+            if first.as_object().is_some_and(|o| o.is_empty()) {
+                ("catch_all".to_string(), "(any)".to_string())
+            } else if let Some(hosts) = first.get("host").and_then(Value::as_array)
+                && let Some(h) = hosts.first().and_then(Value::as_str)
+            {
+                ("host".to_string(), h.to_string())
+            } else if let Some(paths) = first.get("path").and_then(Value::as_array)
+                && let Some(p) = paths.first().and_then(Value::as_str)
+            {
+                ("path".to_string(), p.to_string())
+            } else {
+                // A matcher shape we don't model (e.g. header, method) —
+                // surface the JSON so the operator at least sees there's
+                // *something* there.
+                ("other".to_string(), first.to_string())
+            }
+        }
+    };
+
+    // ── Handler chain: walk to find the dominant kind. ────────
+    // Routes are usually subroute → inner routes → handlers. We walk
+    // until we hit a recognised leaf handler. Order matters only for
+    // displaying which kind is "dominant"; the actual ordering in the
+    // route is handled by Caddy and not our concern.
+    let (handler_kind, upstream) = extract_handler_summary(route);
+
+    CaddyRouteSummary {
+        match_kind,
+        match_value,
+        upstream,
+        handler_kind,
+        source: source.to_string(),
+        app_name,
+        server: server.to_string(),
+    }
+}
+
+/// Walk a route JSON to identify its leaf handler. Returns the handler
+/// kind (`reverse_proxy`, `file_server`, `static_response`, `rewrite`,
+/// `other`, or `unknown` when the chain has no handler we recognise)
+/// and the reverse_proxy upstream (`127.0.0.1:port`) when present.
+///
+/// Recursive in the static sense: subroute → inner routes → handlers
+/// is the only nesting Caddy emits in practice for the patterns NASty
+/// uses, so we just do two levels by hand rather than reaching for a
+/// general tree walker.
+fn extract_handler_summary(route: &Value) -> (String, Option<String>) {
+    fn classify(handler: &Value) -> Option<(String, Option<String>)> {
+        let kind = handler.get("handler").and_then(Value::as_str)?;
+        match kind {
+            "reverse_proxy" => {
+                let upstream = handler
+                    .get("upstreams")
+                    .and_then(Value::as_array)
+                    .and_then(|us| us.first())
+                    .and_then(|u| u.get("dial"))
+                    .and_then(Value::as_str)
+                    .map(String::from);
+                Some(("reverse_proxy".to_string(), upstream))
+            }
+            "file_server" => Some(("file_server".to_string(), None)),
+            "static_response" => Some(("static_response".to_string(), None)),
+            "rewrite" => Some(("rewrite".to_string(), None)),
+            other => Some((other.to_string(), None)),
+        }
+    }
+
+    let Some(handlers) = route.get("handle").and_then(Value::as_array) else {
+        return ("unknown".to_string(), None);
+    };
+    for handler in handlers {
+        // Subroute: dive into the nested route list.
+        if handler.get("handler").and_then(Value::as_str) == Some("subroute") {
+            let Some(inner_routes) = handler.get("routes").and_then(Value::as_array) else {
+                continue;
+            };
+            for inner in inner_routes {
+                let Some(inner_handles) = inner.get("handle").and_then(Value::as_array) else {
+                    continue;
+                };
+                // Prefer reverse_proxy over rewrite/headers (the leaf of
+                // an app route is reverse_proxy; rewrite/headers are
+                // preprocessing the operator doesn't care about for the
+                // overview).
+                let mut best: Option<(String, Option<String>)> = None;
+                for h in inner_handles {
+                    if let Some(classified) = classify(h) {
+                        let is_proxy = classified.0 == "reverse_proxy";
+                        let is_terminal = matches!(
+                            classified.0.as_str(),
+                            "reverse_proxy" | "file_server" | "static_response"
+                        );
+                        if is_proxy {
+                            return classified;
+                        }
+                        if is_terminal && best.is_none() {
+                            best = Some(classified);
+                        }
+                    }
+                }
+                if let Some(b) = best {
+                    return b;
+                }
+            }
+            continue;
+        }
+        if let Some(classified) = classify(handler) {
+            return classified;
+        }
+    }
+    ("unknown".to_string(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +707,104 @@ mod tests {
         };
         let v = build_route_json(&r);
         assert_eq!(extract_route_host(&v), None);
+    }
+
+    // ── summarise_route ──
+
+    #[test]
+    fn summarise_path_prefix_app_route_attributes_to_engine() {
+        let r = AppRoute {
+            name: "haze".into(),
+            host_port: 4420,
+            subdomain: None,
+        };
+        let v = build_route_json(&r);
+        let s = summarise_route("srv0", &v);
+        assert_eq!(s.match_kind, "path");
+        assert_eq!(s.match_value, "/apps/haze/*");
+        assert_eq!(s.handler_kind, "reverse_proxy");
+        assert_eq!(s.upstream.as_deref(), Some("127.0.0.1:4420"));
+        assert_eq!(s.source, "engine-app");
+        assert_eq!(s.app_name.as_deref(), Some("haze"));
+        assert_eq!(s.server, "srv0");
+    }
+
+    #[test]
+    fn summarise_subdomain_app_route_picks_up_host() {
+        let r = AppRoute {
+            name: "jellyfin".into(),
+            host_port: 8096,
+            subdomain: Some("jellyfin.example.com".into()),
+        };
+        let v = build_route_json(&r);
+        let s = summarise_route("srv0", &v);
+        assert_eq!(s.match_kind, "host");
+        assert_eq!(s.match_value, "jellyfin.example.com");
+        assert_eq!(s.handler_kind, "reverse_proxy");
+        assert_eq!(s.upstream.as_deref(), Some("127.0.0.1:8096"));
+        assert_eq!(s.source, "engine-app");
+        assert_eq!(s.app_name.as_deref(), Some("jellyfin"));
+    }
+
+    #[test]
+    fn summarise_caddyfile_route_marks_source_static() {
+        // Routes baked into the Caddyfile have no @id (or one that
+        // doesn't carry our prefix). The summary must mark them
+        // `static` and leave app_name None so the WebUI doesn't
+        // pretend the operator can edit them via apps.ingress.set.
+        let v = json!({
+            "match": [{"path": ["/api/*"]}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [
+                {"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:2137"}]}
+            ]}]}],
+            "terminal": true
+        });
+        let s = summarise_route("srv0", &v);
+        assert_eq!(s.match_kind, "path");
+        assert_eq!(s.match_value, "/api/*");
+        assert_eq!(s.source, "static");
+        assert_eq!(s.app_name, None);
+        assert_eq!(s.upstream.as_deref(), Some("127.0.0.1:2137"));
+    }
+
+    #[test]
+    fn summarise_catch_all_route_has_match_value_any() {
+        // The WebUI SPA fallback is shaped as a route with the empty
+        // matcher `{}`. The summary surfaces a non-empty match_value
+        // ("(any)") so the operator sees a meaningful row instead of
+        // a blank cell, and tags handler_kind as file_server.
+        let v = json!({
+            "match": [{}],
+            "handle": [{"handler": "subroute", "routes": [{"handle": [
+                {"handler": "file_server", "hide": ["/etc/caddy/caddy_config"]}
+            ]}]}]
+        });
+        let s = summarise_route("srv0", &v);
+        assert_eq!(s.match_kind, "catch_all");
+        assert_eq!(s.match_value, "(any)");
+        assert_eq!(s.handler_kind, "file_server");
+        assert_eq!(s.upstream, None);
+        assert_eq!(s.source, "static");
+    }
+
+    #[test]
+    fn summarise_http_redirect_server_static_response() {
+        // The HTTP→HTTPS redirect on srv1 is a static_response with a
+        // Location header. The overview should show it as a row with
+        // handler_kind = static_response and server = srv1 so the
+        // WebUI groups it separately from the HTTPS routes.
+        let v = json!({
+            "match": [{}],
+            "handle": [{
+                "handler": "static_response",
+                "status_code": 301,
+                "headers": {"Location": ["https://{http.request.host}{http.request.uri}"]}
+            }]
+        });
+        let s = summarise_route("srv1", &v);
+        assert_eq!(s.match_kind, "catch_all");
+        assert_eq!(s.handler_kind, "static_response");
+        assert_eq!(s.server, "srv1");
+        assert_eq!(s.source, "static");
     }
 }
