@@ -2616,6 +2616,7 @@ dependencies = [
  "chrono",
  "lettre",
  "libc",
+ "nasty-apps",
  "nasty-common",
  "reqwest 0.13.3",
  "rnix",

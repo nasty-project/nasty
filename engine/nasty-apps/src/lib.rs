@@ -28,7 +28,7 @@ use thiserror::Error;
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
-mod caddy;
+pub mod caddy;
 
 use caddy::{AppRoute, CaddyApi};
 pub use caddy::{CaddyRouteSummary, HostCert};

@@ -5,9 +5,17 @@ let
   inherit (lib) mkEnableOption mkOption mkIf types;
   nastySystemFlakeSnapshot = args.nastySystemFlakeSnapshot or null;
 
-  useSelfSigned = cfg.tls.selfSigned && cfg.tls.certFile == null && cfg.tls.keyFile == null;
-  tlsCertFile = if cfg.tls.certFile != null then cfg.tls.certFile else "/var/lib/nasty/tls/cert.pem";
-  tlsKeyFile = if cfg.tls.keyFile != null then cfg.tls.keyFile else "/var/lib/nasty/tls/key.pem";
+  # When the operator supplies a cert + key (cfg.tls.certFile/keyFile),
+  # Caddy serves those for the :443 catch-all. Otherwise we use Caddy's
+  # `tls internal` directive — Caddy's "Local Authority" issues a
+  # self-signed cert into its own state dir (`/var/lib/caddy/...`) and
+  # auto-renews it. No more `nasty-selfsigned-cert.service`, no more
+  # cert.pem at /var/lib/nasty/tls/.
+  useUserCert = cfg.tls.certFile != null && cfg.tls.keyFile != null;
+  caddyTlsDirective =
+    if useUserCert
+    then "tls ${cfg.tls.certFile} ${cfg.tls.keyFile}"
+    else "tls internal";
 
   # targetcli-fb 3.0.2 passes `exclusive=` to rtslib-fb, but nixpkgs ships
   # rtslib-fb 2.2.3 which lacks that parameter.  Bump rtslib to 2.2.4+.
@@ -819,14 +827,18 @@ in {
 
     systemd.tmpfiles.rules = [
       "d /var/lib/nasty 0751 root root -"
+      # /var/lib/nasty/tls/ used to hold the static self-signed cert.
+      # `tls internal` in the Caddyfile now puts that under Caddy's
+      # own state dir; the directory entry below is kept so the
+      # engine's archive_path_once migration can find the old files
+      # to move them aside without racing the tmpfiles-creation step.
       "d /var/lib/nasty/tls 0750 root caddy -"
-      # Engine-managed Caddy snippets — vhosts.conf is imported by the
-      # main Caddyfile (hostname-bound ACME vhost when enabled, empty
-      # otherwise); acme.env feeds DNS-01 provider creds into Caddy via
+      # acme.env feeds DNS-01 provider creds into Caddy via
       # EnvironmentFile. Seeded empty so Caddy can start before the
-      # engine has had a chance to write either.
+      # engine has had a chance to write it. (vhosts.conf is no longer
+      # written — TLS automation is driven through the admin API; the
+      # engine's first-boot migration archives any leftover file.)
       "d /var/lib/nasty/caddy 0750 root caddy -"
-      "f /var/lib/nasty/caddy/vhosts.conf 0644 root caddy -"
       "f /var/lib/nasty/caddy/acme.env 0640 root caddy -"
       "d /var/lib/nasty/subvolumes 0750 root root -"
       "d /var/lib/nasty/shares 0750 root root -"
@@ -849,44 +861,13 @@ in {
       "d /var/state/ups 0750 root root -"
     ];
 
-    # ── Self-signed TLS certificate ───────────────────────────
-
-    systemd.services.nasty-selfsigned-cert = mkIf useSelfSigned {
-      description = "Generate NASty self-signed TLS certificate";
-      wantedBy = [ "multi-user.target" ];
-      before = [ "caddy.service" ];
-      requiredBy = [ "caddy.service" ];
-
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = pkgs.writeShellScript "nasty-selfsigned-cert" ''
-          set -euo pipefail
-          CERT="${tlsCertFile}"
-          KEY="${tlsKeyFile}"
-
-          if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
-            echo "Generating self-signed TLS certificate for NASty..."
-            ${pkgs.openssl}/bin/openssl req -x509 -newkey ec \
-              -pkeyopt ec_paramgen_curve:prime256v1 \
-              -keyout "$KEY" -out "$CERT" \
-              -days 3650 -nodes \
-              -subj "/CN=nasty.local/O=NASty NAS" \
-              -addext "subjectAltName=DNS:nasty.local,DNS:localhost,IP:127.0.0.1"
-            echo "Self-signed certificate generated at $CERT"
-          else
-            echo "TLS certificate already exists; re-applying ownership"
-          fi
-
-          # Always re-apply ownership / mode so an upgrade from the
-          # nginx era (where the key was group `nginx`) gets the key
-          # readable by Caddy without forcing a regeneration.
-          chmod 640 "$KEY"
-          chown root:caddy "$KEY"
-          chmod 644 "$CERT"
-        '';
-      };
-    };
+    # The static `:443` fallback is now `tls internal` by default
+    # (Caddy's Local Authority issues + auto-renews a self-signed cert
+    # into its own state dir). The old `nasty-selfsigned-cert.service`
+    # that generated /var/lib/nasty/tls/cert.pem on first boot is gone.
+    # Existing boxes carry the old cert.pem until the engine's first-
+    # boot migration archives it (see `archive_lego_dir_once` in
+    # nasty-engine).
 
     # ── NASty Metrics service ────────────────────────────────
 
@@ -1222,16 +1203,16 @@ in {
     # Caddy is configured as a single named snippet (`nasty_webui_routes`)
     # that holds every reverse-proxy / file-server / websocket / header
     # rule, plus a static `:<port>` vhost that mounts the snippet with the
-    # self-signed (or user-supplied) cert. The engine then optionally
-    # writes a hostname-bound ACME vhost to `/var/lib/nasty/caddy/vhosts.conf`
-    # which the main Caddyfile imports — Caddy issues + serves a real cert
-    # for that hostname while the static `:<port>` block stays as the IP
-    # fallback. Both vhosts share routes through the snippet, so we don't
-    # have to keep them in sync by hand.
+    # self-signed (or user-supplied) cert.
     #
-    # `auto_https off` because we never want Caddy enrolling for IP-bound
-    # vhosts; the engine-managed snippet drives ACME explicitly via the
-    # `tls EMAIL` form on a hostname-bound block.
+    # TLS automation (Let's Encrypt / ZeroSSL / staging) is pushed through
+    # the same admin API as ingress routes: on startup and after every
+    # settings/ingress mutation, the engine PUTs `apps.tls.automation`
+    # with a policy per managed hostname (main domain + each app
+    # subdomain). Caddy then issues + renews each cert, and SNI matching
+    # serves the right one. The static-cert `:<port>` block below stays
+    # as the IP / unknown-SNI fallback. No `vhosts.conf` file, no
+    # `systemctl reload caddy` on every settings change.
     services.caddy = mkIf (cfg.webui.package != null) {
       enable = true;
       # Rebuild Caddy with DNS-01 plugins compiled in. Stock `pkgs.caddy`
@@ -1266,7 +1247,28 @@ in {
         hash = "sha256-xwtaYTcoX0ZfAdfNiJG9b3zZrwH9aVhwJoxdDtgtQKU=";
       };
       globalConfig = ''
-        auto_https off
+        # auto_https stays ON so Caddy generates the per-hostname
+        # `tls_connection_policies` entries that route a given SNI to
+        # the right managed cert. The engine still drives issuance
+        # explicitly through `apps.tls.automation` PUTs over the admin
+        # API — auto_https only adds the listener-level glue.
+        #
+        # `disable_redirects` because we already declare an explicit
+        # `:<httpPort> { redir ... }` block below; without this, Caddy
+        # tries to add its own redirect server on :80 and the two
+        # collide.
+        auto_https disable_redirects
+
+        # When a TLS connection arrives with no SNI (direct-IP access,
+        # `curl https://10.x.x.x/`) or an SNI we don't recognise,
+        # Caddy substitutes this value before site routing. Pairs with
+        # the `nasty.local:443 { tls internal }` block below — every
+        # such connection ends up served by the internal-CA cert
+        # instead of TLS-handshake-failing. Without this, port-only
+        # `:443 { tls internal }` had no hostname to issue against and
+        # every IP-direct curl got `tlsv1 alert internal error`
+        # (caught by appliance-smoke CI).
+        default_sni nasty.local
       '';
       extraConfig = ''
         (nasty_webui_routes) {
@@ -1433,18 +1435,29 @@ in {
           redir https://{host}{uri} permanent
         }
 
-        # Always-on static-cert vhost. Serves the self-signed (or
-        # user-supplied) cert on the IP path. When ACME is enabled,
-        # Caddy prefers the hostname-bound vhost from the import below
-        # for matching SNI, and this block becomes the IP fallback.
-        :${toString cfg.webui.port} {
-          tls ${tlsCertFile} ${tlsKeyFile}
+        # Fallback site bound to `nasty.local` AND the port-only
+        # catch-all on :${toString cfg.webui.port}. The hostname is
+        # what `tls internal` issues the self-signed cert against (a
+        # port-only listener alone has no hostname for the internal CA
+        # to bind to). The port-only address makes the same site catch
+        # any TLS connection on this listener — combined with the
+        # `default_sni nasty.local` global directive, every SNI-less
+        # or unmatched-SNI connection ends up here and gets served the
+        # `nasty.local` cert.
+        #
+        # When ACME is enabled, the engine pushes
+        # `tls.automation.policies` per managed hostname via the admin
+        # API; `auto_https` adds per-SNI connection policies in front
+        # of this fallback so SNI=<managed-host> wins. Both share
+        # routes through the named snippet above.
+        #
+        # User-supplied cert + key still honoured via
+        # `cfg.tls.certFile/keyFile`; we pick that path instead of
+        # `tls internal` when both are set.
+        nasty.local, :${toString cfg.webui.port} {
+          ${caddyTlsDirective}
           import nasty_webui_routes
         }
-
-        # Engine-managed: hostname-bound ACME vhost when the user has
-        # enabled Let's Encrypt in Settings → TLS. Empty otherwise.
-        import /var/lib/nasty/caddy/vhosts.conf
       '';
     };
 

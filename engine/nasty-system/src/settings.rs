@@ -66,31 +66,88 @@ pub fn reset_acme_status() {
     set_acme_status("idle", "", None);
 }
 
-/// Re-apply the Caddy TLS snippet. Useful after a transient failure
-/// (Caddy briefly down, ACME server flaking, etc.) — the user can hit
-/// "retry" in the WebUI and we re-render + reload, which kicks Caddy's
-/// internal ACME state machine back into action.
+/// Re-apply the Caddy TLS automation policy. Useful after a transient
+/// failure (Caddy briefly down, ACME server flaking, etc.) — the user
+/// can hit "retry" in the WebUI and we push the same policies again,
+/// which kicks Caddy's issuance state machine back into action.
 pub async fn retry_acme() -> Result<(), String> {
     let settings = load().await;
+    let app_subdomains = load_app_subdomains().await;
     tokio::spawn(async move {
-        if let Err(e) = apply_caddy_tls(&settings).await {
-            warn!("Caddy TLS reload failed: {e}");
+        if let Err(e) = apply_caddy_tls_with_apps(&settings, &app_subdomains).await {
+            warn!("Caddy TLS reapply failed: {e}");
         }
     });
     Ok(())
 }
 
+/// Fire-and-forget TLS automation reapply. Called by router-level
+/// ingress mutations (set / remove with a subdomain) so a newly-added
+/// hostname gets a cert immediately, and a removed one stops being
+/// renewed. Cheap when nothing changed — Caddy compares the PUT body
+/// against the running config and no-ops if identical.
+///
+/// Best-effort: failures log a warning. The next user-triggered TLS
+/// action (settings change, retry button) reconverges.
+pub async fn reapply_tls_from_disk() {
+    let settings = load().await;
+    let app_subdomains = load_app_subdomains().await;
+    if let Err(e) = apply_caddy_tls_with_apps(&settings, &app_subdomains).await {
+        warn!("Caddy TLS reapply failed: {e}");
+    }
+}
+
+/// Walk `/var/lib/nasty/apps/*.json` and collect every non-empty
+/// `ingress_subdomain` value. Used by [`retry_acme`] and the
+/// settings-change path so the TLS policy set always reflects every
+/// hostname Caddy needs to serve, not just the main domain.
+///
+/// nasty-system reads these manifests as raw JSON (rather than via
+/// the nasty-apps type) to keep the dep direction one-way: apps
+/// already depends on system via the AppRoute / CaddyApi flow, and
+/// pulling apps's typed reader in would close that loop. Best-effort:
+/// any read or parse failure is logged at debug and skipped — a
+/// malformed app.json shouldn't block the main-domain cert refresh.
+async fn load_app_subdomains() -> Vec<String> {
+    let dir = "/var/lib/nasty/apps";
+    let mut out = Vec::new();
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(d) => d,
+        Err(_) => return out,
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(host) = v.get("ingress_subdomain").and_then(|s| s.as_str())
+            && !host.trim().is_empty()
+        {
+            out.push(host.trim().to_string());
+        }
+    }
+    out
+}
+
 const STATE_PATH: &str = "/var/lib/nasty/settings.json";
 const STATE_DIR: &str = "/var/lib/nasty";
-const TLS_CERT_PATH: &str = "/var/lib/nasty/tls/cert.pem";
-
-// Caddy reads this snippet from its main Caddyfile via `import` to add a
-// hostname-bound vhost when ACME is enabled. Empty file = no extra vhost,
-// Caddy serves the static-cert `:8443` block from the NixOS-managed config.
-const CADDY_VHOSTS_PATH: &str = "/var/lib/nasty/caddy/vhosts.conf";
 
 // Caddy reads DNS-01 provider credentials from this EnvironmentFile (the
-// caddy.service unit references it). One KEY=VAL per line.
+// caddy.service unit references it). One KEY=VAL per line. We still
+// write this even though the rest of the TLS pipeline moved to the
+// admin API — Caddy resolves `{env.X}` references in admin-pushed
+// config from the process env, which is populated from this file at
+// service start. No way to push secrets directly through the admin API
+// without baking them into the JSON, which would leak them into the
+// Caddy storage on disk.
 const CADDY_ACME_ENV_PATH: &str = "/var/lib/nasty/caddy/acme.env";
 
 /// Display unit for temperatures rendered in the WebUI. Internal storage
@@ -435,12 +492,13 @@ impl SettingsService {
         save(&settings).await.map_err(|e| e.to_string())?;
         if tls_changed {
             // Always re-apply on a TLS change — even when ACME is now
-            // disabled the snippet must flip back to the static-cert
-            // form so Caddy stops serving the old ACME-issued cert.
+            // disabled, the automation policy must be cleared so Caddy
+            // stops renewing certs we no longer want.
             let s = settings.clone();
+            let app_subdomains = load_app_subdomains().await;
             tokio::spawn(async move {
-                if let Err(e) = apply_caddy_tls(&s).await {
-                    warn!("Caddy TLS reload failed: {e}");
+                if let Err(e) = apply_caddy_tls_with_apps(&s, &app_subdomains).await {
+                    warn!("Caddy TLS reapply failed: {e}");
                 }
             });
         }
@@ -554,12 +612,13 @@ async fn save(settings: &Settings) -> Result<(), std::io::Error> {
 // used to live in this file as a 250-line `lego` subprocess wrapper.
 //
 // The engine's job here is reduced to:
-//   1. Render a Caddy snippet from `Settings` describing the desired
-//      TLS state (static cert vs hostname-bound ACME vhost).
-//   2. Write it to `CADDY_VHOSTS_PATH`, where the NixOS-managed
-//      Caddyfile imports it.
-//   3. Reload Caddy (`systemctl reload`) so it picks up the snippet.
-//   4. Read back what Caddy ends up serving so the WebUI can show
+//   1. Write the user's DNS-provider credentials to the
+//      `CADDY_ACME_ENV_PATH` EnvironmentFile so Caddy can resolve
+//      `{env.X}` references in admin-pushed config.
+//   2. Push a `tls.automation.policies[]` block to Caddy's admin API
+//      describing every hostname we want a cert for (main domain +
+//      per-app subdomains). Caddy issues + renews + staples.
+//   3. Read back what Caddy ends up serving so the WebUI can show
 //      issuer / expiry / status.
 //
 // Caddy stores ACME-issued certs under
@@ -571,157 +630,21 @@ async fn save(settings: &Settings) -> Result<(), std::io::Error> {
 
 const CADDY_DATA_DIR: &str = "/var/lib/caddy";
 
-/// Render the `dns <provider>` directive body for a DNS-01 challenge.
-///
-/// Each plugin's Caddyfile syntax is slightly different:
-///   - Single-token plugins (cloudflare, duckdns, linode, hetzner, desec)
-///     take the credential as the first positional argument; we render it
-///     as a `{env.NAME}` placeholder so Caddy reads it from the
-///     `EnvironmentFile` written from `tls_dns_credentials`.
-///   - Two-token plugins (porkbun) take both as positional args.
-///   - Multi-arg plugins (namecheap, rfc2136) require a sub-block.
-///   - route53 reads AWS_* env vars automatically; the empty form works.
-///   - Anything not in this table falls back to a bare `dns <name>` and
-///     hopes the plugin can self-configure from environment. If the
-///     plugin isn't compiled into the Caddy binary at all, Caddy's
-///     reload will reject the config with a clear "unknown module"
-///     message — caller surfaces that error through the WebUI.
-///
-/// The result may be multi-line; the caller is responsible for
-/// indenting each line to the enclosing `tls { ... }` block.
-fn dns_directive_for(provider: &str) -> String {
-    match provider {
-        "cloudflare" => "dns cloudflare {env.CF_API_TOKEN}".to_string(),
-        "duckdns" => "dns duckdns {env.DUCKDNS_TOKEN}".to_string(),
-        "linode" => "dns linode {env.LINODE_TOKEN}".to_string(),
-        "desec" => "dns desec {env.DESEC_TOKEN}".to_string(),
-        "hetzner" => "dns hetzner {env.HETZNER_API_TOKEN}".to_string(),
-        // route53 plugin reads AWS_REGION / AWS_ACCESS_KEY_ID /
-        // AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN) from env on its
-        // own when given no positional args.
-        "route53" => "dns route53".to_string(),
-        // porkbun takes two positional args (api_key, secret_api_key).
-        "porkbun" => "dns porkbun {env.PORKBUN_API_KEY} {env.PORKBUN_SECRET_API_KEY}".to_string(),
-        "namecheap" => "dns namecheap {\n    \
-                        user {env.NAMECHEAP_USER}\n    \
-                        api_key {env.NAMECHEAP_API_KEY}\n    \
-                        api_endpoint https://api.namecheap.com/xml.response\n    \
-                        client_ip {env.NAMECHEAP_CLIENT_IP}\n\
-                        }"
-        .to_string(),
-        "rfc2136" => "dns rfc2136 {\n    \
-                      key_name {env.RFC2136_KEY_NAME}\n    \
-                      key {env.RFC2136_KEY}\n    \
-                      key_alg {env.RFC2136_KEY_ALG}\n    \
-                      server {env.RFC2136_SERVER}\n\
-                      }"
-        .to_string(),
-        _ => format!("dns {provider}"),
-    }
-}
-
-/// Render the Caddy snippet that should live at `CADDY_VHOSTS_PATH`.
-///
-/// When ACME is disabled or no domain is set, returns the empty string —
-/// the NixOS-managed `:8443` block (with the static self-signed cert)
-/// is the only vhost in play. When ACME is enabled, returns a single
-/// hostname-bound vhost that Caddy will issue + serve a real cert for,
-/// while the static `:8443` block stays as the IP-fallback for users
-/// hitting the box by address.
-fn caddy_vhosts_snippet(settings: &Settings, https_port: u16) -> String {
-    if !settings.tls_acme_enabled {
-        return String::new();
-    }
-    let Some(domain) = settings.tls_domain.as_deref() else {
-        return String::new();
-    };
-    if domain.trim().is_empty() {
-        return String::new();
-    }
-
-    // Email is optional for Caddy's ACME issuer (Let's Encrypt requires
-    // one for renewal notices but won't reject without). Render an empty
-    // arg if missing rather than failing the whole reload.
-    let email = settings
-        .tls_acme_email
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    let mut out = String::new();
-    out.push_str(&format!("{domain}:{https_port} {{\n"));
-
-    // The `tls` directive's first form is `tls EMAIL` (or just `tls`)
-    // and triggers Caddy's automatic ACME flow for the matched
-    // hostname(s). Anything inside `{ ... }` overrides the defaults.
-    let needs_block = settings.tls_acme_staging
-        || settings.tls_challenge_type == "dns"
-        || settings.tls_challenge_type == "tls-alpn"
-        || settings.tls_challenge_type == "http";
-
-    if !needs_block {
-        if email.is_empty() {
-            out.push_str("    tls\n");
-        } else {
-            out.push_str(&format!("    tls {email}\n"));
-        }
-    } else {
-        if email.is_empty() {
-            out.push_str("    tls {\n");
-        } else {
-            out.push_str(&format!("    tls {email} {{\n"));
-        }
-
-        // Restrict the challenge mechanism. Caddy defaults to trying
-        // both HTTP-01 and TLS-ALPN-01; pinning lets the user pick one
-        // when their network only allows one (e.g. port 80 firewalled).
-        match settings.tls_challenge_type.as_str() {
-            "http" => out.push_str("        protocols tls1.2 tls1.3\n"),
-            "tls-alpn" => out.push_str("        protocols tls1.2 tls1.3\n"),
-            _ => {}
-        }
-
-        // DNS-01 needs a `dns` directive whose shape varies per
-        // plugin: single-token plugins take the credential as the
-        // first positional arg, multi-arg plugins want a sub-block
-        // with named keys. Either way, we render `{env.X}` placeholders
-        // that Caddy expands at request time from its EnvironmentFile
-        // (sourced from `tls_dns_credentials`). Caller is responsible
-        // for pasting matching KEY=VAL lines into credentials.
-        if settings.tls_challenge_type == "dns"
-            && let Some(provider) = settings.tls_dns_provider.as_deref()
-        {
-            for line in dns_directive_for(provider).lines() {
-                out.push_str("        ");
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-
-        // Issuer block: only needed for the staging override. Without
-        // it, Caddy uses the production Let's Encrypt directory (its
-        // default).
-        if settings.tls_acme_staging {
-            out.push_str("        issuer acme {\n");
-            out.push_str("            ca https://acme-staging-v02.api.letsencrypt.org/directory\n");
-            out.push_str("        }\n");
-            out.push_str("        issuer zerossl {\n");
-            out.push_str("            ca https://acme-staging-v02.api.letsencrypt.org/directory\n");
-            out.push_str("        }\n");
-        }
-
-        out.push_str("    }\n");
-    }
-
-    out.push_str("    import nasty_webui_routes\n");
-    out.push_str("}\n");
-    out
-}
+/// Per-app subdomain ingresses the engine knows about, used to extend
+/// the TLS automation policy beyond just the main `tls_domain`.
+/// Sourced by the engine binary (it has the apps service) and passed
+/// to [`apply_caddy_tls_with_apps`]. Settings code stays decoupled
+/// from the apps crate's storage layer.
+pub type AppSubdomains = Vec<String>;
 
 /// Render the Caddy `EnvironmentFile` content from `tls_dns_credentials`.
 /// Empty when ACME-DNS is off — the file is recreated empty so a stale
 /// value from a previous provider doesn't leak into the next run.
+///
+/// The env vars referenced from `dns_provider_json` in nasty-apps' caddy
+/// module (e.g. `CLOUDFLARE_DNS_API_TOKEN`) must be present in this file
+/// for Caddy to resolve them at request time. We trust the operator to
+/// write KEY=VAL lines matching what the chosen provider expects.
 fn caddy_acme_env(settings: &Settings) -> String {
     if !settings.tls_acme_enabled
         || settings.tls_challenge_type != "dns"
@@ -738,45 +661,54 @@ fn caddy_acme_env(settings: &Settings) -> String {
         + "\n"
 }
 
-/// Apply current settings to Caddy: render the snippet + env file,
-/// write them, reload Caddy, then refresh the cached ACME status from
-/// whatever Caddy ends up serving.
+/// Apply current TLS settings to Caddy via the admin API: write the
+/// EnvironmentFile (so Caddy can resolve `{env.X}` placeholders), then
+/// push the automation policy set.
+///
+/// `app_subdomains` is the list of additional hostnames per-app ingress
+/// has registered. Empty when the caller is settings-only (the engine
+/// binary will pass the real list during startup reconcile and on
+/// ingress mutations).
+///
+/// File-vs-admin-API split: secrets stay file-based because pushing
+/// them through the admin API would land them in `/var/lib/caddy/...`
+/// alongside the cert storage. EnvironmentFile is the standard
+/// systemd-managed secrets path; mode 0640 + group caddy keeps it out
+/// of unprivileged hands.
 pub async fn apply_caddy_tls(settings: &Settings) -> Result<(), String> {
+    apply_caddy_tls_with_apps(settings, &[]).await
+}
+
+/// Variant of [`apply_caddy_tls`] that takes the per-app subdomain list
+/// explicitly. The engine binary knows about apps; settings doesn't, so
+/// we keep the dep direction clean by funnelling everything through
+/// this helper.
+pub async fn apply_caddy_tls_with_apps(
+    settings: &Settings,
+    app_subdomains: &[String],
+) -> Result<(), String> {
     let domain_for_status = settings.tls_domain.clone();
 
     if settings.tls_acme_enabled {
         set_acme_status(
             "running",
-            "Reloading Caddy with ACME configuration...",
+            "Applying TLS automation via Caddy admin API...",
             domain_for_status.as_deref(),
         );
     }
 
-    // Both files live in the same dir, owned by the caddy user/group so
-    // Caddy can read them. Engine runs as root, so the create + chown
-    // here are guaranteed to succeed even on first apply — but log any
-    // failure anyway per the workspace-wide rule (see CONTRIBUTING.md).
-    if let Some(parent) = std::path::Path::new(CADDY_VHOSTS_PATH).parent()
+    // EnvironmentFile lives next to the (now-vestigial) caddy state
+    // dir. Owned by root:caddy so the unit can read it.
+    if let Some(parent) = std::path::Path::new(CADDY_ACME_ENV_PATH).parent()
         && let Err(e) = tokio::fs::create_dir_all(parent).await
     {
         warn!("create_dir_all({}) failed: {e}", parent.display());
-    }
-
-    let snippet = caddy_vhosts_snippet(settings, 8443);
-    tokio::fs::write(CADDY_VHOSTS_PATH, &snippet)
-        .await
-        .map_err(|e| format!("write {CADDY_VHOSTS_PATH}: {e}"))?;
-    if let Err(e) =
-        tokio::fs::set_permissions(CADDY_VHOSTS_PATH, std::fs::Permissions::from_mode(0o644)).await
-    {
-        warn!("chmod 644 {CADDY_VHOSTS_PATH} failed: {e}");
     }
 
     let env_content = caddy_acme_env(settings);
     tokio::fs::write(CADDY_ACME_ENV_PATH, &env_content)
         .await
         .map_err(|e| format!("write {CADDY_ACME_ENV_PATH}: {e}"))?;
-    // 0640 + chown caddy: secrets, not world-readable.
     if let Err(e) =
         tokio::fs::set_permissions(CADDY_ACME_ENV_PATH, std::fs::Permissions::from_mode(0o640))
             .await
@@ -785,56 +717,143 @@ pub async fn apply_caddy_tls(settings: &Settings) -> Result<(), String> {
     }
     nasty_common::cmd::try_run("chown", &["root:caddy", CADDY_ACME_ENV_PATH]).await;
 
-    // `systemctl reload caddy` directly rather than through try_run so
-    // we can surface stderr to the caller (the WebUI shows it as an
-    // error toast). Spawn / non-zero-exit logging happens here inline.
-    let reload = tokio::process::Command::new("systemctl")
-        .args(["reload", "caddy"])
-        .output()
-        .await
-        .map_err(|e| {
-            let m = format!("systemctl reload caddy: spawn failed: {e}");
-            warn!("{m}");
-            m
-        })?;
-    if !reload.status.success() {
-        let stderr = String::from_utf8_lossy(&reload.stderr).to_string();
-        let msg = format!("caddy reload failed: {stderr}");
-        warn!("{msg}");
-        set_acme_status("error", &msg, domain_for_status.as_deref());
-        return Err(msg);
+    // Restart Caddy if the env file changed — admin-API config can
+    // reference `{env.X}` but those references are resolved against the
+    // process environment, populated from EnvironmentFile at unit
+    // start. Updates to the file don't reach the running process until
+    // it's restarted. Skip when ACME is off (no env to refresh) or
+    // when creds match what's already loaded (env_matches_running).
+    if settings.tls_acme_enabled
+        && settings.tls_challenge_type == "dns"
+        && !env_matches_running(&env_content).await
+    {
+        let restart = tokio::process::Command::new("systemctl")
+            .args(["restart", "caddy"])
+            .output()
+            .await
+            .map_err(|e| {
+                let m = format!("systemctl restart caddy: spawn failed: {e}");
+                warn!("{m}");
+                m
+            })?;
+        if !restart.status.success() {
+            let stderr = String::from_utf8_lossy(&restart.stderr).to_string();
+            let msg = format!("caddy restart failed: {stderr}");
+            warn!("{msg}");
+            set_acme_status("error", &msg, domain_for_status.as_deref());
+            return Err(msg);
+        }
+        info!("caddy restarted (EnvironmentFile refreshed)");
+        // Wait for admin API to come back up before pushing config.
+        let api = nasty_apps::caddy::CaddyApi::new();
+        if let Err(e) = api.wait_ready(30).await {
+            warn!("caddy admin API not ready after restart: {e}");
+            set_acme_status("error", &e, domain_for_status.as_deref());
+            return Err(e);
+        }
     }
-    info!("caddy reloaded");
 
-    // Push the status forward best-effort. A successful reload doesn't
-    // mean the ACME issuance is complete — Caddy issues asynchronously
-    // — so we fall back to "running" if no cert is on disk yet.
+    // Build the desired policy set: main domain (when ACME enabled) +
+    // every app subdomain. Empty ⇒ Caddy clears automation and falls
+    // back to the static-cert :443 block.
+    let policies = build_policy_set(settings, app_subdomains);
+    let issuer = nasty_apps::caddy::TlsIssuer {
+        email: settings.tls_acme_email.clone(),
+        dns_provider: if settings.tls_acme_enabled && settings.tls_challenge_type == "dns" {
+            settings.tls_dns_provider.clone()
+        } else {
+            None
+        },
+        staging: settings.tls_acme_staging,
+    };
+
+    let api = nasty_apps::caddy::CaddyApi::new();
+    if let Err(e) = api.set_tls_automation(&policies, &issuer).await {
+        warn!("caddy: set_tls_automation failed: {e}");
+        set_acme_status("error", &e, domain_for_status.as_deref());
+        return Err(e);
+    }
+
     refresh_acme_status_from_disk(settings).await;
     Ok(())
 }
 
-/// Locate the cert Caddy is currently serving for `domain`, falling back
-/// to the static-cert path used when ACME is off.
-async fn locate_serving_cert(settings: &Settings) -> Option<String> {
-    if settings.tls_acme_enabled
-        && let Some(domain) = settings.tls_domain.as_deref()
+/// Cheap check: read the running Caddy unit's EnvironmentFile contents
+/// via systemd and see whether they match `expected`. Used to skip an
+/// expensive restart when the operator hits "save" without actually
+/// changing credentials. Returns true on any read failure so we err on
+/// the side of NOT restarting (safer to leave running than to bounce
+/// for no reason).
+async fn env_matches_running(expected: &str) -> bool {
+    let current = match tokio::fs::read_to_string(CADDY_ACME_ENV_PATH).await {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
+    current.trim() == expected.trim()
+}
+
+/// Build the `Vec<TlsPolicy>` to push for the current settings + app
+/// subdomain set. Returns empty when ACME is disabled — the caller
+/// PUTs that empty list to clear Caddy's automation.
+fn build_policy_set(
+    settings: &Settings,
+    app_subdomains: &[String],
+) -> Vec<nasty_apps::caddy::TlsPolicy> {
+    if !settings.tls_acme_enabled {
+        return Vec::new();
+    }
+    let mut policies = Vec::new();
+    if let Some(domain) = settings.tls_domain.as_deref()
+        && !domain.trim().is_empty()
     {
-        // `/var/lib/caddy/.local/share/caddy/certificates/<endpoint>/<domain>/<domain>.crt`
-        // Endpoint dir name varies (production vs staging vs zerossl
-        // fallback), so glob one level deep.
-        let base = format!("{CADDY_DATA_DIR}/.local/share/caddy/certificates");
-        if let Ok(mut endpoints) = tokio::fs::read_dir(&base).await {
-            while let Ok(Some(ep)) = endpoints.next_entry().await {
-                let candidate = format!("{}/{domain}/{domain}.crt", ep.path().display());
-                if tokio::fs::metadata(&candidate).await.is_ok() {
-                    return Some(candidate);
-                }
-            }
+        policies.push(nasty_apps::caddy::TlsPolicy {
+            host: domain.trim().to_string(),
+        });
+    }
+    for sub in app_subdomains {
+        let sub = sub.trim();
+        if sub.is_empty() {
+            continue;
         }
+        // Deduplicate against the main domain.
+        if policies.iter().any(|p| p.host == sub) {
+            continue;
+        }
+        policies.push(nasty_apps::caddy::TlsPolicy {
+            host: sub.to_string(),
+        });
+    }
+    policies
+}
+
+/// Locate the cert Caddy is currently serving for `domain` when ACME
+/// is on. Returns None when no managed cert is on disk yet — caller
+/// surfaces that as "still issuing".
+///
+/// We only look under Caddy's ACME-issuer subtrees
+/// (`certificates/acme-v02.*` etc.) — NOT under the internal-CA
+/// subtree, because a managed-cert-not-yet-issued shouldn't be masked
+/// by Caddy's local-authority cert. The internal CA's cert is what
+/// the `:443` fallback serves, and the WebUI's "active certificate"
+/// view is about the *managed* cert.
+async fn locate_serving_cert(settings: &Settings) -> Option<String> {
+    if !settings.tls_acme_enabled {
         return None;
     }
-    if tokio::fs::metadata(TLS_CERT_PATH).await.is_ok() {
-        return Some(TLS_CERT_PATH.to_string());
+    let domain = settings.tls_domain.as_deref()?;
+    let base = format!("{CADDY_DATA_DIR}/.local/share/caddy/certificates");
+    let mut endpoints = tokio::fs::read_dir(&base).await.ok()?;
+    while let Ok(Some(ep)) = endpoints.next_entry().await {
+        let name = ep.file_name().to_string_lossy().into_owned();
+        // Skip the internal-CA dir — those certs are for the fallback,
+        // not for the managed hostname.
+        if name.starts_with("local") {
+            continue;
+        }
+        let candidate = format!("{}/{domain}/{domain}.crt", ep.path().display());
+        if tokio::fs::metadata(&candidate).await.is_ok() {
+            return Some(candidate);
+        }
     }
     None
 }
@@ -845,25 +864,24 @@ async fn locate_serving_cert(settings: &Settings) -> Option<String> {
 pub async fn refresh_acme_status_from_disk(settings: &Settings) {
     let domain = settings.tls_domain.clone();
     if !settings.tls_acme_enabled {
-        // Static-cert mode. Show the cert details if we have any so the
-        // WebUI's "Active certificate" panel still has something to
-        // render, but flag the state as idle so the page doesn't claim
-        // ACME succeeded.
-        let cert_info = read_cert_info(TLS_CERT_PATH).await;
+        // No ACME. The :443 fallback is Caddy's internal-CA cert,
+        // managed entirely by Caddy. Surface that as `idle` rather
+        // than parsing a specific file — there's no "static cert"
+        // path the operator can point at anymore.
         let status = ACME_STATUS.get_or_init(|| std::sync::Mutex::new(AcmeStatus::default()));
         if let Ok(mut s) = status.lock() {
             s.state = "idle".into();
-            s.message = "Static certificate (ACME disabled)".into();
+            s.message = "ACME disabled; Caddy's internal CA is serving the :443 fallback.".into();
             s.domain = domain;
-            s.expires = cert_info.expires;
-            s.issued = cert_info.issued;
-            s.issuer = cert_info.issuer;
+            s.expires = None;
+            s.issued = None;
+            s.issuer = None;
         }
         return;
     }
 
     let Some(path) = locate_serving_cert(settings).await else {
-        // ACME enabled but no cert on disk yet — still issuing.
+        // ACME enabled but no managed cert on disk yet — still issuing.
         set_acme_status(
             "running",
             "Waiting for Caddy to obtain a certificate...",
@@ -1036,7 +1054,7 @@ async fn read_cert_info(cert_path: &str) -> CertInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, caddy_acme_env, caddy_vhosts_snippet, dns_directive_for, to_nix_string};
+    use super::{Settings, build_policy_set, caddy_acme_env, to_nix_string};
 
     fn acme_enabled_settings(challenge: &str) -> Settings {
         Settings {
@@ -1048,137 +1066,71 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dns_directive_for_known_single_token_plugins() {
-        // Single-token plugins (Cloudflare et al.) take the credential as
-        // the first positional arg; we render `{env.NAME}` so Caddy reads
-        // it from the EnvironmentFile we write at apply time. Pin the
-        // exact env-var name per plugin — getting it wrong here means
-        // users paste the right secret under the wrong key and the
-        // plugin silently fails to authenticate.
-        assert_eq!(
-            dns_directive_for("cloudflare"),
-            "dns cloudflare {env.CF_API_TOKEN}"
-        );
-        assert_eq!(
-            dns_directive_for("duckdns"),
-            "dns duckdns {env.DUCKDNS_TOKEN}"
-        );
-        assert_eq!(dns_directive_for("linode"), "dns linode {env.LINODE_TOKEN}");
-        assert_eq!(dns_directive_for("desec"), "dns desec {env.DESEC_TOKEN}");
-        assert_eq!(
-            dns_directive_for("hetzner"),
-            "dns hetzner {env.HETZNER_API_TOKEN}"
-        );
-    }
+    // ── build_policy_set ──
 
     #[test]
-    fn dns_directive_for_route53_relies_on_aws_env_discovery() {
-        // route53 plugin reads AWS_REGION / AWS_ACCESS_KEY_ID /
-        // AWS_SECRET_ACCESS_KEY directly from process env when given no
-        // positional args — exactly what we want for the
-        // EnvironmentFile-driven flow.
-        assert_eq!(dns_directive_for("route53"), "dns route53");
-    }
-
-    #[test]
-    fn dns_directive_for_porkbun_takes_two_positional_tokens() {
-        assert_eq!(
-            dns_directive_for("porkbun"),
-            "dns porkbun {env.PORKBUN_API_KEY} {env.PORKBUN_SECRET_API_KEY}"
-        );
-    }
-
-    #[test]
-    fn dns_directive_for_namecheap_emits_sub_block_with_four_keys() {
-        // Namecheap needs user, api_key, api_endpoint, and client_ip —
-        // a positional form doesn't exist. The api_endpoint is fixed at
-        // the v2 XML endpoint (the only one the Caddy plugin supports).
-        let directive = dns_directive_for("namecheap");
-        assert!(directive.starts_with("dns namecheap {"));
-        assert!(directive.contains("user {env.NAMECHEAP_USER}"));
-        assert!(directive.contains("api_key {env.NAMECHEAP_API_KEY}"));
-        assert!(directive.contains("api_endpoint https://api.namecheap.com/xml.response"));
-        assert!(directive.contains("client_ip {env.NAMECHEAP_CLIENT_IP}"));
-        assert!(directive.trim_end().ends_with('}'));
-    }
-
-    #[test]
-    fn dns_directive_for_rfc2136_emits_sub_block_with_four_keys() {
-        let directive = dns_directive_for("rfc2136");
-        assert!(directive.starts_with("dns rfc2136 {"));
-        assert!(directive.contains("key_name {env.RFC2136_KEY_NAME}"));
-        assert!(directive.contains("key {env.RFC2136_KEY}"));
-        assert!(directive.contains("key_alg {env.RFC2136_KEY_ALG}"));
-        assert!(directive.contains("server {env.RFC2136_SERVER}"));
-    }
-
-    #[test]
-    fn dns_directive_for_unknown_provider_falls_through_to_bare_name() {
-        // Unknown / not-yet-baked-in providers get a bare `dns <name>`.
-        // Caddy will reject the reload with a clear "unknown module"
-        // error if the plugin isn't compiled into the binary, which is
-        // what we want — the caller surfaces that error via the WebUI.
-        assert_eq!(dns_directive_for("madeup"), "dns madeup");
-    }
-
-    #[test]
-    fn vhosts_snippet_empty_when_acme_disabled() {
-        // The static-cert `:8443` vhost in nasty.nix is the only one
-        // active; no hostname-bound block.
+    fn policy_set_empty_when_acme_disabled() {
+        // ACME off ⇒ no policies ⇒ engine PUTs an empty array ⇒ Caddy
+        // stops renewing. Per-app subdomains are ignored in this state
+        // because the user has opted out of cert automation entirely.
         let s = Settings::default();
-        assert!(caddy_vhosts_snippet(&s, 8443).is_empty());
+        assert!(
+            build_policy_set(&s, &["app.example.com".into()]).is_empty(),
+            "subdomains must be skipped when ACME is disabled"
+        );
     }
 
     #[test]
-    fn vhosts_snippet_tls_alpn_emits_short_form() {
-        // The simplest happy path: TLS-ALPN-01 with no DNS provider and
-        // no staging server. Caddy's automatic HTTP-01/TLS-ALPN-01 flow
-        // kicks in from a bare `tls EMAIL` directive (inside a block
-        // because we pin protocols).
-        let s = acme_enabled_settings("tls-alpn");
-        let out = caddy_vhosts_snippet(&s, 8443);
-        assert!(out.contains("nas.example.com:8443 {"));
-        assert!(out.contains("tls admin@example.com {"));
-        assert!(out.contains("import nasty_webui_routes"));
-        // No DNS plugin directive, no staging-CA override.
-        assert!(!out.contains("dns "));
-        assert!(!out.contains("acme-staging"));
+    fn policy_set_includes_main_domain() {
+        let s = acme_enabled_settings("dns");
+        let policies = build_policy_set(&s, &[]);
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].host, "nas.example.com");
     }
 
     #[test]
-    fn vhosts_snippet_dns_challenge_inlines_directive_at_indent() {
-        // The DNS directive needs to land inside the `tls { … }` block
-        // at the 8-space indent level the caller adds, so a sub-block
-        // (e.g., namecheap) ends up correctly nested. Verifying the
-        // structure here means a future plugin-table edit can't sneak
-        // a malformed Caddyfile past CI.
+    fn policy_set_appends_app_subdomains() {
+        let s = acme_enabled_settings("dns");
+        let policies = build_policy_set(&s, &["a.example.com".into(), "b.example.com".into()]);
+        assert_eq!(policies.len(), 3);
+        // Main domain comes first so it gets issued first on cold boot.
+        assert_eq!(policies[0].host, "nas.example.com");
+        assert_eq!(policies[1].host, "a.example.com");
+        assert_eq!(policies[2].host, "b.example.com");
+    }
+
+    #[test]
+    fn policy_set_dedupes_subdomain_matching_main_domain() {
+        // Edge case where an app's subdomain happens to equal the main
+        // domain (operator misconfiguration). Without the dedupe Caddy
+        // would receive two policies with the same subject and reject
+        // the PUT — fail open by collapsing.
+        let s = acme_enabled_settings("dns");
+        let policies = build_policy_set(&s, &["nas.example.com".into()]);
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].host, "nas.example.com");
+    }
+
+    #[test]
+    fn policy_set_skips_blank_subdomain_entries() {
+        // The on-disk app.json may carry an empty or whitespace
+        // `ingress_subdomain` field when the operator cleared it.
+        // load_app_subdomains skips blanks; this is the second line of
+        // defence.
+        let s = acme_enabled_settings("dns");
+        let policies = build_policy_set(&s, &["".into(), "   ".into()]);
+        assert_eq!(policies.len(), 1, "only the main domain should remain");
+    }
+
+    #[test]
+    fn policy_set_skips_main_domain_when_empty_string() {
+        // Operator enabled ACME but didn't (yet) fill in the domain
+        // field — only the apps' subdomains end up in the policy set.
         let mut s = acme_enabled_settings("dns");
-        s.tls_dns_provider = Some("cloudflare".into());
-        let out = caddy_vhosts_snippet(&s, 8443);
-        assert!(out.contains("        dns cloudflare {env.CF_API_TOKEN}"));
-    }
-
-    #[test]
-    fn vhosts_snippet_dns_sub_block_provider_keeps_inner_indent() {
-        let mut s = acme_enabled_settings("dns");
-        s.tls_dns_provider = Some("namecheap".into());
-        let out = caddy_vhosts_snippet(&s, 8443);
-        // First line of the sub-block at 8-space indent…
-        assert!(out.contains("        dns namecheap {"));
-        // …and the inner keys at 12 (the directive itself uses 4 spaces
-        // of internal indent, the caller adds 8).
-        assert!(out.contains("            user {env.NAMECHEAP_USER}"));
-        assert!(out.contains("            api_key {env.NAMECHEAP_API_KEY}"));
-    }
-
-    #[test]
-    fn vhosts_snippet_staging_emits_issuer_ca_override() {
-        let mut s = acme_enabled_settings("tls-alpn");
-        s.tls_acme_staging = true;
-        let out = caddy_vhosts_snippet(&s, 8443);
-        assert!(out.contains("issuer acme {"));
-        assert!(out.contains("ca https://acme-staging-v02.api.letsencrypt.org/directory"));
+        s.tls_domain = Some("   ".into());
+        let policies = build_policy_set(&s, &["only.example.com".into()]);
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].host, "only.example.com");
     }
 
     #[test]

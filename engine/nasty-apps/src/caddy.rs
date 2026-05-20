@@ -11,6 +11,12 @@
 //!
 //! Each app's route is tagged with `@id = nasty-app-<name>` so we
 //! can manipulate it without traversing the JSON config tree.
+//!
+//! TLS automation is driven through the same admin API: `set_tls_automation`
+//! PUTs the full `apps.tls.automation` block, replacing whatever was there.
+//! The caller (engine startup + settings/ingress mutations) builds the
+//! desired policy set from settings + per-app subdomains and pushes it in
+//! one shot. No file rewrite, no reload — Caddy issues the certs.
 
 use std::time::Duration;
 
@@ -47,6 +53,36 @@ pub struct AppRoute {
     /// via DNS-01, or per-name via HTTP-01/TLS-ALPN-01) handles cert
     /// acquisition. V1 doesn't add per-app ACME knobs.
     pub subdomain: Option<String>,
+}
+
+/// One hostname that Caddy should auto-provision a certificate for.
+/// The caller assembles a `Vec<TlsPolicy>` from settings (main domain) +
+/// per-app subdomains and passes it to [`CaddyApi::set_tls_automation`].
+///
+/// All policies share the same issuer config — they differ only in
+/// `subjects` — so we don't carry per-host email/provider knobs. If a
+/// future use case wants that (e.g. one app on Cloudflare DNS, another
+/// on Route 53), grow the struct then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsPolicy {
+    /// Fully-qualified hostname Caddy should issue a cert for.
+    pub host: String,
+}
+
+/// Issuer configuration shared by every policy emitted in one
+/// `set_tls_automation` call. Mirrors the user's settings (email + DNS
+/// provider + staging flag) and gets folded into the ACME issuer block
+/// of each policy.
+///
+/// When `dns_provider` is `Some`, the policy uses DNS-01 with the named
+/// caddy-dns plugin. When `None`, Caddy falls back to its default
+/// challenge order (HTTP-01 then TLS-ALPN-01) — useful when port 80 is
+/// reachable from the internet but DNS automation isn't set up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsIssuer {
+    pub email: Option<String>,
+    pub dns_provider: Option<String>,
+    pub staging: bool,
 }
 
 /// One row in the Ingress overview page — every route Caddy is serving,
@@ -401,6 +437,61 @@ impl CaddyApi {
         }
         Ok(())
     }
+
+    /// Replace Caddy's `apps.tls.automation` block with the policies
+    /// derived from `policies` + `issuer`. Empty `policies` is the
+    /// "ACME-off" state: PUT clears any prior automation config so
+    /// Caddy stops trying to renew certs we no longer want.
+    ///
+    /// One policy per host, all sharing the same issuer. Caddy issues
+    /// a separate cert per subject — we don't try to SAN-combine
+    /// because not every DNS provider supports the wildcards that would
+    /// make combining worthwhile, and per-host certs make revocation /
+    /// renewal failures isolated.
+    ///
+    /// Idempotent: identical input ⇒ identical PUT body ⇒ Caddy
+    /// no-ops internally. Failures (Caddy not running, JSON shape
+    /// rejected) are returned for the caller to log and surface in
+    /// `acme_status`.
+    pub async fn set_tls_automation(
+        &self,
+        policies: &[TlsPolicy],
+        issuer: &TlsIssuer,
+    ) -> Result<(), String> {
+        let body = build_tls_automation_json(policies, issuer);
+        // PUT `/config/apps/tls/automation` replaces the entire
+        // automation object. The parent `apps.tls` is always present
+        // because the static-cert :443 block in the Caddyfile creates
+        // `apps.tls.certificates.load_files` — so we never have to
+        // bootstrap `apps.tls` itself, just its automation child.
+        let url = format!("{}/config/apps/tls/automation", self.base_url);
+        let resp = self
+            .client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("PUT {url}: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("PUT {url}: status {status} body={text}"));
+        }
+        if policies.is_empty() {
+            info!("caddy: cleared TLS automation policies");
+        } else {
+            info!(
+                "caddy: set TLS automation for {} host(s): {}",
+                policies.len(),
+                policies
+                    .iter()
+                    .map(|p| p.host.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Build the Caddy JSON route object for one app ingress.  Mirror
@@ -456,6 +547,124 @@ fn build_route_json(route: &AppRoute) -> Value {
         }],
         "terminal": true
     })
+}
+
+/// Build the JSON body for `PUT /config/apps/tls/automation`. One policy
+/// per host so a failure on one cert doesn't take down the others — and
+/// so the WebUI's per-host cert-status view (`cert_info_for_host`)
+/// matches one-to-one with Caddy's storage layout.
+///
+/// `policies` empty ⇒ `{ "policies": [] }` (Caddy stops auto-issuing).
+fn build_tls_automation_json(policies: &[TlsPolicy], issuer: &TlsIssuer) -> Value {
+    let policy_values: Vec<Value> = policies
+        .iter()
+        .map(|p| {
+            json!({
+                "subjects": [p.host.clone()],
+                "issuers": [build_acme_issuer_json(issuer)],
+            })
+        })
+        .collect();
+    json!({ "policies": policy_values })
+}
+
+/// Build one ACME issuer block for an automation policy. Shape mirrors
+/// `caddy adapt`'s output for a `tls EMAIL { dns PROVIDER ... }` block —
+/// emitted by hand here because the admin API takes JSON, not Caddyfile.
+///
+/// DNS-01 vs HTTP-01/TLS-ALPN-01 split: when `dns_provider` is None we
+/// omit the `challenges` field entirely and let Caddy use its default
+/// challenge order (HTTP-01 then TLS-ALPN-01). When DNS is set, we emit
+/// only the `dns` challenge — pinning matters because some users pick
+/// DNS specifically because port 80 isn't reachable from the public
+/// internet, and falling back to HTTP-01 in that case would just rack
+/// up failed attempts at the ACME server.
+fn build_acme_issuer_json(issuer: &TlsIssuer) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("module".into(), json!("acme"));
+    if let Some(email) = issuer.email.as_deref()
+        && !email.is_empty()
+    {
+        obj.insert("email".into(), json!(email));
+    }
+    if issuer.staging {
+        // Staging directory URL — accepts any caller, doesn't count
+        // against Let's Encrypt's production rate limits. Used for
+        // testing changes to the cert pipeline without burning quota.
+        obj.insert(
+            "ca".into(),
+            json!("https://acme-staging-v02.api.letsencrypt.org/directory"),
+        );
+    }
+    if let Some(provider) = issuer.dns_provider.as_deref() {
+        obj.insert(
+            "challenges".into(),
+            json!({ "dns": { "provider": dns_provider_json(provider) } }),
+        );
+    }
+    Value::Object(obj)
+}
+
+/// Map a DNS provider code to its caddy-dns plugin JSON shape. Each
+/// plugin exposes the credentials it needs as named JSON fields; the
+/// values are `{env.NAME}` placeholders that Caddy expands at request
+/// time from its EnvironmentFile (sourced from `tls_dns_credentials`).
+///
+/// Env var names mirror what users typically write in the credentials
+/// textarea: `CLOUDFLARE_DNS_API_TOKEN=…`, `PORKBUN_API_KEY=…`, etc.
+/// They don't necessarily match what each plugin's README suggests as
+/// a convention — but matching what's already saved in 0.0.7 boxes'
+/// `settings.json` matters more than matching upstream docs.
+///
+/// Unknown providers get a stub object with just the name; Caddy will
+/// reject the PUT with "unknown module" if the plugin isn't compiled
+/// in, and the engine surfaces that through `acme_status`.
+fn dns_provider_json(provider: &str) -> Value {
+    match provider {
+        "cloudflare" => json!({
+            "name": "cloudflare",
+            "api_token": "{env.CLOUDFLARE_DNS_API_TOKEN}"
+        }),
+        "duckdns" => json!({
+            "name": "duckdns",
+            "api_token": "{env.DUCKDNS_TOKEN}"
+        }),
+        "linode" => json!({
+            "name": "linode",
+            "api_token": "{env.LINODE_TOKEN}"
+        }),
+        "desec" => json!({
+            "name": "desec",
+            "token": "{env.DESEC_TOKEN}"
+        }),
+        "hetzner" => json!({
+            "name": "hetzner",
+            "api_token": "{env.HETZNER_API_TOKEN}"
+        }),
+        // route53 plugin reads AWS_REGION / AWS_ACCESS_KEY_ID /
+        // AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN) from env on its
+        // own. Empty config object lets it self-configure.
+        "route53" => json!({ "name": "route53" }),
+        "porkbun" => json!({
+            "name": "porkbun",
+            "api_key": "{env.PORKBUN_API_KEY}",
+            "api_secret_key": "{env.PORKBUN_SECRET_API_KEY}"
+        }),
+        "namecheap" => json!({
+            "name": "namecheap",
+            "user": "{env.NAMECHEAP_USER}",
+            "api_key": "{env.NAMECHEAP_API_KEY}",
+            "client_ip": "{env.NAMECHEAP_CLIENT_IP}"
+        }),
+        "rfc2136" => json!({
+            "name": "rfc2136",
+            "key_name": "{env.RFC2136_KEY_NAME}",
+            "key": "{env.RFC2136_KEY}",
+            "key_alg": "{env.RFC2136_KEY_ALG}",
+            "server": "{env.RFC2136_SERVER}"
+        }),
+        other => json!({ "name": other }),
+    }
 }
 
 /// Pull the first hostname out of the route's `match[].host[]` array,
@@ -818,6 +1027,126 @@ mod tests {
         assert_eq!(s.handler_kind, "file_server");
         assert_eq!(s.upstream, None);
         assert_eq!(s.source, "static");
+    }
+
+    // ── build_tls_automation_json ──
+
+    #[test]
+    fn tls_automation_empty_policies_clears_caddy() {
+        // The "ACME off" PUT body. Caddy treats an empty policies array
+        // as "stop trying to auto-issue anything" — distinct from
+        // *missing* automation (which would inherit defaults). Asserts
+        // the shape stays exactly `{policies: []}` so future refactors
+        // can't accidentally re-enable defaults by emitting `null`.
+        let body = build_tls_automation_json(
+            &[],
+            &TlsIssuer {
+                email: None,
+                dns_provider: None,
+                staging: false,
+            },
+        );
+        assert_eq!(body, json!({"policies": []}));
+    }
+
+    #[test]
+    fn tls_automation_cloudflare_dns_shape() {
+        let body = build_tls_automation_json(
+            &[TlsPolicy {
+                host: "nas.example.com".into(),
+            }],
+            &TlsIssuer {
+                email: Some("ops@example.com".into()),
+                dns_provider: Some("cloudflare".into()),
+                staging: false,
+            },
+        );
+        let p = &body["policies"][0];
+        assert_eq!(p["subjects"][0], "nas.example.com");
+        let issuer = &p["issuers"][0];
+        assert_eq!(issuer["module"], "acme");
+        assert_eq!(issuer["email"], "ops@example.com");
+        // No staging CA → no `ca` override field at all (Caddy uses prod).
+        assert!(issuer.get("ca").is_none());
+        let prov = &issuer["challenges"]["dns"]["provider"];
+        assert_eq!(prov["name"], "cloudflare");
+        assert_eq!(prov["api_token"], "{env.CLOUDFLARE_DNS_API_TOKEN}");
+    }
+
+    #[test]
+    fn tls_automation_staging_sets_ca_url() {
+        let body = build_tls_automation_json(
+            &[TlsPolicy {
+                host: "h.example".into(),
+            }],
+            &TlsIssuer {
+                email: None,
+                dns_provider: None,
+                staging: true,
+            },
+        );
+        let issuer = &body["policies"][0]["issuers"][0];
+        assert_eq!(
+            issuer["ca"],
+            "https://acme-staging-v02.api.letsencrypt.org/directory"
+        );
+    }
+
+    #[test]
+    fn tls_automation_no_dns_provider_omits_challenges() {
+        // Without a DNS provider Caddy uses its default challenge order
+        // (HTTP-01, TLS-ALPN-01). Asserting the `challenges` field is
+        // absent — not present-but-empty — because Caddy treats
+        // `challenges: {}` as "no challenge modules enabled" which
+        // would block all issuance.
+        let body = build_tls_automation_json(
+            &[TlsPolicy {
+                host: "h.example".into(),
+            }],
+            &TlsIssuer {
+                email: Some("a@b".into()),
+                dns_provider: None,
+                staging: false,
+            },
+        );
+        let issuer = &body["policies"][0]["issuers"][0];
+        assert!(issuer.get("challenges").is_none());
+    }
+
+    #[test]
+    fn tls_automation_one_policy_per_host() {
+        // Per-host policies isolate failures and match `cert_info_for_host`'s
+        // one-cert-per-hostname assumption. Two subjects in → two policies
+        // out, not one combined-SAN policy.
+        let body = build_tls_automation_json(
+            &[
+                TlsPolicy {
+                    host: "a.example".into(),
+                },
+                TlsPolicy {
+                    host: "b.example".into(),
+                },
+            ],
+            &TlsIssuer {
+                email: None,
+                dns_provider: None,
+                staging: false,
+            },
+        );
+        let policies = body["policies"].as_array().unwrap();
+        assert_eq!(policies.len(), 2);
+        assert_eq!(policies[0]["subjects"][0], "a.example");
+        assert_eq!(policies[1]["subjects"][0], "b.example");
+    }
+
+    #[test]
+    fn dns_provider_json_unknown_provider_is_stub() {
+        // A provider name we don't have a hand-rolled shape for (e.g. a
+        // newly-added plugin) gets a bare `{name: <code>}` object.
+        // Caddy will reject if the plugin isn't compiled in; we don't
+        // try to be smart at the engine layer.
+        let v = dns_provider_json("freenom");
+        assert_eq!(v, json!({"name": "freenom"}));
     }
 
     #[test]
