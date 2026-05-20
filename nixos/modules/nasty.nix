@@ -627,17 +627,43 @@ in {
       '')
 
       (writeShellScriptBin "nasty-report" ''
-        set -euo pipefail
+        # `set -e` is intentionally OFF: this script is meant to be run on
+        # broken systems where individual commands will fail. We want each
+        # section to attempt independently and produce as much diagnostic
+        # info as possible even when half the box is down. `pipefail` is
+        # also off — the `tee` at the end shouldn't fail-mask any
+        # diagnostic command upstream of it.
+        set -u
 
         SEP="─────────────────────────────────────────────────────"
 
         section() { echo ""; echo "$SEP"; echo "  $1"; echo "$SEP"; }
+
+        # Persist every report under /var/lib/nasty/reports/. Two reasons:
+        # 1) When the WebUI is dead, the operator may roll back to a
+        #    working generation and want to send us what they had on the
+        #    broken one. /var/lib survives nixos-rebuild rollbacks (it's
+        #    state, not config) so the report survives with it.
+        # 2) Capturing the same machine state across multiple rebuild
+        #    attempts gives us a delta to look at.
+        # Rotate aggressively (keep last 10) so a wedged box doesn't fill
+        # the disk with reports.
+        REPORTS_DIR="/var/lib/nasty/reports"
+        mkdir -p "$REPORTS_DIR" 2>/dev/null
+        TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
+        REPORT_FILE="$REPORTS_DIR/nasty-report-$TIMESTAMP.txt"
+        ls -1t "$REPORTS_DIR"/nasty-report-*.txt 2>/dev/null | tail -n +11 | xargs -r rm -f
+
+        # Tee everything to both stdout (the operator's terminal) and the
+        # persisted file. `exec` redirects the rest of the script.
+        exec > >(tee "$REPORT_FILE") 2>&1
 
         echo ""
         echo "╔═════════════════════════════════════════════════════╗"
         echo "║              NASty Diagnostic Dump                  ║"
         echo "╚═════════════════════════════════════════════════════╝"
         echo "  $(date '+%Y-%m-%d %H:%M:%S %Z')  |  $(hostname)  |  NASty $(cat /etc/nasty-version 2>/dev/null || echo unknown)"
+        echo "  Saved to: $REPORT_FILE"
 
         section "System"
         echo "  OS:      $(nixos-version 2>/dev/null || echo unknown)"
@@ -702,12 +728,124 @@ in {
         section "Recent Engine Logs (last 50 lines)"
         journalctl -u nasty-engine -n 50 --no-pager 2>/dev/null | sed 's/^/  /' || echo "  (unavailable)"
 
+        section "Reverse Proxy — Caddy"
+        # Service state first: covers the "caddy.service could not be
+        # found" case (build evaluated falsy / module skipped) by
+        # distinguishing "not installed" from "installed but failed".
+        if systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+          echo "  Unit:       installed"
+          state=$(systemctl is-active caddy.service 2>/dev/null || true)
+          enabled=$(systemctl is-enabled caddy.service 2>/dev/null || true)
+          echo "  Active:     $state"
+          echo "  Enabled:    $enabled"
+        else
+          echo "  Unit:       NOT INSTALLED (services.caddy probably evaluated to absent)"
+        fi
+        echo ""
+        echo "  Listening sockets on :80 / :443 / :2019 (Caddy admin API):"
+        ss -tlnp 2>/dev/null | awk '/:80\s|:443\s|:2019\s/ {print "    " $0}' || echo "    (ss unavailable)"
+        echo ""
+        # Caddy's admin API is on 127.0.0.1:2019; pulling the runtime
+        # config tells us what TLS automation policies / app routes are
+        # actually live, vs. what we think we pushed. Short timeout so
+        # this doesn't hang on broken systems.
+        echo "  Admin-API runtime config (apps.tls + apps.http servers):"
+        if curl -fsS --max-time 3 http://127.0.0.1:2019/config/apps 2>/dev/null \
+          | ${pkgs.jq}/bin/jq '{tls: .tls, servers: (.http.servers // {} | map_values({listen, route_count: (.routes|length), tls_policy_count: ((.tls_connection_policies // [])|length)}))}' 2>/dev/null \
+          | sed 's/^/    /'; then
+          :
+        else
+          echo "    (admin API not reachable — caddy may not be running)"
+        fi
+        echo ""
+        echo "  Issued certs on disk:"
+        find /var/lib/caddy/.local/share/caddy/certificates -name '*.crt' 2>/dev/null \
+          | sed 's|^|    |' || echo "    (none)"
+        echo ""
+        echo "  Recent Caddy logs (last 30 lines, level=warn or error):"
+        journalctl -u caddy -n 200 --no-pager 2>/dev/null \
+          | grep -iE '"level":"(warn|error)"|^Aug |^May |^Apr |^Jan |^Feb |^Mar |^Jun |^Jul |^Sep |^Oct |^Nov |^Dec ' \
+          | tail -30 \
+          | sed 's/^/    /' || echo "    (unavailable)"
+
+        section "Networking"
+        echo "  Interfaces:"
+        ip -brief addr show 2>/dev/null | sed 's/^/    /' || echo "    (ip unavailable)"
+        echo ""
+        echo "  Routes:"
+        ip route show 2>/dev/null | sed 's/^/    /' || true
+        echo ""
+        echo "  /etc/resolv.conf:"
+        sed 's/^/    /' /etc/resolv.conf 2>/dev/null || echo "    (missing)"
+        echo ""
+        # systemd-resolved is the box's actual stub; resolv.conf above
+        # may just point at 127.0.0.53. Surface the upstream resolvers
+        # resolved is using.
+        if command -v resolvectl >/dev/null 2>&1; then
+          echo "  resolvectl status (DNS servers / search domains):"
+          resolvectl status 2>/dev/null | grep -E 'DNS Servers|DNS Domain|Current DNS' | sed 's/^/    /' || true
+        fi
+        echo ""
+        # The two DNS resolvers our DNS-01 propagation check uses by
+        # default. If they're unreachable, the upgrade migration's cert
+        # issuance will appear to hang for 30+ seconds.
+        echo "  Public-DNS reachability (1.1.1.1, 8.8.8.8, port 53):"
+        for r in 1.1.1.1 8.8.8.8; do
+          if timeout 2 bash -c "echo > /dev/tcp/$r/53" 2>/dev/null; then
+            echo "    $r:53  reachable"
+          else
+            echo "    $r:53  UNREACHABLE"
+          fi
+        done
+        echo ""
+        echo "  Firewall (nftables) summary:"
+        nft list ruleset 2>/dev/null | head -40 | sed 's/^/    /' || echo "    (nft unavailable)"
+
+        section "System Updates — Flake + Generations"
+        echo "  Current NixOS generation:"
+        readlink /run/current-system 2>/dev/null | sed 's/^/    /'
+        echo ""
+        echo "  Last 5 boot generations:"
+        # nix-env -p shows the bootloader's view; nixos-rebuild list-generations is more
+        # human-readable but only exists in newer NixOS. Fall back gracefully.
+        if command -v nixos-rebuild >/dev/null 2>&1 && nixos-rebuild list-generations 2>/dev/null | head -6 | sed 's/^/    /'; then
+          :
+        else
+          nix-env --list-generations --profile /nix/var/nix/profiles/system 2>/dev/null \
+            | tail -5 | sed 's/^/    /' || echo "    (unavailable)"
+        fi
+        echo ""
+        echo "  /etc/nixos/flake.lock (nixpkgs + nasty pins):"
+        if [ -f /etc/nixos/flake.lock ]; then
+          ${pkgs.jq}/bin/jq -r '
+            (.nodes.nixpkgs.locked // {}) as $np
+            | (.nodes.nasty.locked // {}) as $n
+            | (.nodes."bcachefs-tools".locked // {}) as $b
+            | "    nixpkgs:        ref=\($np.ref // "?")  rev=\($np.rev // "?" | .[0:12])  lastModified=\($np.lastModified // "?")",
+              "    nasty:          ref=\($n.ref // "?")  rev=\($n.rev // "?" | .[0:12])  lastModified=\($n.lastModified // "?")",
+              "    bcachefs-tools: ref=\($b.ref // "?")  rev=\($b.rev // "?" | .[0:12])  lastModified=\($b.lastModified // "?")"
+          ' /etc/nixos/flake.lock 2>/dev/null || echo "    (parse failed)"
+        else
+          echo "    (no /etc/nixos/flake.lock — not running from a flake?)"
+        fi
+        echo ""
+        echo "  Recent nixos-rebuild attempts (journal, last 40 lines):"
+        # nixos-rebuild logs as a transient unit; journalctl -u nixos-rebuild won't
+        # work, but we can grep the journal for the activation script's stdout.
+        journalctl --since '2 hours ago' --no-pager 2>/dev/null \
+          | grep -E 'nixos-rebuild|activating the configuration|switching to system configuration|error: builder for|hash mismatch|sha256-' \
+          | tail -40 \
+          | sed 's/^/    /' || echo "    (none)"
+
         section "dmesg — bcachefs / storage errors (last 30)"
         dmesg --level=err,warn -T 2>/dev/null | grep -iE 'bcachefs|nvme|scsi|ata|disk|i/o error' | tail -30 | sed 's/^/  /' || echo "  (none)"
 
         echo ""
         echo "$SEP"
-        echo "  Share full output:  report | nc termbin.com 9999"
+        echo "  Report saved to: $REPORT_FILE"
+        echo "  Older reports:   $REPORTS_DIR/  (keeps last 10)"
+        echo "  Share output:    report | nc termbin.com 9999"
+        echo "  Share saved:     cat $REPORT_FILE | nc termbin.com 9999"
         echo "$SEP"
         echo ""
       '')
@@ -838,6 +976,12 @@ in {
       # engine has had a chance to write it. (vhosts.conf is no longer
       # written — TLS automation is driven through the admin API; the
       # engine's first-boot migration archives any leftover file.)
+      # /var/lib/nasty/reports/ holds rotated nasty-report dumps.
+      # Surviving boot-generation rollbacks is the point — operator
+      # generates a report on a broken system, rolls back to a working
+      # one, then `cat`s the saved report to share. tmpfiles creates
+      # the dir; the script rotates within it (keep last 10).
+      "d /var/lib/nasty/reports 0750 root root -"
       "d /var/lib/nasty/caddy 0750 root caddy -"
       "f /var/lib/nasty/caddy/acme.env 0640 root caddy -"
       "d /var/lib/nasty/subvolumes 0750 root root -"
