@@ -358,6 +358,24 @@ pub(super) async fn try_route(
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),
         },
+        // Caddy's internal-CA root cert (PEM). The WebUI surfaces this
+        // as a download so operators can import it into their OS or
+        // browser trust store and stop getting fresh "untrusted cert"
+        // warnings for every NASty box served via `tls internal`.
+        // None ⇒ Caddy hasn't bootstrapped the CA yet (fresh box or
+        // not running); return the engine-level error string so the
+        // WebUI can render a clear "try again in a moment" message.
+        "system.tls.local_ca_root" => {
+            match nasty_system::settings::read_caddy_local_ca_root().await {
+                Some(pem) => ok(req, pem),
+                None => err(
+                    req,
+                    "Caddy local-CA root not available yet \
+                 (Caddy may still be starting up). Try again in a moment."
+                        .to_string(),
+                ),
+            }
+        }
         "system.tuning.get" => ok(req, state.tuning.get().await),
         "system.tuning.update" => match parse_params(req) {
             Ok(p) => match state.tuning.update(p).await {
