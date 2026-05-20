@@ -358,6 +358,16 @@ pub(super) async fn try_route(
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),
         },
+        // Per-host TLS automation status. Returns one entry per
+        // managed hostname Caddy is tracking (from
+        // `apps.tls.certificates.automate`), with state =
+        // active / issuing / failed / pending and the latest log
+        // message attached. Used by the /tls page's "Managed
+        // certificates" section so the operator can see why a cert
+        // is stuck instead of staring at an indefinite "pending".
+        "system.tls.host_statuses" => {
+            ok(req, nasty_system::settings::list_host_tls_statuses().await)
+        }
         // Caddy's internal-CA root cert (PEM). The WebUI surfaces this
         // as a download so operators can import it into their OS or
         // browser trust store and stop getting fresh "untrusted cert"

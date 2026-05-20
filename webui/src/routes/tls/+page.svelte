@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import type { Settings } from '$lib/types';
@@ -56,7 +56,46 @@
 		showAdvancedDns = !!tlsDnsResolver || tlsDnsPropagationWait > 0;
 		tlsAcmeStaging = settings?.tls_acme_staging ?? false;
 		try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
+		refreshHostStatuses();
+		// Poll every 10s so the operator sees state transitions
+		// (issuing → active) without manually refreshing. Cheap
+		// (admin-API read + journalctl tail).
+		hostStatusPollHandle = setInterval(refreshHostStatuses, 10_000) as unknown as number;
 	});
+
+	type HostTlsStatus = {
+		host: string;
+		state: 'active' | 'issuing' | 'failed' | 'pending';
+		issuer?: string;
+		issued?: string;
+		expires?: string;
+		expires_in_days?: number;
+		message?: string;
+	};
+
+	let hostStatuses: HostTlsStatus[] = $state([]);
+	let hostStatusPollHandle: number | null = $state(null);
+
+	async function refreshHostStatuses() {
+		try {
+			hostStatuses = await client.call<HostTlsStatus[]>('system.tls.host_statuses');
+		} catch {
+			// engine restart / transient network — keep prior list, retry next tick
+		}
+	}
+
+	onDestroy(() => {
+		if (hostStatusPollHandle !== null) clearInterval(hostStatusPollHandle);
+	});
+
+	function badgeForState(s: string): { label: string; cls: string } {
+		switch (s) {
+			case 'active': return { label: 'active', cls: 'bg-green-500/15 text-green-400 border-green-500/40' };
+			case 'issuing': return { label: 'issuing…', cls: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/40' };
+			case 'failed': return { label: 'failed', cls: 'bg-red-500/15 text-red-400 border-red-500/40' };
+			default: return { label: 'pending', cls: 'bg-muted text-muted-foreground border-border' };
+		}
+	}
 
 	let downloadingCaRoot = $state(false);
 
@@ -406,6 +445,64 @@
 			<Button size="xs" variant="secondary" class="mt-3" onclick={async () => { await client.call('system.acme.reset'); acmeStatus = await client.call('system.acme.status'); }}>
 				Dismiss
 			</Button>
+		{/if}
+	</section>
+
+	<!-- Managed certificates — per-host issuance state from Caddy.
+	     Auto-refreshes every 10s. Replaces the operator's previous
+	     workflow of "ssh in and grep journalctl" when an ingress sits
+	     on `pending` for longer than expected. -->
+	<section class="rounded-lg border border-border p-5 lg:col-span-2">
+		<div class="flex items-baseline justify-between gap-3 mb-3">
+			<h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Managed Certificates</h3>
+			<span class="text-xs text-muted-foreground">Updates every 10s</span>
+		</div>
+		{#if hostStatuses.length === 0}
+			<p class="text-sm text-muted-foreground">
+				No managed hostnames yet. Hosts appear here once you enable Let's Encrypt above or assign a
+				subdomain ingress to an app — the engine pushes each one to Caddy and tracks issuance.
+			</p>
+		{:else}
+			<table class="w-full text-sm">
+				<thead>
+					<tr class="text-left text-xs uppercase text-muted-foreground">
+						<th class="pb-2 font-medium">Host</th>
+						<th class="pb-2 font-medium">State</th>
+						<th class="pb-2 font-medium">Issuer / Expires</th>
+						<th class="pb-2 font-medium">Detail</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each hostStatuses as h}
+						{@const badge = badgeForState(h.state)}
+						<tr class="border-t border-border">
+							<td class="py-2 pr-3 font-mono text-xs">{h.host}</td>
+							<td class="py-2 pr-3">
+								<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[0.65rem] {badge.cls}">{badge.label}</span>
+							</td>
+							<td class="py-2 pr-3 text-xs">
+								{#if h.state === 'active'}
+									<div>{h.issuer || '—'}</div>
+									{#if h.expires}
+										<div class="text-muted-foreground">{h.expires}{#if h.expires_in_days !== undefined && h.expires_in_days !== null} ({h.expires_in_days}d){/if}</div>
+									{/if}
+								{:else}
+									<span class="text-muted-foreground">—</span>
+								{/if}
+							</td>
+							<td class="py-2 text-xs">
+								{#if h.message}
+									<span class="text-muted-foreground break-all">{h.message}</span>
+								{:else if h.state === 'pending'}
+									<span class="text-muted-foreground">Waiting for Caddy to start issuance…</span>
+								{:else}
+									<span class="text-muted-foreground">—</span>
+								{/if}
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
 		{/if}
 	</section>
 

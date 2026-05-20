@@ -135,9 +135,13 @@ pub struct CaddyRouteSummary {
     /// Populated by the engine binary after `list_all_route_summaries`
     /// returns — nasty-apps doesn't have access to the cert directory
     /// or PEM parser. `None` for non-host routes (`path` / `catch_all`)
-    /// and for host routes Caddy hasn't issued a cert for yet (the
-    /// "pending" state — auto-HTTPS issues asynchronously on first
-    /// request).
+    /// and for host routes whose cert isn't on disk yet — the engine
+    /// pushes automation policies eagerly via `set_tls_automation` so
+    /// issuance starts at policy-push time, not on first request, but
+    /// DNS-01 + propagation_delay can take 30-90s before the cert
+    /// lands. Use `system.tls.host_statuses` for the live state of
+    /// each managed host (issuing / failed / active) with error
+    /// details when issuance is stuck.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert: Option<HostCert>,
 }

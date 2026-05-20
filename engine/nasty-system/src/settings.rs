@@ -1131,10 +1131,13 @@ pub struct HostCertInfo {
 ///     (`wildcard_.example.com/wildcard_.example.com.crt` covers
 ///     `<anything>.example.com`).
 ///
-/// Returns `None` when no cert is on disk yet — Caddy auto-HTTPS issues
-/// asynchronously on first request, so a freshly-set ingress can spend
-/// a few seconds with no cert. The WebUI renders that as "pending"
-/// rather than treating it as a hard failure.
+/// Returns `None` when no cert is on disk yet. Issuance is eager —
+/// the engine pushes automation policies the moment an ingress is
+/// set, so Caddy starts work immediately — but DNS-01 with our 30s
+/// `propagation_delay` plus the ACME order round-trip can take
+/// 30-90s before the cert lands. See [`host_tls_status`] for the
+/// richer state (issuing / failed / active) including the last error
+/// message when issuance is stuck.
 pub async fn cert_info_for_host(host: &str) -> Option<HostCertInfo> {
     let path = locate_cert_for_host(host).await?;
     let info = read_cert_info(&path).await;
@@ -1153,6 +1156,188 @@ pub async fn cert_info_for_host(host: &str) -> Option<HostCertInfo> {
         expires_in_days,
         path,
     })
+}
+
+/// Per-host TLS state surfaced on the `/tls` page. Distinguishes the
+/// four states a managed hostname can be in:
+///
+/// - `active` — cert on disk, currently being served. `issuer` /
+///   `expires` / `expires_in_days` are populated.
+/// - `issuing` — Caddy is actively working on getting a cert. Tail
+///   of recent log lines for this host showed `obtaining
+///   certificate` or `trying to solve challenge`. `message` carries
+///   the most recent log line so the operator can see how far along
+///   the process is.
+/// - `failed` — Caddy tried and gave up (rate-limit, DNS challenge
+///   timeout, provider auth error). `message` carries the failure
+///   reason verbatim from the log.
+/// - `pending` — policy exists but Caddy hasn't logged any activity
+///   yet (sub-second window between policy push and first work).
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct HostTlsStatus {
+    pub host: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<i64>,
+    /// `active` ⇒ on-disk cert path. `failed` / `issuing` ⇒ last log
+    /// line, verbatim. `pending` ⇒ None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Build a [`HostTlsStatus`] for one managed hostname.
+///
+/// Decision tree:
+///   1. Cert on disk via [`cert_info_for_host`] ⇒ `active`.
+///   2. Else tail Caddy's journal for the last 10 minutes, find log
+///      lines matching `"identifier":"<host>"`, classify the most
+///      recent one:
+///        - "obtained successfully" ⇒ `active` (race: cert just
+///          landed but cert_info_for_host raced ahead of disk sync)
+///        - "could not get" / "error" / "timed out" ⇒ `failed`
+///          with the error message as `message`
+///        - any other engaged-state phrase ⇒ `issuing` with the line
+///          as `message`
+///   3. No matching log lines ⇒ `pending`.
+pub async fn host_tls_status(host: &str) -> HostTlsStatus {
+    if let Some(info) = cert_info_for_host(host).await {
+        return HostTlsStatus {
+            host: host.to_string(),
+            state: "active".into(),
+            issuer: info.issuer,
+            issued: info.issued,
+            expires: info.expires,
+            expires_in_days: info.expires_in_days,
+            message: Some(info.path),
+        };
+    }
+
+    // Tail Caddy's journal for this host. JSON-formatted logs from
+    // certmagic always carry `"identifier":"<host>"` for ACME events
+    // — that's the field we grep for. 10-minute window covers a
+    // full DNS-01 attempt + a retry, but stays cheap.
+    let output = tokio::process::Command::new("journalctl")
+        .args(["-u", "caddy", "--since", "10 min ago", "--no-pager"])
+        .output()
+        .await;
+    let lines = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => String::new(),
+    };
+
+    // Walk lines newest-last (journalctl default). Find the most
+    // recent log mentioning this host; classify by content.
+    let needle = format!("\"identifier\":\"{host}\"");
+    let last = lines.lines().rev().find(|l| l.contains(&needle));
+    let Some(line) = last else {
+        return HostTlsStatus {
+            host: host.to_string(),
+            state: "pending".into(),
+            issuer: None,
+            issued: None,
+            expires: None,
+            expires_in_days: None,
+            message: None,
+        };
+    };
+
+    let lower = line.to_lowercase();
+    let state = if lower.contains("could not get") || lower.contains("timed out") {
+        "failed"
+    } else if lower.contains("obtained successfully") {
+        "active"
+    } else {
+        "issuing"
+    };
+
+    HostTlsStatus {
+        host: host.to_string(),
+        state: state.into(),
+        issuer: None,
+        issued: None,
+        expires: None,
+        expires_in_days: None,
+        message: Some(extract_log_message(line)),
+    }
+}
+
+/// Return the list of all managed hostnames Caddy is currently
+/// tracking, with each one's current TLS status. Reads
+/// `apps.tls.certificates.automate` from Caddy's admin API (the
+/// authoritative "what hosts should Caddy be obtaining certs for"
+/// list — set by our `set_tls_automation` flow) and resolves status
+/// per host.
+///
+/// Skips `nasty.local` (the internal-CA fallback) — that one is
+/// always active and not interesting on the /tls page.
+pub async fn list_host_tls_statuses() -> Vec<HostTlsStatus> {
+    let url = "http://127.0.0.1:2019/config/apps/tls/certificates/automate";
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build();
+    let Ok(client) = client else {
+        return Vec::new();
+    };
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let hosts: Vec<String> = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for host in hosts {
+        if host == "nasty.local" {
+            continue;
+        }
+        out.push(host_tls_status(&host).await);
+    }
+    out
+}
+
+/// Pull the human-readable `msg` field out of a Caddy JSON log line,
+/// falling back to the whole line when the format doesn't match what
+/// we expect. Keeps the WebUI tooltip readable instead of dumping
+/// raw JSON.
+fn extract_log_message(line: &str) -> String {
+    // Look for "msg":"..." (un-escaped naive parse, good enough for
+    // certmagic's well-formed logs). If we find `error` field too,
+    // prefer it (it carries the actual failure detail).
+    if let Some(err) = extract_json_string_field(line, "error")
+        && !err.is_empty()
+    {
+        return err;
+    }
+    if let Some(msg) = extract_json_string_field(line, "msg") {
+        return msg;
+    }
+    line.to_string()
+}
+
+fn extract_json_string_field(line: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\":\"");
+    let start = line.find(&key)? + key.len();
+    let rest = &line[start..];
+    let mut end = 0;
+    let bytes = rest.as_bytes();
+    while end < bytes.len() {
+        if bytes[end] == b'\\' {
+            end += 2;
+            continue;
+        }
+        if bytes[end] == b'"' {
+            break;
+        }
+        end += 1;
+    }
+    Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
 }
 
 async fn locate_cert_for_host(host: &str) -> Option<String> {

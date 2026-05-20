@@ -165,11 +165,14 @@
 										{@const cb = certBadge(r.cert)}
 										<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[0.65rem] cursor-help {cb.class}" title={cb.title}>{cb.label}</span>
 									{:else if r.match_kind === "host"}
-										<!-- Host route with no cert on disk yet — auto-HTTPS issues
-										     asynchronously on first request, so a freshly-set ingress can
-										     spend a few seconds in this state. Surface it as "pending"
-										     rather than a hard failure so the operator doesn't panic. -->
-										<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[0.65rem] bg-muted text-muted-foreground border-border" title="No cert on disk yet — Caddy issues asynchronously on first request.">pending</span>
+										<!-- Host route with no cert on disk yet — issuance is
+										     eager (engine pushes automation on ingress set) but
+										     DNS-01 + propagation_delay can take 30-90s. The /tls
+										     page's "Managed certificates" section surfaces the
+										     live state per host (issuing / failed / active) with
+										     the last log message; we just point there from the
+										     tooltip rather than duplicating the polling logic. -->
+										<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[0.65rem] bg-muted text-muted-foreground border-border" title="No cert on disk yet — see Managed certificates on the TLS page for live status.">pending</span>
 									{:else}
 										<span class="text-muted-foreground">—</span>
 									{/if}
