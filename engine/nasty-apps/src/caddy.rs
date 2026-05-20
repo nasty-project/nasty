@@ -438,18 +438,27 @@ impl CaddyApi {
         Ok(())
     }
 
-    /// Replace Caddy's `apps.tls.automation` block with the policies
-    /// derived from `policies` + `issuer`. Empty `policies` is the
-    /// "ACME-off" state: PUT clears any prior automation config so
-    /// Caddy stops trying to renew certs we no longer want.
+    /// Replace Caddy's `apps.tls.automation.policies` array with the
+    /// caller's managed-host set + the always-present `nasty.local`
+    /// internal-CA fallback. Empty `policies` ⇒ only the fallback is
+    /// pushed; ACME-off boxes still serve a working cert for IP and
+    /// unknown-SNI traffic via the `tls internal` site in the
+    /// Caddyfile.
     ///
-    /// One policy per host, all sharing the same issuer. Caddy issues
-    /// a separate cert per subject — we don't try to SAN-combine
-    /// because not every DNS provider supports the wildcards that would
-    /// make combining worthwhile, and per-host certs make revocation /
-    /// renewal failures isolated.
+    /// One policy per managed host, all sharing the same ACME issuer.
+    /// Per-host policies keep failures isolated and make the
+    /// `cert_info_for_host` view map one-to-one onto Caddy's storage.
+    /// The `nasty.local` fallback is appended last so SNI matching
+    /// hits managed hosts first.
     ///
-    /// Idempotent: identical input ⇒ identical PUT body ⇒ Caddy
+    /// HTTP verb is PATCH: Caddy admin API uses PUT and POST with
+    /// "create new" semantics that error 409 when the path already
+    /// has a value. The Caddyfile-derived config always creates
+    /// `apps.tls.automation` (because of `tls internal` on the
+    /// fallback site), so the path is always pre-existing by the time
+    /// we get here.
+    ///
+    /// Idempotent: identical input ⇒ identical PATCH body ⇒ Caddy
     /// no-ops internally. Failures (Caddy not running, JSON shape
     /// rejected) are returned for the caller to log and surface in
     /// `acme_status`.
@@ -459,29 +468,24 @@ impl CaddyApi {
         issuer: &TlsIssuer,
     ) -> Result<(), String> {
         let body = build_tls_automation_json(policies, issuer);
-        // PUT `/config/apps/tls/automation` replaces the entire
-        // automation object. The parent `apps.tls` is always present
-        // because the static-cert :443 block in the Caddyfile creates
-        // `apps.tls.certificates.load_files` — so we never have to
-        // bootstrap `apps.tls` itself, just its automation child.
         let url = format!("{}/config/apps/tls/automation", self.base_url);
         let resp = self
             .client
-            .put(&url)
+            .patch(&url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("PUT {url}: {e}"))?;
+            .map_err(|e| format!("PATCH {url}: {e}"))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(format!("PUT {url}: status {status} body={text}"));
+            return Err(format!("PATCH {url}: status {status} body={text}"));
         }
         if policies.is_empty() {
-            info!("caddy: cleared TLS automation policies");
+            info!("caddy: TLS automation set to fallback-only (nasty.local internal CA)");
         } else {
             info!(
-                "caddy: set TLS automation for {} host(s): {}",
+                "caddy: set TLS automation for {} managed host(s): {} (+ nasty.local fallback)",
                 policies.len(),
                 policies
                     .iter()
@@ -549,14 +553,18 @@ fn build_route_json(route: &AppRoute) -> Value {
     })
 }
 
-/// Build the JSON body for `PUT /config/apps/tls/automation`. One policy
-/// per host so a failure on one cert doesn't take down the others — and
-/// so the WebUI's per-host cert-status view (`cert_info_for_host`)
-/// matches one-to-one with Caddy's storage layout.
+/// Build the JSON body for `PATCH /config/apps/tls/automation`. One
+/// policy per managed host (using the shared ACME issuer), plus a
+/// trailing `nasty.local` policy that uses Caddy's internal CA — that
+/// last entry mirrors what `tls internal` in the Caddyfile creates,
+/// and we always include it so a PATCH that replaces the whole policy
+/// list doesn't accidentally orphan the IP / unknown-SNI fallback
+/// cert.
 ///
-/// `policies` empty ⇒ `{ "policies": [] }` (Caddy stops auto-issuing).
+/// Order matters: managed hosts first, so Caddy's SNI matching hits
+/// them before falling through to nasty.local.
 fn build_tls_automation_json(policies: &[TlsPolicy], issuer: &TlsIssuer) -> Value {
-    let policy_values: Vec<Value> = policies
+    let mut policy_values: Vec<Value> = policies
         .iter()
         .map(|p| {
             json!({
@@ -565,6 +573,10 @@ fn build_tls_automation_json(policies: &[TlsPolicy], issuer: &TlsIssuer) -> Valu
             })
         })
         .collect();
+    policy_values.push(json!({
+        "subjects": ["nasty.local"],
+        "issuers": [{ "module": "internal" }],
+    }));
     json!({ "policies": policy_values })
 }
 
@@ -1032,12 +1044,12 @@ mod tests {
     // ── build_tls_automation_json ──
 
     #[test]
-    fn tls_automation_empty_policies_clears_caddy() {
-        // The "ACME off" PUT body. Caddy treats an empty policies array
-        // as "stop trying to auto-issue anything" — distinct from
-        // *missing* automation (which would inherit defaults). Asserts
-        // the shape stays exactly `{policies: []}` so future refactors
-        // can't accidentally re-enable defaults by emitting `null`.
+    fn tls_automation_empty_policies_yields_fallback_only() {
+        // The "ACME off" PATCH body. We still emit the trailing
+        // nasty.local internal-CA policy so the IP / unknown-SNI
+        // fallback keeps working — without it, PATCHing an empty
+        // policies array would orphan the cert that `tls internal` in
+        // the Caddyfile depends on.
         let body = build_tls_automation_json(
             &[],
             &TlsIssuer {
@@ -1046,7 +1058,33 @@ mod tests {
                 staging: false,
             },
         );
-        assert_eq!(body, json!({"policies": []}));
+        let policies = body["policies"].as_array().unwrap();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0]["subjects"][0], "nasty.local");
+        assert_eq!(policies[0]["issuers"][0]["module"], "internal");
+    }
+
+    #[test]
+    fn tls_automation_managed_hosts_precede_fallback() {
+        // SNI matching order: managed hosts first so a request for
+        // nas.example.com hits its ACME-issued cert, not the local-CA
+        // fallback. Verifying the order explicitly because Caddy walks
+        // the policies array top-to-bottom and a future "sort
+        // alphabetically" refactor would silently break SNI routing.
+        let body = build_tls_automation_json(
+            &[TlsPolicy {
+                host: "nas.example.com".into(),
+            }],
+            &TlsIssuer {
+                email: None,
+                dns_provider: None,
+                staging: false,
+            },
+        );
+        let policies = body["policies"].as_array().unwrap();
+        assert_eq!(policies.len(), 2);
+        assert_eq!(policies[0]["subjects"][0], "nas.example.com");
+        assert_eq!(policies[1]["subjects"][0], "nasty.local");
     }
 
     #[test]
@@ -1116,8 +1154,9 @@ mod tests {
     #[test]
     fn tls_automation_one_policy_per_host() {
         // Per-host policies isolate failures and match `cert_info_for_host`'s
-        // one-cert-per-hostname assumption. Two subjects in → two policies
-        // out, not one combined-SAN policy.
+        // one-cert-per-hostname assumption. Two managed subjects in →
+        // two managed policies out + the nasty.local fallback, not one
+        // combined-SAN policy.
         let body = build_tls_automation_json(
             &[
                 TlsPolicy {
@@ -1134,9 +1173,10 @@ mod tests {
             },
         );
         let policies = body["policies"].as_array().unwrap();
-        assert_eq!(policies.len(), 2);
+        assert_eq!(policies.len(), 3);
         assert_eq!(policies[0]["subjects"][0], "a.example");
         assert_eq!(policies[1]["subjects"][0], "b.example");
+        assert_eq!(policies[2]["subjects"][0], "nasty.local");
     }
 
     #[test]
