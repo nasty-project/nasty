@@ -777,6 +777,34 @@ async fn save_proxy_disabled_reason(app_name: &str, reason: &str) -> Result<(), 
     Ok(())
 }
 
+/// Drop the `proxy_disabled_reason` field from an app's manifest.
+/// Called when the operator moves the app to subdomain mode — the
+/// recorded reason describes a path-prefix-mode failure that doesn't
+/// apply to subdomain mode, so the verdict is stale. Idempotent: if
+/// the manifest doesn't exist or the field isn't set, returns Ok.
+async fn clear_proxy_disabled_reason(app_name: &str) -> Result<(), AppsError> {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let mut manifest: serde_json::Value = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(s) => serde_json::from_str(&s)
+            .map_err(|e| AppsError::CommandFailed(format!("manifest parse: {e}")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(AppsError::CommandFailed(format!("manifest read: {e}"))),
+    };
+    let Some(map) = manifest.as_object_mut() else {
+        return Ok(());
+    };
+    if map.remove("proxy_disabled_reason").is_none() {
+        return Ok(());
+    }
+    tokio::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .await
+    .map_err(|e| AppsError::CommandFailed(format!("manifest write: {e}")))?;
+    Ok(())
+}
+
 /// Read `proxy_disabled_reason` from an app's manifest. Returns `None`
 /// when the manifest is missing, unparseable, or simply has no such
 /// field — all of which are the "no hint to surface" cases for the
@@ -3060,17 +3088,27 @@ impl AppsService {
             let saw_managed_apps = !apps.is_empty();
             let mut routes = Vec::new();
             for app in apps {
-                // Skip apps whose post-install probe disabled the
-                // reverse proxy (haze-class apps that emit absolute
-                // root-path assets). Without this check, every engine
-                // restart re-added the ingress the probe killed —
-                // user installs haze, ingress disabled, restart engine,
-                // ingress is back, /apps/haze/ goes blank again until
-                // someone notices and re-removes it. The manifest is
-                // the source of truth; honour it.
-                if app.proxy_disabled_reason.is_some() {
+                // The post-install probe disables path-prefix ingress
+                // for haze-class apps that emit absolute root-path
+                // assets — that's `proxy_disabled_reason` being set.
+                // BUT: the reason only describes a failure in
+                // path-prefix mode. If the operator later set a
+                // subdomain ingress, that mode serves the app at its
+                // own root and bypasses the absolute-path-asset
+                // problem entirely. In that case the manifest is the
+                // source of truth and the probe's verdict is stale.
+                //
+                // Skip the reconcile only when proxy_disabled_reason
+                // is set AND the operator hasn't opted into subdomain
+                // mode. Honouring a persisted subdomain here is what
+                // makes "Path-prefix → subdomain later" survive a
+                // reboot (issue #247): without it, the subdomain
+                // disappears on every restart because the probe-set
+                // reason wins over the manifest.
+                let subdomain = load_ingress_subdomain(&app.name).await;
+                if app.proxy_disabled_reason.is_some() && subdomain.is_none() {
                     info!(
-                        "apps: '{}' has proxy_disabled_reason — skipping ingress reconcile",
+                        "apps: '{}' has proxy_disabled_reason and no subdomain — skipping ingress reconcile",
                         app.name
                     );
                     continue;
@@ -3083,14 +3121,6 @@ impl AppsService {
                 else {
                     continue;
                 };
-                // Persist the subdomain mode across engine restarts by
-                // reading it back from the manifest. Without this, the
-                // reconcile pass rebuilds every route in path-prefix mode
-                // and silently downgrades user-chosen subdomain ingresses
-                // on every restart — the same "ingress comes back from
-                // the dead after a reboot" trap that proxy_disabled_reason
-                // had before #225 honoured the manifest.
-                let subdomain = load_ingress_subdomain(&app.name).await;
                 routes.push(AppRoute {
                     name: app.name,
                     host_port: port,
@@ -3156,6 +3186,27 @@ impl AppsService {
             warn!(
                 "Could not persist ingress_subdomain for '{}': {e} — \
                  the route is set in Caddy but may revert on engine restart",
+                req.name
+            );
+        }
+        // Switching from path-prefix to subdomain mode invalidates
+        // any prior `proxy_disabled_reason` the post-install probe
+        // may have recorded: that reason describes a failure in
+        // path-prefix mode (absolute root-path assets that don't
+        // route through `/apps/<name>/`), and subdomain mode serves
+        // the app at its own root where the problem doesn't apply.
+        // Clearing it here is what makes the "install with default
+        // path-prefix, fail the probe, then move to subdomain"
+        // workflow survive a reboot — without this, the reconcile
+        // pass keeps seeing the stale reason and skipping the
+        // subdomain ingress (issue #247).
+        if subdomain.is_some()
+            && let Err(e) = clear_proxy_disabled_reason(&req.name).await
+        {
+            warn!(
+                "Could not clear proxy_disabled_reason for '{}': {e} — \
+                 the subdomain route is set in Caddy but reconcile may \
+                 still skip it on engine restart",
                 req.name
             );
         }
