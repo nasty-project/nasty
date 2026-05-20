@@ -16,6 +16,9 @@
 	let tlsChallengeType = $state<'tls-alpn' | 'http' | 'dns'>('tls-alpn');
 	let tlsDnsProvider = $state('');
 	let tlsDnsCredentials = $state('');
+	let tlsDnsResolver = $state('');
+	let tlsDnsPropagationWait = $state(0);
+	let showAdvancedDns = $state(false);
 	let savingTls = $state(false);
 	let tlsChanged = $state(false);
 	let editing = $state(false);
@@ -45,9 +48,37 @@
 		tlsChallengeType = settings?.tls_challenge_type ?? 'tls-alpn';
 		tlsDnsProvider = settings?.tls_dns_provider ?? '';
 		tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
-		tlsAcmeStaging = (settings as any)?.tls_acme_staging ?? false;
+		tlsDnsResolver = settings?.tls_dns_resolver ?? '';
+		tlsDnsPropagationWait = settings?.tls_dns_propagation_wait ?? 0;
+		// Expand the advanced section if the operator has previously
+		// set either knob — they shouldn't have to hunt for the
+		// non-default value they last saved.
+		showAdvancedDns = !!tlsDnsResolver || tlsDnsPropagationWait > 0;
+		tlsAcmeStaging = settings?.tls_acme_staging ?? false;
 		try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
 	});
+
+	let downloadingCaRoot = $state(false);
+
+	async function downloadCaRoot() {
+		downloadingCaRoot = true;
+		try {
+			const pem = await client.call<string>('system.tls.local_ca_root');
+			const blob = new Blob([pem], { type: 'application/x-pem-file' });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = `nasty-local-ca-${settings?.hostname || 'root'}.crt`;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(url);
+		} catch (e) {
+			const toast = await import('$lib/toast.svelte');
+			toast.error(String(e));
+		}
+		downloadingCaRoot = false;
+	}
 
 	async function saveTls() {
 		savingTls = true;
@@ -59,6 +90,8 @@
 				tls_challenge_type: tlsChallengeType,
 				tls_dns_provider: tlsDnsProvider || null,
 				tls_dns_credentials: tlsDnsCredentials || null,
+				tls_dns_resolver: tlsDnsResolver || '',
+				tls_dns_propagation_wait: tlsDnsPropagationWait || 0,
 				tls_acme_staging: tlsAcmeStaging,
 			}),
 			tlsAcmeEnabled ? 'Let\'s Encrypt certificate requested — check status below' : 'TLS settings saved'
@@ -225,6 +258,57 @@
 						verification happens via DNS records.
 					</span>
 				</div>
+
+				<div class="mb-4">
+					<button
+						type="button"
+						onclick={() => showAdvancedDns = !showAdvancedDns}
+						class="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+					>
+						<span>{showAdvancedDns ? '▾' : '▸'}</span>
+						<span>Advanced DNS settings</span>
+					</button>
+					{#if showAdvancedDns}
+						<div class="mt-3 space-y-3 rounded-md border border-border p-3">
+							<div>
+								<label for="tls-dns-resolver" class="mb-1 block text-xs text-muted-foreground">
+									Resolvers (comma-separated)
+								</label>
+								<input
+									id="tls-dns-resolver"
+									type="text"
+									bind:value={tlsDnsResolver}
+									oninput={() => tlsChanged = true}
+									class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+									placeholder="1.1.1.1, 8.8.8.8"
+								/>
+								<span class="mt-1 block text-xs text-muted-foreground">
+									DNS servers used to verify TXT-record propagation. Default: <code>1.1.1.1, 8.8.8.8</code>.
+									Override when the box can't reach those (split-horizon DNS, air-gapped networks).
+								</span>
+							</div>
+							<div>
+								<label for="tls-dns-wait" class="mb-1 block text-xs text-muted-foreground">
+									Propagation wait (seconds)
+								</label>
+								<input
+									id="tls-dns-wait"
+									type="number"
+									min="0"
+									bind:value={tlsDnsPropagationWait}
+									oninput={() => tlsChanged = true}
+									class="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+									placeholder="30"
+								/>
+								<span class="mt-1 block text-xs text-muted-foreground">
+									Sleep this long after creating the TXT record before checking propagation. Default: 30s.
+									Bump if issuance keeps timing out — some resolvers cache NXDOMAIN aggressively (SOA MINIMUM
+									TTL up to an hour). Set <code>0</code> to use the default.
+								</span>
+							</div>
+						</div>
+					{/if}
+				</div>
 			{/if}
 
 			{#if !tlsDomain.trim() || !tlsAcmeEmail.trim() || (tlsChallengeType === 'dns' && !tlsDnsProvider)}
@@ -323,5 +407,24 @@
 				Dismiss
 			</Button>
 		{/if}
+	</section>
+
+	<!-- Local CA root (always shown — covers the IP-direct / no-ACME case) -->
+	<section class="rounded-lg border border-border p-5 lg:col-span-2">
+		<h3 class="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Local CA Root</h3>
+		<p class="text-sm text-muted-foreground mb-3">
+			Caddy serves a self-signed certificate (issued by Caddy's internal CA) for direct-IP access and any
+			hostname that doesn't have a managed Let's Encrypt cert. Browsers don't trust this CA by default —
+			import this root certificate into your OS or browser trust store once and every NASty service signed
+			by it stops triggering security warnings on this machine.
+		</p>
+		<Button size="sm" variant="secondary" onclick={downloadCaRoot} disabled={downloadingCaRoot}>
+			{downloadingCaRoot ? 'Preparing…' : 'Download root certificate (.crt)'}
+		</Button>
+		<p class="mt-2 text-xs text-muted-foreground">
+			Each NASty box has its own CA root, so you'll need to import one per box. The downloaded file is the
+			PEM-encoded root cert; import via your OS keychain (macOS), <code>certmgr</code> / Group Policy
+			(Windows), <code>update-ca-certificates</code> (Linux), or your browser's Authorities tab.
+		</p>
 	</section>
 </div>

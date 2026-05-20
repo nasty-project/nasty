@@ -577,6 +577,9 @@ export interface Settings {
 	tls_challenge_type: 'tls-alpn' | 'dns';
 	tls_dns_provider: string | null;
 	tls_dns_credentials: string | null;
+	tls_acme_staging: boolean;
+	tls_dns_resolver: string | null;
+	tls_dns_propagation_wait: number | null;
 	telemetry_enabled: boolean;
 }
 

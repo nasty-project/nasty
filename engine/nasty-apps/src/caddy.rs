@@ -78,11 +78,19 @@ pub struct TlsPolicy {
 /// caddy-dns plugin. When `None`, Caddy falls back to its default
 /// challenge order (HTTP-01 then TLS-ALPN-01) — useful when port 80 is
 /// reachable from the internet but DNS automation isn't set up.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TlsIssuer {
     pub email: Option<String>,
     pub dns_provider: Option<String>,
     pub staging: bool,
+    /// External DNS resolvers used during DNS-01 propagation checks.
+    /// `None` ⇒ engine default (`["1.1.1.1", "8.8.8.8"]`). Set when
+    /// the box can't reach those (split-horizon DNS, restricted egress).
+    pub dns_resolvers: Option<Vec<String>>,
+    /// Seconds to wait after creating the TXT record before checking
+    /// propagation. `None` ⇒ engine default (30s). Bump when resolvers
+    /// have unusually long negative-TTL caching.
+    pub dns_propagation_wait_secs: Option<u32>,
 }
 
 /// One row in the Ingress overview page — every route Caddy is serving,
@@ -644,8 +652,9 @@ fn build_acme_issuer_json(issuer: &TlsIssuer) -> Value {
         // resolver (systemd-resolved on most boxes), which in our setup
         // (split-horizon DNS, internal-only resolver, or just a slow
         // ISP cache) may not see the record for minutes — long enough
-        // that Caddy gives up. Pin to Cloudflare + Google so the box's
-        // own resolver setup doesn't block issuance.
+        // that Caddy gives up. Default to Cloudflare + Google so the
+        // box's own resolver setup doesn't block issuance; operators
+        // can override via `tls_dns_resolver` in settings.
         //
         // `propagation_delay` makes Caddy sleep N seconds after the
         // provider's API call before issuing the verification query.
@@ -654,18 +663,20 @@ fn build_acme_issuer_json(issuer: &TlsIssuer) -> Value {
         // is cached for the SOA's MINIMUM TTL — often 1 hour for
         // Cloudflare), sees no record, retries on a backoff that
         // never converges within the propagation timeout. 30s
-        // matches what the lego flow used (`--dns.propagation-wait`).
-        //
-        // Both settings mirror the lego defaults; hardcoded for now
-        // because the settings struct doesn't expose knobs. Easy to
-        // make configurable when a user has a real reason.
+        // matches what the lego flow used (`--dns.propagation-wait`)
+        // and is the default when `tls_dns_propagation_wait` is unset.
+        let resolvers: Vec<String> = issuer
+            .dns_resolvers
+            .clone()
+            .unwrap_or_else(|| vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()]);
+        let propagation_delay = format!("{}s", issuer.dns_propagation_wait_secs.unwrap_or(30));
         obj.insert(
             "challenges".into(),
             json!({
                 "dns": {
                     "provider": dns_provider_json(provider),
-                    "resolvers": ["1.1.1.1", "8.8.8.8"],
-                    "propagation_delay": "30s"
+                    "resolvers": resolvers,
+                    "propagation_delay": propagation_delay,
                 }
             }),
         );
@@ -1112,6 +1123,7 @@ mod tests {
                 email: None,
                 dns_provider: None,
                 staging: false,
+                ..Default::default()
             },
         );
         let policies = body["policies"].as_array().unwrap();
@@ -1135,6 +1147,7 @@ mod tests {
                 email: None,
                 dns_provider: None,
                 staging: false,
+                ..Default::default()
             },
         );
         let policies = body["policies"].as_array().unwrap();
@@ -1153,6 +1166,7 @@ mod tests {
                 email: Some("ops@example.com".into()),
                 dns_provider: Some("cloudflare".into()),
                 staging: false,
+                ..Default::default()
             },
         );
         let p = &body["policies"][0];
@@ -1177,6 +1191,7 @@ mod tests {
                 email: None,
                 dns_provider: None,
                 staging: true,
+                ..Default::default()
             },
         );
         let issuer = &body["policies"][0]["issuers"][0];
@@ -1184,6 +1199,52 @@ mod tests {
             issuer["ca"],
             "https://acme-staging-v02.api.letsencrypt.org/directory"
         );
+    }
+
+    #[test]
+    fn tls_automation_dns_challenge_uses_custom_resolvers_when_set() {
+        // When the operator overrides `tls_dns_resolver`, those values
+        // should make it into the challenge config verbatim instead of
+        // the hardcoded Cloudflare/Google defaults. Useful for boxes
+        // on air-gapped networks where 1.1.1.1 isn't reachable.
+        let body = build_tls_automation_json(
+            &[TlsPolicy {
+                host: "h.example".into(),
+            }],
+            &TlsIssuer {
+                email: None,
+                dns_provider: Some("cloudflare".into()),
+                staging: false,
+                dns_resolvers: Some(vec!["10.0.0.53".into(), "10.0.0.54".into()]),
+                dns_propagation_wait_secs: None,
+            },
+        );
+        let resolvers = body["policies"][0]["issuers"][0]["challenges"]["dns"]["resolvers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(resolvers.len(), 2);
+        assert_eq!(resolvers[0], "10.0.0.53");
+        assert_eq!(resolvers[1], "10.0.0.54");
+    }
+
+    #[test]
+    fn tls_automation_dns_challenge_uses_custom_propagation_wait_when_set() {
+        // Custom wait overrides the 30s default. Caddy serialises the
+        // duration as "<n>s" — the engine takes a u32 and renders it.
+        let body = build_tls_automation_json(
+            &[TlsPolicy {
+                host: "h.example".into(),
+            }],
+            &TlsIssuer {
+                email: None,
+                dns_provider: Some("cloudflare".into()),
+                staging: false,
+                dns_resolvers: None,
+                dns_propagation_wait_secs: Some(120),
+            },
+        );
+        let delay = &body["policies"][0]["issuers"][0]["challenges"]["dns"]["propagation_delay"];
+        assert_eq!(delay, "120s");
     }
 
     #[test]
@@ -1203,6 +1264,7 @@ mod tests {
                 email: None,
                 dns_provider: Some("cloudflare".into()),
                 staging: false,
+                ..Default::default()
             },
         );
         let resolvers = &body["policies"][0]["issuers"][0]["challenges"]["dns"]["resolvers"];
@@ -1227,6 +1289,7 @@ mod tests {
                 email: Some("a@b".into()),
                 dns_provider: None,
                 staging: false,
+                ..Default::default()
             },
         );
         let issuer = &body["policies"][0]["issuers"][0];
@@ -1252,6 +1315,7 @@ mod tests {
                 email: None,
                 dns_provider: None,
                 staging: false,
+                ..Default::default()
             },
         );
         let policies = body["policies"].as_array().unwrap();

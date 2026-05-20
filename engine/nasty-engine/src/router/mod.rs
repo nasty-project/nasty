@@ -128,6 +128,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.nut.status"
                 | "system.tailscale.get"
                 | "system.acme.status"
+                | "system.tls.local_ca_root"
                 | "system.metrics.history"
                 | "system.metrics.prometheus"
                 | "alert.rules.list"

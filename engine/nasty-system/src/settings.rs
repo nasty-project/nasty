@@ -97,6 +97,21 @@ pub async fn reapply_tls_from_disk() {
     }
 }
 
+/// Caddy's internal-CA root certificate. Lives in Caddy's state dir
+/// alongside the issued certs; we return its PEM so the WebUI can offer
+/// it as a download, letting operators import the cert into their
+/// OS/browser trust store and have every NASty box that uses
+/// `tls internal` (the default fallback) be trusted without per-host
+/// security warnings.
+///
+/// Returns the PEM string. None on read failure (Caddy not yet
+/// started, file permissions, no internal CA bootstrapped). Caller
+/// surfaces None as a 404-ish "not available yet" to the WebUI.
+pub async fn read_caddy_local_ca_root() -> Option<String> {
+    const ROOT_PATH: &str = "/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt";
+    tokio::fs::read_to_string(ROOT_PATH).await.ok()
+}
+
 /// Walk `/var/lib/nasty/apps/*.json` and collect every non-empty
 /// `ingress_subdomain` value. Used by [`retry_acme`] and the
 /// settings-change path so the TLS policy set always reflects every
@@ -202,6 +217,24 @@ pub struct Settings {
     /// Use Let's Encrypt staging environment (for testing, avoids rate limits).
     #[serde(default)]
     pub tls_acme_staging: bool,
+    /// External DNS resolvers (comma-separated) to use when verifying
+    /// TXT-record propagation during DNS-01. Defaults to "1.1.1.1,8.8.8.8".
+    /// Set this when the box's authoritative DNS isn't reachable via
+    /// public resolvers (split-horizon zones, air-gapped networks).
+    /// Empty / None ⇒ use the default.
+    #[serde(default)]
+    pub tls_dns_resolver: Option<String>,
+    /// Seconds to wait after creating the TXT record before checking
+    /// propagation. Defaults to 30. The recursive resolvers we use to
+    /// verify propagation often have a long negative TTL on the
+    /// `_acme-challenge.X` name (cached NXDOMAIN from prior lookups);
+    /// without a wait, Caddy queries immediately, sees the cached
+    /// answer, and the timer-based propagation check times out before
+    /// the cache flushes. Bump this when issuance still times out
+    /// after several minutes (slow DNS providers, long SOA MINIMUM
+    /// TTL on the parent zone).
+    #[serde(default)]
+    pub tls_dns_propagation_wait: Option<u32>,
     /// Whether anonymous telemetry is enabled (drive count, storage capacity).
     #[serde(default = "default_telemetry_enabled")]
     pub telemetry_enabled: bool,
@@ -330,6 +363,8 @@ impl Default for Settings {
             tls_dns_provider: None,
             tls_dns_credentials: None,
             tls_acme_staging: false,
+            tls_dns_resolver: None,
+            tls_dns_propagation_wait: None,
             telemetry_enabled: default_telemetry_enabled(),
             oidc: OidcSettings::default(),
         }
@@ -360,6 +395,10 @@ pub struct SettingsUpdate {
     pub tls_dns_credentials: Option<String>,
     /// Use staging environment.
     pub tls_acme_staging: Option<bool>,
+    /// External DNS resolvers (comma-separated). Empty string clears.
+    pub tls_dns_resolver: Option<String>,
+    /// Propagation wait in seconds. 0 clears (engine treats as default).
+    pub tls_dns_propagation_wait: Option<u32>,
     /// Enable/disable anonymous telemetry.
     pub telemetry_enabled: Option<bool>,
 }
@@ -485,6 +524,27 @@ impl SettingsService {
         {
             settings.tls_acme_staging = staging;
             tls_changed = true;
+        }
+        if let Some(resolver) = update.tls_dns_resolver {
+            let resolver = if resolver.trim().is_empty() {
+                None
+            } else {
+                Some(resolver.trim().to_string())
+            };
+            if settings.tls_dns_resolver != resolver {
+                settings.tls_dns_resolver = resolver;
+                tls_changed = true;
+            }
+        }
+        if let Some(wait) = update.tls_dns_propagation_wait {
+            // 0 ⇒ clear (engine falls back to the default 30s). Allows
+            // the WebUI form to express "use default" without needing a
+            // separate null/clear field.
+            let wait = if wait == 0 { None } else { Some(wait) };
+            if settings.tls_dns_propagation_wait != wait {
+                settings.tls_dns_propagation_wait = wait;
+                tls_changed = true;
+            }
         }
         if let Some(telemetry) = update.telemetry_enabled {
             settings.telemetry_enabled = telemetry;
@@ -772,6 +832,17 @@ pub async fn apply_caddy_tls_with_apps(
             None
         },
         staging: settings.tls_acme_staging,
+        dns_resolvers: settings
+            .tls_dns_resolver
+            .as_deref()
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty()),
+        dns_propagation_wait_secs: settings.tls_dns_propagation_wait,
     };
 
     let api = nasty_apps::caddy::CaddyApi::new();
