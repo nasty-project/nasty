@@ -492,11 +492,8 @@ async fn archive_path_once(path: &str, flag: &str, label: &str) {
                 "{label} migration: moved {path} → {archive_path}. \
                  Safe to delete once Caddy admin-API TLS is confirmed working."
             );
-            let _ = tokio::fs::write(
-                flag,
-                format!("archived to {archive_path}\n").as_bytes(),
-            )
-            .await;
+            let _ =
+                tokio::fs::write(flag, format!("archived to {archive_path}\n").as_bytes()).await;
         }
         Err(e) => {
             warn!("{label} migration: rename {path} → {archive_path} failed: {e}");

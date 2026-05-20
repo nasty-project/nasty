@@ -795,7 +795,10 @@ async fn env_matches_running(expected: &str) -> bool {
 /// Build the `Vec<TlsPolicy>` to push for the current settings + app
 /// subdomain set. Returns empty when ACME is disabled — the caller
 /// PUTs that empty list to clear Caddy's automation.
-fn build_policy_set(settings: &Settings, app_subdomains: &[String]) -> Vec<nasty_apps::caddy::TlsPolicy> {
+fn build_policy_set(
+    settings: &Settings,
+    app_subdomains: &[String],
+) -> Vec<nasty_apps::caddy::TlsPolicy> {
     if !settings.tls_acme_enabled {
         return Vec::new();
     }
@@ -868,8 +871,7 @@ pub async fn refresh_acme_status_from_disk(settings: &Settings) {
         let status = ACME_STATUS.get_or_init(|| std::sync::Mutex::new(AcmeStatus::default()));
         if let Ok(mut s) = status.lock() {
             s.state = "idle".into();
-            s.message =
-                "ACME disabled; Caddy's internal CA is serving the :443 fallback.".into();
+            s.message = "ACME disabled; Caddy's internal CA is serving the :443 fallback.".into();
             s.domain = domain;
             s.expires = None;
             s.issued = None;
