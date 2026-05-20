@@ -100,7 +100,15 @@ pub(super) async fn try_route(
         },
         "apps.remove" => match require_str(req, "name") {
             Ok(name) => match state.apps.remove(name).await {
-                Ok(()) => ok(req, "ok"),
+                Ok(()) => {
+                    // Cover the case where the removed app had a
+                    // subdomain ingress — Caddy stops trying to renew
+                    // the now-orphaned cert. The internal remove path
+                    // in nasty-apps clears the route via the admin API
+                    // but doesn't know about the TLS-automation layer.
+                    tokio::spawn(nasty_system::settings::reapply_tls_from_disk());
+                    ok(req, "ok")
+                }
                 Err(e) => err(req, e),
             },
             Err(r) => r,
@@ -273,7 +281,14 @@ pub(super) async fn try_route(
                     err(req, format!("subdomain conflict: {reason}"))
                 } else {
                     match state.apps.ingress_set(p).await {
-                        Ok(v) => ok(req, v),
+                        Ok(v) => {
+                            // Refresh Caddy's TLS automation so a new
+                            // subdomain gets a cert immediately. Spawn
+                            // so the RPC reply isn't blocked by the
+                            // admin-API round-trip.
+                            tokio::spawn(nasty_system::settings::reapply_tls_from_disk());
+                            ok(req, v)
+                        }
                         Err(e) => err(req, e),
                     }
                 }
@@ -300,7 +315,13 @@ pub(super) async fn try_route(
         }
         "apps.ingress.remove" => match require_str(req, "name") {
             Ok(name) => match state.apps.ingress_remove(name).await {
-                Ok(()) => ok(req, "ok"),
+                Ok(()) => {
+                    // Reapply so Caddy stops trying to renew the cert
+                    // for the now-orphaned subdomain. Same fire-and-
+                    // forget pattern as the set arm above.
+                    tokio::spawn(nasty_system::settings::reapply_tls_from_disk());
+                    ok(req, "ok")
+                }
                 Err(e) => err(req, e),
             },
             Err(r) => r,
