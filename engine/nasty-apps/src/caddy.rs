@@ -475,10 +475,38 @@ impl CaddyApi {
         policies: &[TlsPolicy],
         issuer: &TlsIssuer,
     ) -> Result<(), String> {
-        // 1) PATCH the policies array. This says HOW to issue each
-        //    hostname's cert (ACME issuer + DNS provider config).
-        let body = build_tls_automation_json(policies, issuer);
-        let url = format!("{}/config/apps/tls/automation", self.base_url);
+        // Single PATCH against `/config/apps/tls` that replaces both
+        // `automation` and `certificates` at once.
+        //
+        // Why one PATCH instead of two: each PATCH triggers a Caddy
+        // config reload, which CANCELS any in-flight ACME job. With
+        // separate PATCHes — first automation, then automate — the
+        // first PATCH starts issuance for a newly-added hostname, the
+        // second PATCH cancels it mid-flight, the in-flight DNS-01
+        // Present call gets aborted, and the TXT record never lands on
+        // the provider. Then Caddy retries with a fresh order/token,
+        // but some DNS providers (including caddy-dns/cloudflare in
+        // 2.11) handle rapid Present/CleanUp cycles poorly and fail
+        // silently — the next provider call sees the prior cleanup
+        // state and skips. Observed on 10.10.20.100 with whoami.0f.ee:
+        // Caddy logged "obtaining certificate" then "context canceled"
+        // sub-second apart, and no TXT record ever appeared on
+        // Cloudflare for the challenge.
+        //
+        // `automation.policies` says HOW to issue; `certificates.automate`
+        // says WHICH names to obtain. Both need to be set together;
+        // setting just one is incomplete state Caddy shouldn't see.
+        let automate: Vec<&str> = policies
+            .iter()
+            .map(|p| p.host.as_str())
+            .chain(std::iter::once("nasty.local"))
+            .collect();
+        let automation = build_tls_automation_json(policies, issuer);
+        let body = json!({
+            "automation": automation,
+            "certificates": { "automate": automate },
+        });
+        let url = format!("{}/config/apps/tls", self.base_url);
         let resp = self
             .client
             .patch(&url)
@@ -490,32 +518,6 @@ impl CaddyApi {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("PATCH {url}: status {status} body={text}"));
-        }
-
-        // 2) PATCH `certificates.automate` with the same hostname set.
-        //    This is the list Caddy walks to *trigger* issuance — without
-        //    it the policies sit there describing how to issue certs
-        //    Caddy never tries to obtain. The Caddyfile populates this
-        //    from `tls internal` on the fallback site (nasty.local
-        //    only); ACME-managed hosts are admin-API-only so they have
-        //    to be added here explicitly.
-        let automate: Vec<&str> = policies
-            .iter()
-            .map(|p| p.host.as_str())
-            .chain(std::iter::once("nasty.local"))
-            .collect();
-        let automate_url = format!("{}/config/apps/tls/certificates/automate", self.base_url);
-        let resp = self
-            .client
-            .patch(&automate_url)
-            .json(&automate)
-            .send()
-            .await
-            .map_err(|e| format!("PATCH {automate_url}: {e}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("PATCH {automate_url}: status {status} body={text}"));
         }
 
         if policies.is_empty() {
