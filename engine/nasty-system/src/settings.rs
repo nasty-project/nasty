@@ -782,7 +782,62 @@ pub async fn apply_caddy_tls_with_apps(
     }
 
     refresh_acme_status_from_disk(settings).await;
+
+    // Caddy issues asynchronously. The status set above will be
+    // "running" / "Waiting for Caddy to obtain a certificate..." until
+    // the file lands on disk — which could be seconds (HTTP-01 from a
+    // public IP) or a few minutes (DNS-01 with our 30s propagation
+    // delay + ACME finalize round-trip). Without a follow-up poll the
+    // WebUI would stay on the "Provisioning" badge forever; users
+    // would have to refresh the engine to see "success".
+    //
+    // Spawn a polling task that re-runs refresh_acme_status_from_disk
+    // until the cert appears or we hit a 5-minute cap. Cheap (a few
+    // statx calls per tick) and the engine doesn't outlive Caddy's
+    // issuance window in practice. Only spawn when ACME is on and a
+    // managed cert is expected; otherwise there's nothing to wait for.
+    if settings.tls_acme_enabled && !policies.is_empty() {
+        let settings_for_poll = settings.clone();
+        tokio::spawn(async move {
+            poll_until_issued(&settings_for_poll).await;
+        });
+    }
+
     Ok(())
+}
+
+/// Re-run `refresh_acme_status_from_disk` on a fixed cadence until the
+/// status flips to `success` or `MAX_POLL_SECS` elapses. Called from
+/// `apply_caddy_tls_with_apps` after a successful policy push so the
+/// WebUI's "Provisioning" badge transitions to "Active" without the
+/// user having to refresh or restart the engine.
+///
+/// Cadence is 5s — Caddy DNS-01 takes ~30s minimum (our propagation
+/// delay) so we'd never catch a sub-5s issuance anyway, and a tighter
+/// poll would just spin against an empty cert dir.
+async fn poll_until_issued(settings: &Settings) {
+    const MAX_POLL_SECS: u64 = 300;
+    const POLL_INTERVAL_SECS: u64 = 5;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(MAX_POLL_SECS);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+        refresh_acme_status_from_disk(settings).await;
+        if get_acme_status().state == "success" {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            // Don't escalate to "error" — Caddy is still retrying in the
+            // background and might succeed minutes later. Leave the
+            // status as-is so the operator can see whatever Caddy's
+            // last reported state was; the next settings change or
+            // retry_acme call will pick it up.
+            warn!(
+                "acme: cert not issued within {MAX_POLL_SECS}s; leaving \
+                 status as-is. Caddy will keep retrying in the background."
+            );
+            return;
+        }
+    }
 }
 
 /// Verify that every `KEY=` line in `env_content` has a matching key

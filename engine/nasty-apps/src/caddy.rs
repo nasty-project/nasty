@@ -647,17 +647,25 @@ fn build_acme_issuer_json(issuer: &TlsIssuer) -> Value {
         // that Caddy gives up. Pin to Cloudflare + Google so the box's
         // own resolver setup doesn't block issuance.
         //
-        // This mirrors what the lego flow did with `--dns.resolvers`
-        // before the Caddy migration. Hardcoded for now because the
-        // settings struct doesn't yet expose a knob; it's reasonable
-        // to make this configurable later, but every realistic box
-        // can reach 1.1.1.1 and 8.8.8.8.
+        // `propagation_delay` makes Caddy sleep N seconds after the
+        // provider's API call before issuing the verification query.
+        // Without this Caddy queries instantly, hits the resolver's
+        // negative cache (the prior NXDOMAIN for `_acme-challenge.X`
+        // is cached for the SOA's MINIMUM TTL — often 1 hour for
+        // Cloudflare), sees no record, retries on a backoff that
+        // never converges within the propagation timeout. 30s
+        // matches what the lego flow used (`--dns.propagation-wait`).
+        //
+        // Both settings mirror the lego defaults; hardcoded for now
+        // because the settings struct doesn't expose knobs. Easy to
+        // make configurable when a user has a real reason.
         obj.insert(
             "challenges".into(),
             json!({
                 "dns": {
                     "provider": dns_provider_json(provider),
-                    "resolvers": ["1.1.1.1", "8.8.8.8"]
+                    "resolvers": ["1.1.1.1", "8.8.8.8"],
+                    "propagation_delay": "30s"
                 }
             }),
         );
