@@ -706,6 +706,15 @@ pub async fn apply_caddy_tls_with_apps(
     }
 
     let env_content = caddy_acme_env(settings);
+    // Read the prior file BEFORE writing so we can detect a real
+    // change. Reading after write would just compare what we wrote to
+    // what we wrote — that bug shipped once already (Caddy stayed up
+    // with an empty EnvironmentFile and every `{env.X}` reference
+    // resolved to ""). Missing file ⇒ empty prior content ⇒ change
+    // detected, which is what we want on first migration.
+    let prior_env_content = tokio::fs::read_to_string(CADDY_ACME_ENV_PATH)
+        .await
+        .unwrap_or_default();
     tokio::fs::write(CADDY_ACME_ENV_PATH, &env_content)
         .await
         .map_err(|e| format!("write {CADDY_ACME_ENV_PATH}: {e}"))?;
@@ -717,16 +726,15 @@ pub async fn apply_caddy_tls_with_apps(
     }
     nasty_common::cmd::try_run("chown", &["root:caddy", CADDY_ACME_ENV_PATH]).await;
 
+    let env_changed = env_content.trim() != prior_env_content.trim();
+
     // Restart Caddy if the env file changed — admin-API config can
     // reference `{env.X}` but those references are resolved against the
     // process environment, populated from EnvironmentFile at unit
     // start. Updates to the file don't reach the running process until
     // it's restarted. Skip when ACME is off (no env to refresh) or
-    // when creds match what's already loaded (env_matches_running).
-    if settings.tls_acme_enabled
-        && settings.tls_challenge_type == "dns"
-        && !env_matches_running(&env_content).await
-    {
+    // when creds match what's already loaded.
+    if settings.tls_acme_enabled && settings.tls_challenge_type == "dns" && env_changed {
         let restart = tokio::process::Command::new("systemctl")
             .args(["restart", "caddy"])
             .output()
@@ -776,20 +784,6 @@ pub async fn apply_caddy_tls_with_apps(
 
     refresh_acme_status_from_disk(settings).await;
     Ok(())
-}
-
-/// Cheap check: read the running Caddy unit's EnvironmentFile contents
-/// via systemd and see whether they match `expected`. Used to skip an
-/// expensive restart when the operator hits "save" without actually
-/// changing credentials. Returns true on any read failure so we err on
-/// the side of NOT restarting (safer to leave running than to bounce
-/// for no reason).
-async fn env_matches_running(expected: &str) -> bool {
-    let current = match tokio::fs::read_to_string(CADDY_ACME_ENV_PATH).await {
-        Ok(s) => s,
-        Err(_) => return true,
-    };
-    current.trim() == expected.trim()
 }
 
 /// Build the `Vec<TlsPolicy>` to push for the current settings + app
