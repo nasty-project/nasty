@@ -706,15 +706,6 @@ pub async fn apply_caddy_tls_with_apps(
     }
 
     let env_content = caddy_acme_env(settings);
-    // Read the prior file BEFORE writing so we can detect a real
-    // change. Reading after write would just compare what we wrote to
-    // what we wrote — that bug shipped once already (Caddy stayed up
-    // with an empty EnvironmentFile and every `{env.X}` reference
-    // resolved to ""). Missing file ⇒ empty prior content ⇒ change
-    // detected, which is what we want on first migration.
-    let prior_env_content = tokio::fs::read_to_string(CADDY_ACME_ENV_PATH)
-        .await
-        .unwrap_or_default();
     tokio::fs::write(CADDY_ACME_ENV_PATH, &env_content)
         .await
         .map_err(|e| format!("write {CADDY_ACME_ENV_PATH}: {e}"))?;
@@ -726,15 +717,23 @@ pub async fn apply_caddy_tls_with_apps(
     }
     nasty_common::cmd::try_run("chown", &["root:caddy", CADDY_ACME_ENV_PATH]).await;
 
-    let env_changed = env_content.trim() != prior_env_content.trim();
-
-    // Restart Caddy if the env file changed — admin-API config can
-    // reference `{env.X}` but those references are resolved against the
-    // process environment, populated from EnvironmentFile at unit
-    // start. Updates to the file don't reach the running process until
-    // it's restarted. Skip when ACME is off (no env to refresh) or
-    // when creds match what's already loaded.
-    if settings.tls_acme_enabled && settings.tls_challenge_type == "dns" && env_changed {
+    // Decide whether to restart Caddy. The naive check (did the file
+    // content change?) is wrong: an earlier deploy may have written
+    // the file *after* Caddy had already started reading an empty
+    // version, leaving the file content correct but Caddy's process
+    // env empty. The file content is now identical to what we'd
+    // write, change-detection says "skip", and every `{env.X}` in our
+    // pushed config resolves to "" — exactly what was happening in
+    // production.
+    //
+    // Direct check: read Caddy's /proc/<pid>/environ and see whether
+    // every KEY from acme.env is actually loaded into the running
+    // process. Missing any key ⇒ restart. Engine runs as root so it
+    // can read /proc/<other-uid-pid>/environ without issue.
+    let needs_restart = settings.tls_acme_enabled
+        && settings.tls_challenge_type == "dns"
+        && !caddy_environ_has_keys_from(&env_content).await;
+    if needs_restart {
         let restart = tokio::process::Command::new("systemctl")
             .args(["restart", "caddy"])
             .output()
@@ -784,6 +783,69 @@ pub async fn apply_caddy_tls_with_apps(
 
     refresh_acme_status_from_disk(settings).await;
     Ok(())
+}
+
+/// Verify that every `KEY=` line in `env_content` has a matching key
+/// in the running Caddy process's environment. Returns `false` if any
+/// expected key is missing — caller should restart Caddy to refresh
+/// the EnvironmentFile.
+///
+/// `false` is also returned when Caddy isn't running (no MainPID, or
+/// /proc/<pid>/environ unreadable) so the caller restarts and gets a
+/// fresh process. Empty `env_content` returns `true` (nothing to
+/// verify, no restart needed).
+///
+/// Read directly from /proc/<pid>/environ rather than from systemd
+/// because systemd's `EnvironmentFile` only loads at unit start —
+/// there's no "show me the env vars systemd thinks the unit has"
+/// query that reflects updates between start and now. /proc is
+/// authoritative.
+async fn caddy_environ_has_keys_from(env_content: &str) -> bool {
+    let expected_keys: Vec<&str> = env_content
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
+        .filter(|k| !k.is_empty())
+        .collect();
+    if expected_keys.is_empty() {
+        return true;
+    }
+    let Some(pid) = caddy_main_pid().await else {
+        return false;
+    };
+    let environ_path = format!("/proc/{pid}/environ");
+    let environ_bytes = match tokio::fs::read(&environ_path).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("read {environ_path}: {e}");
+            return false;
+        }
+    };
+    // /proc/<pid>/environ is NUL-separated KEY=VAL entries.
+    let entries: Vec<&[u8]> = environ_bytes.split(|&b| b == 0).collect();
+    for key in expected_keys {
+        let needle = format!("{key}=");
+        let needle_bytes = needle.as_bytes();
+        let present = entries.iter().any(|e| e.starts_with(needle_bytes));
+        if !present {
+            return false;
+        }
+    }
+    true
+}
+
+/// Look up Caddy's MainPID via systemd. Returns None when the unit
+/// isn't running (MainPID==0) or when systemctl can't be invoked.
+async fn caddy_main_pid() -> Option<u32> {
+    let out = tokio::process::Command::new("systemctl")
+        .args(["show", "-p", "MainPID", "--value", "caddy.service"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    if pid == 0 { None } else { Some(pid) }
 }
 
 /// Build the `Vec<TlsPolicy>` to push for the current settings + app
