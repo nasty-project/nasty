@@ -467,6 +467,8 @@ impl CaddyApi {
         policies: &[TlsPolicy],
         issuer: &TlsIssuer,
     ) -> Result<(), String> {
+        // 1) PATCH the policies array. This says HOW to issue each
+        //    hostname's cert (ACME issuer + DNS provider config).
         let body = build_tls_automation_json(policies, issuer);
         let url = format!("{}/config/apps/tls/automation", self.base_url);
         let resp = self
@@ -481,6 +483,33 @@ impl CaddyApi {
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("PATCH {url}: status {status} body={text}"));
         }
+
+        // 2) PATCH `certificates.automate` with the same hostname set.
+        //    This is the list Caddy walks to *trigger* issuance — without
+        //    it the policies sit there describing how to issue certs
+        //    Caddy never tries to obtain. The Caddyfile populates this
+        //    from `tls internal` on the fallback site (nasty.local
+        //    only); ACME-managed hosts are admin-API-only so they have
+        //    to be added here explicitly.
+        let automate: Vec<&str> = policies
+            .iter()
+            .map(|p| p.host.as_str())
+            .chain(std::iter::once("nasty.local"))
+            .collect();
+        let automate_url = format!("{}/config/apps/tls/certificates/automate", self.base_url);
+        let resp = self
+            .client
+            .patch(&automate_url)
+            .json(&automate)
+            .send()
+            .await
+            .map_err(|e| format!("PATCH {automate_url}: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("PATCH {automate_url}: status {status} body={text}"));
+        }
+
         if policies.is_empty() {
             info!("caddy: TLS automation set to fallback-only (nasty.local internal CA)");
         } else {
@@ -609,9 +638,28 @@ fn build_acme_issuer_json(issuer: &TlsIssuer) -> Value {
         );
     }
     if let Some(provider) = issuer.dns_provider.as_deref() {
+        // `resolvers` tells Caddy/certmagic which DNS servers to use
+        // when verifying that the TXT challenge record has propagated.
+        // Without this, propagation checks go through the local stub
+        // resolver (systemd-resolved on most boxes), which in our setup
+        // (split-horizon DNS, internal-only resolver, or just a slow
+        // ISP cache) may not see the record for minutes — long enough
+        // that Caddy gives up. Pin to Cloudflare + Google so the box's
+        // own resolver setup doesn't block issuance.
+        //
+        // This mirrors what the lego flow did with `--dns.resolvers`
+        // before the Caddy migration. Hardcoded for now because the
+        // settings struct doesn't yet expose a knob; it's reasonable
+        // to make this configurable later, but every realistic box
+        // can reach 1.1.1.1 and 8.8.8.8.
         obj.insert(
             "challenges".into(),
-            json!({ "dns": { "provider": dns_provider_json(provider) } }),
+            json!({
+                "dns": {
+                    "provider": dns_provider_json(provider),
+                    "resolvers": ["1.1.1.1", "8.8.8.8"]
+                }
+            }),
         );
     }
     Value::Object(obj)
@@ -1128,6 +1176,32 @@ mod tests {
             issuer["ca"],
             "https://acme-staging-v02.api.letsencrypt.org/directory"
         );
+    }
+
+    #[test]
+    fn tls_automation_dns_challenge_pins_external_resolvers() {
+        // DNS propagation check has to bypass the box's stub resolver
+        // (systemd-resolved on most boxes) — without an explicit
+        // resolver list, certmagic queries 127.0.0.53, may not see the
+        // freshly-set TXT record for minutes, and gives up. Pin to
+        // Cloudflare + Google so issuance doesn't depend on whatever
+        // DNS the operator has wired up locally. Mirrors what the
+        // lego flow did with `--dns.resolvers` before the switch.
+        let body = build_tls_automation_json(
+            &[TlsPolicy {
+                host: "h.example".into(),
+            }],
+            &TlsIssuer {
+                email: None,
+                dns_provider: Some("cloudflare".into()),
+                staging: false,
+            },
+        );
+        let resolvers = &body["policies"][0]["issuers"][0]["challenges"]["dns"]["resolvers"];
+        let resolvers = resolvers.as_array().expect("resolvers array present");
+        assert_eq!(resolvers.len(), 2);
+        assert_eq!(resolvers[0], "1.1.1.1");
+        assert_eq!(resolvers[1], "8.8.8.8");
     }
 
     #[test]
