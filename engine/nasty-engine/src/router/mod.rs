@@ -115,6 +115,31 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "apps.compose.remove"
                 | "apps.ingress.set"
                 | "apps.ingress.remove"
+                // Backup lifecycle is operator territory in a NAS
+                // appliance — same role that manages shares + apps
+                // typically manages where the data is copied. The
+                // read paths (`backup.profile.get`/`list`,
+                // `backup.status`, `backup.snapshots`) are already
+                // in `is_read_only`, so credentials in profiles are
+                // already visible to operators; admitting the write
+                // paths doesn't widen secrets exposure.
+                | "backup.profile.create"
+                | "backup.profile.update"
+                | "backup.profile.delete"
+                | "backup.run"
+                | "backup.repo.check"
+                | "backup.repo.init"
+                // Service-protocol toggles (NFS/SMB/iSCSI/NVMe-oF
+                // server services + SSH/mDNS/SMART). Operators were
+                // creating shares for protocols they couldn't turn
+                // on — the share would land on disk but no server
+                // was listening. Same coupling as share CRUD.
+                | "service.protocol.enable"
+                | "service.protocol.disable"
+                // VM disk-image import. Operator already has
+                // `vm.create` etc.; without import they can't
+                // populate the disk to boot from.
+                | "vm.images.ensure"
                 | "firmware.update"
         )
 }
