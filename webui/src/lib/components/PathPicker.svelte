@@ -64,12 +64,22 @@
 
 	$effect(() => {
 		if (open) {
-			currentPath = normalizeRel(initialPath);
+			// Snapshot the starting path into a local before writing
+			// to the reactive `currentPath` — passing `currentPath`
+			// itself to `browse()` here would make it a dependency of
+			// this effect (Svelte 5 tracks reactive reads regardless of
+			// any prior write in the same run). When `browse()` later
+			// async-updates `currentPath` after a fetch, the effect
+			// would re-run, reset `currentPath` back to `initialPath`,
+			// and re-fetch the root — wiping the descent and producing
+			// the "click does nothing but blink" behaviour from #252.
+			const start = normalizeRel(initialPath);
+			currentPath = start;
 			mkdirOpen = false;
 			subvolOpen = false;
 			mkdirName = '';
 			subvolName = '';
-			browse(currentPath);
+			browse(start);
 		}
 	});
 
