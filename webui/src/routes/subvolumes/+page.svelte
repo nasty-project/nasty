@@ -461,25 +461,117 @@
 		'vms': 'Virtual machine images and disk storage',
 	};
 
+	// Delete-with-cascade dialog state. The current confirm() helper
+	// only renders a text body, which can't express the structured
+	// "these four shares will be removed too" / "these three things
+	// you have to clean up first" branching that a real cascade needs.
+	let deleteSv: Subvolume | null = $state(null);
+	let deleteChildren: string[] = $state([]);
+	let deleteDeps: SubvolumeDependents | null = $state(null);
+	let cascadeRunning = $state(false);
+	let cascadeStatus = $state('');
+
+	/** Dependents we can safely delete on the user's behalf in response
+	 * to "delete the subvolume." Each entry maps the human-readable
+	 * label shown in the dialog onto the `share.<svc>.delete` RPC and
+	 * the entity ID to pass it. NFS/SMB/iSCSI/NVMe-oF are pure config
+	 * removals — no data loss outside the subvolume itself, which is
+	 * about to go anyway. */
+	type CascadableDep = { kind: 'nfs' | 'smb' | 'iscsi' | 'nvmeof'; label: string; id: string };
+
+	const cascadableDeps = $derived.by((): CascadableDep[] => {
+		if (!deleteDeps) return [];
+		const out: CascadableDep[] = [];
+		// dependents stores SmbShare.name (not id) and IscsiTarget.iqn /
+		// NvmeofSubsystem.nqn — look up the id via the per-service list
+		// so we can pass the right thing to the delete RPC.
+		for (const id of deleteDeps.nfs_shares) {
+			const s = allNfs.find(x => x.id === id);
+			out.push({ kind: 'nfs', label: `NFS share at ${s?.path ?? id}`, id });
+		}
+		for (const name of deleteDeps.smb_shares) {
+			const s = allSmb.find(x => x.name === name);
+			if (s) out.push({ kind: 'smb', label: `SMB share '${name}'`, id: s.id });
+		}
+		for (const iqn of deleteDeps.iscsi_targets) {
+			const t = allIscsi.find(x => x.iqn === iqn);
+			if (t) out.push({ kind: 'iscsi', label: `iSCSI target ${iqn}`, id: t.id });
+		}
+		for (const nqn of deleteDeps.nvmeof_subsystems) {
+			const s = allNvmeof.find(x => x.nqn === nqn);
+			if (s) out.push({ kind: 'nvmeof', label: `NVMe-oF subsystem ${nqn}`, id: s.id });
+		}
+		return out;
+	});
+
+	/** Dependents that the user has to remove manually before the
+	 * subvolume can go. Apps/VMs/backups all imply non-trivial
+	 * lifecycles we shouldn't tear down implicitly from a Delete
+	 * Subvolume click. */
+	const blockingDeps = $derived.by((): { label: string; route: string }[] => {
+		if (!deleteDeps) return [];
+		const out: { label: string; route: string }[] = [];
+		for (const v of deleteDeps.vms) out.push({ label: `VM '${v}'`, route: '/vms' });
+		for (const a of deleteDeps.apps) out.push({ label: `app '${a}'`, route: '/apps' });
+		for (const b of deleteDeps.backup_jobs) out.push({ label: `backup job '${b}'`, route: '/backups' });
+		return out;
+	});
+
 	async function deleteSubvolume(sv: Subvolume) {
-		const systemUse = SYSTEM_SUBVOLUMES[sv.name];
-		// Check for child subvolumes
+		// Look up child subvolumes synchronously into the dialog state
+		// so the body renders the full impact before any destructive
+		// action is taken.
 		let children: string[] = [];
 		try { children = await client.call<string[]>('subvolume.children', { filesystem: sv.filesystem, name: sv.name }); } catch {}
-		let warning = '';
-		if (systemUse) {
-			warning += `This subvolume is used by the system for: ${systemUse}. Deleting it may break functionality. `;
+		deleteSv = sv;
+		deleteChildren = children;
+		deleteDeps = dependentsByPath.get(sv.path) ?? null;
+	}
+
+	function cancelDelete() {
+		if (cascadeRunning) return;
+		deleteSv = null;
+		deleteChildren = [];
+		deleteDeps = null;
+		cascadeStatus = '';
+	}
+
+	async function runDelete() {
+		if (!deleteSv) return;
+		const sv = deleteSv;
+		cascadeRunning = true;
+		try {
+			// Walk cascadable dependents first. Order doesn't strictly
+			// matter for the four service types (none nest into each
+			// other) but iSCSI/NVMe-oF first feels right because they
+			// hold the loop device open — clearing them first means the
+			// subvolume.delete that follows runs against an idle device.
+			const deps = cascadableDeps;
+			for (let i = 0; i < deps.length; i++) {
+				const d = deps[i];
+				cascadeStatus = `Removing ${d.label} (${i + 1}/${deps.length})…`;
+				const rpc = `share.${d.kind}.delete`;
+				try {
+					await client.call(rpc, { id: d.id });
+				} catch (e) {
+					alert(`Failed to remove ${d.label}: ${e instanceof Error ? e.message : String(e)}\n\nThe subvolume was NOT deleted. Resolve the error and retry.`);
+					return;
+				}
+			}
+			cascadeStatus = `Deleting subvolume…`;
+			const ok = await withToast(
+				() => client.call('subvolume.delete', { filesystem: sv.filesystem, name: sv.name }),
+				`Subvolume "${sv.name}" deleted`
+			);
+			if (ok === undefined) return;
+			deleteSv = null;
+			deleteChildren = [];
+			deleteDeps = null;
+			await refresh();
+		} finally {
+			cascadeRunning = false;
+			cascadeStatus = '';
 		}
-		if (children.length > 0) {
-			warning += `This will also delete ${children.length} nested subvolume${children.length > 1 ? 's' : ''}: ${children.join(', ')}. `;
-		}
-		warning += 'All snapshots will also be deleted.';
-		if (!await confirm(`Delete "${sv.name}"?`, warning)) return;
-		await withToast(
-			() => client.call('subvolume.delete', { filesystem: sv.filesystem, name: sv.name }),
-			`Subvolume "${sv.name}" deleted`
-		);
-		await refresh();
 	}
 
 	async function attachSubvolume(sv: Subvolume) {
@@ -1521,6 +1613,84 @@
 			<Button size="sm" onclick={cloneSubvolume}>Create</Button>
 			<Button variant="secondary" size="sm" onclick={() => showClone = null}>Cancel</Button>
 		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- Delete subvolume with cascade. Replaces the old confirm() flow so
+     the user can see which shares / targets get cleaned up alongside,
+     instead of hitting a wall when the subvolume turns out to be
+     in use. -->
+<Dialog.Root open={deleteSv !== null} onOpenChange={(open) => { if (!open) cancelDelete(); }}>
+	<Dialog.Content>
+		<Dialog.Header>
+			<Dialog.Title>Delete subvolume "{deleteSv?.name ?? ''}"</Dialog.Title>
+		</Dialog.Header>
+
+		{#if deleteSv}
+			{@const systemUse = SYSTEM_SUBVOLUMES[deleteSv.name]}
+			{#if systemUse}
+				<div class="mb-3 rounded-md border border-amber-700/50 bg-amber-950/30 p-3 text-sm">
+					<strong class="text-amber-400">System subvolume.</strong>
+					<span class="text-muted-foreground">Used by the system for: {systemUse}. Deleting may break functionality.</span>
+				</div>
+			{/if}
+
+			{#if blockingDeps.length > 0}
+				<!-- Apps / VMs / backups can't be torn down implicitly from
+				     a Delete Subvolume click — those have their own
+				     lifecycles. Refuse with a clear pointer to where to
+				     clean them up. -->
+				<div class="mb-3 rounded-md border border-red-700/50 bg-red-950/30 p-3 text-sm">
+					<p class="mb-2 font-semibold text-red-400">Cannot delete — clean these up first:</p>
+					<ul class="ml-4 list-disc space-y-1 text-muted-foreground">
+						{#each blockingDeps as b}
+							<li>
+								{b.label}
+								<a href={b.route} class="ml-1 text-xs text-primary underline">go to {b.route}</a>
+							</li>
+						{/each}
+					</ul>
+				</div>
+				<Dialog.Footer>
+					<Button variant="secondary" size="sm" onclick={cancelDelete}>Close</Button>
+				</Dialog.Footer>
+			{:else}
+				<p class="mb-3 text-sm text-muted-foreground">
+					{#if deleteChildren.length > 0}
+						This will also delete {deleteChildren.length} nested subvolume{deleteChildren.length === 1 ? '' : 's'}: {deleteChildren.join(', ')}.
+					{/if}
+					All snapshots will also be deleted.
+				</p>
+
+				{#if cascadableDeps.length > 0}
+					<div class="mb-3 rounded-md border border-border bg-muted/20 p-3 text-sm">
+						<p class="mb-2 font-semibold">
+							Currently in use — these will be removed as part of the delete:
+						</p>
+						<ul class="ml-4 list-disc space-y-1 text-muted-foreground">
+							{#each cascadableDeps as d}
+								<li class="font-mono text-xs">{d.label}</li>
+							{/each}
+						</ul>
+					</div>
+				{/if}
+
+				{#if cascadeRunning}
+					<div class="mb-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+						{cascadeStatus || 'Working…'}
+					</div>
+				{/if}
+
+				<Dialog.Footer>
+					<Button variant="destructive" size="sm" onclick={runDelete} disabled={cascadeRunning}>
+						{cascadableDeps.length > 0
+							? `Delete subvolume + ${cascadableDeps.length} dependent${cascadableDeps.length === 1 ? '' : 's'}`
+							: 'Delete subvolume'}
+					</Button>
+					<Button variant="secondary" size="sm" onclick={cancelDelete} disabled={cascadeRunning}>Cancel</Button>
+				</Dialog.Footer>
+			{/if}
+		{/if}
 	</Dialog.Content>
 </Dialog.Root>
 
