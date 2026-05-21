@@ -340,6 +340,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/files/mkdir", post(files_mkdir_handler))
         .route("/api/files/rename", post(files_rename_handler))
+        .route("/api/files/copy", post(files_copy_handler))
         .route(
             "/api/files/content",
             get(files_content_handler)
@@ -1427,6 +1428,214 @@ async fn files_rename_handler(
         )
             .into_response(),
     }
+}
+
+/// Copy a file or directory to a new location under /fs. The source
+/// and destination safety rules mirror `files_rename_handler`: both
+/// ends must canonicalize under /fs, neither may target a filesystem
+/// root, and the destination must not exist (we never silently
+/// overwrite — bulk-copying a folder of media onto an existing folder
+/// of the same name has bitten us before).
+///
+/// Unlike rename, copy isn't kernel-atomic. For files we use
+/// `tokio::fs::copy` directly; for directories we walk iteratively
+/// with a stack — recursion depth on a populated photo / media tree
+/// can otherwise blow the default stack.
+///
+/// POST /api/files/copy with body `{ from, to }` — same shape as
+/// rename so the WebUI can reuse its existing request builder.
+async fn files_copy_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RenameRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = validate_bearer(&headers, &state.auth).await {
+        return e.into_response();
+    }
+
+    let from = match safe_path(&req.from) {
+        Ok(p) => p,
+        Err(status) => {
+            return (
+                status,
+                Json(serde_json::json!({"error": "Invalid source path"})),
+            )
+                .into_response();
+        }
+    };
+    let from_rel = from.strip_prefix(FILES_ROOT).unwrap_or(&from);
+    if from_rel.components().count() <= 1 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot copy filesystem root directories — use the Subvolumes page"})),
+        )
+            .into_response();
+    }
+    if is_inside_block_subvolume(&from) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot copy block subvolume contents — manage via the Subvolumes page"})),
+        )
+            .into_response();
+    }
+
+    let clean_to = req.to.replace("\\", "/");
+    let trimmed_to = clean_to.trim_start_matches('/');
+    let (parent_req, leaf) = match trimmed_to.rsplit_once('/') {
+        Some((p, l)) => (p, l),
+        None => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Destination must include a filesystem path component"})),
+            )
+                .into_response();
+        }
+    };
+    if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains('/') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid destination name"})),
+        )
+            .into_response();
+    }
+    let parent = match safe_path(parent_req) {
+        Ok(p) => p,
+        Err(status) => {
+            return (
+                status,
+                Json(serde_json::json!({"error": "Invalid destination parent"})),
+            )
+                .into_response();
+        }
+    };
+    if is_inside_block_subvolume(&parent) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Cannot copy into block subvolume contents"})),
+        )
+            .into_response();
+    }
+    let to = parent.join(leaf);
+    if !to.starts_with(FILES_ROOT) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Invalid destination path"})),
+        )
+            .into_response();
+    }
+    if to == from {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Source and destination are the same"})),
+        )
+            .into_response();
+    }
+    // Refuse copying a directory into itself or any of its descendants
+    // — that's an infinite walk and produces nonsense even when
+    // bounded. `to.starts_with(&from)` catches both cases.
+    if to.starts_with(&from) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot copy a directory into itself"})),
+        )
+            .into_response();
+    }
+    if to.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Destination already exists"})),
+        )
+            .into_response();
+    }
+
+    let from_meta = match tokio::fs::symlink_metadata(&from).await {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("stat source: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let result = if from_meta.is_dir() {
+        copy_dir_recursive(&from, &to).await
+    } else {
+        tokio::fs::copy(&from, &to)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+
+    match result {
+        Ok(()) => {
+            info!("Copied {} -> {}", from.display(), to.display());
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// Recursively copy `src` to `dst`. Iterative (stack-based) so a deep
+/// tree can't blow the default tokio task stack. Plain files use
+/// `tokio::fs::copy`; symlinks are recreated with `symlink` rather
+/// than dereferenced (matches `cp -a` semantics — losing a relative
+/// symlink to absolute, or vice versa, would silently change what the
+/// user expects to be a literal link).
+///
+/// Permissions and timestamps follow the kernel's default behaviour
+/// for `copy`/`mkdir` — we don't preserve mtime/atime explicitly.
+/// That's fine for the WebUI's "copy this folder" affordance, which
+/// is treated by users as "new copy made now," not "snapshot of
+/// the original at this point in time."
+async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    // (current source path, current destination path) tuples.
+    let mut stack: Vec<(std::path::PathBuf, std::path::PathBuf)> =
+        vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((src_dir, dst_dir)) = stack.pop() {
+        tokio::fs::create_dir(&dst_dir)
+            .await
+            .map_err(|e| format!("mkdir {}: {e}", dst_dir.display()))?;
+        let mut entries = tokio::fs::read_dir(&src_dir)
+            .await
+            .map_err(|e| format!("read_dir {}: {e}", src_dir.display()))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("next_entry {}: {e}", src_dir.display()))?
+        {
+            let entry_src = entry.path();
+            let entry_dst = dst_dir.join(entry.file_name());
+            let meta = entry
+                .metadata()
+                .await
+                .map_err(|e| format!("metadata {}: {e}", entry_src.display()))?;
+            if meta.is_dir() {
+                stack.push((entry_src, entry_dst));
+            } else if meta.file_type().is_symlink() {
+                let target = tokio::fs::read_link(&entry_src)
+                    .await
+                    .map_err(|e| format!("read_link {}: {e}", entry_src.display()))?;
+                tokio::fs::symlink(&target, &entry_dst)
+                    .await
+                    .map_err(|e| format!("symlink {}: {e}", entry_dst.display()))?;
+            } else {
+                tokio::fs::copy(&entry_src, &entry_dst).await.map_err(|e| {
+                    format!(
+                        "copy {} -> {}: {e}",
+                        entry_src.display(),
+                        entry_dst.display()
+                    )
+                })?;
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── File content/download endpoint ─────────────────────────────
