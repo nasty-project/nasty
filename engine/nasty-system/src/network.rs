@@ -1568,7 +1568,59 @@ async fn apply_config(
             warn!("network apply: connection '{id}' failed: {msg}");
         }
     }
+
+    // LAN-discovery daemons capture the live interface set at start
+    // and don't all react to netlink topology changes. After a bridge
+    // / bond / VLAN appears (or the management IP moves to a newly
+    // enslaved interface), `samba-wsdd` keeps announcing on the old
+    // set and Windows Explorer stops seeing the box; `avahi-daemon`
+    // is more dynamic but a clean restart costs ~1s of disrupted
+    // mDNS and reliably resets the publish list. Best-effort —
+    // discovery is UX, not the data path. Only restarts daemons that
+    // are currently active so we don't accidentally start one a
+    // protocol toggle had left disabled (#270).
+    //
+    // We deliberately do NOT rebind the data-path services here:
+    //
+    //   smbd / nmbd:  `interfaces =` is unset → 0.0.0.0 wildcard
+    //                 bind → picks up new interfaces automatically.
+    //                 Restart would also kick active SMB sessions.
+    //   nfs-server:   nfsd binds 0.0.0.0:2049 → same story; restart
+    //                 causes ESTALE on active mounts.
+    //   target.svc:   LIO portal config defaults to 0.0.0.0:3260;
+    //                 restart drops every initiator's session.
+    //   nvmet:        wildcard portals in configfs; same disruption.
+    //
+    // Discovery is what actually breaks under a bridge change — the
+    // data path is interface-agnostic by default.
+    rebind_discovery_daemons().await;
+
     Ok(outcome)
+}
+
+async fn rebind_discovery_daemons() {
+    for unit in ["samba-wsdd.service", "avahi-daemon.service"] {
+        let is_active = tokio::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", unit])
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !is_active {
+            continue;
+        }
+        match tokio::process::Command::new("systemctl")
+            .args(["restart", unit])
+            .status()
+            .await
+        {
+            Ok(s) if s.success() => {
+                info!("Restarted {unit} to rebind discovery to new interface set");
+            }
+            Ok(s) => warn!("systemctl restart {unit} exited with {s}"),
+            Err(e) => warn!("systemctl restart {unit} failed: {e}"),
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
