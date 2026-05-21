@@ -275,17 +275,27 @@ async fn main() -> anyhow::Result<()> {
     // Build the OIDC client if SSO is configured. Failures are logged, not
     // fatal — a misconfigured IdP shouldn't block the engine from starting,
     // and admins can fix the config via the WebUI.
+    //
+    // Spawned (not awaited) because OIDC discovery fires an HTTP request
+    // at the IdP, and a slow / unreachable IdP would otherwise block
+    // startup for the full reqwest connect timeout (~75 s by default) —
+    // long enough to push past systemd's TimeoutStartSec. The SSO button
+    // on the login page is gated on the rebuild completing, so the
+    // visible effect of spawning is "button appears a moment late" rather
+    // than "engine stuck on Type=notify ready for over a minute."
     {
         let oidc_settings = state.settings.get().await.oidc;
         if oidc_settings.enabled {
-            if let Err(e) = state.oidc.rebuild(&oidc_settings).await {
-                tracing::warn!("OIDC client init failed at startup: {e}");
-            } else {
-                info!(
-                    "OIDC client initialized (issuer={:?})",
-                    oidc_settings.issuer_url
-                );
-            }
+            let oidc_holder = state.oidc.clone();
+            tokio::spawn(async move {
+                match oidc_holder.rebuild(&oidc_settings).await {
+                    Ok(()) => info!(
+                        "OIDC client initialized (issuer={:?})",
+                        oidc_settings.issuer_url
+                    ),
+                    Err(e) => tracing::warn!("OIDC client init failed at startup: {e}"),
+                }
+            });
         }
     }
 
