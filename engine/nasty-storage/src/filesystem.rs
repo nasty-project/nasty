@@ -2579,7 +2579,15 @@ async fn read_fs_options_show_super(device: Option<&str>) -> FilesystemOptions {
 
     let output = match cmd::run_ok("bcachefs", &["show-super", dev]).await {
         Ok(o) => o,
-        Err(_) => return FilesystemOptions::default(),
+        Err(e) => {
+            // `show-super` failure means the WebUI's "Options" panel
+            // for this filesystem will display all defaults — masking
+            // whatever the real on-disk options are. Worth logging
+            // so the operator can correlate the missing data with a
+            // bcachefs tools / permission issue.
+            warn!("bcachefs show-super {dev} failed: {e}; reporting defaults");
+            return FilesystemOptions::default();
+        }
     };
 
     let mut opts = FilesystemOptions::default();
@@ -2744,7 +2752,13 @@ async fn discover_unmounted_bcachefs(
 ) -> Vec<(String, String, Vec<String>)> {
     let output = match cmd::run_ok("blkid", &["-t", "TYPE=bcachefs", "-o", "export"]).await {
         Ok(o) => o,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            // blkid failure means we'll silently miss every unmounted
+            // bcachefs filesystem on the box. The WebUI's "import"
+            // flow won't see them. Loud log so the operator notices.
+            warn!("blkid failed: {e}; unmounted bcachefs filesystems will not be discovered");
+            return Vec::new();
+        }
     };
 
     // Parse blkid export format: blocks separated by blank lines

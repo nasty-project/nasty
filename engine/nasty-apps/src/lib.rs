@@ -3327,7 +3327,15 @@ impl AppsService {
                         parent_exists,
                     });
                 }
-                Err(_) => {}
+                Err(e) => {
+                    // Per the doc comment above: stat hiccups other
+                    // than ENOENT are deliberately not flagged to the
+                    // user (don't block a deploy on a transient
+                    // permission error). But the operator should at
+                    // least see WHY a path the WebUI shows as fine
+                    // would fail at docker-run time — log it.
+                    warn!("check_devices: stat({path}) failed: {e}; treating as existing");
+                }
             }
         }
         missing
@@ -3417,7 +3425,16 @@ impl AppsService {
                         line,
                     });
                 }
-                Err(_) => {}
+                Err(e) => {
+                    // Same rationale as check_devices: don't block a
+                    // deploy on a non-ENOENT stat hiccup, but log so
+                    // the operator can correlate a later docker-run
+                    // permission error with the silent skip here.
+                    warn!(
+                        "check_volumes: stat({}) failed: {e}; skipping permission check",
+                        bind.host_path
+                    );
+                }
             }
         }
         out
