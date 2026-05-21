@@ -75,6 +75,12 @@
 
 	let hostStatuses: HostTlsStatus[] = $state([]);
 	let hostStatusPollHandle: number | null = $state(null);
+	// Page-scoped handles for the post-save / Retry ACME-status pollers so
+	// onDestroy can cancel them on SPA navigation — otherwise the 2-second
+	// interval (plus its 5-min setTimeout backstop) keeps hammering
+	// system.acme.status long after the user has left the page.
+	let acmePollHandle: ReturnType<typeof setInterval> | null = null;
+	let acmePollTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	async function refreshHostStatuses() {
 		try {
@@ -84,8 +90,27 @@
 		}
 	}
 
+	function stopAcmePolling() {
+		if (acmePollHandle !== null) { clearInterval(acmePollHandle); acmePollHandle = null; }
+		if (acmePollTimeout !== null) { clearTimeout(acmePollTimeout); acmePollTimeout = null; }
+	}
+
+	function startAcmePolling() {
+		stopAcmePolling();
+		acmePollHandle = setInterval(async () => {
+			try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
+			if (acmeStatus && (acmeStatus.state === 'success' || acmeStatus.state === 'error')) {
+				stopAcmePolling();
+			}
+		}, 2000);
+		// 5 min backstop: DNS propagation can be slow, but at some point
+		// the poller stops being useful and just costs RPC traffic.
+		acmePollTimeout = setTimeout(stopAcmePolling, 300_000);
+	}
+
 	onDestroy(() => {
 		if (hostStatusPollHandle !== null) clearInterval(hostStatusPollHandle);
+		stopAcmePolling();
 	});
 
 	function badgeForState(s: string): { label: string; cls: string } {
@@ -139,15 +164,7 @@
 			settings = result;
 			tlsChanged = false;
 			editing = false;
-			if (tlsAcmeEnabled) {
-				const poll = setInterval(async () => {
-					try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
-					if (acmeStatus && (acmeStatus.state === 'success' || acmeStatus.state === 'error')) {
-						clearInterval(poll);
-					}
-				}, 2000);
-				setTimeout(() => clearInterval(poll), 300000); // 5 min (DNS propagation can be slow)
-			}
+			if (tlsAcmeEnabled) startAcmePolling();
 		}
 		savingTls = false;
 	}
@@ -368,13 +385,7 @@
 			{#if tlsAcmeEnabled && acmeStatus?.state !== 'running'}
 				<Button size="sm" variant="secondary" onclick={async () => {
 					await withToast(() => client.call('system.acme.retry'), 'Provisioning started');
-					const poll = setInterval(async () => {
-						try { acmeStatus = await client.call('system.acme.status'); } catch { /* ignore */ }
-						if (acmeStatus && (acmeStatus.state === 'success' || acmeStatus.state === 'error')) {
-							clearInterval(poll);
-						}
-					}, 2000);
-					setTimeout(() => clearInterval(poll), 300000);
+					startAcmePolling();
 				}}>
 					Retry
 				</Button>

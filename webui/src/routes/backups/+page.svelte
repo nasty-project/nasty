@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/stores';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
@@ -192,6 +192,14 @@
 	let snapshots: BackupSnapshot[] = $state([]);
 	let snapshotsLoading = $state(false);
 
+	// Page-scoped handle for the post-runBackup status poll so onDestroy can
+	// cancel it on SPA navigation — otherwise the 3-second interval keeps
+	// running until the backup finishes server-side, which can be minutes.
+	let runBackupPoll: ReturnType<typeof setInterval> | null = null;
+	function stopRunBackupPoll() {
+		if (runBackupPoll !== null) { clearInterval(runBackupPoll); runBackupPoll = null; }
+	}
+
 	onMount(async () => {
 		await refresh();
 		loading = false;
@@ -204,6 +212,10 @@
 			selectedSources = new Set(['/var/lib/nasty']);
 			loadSourceData();
 		}
+	});
+
+	onDestroy(() => {
+		stopRunBackupPoll();
 	});
 
 	let snapshotCounts: Record<string, number> = $state({});
@@ -272,11 +284,13 @@
 
 	async function runBackup(id: string) {
 		await withToast(() => client.call('backup.run', { id }), 'Backup started');
-		// Poll status
-		const poll = setInterval(async () => {
+		// Poll status until the backup finishes — onDestroy cancels this on
+		// SPA navigation so we don't keep polling after the user leaves.
+		stopRunBackupPoll();
+		runBackupPoll = setInterval(async () => {
 			backupStatus = await client.call<BackupStatus>('backup.status');
 			if (!backupStatus?.running) {
-				clearInterval(poll);
+				stopRunBackupPoll();
 				await refresh();
 			}
 		}, 3000);

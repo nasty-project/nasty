@@ -200,6 +200,15 @@
 		if (p?.collection === 'protocol') refresh();
 	}
 
+	// Page-scoped handles for the post-enable Docker-status poll so onDestroy
+	// can cancel them on SPA navigation.
+	let dockerEnablePoll: ReturnType<typeof setInterval> | null = null;
+	let dockerEnableTimeout: ReturnType<typeof setTimeout> | null = null;
+	function stopDockerEnablePoll() {
+		if (dockerEnablePoll !== null) { clearInterval(dockerEnablePoll); dockerEnablePoll = null; }
+		if (dockerEnableTimeout !== null) { clearTimeout(dockerEnableTimeout); dockerEnableTimeout = null; }
+	}
+
 	onMount(async () => {
 		client.onEvent(handleEvent);
 		await refresh();
@@ -210,7 +219,10 @@
 		if (target) toggleConfig(target);
 	});
 
-	onDestroy(() => client.offEvent(handleEvent));
+	onDestroy(() => {
+		client.offEvent(handleEvent);
+		stopDockerEnablePoll();
+	});
 
 	async function refresh() {
 		await withToast(async () => {
@@ -235,12 +247,13 @@
 			'Docker enabled — starting runtime'
 		);
 		dockerEnabling = false;
-		// Poll until running
-		const poll = setInterval(async () => {
+		// Poll until running.
+		stopDockerEnablePoll();
+		dockerEnablePoll = setInterval(async () => {
 			dockerStatus = await client.call<AppsStatus>('apps.status').catch(() => null);
-			if (dockerStatus?.running) { clearInterval(poll); }
+			if (dockerStatus?.running) stopDockerEnablePoll();
 		}, 3000);
-		setTimeout(() => clearInterval(poll), 60000);
+		dockerEnableTimeout = setTimeout(stopDockerEnablePoll, 60_000);
 	}
 
 	async function disableDocker() {

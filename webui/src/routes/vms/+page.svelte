@@ -566,6 +566,15 @@
 		loading = false;
 	});
 
+	// Tear down any open WS / xterm / noVNC instances on SPA navigation —
+	// closeConsole() handles consoleWs, consoleTerm and vncRfb; importWs is
+	// owned by the disk-import dialog so we close it explicitly.
+	onDestroy(() => {
+		closeConsole();
+		importWs?.close();
+		importWs = null;
+	});
+
 	async function loadNetwork() {
 		try {
 			networkState = await client.call<NetworkState>('system.network.get');
