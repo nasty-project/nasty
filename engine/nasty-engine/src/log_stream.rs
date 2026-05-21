@@ -101,7 +101,12 @@ async fn handle_logs(
 
     // Admin only — system journals can leak secrets, IPs, and audit detail.
     match state.auth.validate(&token, &client_ip).await {
-        Ok(s) if s.role == crate::auth::Role::Admin => {}
+        Ok(s) if s.role == crate::auth::Role::Admin => {
+            // Comment above says journals can leak secrets / IPs /
+            // audit detail — so a live stream of them is sensitive and
+            // every open deserves an audit entry, not just denials.
+            crate::auth::audit("log_stream_opened", &s.username, &client_ip, "");
+        }
         Ok(s) => {
             crate::auth::audit(
                 "log_stream_denied",

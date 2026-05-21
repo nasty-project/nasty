@@ -267,6 +267,20 @@ async fn wait_for_terminal_auth(
 
     match state.auth.validate(&token, client_ip).await {
         Ok(session) if session.role == crate::auth::Role::Admin => {
+            // Opening an interactive root shell on the host is the
+            // single highest-stakes admin action — record every open,
+            // not just denials, so the audit trail can answer "who had
+            // a shell at 03:42?" later.
+            crate::auth::audit(
+                "terminal_opened",
+                &session.username,
+                client_ip,
+                &auth
+                    .cmd
+                    .as_deref()
+                    .map(|c| format!("cmd={}", c.join(" ")))
+                    .unwrap_or_default(),
+            );
             let _ = socket
                 .send(Message::Text(r#"{"authenticated":true}"#.into()))
                 .await;

@@ -342,6 +342,18 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
         Role::Operator => !is_operator_allowed(&request.method),
     };
     if denied {
+        // Record role-based denials so an attempted role-escalation
+        // (or a misconfigured client) leaves a trail. Read methods are
+        // never denied here (is_universally_allowed covers them), so
+        // this can't fire on routine browser polling — every entry
+        // represents an intentional mutation the session role couldn't
+        // perform.
+        crate::auth::audit(
+            "permission_denied",
+            &session.username,
+            session.client_ip.as_deref().unwrap_or("unknown"),
+            &format!("method={} role={:?}", request.method, session.role),
+        );
         let resp = Response::error(request.id, ErrorCode::InternalError, "Permission denied");
         return serde_json::to_string(&resp).unwrap();
     }
