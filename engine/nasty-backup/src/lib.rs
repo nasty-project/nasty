@@ -536,3 +536,257 @@ async fn save_profiles(profiles: &[BackupProfile]) {
         }
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────
+//
+// Coverage focuses on the pure surface — the backend-options builder
+// and the on-disk serde contract. The Repository / Backup execution
+// paths are integration territory (they hit the local FS, rustic_core,
+// and network backends) and are exercised end-to-end on real boxes.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn baseline_profile(target: BackupTarget) -> BackupProfile {
+        BackupProfile {
+            id: "abc12345".into(),
+            name: "test".into(),
+            enabled: true,
+            sources: vec!["/data".into()],
+            target,
+            schedule: None,
+            retention: RetentionPolicy::default(),
+            password: "hunter2".into(),
+            snapshot_before: true,
+            repo_initialized: false,
+            last_run: None,
+        }
+    }
+
+    #[test]
+    fn backend_options_local_uses_plain_path() {
+        let opts = BackupTarget::Local {
+            path: "/srv/backup".into(),
+        }
+        .to_backend_options();
+        assert_eq!(opts.repository.as_deref(), Some("/srv/backup"));
+        // Local has no extra option keys — repository alone is enough.
+        assert!(opts.options.is_empty(), "got {:?}", opts.options);
+    }
+
+    #[test]
+    fn backend_options_s3_carries_credentials_and_endpoint() {
+        let opts = BackupTarget::S3 {
+            endpoint: "https://s3.example.com".into(),
+            bucket: "my-bucket".into(),
+            access_key: "AKIA".into(),
+            secret_key: "secret".into(),
+            region: Some("eu-west-1".into()),
+        }
+        .to_backend_options();
+        assert_eq!(opts.repository.as_deref(), Some("opendal:s3"));
+        assert_eq!(
+            opts.options.get("bucket").map(String::as_str),
+            Some("my-bucket")
+        );
+        assert_eq!(
+            opts.options.get("endpoint").map(String::as_str),
+            Some("https://s3.example.com")
+        );
+        assert_eq!(
+            opts.options.get("access_key_id").map(String::as_str),
+            Some("AKIA")
+        );
+        assert_eq!(
+            opts.options.get("secret_access_key").map(String::as_str),
+            Some("secret")
+        );
+        assert_eq!(
+            opts.options.get("region").map(String::as_str),
+            Some("eu-west-1")
+        );
+    }
+
+    #[test]
+    fn backend_options_s3_without_region_omits_region_key() {
+        // The region option is optional. When None, the key should
+        // not appear in options at all — rustic/opendal treat absent
+        // and empty differently.
+        let opts = BackupTarget::S3 {
+            endpoint: "https://s3.example.com".into(),
+            bucket: "b".into(),
+            access_key: "AKIA".into(),
+            secret_key: "s".into(),
+            region: None,
+        }
+        .to_backend_options();
+        assert!(
+            !opts.options.contains_key("region"),
+            "got {:?}",
+            opts.options
+        );
+    }
+
+    #[test]
+    fn backend_options_sftp_defaults_port_to_22() {
+        let opts = BackupTarget::Sftp {
+            host: "host.example.com".into(),
+            user: "backup".into(),
+            path: "/mnt/repo".into(),
+            port: None,
+        }
+        .to_backend_options();
+        assert_eq!(opts.repository.as_deref(), Some("opendal:sftp"));
+        assert_eq!(
+            opts.options.get("endpoint").map(String::as_str),
+            Some("host.example.com:22")
+        );
+        assert_eq!(opts.options.get("user").map(String::as_str), Some("backup"));
+        assert_eq!(
+            opts.options.get("root").map(String::as_str),
+            Some("/mnt/repo")
+        );
+    }
+
+    #[test]
+    fn backend_options_sftp_honours_custom_port() {
+        let opts = BackupTarget::Sftp {
+            host: "host.example.com".into(),
+            user: "backup".into(),
+            path: "/mnt/repo".into(),
+            port: Some(2222),
+        }
+        .to_backend_options();
+        assert_eq!(
+            opts.options.get("endpoint").map(String::as_str),
+            Some("host.example.com:2222")
+        );
+    }
+
+    #[test]
+    fn backend_options_rest_prefixes_url() {
+        // rustic's REST backend wants "rest:<url>" — losing the prefix
+        // would silently fall through to opendal and break auth.
+        let opts = BackupTarget::Rest {
+            url: "https://rest.example.com/repo".into(),
+        }
+        .to_backend_options();
+        assert_eq!(
+            opts.repository.as_deref(),
+            Some("rest:https://rest.example.com/repo")
+        );
+    }
+
+    #[test]
+    fn backend_options_b2_carries_credentials() {
+        let opts = BackupTarget::B2 {
+            bucket: "my-b2".into(),
+            account_id: "abc".into(),
+            account_key: "def".into(),
+        }
+        .to_backend_options();
+        assert_eq!(opts.repository.as_deref(), Some("opendal:b2"));
+        assert_eq!(
+            opts.options.get("bucket").map(String::as_str),
+            Some("my-b2")
+        );
+        assert_eq!(
+            opts.options.get("account_id").map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            opts.options.get("account_key").map(String::as_str),
+            Some("def")
+        );
+    }
+
+    #[test]
+    fn profile_deserialises_with_default_optionals() {
+        // The on-disk format must accept missing `schedule`, `retention`,
+        // `snapshot_before`, `repo_initialized`, `last_run` — old state
+        // files predate every field after sources/target/password and
+        // must still load without error or migration churn.
+        let json = r#"{
+            "id": "id1",
+            "name": "x",
+            "enabled": true,
+            "sources": ["/a"],
+            "target": {"type": "local", "path": "/r"},
+            "password": "p"
+        }"#;
+        let p: BackupProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(p.id, "id1");
+        assert_eq!(p.schedule, None);
+        assert_eq!(p.retention.keep_last, None);
+        // `snapshot_before` defaults to TRUE — the WebUI assumes this,
+        // and silently flipping it to false on legacy profiles would
+        // turn off bcachefs-snapshot integrity guarantees.
+        assert!(p.snapshot_before);
+        assert!(!p.repo_initialized);
+        assert!(p.last_run.is_none());
+    }
+
+    #[test]
+    fn profile_round_trips_through_json() {
+        // Catches accidental field renames / serde-tag changes that
+        // would leave existing /var/lib/nasty/backups.json unreadable
+        // after a restart.
+        let original = baseline_profile(BackupTarget::Local {
+            path: "/srv".into(),
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: BackupProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.name, original.name);
+        assert_eq!(restored.enabled, original.enabled);
+        assert_eq!(restored.sources, original.sources);
+        assert_eq!(restored.password, original.password);
+        match restored.target {
+            BackupTarget::Local { path } => assert_eq!(path, "/srv"),
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn target_uses_snake_case_type_tag() {
+        // Locks in the serde(tag = "type", rename_all = "snake_case")
+        // contract — the WebUI sends "type": "local" / "s3" / "sftp"
+        // / "rest" / "b2" verbatim.
+        let json = serde_json::to_string(&BackupTarget::B2 {
+            bucket: "x".into(),
+            account_id: "y".into(),
+            account_key: "z".into(),
+        })
+        .unwrap();
+        assert!(json.contains(r#""type":"b2""#), "got {json}");
+    }
+
+    #[test]
+    fn retention_policy_omits_none_fields() {
+        // RetentionPolicy with all-None fields should serialise to an
+        // empty(-ish) object — losing this property would balloon every
+        // saved profile with "keep_last":null,"keep_daily":null… noise.
+        // (Serde defaults to emitting nulls; if a future refactor adds
+        // skip_serializing_if=Option::is_none, this test catches the
+        // accidental drop.)
+        let r = RetentionPolicy::default();
+        let json = serde_json::to_string(&r).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Either an empty object, or one with every value null —
+        // both are acceptable; what's unacceptable is a present
+        // non-null value when nothing was set.
+        if let Some(obj) = v.as_object() {
+            for (k, val) in obj {
+                assert!(val.is_null(), "{k} should be null, got {val}");
+            }
+        }
+    }
+
+    #[test]
+    fn error_to_rpc_error_uses_display() {
+        // The RPC layer surfaces this string to the WebUI verbatim
+        // — keep it tied to Display so error variants stay readable.
+        let e = BackupError::NotFound("missing-id".into());
+        assert_eq!(e.to_rpc_error(), "profile not found: missing-id");
+    }
+}

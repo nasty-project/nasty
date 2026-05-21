@@ -1218,3 +1218,187 @@ fn main() {
 
     println!("Written {} ({} bytes)", out_path.display(), md.len());
 }
+
+// ── Tests ─────────────────────────────────────────────────────
+//
+// The interesting surface here is the JSON-Schema → markdown
+// transformation. The `methods()` table and `main()` are integration
+// tests in spirit — they walk every JsonSchema-derived type in the
+// workspace and write docs/api.md, which is verified by the
+// "regenerate docs" CI job. The unit tests below pin the small
+// schema-shape converters so a refactor that breaks how oneOf /
+// $ref / nullables render fails fast instead of silently producing
+// bad markdown.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn type_str_simple_type() {
+        assert_eq!(type_str_from_schema(&json!({"type": "string"})), "string");
+        assert_eq!(type_str_from_schema(&json!({"type": "integer"})), "integer");
+        assert_eq!(type_str_from_schema(&json!({"type": "boolean"})), "boolean");
+    }
+
+    #[test]
+    fn type_str_ref_uses_last_path_segment() {
+        // Schemars emits `$ref: "#/$defs/Foo"` — the markdown renders
+        // it as the short name backticked.
+        assert_eq!(
+            type_str_from_schema(&json!({"$ref": "#/$defs/Filesystem"})),
+            "`Filesystem`"
+        );
+    }
+
+    #[test]
+    fn type_str_array_with_simple_items() {
+        assert_eq!(
+            type_str_from_schema(&json!({"type": "array", "items": {"type": "string"}})),
+            "string[]"
+        );
+    }
+
+    #[test]
+    fn type_str_array_with_ref_items() {
+        // `items` recursion has to handle $ref too — otherwise lists
+        // of named structs render as the literal string "object[]".
+        assert_eq!(
+            type_str_from_schema(&json!({
+                "type": "array",
+                "items": {"$ref": "#/$defs/Subvolume"}
+            })),
+            "`Subvolume`[]"
+        );
+    }
+
+    #[test]
+    fn type_str_nullable_strips_null() {
+        // `Option<T>` flows in as type = ["T", "null"]. Showing "null"
+        // in the docs is noise — the Required column already conveys
+        // optionality.
+        assert_eq!(
+            type_str_from_schema(&json!({"type": ["string", "null"]})),
+            "string"
+        );
+    }
+
+    #[test]
+    fn type_str_oneof_pipes_variants() {
+        // `\|` is the markdown table-cell escape for a pipe — without
+        // it the column rendering breaks.
+        assert_eq!(
+            type_str_from_schema(&json!({
+                "oneOf": [{"type": "string"}, {"type": "integer"}]
+            })),
+            "string \\| integer"
+        );
+    }
+
+    #[test]
+    fn type_str_anyof_pipes_variants() {
+        // anyOf and oneOf render the same way; some serde representations
+        // use anyOf where others use oneOf.
+        assert_eq!(
+            type_str_from_schema(&json!({
+                "anyOf": [{"type": "string"}, {"type": "integer"}]
+            })),
+            "string \\| integer"
+        );
+    }
+
+    #[test]
+    fn type_str_enum_quotes_each_variant() {
+        assert_eq!(
+            type_str_from_schema(&json!({"enum": ["admin", "operator", "readonly"]})),
+            "`admin` \\| `operator` \\| `readonly`"
+        );
+    }
+
+    #[test]
+    fn type_str_fallback_is_object() {
+        // Empty schema, or one that doesn't match any branch, defaults
+        // to "object" rather than panicking.
+        assert_eq!(type_str_from_schema(&json!({})), "object");
+    }
+
+    #[test]
+    fn result_summary_array_renders_with_items() {
+        // Top-level arrays — common for `.list` RPC results — get a
+        // `T[]` summary instead of falling through to "`object`".
+        assert_eq!(
+            render_result_summary(&json!({
+                "type": "array",
+                "items": {"$ref": "#/$defs/Snapshot"}
+            })),
+            "``Snapshot`[]`"
+        );
+    }
+
+    #[test]
+    fn result_summary_array_without_items_renders_as_array() {
+        assert_eq!(render_result_summary(&json!({"type": "array"})), "`array`");
+    }
+
+    #[test]
+    fn result_summary_ref_uses_short_name() {
+        assert_eq!(
+            render_result_summary(&json!({"$ref": "#/$defs/SettingsUpdate"})),
+            "`SettingsUpdate`"
+        );
+    }
+
+    #[test]
+    fn result_summary_fallback_is_object() {
+        assert_eq!(render_result_summary(&json!({})), "`object`");
+    }
+
+    #[test]
+    fn render_properties_resolves_ref_via_defs() {
+        // Properties named via $ref must be looked up in the `defs`
+        // map. Without this, the docs would render every typed param
+        // struct as having zero fields.
+        let defs = json!({
+            "Foo": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Item name"}
+                },
+                "required": ["name"],
+            }
+        });
+        let rendered = render_properties(&json!({"$ref": "#/$defs/Foo"}), &defs).unwrap();
+        assert!(rendered.contains("`name`"), "rendered:\n{rendered}");
+        assert!(rendered.contains("string"), "rendered:\n{rendered}");
+        // Required column shows "yes" for items in the required list.
+        assert!(rendered.contains("yes"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Item name"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn render_properties_marks_optional_fields_no() {
+        let rendered = render_properties(
+            &json!({
+                "type": "object",
+                "properties": {
+                    "maybe": {"type": "string"}
+                }
+            }),
+            &json!({}),
+        )
+        .unwrap();
+        // Field is not in `required` — should render "no".
+        assert!(rendered.contains("`maybe`"), "rendered:\n{rendered}");
+        assert!(rendered.contains("| no |"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn render_properties_returns_none_for_empty_object() {
+        // No properties → no table; the caller skips the section
+        // entirely rather than emitting an empty header.
+        assert!(render_properties(&json!({"type": "object"}), &json!({})).is_none());
+        assert!(
+            render_properties(&json!({"type": "object", "properties": {}}), &json!({})).is_none()
+        );
+    }
+}
