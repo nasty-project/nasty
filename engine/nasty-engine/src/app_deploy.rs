@@ -155,8 +155,8 @@ async fn handle_deploy(
 
     // Authenticate — admin only. Compose deploys can mount host paths and run
     // privileged containers, so this is effectively root-equivalent.
-    match state.auth.validate(&token, &client_ip).await {
-        Ok(s) if s.role == crate::auth::Role::Admin => {}
+    let session = match state.auth.validate(&token, &client_ip).await {
+        Ok(s) if s.role == crate::auth::Role::Admin => s,
         Ok(s) => {
             crate::auth::audit(
                 "app_deploy_denied",
@@ -177,7 +177,7 @@ async fn handle_deploy(
             report_error(&mut socket, &req.name, "auth", "invalid token").await;
             return;
         }
-    }
+    };
 
     info!(
         "Deploy stream started for '{}' (kind: {})",
@@ -185,8 +185,8 @@ async fn handle_deploy(
     );
 
     match req.kind.as_str() {
-        "simple" => deploy_simple(&mut socket, &state, &req).await,
-        "compose" => deploy_compose(&mut socket, &state, &req).await,
+        "simple" => deploy_simple(&mut socket, &state, &req, &session, &client_ip).await,
+        "compose" => deploy_compose(&mut socket, &state, &req, &session, &client_ip).await,
         "pull" => deploy_pull(&mut socket, &state, &req).await,
         _ => {
             report_error(&mut socket, &req.name, "dispatch", "unknown deploy kind").await;
@@ -194,7 +194,13 @@ async fn handle_deploy(
     }
 }
 
-async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployRequest) {
+async fn deploy_simple(
+    socket: &mut WebSocket,
+    state: &AppState,
+    req: &DeployRequest,
+    session: &crate::auth::Session,
+    client_ip: &str,
+) {
     let image = match &req.image {
         Some(img) => img.clone(),
         None => {
@@ -268,8 +274,8 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
     if req.allow_unsafe {
         crate::auth::audit(
             "simple_unsafe_deploy",
-            "<websocket>",
-            "<websocket>",
+            &session.username,
+            client_ip,
             &format!("app={}", req.name),
         );
         let _ = socket
@@ -296,7 +302,13 @@ async fn deploy_simple(socket: &mut WebSocket, state: &AppState, req: &DeployReq
     }
 }
 
-async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRequest) {
+async fn deploy_compose(
+    socket: &mut WebSocket,
+    state: &AppState,
+    req: &DeployRequest,
+    session: &crate::auth::Session,
+    client_ip: &str,
+) {
     let compose_content = match &req.compose_file {
         Some(c) => c.clone(),
         None => {
@@ -324,8 +336,8 @@ async fn deploy_compose(socket: &mut WebSocket, state: &AppState, req: &DeployRe
     if req.allow_unsafe {
         crate::auth::audit(
             "compose_unsafe_deploy",
-            "<websocket>",
-            "<websocket>",
+            &session.username,
+            client_ip,
             &format!("app={}", req.name),
         );
         let _ = socket

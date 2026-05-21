@@ -106,7 +106,17 @@ async fn proxy_unix_socket(
 
     // Admin or Operator — VM console is interactive root inside the guest.
     match state.auth.validate(&token, &client_ip).await {
-        Ok(s) if s.role == crate::auth::Role::Admin || s.role == crate::auth::Role::Operator => {}
+        Ok(s) if s.role == crate::auth::Role::Admin || s.role == crate::auth::Role::Operator => {
+            // Console is interactive root in the guest — record opens
+            // so the audit log can show who attached to which VM and
+            // when, not just rejected attempts.
+            crate::auth::audit(
+                "vm_console_opened",
+                &s.username,
+                &client_ip,
+                &format!("vm={vm_id} type={console_type}"),
+            );
+        }
         Ok(s) => {
             crate::auth::audit(
                 "vm_console_denied",
