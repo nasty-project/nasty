@@ -155,7 +155,23 @@
 								<td class="p-2">
 									<span class="inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[0.65rem] {mb.class}">{mb.label}</span>
 								</td>
-								<td class="p-2 font-mono text-xs break-all">{r.match_value}</td>
+								<td class="p-2 font-mono text-xs break-all">
+									<!-- Make the value clickable when it resolves to a real URL.
+									     `host`-match: full https://<host>/ (the cert serves it; new
+									     tab keeps the operator on the WebUI). `path`-match: relative
+									     path on the current origin with the trailing `*` glob
+									     stripped (so /apps/haze/* becomes /apps/haze/ which Caddy
+									     proxies to the container). Catch-all stays plain text — no
+									     meaningful destination. -->
+									{#if r.match_kind === 'host'}
+										<a class="text-blue-400 hover:text-blue-300" href={`https://${r.match_value}/`} target="_blank" rel="noopener noreferrer">{r.match_value}</a>
+									{:else if r.match_kind === 'path'}
+										{@const pathHref = r.match_value.replace(/\/\*+$/, '/').replace(/\*+$/, '')}
+										<a class="text-blue-400 hover:text-blue-300" href={pathHref} target="_blank" rel="noopener noreferrer">{r.match_value}</a>
+									{:else}
+										{r.match_value}
+									{/if}
+								</td>
 								<td class="p-2 text-xs text-muted-foreground">{r.handler_kind}</td>
 								<td class="p-2 font-mono text-xs">
 									{#if r.upstream}{r.upstream}{:else}<span class="text-muted-foreground">—</span>{/if}
