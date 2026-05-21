@@ -1041,14 +1041,22 @@ in {
 
         # nasty-metrics is a read-only system inspector + Prometheus
         # endpoint. Unlike nasty-engine it does NOT manage mounts /
-        # services / kernel tunables, so we can apply the full
+        # services / kernel tunables, so we can apply most of the
         # service-hardening set without breaking what it does.
         #
-        # The two `Protect*` directives we intentionally leave off:
+        # The Protect* directives we intentionally leave off:
         #   - ProtectKernelLogs: it shells out to `dmesg` for kernel
         #     error metrics. Setting this would block /dev/kmsg.
         #   - PrivateDevices:    smartctl needs /dev/sd*, /dev/nvme*
         #     to read SMART data. PrivateDevices hides all of /dev.
+        #   - SystemCallFilter:  the original `@system-service
+        #     ~@privileged ~@resources` set fatally SIGSYS'd the
+        #     service in <50ms at startup. `~@resources` strips
+        #     `sched_setaffinity` (and the rest of the sched_set*
+        #     family), which tokio's multi-thread runtime calls when
+        #     pinning worker threads. The other Protect* directives
+        #     below still cover the same threat model without the
+        #     seccomp-filter fragility.
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
@@ -1069,7 +1077,6 @@ in {
         # Prometheus HTTP endpoint on :2138.
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
         SystemCallArchitectures = "native";
-        SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
         UMask = "0077";
       };
     };
