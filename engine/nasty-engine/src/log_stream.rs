@@ -105,12 +105,7 @@ async fn handle_logs(
             // Comment above says journals can leak secrets / IPs /
             // audit detail — so a live stream of them is sensitive and
             // every open deserves an audit entry, not just denials.
-            crate::auth::audit(
-                "log_stream_opened",
-                &s.username,
-                &client_ip,
-                "",
-            );
+            crate::auth::audit("log_stream_opened", &s.username, &client_ip, "");
         }
         Ok(s) => {
             crate::auth::audit(
