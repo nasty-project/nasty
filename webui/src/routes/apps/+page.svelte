@@ -1628,20 +1628,25 @@
 						<Button size="xs" variant="outline" onclick={addPort}>+ Add Port</Button>
 					</div>
 					{#if newPorts.length > 0}
-						<div class="grid grid-cols-[1fr_80px_90px_60px_auto] gap-2 mb-1">
+						<!-- Column order matches `docker run -p HOST:CONTAINER` —
+						     Exposed (host) first, Internal (container) second.
+						     The listing and the dropdown elsewhere on this page
+						     also read host:container, so all three surfaces line
+						     up. See issue #271. -->
+						<div class="grid grid-cols-[1fr_90px_80px_60px_auto] gap-2 mb-1">
 							<span class="text-[0.65rem] text-muted-foreground">Name</span>
-							<span class="text-[0.65rem] text-muted-foreground">Internal</span>
 							<span class="text-[0.65rem] text-muted-foreground">Exposed</span>
+							<span class="text-[0.65rem] text-muted-foreground">Internal</span>
 							<span class="text-[0.65rem] text-muted-foreground"></span>
 							<span></span>
 						</div>
 					{/if}
 					{#each newPorts as port, i}
 						{@const hasConflict = portConflicts.some(c => c.port === (parseInt(port.host_port) || port.container_port))}
-						<div class="grid grid-cols-[1fr_80px_90px_60px_auto] gap-2 mt-1 items-center">
+						<div class="grid grid-cols-[1fr_90px_80px_60px_auto] gap-2 mt-1 items-center">
 							<Input bind:value={port.name} placeholder="e.g. http" class="h-8 text-xs" />
-							<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
 							<Input bind:value={port.host_port} placeholder={String(port.container_port)} class="h-8 text-xs {hasConflict ? 'border-amber-500 ring-1 ring-amber-500/50' : ''}" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
+							<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
 							<select bind:value={port.protocol} class="h-8 rounded-md border border-input bg-transparent px-1 text-xs">
 								<option>TCP</option>
 								<option>UDP</option>
@@ -1657,7 +1662,7 @@
 							{/each}
 						</div>
 					{/if}
-					<p class="mt-1 text-[0.6rem] text-muted-foreground">Internal = port inside the container. Exposed = port on the host (defaults to internal port if empty). App is also accessible at /apps/{'{name}'}/ via reverse proxy.</p>
+					<p class="mt-1 text-[0.6rem] text-muted-foreground">Exposed = port on the host (what clients connect to). Internal = port inside the container. Leave Exposed blank to use the same number as Internal. App is also accessible at /apps/{'{name}'}/ via reverse proxy.</p>
 				</div>
 
 				<!-- Environment Variables -->
@@ -1992,7 +1997,7 @@
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap">Memory</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap" title="Cumulative bytes since container start">Net&nbsp;I/O</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap" title="Cumulative block-device read/write since container start">Disk&nbsp;I/O</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Ports</th>
+					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground" title="host:container — same direction as `docker run -p HOST:CONTAINER`">Ports</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
 					<th class="w-px border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground whitespace-nowrap">Actions</th>
 				</tr>
