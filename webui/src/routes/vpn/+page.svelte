@@ -3,18 +3,9 @@
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { Button } from '$lib/components/ui/button';
+	import type { TailscaleStatus } from '$lib/types';
 
 	const client = getClient();
-
-	interface TailscaleStatus {
-		enabled: boolean;
-		daemon_running: boolean;
-		connected: boolean;
-		ip?: string;
-		hostname?: string;
-		version?: string;
-		has_auth_key: boolean;
-	}
 
 	let tsStatus: TailscaleStatus | null = $state(null);
 	let tsAuthKey = $state('');

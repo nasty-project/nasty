@@ -4,7 +4,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
-	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Filesystem, SmbGroup } from '$lib/types';
+	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Filesystem, SmbGroup, OidcSettings } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -70,19 +70,6 @@
 	let newTokenTried = $state(false);
 
 	// ── Single Sign-On (OIDC) ──────────────────────────────────
-	type OidcRoleMapping = { group: string; role: string };
-	type OidcSettings = {
-		enabled: boolean;
-		issuer_url: string | null;
-		client_id: string | null;
-		client_secret: string | null;
-		redirect_uri: string | null;
-		scopes: string[];
-		groups_claim: string;
-		role_mappings: OidcRoleMapping[];
-		default_role: string | null;
-		auto_provision: boolean;
-	};
 	let oidc: OidcSettings | null = $state(null);
 	let oidcSecretSet = $state(false);
 	let oidcSecretInput = $state('');

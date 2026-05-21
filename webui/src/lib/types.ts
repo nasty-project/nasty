@@ -566,6 +566,24 @@ export interface ProtocolStatus {
 
 export type TempUnit = 'celsius' | 'fahrenheit';
 
+export interface OidcRoleMapping {
+	group: string;
+	role: string;
+}
+
+export interface OidcSettings {
+	enabled: boolean;
+	issuer_url: string | null;
+	client_id: string | null;
+	client_secret: string | null;
+	redirect_uri: string | null;
+	scopes: string[];
+	groups_claim: string;
+	role_mappings: OidcRoleMapping[];
+	default_role: string | null;
+	auto_provision: boolean;
+}
+
 export interface Settings {
 	timezone: string;
 	hostname: string | null;
@@ -574,13 +592,24 @@ export interface Settings {
 	tls_domain: string | null;
 	tls_acme_email: string | null;
 	tls_acme_enabled: boolean;
-	tls_challenge_type: 'tls-alpn' | 'dns';
+	tls_challenge_type: 'tls-alpn' | 'http' | 'dns';
 	tls_dns_provider: string | null;
 	tls_dns_credentials: string | null;
 	tls_acme_staging: boolean;
 	tls_dns_resolver: string | null;
 	tls_dns_propagation_wait: number | null;
 	telemetry_enabled: boolean;
+	oidc: OidcSettings;
+}
+
+export interface TailscaleStatus {
+	enabled: boolean;
+	daemon_running: boolean;
+	connected: boolean;
+	ip?: string;
+	hostname?: string;
+	version?: string;
+	has_auth_key: boolean;
 }
 
 export type NutMode = 'local' | 'remote';
