@@ -3,8 +3,9 @@
 	import { goto } from '$app/navigation';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil } from '@lucide/svelte';
+	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput } from '@lucide/svelte';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import PathPicker from '$lib/components/PathPicker.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 
 	interface FileEntry {
@@ -132,6 +133,125 @@
 	let renameTarget: FileEntry | null = $state(null);
 	let renameValue = $state('');
 	let renameTried = $state(false);
+
+	// Multi-select for bulk actions. Keyed by entry.name within the
+	// current directory — clears automatically on browse() since
+	// `selected` is reset whenever currentPath changes.
+	let selected: Set<string> = $state(new Set());
+	$effect(() => { void currentPath; selected = new Set(); });
+
+	// Copy / Move picker. `pickerMode` controls which API the chosen
+	// destination is fed into; `pickerTargets` is the list of entries
+	// the action will iterate (either a single-row click or the
+	// current multi-select). Using a list keeps the single and bulk
+	// flows on one code path.
+	let pickerOpen = $state(false);
+	let pickerMode: 'copy' | 'move' = $state('copy');
+	let pickerTargets: FileEntry[] = $state([]);
+	let bulkActionRunning = $state(false);
+	let bulkActionStatus = $state('');
+	let bulkDeleteConfirm = $state(false);
+
+	function isSelected(name: string): boolean { return selected.has(name); }
+	function toggleSelected(name: string) {
+		const next = new Set(selected);
+		if (next.has(name)) next.delete(name); else next.add(name);
+		selected = next;
+	}
+	function clearSelection() { selected = new Set(); }
+	function toggleSelectAll() {
+		if (selected.size === visibleEntries.length && visibleEntries.length > 0) {
+			selected = new Set();
+		} else {
+			selected = new Set(visibleEntries.map(e => e.name));
+		}
+	}
+	function selectedEntries(): FileEntry[] {
+		return visibleEntries.filter(e => selected.has(e.name));
+	}
+
+	function openPicker(targets: FileEntry[], mode: 'copy' | 'move') {
+		if (targets.length === 0) return;
+		pickerTargets = targets;
+		pickerMode = mode;
+		pickerOpen = true;
+	}
+
+	// PathPicker returns absolute paths like "/fs/tank/photos". The
+	// files API takes paths relative to /fs, so we strip that prefix
+	// before issuing the per-entry request.
+	function relFromHostPath(abs: string): string {
+		const stripped = abs.replace(/^\/fs\/?/, '');
+		return stripped;
+	}
+
+	async function runPickerAction(destAbs: string) {
+		pickerOpen = false;
+		const destRel = relFromHostPath(destAbs);
+		const endpoint = pickerMode === 'copy' ? '/api/files/copy' : '/api/files/rename';
+		const verb = pickerMode === 'copy' ? 'copy' : 'move';
+		const targets = pickerTargets.slice();
+		pickerTargets = [];
+
+		bulkActionRunning = true;
+		const errors: string[] = [];
+		for (let i = 0; i < targets.length; i++) {
+			const entry = targets[i];
+			bulkActionStatus = `${verb} ${i + 1}/${targets.length}: ${entry.name}`;
+			const from = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+			const to = destRel ? `${destRel}/${entry.name}` : entry.name;
+			if (from === to) continue; // copying/moving onto self → skip silently
+			try {
+				const res = await fetch(endpoint, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ from, to }),
+				});
+				if (!res.ok) {
+					const data = await res.json().catch(() => ({}));
+					errors.push(`${entry.name}: ${data.error || res.statusText}`);
+				}
+			} catch (e) {
+				errors.push(`${entry.name}: ${e instanceof Error ? e.message : String(e)}`);
+			}
+		}
+		bulkActionRunning = false;
+		bulkActionStatus = '';
+		if (errors.length > 0) {
+			alert(`${verb} finished with ${errors.length} error(s):\n\n${errors.join('\n')}`);
+		}
+		clearSelection();
+		await browse(currentPath);
+	}
+
+	async function runBulkDelete() {
+		bulkDeleteConfirm = false;
+		const targets = selectedEntries();
+		if (targets.length === 0) return;
+		bulkActionRunning = true;
+		const errors: string[] = [];
+		for (let i = 0; i < targets.length; i++) {
+			const entry = targets[i];
+			bulkActionStatus = `delete ${i + 1}/${targets.length}: ${entry.name}`;
+			const path = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+			try {
+				const res = await fetch(`/api/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+				if (!res.ok) {
+					const data = await res.json().catch(() => ({}));
+					errors.push(`${entry.name}: ${data.error || res.statusText}`);
+				}
+			} catch (e) {
+				errors.push(`${entry.name}: ${e instanceof Error ? e.message : String(e)}`);
+			}
+		}
+		bulkActionRunning = false;
+		bulkActionStatus = '';
+		if (errors.length > 0) {
+			alert(`Delete finished with ${errors.length} error(s):\n\n${errors.join('\n')}`);
+		}
+		clearSelection();
+		await browse(currentPath);
+	}
 
 	// Edit (text files in the preview modal)
 	let editing = $state(false);
@@ -388,6 +508,34 @@
 	</div>
 </div>
 
+<!-- Bulk action bar (visible only when at least one row is selected) -->
+{#if selected.size > 0 && !isRoot}
+	<div class="mb-3 flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+		<span class="text-sm font-medium">{selected.size} selected</span>
+		<div class="ml-auto flex items-center gap-2">
+			<Button size="sm" variant="outline" onclick={() => openPicker(selectedEntries(), 'copy')} disabled={bulkActionRunning}>
+				<Copy size={14} class="mr-1" /> Copy
+			</Button>
+			<Button size="sm" variant="outline" onclick={() => openPicker(selectedEntries(), 'move')} disabled={bulkActionRunning}>
+				<FolderInput size={14} class="mr-1" /> Move
+			</Button>
+			<Button size="sm" variant="destructive" onclick={() => bulkDeleteConfirm = true} disabled={bulkActionRunning}>
+				<Trash2 size={14} class="mr-1" /> Delete
+			</Button>
+			<Button size="sm" variant="ghost" onclick={clearSelection} disabled={bulkActionRunning}>
+				Clear
+			</Button>
+		</div>
+	</div>
+{/if}
+
+<!-- Bulk action progress strip -->
+{#if bulkActionRunning}
+	<div class="mb-3 rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+		{bulkActionStatus || 'Working…'}
+	</div>
+{/if}
+
 <!-- Upload progress -->
 {#if uploading}
 	<div class="mb-4 rounded-md border border-border p-3">
@@ -426,6 +574,17 @@
 	<table class="w-full text-sm">
 		<thead>
 			<tr>
+				{#if !isRoot}
+					<th class="w-10 border-b-2 border-border p-3">
+						<input
+							type="checkbox"
+							class="h-3.5 w-3.5"
+							aria-label="Select all"
+							checked={selected.size > 0 && selected.size === visibleEntries.length}
+							indeterminate={selected.size > 0 && selected.size < visibleEntries.length}
+							onchange={toggleSelectAll} />
+					</th>
+				{/if}
 				<SortTh label="Name" active={sortKey === 'name'} dir={sortDir} onclick={() => toggleSort('name')} />
 				<SortTh label="Size" active={sortKey === 'size'} dir={sortDir} onclick={() => toggleSort('size')} align="right" />
 				<SortTh label="Modified" active={sortKey === 'modified'} dir={sortDir} onclick={() => toggleSort('modified')} align="right" />
@@ -436,7 +595,17 @@
 		</thead>
 		<tbody>
 			{#each visibleEntries as entry}
-				<tr class="border-b border-border hover:bg-muted/30 transition-colors group">
+				<tr class="border-b border-border hover:bg-muted/30 transition-colors group {isSelected(entry.name) ? 'bg-muted/20' : ''}">
+					{#if !isRoot}
+						<td class="p-3">
+							<input
+								type="checkbox"
+								class="h-3.5 w-3.5"
+								aria-label={`Select ${entry.name}`}
+								checked={isSelected(entry.name)}
+								onchange={() => toggleSelected(entry.name)} />
+						</td>
+					{/if}
 					<td class="p-3">
 						{#if entry.is_dir}
 							<button class="flex items-center gap-2 hover:text-primary transition-colors" onclick={() => navigateTo(entry)}>
@@ -480,6 +649,18 @@
 									onclick={() => startRename(entry)}
 									title="Rename">
 									<Pencil size={14} />
+								</button>
+								<button
+									class="text-muted-foreground/40 hover:text-foreground transition-colors"
+									onclick={() => openPicker([entry], 'copy')}
+									title="Copy to…">
+									<Copy size={14} />
+								</button>
+								<button
+									class="text-muted-foreground/40 hover:text-foreground transition-colors"
+									onclick={() => openPicker([entry], 'move')}
+									title="Move to…">
+									<FolderInput size={14} />
 								</button>
 								<button
 									class="text-muted-foreground/40 hover:text-destructive transition-colors"
@@ -615,3 +796,32 @@
 		</div>
 	</div>
 {/if}
+
+<!-- Bulk delete confirm modal -->
+{#if bulkDeleteConfirm}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<Card class="w-full max-w-sm">
+			<CardContent class="pt-6">
+				<h3 class="mb-2 text-lg font-semibold">Delete {selected.size} item{selected.size === 1 ? '' : 's'}?</h3>
+				<p class="mb-4 text-sm text-muted-foreground">
+					This cannot be undone. Directories are removed with their contents.
+				</p>
+				<div class="flex gap-2">
+					<Button variant="destructive" onclick={runBulkDelete}>Delete {selected.size}</Button>
+					<Button variant="secondary" onclick={() => bulkDeleteConfirm = false}>Cancel</Button>
+				</div>
+			</CardContent>
+		</Card>
+	</div>
+{/if}
+
+<!-- Copy / Move destination picker -->
+<PathPicker
+	open={pickerOpen}
+	initialPath={currentPath}
+	title={pickerMode === 'copy'
+		? `Copy ${pickerTargets.length} item${pickerTargets.length === 1 ? '' : 's'} to…`
+		: `Move ${pickerTargets.length} item${pickerTargets.length === 1 ? '' : 's'} to…`}
+	onPick={runPickerAction}
+	onClose={() => { pickerOpen = false; pickerTargets = []; }}
+/>
