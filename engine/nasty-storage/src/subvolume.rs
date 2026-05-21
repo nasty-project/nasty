@@ -1866,7 +1866,14 @@ async fn build_losetup_map() -> HashMap<String, String> {
     .await
     {
         Ok(o) => o,
-        Err(_) => return map,
+        Err(e) => {
+            // Empty loop-device map means the caller (subvolume
+            // enumeration) can't resolve block-subvolume backing
+            // files to /dev/loopN entries. The WebUI sees those
+            // subvolumes as detached even when they aren't.
+            warn!("losetup failed: {e}; loop-device map will be empty");
+            return map;
+        }
     };
 
     for line in output.lines() {
@@ -1906,7 +1913,17 @@ fn find_loop_device_from_map(
 async fn find_child_subvolumes(mount_point: &str, parent_name: &str) -> Vec<String> {
     let output = match cmd::run_ok("bcachefs", &["subvolume", "list", "-R", mount_point]).await {
         Ok(o) => o,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            // Empty children list means the caller (subvolume delete
+            // path) won't see nested subvolumes that need to be
+            // removed first — the outer delete then fails with a
+            // less actionable error. Surface the real cause here.
+            warn!(
+                "bcachefs subvolume list -R {mount_point} failed: {e}; \
+                 children of {parent_name} will not be discovered"
+            );
+            return Vec::new();
+        }
     };
 
     let prefix = format!("{parent_name}/");
