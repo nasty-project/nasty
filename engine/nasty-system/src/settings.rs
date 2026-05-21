@@ -90,6 +90,20 @@ pub async fn retry_acme() -> Result<(), String> {
 /// Best-effort: failures log a warning. The next user-triggered TLS
 /// action (settings change, retry button) reconverges.
 pub async fn reapply_tls_from_disk() {
+    // Wait for Caddy's admin API before pushing the policy set. Engine
+    // startup spawns this concurrently with the rest of restore, and on
+    // a fresh boot Caddy can still be initialising when we get here.
+    // main.rs already does a wait_ready before apps.reconcile_app_routes,
+    // but if that timed out (slow Caddy, journald wedged, etc.) calling
+    // set_tls_automation here would fail silently with no retry until
+    // the next engine restart — leaving the box without the policy set
+    // it should have on disk-state. Re-arming the wait_ready locally
+    // means a Caddy that needed more than 30 s still gets its config.
+    let api = nasty_apps::caddy::CaddyApi::new();
+    if let Err(e) = api.wait_ready(30).await {
+        warn!("Caddy admin API not ready ({e}); skipping TLS reapply at startup");
+        return;
+    }
     let settings = load().await;
     let app_subdomains = load_app_subdomains().await;
     if let Err(e) = apply_caddy_tls_with_apps(&settings, &app_subdomains).await {
