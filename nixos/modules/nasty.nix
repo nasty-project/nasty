@@ -1044,19 +1044,25 @@ in {
         # services / kernel tunables, so we can apply most of the
         # service-hardening set without breaking what it does.
         #
-        # The Protect* directives we intentionally leave off:
+        # The directives we intentionally leave off:
         #   - ProtectKernelLogs: it shells out to `dmesg` for kernel
         #     error metrics. Setting this would block /dev/kmsg.
         #   - PrivateDevices:    smartctl needs /dev/sd*, /dev/nvme*
         #     to read SMART data. PrivateDevices hides all of /dev.
-        #   - SystemCallFilter:  the original `@system-service
-        #     ~@privileged ~@resources` set fatally SIGSYS'd the
-        #     service in <50ms at startup. `~@resources` strips
-        #     `sched_setaffinity` (and the rest of the sched_set*
-        #     family), which tokio's multi-thread runtime calls when
-        #     pinning worker threads. The other Protect* directives
-        #     below still cover the same threat model without the
-        #     seccomp-filter fragility.
+        #   - ProcSubset:        the whole *point* of metrics is to
+        #     read /proc/loadavg, /proc/meminfo, /proc/stat,
+        #     /proc/net/dev, /proc/diskstats. ProcSubset=pid hides
+        #     everything except /proc/<pid>/* — leaving the service
+        #     up but reading zeros for every CPU / memory / network
+        #     stat. ProtectProc=invisible stays on because it only
+        #     hides other users' processes (a separate concern).
+        #   - SystemCallFilter:  the original
+        #     `@system-service ~@privileged ~@resources` set fatally
+        #     SIGSYS'd the service in <50ms at startup. The hot path
+        #     was SQLite's WAL init calling `fchown()` (which is in
+        #     @privileged); the runtime / tokio paths were close
+        #     behind. Re-add as additive-only (`@system-service`
+        #     alone, no `~@` subtractors) if you want it back.
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
@@ -1066,7 +1072,6 @@ in {
         ProtectClock = true;
         ProtectHostname = true;
         ProtectProc = "invisible";
-        ProcSubset = "pid";
         RestrictNamespaces = true;
         RestrictRealtime = true;
         LockPersonality = true;
