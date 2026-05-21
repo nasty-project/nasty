@@ -20,9 +20,28 @@ mod vm;
 use crate::AppState;
 use crate::auth::{Role, Session};
 
-/// Methods an operator token is allowed to call (in addition to all read-only methods)
-fn is_operator_allowed(method: &str) -> bool {
+/// Methods every authenticated user can call regardless of role.
+/// Two categories:
+///   1. Pure reads (`is_read_only`).
+///   2. Mutations that only affect the caller's own session/account —
+///      logging out, changing your own password. Putting these in
+///      `is_read_only` would be misleading (they DO write), so the
+///      role-check pipes through this wider predicate instead.
+fn is_universally_allowed(method: &str) -> bool {
     is_read_only(method)
+        || matches!(
+            method,
+            // Without these, ReadOnly and Operator users literally
+            // couldn't log out or change their own password — the
+            // engine would deny them with "Permission denied".
+            "auth.logout" | "auth.change_password"
+        )
+}
+
+/// Methods an operator token is allowed to call (in addition to
+/// everything in `is_universally_allowed`).
+fn is_operator_allowed(method: &str) -> bool {
+    is_universally_allowed(method)
         || matches!(
             method,
             "subvolume.create"
@@ -46,7 +65,14 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "smb.user.create"
                 | "smb.user.delete"
                 | "smb.user.set_password"
+                // Operator can create, delete, AND manage members of
+                // SMB groups — the old list only had `delete`, which
+                // meant operators could tear groups down they had no
+                // way to build up.
+                | "smb.group.create"
                 | "smb.group.delete"
+                | "smb.group.add_member"
+                | "smb.group.remove_member"
                 | "share.iscsi.create"
                 | "share.iscsi.delete"
                 | "share.iscsi.add_lun"
@@ -63,12 +89,19 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "share.nvmeof.remove_host"
                 | "vm.create"
                 | "vm.update"
+                // `vm.delete` was admin-only; operator could spin up
+                // VMs they had no way to tear down. Closes the same
+                // create-vs-delete asymmetry as smb.group above.
+                | "vm.delete"
                 | "vm.start"
                 | "vm.stop"
                 | "vm.kill"
                 | "vm.snapshot"
                 | "vm.clone"
                 | "apps.enable"
+                // `apps.disable` was admin-only — same asymmetry: an
+                // operator could turn the apps runtime on but not off.
+                | "apps.disable"
                 | "apps.install"
                 | "apps.update"
                 | "apps.remove"
@@ -165,6 +198,11 @@ fn is_read_only(method: &str) -> bool {
                 | "apps.check_devices"
                 | "apps.check_volumes"
                 | "apps.status"
+                // Live CPU / mem / network stats per container.
+                // Pure read; the WebUI polls it from the Apps page
+                // and ReadOnly users need it for the dashboard to
+                // populate.
+                | "apps.stats"
                 | "apps.logs"
                 | "apps.compose.logs"
                 | "apps.container.logs"
@@ -265,10 +303,17 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
         return serde_json::to_string(&resp).unwrap();
     }
 
-    // Enforce role permissions
+    // Enforce role permissions.
+    //
+    // ReadOnly used to map to `is_read_only` directly, which meant
+    // ReadOnly users couldn't log out or change their own password —
+    // both are mutations and so didn't qualify as "read-only". The
+    // wider `is_universally_allowed` predicate handles the read-set
+    // plus the small set of self-only mutations every authenticated
+    // user is allowed.
     let denied = match session.role {
         Role::Admin => false,
-        Role::ReadOnly => !is_read_only(&request.method),
+        Role::ReadOnly => !is_universally_allowed(&request.method),
         Role::Operator => !is_operator_allowed(&request.method),
     };
     if denied {
