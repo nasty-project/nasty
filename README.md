@@ -33,7 +33,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **Subvolumes** — filesystem and block subvolumes with quotas, compression, and tiering per subvolume
 - **Snapshots** — instant, space-efficient point-in-time copies
 - **Encryption lifecycle** — lock and unlock encrypted filesystems from the WebUI, with a dependents preview that lists every app, VM, share, and backup that would break before you confirm
-- **File browser** — browse, upload, and manage files from the web UI
+- **File browser** — browse, upload, edit, rename, copy, move, and bulk-manage files from the web UI
 - **Backups** — encrypted, deduplicated, incremental backups to local, S3, SFTP, REST, or Backblaze B2 with per-profile schedules and retention
 
 ### Monitoring & Alerts
@@ -56,7 +56,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **Networking** — NetworkManager-based with confirm-or-rollback: edits stage, apply, and auto-revert if you don't confirm in time, so a typo can't lock you out over SSH
 - **Let's Encrypt** — automatic TLS certificates via ACME (TLS-ALPN and DNS challenges)
 - **Tailscale** — built-in VPN with one-click setup
-- **Access control** — local user accounts with role-based permissions, API tokens, and OIDC single sign-on
+- **Access control** — local user accounts with role-based permissions, API tokens, OIDC single sign-on, and an append-only audit log of every mutation, login attempt, and privileged-console open
 - **UPS monitoring** — NUT integration for graceful shutdown on power loss (opt-in)
 - **Atomic updates** — NixOS-based, with one-click rollback to any previous generation
 - **Binary cache** — fast updates via cachix on both x86_64 and aarch64 (engine, webui, bcachefs-tools pre-built — no Rust + npm compile on Pi / Odroid / Rockchip boxes)
