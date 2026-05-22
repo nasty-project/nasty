@@ -16,6 +16,13 @@ const FS_STATE_PATH: &str = "/var/lib/nasty/fs-state.json";
 const KEYS_DIR: &str = "/var/lib/nasty/keys";
 const PROC_KEYS_PATH: &str = "/proc/keys";
 
+/// Suffix for a TPM2-sealed copy of the encryption key (#102). Lives
+/// alongside the plaintext `.key` in [`KEYS_DIR`]; `read_unlock_key`
+/// prefers the sealed copy when both are present and falls back to
+/// the plaintext on unseal failure so a cleared TPM or Secure-Boot
+/// toggle can't strand the user.
+const TPM_SEALED_SUFFIX: &str = "tpm";
+
 /// Parse /proc/keys output and return true if the session keyring (or any
 /// keyring visible to this process) holds a `bcachefs:<uuid>` key.
 /// `bcachefs unlock -k session` lands the FS encryption key here; the kernel
@@ -79,6 +86,69 @@ fn parse_bcachefs_key_id(contents: &str, uuid: &str) -> Option<String> {
 async fn find_bcachefs_key_id(uuid: &str) -> Option<String> {
     let contents = tokio::fs::read_to_string(PROC_KEYS_PATH).await.ok()?;
     parse_bcachefs_key_id(&contents, uuid)
+}
+
+/// Resolve the auto-unlock material for filesystem `name`. Returns
+/// the raw passphrase bytes that should be fed to `bcachefs unlock`
+/// via stdin.
+///
+/// Resolution order (#102 — TPM2 sealing):
+///   1. `<KEYS_DIR>/<name>.tpm` — TPM-sealed blob, PCR-7 bound. We
+///      unseal it and use the result.
+///   2. `<KEYS_DIR>/<name>.key` — plaintext fallback. Kept around as
+///      the designated recovery path when binding to a TPM, and the
+///      only on-disk material for systems without TPM2.
+///   3. None — the caller must prompt for a passphrase.
+///
+/// A sealed blob that fails to unseal (TPM cleared, Secure Boot
+/// disabled, blob corrupt) is logged and treated as missing so the
+/// `.key` fallback kicks in. We do not surface the unseal error to
+/// the caller — a stale `.tpm` shouldn't block a mount that the
+/// `.key` would otherwise handle.
+async fn read_unlock_key(name: &str) -> Result<Option<Vec<u8>>, FilesystemError> {
+    let sealed_path = format!("{KEYS_DIR}/{name}.{TPM_SEALED_SUFFIX}");
+    if Path::new(&sealed_path).exists() {
+        match unseal_key_file(&sealed_path).await {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(e) => warn!(
+                "TPM unseal for '{name}' at {sealed_path} failed ({e}); falling back to plaintext .key"
+            ),
+        }
+    }
+    let key_path = format!("{KEYS_DIR}/{name}.key");
+    if Path::new(&key_path).exists() {
+        let bytes = tokio::fs::read(&key_path).await.map_err(|e| {
+            FilesystemError::CommandFailed(format!("read key for '{name}' at {key_path}: {e}"))
+        })?;
+        return Ok(Some(bytes));
+    }
+    Ok(None)
+}
+
+async fn unseal_key_file(path: &str) -> Result<Vec<u8>, String> {
+    let data = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("read {path}: {e}"))?;
+    let blob: nasty_common::tpm::SealedBlob =
+        serde_json::from_slice(&data).map_err(|e| format!("parse {path}: {e}"))?;
+    nasty_common::tpm::unseal(&blob)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Pipe `key_bytes` into `bcachefs unlock` via stdin. The trailing
+/// newline matches the existing passphrase-stdin form — bcachefs
+/// reads up to the first newline as the passphrase.
+async fn bcachefs_unlock_with_key(device: &str, key_bytes: &[u8]) -> Result<(), FilesystemError> {
+    let mut stdin = Vec::with_capacity(key_bytes.len() + 1);
+    stdin.extend_from_slice(key_bytes);
+    if !key_bytes.ends_with(b"\n") {
+        stdin.push(b'\n');
+    }
+    cmd::run_ok_stdin("bcachefs", &["unlock", "-k", "session", device], &stdin)
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -362,6 +432,16 @@ pub struct DeviceSetStateRequest {
     pub device: String,
     /// One of: rw, ro, failed, spare
     pub state: String,
+}
+
+/// Host + per-FS TPM2 bind state returned from `fs.tpm.status`,
+/// `fs.tpm.bind`, and `fs.tpm.unbind`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TpmBindStatus {
+    /// Host has a usable TPM 2.0 resource manager (`/dev/tpmrm0`).
+    pub tpm_available: bool,
+    /// A `<KEYS_DIR>/<name>.tpm` sealed blob exists for this filesystem.
+    pub bound: bool,
 }
 
 /// Detailed filesystem usage from `bcachefs fs usage`.
@@ -924,21 +1004,8 @@ impl FilesystemService {
 
         // Unlock encrypted filesystem before mounting
         if is_encrypted {
-            let key_path = format!("{KEYS_DIR}/{}.key", req.name);
-            if Path::new(&key_path).exists() {
-                cmd::run_ok(
-                    "bcachefs",
-                    &[
-                        "unlock",
-                        "-k",
-                        "session",
-                        "-f",
-                        &key_path,
-                        &req.devices[0].path,
-                    ],
-                )
-                .await
-                .map_err(FilesystemError::CommandFailed)?;
+            if let Some(bytes) = read_unlock_key(&req.name).await? {
+                bcachefs_unlock_with_key(&req.devices[0].path, &bytes).await?;
             } else if let Some(ref passphrase) = req.passphrase {
                 let stdin = format!("{passphrase}\n");
                 cmd::run_ok_stdin(
@@ -1107,12 +1174,12 @@ impl FilesystemService {
         let first_device = fs.devices.first().map(|d| d.path.as_str()).unwrap_or("");
 
         // Unlock encrypted filesystem before mounting. Three paths:
-        // 1. Stored key file exists (auto-unlock-on-boot setup) → use
-        //    it to load the key into the session keyring.
-        // 2. No stored key file BUT the keyring already has the key
-        //    (user clicked Unlock with a passphrase earlier this
-        //    session) → nothing to do, kernel will use the loaded
-        //    key when we call `bcachefs mount`.
+        // 1. Stored key (TPM-sealed `.tpm` or plaintext `.key`) exists
+        //    (auto-unlock-on-boot setup) → load it into the session
+        //    keyring via `bcachefs unlock`.
+        // 2. No stored key BUT the keyring already has the key (user
+        //    clicked Unlock with a passphrase earlier this session)
+        //    → nothing to do, kernel uses the loaded key at mount.
         // 3. Neither → genuinely locked, ask user to unlock first.
         //
         // Path 2 was missing before — a passphrase-unlocked FS would
@@ -1120,14 +1187,8 @@ impl FilesystemService {
         // the UI would show the FS as Unmounted (correctly: the
         // `locked` flag is keyring-aware) but Mount would fail.
         if opts.encrypted == Some(true) {
-            let key_path = format!("{KEYS_DIR}/{name}.key");
-            if Path::new(&key_path).exists() {
-                cmd::run_ok(
-                    "bcachefs",
-                    &["unlock", "-k", "session", "-f", &key_path, first_device],
-                )
-                .await
-                .map_err(FilesystemError::CommandFailed)?;
+            if let Some(bytes) = read_unlock_key(name).await? {
+                bcachefs_unlock_with_key(first_device, &bytes).await?;
             } else if !is_bcachefs_key_loaded(&fs.uuid).await {
                 return Err(FilesystemError::CommandFailed(format!(
                     "encrypted filesystem '{name}' is locked — unlock it first, then mount."
@@ -1246,6 +1307,84 @@ impl FilesystemService {
         tokio::fs::remove_file(&key_path).await.map_err(|e| {
             FilesystemError::CommandFailed(format!("delete key for '{name}' at {key_path}: {e}"))
         })
+    }
+
+    /// TPM2 bind status for filesystem `name`.
+    ///
+    /// `tpm_available` is the host capability (`/dev/tpmrm0` present);
+    /// `bound` is per-FS (a `<name>.tpm` sealed blob exists). The two
+    /// are independent — a host can lose its TPM (firmware downgrade,
+    /// chip swap) and still have a stale `.tpm` file from before.
+    pub async fn tpm_status(&self, name: &str) -> TpmBindStatus {
+        let sealed_path = format!("{KEYS_DIR}/{name}.{TPM_SEALED_SUFFIX}");
+        TpmBindStatus {
+            tpm_available: nasty_common::tpm::is_available().await,
+            bound: Path::new(&sealed_path).exists(),
+        }
+    }
+
+    /// Seal the stored plaintext key with the host TPM and write it
+    /// next to the existing `<name>.key` as `<name>.tpm`. The plaintext
+    /// `.key` is **kept** as a recovery path — wiping it is a separate
+    /// explicit step the user invokes via `delete_key` after they've
+    /// satisfied themselves the bind works.
+    ///
+    /// Errors when:
+    ///   - the host has no usable TPM2 (`/dev/tpmrm0` missing);
+    ///   - no plaintext `.key` exists to seal (caller must create the
+    ///     FS with `store_key=true` first);
+    ///   - the FS isn't encrypted at all (programming bug — surfaced
+    ///     so it doesn't silently no-op).
+    pub async fn tpm_bind(&self, name: &str) -> Result<TpmBindStatus, FilesystemError> {
+        let fs = self.get(name).await?;
+        if fs.options.encrypted != Some(true) {
+            return Err(FilesystemError::InvalidInput(format!(
+                "filesystem '{name}' is not encrypted"
+            )));
+        }
+        if !nasty_common::tpm::is_available().await {
+            return Err(FilesystemError::CommandFailed(
+                "TPM2 not available on this host".into(),
+            ));
+        }
+
+        let key_path = format!("{KEYS_DIR}/{name}.key");
+        let plaintext = tokio::fs::read(&key_path).await.map_err(|e| {
+            FilesystemError::CommandFailed(format!(
+                "no stored key for '{name}' at {key_path}: {e} — bind requires an existing .key"
+            ))
+        })?;
+
+        let blob = nasty_common::tpm::seal_with_pcr7(&plaintext)
+            .await
+            .map_err(|e| FilesystemError::CommandFailed(format!("tpm seal: {e}")))?;
+        let json = serde_json::to_vec_pretty(&blob)
+            .map_err(|e| FilesystemError::CommandFailed(format!("serialize sealed blob: {e}")))?;
+
+        let sealed_path = format!("{KEYS_DIR}/{name}.{TPM_SEALED_SUFFIX}");
+        tokio::fs::write(&sealed_path, &json)
+            .await
+            .map_err(|e| FilesystemError::CommandFailed(format!("write {sealed_path}: {e}")))?;
+        info!("Filesystem '{name}' key sealed to TPM at {sealed_path}");
+
+        Ok(self.tpm_status(name).await)
+    }
+
+    /// Remove the TPM-sealed copy of the key. The plaintext `.key`
+    /// (if present) is unaffected — auto-unlock continues working off
+    /// it. No-op (success) when no sealed blob exists.
+    pub async fn tpm_unbind(&self, name: &str) -> Result<TpmBindStatus, FilesystemError> {
+        let sealed_path = format!("{KEYS_DIR}/{name}.{TPM_SEALED_SUFFIX}");
+        match tokio::fs::remove_file(&sealed_path).await {
+            Ok(()) => info!("Filesystem '{name}' TPM seal removed ({sealed_path})"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(FilesystemError::CommandFailed(format!(
+                    "remove {sealed_path}: {e}"
+                )));
+            }
+        }
+        Ok(self.tpm_status(name).await)
     }
 
     /// Update runtime-mutable options on a mounted filesystem via sysfs.

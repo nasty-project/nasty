@@ -101,7 +101,7 @@ use nasty_sharing::smb::{CreateSmbShareRequest, SmbShare, UpdateSmbShareRequest}
 use nasty_storage::filesystem::{
     BlockDevice, CreateFilesystemRequest, DestroyFilesystemRequest, DeviceActionRequest,
     DeviceAddRequest, DeviceSetLabelRequest, DeviceSetStateRequest, Filesystem, FsUsage,
-    ReconcileStatus, ScrubStatus, UpdateFilesystemOptionsRequest,
+    ReconcileStatus, ScrubStatus, TpmBindStatus, UpdateFilesystemOptionsRequest,
 };
 use nasty_storage::subvolume::{
     CloneSnapshotRequest, CreateSnapshotRequest, CreateSubvolumeRequest, DeleteSnapshotRequest,
@@ -545,6 +545,27 @@ fn methods(generator: &mut SchemaGenerator) -> Vec<(&'static str, Vec<Method>)> 
                     role: "any",
                     params: MethodParams::Literal("`{\"name\": string}`"),
                     result: Some(gen_schema::<FsUsage>(generator)),
+                },
+                Method {
+                    name: "fs.tpm.status",
+                    desc: "Report TPM2 host capability and per-filesystem bind state. `tpm_available` reflects whether `/dev/tpmrm0` is present; `bound` reflects whether a sealed-key blob exists for this filesystem.",
+                    role: "any",
+                    params: MethodParams::Literal("`{\"name\": string}`"),
+                    result: Some(gen_schema::<TpmBindStatus>(generator)),
+                },
+                Method {
+                    name: "fs.tpm.bind",
+                    desc: "Seal the filesystem's stored encryption key with the host TPM2 (PCR-7 bound). Writes the sealed blob next to the plaintext `.key`; the plaintext is retained as a recovery path until `fs.key.delete` is invoked. Errors when the host has no usable TPM2 or no stored `.key` exists.",
+                    role: "admin",
+                    params: MethodParams::Literal("`{\"name\": string}`"),
+                    result: Some(gen_schema::<TpmBindStatus>(generator)),
+                },
+                Method {
+                    name: "fs.tpm.unbind",
+                    desc: "Remove the TPM2-sealed copy of the encryption key. The plaintext `.key` is unaffected. No-op success when no sealed blob exists.",
+                    role: "admin",
+                    params: MethodParams::Literal("`{\"name\": string}`"),
+                    result: Some(gen_schema::<TpmBindStatus>(generator)),
                 },
             ],
         ),

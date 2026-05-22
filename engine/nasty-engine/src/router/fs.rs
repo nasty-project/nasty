@@ -122,6 +122,24 @@ pub(super) async fn try_route(
             },
             Err(r) => r,
         },
+        "fs.tpm.status" => match require_str(req, "name") {
+            Ok(name) => ok(req, state.filesystems.tpm_status(name).await),
+            Err(r) => r,
+        },
+        "fs.tpm.bind" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.tpm_bind(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.tpm.unbind" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.tpm_unbind(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         "device.list" => match state.filesystems.list_devices().await {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
