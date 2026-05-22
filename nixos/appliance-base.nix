@@ -1,4 +1,4 @@
-{ config, lib, pkgs, nasty-engine, nasty-webui ? null, ... }:
+{ config, lib, pkgs, nasty-engine, nasty-webui ? null, nasty-version ? "dev", ... }:
 
 {
   imports = [ ./binary-cache.nix ];
@@ -80,6 +80,12 @@
   # Branding
   system.nixos.distroName = "NASty";
   system.nixos.distroId = "nasty";
+  # Boot menu entries read as `NASty v<release>` instead of the
+  # default `NASty <release>.<commit-date>.<commit-hash>` nixpkgs
+  # blob. Falls back to "dev" when this file is consumed standalone
+  # (no specialArgs from the flake) — typical for nixos-rebuild
+  # tests that import the module without the wrapper.
+  system.nixos.label = "v${nasty-version}";
 
   # Useful tools
   environment.systemPackages = with pkgs; [ vim file binutils git fwupd rsync iotop-c btop ];

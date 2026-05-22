@@ -16,7 +16,7 @@
 # by passing NASTY_CLOUD_TESTING_CREDS=1 in the build environment. Production
 # images must never be built with this flag.
 
-{ config, lib, pkgs, nasty-engine, nasty-webui ? null, ... }:
+{ config, lib, pkgs, nasty-engine, nasty-webui ? null, nasty-version ? "dev", ... }:
 
 let
   # Refuse to bake known-bad credentials unless the operator explicitly opts in
@@ -61,5 +61,8 @@ in
 
   system.nixos.distroName = "NASty";
   system.nixos.distroId = "nasty";
+  # Same boot-menu rename as appliance-base. Falls back to "dev"
+  # when consumed standalone outside the flake's specialArgs.
+  system.nixos.label = "v${nasty-version}";
   system.stateVersion = "24.11";
 }

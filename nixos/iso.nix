@@ -1,4 +1,4 @@
-{ config, pkgs, lib, nasty-engine, nasty-webui, nixpkgs, nasty-rootfs-toplevel ? null, installerSystemFlake, installerNastySource ? null, ... }:
+{ config, pkgs, lib, nasty-engine, nasty-webui, nasty-version, nixpkgs, nasty-rootfs-toplevel ? null, installerSystemFlake, installerNastySource ? null, ... }:
 
 let
   nasty-grub-theme = pkgs.runCommand "nasty-grub-theme" {
@@ -97,10 +97,20 @@ in
   # ── Branding ──────────────────────────────────────────────
   image.baseName = lib.mkForce "nasty";
   isoImage.volumeID = "NASTY_INSTALLER";
-  isoImage.appendToMenuLabel = " NASty Installer";
+  # `distroName` already supplies the "NASty " prefix and
+  # `system.nixos.label` below supplies the version, so this suffix
+  # only needs to add the "Installer" disambiguator — keeping
+  # "NASty" in here too would produce the awkward `NASty v0.0.8
+  # NASty Installer` we shipped pre-cleanup.
+  isoImage.appendToMenuLabel = " Installer";
 
   system.nixos.distroName = "NASty";
   system.nixos.distroId = "nasty";
+  # Override the default release.commit-date.commit-hash label
+  # (e.g. "26.05.20260515.d233902") with the NASty version. Surfaces
+  # as the middle token in the systemd-boot menu — `NASty v0.0.8
+  # Installer` reads cleaner than the nixpkgs commit blob.
+  system.nixos.label = "v${nasty-version}";
 
   boot.supportedFilesystems = [ "bcachefs" ];
 
