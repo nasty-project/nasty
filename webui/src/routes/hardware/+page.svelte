@@ -263,6 +263,45 @@
 				{/if}
 			</CardContent>
 		</Card>
+
+		<Card>
+			<CardContent class="pt-4 pb-3">
+				<h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+					TPM
+				</h3>
+				{#if !summary?.tpm}
+					<div class="text-sm font-medium">Not present</div>
+					<div class="mt-1 text-xs text-muted-foreground">
+						Either no TPM chip is installed, the chip is disabled in
+						firmware (BIOS fTPM / PTT toggle), or the kernel driver
+						isn't loaded.
+					</div>
+				{:else}
+					{@const tpm = summary.tpm}
+					{@const isTpm2 = tpm.version_major === 2}
+					{@const usable = isTpm2 && tpm.rm_available}
+					<div class="text-sm font-medium">
+						{#if tpm.version_major}
+							TPM {tpm.version_major}.0
+						{:else}
+							TPM (version unknown)
+						{/if}
+						{#if usable}
+							<span class="ml-1 text-xs text-emerald-400">· ready</span>
+						{:else if isTpm2}
+							<span class="ml-1 text-xs text-amber-500">· no /dev/tpmrm0</span>
+						{:else}
+							<span class="ml-1 text-xs text-amber-500">· incompatible (need 2.0)</span>
+						{/if}
+					</div>
+					{#if tpm.description}
+						<div class="mt-1 text-xs text-muted-foreground">{tpm.description}</div>
+					{:else if tpm.manufacturer}
+						<div class="mt-1 text-xs text-muted-foreground">{tpm.manufacturer}</div>
+					{/if}
+				{/if}
+			</CardContent>
+		</Card>
 	</div>
 
 	<!-- ── DIMM detail (collapsed by default) ──────────────────────── -->
