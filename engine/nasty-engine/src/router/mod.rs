@@ -932,6 +932,7 @@ pub(super) async fn vm_clone(
         networks: Some(src.networks.clone()),
         passthrough_devices: None, // Don't clone passthrough — can't share devices
         usb_devices: None,         // Same reasoning — only one VM at a time can own a USB device
+        cdroms: None,
         boot_iso: None,
         boot_order: Some(src.boot_order.clone()),
         uefi: Some(src.uefi),

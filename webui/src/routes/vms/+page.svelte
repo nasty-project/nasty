@@ -53,7 +53,10 @@
 	let newDiskCreate = $state(false);
 	let newDiskFs = $state('');
 	let newDiskSize = $state(10); // GiB
-	let newIso = $state('');
+	// ISO list for the install form — starts with one empty row so the
+	// common single-ISO case stays one-click. Operators add more rows
+	// when they need the Win11 + virtio-win combo (#285).
+	let newIsos = $state<string[]>(['']);
 	let imageFiles: { name: string; path: string; filesystem: string; size_bytes: number }[] = $state([]);
 	let noImagesSubvolume = $state(false);
 	let uploading = $state(false);
@@ -107,7 +110,7 @@
 		newDiskCreate = false;
 		newDiskFs = '';
 		newDiskSize = 10;
-		newIso = '';
+		newIsos = [''];
 		newDescription = '';
 		newBootOrder = 'disk';
 		newAutostart = false;
@@ -666,8 +669,9 @@
 		if (diskPath) {
 			params.disks = [{ path: diskPath, interface: 'virtio', readonly: false }];
 		}
-		if (newIso) {
-			params.boot_iso = newIso;
+		const cdroms = newIsos.filter((p) => p);
+		if (cdroms.length > 0) {
+			params.cdroms = cdroms;
 			if (!newDisk) params.boot_order = 'cdrom';
 		}
 		if (newDescription) params.description = newDescription;
@@ -1164,15 +1168,27 @@
 				{/if}
 			</div>
 			<div class="mb-4">
-				<Label>Boot Image (optional)</Label>
+				<Label>Boot Image{newIsos.length > 1 ? 's' : ''} (optional)</Label>
 				{#if !noImagesSubvolume}
-					<select bind:value={newIso} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-						<option value="">None</option>
-						{#each imageFiles as iso}
-							<option value={iso.path}>{iso.name} ({iso.filesystem}, {formatSize(iso.size_bytes)})</option>
-						{/each}
-					</select>
+					{#each newIsos as _iso, i (i)}
+						<div class="mt-1 flex items-center gap-2">
+							<select bind:value={newIsos[i]} class="h-9 flex-1 rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="">{i === 0 ? 'None' : '(remove)'}</option>
+								{#each imageFiles as iso}
+									<option value={iso.path}>{iso.name} ({iso.filesystem}, {formatSize(iso.size_bytes)})</option>
+								{/each}
+							</select>
+							{#if newIsos.length > 1}
+								<Button size="sm" variant="outline" onclick={() => newIsos = newIsos.filter((_, idx) => idx !== i)}>Remove</Button>
+							{/if}
+						</div>
+					{/each}
 					<div class="mt-2 flex items-center gap-3">
+						<Button
+							size="sm"
+							variant="outline"
+							onclick={() => newIsos = [...newIsos, '']}
+						>+ Add ISO</Button>
 						<Button
 							size="sm"
 							variant="outline"
@@ -1191,6 +1207,9 @@
 						/>
 						<span class="text-xs text-muted-foreground">ISO, qcow2, img, raw, vdi, vmdk (xz/gz/bz2 OK)</span>
 					</div>
+					{#if newIsos.filter(Boolean).length > 1}
+						<p class="mt-1 text-xs text-muted-foreground">First ISO boots when boot order is CD-ROM. Extra ISOs surface inside the guest (e.g. Win11 + virtio-win driver disc).</p>
+					{/if}
 					{#if uploading}
 						<div class="mt-2 flex items-center gap-2">
 							<div class="h-2 flex-1 rounded-full bg-muted overflow-hidden">
@@ -1211,7 +1230,7 @@
 						</div>
 					</div>
 				{:else}
-					<Input bind:value={newIso} placeholder="No images available" class="mt-1" disabled />
+					<Input value="" placeholder="No images available" class="mt-1" disabled />
 				{/if}
 			</div>
 			<div class="mb-4">
@@ -1368,9 +1387,10 @@
 					<span class="text-muted-foreground">Disk</span>
 					<span class="font-mono text-xs">{newDiskCreate ? `vm-${newName} (${newDiskSize} GiB, new)` : newDisk}</span>
 				{/if}
-				{#if newIso}
-					<span class="text-muted-foreground">Boot ISO</span>
-					<span class="font-mono text-xs">{newIso}</span>
+				{#if newIsos.some(Boolean)}
+					{@const selectedIsos = newIsos.filter(Boolean)}
+					<span class="text-muted-foreground">CD-ROM{selectedIsos.length > 1 ? 's' : ''}</span>
+					<span class="font-mono text-xs">{selectedIsos.join(', ')}</span>
 				{/if}
 				<span class="text-muted-foreground">Network</span>
 				<span>{newNetMode === 'bridge' ? `Bridge (${newNetBridge || 'none selected'})` : 'NAT'}</span>
@@ -1611,18 +1631,38 @@
 											{/if}
 										</div>
 										<div>
-											<span class="text-xs text-muted-foreground">Boot ISO</span>
+											<span class="text-xs text-muted-foreground">CD-ROM ISOs</span>
 											{#if !vm.running}
-												<select value={vm.boot_iso ?? ''}
-													class="mt-0.5 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-													onchange={(e) => updateVmField(vm.id, 'boot_iso', (e.target as HTMLSelectElement).value)}>
-													<option value="">None (no ISO)</option>
-													{#each imageFiles as iso}
-														<option value={iso.path}>{iso.name}</option>
-													{/each}
-												</select>
+												{@const currentCdroms = vm.cdroms ?? (vm.boot_iso ? [vm.boot_iso] : [])}
+												{#each currentCdroms as iso, i (i)}
+													<div class="mt-0.5 flex items-center gap-1">
+														<select value={iso}
+															class="h-8 flex-1 rounded-md border border-input bg-transparent px-2 text-xs"
+															onchange={(e) => {
+																const next = [...currentCdroms];
+																next[i] = (e.target as HTMLSelectElement).value;
+																updateVmField(vm.id, 'cdroms', next.filter(Boolean));
+															}}>
+															<option value="">None</option>
+															{#each imageFiles as img}
+																<option value={img.path}>{img.name}</option>
+															{/each}
+														</select>
+														<Button size="xs" variant="outline"
+															onclick={() => updateVmField(vm.id, 'cdroms', currentCdroms.filter((_, idx) => idx !== i))}>×</Button>
+													</div>
+												{/each}
+												<Button size="xs" variant="outline" class="mt-1"
+													onclick={() => updateVmField(vm.id, 'cdroms', [...currentCdroms, ''])}>+ Add ISO</Button>
 											{:else}
-												<div class="mt-0.5 text-xs font-mono">{vm.boot_iso || 'None'}</div>
+												{@const cdroms = vm.cdroms ?? (vm.boot_iso ? [vm.boot_iso] : [])}
+												{#if cdroms.length === 0}
+													<div class="mt-0.5 text-xs font-mono">None</div>
+												{:else}
+													{#each cdroms as iso}
+														<div class="mt-0.5 text-xs font-mono">{iso}</div>
+													{/each}
+												{/if}
 											{/if}
 										</div>
 									</div>

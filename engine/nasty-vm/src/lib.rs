@@ -84,8 +84,20 @@ pub struct VmConfig {
     /// plugging in two identical keyboards passes both through.
     #[serde(default)]
     pub usb_devices: Vec<UsbPassthrough>,
-    /// Path to boot ISO (for installation). Removed after first boot if desired.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// ISO files to attach as CD-ROM devices. The first entry is the
+    /// one QEMU treats as the boot CD when `boot_order = "cdrom"`;
+    /// additional entries show up as extra read-only CDs inside the
+    /// guest (typical use: Windows 11 install needs the Win11 ISO
+    /// alongside the virtio-win driver ISO so the installer can see
+    /// the virtio storage controller — issue #285).
+    #[serde(default)]
+    pub cdroms: Vec<String>,
+    /// Legacy single-ISO field, kept for cross-version state-file
+    /// compatibility. On load we migrate this into `cdroms` if
+    /// `cdroms` is empty; on save we mirror `cdroms.first()` back
+    /// into here so a hypothetical rollback to a pre-`cdroms` engine
+    /// still sees the boot ISO. New code reads `cdroms` exclusively.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_iso: Option<String>,
     /// Boot order: "disk", "cdrom", or "network".
     #[serde(default = "default_boot_order")]
@@ -123,6 +135,22 @@ fn default_true() -> bool {
 impl HasId for VmConfig {
     fn id(&self) -> &str {
         &self.id
+    }
+}
+
+impl VmConfig {
+    /// In-memory migration after loading from disk. Old state files
+    /// have `boot_iso = "/path"` and an empty `cdroms`; promote the
+    /// single ISO into the list so the rest of the engine can stay
+    /// single-source-of-truth on `cdroms`. Idempotent — re-running
+    /// on an already-migrated config is a no-op.
+    pub fn migrate_cdroms(&mut self) {
+        if self.cdroms.is_empty()
+            && let Some(iso) = self.boot_iso.as_deref()
+            && !iso.is_empty()
+        {
+            self.cdroms.push(iso.to_string());
+        }
     }
 }
 
@@ -230,7 +258,13 @@ pub struct CreateVmRequest {
     pub passthrough_devices: Option<Vec<PassthroughDevice>>,
     /// USB devices to pass through (vendor:product pairs).
     pub usb_devices: Option<Vec<UsbPassthrough>>,
-    /// Path to boot ISO for installation.
+    /// ISO files to attach as CD-ROM devices. First entry boots when
+    /// `boot_order = "cdrom"`. See #285 for the Windows-install
+    /// motivating case (Win11 ISO + virtio-win driver ISO).
+    pub cdroms: Option<Vec<String>>,
+    /// Legacy single-ISO field. When set and `cdroms` is unset, the
+    /// engine treats it as `cdroms = vec![boot_iso]`. Kept for
+    /// clients that haven't been updated to send the new field.
     pub boot_iso: Option<String>,
     /// Boot order: "disk", "cdrom", or "network".
     pub boot_order: Option<String>,
@@ -260,7 +294,13 @@ pub struct UpdateVmRequest {
     pub passthrough_devices: Option<Vec<PassthroughDevice>>,
     /// Replace USB passthrough devices.
     pub usb_devices: Option<Vec<UsbPassthrough>>,
-    /// Set or clear boot ISO.
+    /// Replace the CD-ROM list. Empty vec clears all CD-ROMs; absent
+    /// (`None`) leaves the existing list untouched.
+    pub cdroms: Option<Vec<String>>,
+    /// Legacy single-ISO setter. When set and `cdroms` is absent,
+    /// the engine treats an empty string as "clear all CD-ROMs" and
+    /// a non-empty string as "set CD-ROM list to a single entry."
+    /// Use `cdroms` for new code.
     pub boot_iso: Option<String>,
     /// Boot order.
     pub boot_order: Option<String>,
@@ -444,7 +484,8 @@ impl VmService {
     pub async fn list(&self) -> Result<Vec<VmStatus>, VmError> {
         let configs: Vec<VmConfig> = state_dir().load_all().await;
         let mut result = Vec::with_capacity(configs.len());
-        for config in configs {
+        for mut config in configs {
+            config.migrate_cdroms();
             let running = self.is_running(&config.id).await;
             let pid = if running {
                 self.get_pid(&config.id).await
@@ -462,10 +503,11 @@ impl VmService {
     }
 
     pub async fn get(&self, id: &str) -> Result<VmStatus, VmError> {
-        let config: VmConfig = state_dir()
+        let mut config: VmConfig = state_dir()
             .load(id)
             .await
             .ok_or_else(|| VmError::NotFound(id.to_string()))?;
+        config.migrate_cdroms();
 
         let running = self.is_running(id).await;
         let pid = if running {
@@ -505,11 +547,19 @@ impl VmService {
                 validate_vm_path(&disk.path)?;
             }
         }
-        if let Some(ref iso) = req.boot_iso {
+        // Merge the new `cdroms` list with the legacy `boot_iso`
+        // single-string field. Clients that haven't been updated
+        // still send `boot_iso`; new clients send `cdroms`. When
+        // both are present `cdroms` wins (it's the canonical field).
+        let cdroms: Vec<String> = match (req.cdroms.clone(), req.boot_iso.clone()) {
+            (Some(list), _) => list,
+            (None, Some(iso)) if !iso.is_empty() => vec![iso],
+            _ => Vec::new(),
+        };
+        for iso in &cdroms {
             if !Path::new(iso).exists() {
                 return Err(VmError::InvalidDiskPath(format!(
-                    "boot ISO {} does not exist",
-                    iso
+                    "CD-ROM ISO {iso} does not exist"
                 )));
             }
             validate_vm_path(iso)?;
@@ -535,7 +585,10 @@ impl VmService {
             }),
             passthrough_devices: req.passthrough_devices.unwrap_or_default(),
             usb_devices: req.usb_devices.unwrap_or_default(),
-            boot_iso: req.boot_iso,
+            // Legacy compat mirror: first cdrom into boot_iso so a
+            // rollback engine still sees the boot ISO.
+            boot_iso: cdroms.first().cloned(),
+            cdroms,
             boot_order: req.boot_order.unwrap_or_else(|| "disk".to_string()),
             uefi: req.uefi.unwrap_or(true),
             description: req.description,
@@ -557,6 +610,7 @@ impl VmService {
             .load(&req.id)
             .await
             .ok_or_else(|| VmError::NotFound(req.id.clone()))?;
+        config.migrate_cdroms();
 
         // Don't allow updates while running (except autostart/description)
         let running = self.is_running(&req.id).await;
@@ -579,6 +633,7 @@ impl VmService {
                 || req.networks.is_some()
                 || req.passthrough_devices.is_some()
                 || req.usb_devices.is_some()
+                || req.cdroms.is_some()
                 || req.boot_iso.is_some()
                 || req.boot_order.is_some()
                 || req.uefi.is_some()
@@ -611,12 +666,27 @@ impl VmService {
                 validate_usb_passthroughs(&usb)?;
                 config.usb_devices = usb;
             }
-            if let Some(ref iso) = req.boot_iso {
-                config.boot_iso = if iso.is_empty() {
-                    None
-                } else {
-                    Some(iso.clone())
-                };
+            // CD-ROM update: `cdroms` is the canonical setter, but
+            // older clients still send `boot_iso`. `cdroms` wins
+            // when both are present.
+            let new_cdroms: Option<Vec<String>> = match (req.cdroms, req.boot_iso.as_deref()) {
+                (Some(list), _) => Some(list),
+                (None, Some("")) => Some(Vec::new()),
+                (None, Some(iso)) => Some(vec![iso.to_string()]),
+                _ => None,
+            };
+            if let Some(list) = new_cdroms {
+                for iso in &list {
+                    if !Path::new(iso).exists() {
+                        return Err(VmError::InvalidDiskPath(format!(
+                            "CD-ROM ISO {iso} does not exist"
+                        )));
+                    }
+                    validate_vm_path(iso)?;
+                }
+                config.cdroms = list;
+                // Keep the legacy field mirrored for rollback safety.
+                config.boot_iso = config.cdroms.first().cloned();
             }
             if let Some(bo) = req.boot_order {
                 config.boot_order = bo;
@@ -667,10 +737,11 @@ impl VmService {
     // ── Lifecycle ───────────────────────────────────────────
 
     pub async fn start(&self, id: &str) -> Result<VmStatus, VmError> {
-        let config: VmConfig = state_dir()
+        let mut config: VmConfig = state_dir()
             .load(id)
             .await
             .ok_or_else(|| VmError::NotFound(id.to_string()))?;
+        config.migrate_cdroms();
 
         if self.is_running(id).await {
             return Err(VmError::AlreadyRunning(config.name));
@@ -690,11 +761,10 @@ impl VmService {
             }
             validate_vm_path(&disk.path)?;
         }
-        if let Some(ref iso) = config.boot_iso {
+        for iso in &config.cdroms {
             if !Path::new(iso).exists() {
                 return Err(VmError::InvalidDiskPath(format!(
-                    "boot ISO {} does not exist",
-                    iso
+                    "CD-ROM ISO {iso} does not exist"
                 )));
             }
             validate_vm_path(iso)?;
@@ -933,9 +1003,23 @@ fn build_qemu_args(config: &VmConfig) -> Vec<String> {
         }
     }
 
-    // Boot ISO (as a CDROM)
-    if let Some(ref iso) = config.boot_iso {
-        args.extend_from_slice(&["-cdrom".to_string(), iso.clone()]);
+    // CD-ROM devices. The legacy `-cdrom <path>` shortcut only
+    // attaches one ISO at IDE 1:0; multiple CD-ROMs need explicit
+    // `-drive` entries with unique indices. We always use the
+    // explicit form, including when there's only one ISO, so the
+    // emission stays uniform.
+    //
+    // `if=ide` puts each ISO on the IDE controller present on
+    // Q35 (and i440fx) machine types — that's where Windows
+    // installers and most live images expect to find their CD.
+    // `index=N` is the slot on the controller (0..3 for IDE);
+    // first entry is index=0 which is what `boot order=d` boots
+    // from when boot_order = "cdrom".
+    for (i, iso) in config.cdroms.iter().enumerate() {
+        args.extend_from_slice(&[
+            "-drive".to_string(),
+            format!("file={iso},media=cdrom,if=ide,index={i},readonly=on,id=cd{i}"),
+        ]);
     }
 
     // Boot order
@@ -1138,6 +1222,7 @@ mod tests {
             networks: vec![],
             passthrough_devices: vec![],
             usb_devices: vec![],
+            cdroms: vec![],
             boot_iso: None,
             boot_order: "disk".to_string(),
             uefi: false,
@@ -1221,5 +1306,97 @@ mod tests {
             ),
             "missing second device, args: {args:?}"
         );
+    }
+
+    #[test]
+    fn migrate_cdroms_promotes_legacy_boot_iso() {
+        // State file from a pre-#285 engine: boot_iso populated,
+        // cdroms empty (serde default).
+        let mut cfg = base_config();
+        cfg.boot_iso = Some("/fs/tank/iso/win11.iso".to_string());
+        cfg.migrate_cdroms();
+        assert_eq!(cfg.cdroms, vec!["/fs/tank/iso/win11.iso"]);
+    }
+
+    #[test]
+    fn migrate_cdroms_idempotent() {
+        // A freshly-migrated VmConfig has both fields populated and
+        // mirrored. Running migrate again must not duplicate.
+        let mut cfg = base_config();
+        cfg.cdroms = vec!["/fs/tank/iso/a.iso".to_string()];
+        cfg.boot_iso = Some("/fs/tank/iso/a.iso".to_string());
+        cfg.migrate_cdroms();
+        assert_eq!(cfg.cdroms, vec!["/fs/tank/iso/a.iso"]);
+    }
+
+    #[test]
+    fn migrate_cdroms_skips_when_already_multi() {
+        // Multi-cdrom state from a new-engine save. The legacy
+        // boot_iso mirror is the first entry; migrate must NOT
+        // append it to the existing list.
+        let mut cfg = base_config();
+        cfg.cdroms = vec!["/iso/a.iso".to_string(), "/iso/b.iso".to_string()];
+        cfg.boot_iso = Some("/iso/a.iso".to_string());
+        cfg.migrate_cdroms();
+        assert_eq!(cfg.cdroms.len(), 2);
+        assert_eq!(cfg.cdroms[0], "/iso/a.iso");
+        assert_eq!(cfg.cdroms[1], "/iso/b.iso");
+    }
+
+    #[test]
+    fn migrate_cdroms_empty_boot_iso_treated_as_none() {
+        // Legacy state files occasionally have `boot_iso: ""` rather
+        // than missing the key — make sure that doesn't end up as a
+        // CD-ROM entry with an empty path that QEMU would reject.
+        let mut cfg = base_config();
+        cfg.boot_iso = Some(String::new());
+        cfg.migrate_cdroms();
+        assert!(cfg.cdroms.is_empty());
+    }
+
+    #[test]
+    fn qemu_emits_one_drive_per_cdrom_with_unique_indices() {
+        // The motivating scenario: Win11 + virtio-win driver ISO.
+        // Both need to be visible to the guest at the same time,
+        // first one boots when boot_order = "cdrom".
+        let mut cfg = base_config();
+        cfg.cdroms = vec![
+            "/fs/tank/iso/Win11.iso".to_string(),
+            "/fs/tank/iso/virtio-win.iso".to_string(),
+        ];
+        cfg.boot_order = "cdrom".to_string();
+        let args = build_qemu_args(&cfg);
+
+        // Each ISO gets its own -drive entry with a distinct index.
+        let drives: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                a.as_str() == "-drive" && args.get(i + 1).is_some_and(|v| v.contains("media=cdrom"))
+            })
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(drives.len(), 2, "expected 2 CD-ROM drives, args: {args:?}");
+        assert!(drives[0].contains("file=/fs/tank/iso/Win11.iso"));
+        assert!(drives[0].contains("index=0"));
+        assert!(drives[0].contains("readonly=on"));
+        assert!(drives[1].contains("file=/fs/tank/iso/virtio-win.iso"));
+        assert!(drives[1].contains("index=1"));
+
+        // Boot order still points at the CD-ROM channel.
+        let boot_pos = args.iter().position(|a| a == "-boot").expect("boot arg");
+        assert_eq!(args[boot_pos + 1], "order=d");
+    }
+
+    #[test]
+    fn qemu_emits_no_cdrom_when_list_empty() {
+        // VM with no ISOs at all (post-install state, or a VM that
+        // never had one) emits zero CD-ROM -drive entries. Boot
+        // order can still be "disk" / "network".
+        let mut cfg = base_config();
+        cfg.cdroms = vec![];
+        let args = build_qemu_args(&cfg);
+        let cdrom_drives = args.iter().filter(|a| a.contains("media=cdrom")).count();
+        assert_eq!(cdrom_drives, 0);
     }
 }
