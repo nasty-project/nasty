@@ -61,10 +61,14 @@ export interface TpmInfo {
 	 * and any sealing path actually opens. False means a chip exists but
 	 * isn't usable from userspace. */
 	rm_available: boolean;
-	/** Vendor + model string from sysfs's `description` attribute. */
-	description: string | null;
-	/** 4-char ASCII manufacturer code (IFX, STM, NTC, AMD for fTPM). */
+	/** 4-char ASCII manufacturer code reported by the chip via
+	 * `TPM2_PT_MANUFACTURER`: IFX (Infineon), STM (STMicroelectronics),
+	 * NTC (Nuvoton), IBM (swtpm), AMD (fTPM), etc. */
 	manufacturer: string | null;
+	/** Vendor's marketing model string from `TPM2_PT_VENDOR_STRING_1..4`,
+	 * concatenated and trimmed. E.g. "SLB9665" for Infineon, "SW  TPM"
+	 * for swtpm. */
+	vendor_string: string | null;
 }
 
 export interface DmiSystem {
