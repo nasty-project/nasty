@@ -273,6 +273,41 @@ pub struct HardwareSummary {
     pub cpu: Option<CpuSummary>,
     pub memory: MemorySummary,
     pub usb: Vec<UsbDevice>,
+    /// TPM chip presence + usability for the encryption-key sealing
+    /// flows that #102 is building toward. `None` when no TPM device
+    /// is enumerated by the kernel at all (no chip, disabled in
+    /// firmware, missing driver).
+    pub tpm: Option<TpmInfo>,
+}
+
+/// Snapshot of the host's first TPM device — what the kernel sees at
+/// `/sys/class/tpm/tpm0/`. We only inspect index 0 because everything
+/// downstream (sealing, unsealing, auto-unlock) targets the system's
+/// "main" TPM; multi-TPM boxes are out of scope.
+///
+/// The two booleans together answer the question that matters for #102:
+///   - `version_major == 2` AND `rm_available` ⇒ usable for sealing.
+///   - Anything else ⇒ surface as "incompatible" in the WebUI and skip
+///     the bind-to-TPM affordance.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TpmInfo {
+    /// `1` for TPM 1.2 (incompatible with the planned sealing flow),
+    /// `2` for TPM 2.0. Read from `tpm_version_major`.
+    pub version_major: Option<u32>,
+    /// `/dev/tpmrm0` is the resource-manager interface tpm2-tools and
+    /// any sealing code actually talks to. Present on TPM 2.0 systems
+    /// with the in-kernel resource manager enabled (default on every
+    /// modern kernel). When false, the chip exists but the sealing
+    /// path will fail at the device-open step.
+    pub rm_available: bool,
+    /// Free-form vendor / model string from sysfs's `description`
+    /// attribute (e.g. `Infineon SLB 9670`). Empty when sysfs doesn't
+    /// expose it — fall back to the manufacturer field for display.
+    pub description: Option<String>,
+    /// 4-character ASCII manufacturer code from
+    /// `/sys/class/tpm/tpm0/tpm_vendor` / `manufacturer` when
+    /// available (e.g. `IFX`, `STM`, `NTC`, `AMD` for fTPM).
+    pub manufacturer: Option<String>,
 }
 
 /// DMI Type 1 + Type 2 — the "what hardware is this box" basics.
@@ -383,13 +418,66 @@ async fn build_summary() -> HardwareSummary {
     let (system, bios, memory) = parse_dmidecode(&dmidecode_baseboard);
     let cpu = read_cpu_info().await;
     let usb = read_usb_devices().await;
+    let tpm = read_tpm_info().await;
     HardwareSummary {
         system,
         bios,
         cpu,
         memory,
         usb,
+        tpm,
     }
+}
+
+/// Probe `/sys/class/tpm/tpm0/` for TPM presence + version + identity.
+/// Cheap (~3 sysfs reads, no command spawns). Returns `None` when the
+/// device doesn't exist in sysfs at all — i.e. no chip, no driver, or
+/// the host firmware has TPM disabled (BIOS `fTPM` toggle off, etc.).
+async fn read_tpm_info() -> Option<TpmInfo> {
+    const TPM_SYSFS: &str = "/sys/class/tpm/tpm0";
+    // First gate: does the sysfs entry exist? Missing ⇒ no TPM the
+    // kernel could see. Cheap stat — we read the directory metadata,
+    // not its contents.
+    if tokio::fs::metadata(TPM_SYSFS).await.is_err() {
+        return None;
+    }
+
+    // Read attribute helper — sysfs files are short, trimming is
+    // important (every value ends in `\n`).
+    async fn read_attr(path: &str) -> Option<String> {
+        tokio::fs::read_to_string(path)
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    let version_major = read_attr(&format!("{TPM_SYSFS}/tpm_version_major"))
+        .await
+        .and_then(|s| s.parse::<u32>().ok());
+
+    // `/dev/tpmrm0` is the resource-manager char dev. Without it the
+    // sealing path can't open anything to talk to — that's the
+    // distinction between "kernel saw a TPM" and "kernel made it
+    // usable for tpm2-tools."
+    let rm_available = tokio::fs::metadata("/dev/tpmrm0").await.is_ok();
+
+    // sysfs exposes two related strings: `description` (vendor + model
+    // free-form) and `tpm_vendor` (4-char ASCII manufacturer code on
+    // 2.0; older kernels expose it as `manufacturer` instead). Try
+    // both so we degrade gracefully on older driver versions.
+    let description = read_attr(&format!("{TPM_SYSFS}/description")).await;
+    let manufacturer = match read_attr(&format!("{TPM_SYSFS}/tpm_vendor")).await {
+        Some(s) => Some(s),
+        None => read_attr(&format!("{TPM_SYSFS}/manufacturer")).await,
+    };
+
+    Some(TpmInfo {
+        version_major,
+        rm_available,
+        description,
+        manufacturer,
+    })
 }
 
 async fn run_text(cmd: &str, args: &[&str]) -> Option<String> {

@@ -51,6 +51,20 @@ export interface HardwareSummary {
 	cpu: CpuSummary | null;
 	memory: MemorySummary;
 	usb: UsbDevice[];
+	tpm: TpmInfo | null;
+}
+
+export interface TpmInfo {
+	/** 1 = TPM 1.2 (incompatible with planned sealing), 2 = TPM 2.0. */
+	version_major: number | null;
+	/** `/dev/tpmrm0` is present — the resource-manager dev that tpm2-tools
+	 * and any sealing path actually opens. False means a chip exists but
+	 * isn't usable from userspace. */
+	rm_available: boolean;
+	/** Vendor + model string from sysfs's `description` attribute. */
+	description: string | null;
+	/** 4-char ASCII manufacturer code (IFX, STM, NTC, AMD for fTPM). */
+	manufacturer: string | null;
 }
 
 export interface DmiSystem {
