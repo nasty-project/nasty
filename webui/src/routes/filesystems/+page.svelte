@@ -17,7 +17,7 @@
 	import { confirmDangerous } from '$lib/confirm-dangerous.svelte';
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { summarizeDependents } from '$lib/fs-dependents';
-	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents } from '$lib/types';
+	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents, TpmBindStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -27,6 +27,7 @@
 
 	let filesystems: Filesystem[] = $state([]);
 	let devices: BlockDevice[] = $state([]);
+	let tpmStatus: Record<string, TpmBindStatus> = $state({});
 	let wizardStep: 0 | 1 | 2 | 3 = $state(0); // 0=hidden, 1=name+devices, 2=profile, 3=review
 	let loading = $state(true);
 
@@ -159,6 +160,51 @@
 			filesystems = await client.call<Filesystem[]>('fs.list');
 			devices = await client.call<BlockDevice[]>('device.list');
 		});
+		// Refresh TPM bind state for encrypted filesystems in parallel.
+		// Non-encrypted FSes are skipped — the engine would return
+		// `tpm_available` correctly but `bound: false` is uninteresting.
+		const encrypted = filesystems.filter((fs) => fs.options.encrypted);
+		const results = await Promise.all(
+			encrypted.map(async (fs) => {
+				try {
+					const status = await client.call<TpmBindStatus>('fs.tpm.status', { name: fs.name });
+					return [fs.name, status] as const;
+				} catch {
+					return null;
+				}
+			})
+		);
+		const next: Record<string, TpmBindStatus> = {};
+		for (const r of results) if (r) next[r[0]] = r[1];
+		tpmStatus = next;
+	}
+
+	async function bindTpm(fs: Filesystem) {
+		const ok = await confirm(
+			`Bind "${fs.name}" to TPM2`,
+			`The stored encryption key will be sealed against this host's TPM2 and bound to PCR 7 (Secure Boot state). Auto-unlock at boot will prefer the sealed copy. The plaintext key file is kept as a recovery path; remove it explicitly with Export Key → Destroy Key later if desired.\n\nContinue?`,
+			{ confirmLabel: 'Bind' }
+		);
+		if (!ok) return;
+		await withToast(
+			() => client.call<TpmBindStatus>('fs.tpm.bind', { name: fs.name }),
+			`Filesystem "${fs.name}" sealed to TPM2.`
+		);
+		await refresh();
+	}
+
+	async function unbindTpm(fs: Filesystem) {
+		const ok = await confirm(
+			`Unbind "${fs.name}" from TPM2`,
+			`The sealed TPM blob will be removed. Auto-unlock will fall back to the plaintext .key file (if present) or require a passphrase.\n\nContinue?`,
+			{ confirmLabel: 'Unbind' }
+		);
+		if (!ok) return;
+		await withToast(
+			() => client.call<TpmBindStatus>('fs.tpm.unbind', { name: fs.name }),
+			`TPM seal removed for "${fs.name}".`
+		);
+		await refresh();
 	}
 
 	// ── Tiering profile logic ────────────────────────────────────
@@ -1369,6 +1415,24 @@
 								Export Key
 							</Button>
 						{/if}
+						{#if fs.options.encrypted && tpmStatus[fs.name]?.tpm_available}
+							{#if tpmStatus[fs.name].bound}
+								<Button variant="secondary" size="xs" onclick={() => unbindTpm(fs)}>
+									Unbind TPM
+								</Button>
+							{:else}
+								<Button
+									variant="secondary"
+									size="xs"
+									onclick={() => bindTpm(fs)}
+									disabled={!fs.options.key_stored}
+									title={fs.options.key_stored
+										? 'Seal the stored encryption key with this host\'s TPM2 (PCR-7 bound).'
+										: 'No stored key — binding to TPM requires a key file. Recreate the filesystem with “store key” enabled or restore the key first.'}>
+									Bind to TPM
+								</Button>
+							{/if}
+						{/if}
 						<Button variant="destructive" size="xs" onclick={() => destroyFs(fs.name)}>Destroy</Button>
 					</div>
 				</div>
@@ -1392,6 +1456,7 @@
 							{#if fsReplicas > 1} · {fsReplicas} replicas{/if}
 							{#if fsEc} · <span title="Erasure coding (Reed-Solomon parity). At {fsReplicas} replicas this is a {fsReplicas === 2 ? 'RAID-5' : 'RAID-6'}-style layout.">erasure code</span>{/if}
 							{#if fs.options.encrypted} · <span title={fs.options.locked ? 'Encrypted, currently locked — unlock to mount.' : 'Encrypted.'}>encrypted{fs.options.locked ? ' · locked' : ''}</span>{/if}
+							{#if fs.options.encrypted && tpmStatus[fs.name]?.bound} · <span title="Encryption key is sealed to this host's TPM2, bound to PCR 7. Auto-unlock prefers the sealed copy and falls back to the plaintext .key on unseal failure.">TPM-bound</span>{/if}
 							{#if fs.options.compression} · {fs.options.compression}{/if}
 						</span>
 					</div>

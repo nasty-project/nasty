@@ -204,6 +204,11 @@ export interface Filesystem {
 	options: FilesystemOptions;
 }
 
+export interface TpmBindStatus {
+	tpm_available: boolean;
+	bound: boolean;
+}
+
 export interface FilesystemOptions {
 	compression: string | null;
 	background_compression: string | null;
