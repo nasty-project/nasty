@@ -209,13 +209,20 @@
 
 	onMount(async () => {
 		await withToast(async () => {
-			[settings, info, timezones, networkState] = await Promise.all([
+			let liveLogFilter: string;
+			[settings, info, timezones, networkState, liveLogFilter] = await Promise.all([
 				client.call<Settings>('system.settings.get'),
 				client.call<SystemInfo>('system.info'),
 				client.call<string[]>('system.settings.timezones'),
 				client.call<NetworkState>('system.network.get'),
+				// Engine returns the live tracing EnvFilter as a string,
+				// so the Log Level input pre-populates with what's actually
+				// running — the placeholder is now a real suggestion shown
+				// only when the operator clears the field.
+				client.call<string>('system.log.level').catch(() => ''),
 			]);
 			hostnameInput = settings.hostname ?? info.hostname;
+			logFilter = liveLogFilter;
 			syncNetworkForm();
 		});
 	});

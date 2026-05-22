@@ -532,9 +532,21 @@ pub(super) async fn try_route(
         },
         "system.reboot_required" => ok(req, state.updates.reboot_required().await),
         "system.log.level" => {
-            // Return the current filter as a string — not easily available from reload handle,
-            // so just return a placeholder. The set method is more useful.
-            ok(req, "use system.log.set_level to change")
+            // Return the live filter so the WebUI's Log Level input can be
+            // pre-populated with what's actually running. Without this the
+            // input stays empty and shows a placeholder, which an operator
+            // reasonably mistakes for the current value — and "Normal"
+            // looks like it does something even when the running filter is
+            // already the Normal preset.
+            //
+            // `with_current` returns Err only if the parent dispatcher has
+            // been dropped — never happens in our lifecycle (the reload
+            // handle outlives the dispatcher for the entire engine run),
+            // so the Err arm is a safety surface, not an expected path.
+            match state.log_reload.with_current(|f| f.to_string()) {
+                Ok(s) => ok(req, s),
+                Err(e) => err(req, format!("failed to read current filter: {e}")),
+            }
         }
         "system.log.set_level" => {
             #[derive(Deserialize)]
