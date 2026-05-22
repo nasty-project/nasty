@@ -23,6 +23,33 @@
 	let filter = $state('');
 	let showAllDimms = $state(false);
 
+	// TPM2_PT_MANUFACTURER 4-char ASCII codes → human-readable vendor names.
+	// Source: TCG Vendor ID Registry (the assigned-numbers table that the
+	// chips burn into firmware). Trailing-space codes ("IBM ", "ATML")
+	// are preserved exactly because that's what the chip publishes.
+	const TPM_MANUFACTURERS: Record<string, string> = {
+		IFX: 'Infineon',
+		STM: 'STMicroelectronics',
+		NTC: 'Nuvoton',
+		'IBM ': 'swtpm (IBM software TPM)',
+		AMD: 'AMD fTPM',
+		INTC: 'Intel PTT',
+		MSFT: 'Microsoft',
+		ATML: 'Atmel',
+		BRCM: 'Broadcom',
+		HPI: 'HPI',
+		HPE: 'HPE',
+		LEN: 'Lenovo',
+		FLYS: 'Flyslice',
+		SMSN: 'Samsung',
+		QCOM: 'Qualcomm',
+		SNS: 'Sinosun',
+		TXN: 'Texas Instruments',
+		WEC: 'Winbond',
+		ROCC: 'Fuzhou Rockchip',
+		GOOG: 'Google',
+	};
+
 	// Persisted passthrough config from the engine. `pending` is the
 	// local edit set (before Apply); each entry is "vendor:device" so
 	// Set membership tests work without a custom equality predicate.
@@ -294,10 +321,11 @@
 							<span class="ml-1 text-xs text-amber-500">· incompatible (need 2.0)</span>
 						{/if}
 					</div>
-					{#if tpm.description}
-						<div class="mt-1 text-xs text-muted-foreground">{tpm.description}</div>
-					{:else if tpm.manufacturer}
-						<div class="mt-1 text-xs text-muted-foreground">{tpm.manufacturer}</div>
+					{@const mfrCode = tpm.manufacturer?.trim()}
+					{@const mfrFull = (mfrCode && TPM_MANUFACTURERS[mfrCode]) || mfrCode}
+					{@const vendorLine = [mfrFull, tpm.vendor_string?.trim()].filter(Boolean).join(' ')}
+					{#if vendorLine}
+						<div class="mt-1 text-xs text-muted-foreground">{vendorLine}</div>
 					{/if}
 				{/if}
 			</CardContent>

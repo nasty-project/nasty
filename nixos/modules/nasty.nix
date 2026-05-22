@@ -585,6 +585,7 @@ in {
       nano              # quick file editing
       qemu              # QEMU/KVM for virtual machines
       pciutils          # lspci for passthrough device discovery
+      tpm2-tools        # tpm2_getcap, tpm2_pcrread, tpm2_unseal — engine reads vendor info via tpm2_getcap, operators use the rest for TPM debugging
       docker-compose    # Docker Compose for multi-container apps
       croc              # peer-to-peer file transfer for sending debug reports
       rustic             # deduplicating encrypted backups (restic-compatible)
@@ -1135,6 +1136,7 @@ in {
         pciutils                     # lspci — PCI passthrough enumeration + hardware page
         usbutils                     # lsusb — USB enumeration for hardware page + VM USB passthrough
         dmidecode                    # DMI tables for /system/hardware (BIOS, baseboard, memory)
+        tpm2-tools                   # tpm2_getcap — engine reads chip vendor/model for the Hardware page (sysfs doesn't expose it on virtualized TPMs or many real drivers)
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
