@@ -1488,6 +1488,29 @@ in {
         # internal cert is served.
         default_sni nasty.local
         fallback_sni nasty.local
+
+        # Don't try to install Caddy's internal-CA root into the local
+        # OS / Java / NSS trust stores. On NixOS those paths are
+        # read-only via the Nix store, so Caddy emits three startup
+        # log lines on every boot:
+        #
+        #   define JAVA_HOME environment variable to use the Java trust
+        #   warning: "certutil" is not available, install "certutil" …
+        #   error: failed to install root certificate … failed to
+        #     execute tee: exit status 1
+        #
+        # None of them affect serving — TLS handshakes work, the cert
+        # is valid — but they make the boot log look broken and send
+        # operators chasing a phantom. Operators who want the root in
+        # their client's trust store grab it via the WebUI's
+        # "Download CA Root" button on the TLS page.
+        #
+        # Note: the equivalent JSON field is `apps.pki.cas.<id>.install_trust`
+        # but Caddy's Caddyfile parser doesn't expose that per-CA; the
+        # global `skip_install_trust` directive below is the Caddyfile
+        # path to the same outcome (applies to every CA, which is what
+        # we want here — there's only the one local CA).
+        skip_install_trust
       '';
       extraConfig = ''
         (nasty_webui_routes) {
