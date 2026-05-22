@@ -1462,16 +1462,30 @@ in {
         # collide.
         auto_https disable_redirects
 
-        # When a TLS connection arrives with no SNI (direct-IP access,
-        # `curl https://10.x.x.x/`) or an SNI we don't recognise,
-        # Caddy substitutes this value before site routing. Pairs with
-        # the `nasty.local:443 { tls internal }` block below — every
-        # such connection ends up served by the internal-CA cert
-        # instead of TLS-handshake-failing. Without this, port-only
-        # `:443 { tls internal }` had no hostname to issue against and
-        # every IP-direct curl got `tlsv1 alert internal error`
-        # (caught by appliance-smoke CI).
+        # SNI substitution rules. Both pair with the
+        # `nasty.local:443 { tls internal }` block below so every
+        # otherwise-unmatchable connection ends up served by the
+        # internal-CA cert instead of TLS-handshake-failing.
+        #
+        # `default_sni` only fires when the ClientHello has NO SNI at
+        # all — the direct-IP-literal case (`curl https://10.x.x.x/`).
+        # Without it, a port-only `:443 { tls internal }` listener has
+        # no hostname for the internal CA to bind to and IP-direct
+        # connections get `tlsv1 alert internal error` (originally
+        # caught by appliance-smoke CI).
+        #
+        # `fallback_sni` covers the other case: ClientHello DOES send
+        # an SNI but no `automation.policies` entry has it in
+        # `subjects` (typical for tailnet hostnames in the CSI E2E
+        # rig — the QEMU VM curls the box at its `*.ts.net` MagicDNS
+        # name, which we deliberately don't put on the cert). Without
+        # it, Caddy has no policy to apply, doesn't issue on-demand
+        # (we don't want arbitrary-SNI cert issuance), and emits
+        # `internal_error`. With it, the unknown SNI is rewritten to
+        # `nasty.local`, the internal-CA policy matches, and the
+        # internal cert is served.
         default_sni nasty.local
+        fallback_sni nasty.local
       '';
       extraConfig = ''
         (nasty_webui_routes) {
