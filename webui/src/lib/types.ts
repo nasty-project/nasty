@@ -968,6 +968,14 @@ export interface VmConfig {
 	networks: VmNetwork[];
 	passthrough_devices: PassthroughDevice[];
 	usb_devices?: UsbPassthrough[];
+	/** CD-ROM ISO paths attached to the VM. First entry is the one that
+	 * boots when `boot_order === 'cdrom'`; additional entries surface
+	 * inside the guest as extra read-only CDs (Win11 + virtio-win is
+	 * the canonical multi-ISO case). */
+	cdroms: string[];
+	/** Legacy single-ISO field — mirrors `cdroms[0]` on the engine side.
+	 * New WebUI code reads `cdroms` instead. Kept here so cross-version
+	 * state files don't trip TypeScript at the boundary. */
 	boot_iso?: string;
 	boot_order: string;
 	uefi: boolean;
