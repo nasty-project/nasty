@@ -574,12 +574,14 @@ in {
       jq                # JSON parsing (used by engine scripts)
       htop
       python3           # scripting and quick data processing
+      uv                # fast Python package manager (uv + uvx — `uvx <tool>` for one-shots)
       file              # file type identification
       tree              # directory structure visualization
       eza               # modern ls replacement (colors, git, tree)
       strace            # system call tracing for debugging
       trace-cmd         # ftrace frontend for kernel tracing
       dig               # DNS debugging
+      openssl           # cert inspection (x509 -text), TLS handshake debugging (s_client)
       nano              # quick file editing
       qemu              # QEMU/KVM for virtual machines
       pciutils          # lspci for passthrough device discovery
