@@ -204,9 +204,14 @@
 					detail: 'The built-in terminal gives you a bash shell on the NAS, accessible from the web UI. Useful for running bcachefs commands, inspecting logs, or anything the web UI doesn\'t cover. Commands like nasty-top are available here.',
 				},
 				{
+					term: 'Caddy',
+					summary: 'The reverse proxy and TLS terminator running in front of the engine.',
+					detail: 'Caddy serves the web UI on port 443, terminates HTTPS, and proxies /api/* and /ws/* to the engine on 127.0.0.1:2137. Certificates come from either Let\'s Encrypt (ACME) when you\'ve set a real domain, or from Caddy\'s built-in "internal" CA when you haven\'t — that\'s the self-signed cert you\'ll see on nasty.local and on the box\'s IP addresses. The engine talks to Caddy through its admin API on 127.0.0.1:2019 to push per-app routes and TLS automation policies at runtime, so app installs and TLS settings changes apply without restarting anything. Replaced nginx in 0.0.8. Logs: journalctl -u caddy.',
+				},
+				{
 					term: 'ACME / Let\'s Encrypt',
 					summary: 'Automatic TLS certificates for the web UI.',
-					detail: 'NASty can request a free, trusted TLS certificate for your hostname from Let\'s Encrypt and renew it automatically. Two challenge types are supported: TLS-ALPN (works when NASty is reachable on port 443 from the internet) and DNS-01 (works behind a NAT / on a private network, but needs API credentials for your DNS provider). Configure under Settings → TLS.',
+					detail: 'NASty can request a free, trusted TLS certificate for your hostname from Let\'s Encrypt and renew it automatically. Two challenge types are supported: TLS-ALPN (works when NASty is reachable on port 443 from the internet) and DNS-01 (works behind a NAT / on a private network, but needs API credentials for your DNS provider). Issuance is handled by Caddy. Configure under Settings → TLS.',
 				},
 				{
 					term: 'Tailscale',
@@ -242,6 +247,11 @@
 					term: 'SSO / OIDC',
 					summary: 'Sign in to NASty with an external identity provider.',
 					detail: 'OpenID Connect lets you delegate web UI login to a provider like Authentik, Keycloak, Google, or any OIDC-compliant IdP. Users log in once at the provider and are redirected back. Configure under Access Control → Identity Provider; existing local accounts keep working alongside SSO.',
+				},
+				{
+					term: 'Audit Log',
+					summary: 'Append-only record of every action operators take on the box.',
+					detail: 'Lives at /var/lib/nasty/audit.log (mode 0600) and is mirrored to journald with target "audit", so tampering with the file still leaves a trail. Every state-changing RPC the engine accepts is recorded with the username, client IP, method name, and a safelist-filtered parameter summary (secrets like passwords / API tokens / TLS DNS credentials never make it in). Logged in addition to mutations: every login attempt (success and failure), permission denials, terminal / VM-console / log-stream opens, and unsafe app deploys — anything an auditor would want to reconstruct after the fact. Read it via the audit.list RPC or the Logs page in the WebUI; rotated by logrotate at 10 MB.',
 				},
 			],
 		},

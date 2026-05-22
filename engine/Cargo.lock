@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-apidoc"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "nasty-sharing",
  "nasty-storage",
@@ -2472,7 +2472,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-apps"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bollard",
  "futures-util",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-backup"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "chrono",
  "jiff",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-common"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-engine"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2559,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-metrics"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -2575,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-sharing"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "nasty-common",
  "schemars 1.2.1",
@@ -2589,14 +2589,14 @@ dependencies = [
 
 [[package]]
 name = "nasty-snapshot"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "nasty-storage",
 ]
 
 [[package]]
 name = "nasty-storage"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "nasty-common",
  "schemars 1.2.1",
@@ -2611,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-system"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2636,7 +2636,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-vm"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "nasty-common",
  "schemars 1.2.1",
