@@ -548,6 +548,17 @@ impl FilesystemService {
         let mut failed_names = Vec::new();
 
         for (name, opts) in &state {
+            // Honor the operator's "I unmounted this on purpose"
+            // signal. Without this, every boot would auto-mount FSes
+            // the operator deliberately took down. Missing field
+            // (None) and Some(true) both keep auto-mount on — that's
+            // the historical default for entries written before the
+            // `mounted` flag existed.
+            if opts.mounted == Some(false) {
+                info!("Filesystem '{name}' was unmounted by the operator — skipping auto-mount");
+                continue;
+            }
+
             let mount_point = format!("{NASTY_MOUNT_BASE}/{name}");
 
             if is_mountpoint(&mount_point).await {
@@ -1123,8 +1134,12 @@ impl FilesystemService {
         let uuid_mount = format!("UUID={}", fs.uuid);
         let _ = cmd::run_ok("umount", &[&uuid_mount]).await;
 
-        // Track mount state
-        save_fs_unmounted(&req.name).await;
+        // Forget the filesystem entirely — destroy wipes the
+        // superblocks below, so keeping a stale state entry would
+        // have `restore_mounts` waiting 60 s for the now-gone devices
+        // on every boot. Distinct from plain `unmount`, which uses
+        // `save_fs_unmounted` to preserve tuned options.
+        forget_fs(&req.name).await;
 
         // Remove mount point directory if it exists
         let mount_dir = format!("{NASTY_MOUNT_BASE}/{}", req.name);
@@ -2978,6 +2993,18 @@ struct FsMountOptions {
     /// Device paths that were part of the filesystem at last mount.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     devices: Vec<String>,
+    /// Whether the filesystem should be auto-mounted at next boot.
+    /// `Some(true)` / missing = auto-mount (existing behaviour preserved
+    /// for state files that pre-date this field). `Some(false)` = the
+    /// operator unmounted it deliberately and `restore_mounts` should
+    /// leave it alone. Previously the unmount path removed the entry
+    /// entirely, which also wiped every tuned mount option
+    /// (`encrypted`, `compression`, `journal_flush_delay`, …) — so
+    /// the next mount started from `FsMountOptions::default()` and
+    /// silently lost the user's config. Tracking unmount as a flag
+    /// instead lets us preserve those options across an unmount cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mounted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encrypted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2999,7 +3026,12 @@ struct FsMountOptions {
 /// Filesystem state: maps fs name → mount options.
 type FsState = HashMap<String, FsMountOptions>;
 
-async fn save_fs_mounted_with_opts(fs_name: &str, opts: FsMountOptions) {
+async fn save_fs_mounted_with_opts(fs_name: &str, mut opts: FsMountOptions) {
+    // Always flip mounted=true here so callers can't forget — the
+    // function name promises "mounted state recorded," and the only
+    // way next boot's `restore_mounts` knows to mount this FS is the
+    // flag being true (or absent).
+    opts.mounted = Some(true);
     let mut state = load_fs_state().await;
     state.insert(fs_name.to_string(), opts);
     if let Err(e) = save_fs_state(&state).await {
@@ -3011,11 +3043,33 @@ async fn save_fs_mounted_with_opts(fs_name: &str, opts: FsMountOptions) {
     }
 }
 
+/// Mark a filesystem as unmounted without losing its tuned mount
+/// options. Sets `mounted: Some(false)` so `restore_mounts` skips it
+/// at next boot; preserves `encrypted`, `compression`, `journal_*`,
+/// `io_scheduler`, etc. so the next manual `mount` doesn't start
+/// from defaults. Pre-fix this function removed the entry entirely,
+/// which silently wiped the operator's config (and produced the
+/// "encrypted=None at boot → systemd-ask-password deadlock" reported
+/// on 10.10.10.71 after a passing unmount/mount cycle).
 async fn save_fs_unmounted(fs_name: &str) {
     let mut state = load_fs_state().await;
-    state.remove(fs_name);
+    let opts = state.entry(fs_name.to_string()).or_default();
+    opts.mounted = Some(false);
     if let Err(e) = save_fs_state(&state).await {
         warn!("save_fs_state(unmounted: {fs_name}) failed: {e}");
+    }
+}
+
+/// Forget a filesystem entirely — remove its entry from the state
+/// file. Used by `destroy`, where the underlying bcachefs is being
+/// wiped: keeping a stale entry would have `restore_mounts` waiting
+/// 60 s for the now-gone devices to reappear on every boot.
+async fn forget_fs(fs_name: &str) {
+    let mut state = load_fs_state().await;
+    if state.remove(fs_name).is_some()
+        && let Err(e) = save_fs_state(&state).await
+    {
+        warn!("save_fs_state(forget: {fs_name}) failed: {e}");
     }
 }
 
@@ -3153,6 +3207,61 @@ fn find_fs_name_by_devices(_devices: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── FsMountOptions / state serialisation ───────────────────────
+
+    /// Existing on-disk state files (written before the `mounted`
+    /// flag was added) parse cleanly, with `mounted` left as `None`.
+    /// `restore_mounts` treats `None == auto-mount`, so legacy
+    /// installs keep their existing behaviour after an upgrade.
+    #[test]
+    fn fs_mount_options_deserializes_pre_mounted_flag_state() {
+        let legacy = r#"{
+            "uuid": "1936f811-8b77-4931-822e-3f9454f93162",
+            "devices": ["/dev/sdd", "/dev/sdb", "/dev/sdc"],
+            "encrypted": true,
+            "compression": null
+        }"#;
+        let opts: FsMountOptions = serde_json::from_str(legacy).expect("legacy state parses");
+        assert_eq!(opts.mounted, None);
+        assert_eq!(opts.encrypted, Some(true));
+        assert_eq!(opts.devices.len(), 3);
+    }
+
+    /// Round-trip an unmount→mount cycle in pure data form: an FS
+    /// with tuned options must keep them across a `mounted = false`
+    /// pause and survive serde re-serialization. Regression for
+    /// "unmount silently wiped my compression/journal_flush_delay/
+    /// io_scheduler config" — pre-fix `save_fs_unmounted` did a
+    /// flat `state.remove(name)`.
+    #[test]
+    fn unmount_preserves_tuned_options_across_state_roundtrip() {
+        let mounted = FsMountOptions {
+            uuid: Some("uuid-1".into()),
+            devices: vec!["/dev/sda".into(), "/dev/sdb".into()],
+            mounted: Some(true),
+            encrypted: Some(true),
+            journal_flush_delay: Some(1000),
+            io_scheduler: Some("none".into()),
+            ..FsMountOptions::default()
+        };
+
+        // Simulate `save_fs_unmounted`: preserve the entry, flip
+        // mounted=false, leave everything else alone.
+        let mut after_unmount = mounted.clone();
+        after_unmount.mounted = Some(false);
+
+        // Round-trip through JSON the way fs-state.json does, so
+        // skip_serializing_if / default decorators are exercised.
+        let json = serde_json::to_string(&after_unmount).expect("serialize");
+        let restored: FsMountOptions = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(restored.mounted, Some(false));
+        assert_eq!(restored.encrypted, Some(true)); // the regression we're fencing
+        assert_eq!(restored.journal_flush_delay, Some(1000));
+        assert_eq!(restored.io_scheduler.as_deref(), Some("none"));
+        assert_eq!(restored.devices, vec!["/dev/sda", "/dev/sdb"]);
+    }
 
     // ── parse_human_bytes ──────────────────────────────────────────
 
