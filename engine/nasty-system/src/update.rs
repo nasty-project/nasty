@@ -400,8 +400,11 @@ echo "false" > {UPDATE_WEBUI_CHANGED}
 echo "==> Updating local system flake..."
 cd {NIXOS_FLAKE_DIR}
 cp {flake_temp_path} flake.nix
-nix flake update nixpkgs
-nix flake update bcachefs-tools
+# Only refresh the `nasty` input by default. Operators who want a
+# kernel / system bump pin nixpkgs and bcachefs-tools explicitly
+# via the Version page (system.version.switch RPC) — the upgrade
+# flow is NASty-only so a small release tag doesn't drag the whole
+# distro along with it.
 nix flake update nasty
 
 echo "==> Rebuilding system..."
@@ -634,17 +637,18 @@ echo "==> Update complete!"
                 )
             }
             ReleaseChannel::Nasty => (
-                // Refresh every flake input the wrapper owns, not just
-                // `nasty`. Without this, the weekly nixpkgs bump never
-                // reaches `main`-tracking users — they'd see only the
-                // new nasty commits while their kernel + system
-                // packages stayed pinned to whatever the wrapper's
-                // lock had at install time. Mirrors the tagged-release
-                // upgrade path which already refreshes all three.
+                // Only refresh the `nasty` input. We used to also pull
+                // fresh nixpkgs and bcachefs-tools here so main-tracking
+                // users would get the weekly nixpkgs bump, but that
+                // turned a "ship the latest NASty commits" click into
+                // an unscheduled distro upgrade — exactly the kind of
+                // surprise that ate a /boot's worth of space on more
+                // than one box. Operators who want a kernel / system
+                // bump pin those inputs explicitly via the Version
+                // page (system.version.switch RPC); for everyone else
+                // a small NASty bump now means a small NASty bump.
                 format!(
-                    "echo \"==> Updating wrapper flake inputs (nixpkgs, bcachefs-tools, nasty[{}])...\"\n\
-                     nix flake update nixpkgs\n\
-                     nix flake update bcachefs-tools\n\
+                    "echo \"==> Updating nasty input ({})...\"\n\
                      nix flake update nasty",
                     nasty_input.tracked_ref
                 ),
