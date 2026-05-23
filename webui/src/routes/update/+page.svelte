@@ -10,6 +10,7 @@
 		FirmwareDevice,
 		FirmwareUpdateResult,
 		VersionInfo,
+		VersionInputInfo,
 		VersionTaggedReleaseStatus
 	} from '$lib/types';
 	import { Tag, Trash2, ArrowRightLeft, X, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
@@ -46,8 +47,11 @@
 		: 'version'
 	);
 
-	let info: UpdateInfo | null = $state(null);
-	let checkInfo: UpdateInfo | null = $state(null);
+	let info = $state<UpdateInfo | null>(null);
+	let checkInfo = $state<UpdateInfo | null>(null);
+	const summaryInputs: VersionInputInfo[] | null = $derived(
+		checkInfo?.inputs ?? info?.inputs ?? null
+	);
 	let checking = $state(false);
 	let startingDevUpgrade = $state(false);
 	let taggedReleaseBanner: TaggedReleaseBannerState = $state({ kind: 'loading' });
@@ -192,6 +196,21 @@
 			case 'nasty': return 'nasty';
 			default: return name;
 		}
+	}
+
+	/**
+	 * Pull the human-meaningful ref out of a `github:owner/repo/ref` URL.
+	 * For nixpkgs this lands on the branch name (`nixos-unstable`); for
+	 * bcachefs-tools on a tag (`v1.38.3`); for nasty on either depending
+	 * on channel. Fallback: the trailing path segment, or the raw URL
+	 * if we can't parse it (e.g. git+https forks). Used to fill the
+	 * "Tracking / Latest" column on the Current Version summary card.
+	 */
+	function trackingRef(url: string | null | undefined): string {
+		if (!url) return '—';
+		const match = url.match(/^github:[^/]+\/[^/]+\/(.+)$/);
+		if (match) return match[1];
+		return url;
 	}
 
 	function syncVersionRows(next: VersionInfo) {
@@ -560,6 +579,27 @@
 				</CardContent>
 			</Card>
 		{/if}
+		{#if checkInfo?.error}
+			<Card class="mb-4 border-amber-500/50 bg-amber-500/5">
+				<CardContent class="py-3">
+					<div class="flex items-start gap-3 text-sm">
+						<span class="mt-0.5 text-amber-400">⚠</span>
+						<div class="flex-1">
+							<div class="flex flex-wrap items-center justify-between gap-2">
+								<div class="font-medium text-amber-200">Couldn't reach GitHub</div>
+								<Button size="xs" variant="secondary" onclick={checkForUpdates} disabled={checking}>
+									{checking ? 'Retrying...' : 'Retry'}
+								</Button>
+							</div>
+							<p class="mt-1 break-words font-mono text-xs text-muted-foreground">{checkInfo.error}</p>
+							<p class="mt-2 text-muted-foreground">
+								The "Tracking / Latest" column shows the last successful check (may be stale).
+							</p>
+						</div>
+					</div>
+				</CardContent>
+			</Card>
+		{/if}
 		<Card class="mb-6">
 			<CardContent class="pt-6">
 				<div class="rounded-lg border border-border/60 text-sm">
@@ -574,41 +614,48 @@
 								{/if}
 							</div>
 							<div class="px-4 py-3">
-								<table class="text-sm">
+								<table class="w-full text-sm">
+									<thead>
+										<tr class="text-left text-[0.65rem] uppercase tracking-wide text-muted-foreground">
+											<th class="pb-1 pr-4 font-medium">Input</th>
+											<th class="pb-1 pr-4 font-medium">Locked</th>
+											<th class="pb-1 font-medium">Tracking / Latest</th>
+										</tr>
+									</thead>
 									<tbody>
-									<tr>
-										<td class="pr-4 text-muted-foreground">Installed</td>
-										<td class="font-mono font-semibold">{info?.current_version ?? '—'}</td>
-									</tr>
-									{#if isDevBuild}
-										<tr>
-											<td class="pr-4 text-muted-foreground">Available</td>
-											<td class="font-mono font-semibold">
-												{#if checkInfo?.update_available === true}
-													<span class="text-blue-400">{checkInfo.latest_version}</span>
-												{:else if checkInfo?.update_available === false}
-													<span class="text-muted-foreground">up to date</span>
-												{:else}
-													<span class="text-muted-foreground">—</span>
-												{/if}
-											</td>
-										</tr>
-									{:else}
-										<tr>
-											<td class="pr-4 text-muted-foreground">Latest</td>
-											<td class="font-mono font-semibold">
-												{#if taggedReleaseBanner.kind === 'ready'}
-													{#if taggedReleaseBanner.current_is_latest_standard_url}
-														<span class="text-muted-foreground">up to date</span>
-													{:else}
-														<span class="text-emerald-400">{taggedReleaseBanner.latest_tag}</span>
-													{/if}
-												{:else}
-													<span class="text-muted-foreground">—</span>
-												{/if}
-											</td>
-										</tr>
-									{/if}
+										{#if summaryInputs}
+											{#each summaryInputs as input}
+												<tr>
+													<td class="pr-4 align-top text-muted-foreground">{versionLabel(input.name)}</td>
+													<td class="pr-4 align-top font-mono font-semibold">{input.rev ?? '—'}</td>
+													<td class="align-top font-mono">
+														{#if input.name === 'nasty'}
+															{#if !isDevBuild && taggedReleaseBanner.kind === 'ready'}
+																{#if taggedReleaseBanner.current_is_latest_standard_url}
+																	{taggedReleaseBanner.latest_tag} <span class="text-xs text-muted-foreground">(up to date)</span>
+																{:else}
+																	<span class="text-emerald-400">{taggedReleaseBanner.latest_tag}</span> <span class="text-xs text-muted-foreground">(new)</span>
+																{/if}
+															{:else if isDevBuild && checkInfo?.update_available === true}
+																<span class="text-blue-400">{checkInfo.latest_version}</span>
+															{:else if isDevBuild && checkInfo?.update_available === false}
+																<span class="text-muted-foreground">{trackingRef(input.url)} <span class="text-xs">(up to date)</span></span>
+															{:else}
+																<span class="text-muted-foreground">{trackingRef(input.url)}</span>
+															{/if}
+														{:else}
+															<span class="text-muted-foreground">{trackingRef(input.url)}</span>
+														{/if}
+													</td>
+												</tr>
+											{/each}
+										{:else}
+											<tr>
+												<td class="pr-4 text-muted-foreground">nasty</td>
+												<td class="pr-4 font-mono font-semibold">{info?.current_version ?? '—'}</td>
+												<td class="font-mono text-muted-foreground">—</td>
+											</tr>
+										{/if}
 									</tbody>
 								</table>
 								<div class="mt-3 flex gap-2">
