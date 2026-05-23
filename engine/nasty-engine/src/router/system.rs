@@ -513,6 +513,20 @@ pub(super) async fn try_route(
             }
         }
         "system.update.channel.get" => ok(req, state.updates.get_channel().await),
+        "system.update.build_dir.get" => ok(req, state.updates.get_update_build_dir().await),
+        "system.update.build_dir.set" => match parse_params::<serde_json::Value>(req) {
+            Ok(p) => {
+                let path = p
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                match state.updates.set_update_build_dir(path).await {
+                    Ok(v) => ok(req, v),
+                    Err(e) => err(req, e),
+                }
+            }
+            Err(e) => invalid(req, e),
+        },
         "firmware.available" => ok(req, state.firmware.is_available().await),
         "firmware.devices" => ok(req, state.firmware.list_devices().await),
         "firmware.check" => ok(req, state.firmware.check_updates().await),

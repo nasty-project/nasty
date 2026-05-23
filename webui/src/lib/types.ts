@@ -542,6 +542,15 @@ export interface VersionInputInfo {
 	rev: string | null;
 }
 
+export interface UpdateBuildDirConfig {
+	/** Persisted pool root (e.g. `/fs/first`); null when unset. */
+	path: string | null;
+	/** Mounted bcachefs pools discovered live from `/proc/mounts`. */
+	available_pools: string[];
+	/** Where the sandbox will actually land (`<pool>/.nasty-nix-build`). */
+	resolved: string | null;
+}
+
 export interface VersionInfo {
 	inputs: VersionInputInfo[];
 }

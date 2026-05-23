@@ -11,7 +11,8 @@
 		FirmwareUpdateResult,
 		VersionInfo,
 		VersionInputInfo,
-		VersionTaggedReleaseStatus
+		VersionTaggedReleaseStatus,
+		UpdateBuildDirConfig
 	} from '$lib/types';
 	import { Tag, Trash2, ArrowRightLeft, X, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button';
@@ -49,6 +50,9 @@
 
 	let info = $state<UpdateInfo | null>(null);
 	let checkInfo = $state<UpdateInfo | null>(null);
+	let buildDir = $state<UpdateBuildDirConfig | null>(null);
+	let buildDirDraft = $state<string>('');
+	let savingBuildDir = $state(false);
 	const summaryInputs: VersionInputInfo[] | null = $derived(
 		checkInfo?.inputs ?? info?.inputs ?? null
 	);
@@ -258,11 +262,14 @@
 
 	async function loadVersionPage() {
 		await withToast(async () => {
-			const [nextInfo, nextVersion] = await Promise.all([
+			const [nextInfo, nextVersion, nextBuildDir] = await Promise.all([
 				client.call<VersionInfo>('system.version.get'),
-				client.call<UpdateInfo>('system.update.version')
+				client.call<UpdateInfo>('system.update.version'),
+				client.call<UpdateBuildDirConfig>('system.update.build_dir.get')
 			]);
 			info = nextVersion;
+			buildDir = nextBuildDir;
+			buildDirDraft = nextBuildDir.path ?? '';
 			syncVersionRows(nextInfo);
 			if (readVersionPageAction() === 'version-switch') {
 				taggedReleaseBanner = { kind: 'switching' };
@@ -384,6 +391,23 @@
 			checkInfo = null;
 		}
 		checking = false;
+	}
+
+	async function saveBuildDir() {
+		savingBuildDir = true;
+		const next = await withToast(
+			() => client.call<UpdateBuildDirConfig>('system.update.build_dir.set', {
+				path: buildDirDraft || null
+			}),
+			buildDirDraft
+				? `Build spillover set to ${buildDirDraft}.`
+				: 'Build spillover disabled.'
+		);
+		if (next) {
+			buildDir = next;
+			buildDirDraft = next.path ?? '';
+		}
+		savingBuildDir = false;
 	}
 
 	async function upgradeDevBuild() {
@@ -786,6 +810,39 @@
 						</div>
 					{/if}
 				</div>
+
+				{#if buildDir && buildDir.available_pools.length > 0}
+					<div class="mt-3 rounded-lg border border-border/60 p-4">
+						<div class="mb-1 font-medium">Build space</div>
+						<p class="mb-3 text-xs text-muted-foreground">
+							Default is <code class="font-mono">/tmp</code> (tmpfs in RAM, spilling to root). On a 20&nbsp;GB-class rootfs that's often not enough room for a kernel/bcachefs build; pointing the sandbox at a bcachefs pool with headroom lets the upgrade complete. The engine runs the rebuild in single-user mode (<code class="font-mono">NIX_REMOTE=local</code>) with <code class="font-mono">--option build-dir &lt;pool&gt;/.nasty-nix-build</code> when this is set.
+						</p>
+						<div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+							<select
+								bind:value={buildDirDraft}
+								disabled={savingBuildDir || status?.state === 'running'}
+								class="h-9 flex-1 rounded-md border border-input bg-transparent px-2 text-sm"
+							>
+								<option value="">Default (tmpfs / root)</option>
+								{#each buildDir.available_pools as pool}
+									<option value={pool}>{pool}</option>
+								{/each}
+							</select>
+							<Button
+								size="sm"
+								onclick={saveBuildDir}
+								disabled={savingBuildDir || status?.state === 'running' || buildDirDraft === (buildDir.path ?? '')}
+							>
+								{savingBuildDir ? 'Saving...' : 'Save'}
+							</Button>
+						</div>
+						{#if buildDir.resolved}
+							<p class="mt-2 text-xs text-muted-foreground">
+								Active spillover: <code class="font-mono">{buildDir.resolved}</code>
+							</p>
+						{/if}
+					</div>
+				{/if}
 			</CardContent>
 		</Card>
 

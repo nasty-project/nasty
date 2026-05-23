@@ -113,7 +113,8 @@ use nasty_system::network::NetworkConfig;
 use nasty_system::protocol::ProtocolStatus;
 use nasty_system::settings::{Settings, SettingsUpdate};
 use nasty_system::update::{
-    UpdateInfo, UpdateStatus, VersionInfo, VersionSwitchRequest, VersionTaggedReleaseStatus,
+    UpdateBuildDirConfig, UpdateInfo, UpdateStatus, VersionInfo, VersionSwitchRequest,
+    VersionTaggedReleaseStatus,
 };
 use nasty_system::{DiskHealth, SystemHealth, SystemInfo, SystemStats};
 
@@ -303,6 +304,20 @@ fn methods(generator: &mut SchemaGenerator) -> Vec<(&'static str, Vec<Method>)> 
                     role: "any",
                     params: MethodParams::None,
                     result: Some(gen_schema::<UpdateStatus>(generator)),
+                },
+                Method {
+                    name: "system.update.build_dir.get",
+                    desc: "Return the configured Nix build-dir spillover path (if any) plus the live list of mounted bcachefs pools eligible to host the sandbox. Useful on small-rootfs installs where the default `/tmp` (tmpfs) doesn't have room for kernel-module / Rust compile sandboxes.",
+                    role: "any",
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<UpdateBuildDirConfig>(generator)),
+                },
+                Method {
+                    name: "system.update.build_dir.set",
+                    desc: "Set or clear the Nix build-dir spillover path. Pass `{\"path\": \"/fs/<pool>\"}` to enable (must match one of the mounted bcachefs pools reported by `build_dir.get`) or `{\"path\": null}` to disable. When set, the engine runs upgrade scripts with `NIX_REMOTE=local` and `--option build-dir <pool>/.nasty-nix-build` so the sandbox spills onto bcachefs instead of tmpfs/root.",
+                    role: "admin",
+                    params: MethodParams::Literal("`{\"path\": string | null}`"),
+                    result: Some(gen_schema::<UpdateBuildDirConfig>(generator)),
                 },
                 Method {
                     name: "system.version.get",
