@@ -530,6 +530,10 @@ export interface UpdateInfo {
 	channel: ReleaseChannel;
 	/** "success" | "failed" | null — result of the most recent upgrade-unit run. */
 	last_attempt: string | null;
+	/** Engine-side error message when the latest-version lookup failed (GH unreachable, rate-limited, …). */
+	error: string | null;
+	/** Snapshot of every tracked flake input — populated by both system.update.version and system.update.check. */
+	inputs: VersionInputInfo[] | null;
 }
 
 export interface VersionInputInfo {

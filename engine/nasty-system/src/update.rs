@@ -192,6 +192,21 @@ pub struct UpdateInfo {
     /// pointing at the target tag, which would otherwise make the check
     /// look like a no-op.
     pub last_attempt: Option<String>,
+    /// Human-readable explanation when the latest-version lookup failed
+    /// (GitHub unreachable, rate-limited, refused token, …). Populated
+    /// by `check()`; `version()` leaves it `None`. Surfaced in the UI
+    /// as an amber banner so operators don't see a silent dash when
+    /// GitHub is misbehaving — previously the failure mode was
+    /// indistinguishable from "no check has ever run".
+    pub error: Option<String>,
+    /// Snapshot of each tracked flake input (`nasty`, `nixpkgs`,
+    /// `bcachefs-tools`) — name, URL, locked rev. Embedded here so the
+    /// Version page can render all three pinned components in the
+    /// summary card without making a second RPC. None when the
+    /// engine can't read the local flake (parse error, fresh install
+    /// pre-bootstrap, etc); the UI falls back to the nasty rev alone
+    /// in that case.
+    pub inputs: Option<Vec<VersionInputInfo>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -285,6 +300,8 @@ impl UpdateService {
             update_available: None,
             channel: read_channel().await,
             last_attempt: last_upgrade_attempt_result().await,
+            error: None,
+            inputs: self.version_info().await.ok().map(|v| v.inputs),
         }
     }
 
@@ -500,6 +517,15 @@ echo "==> Update complete!"
 
         // Mild/Spicy: find latest matching tag (v* or s*) on the configured repo.
         // Nasty: track the wrapper flake's configured branch/ref.
+        //
+        // We collect every failure into `lookup_error` so the UI can
+        // surface *why* the check came back empty instead of just
+        // dropping the user on a blank "Latest" column. Returning the
+        // sentinel string "unknown" (the previous behaviour) was
+        // indistinguishable from "this is a fresh box and check has
+        // never run", which is exactly the silent-failure mode the
+        // operator on nasty.0f.ee couldn't see through.
+        let mut lookup_error: Option<String> = None;
         let latest = match channel {
             ReleaseChannel::Mild | ReleaseChannel::Spicy => {
                 let pattern = channel.tag_pattern().unwrap(); // "v*" or "s*"
@@ -513,29 +539,44 @@ echo "==> Update complete!"
                 .await
                 {
                     Ok(tag) => tag,
-                    Err(_) => "unknown".to_string(),
-                }
-            }
-            ReleaseChannel::Nasty => {
-                match check_via_github_api_branch(
-                    &nasty_input.owner,
-                    &nasty_input.repo,
-                    &nasty_input.tracked_ref,
-                )
-                .await
-                {
-                    Ok(sha) => sha,
-                    Err(_) => {
-                        let token = read_github_token().await;
-                        check_via_git_ls_remote(
-                            token.as_deref(),
-                            &nasty_input.repo_url(),
-                            &format!("refs/heads/{}", nasty_input.tracked_ref),
-                        )
-                        .await?
+                    Err(e) => {
+                        warn!(target: "nasty::update", "tagged-release check failed: {e}");
+                        lookup_error = Some(e.to_string());
+                        "unknown".to_string()
                     }
                 }
             }
+            ReleaseChannel::Nasty => match check_via_github_api_branch(
+                &nasty_input.owner,
+                &nasty_input.repo,
+                &nasty_input.tracked_ref,
+            )
+            .await
+            {
+                Ok(sha) => sha,
+                Err(api_err) => {
+                    warn!(
+                        target: "nasty::update",
+                        "GitHub API branch check failed ({api_err}); falling back to git ls-remote",
+                    );
+                    let token = read_github_token().await;
+                    match check_via_git_ls_remote(
+                        token.as_deref(),
+                        &nasty_input.repo_url(),
+                        &format!("refs/heads/{}", nasty_input.tracked_ref),
+                    )
+                    .await
+                    {
+                        Ok(sha) => sha,
+                        Err(ls_err) => {
+                            warn!(target: "nasty::update", "git ls-remote also failed: {ls_err}");
+                            lookup_error =
+                                Some(format!("GitHub API: {api_err}; git ls-remote: {ls_err}"));
+                            "unknown".to_string()
+                        }
+                    }
+                }
+            },
         };
 
         // Strip "-dirty" suffix for comparison — the local build has a dirty
@@ -576,12 +617,16 @@ echo "==> Update complete!"
             available = Some(true);
         }
 
+        let inputs = self.version_info().await.ok().map(|v| v.inputs);
+
         Ok(UpdateInfo {
             current_version: current,
             latest_version: Some(latest),
             update_available: available,
             channel,
             last_attempt,
+            error: lookup_error,
+            inputs,
         })
     }
 
