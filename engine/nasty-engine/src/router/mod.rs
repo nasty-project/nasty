@@ -212,6 +212,7 @@ fn is_read_only(method: &str) -> bool {
                 | "service.base_names.get"
                 | "system.update.version"
                 | "system.update.status"
+                | "system.update.build_dir.get"
                 | "system.reboot_required"
                 | "system.generations.list"
                 | "system.version.get"

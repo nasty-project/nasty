@@ -11,7 +11,8 @@
 		FirmwareUpdateResult,
 		VersionInfo,
 		VersionInputInfo,
-		VersionTaggedReleaseStatus
+		VersionTaggedReleaseStatus,
+		UpdateBuildDirConfig
 	} from '$lib/types';
 	import { Tag, Trash2, ArrowRightLeft, X, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button';
@@ -49,6 +50,9 @@
 
 	let info = $state<UpdateInfo | null>(null);
 	let checkInfo = $state<UpdateInfo | null>(null);
+	let buildDir = $state<UpdateBuildDirConfig | null>(null);
+	let buildDirDraft = $state<string>('');
+	let savingBuildDir = $state(false);
 	const summaryInputs: VersionInputInfo[] | null = $derived(
 		checkInfo?.inputs ?? info?.inputs ?? null
 	);
@@ -61,6 +65,7 @@
 	let startingSwitch = $state(false);
 	let startingUpgrade = $state(false);
 	let upstreamExpanded = $state(false);
+	let buildDirExpanded = $state(false);
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
 	let logEl: HTMLPreElement | undefined = $state();
 	let logCollapsed = $state(true);
@@ -258,11 +263,14 @@
 
 	async function loadVersionPage() {
 		await withToast(async () => {
-			const [nextInfo, nextVersion] = await Promise.all([
+			const [nextInfo, nextVersion, nextBuildDir] = await Promise.all([
 				client.call<VersionInfo>('system.version.get'),
-				client.call<UpdateInfo>('system.update.version')
+				client.call<UpdateInfo>('system.update.version'),
+				client.call<UpdateBuildDirConfig>('system.update.build_dir.get')
 			]);
 			info = nextVersion;
+			buildDir = nextBuildDir;
+			buildDirDraft = nextBuildDir.path ?? '';
 			syncVersionRows(nextInfo);
 			if (readVersionPageAction() === 'version-switch') {
 				taggedReleaseBanner = { kind: 'switching' };
@@ -384,6 +392,23 @@
 			checkInfo = null;
 		}
 		checking = false;
+	}
+
+	async function saveBuildDir() {
+		savingBuildDir = true;
+		const next = await withToast(
+			() => client.call<UpdateBuildDirConfig>('system.update.build_dir.set', {
+				path: buildDirDraft || null
+			}),
+			buildDirDraft
+				? `Build spillover set to ${buildDirDraft}.`
+				: 'Build spillover disabled.'
+		);
+		if (next) {
+			buildDir = next;
+			buildDirDraft = next.path ?? '';
+		}
+		savingBuildDir = false;
 	}
 
 	async function upgradeDevBuild() {
@@ -786,6 +811,58 @@
 						</div>
 					{/if}
 				</div>
+
+				{#if buildDir && buildDir.available_pools.length > 0}
+					<div class="mt-3 rounded-lg border border-border/60">
+						<button
+							onclick={() => { buildDirExpanded = !buildDirExpanded; }}
+							class="flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-muted/20"
+						>
+							{#if buildDirExpanded}
+								<ChevronDown class="h-4 w-4 shrink-0 text-muted-foreground" />
+							{:else}
+								<ChevronRight class="h-4 w-4 shrink-0 text-muted-foreground" />
+							{/if}
+							<div class="flex-1">
+								<div class="font-medium">Recovery: build space override</div>
+								<div class="text-xs text-muted-foreground">
+									{#if buildDir.path}
+										Spillover active — sandbox lives on <code class="font-mono">{buildDir.resolved}</code>.
+									{:else}
+										Last-resort knob. Only useful when upgrades fail with ENOSPC on a tight rootfs.
+									{/if}
+								</div>
+							</div>
+						</button>
+
+						{#if buildDirExpanded}
+							<div class="space-y-3 border-t border-border/60 p-4">
+								<p class="text-xs text-muted-foreground">
+									Normally the Nix sandbox lives on <code class="font-mono">/tmp</code> (tmpfs in RAM, spilling to root) — that's where it belongs. <strong>Don't change this unless upgrades are failing with ENOSPC.</strong> When enabled, the engine runs the rebuild in single-user mode (<code class="font-mono">NIX_REMOTE=local</code>) with <code class="font-mono">--option build-dir &lt;pool&gt;/.nasty-nix-build</code> so the sandbox spills onto the chosen bcachefs pool. Trade-off: build is slower than tmpfs and writes wear on the pool's SSDs during every upgrade.
+								</p>
+								<div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+									<select
+										bind:value={buildDirDraft}
+										disabled={savingBuildDir || status?.state === 'running'}
+										class="h-9 flex-1 rounded-md border border-input bg-transparent px-2 text-sm"
+									>
+										<option value="">Default (tmpfs / root) — recommended</option>
+										{#each buildDir.available_pools as pool}
+											<option value={pool}>Spill to {pool}</option>
+										{/each}
+									</select>
+									<Button
+										size="sm"
+										onclick={saveBuildDir}
+										disabled={savingBuildDir || status?.state === 'running' || buildDirDraft === (buildDir.path ?? '')}
+									>
+										{savingBuildDir ? 'Saving...' : 'Save'}
+									</Button>
+								</div>
+							</div>
+						{/if}
+					</div>
+				{/if}
 			</CardContent>
 		</Card>
 

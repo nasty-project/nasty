@@ -10,6 +10,15 @@ use tracing::{info, warn};
 
 /// Primary version path — writable by the update script, not managed by NixOS.
 const VERSION_PATH: &str = "/var/lib/nasty/version";
+/// File holding the operator-chosen path that upgrade scripts should
+/// use as Nix's `build-dir`. Empty or missing = default (sandbox lives
+/// on `/tmp` → tmpfs → root). When set, scripts run with
+/// `NIX_REMOTE=local` and `--option build-dir <path>` so the daemon is
+/// bypassed and the sandbox spills onto the configured path. The
+/// hard-won lesson from `nasty.fenski.pl` (`#293`-class disks): the
+/// option only takes effect in single-user mode; the daemon ignores
+/// client-side `--option build-dir`.
+const UPDATE_BUILD_DIR_PATH: &str = "/var/lib/nasty/update-build-dir";
 /// Fallback version path — baked in by NixOS at build time (may be a local SHA).
 const VERSION_PATH_FALLBACK: &str = "/etc/nasty-version";
 const UPDATE_UNIT: &str = "nasty-update";
@@ -111,6 +120,166 @@ pub async fn read_channel() -> ReleaseChannel {
 
 async fn write_channel(channel: ReleaseChannel) -> Result<(), std::io::Error> {
     tokio::fs::write(RELEASE_CHANNEL_PATH, channel.to_string()).await
+}
+
+/// Read the operator-chosen build-dir spillover path, if any. Trims
+/// whitespace and treats empty / missing as `None`.
+pub async fn read_update_build_dir() -> Option<String> {
+    let raw = tokio::fs::read_to_string(UPDATE_BUILD_DIR_PATH)
+        .await
+        .ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Persist the build-dir spillover path. `None` clears it (the file
+/// is removed so absence is the canonical "unset" state).
+pub async fn write_update_build_dir(path: Option<&str>) -> Result<(), std::io::Error> {
+    match path {
+        Some(p) => tokio::fs::write(UPDATE_BUILD_DIR_PATH, p).await,
+        None => match tokio::fs::remove_file(UPDATE_BUILD_DIR_PATH).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        },
+    }
+}
+
+/// Enumerate mounted bcachefs filesystems under `/fs/`. Used as the
+/// candidate list the WebUI offers in the build-dir dropdown — only
+/// bcachefs pools are surfaced because they're the only filesystems
+/// the engine guarantees are NASty-managed (we don't want to suggest
+/// the operator spill builds onto a random NFS mount they happened
+/// to bind under `/fs/`). Returns mount points (e.g. `/fs/first`),
+/// not the underlying devices.
+pub async fn list_bcachefs_pool_mounts() -> Vec<String> {
+    let content = match tokio::fs::read_to_string("/proc/mounts").await {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    parse_bcachefs_mounts(&content)
+}
+
+/// Pure parser for `/proc/mounts` rows. Each line has six
+/// space-separated columns: `<source> <mountpoint> <fstype> <options>
+/// <freq> <passno>`. We want column 2 where column 3 is `bcachefs`
+/// and column 2 starts with `/fs/`. Extracted so the parsing rules
+/// can be pinned by unit tests without touching the real /proc.
+fn parse_bcachefs_mounts(proc_mounts: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in proc_mounts.lines() {
+        let mut cols = line.split_whitespace();
+        let _source = cols.next();
+        let mountpoint = match cols.next() {
+            Some(m) => m,
+            None => continue,
+        };
+        let fstype = match cols.next() {
+            Some(f) => f,
+            None => continue,
+        };
+        if fstype == "bcachefs" && mountpoint.starts_with("/fs/") {
+            out.push(mountpoint.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Default subdirectory the spillover lands under so we never write
+/// to the root of a bcachefs pool that may host user data. Kept as a
+/// helper rather than a const so the rendered path is visible in the
+/// API surface (`<pool>/.nasty-nix-build`) and operators recognize it.
+fn build_dir_under_pool(pool: &str) -> String {
+    format!("{}/.nasty-nix-build", pool.trim_end_matches('/'))
+}
+
+/// Resolve the stored build-dir value into the actual path scripts
+/// should use. The stored value may be a bare pool mountpoint
+/// (`/fs/first`) or a fully-qualified spillover dir
+/// (`/fs/first/.nasty-nix-build`); the former is rewritten to the
+/// latter so `.nasty-nix-build` always wraps Nix's sandbox traffic.
+fn resolve_build_dir(stored: &str) -> String {
+    let trimmed = stored.trim();
+    if trimmed.contains("/.nasty-nix-build") || trimmed.ends_with("/.nasty-nix-build") {
+        trimmed.to_string()
+    } else {
+        build_dir_under_pool(trimmed)
+    }
+}
+
+/// Script fragments rendered into the upgrade bash template when a
+/// build-dir spillover is configured. All four strings are empty when
+/// no spillover is configured, so unconditional `{...}` interpolation
+/// stays a no-op for default installs.
+struct BuildDirFragments {
+    /// Multi-line bash block, run once before the rebuild, that
+    /// ensures the spillover directory exists with the strict 0755
+    /// perms Nix demands (it refuses world-writable build-dirs).
+    /// Empty when no spillover is configured.
+    setup: String,
+    /// Inline env prefix for the `nixos-rebuild` line, including the
+    /// trailing space — e.g. `"NIX_REMOTE=local "`. Empty otherwise.
+    /// Needed because client-side `--option build-dir` is only honored
+    /// in single-user mode; the daemon ignores it.
+    env_prefix: String,
+    /// CLI suffix for the `nixos-rebuild` line, including the leading
+    /// space — e.g. `" --option build-dir /fs/first/.nasty-nix-build"`.
+    opt_suffix: String,
+    /// Cleanup block run after the rebuild (regardless of outcome) to
+    /// reclaim the spillover space once the build is done. Empty
+    /// otherwise.
+    cleanup: String,
+}
+
+fn build_dir_fragments(stored: Option<&str>) -> BuildDirFragments {
+    match stored {
+        None => BuildDirFragments {
+            setup: String::new(),
+            env_prefix: String::new(),
+            opt_suffix: String::new(),
+            cleanup: String::new(),
+        },
+        Some(stored) => {
+            let path = resolve_build_dir(stored);
+            BuildDirFragments {
+                setup: format!(
+                    "echo \"==> Preparing build-dir spillover at {path}...\"\n\
+                     mkdir -p \"{path}\"\n\
+                     chmod 0755 \"{path}\"\n"
+                ),
+                env_prefix: "NIX_REMOTE=local ".to_string(),
+                opt_suffix: format!(" --option build-dir \"{path}\""),
+                cleanup: format!("rm -rf \"{path}\"/* 2>/dev/null || true\n"),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateBuildDirConfig {
+    /// Persisted spillover path (`None` = unset, builds use the
+    /// default `/tmp` → tmpfs → root path). Returned verbatim from
+    /// the on-disk setting, **not** the auto-resolved
+    /// `<pool>/.nasty-nix-build` derivation — the WebUI dropdown
+    /// stores pool roots, the engine resolves at script-render time.
+    pub path: Option<String>,
+    /// Mounted bcachefs pool roots under `/fs/` discovered live from
+    /// `/proc/mounts`. Used by the WebUI to populate the dropdown of
+    /// viable spillover targets. Empty on single-disk (mode-1)
+    /// installs that don't have a separate data pool — the feature
+    /// can't help those boxes and the UI hides the option.
+    pub available_pools: Vec<String>,
+    /// Resolved sandbox path the engine would actually pass to
+    /// `nixos-rebuild` (i.e. `<pool>/.nasty-nix-build`). Surfaced so
+    /// the WebUI can show operators where the spillover will land
+    /// without re-implementing the derivation rule.
+    pub resolved: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -398,6 +567,7 @@ impl UpdateService {
             .map_err(|e| UpdateError::CommandFailed(format!("write {flake_temp_path}: {e}")))?;
 
         let local_flake = local_flake();
+        let bd = build_dir_fragments(read_update_build_dir().await.as_deref());
         let script = format!(
             r#"#!/bin/bash
 set -euo pipefail
@@ -414,6 +584,7 @@ _PROXY_CONF_BEFORE=$(_proxy_conf)
 WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
 echo "false" > {UPDATE_WEBUI_CHANGED}
 
+{bd_setup}
 echo "==> Updating local system flake..."
 cd {NIXOS_FLAKE_DIR}
 cp {flake_temp_path} flake.nix
@@ -426,7 +597,8 @@ nix flake update nasty
 
 echo "==> Rebuilding system..."
 _RC=0
-NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake} || _RC=$?
+{bd_env}NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}{bd_opt} || _RC=$?
+{bd_cleanup}
 if [ "$_RC" -ne 0 ]; then
     echo
     echo "==> nixos-rebuild switch failed (exit $_RC)."
@@ -449,6 +621,10 @@ echo "{latest_tag}" > {VERSION_PATH}
 echo "==> Update complete!"
 "#,
             latest_tag = release_status.latest_tag,
+            bd_setup = bd.setup,
+            bd_env = bd.env_prefix,
+            bd_opt = bd.opt_suffix,
+            bd_cleanup = bd.cleanup,
         );
 
         let script_path = "/tmp/nasty-upgrade-tagged-release.sh";
@@ -510,6 +686,60 @@ echo "==> Update complete!"
             .map_err(|e| UpdateError::CommandFailed(format!("write channel: {e}")))?;
         info!("Release channel set to {}", channel.display_name());
         Ok(channel)
+    }
+
+    /// Snapshot the upgrade-script build-dir setting + the live list
+    /// of bcachefs pools the operator could spill to.
+    pub async fn get_update_build_dir(&self) -> UpdateBuildDirConfig {
+        let path = read_update_build_dir().await;
+        UpdateBuildDirConfig {
+            resolved: path.as_deref().map(resolve_build_dir),
+            path,
+            available_pools: list_bcachefs_pool_mounts().await,
+        }
+    }
+
+    /// Persist the operator's build-dir choice. The stored value is
+    /// validated lightly: it must be either `None` (unset) or one of
+    /// the currently-mounted bcachefs pool roots. We don't accept
+    /// arbitrary paths because the upgrade script will `chmod 0755`
+    /// the directory and clean it after the build — pointing it at
+    /// `/etc` would be a disaster.
+    pub async fn set_update_build_dir(
+        &self,
+        path: Option<String>,
+    ) -> Result<UpdateBuildDirConfig, UpdateError> {
+        if let Some(ref p) = path {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                write_update_build_dir(None)
+                    .await
+                    .map_err(|e| UpdateError::CommandFailed(format!("clear build-dir: {e}")))?;
+            } else {
+                let pools = list_bcachefs_pool_mounts().await;
+                if !pools.iter().any(|m| m == trimmed) {
+                    return Err(UpdateError::CommandFailed(format!(
+                        "build-dir must be one of the mounted bcachefs pools \
+                         ({}); got `{trimmed}`",
+                        if pools.is_empty() {
+                            "none currently mounted".to_string()
+                        } else {
+                            pools.join(", ")
+                        }
+                    )));
+                }
+                write_update_build_dir(Some(trimmed))
+                    .await
+                    .map_err(|e| UpdateError::CommandFailed(format!("write build-dir: {e}")))?;
+                info!("Update build-dir spillover set to {trimmed}");
+            }
+        } else {
+            write_update_build_dir(None)
+                .await
+                .map_err(|e| UpdateError::CommandFailed(format!("clear build-dir: {e}")))?;
+            info!("Update build-dir spillover cleared");
+        }
+        Ok(self.get_update_build_dir().await)
     }
 
     /// Check if an update is available by comparing local rev to GitHub
@@ -705,6 +935,7 @@ echo "==> Update complete!"
         };
 
         let local_flake = local_flake();
+        let bd = build_dir_fragments(read_update_build_dir().await.as_deref());
         let script = format!(
             r#"#!/bin/bash
 set -euo pipefail
@@ -724,6 +955,7 @@ _proxy_conf() {{
 }}
 _PROXY_CONF_BEFORE=$(_proxy_conf)
 WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
+{bd_setup}
 echo "==> Updating local system flake..."
 cd {LOCAL_REPO}
 {update_step}
@@ -733,7 +965,8 @@ cd {LOCAL_REPO}
 
 echo "==> Rebuilding system..."
 _RC=0
-NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake} || _RC=$?
+{bd_env}NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}{bd_opt} || _RC=$?
+{bd_cleanup}
 if [ "$_RC" -ne 0 ]; then
     echo
     echo "==> nixos-rebuild switch failed (exit $_RC)."
@@ -760,7 +993,11 @@ fi
 {installed_version_expr}
 
 echo "==> Update complete!"
-"#
+"#,
+            bd_setup = bd.setup,
+            bd_env = bd.env_prefix,
+            bd_opt = bd.opt_suffix,
+            bd_cleanup = bd.cleanup,
         );
 
         // Write script to a temp file
@@ -981,6 +1218,7 @@ echo "==> Update complete!"
             .join("\n");
 
         let local_flake = local_flake();
+        let bd = build_dir_fragments(read_update_build_dir().await.as_deref());
         let script = format!(
             r#"#!/bin/bash
 set -euo pipefail
@@ -997,6 +1235,7 @@ _PROXY_CONF_BEFORE=$(_proxy_conf)
 WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
 echo "false" > {UPDATE_WEBUI_CHANGED}
 
+{bd_setup}
 echo "==> Updating local system flake..."
 cd {NIXOS_FLAKE_DIR}
 LOCK_BEFORE=$(sha256sum flake.lock 2>/dev/null | awk '{{print $1}}' || true)
@@ -1007,10 +1246,12 @@ LOCK_AFTER=$(sha256sum flake.lock 2>/dev/null | awk '{{print $1}}' || true)
 if [ "$LOCK_BEFORE" != "$LOCK_AFTER" ]; then
     echo "==> Rebuilding system..."
     cp flake.lock flake.lock.pre-rebuild
-    if NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}; then
+    if {bd_env}NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}{bd_opt}; then
         rm -f flake.lock.pre-rebuild
+        {bd_cleanup}
     else
         RC=$?
+        {bd_cleanup}
         echo "==> Rebuild failed (exit $RC). Restoring previous flake.lock so update can be retried."
         cp flake.lock.pre-rebuild flake.lock
         rm -f flake.lock.pre-rebuild
@@ -1034,7 +1275,11 @@ else
     echo "==> No flake.lock changes detected; skipping rebuild."
 fi
 echo "==> Update complete!"
-"#
+"#,
+            bd_setup = bd.setup,
+            bd_env = bd.env_prefix,
+            bd_opt = bd.opt_suffix,
+            bd_cleanup = bd.cleanup,
         );
 
         let script_path = "/tmp/nasty-version-switch.sh";
@@ -2616,6 +2861,83 @@ outputs = { nixpkgs, nasty, ... }: {
             classify_last_upgrade_attempt("failed", "timeout"),
             Some("failed")
         );
+    }
+
+    // ── build-dir spillover ────────────────────────────────────────
+
+    #[test]
+    fn parse_bcachefs_mounts_filters_to_fs_prefixed_bcachefs() {
+        // Realistic /proc/mounts excerpt with mixed fstypes. Only the
+        // two bcachefs rows under /fs/ should survive — the bcachefs
+        // mounted at /mnt/external is filtered out (we don't want to
+        // suggest random mountpoints as spillover targets), and the
+        // ext4/tmpfs/proc rows are noise.
+        let mounts = "\
+/dev/sda2 / ext4 rw,relatime 0 0\n\
+tmpfs /tmp tmpfs rw 0 0\n\
+proc /proc proc rw 0 0\n\
+/dev/sda3 /fs/first bcachefs rw,relatime 0 0\n\
+/dev/sdb1 /fs/archive bcachefs rw 0 0\n\
+/dev/sdc1 /mnt/external bcachefs rw 0 0\n\
+";
+        assert_eq!(
+            super::parse_bcachefs_mounts(mounts),
+            vec!["/fs/archive".to_string(), "/fs/first".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_bcachefs_mounts_returns_empty_when_no_bcachefs() {
+        let mounts = "/dev/sda2 / ext4 rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n";
+        assert!(super::parse_bcachefs_mounts(mounts).is_empty());
+    }
+
+    #[test]
+    fn resolve_build_dir_appends_subdir_to_bare_pool() {
+        assert_eq!(
+            super::resolve_build_dir("/fs/first"),
+            "/fs/first/.nasty-nix-build"
+        );
+        assert_eq!(
+            super::resolve_build_dir("/fs/first/"),
+            "/fs/first/.nasty-nix-build"
+        );
+    }
+
+    #[test]
+    fn resolve_build_dir_passes_fully_qualified_path_through() {
+        // Already a spillover dir — don't double-wrap.
+        assert_eq!(
+            super::resolve_build_dir("/fs/first/.nasty-nix-build"),
+            "/fs/first/.nasty-nix-build"
+        );
+    }
+
+    #[test]
+    fn build_dir_fragments_are_empty_when_unset() {
+        let bd = super::build_dir_fragments(None);
+        assert!(bd.setup.is_empty());
+        assert!(bd.env_prefix.is_empty());
+        assert!(bd.opt_suffix.is_empty());
+        assert!(bd.cleanup.is_empty());
+    }
+
+    #[test]
+    fn build_dir_fragments_render_single_user_mode_when_set() {
+        // The empirically-proven combo: NIX_REMOTE=local + --option
+        // build-dir <path>. Anything else (TMPDIR alone, daemon-side
+        // build-dir, --option without single-user mode) was tested
+        // live on .59 and didn't actually divert sandbox traffic.
+        let bd = super::build_dir_fragments(Some("/fs/first"));
+        assert!(bd.setup.contains("/fs/first/.nasty-nix-build"));
+        assert!(bd.setup.contains("mkdir -p"));
+        assert!(bd.setup.contains("chmod 0755")); // Nix refuses world-writable build-dirs
+        assert_eq!(bd.env_prefix, "NIX_REMOTE=local ");
+        assert!(
+            bd.opt_suffix
+                .contains("--option build-dir \"/fs/first/.nasty-nix-build\"")
+        );
+        assert!(bd.cleanup.contains("rm -rf"));
     }
 
     // ── booted-generation comparison ───────────────────────────────
