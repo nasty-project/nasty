@@ -542,6 +542,35 @@ export interface VersionInputInfo {
 	rev: string | null;
 }
 
+// ── Boot status (engine /api/boot_status) ─────────────────────
+//
+// Engine startup walks a fixed list of restoration phases (mount
+// filesystems, restart protocols, restore VMs/apps, etc.). Each
+// phase runs under a wall-clock budget; failures are logged but
+// don't take the engine down. The WebUI polls /api/boot_status
+// during connect so it can show a "NASty is starting up" overlay
+// before READY and a "something didn't come up cleanly" banner
+// after. See #299.
+export type BootPhaseState = 'pending' | 'running' | 'ok' | 'failed';
+
+export interface BootPhase {
+	name: string;
+	state: BootPhaseState;
+	started_at_ms: number | null;
+	finished_at_ms: number | null;
+	duration_ms: number | null;
+	error: string | null;
+}
+
+export type BootOverallState = 'booting' | 'ready' | 'ready_with_errors';
+
+export interface BootStatus {
+	overall: BootOverallState;
+	phases: BootPhase[];
+	process_started_at_unix: number;
+	ready_at_ms: number | null;
+}
+
 export interface UpdateBuildDirConfig {
 	/** Persisted pool root (e.g. `/fs/first`); null when unset. */
 	path: string | null;

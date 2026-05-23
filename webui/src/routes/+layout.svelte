@@ -11,6 +11,7 @@
 	import ReconnectSpinner from '$lib/components/ReconnectSpinner.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { AuthResult } from '$lib/rpc';
+	import type { BootStatus, BootPhase } from '$lib/types';
 	import favicon from '$lib/assets/favicon.svg';
 	import logoLight from '$lib/assets/nasty.svg';
 	import logoDark from '$lib/assets/nasty-white.svg';
@@ -81,6 +82,76 @@
 	let loginPass = $state('');
 	let loginError = $state('');
 	let ssoEnabled = $state(false);
+
+	// Boot status — populated by polling /api/boot_status. While
+	// `overall === 'booting'` we show a TrueNAS-style overlay
+	// instead of the login form because the engine isn't yet able
+	// to authenticate anyone. After READY the same snapshot lets
+	// us surface `ready_with_errors` as a persistent banner so the
+	// operator knows a phase failed at boot and can act on it.
+	// See engine PRs #300 + #301 (#299 design issue).
+	let bootStatus = $state<BootStatus | null>(null);
+	/// Dismiss flag for the post-login "boot had errors" banner so
+	/// it doesn't reappear every page load until manually fixed.
+	const BOOT_BANNER_DISMISSED_KEY = 'nasty:boot_errors_dismissed';
+	let bootBannerDismissed = $state(
+		typeof localStorage !== 'undefined'
+			&& localStorage.getItem(BOOT_BANNER_DISMISSED_KEY) === '1'
+	);
+	function dismissBootBanner() {
+		bootBannerDismissed = true;
+		localStorage.setItem(BOOT_BANNER_DISMISSED_KEY, '1');
+	}
+
+	/**
+	 * Fetch the engine's boot snapshot. Returns null on network
+	 * error (engine not even listening yet) so the caller can
+	 * decide whether to keep polling or give up.
+	 */
+	async function fetchBootStatus(): Promise<BootStatus | null> {
+		try {
+			const res = await fetch('/api/boot_status');
+			if (!res.ok) return null;
+			return (await res.json()) as BootStatus;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * Poll /api/boot_status until the engine reports a non-booting
+	 * overall state, then stop. Updates the `bootStatus` $state
+	 * after every poll so the overlay UI stays current. Resolves
+	 * with the final snapshot (so callers waiting for "engine is
+	 * ready" have something to inspect).
+	 */
+	async function pollUntilReady(): Promise<BootStatus | null> {
+		// 600ms is a fast-enough cadence that phase transitions
+		// feel live without hammering the engine. The overlay also
+		// renders incremental progress (which phases are Ok vs
+		// still Running) so the user sees motion even between
+		// polls.
+		for (;;) {
+			const snap = await fetchBootStatus();
+			if (snap) {
+				bootStatus = snap;
+				if (snap.overall !== 'booting') return snap;
+			} else {
+				// Couldn't reach the engine. Show a placeholder
+				// state so the overlay can render "waiting for
+				// engine…" rather than flashing the login form.
+				if (!bootStatus) {
+					bootStatus = {
+						overall: 'booting',
+						phases: [],
+						process_started_at_unix: Math.floor(Date.now() / 1000),
+						ready_at_ms: null,
+					};
+				}
+			}
+			await new Promise((r) => setTimeout(r, 600));
+		}
+	}
 
 	// Consume an OIDC redirect's URL fragment. The fragment used to carry
 	// `#nasty_token=…` but the engine now sets the session via httpOnly
@@ -342,6 +413,21 @@
 
 	async function tryConnect() {
 		consumeSsoFragment();
+		// Check engine boot state before anything else. If the engine
+		// is still walking its startup phases (Type=notify + 17-step
+		// restoration sequence — see #299), there's no point hitting
+		// /api/auth/check yet: at best it'd 502 through Caddy, at
+		// worst it'd race a half-initialized auth service. The boot
+		// overlay shows live progress instead. Once the engine reports
+		// `ready` or `ready_with_errors` we fall through to the normal
+		// connect flow.
+		const initial = await fetchBootStatus();
+		if (initial) {
+			bootStatus = initial;
+			if (initial.overall === 'booting') {
+				await pollUntilReady();
+			}
+		}
 		// Probe the cookie before opening a WS — saves us from the WS auth
 		// timeout when the user isn't logged in yet.
 		try {
@@ -580,7 +666,51 @@
 <ConfirmDangerousDialog />
 <UnlockFsDialog />
 
-{#if showLogin}
+{#if bootStatus && bootStatus.overall === 'booting'}
+	<!--
+		Engine is mid-startup. Show the per-phase checklist so the
+		operator sees motion and can spot whether a specific phase
+		is stuck rather than staring at a generic spinner. This is
+		also the only thing rendered while the engine isn't yet
+		accepting auth — login is meaningless here.
+	-->
+	<div class="flex min-h-screen items-center justify-center bg-background p-6">
+		<div class="w-full max-w-lg rounded-xl border border-border bg-card p-8">
+			<img src={theme.isDark ? logoDark : logoLight} alt="NASty" class="mb-4 h-32 mx-auto" />
+			<h1 class="text-center text-lg font-semibold">NASty is starting up…</h1>
+			<p class="mt-1 text-center text-sm text-muted-foreground">
+				Waiting for the engine to finish restoring system state. Login will appear automatically once it's ready.
+			</p>
+			<ul class="mt-6 divide-y divide-border/40">
+				{#each bootStatus.phases as phase (phase.name)}
+					<li class="flex items-center justify-between gap-3 py-2 text-sm">
+						<span class="flex items-center gap-2 min-w-0">
+							{#if phase.state === 'pending'}
+								<span class="inline-block h-2 w-2 shrink-0 rounded-full bg-muted-foreground/40" aria-label="pending"></span>
+							{:else if phase.state === 'running'}
+								<span class="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-400" aria-label="running"></span>
+							{:else if phase.state === 'ok'}
+								<span class="inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-500" aria-label="ok"></span>
+							{:else}
+								<span class="inline-block h-2 w-2 shrink-0 rounded-full bg-amber-500" aria-label="failed"></span>
+							{/if}
+							<code class="truncate font-mono text-xs text-muted-foreground">{phase.name}</code>
+						</span>
+						<span class="text-xs text-muted-foreground tabular-nums">
+							{#if phase.state === 'pending'}—{/if}
+							{#if phase.state === 'running'}…{/if}
+							{#if phase.duration_ms != null}
+								{(phase.duration_ms / 1000).toFixed(1)}s
+							{/if}
+						</span>
+					</li>
+				{:else}
+					<li class="py-2 text-center text-sm text-muted-foreground">Connecting to engine…</li>
+				{/each}
+			</ul>
+		</div>
+	</div>
+{:else if showLogin}
 	<div class="flex min-h-screen items-center justify-center">
 		<div class="w-[340px] rounded-xl border border-border bg-card p-8">
 			<img src={theme.isDark ? logoDark : logoLight} alt="NASty" class="mb-4 h-48 mx-auto" />
@@ -1011,6 +1141,26 @@
 						<span class="flex-1">NASty configuration is not backed up.</span>
 						<Button size="sm" onclick={() => goto('/backups?create=config')}>Create Backup</Button>
 						<button onclick={dismissConfigBackup} class="text-xs text-amber-400/60 hover:text-amber-400 shrink-0">dismiss</button>
+					</div>
+				{/if}
+				{#if bootStatus && bootStatus.overall === 'ready_with_errors' && !bootBannerDismissed}
+					{@const failed = bootStatus.phases.filter((p: BootPhase) => p.state === 'failed')}
+					<div class="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-400">
+						<div class="flex items-start gap-3">
+							<span class="flex-1">
+								<strong>{failed.length} boot phase{failed.length === 1 ? '' : 's'} didn't complete cleanly.</strong>
+								The engine is up, but the listed subsystems weren't restored. Check Logs for details and retry the affected operation (e.g. mount a filesystem, restart a protocol) once you've addressed the cause.
+							</span>
+							<button onclick={dismissBootBanner} class="text-xs text-amber-400/60 hover:text-amber-400 shrink-0">dismiss</button>
+						</div>
+						<ul class="mt-2 ml-1 space-y-0.5">
+							{#each failed as p (p.name)}
+								<li class="font-mono text-xs">
+									<span class="text-amber-300">{p.name}</span>
+									{#if p.error}<span class="text-muted-foreground"> — {p.error}</span>{/if}
+								</li>
+							{/each}
+						</ul>
 					</div>
 				{/if}
 				{#if !connected}
