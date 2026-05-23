@@ -184,6 +184,14 @@ pub struct UpdateInfo {
     pub update_available: Option<bool>,
     /// Active release channel.
     pub channel: ReleaseChannel,
+    /// Result of the last upgrade-unit invocation: `"success"`, `"failed"`,
+    /// or `None` if no upgrade has ever been kicked off (or it's still
+    /// running). When `"failed"`, the engine forces `update_available =
+    /// Some(true)` regardless of the tag comparison so the WebUI keeps
+    /// offering Upgrade — a failed rebuild often leaves `flake.lock`
+    /// pointing at the target tag, which would otherwise make the check
+    /// look like a no-op.
+    pub last_attempt: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -276,6 +284,7 @@ impl UpdateService {
             latest_version: None,
             update_available: None,
             channel: read_channel().await,
+            last_attempt: last_upgrade_attempt_result().await,
         }
     }
 
@@ -557,11 +566,22 @@ echo "==> Update complete!"
             available = Some(true);
         }
 
+        // If the previous upgrade attempt failed (ENOSPC on /boot, panic
+        // during activation, …) keep the Upgrade button visible so the
+        // operator can retry. The version comparison alone would say
+        // "up to date" in this state because `nix flake update` rewrites
+        // flake.lock *before* the rebuild runs.
+        let last_attempt = last_upgrade_attempt_result().await;
+        if last_attempt.as_deref() == Some("failed") {
+            available = Some(true);
+        }
+
         Ok(UpdateInfo {
             current_version: current,
             latest_version: Some(latest),
             update_available: available,
             channel,
+            last_attempt,
         })
     }
 
@@ -1774,10 +1794,33 @@ async fn check_via_git_ls_remote(
 }
 
 async fn read_current_version() -> String {
-    // Prefer the writable version written by the update script (contains the real
-    // selected tag or branch commit). Fall back to the nasty input locked in the
-    // local flake, then to the NixOS-baked /etc/nasty-version as a last resort.
+    // Priority is "closest to ground truth first":
+    //
+    // 1. `/var/lib/nasty/version` — written by the upgrade script on its
+    //    final line, only reached after `nixos-rebuild switch` returned 0.
+    //    Reflects intentional state when the upgrade flow drives things.
+    //
+    // 2. `/etc/nasty-version` — baked into the booted NixOS generation
+    //    via `environment.etc."nasty-version"`. Becomes the active /etc
+    //    only after `switch-to-configuration` succeeds, so this file
+    //    matches what the kernel and engine actually are.
+    //
+    // 3. `flake.lock` — aspirational. `nix flake update` rewrites it
+    //    BEFORE the rebuild runs, so on a half-applied upgrade (ENOSPC
+    //    on /boot, kernel panic during activation, …) the lock points
+    //    at the new tag while the running system is still on the old
+    //    one. Used to be priority #2 here, which is the bug that made
+    //    a failed v0.0.7→v0.0.8 attempt report "v0.0.8 — up to date"
+    //    and hide the retry button.
+    //
+    // 4. `"dev"` — last-resort sentinel for unmanaged builds.
     if let Ok(s) = tokio::fs::read_to_string(VERSION_PATH).await {
+        let s = s.trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    if let Ok(s) = tokio::fs::read_to_string(VERSION_PATH_FALLBACK).await {
         let s = s.trim().to_string();
         if !s.is_empty() {
             return s;
@@ -1785,14 +1828,6 @@ async fn read_current_version() -> String {
     }
     if let Some(version) = read_locked_nasty_version().await {
         return version;
-    }
-    for path in &[VERSION_PATH_FALLBACK] {
-        if let Ok(s) = tokio::fs::read_to_string(path).await {
-            let s = s.trim().to_string();
-            if !s.is_empty() {
-                return s;
-            }
-        }
     }
     "dev".to_string()
 }
@@ -1995,6 +2030,52 @@ fn rewrite_flake_input_urls(
 
 fn unquote_nix_string(raw: &str) -> Option<String> {
     serde_json::from_str::<String>(raw).ok()
+}
+
+/// What the most recent invocation of the upgrade unit ended in.
+///
+/// Returns `Some("success")` or `Some("failed")` when the unit has
+/// completed, `None` while it's still running or if it has never been
+/// invoked. The signal is taken from systemd's own bookkeeping — both
+/// `ActiveState` (so we know the unit is at rest) and `Result` (so we
+/// distinguish a clean exit from a crash/timeout/oom).
+///
+/// Used by [`UpdateService::check`] to keep the Upgrade button visible
+/// after a half-applied upgrade, where the version comparison alone
+/// would say "up to date" because `nix flake update` updates the lock
+/// BEFORE the rebuild runs.
+async fn last_upgrade_attempt_result() -> Option<String> {
+    let out = tokio::process::Command::new("systemctl")
+        .args(["show", UPDATE_UNIT, "--property=ActiveState,Result"])
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut active = "";
+    let mut result = "";
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("ActiveState=") {
+            active = v.trim();
+        }
+        if let Some(v) = line.strip_prefix("Result=") {
+            result = v.trim();
+        }
+    }
+    Some(classify_last_upgrade_attempt(active, result)?.to_string())
+}
+
+/// Pure classifier extracted so `last_upgrade_attempt_result` can be
+/// unit-tested without a live systemd. `ActiveState=active|activating`
+/// means we shouldn't draw any conclusion yet (still running). An
+/// empty `Result` paired with `inactive` means the unit was never
+/// invoked. Anything else collapses into `success` vs `failed`.
+fn classify_last_upgrade_attempt(active: &str, result: &str) -> Option<&'static str> {
+    match (active, result) {
+        ("active" | "activating" | "reloading", _) => None,
+        (_, "") => None,
+        (_, "success") => Some("success"),
+        _ => Some("failed"),
+    }
 }
 
 /// Classify the systemd unit state into one of the four states the WebUI
@@ -2433,6 +2514,59 @@ outputs = { nixpkgs, nasty, ... }: {
     fn map_systemd_state_unknown_states_default_to_idle() {
         assert_eq!(map_systemd_state("", ""), "idle");
         assert_eq!(map_systemd_state("maintenance", ""), "idle");
+    }
+
+    // ── last-upgrade-attempt classifier ───────────────────────────
+
+    #[test]
+    fn classify_last_upgrade_returns_none_while_running() {
+        use super::classify_last_upgrade_attempt;
+        for active in ["active", "activating", "reloading"] {
+            assert!(classify_last_upgrade_attempt(active, "").is_none());
+            assert!(classify_last_upgrade_attempt(active, "success").is_none());
+        }
+    }
+
+    #[test]
+    fn classify_last_upgrade_returns_none_when_never_invoked() {
+        use super::classify_last_upgrade_attempt;
+        // systemd reports ActiveState=inactive with an empty Result for a
+        // unit that has never been started. Don't claim "succeeded" in
+        // that state — the absence of evidence isn't evidence of success.
+        assert!(classify_last_upgrade_attempt("inactive", "").is_none());
+    }
+
+    #[test]
+    fn classify_last_upgrade_returns_success_on_clean_exit() {
+        use super::classify_last_upgrade_attempt;
+        assert_eq!(
+            classify_last_upgrade_attempt("inactive", "success"),
+            Some("success")
+        );
+        assert_eq!(
+            classify_last_upgrade_attempt("deactivating", "success"),
+            Some("success")
+        );
+    }
+
+    #[test]
+    fn classify_last_upgrade_returns_failed_for_any_nonsuccess_completion() {
+        use super::classify_last_upgrade_attempt;
+        // exit-code (rebuild returned non-zero), oom-kill, timeout — all
+        // surface as "failed" so the WebUI keeps offering Retry. The
+        // precise reason already lives in the journal-fed status log.
+        assert_eq!(
+            classify_last_upgrade_attempt("failed", "exit-code"),
+            Some("failed")
+        );
+        assert_eq!(
+            classify_last_upgrade_attempt("inactive", "oom-kill"),
+            Some("failed")
+        );
+        assert_eq!(
+            classify_last_upgrade_attempt("failed", "timeout"),
+            Some("failed")
+        );
     }
 
     // ── booted-generation comparison ───────────────────────────────

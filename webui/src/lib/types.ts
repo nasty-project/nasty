@@ -528,6 +528,8 @@ export interface UpdateInfo {
 	latest_version: string | null;
 	update_available: boolean | null;
 	channel: ReleaseChannel;
+	/** "success" | "failed" | null — result of the most recent upgrade-unit run. */
+	last_attempt: string | null;
 }
 
 export interface VersionInputInfo {
