@@ -2,16 +2,26 @@
   description = "NASty local system configuration";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
-    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
-
-    # Installer payload template. Bootstrap substitutes the tagged release
-    # and local system placeholders when writing /etc/nixos/flake.nix.
+    # The wrapper owns exactly one input: nasty. The blessed nixpkgs
+    # and bcachefs-tools revs for any given NASty release are recorded
+    # in nasty's own flake.lock at that ref, and we follow them from
+    # there. That way the maintainer controls all three versions
+    # through nasty's lock alone, the operator's single
+    # `nix flake update nasty` atomically advances all three on the
+    # wrapper, and the wrapper's resolved closure is byte-identical
+    # to what CI built against — so `nasty.cachix.org` actually
+    # substitutes instead of triggering a full local engine recompile.
+    #
+    # Before this template shape (everything before #304-ish), the
+    # wrapper owned its own `nixpkgs.url` and `bcachefs-tools.url`,
+    # and `nasty.inputs.nixpkgs.follows = "nixpkgs"` forced nasty
+    # to use whatever the wrapper had. Any drift in the wrapper's
+    # nixpkgs invalidated cachix coverage — caused every nasty bump
+    # to recompile ~92 Rust crates locally on every box that had
+    # ever run an `nix flake update nixpkgs`.
     nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
-    nasty.inputs.nixpkgs.follows = "nixpkgs";
-    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.follows = "nasty/bcachefs-tools";
   };
 
   outputs = { self, nixpkgs, nasty, ... }:

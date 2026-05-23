@@ -476,17 +476,32 @@ impl UpdateService {
 
     /// Read the exact upstream input URLs and locked revs from the live
     /// `/etc/nixos` flake on the installed system.
+    ///
+    /// Inputs the wrapper *owns* a `.url` for (today: just `nasty`,
+    /// historically all three) are reported with their literal URL.
+    /// Inputs the wrapper *follows* from nasty (today: `nixpkgs` and
+    /// `bcachefs-tools`) are reported with a synthetic
+    /// `follows:nasty/<name>` marker so the WebUI can distinguish
+    /// "operator owns this version" from "this just tracks nasty."
+    /// In either case `rev` comes from `flake.lock`, which carries
+    /// resolved revs for followed inputs too.
     pub async fn version_info(&self) -> Result<VersionInfo, UpdateError> {
         let urls = read_flake_input_urls().await?;
         let revs = read_flake_lock_revs().await;
 
         let mut inputs = Vec::with_capacity(VERSION_INPUT_NAMES.len());
         for name in VERSION_INPUT_NAMES {
-            let url = urls.get(name).cloned().ok_or_else(|| {
-                UpdateError::CommandFailed(format!(
-                    "missing {name}.url in {NIXOS_FLAKE_DIR}/flake.nix"
-                ))
-            })?;
+            let url = match urls.get(name) {
+                Some(u) => u.clone(),
+                None if *name == *"nasty" => {
+                    // `nasty.url` is the one input the wrapper must
+                    // own — there's nothing to follow it from.
+                    return Err(UpdateError::CommandFailed(format!(
+                        "missing nasty.url in {NIXOS_FLAKE_DIR}/flake.nix"
+                    )));
+                }
+                None => format!("follows:nasty/{name}"),
+            };
             inputs.push(VersionInputInfo {
                 name: name.to_string(),
                 url,
@@ -2243,12 +2258,19 @@ fn parse_flake_input_urls(content: &str) -> Result<HashMap<String, ParsedFlakeIn
         );
     }
 
-    for name in VERSION_INPUT_NAMES {
-        if !urls.contains_key(name) {
-            return Err(UpdateError::CommandFailed(format!(
-                "missing {name}.url in {NIXOS_FLAKE_DIR}/flake.nix"
-            )));
-        }
+    // `nasty.url` is the one input the wrapper *must* own — it's what
+    // pins the release the operator is tracking. `nixpkgs.url` and
+    // `bcachefs-tools.url` used to also be required, but the modern
+    // template (post wrapper-follows refactor) declares them as
+    // `nixpkgs.follows = "nasty/nixpkgs"` instead — the wrapper no
+    // longer owns those URLs, it inherits whatever nasty's flake.lock
+    // pins. Their absence here just means "this wrapper uses the
+    // follows pattern"; callers handle that explicitly by checking
+    // the returned map for presence.
+    if !urls.contains_key("nasty") {
+        return Err(UpdateError::CommandFailed(format!(
+            "missing nasty.url in {NIXOS_FLAKE_DIR}/flake.nix"
+        )));
     }
 
     Ok(urls)
@@ -3000,6 +3022,29 @@ proc /proc proc rw 0 0\n\
 }"#;
         let err = parse_flake_input_urls(missing_nasty).unwrap_err();
         assert!(format!("{err:?}").contains("nasty"));
+    }
+
+    /// The current wrapper-flake shape (post wrapper-follows refactor)
+    /// declares only `nasty.url`; nixpkgs and bcachefs-tools come in
+    /// via `follows`. The parser must accept that shape — returning
+    /// just the nasty entry, no error.
+    #[test]
+    fn parse_flake_input_urls_accepts_follows_only_wrapper() {
+        let follows_shape = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.follows = "nasty/bcachefs-tools";
+  };
+}"#;
+        let parsed = parse_flake_input_urls(follows_shape).expect("follows-shape parses");
+        assert_eq!(parsed.len(), 1, "only nasty.url is present");
+        assert_eq!(
+            parsed.get("nasty").map(|p| p.url.as_str()),
+            Some("github:nasty-project/nasty/v0.0.9")
+        );
+        assert!(parsed.get("nixpkgs").is_none());
+        assert!(parsed.get("bcachefs-tools").is_none());
     }
 
     #[test]
