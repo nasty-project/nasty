@@ -136,6 +136,74 @@ async fn unseal_key_file(path: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// What `bcachefs show-super` told us about a member device — used
+/// to decide whether to run `bcachefs unlock` before mounting.
+///
+/// The decision must be driven by what bcachefs itself says, NOT by
+/// the presence of a key file in `KEYS_DIR`. Stale `.key` files do
+/// exist in the wild — older NASty install paths wrote them
+/// regardless of whether the operator selected encryption (observed
+/// live on `.0f.ee` and `10.10.20.100`, March/April installs). If
+/// we always treat "file exists ⇒ FS is encrypted" the engine then
+/// invokes `bcachefs unlock` against an unencrypted device,
+/// bcachefs prints `Error: <dev> is not encrypted`, the mount path
+/// bails out, and the filesystem stays unmounted at boot. Storage
+/// offline. The whole point of having `S` in NAS.
+#[derive(Debug, PartialEq, Eq)]
+enum NeedsUnlock {
+    /// `show-super` succeeded — either the FS isn't encrypted at
+    /// all, or it is encrypted and a key is already loaded in the
+    /// keyring (e.g. from an earlier unlock in this boot). Either
+    /// way the kernel has what it needs for `bcachefs mount`.
+    No,
+    /// `show-super` failed with "error reading passphrase" — the FS
+    /// is encrypted and no usable key is reachable. Caller should
+    /// load one from `KEYS_DIR` (or surface the locked state to the
+    /// operator if no key file exists).
+    Yes,
+    /// `show-super` failed for some unrelated reason (device gone,
+    /// permission denied, bcachefs binary missing, …). Don't try
+    /// unlock; let `bcachefs mount` produce the canonical error.
+    Unknown,
+}
+
+/// Pure classifier for `bcachefs show-super` output. Extracted so
+/// the encryption-detection logic can be pinned with unit tests
+/// — the live wrapper just runs the command and feeds its results
+/// through here.
+fn classify_show_super(exit_success: bool, stderr: &str) -> NeedsUnlock {
+    if exit_success {
+        return NeedsUnlock::No;
+    }
+    // bcachefs prints things like "error reading passphrase" or
+    // "Error: reading superblock: error reading passphrase". Match
+    // the discriminating phrase rather than full strings so we don't
+    // break across bcachefs-tools versions that tweak the prefix.
+    if stderr.contains("error reading passphrase") {
+        return NeedsUnlock::Yes;
+    }
+    NeedsUnlock::Unknown
+}
+
+/// Ask bcachefs whether this device's superblock is currently
+/// readable without an unlock step. Wraps the pure classifier so the
+/// rest of the engine has one place to call.
+async fn probe_needs_unlock(device: &str) -> NeedsUnlock {
+    match cmd::run("bcachefs", &["show-super", device]).await {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            classify_show_super(out.status.success(), &stderr)
+        }
+        Err(e) => {
+            warn!(
+                "bcachefs show-super {device} could not spawn ({e}); \
+                 skipping unlock probe, letting mount produce the canonical error"
+            );
+            NeedsUnlock::Unknown
+        }
+    }
+}
+
 /// Pipe `key_bytes` into `bcachefs unlock` via stdin. The trailing
 /// newline matches the existing passphrase-stdin form — bcachefs
 /// reads up to the first newline as the passphrase.
@@ -1188,45 +1256,58 @@ impl FilesystemService {
 
         let first_device = fs.devices.first().map(|d| d.path.as_str()).unwrap_or("");
 
-        // Unlock decision matrix:
-        // 1. Stored key (TPM-sealed `.tpm` or plaintext `.key`) exists
-        //    → load it into the session keyring via `bcachefs unlock`.
-        //    The key file's existence is itself the authoritative
-        //    signal that this filesystem is encrypted; opts.encrypted
-        //    is unreliable at boot (see below) and we must NOT gate
-        //    on it.
-        // 2. No stored key BUT the keyring already has the key (user
-        //    clicked Unlock with a passphrase earlier this session)
-        //    → nothing to do, kernel uses the loaded key at mount.
-        //    Path 2 was missing before — a passphrase-unlocked FS would
-        //    hit the else-error even though the keyring was ready.
-        // 3. Encrypted but neither key file nor keyring entry exists
-        //    → genuinely locked, ask user to unlock first.
+        // Unlock decision: ASK BCACHEFS, don't infer.
         //
-        // Why key-file-presence is the source of truth, not opts.encrypted:
-        // `opts` is derived from `bcachefs show-super` at runtime, but
-        // show-super needs the encrypted superblock decrypted to report
-        // its options — and that requires the key to already be in the
-        // keyring. At boot the key isn't loaded yet, show-super fails
-        // with "error reading passphrase", and we report defaults
-        // (i.e. opts.encrypted = None). Gating the unlock branch on
-        // `opts.encrypted == Some(true)` therefore SKIPS the auto-unlock
-        // at boot for every encrypted FS, and `bcachefs mount` falls
-        // through to its built-in `systemd-ask-password` prompt which
-        // blocks for 90 s until systemd kills the engine for hitting
-        // TimeoutStartSec. Live regression on 10.10.10.71 after a
-        // reboot; trivial to reproduce on any encrypted FS whose
-        // fs-state.json doesn't carry `encrypted: true` (e.g. ones
-        // created by an older NASty before the field was persisted).
-        let unlocked_via_key_file = if let Some(bytes) = read_unlock_key(name).await? {
-            bcachefs_unlock_with_key(first_device, &bytes).await?;
-            true
-        } else if opts.encrypted == Some(true) && !is_bcachefs_key_loaded(&fs.uuid).await {
-            return Err(FilesystemError::CommandFailed(format!(
-                "encrypted filesystem '{name}' is locked — unlock it first, then mount."
-            )));
-        } else {
-            false
+        // `bcachefs show-super` is the only thing that can tell us
+        // authoritatively whether this filesystem needs an unlock
+        // before mount. Three branches:
+        //
+        // 1. show-super succeeds → either unencrypted, or encrypted
+        //    with a key already loaded. Nothing to do; the kernel
+        //    has what it needs for `bcachefs mount`.
+        // 2. show-super fails with "error reading passphrase" →
+        //    encrypted, no usable key reachable. Read a key from
+        //    KEYS_DIR (`.tpm` then `.key`) and `bcachefs unlock`.
+        //    If no key file is present and the kernel keyring is
+        //    empty, the FS is genuinely locked — fail with a clear
+        //    message so the operator unlocks via the WebUI.
+        // 3. show-super fails for some other reason → don't second-
+        //    guess, let `bcachefs mount` produce the canonical error.
+        //
+        // History of getting here wrong (don't undo any of this):
+        // - Originally we gated on `opts.encrypted == Some(true)`,
+        //   but opts.encrypted is derived from show-super output —
+        //   so on encrypted-but-locked FSes it was None (show-super
+        //   failed at boot) and the auto-unlock branch never fired.
+        //   `bcachefs mount` then prompted via systemd-ask-password
+        //   and the engine timed out. Fixed in PR #297.
+        // - PR #297 switched the gate to "if a key file exists,
+        //   unlock unconditionally." That broke the inverse: stale
+        //   `.key` files on unencrypted filesystems (older install
+        //   paths wrote them anyway) caused `bcachefs unlock` to
+        //   reply "device is not encrypted" → the mount path
+        //   propagated the error → filesystems unmounted at boot
+        //   on .0f.ee and 10.10.20.100. The fix below is to probe
+        //   bcachefs FIRST and only attempt unlock when bcachefs
+        //   itself reports the FS as needing one.
+        let unlocked_via_key_file = match probe_needs_unlock(first_device).await {
+            NeedsUnlock::No => false,
+            NeedsUnlock::Yes => {
+                if let Some(bytes) = read_unlock_key(name).await? {
+                    bcachefs_unlock_with_key(first_device, &bytes).await?;
+                    true
+                } else if is_bcachefs_key_loaded(&fs.uuid).await {
+                    // Probe said "needs unlock" but show-super might
+                    // have just raced our key-loading; the keyring
+                    // has it, so let mount try.
+                    false
+                } else {
+                    return Err(FilesystemError::CommandFailed(format!(
+                        "encrypted filesystem '{name}' is locked — unlock it first, then mount."
+                    )));
+                }
+            }
+            NeedsUnlock::Unknown => false,
         };
 
         let device_arg = fs
@@ -3207,6 +3288,83 @@ fn find_fs_name_by_devices(_devices: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── show-super classification (encryption probe) ──────────────
+
+    /// Happy path: show-super returned 0. Whatever the FS is, we
+    /// don't need to `bcachefs unlock` before mounting it.
+    #[test]
+    fn classify_show_super_success_means_no_unlock_needed() {
+        assert_eq!(super::classify_show_super(true, ""), super::NeedsUnlock::No);
+        // Some bcachefs versions still print noise on stderr even on
+        // success. We trust the exit code.
+        assert_eq!(
+            super::classify_show_super(true, "Note: some advisory message"),
+            super::NeedsUnlock::No
+        );
+    }
+
+    /// Encrypted-and-locked: bcachefs reports it cannot read the
+    /// passphrase, exit non-zero. We need to unlock before mount.
+    #[test]
+    fn classify_show_super_passphrase_failure_means_unlock_needed() {
+        // Exact stderr captured on .0f.ee / .100 boot logs before
+        // the fix:
+        let stderr = "bcachefs exited with exit status: 1: \
+                      Error: reading superblock: error reading passphrase";
+        assert_eq!(
+            super::classify_show_super(false, stderr),
+            super::NeedsUnlock::Yes
+        );
+        // Bare phrase without the wrapping context should also match
+        // — guard against bcachefs-tools tweaking the prefix.
+        assert_eq!(
+            super::classify_show_super(false, "error reading passphrase"),
+            super::NeedsUnlock::Yes
+        );
+    }
+
+    /// **Regression test for the .0f.ee / .100 incident** —
+    /// previously the engine treated "key file present" as proof
+    /// the FS was encrypted, ran `bcachefs unlock`, and got back
+    /// "Error: /dev/sdd is not encrypted". With the show-super
+    /// probe in place, that error path is unreachable: the probe
+    /// would already have classified the device as
+    /// `NeedsUnlock::No` (show-super succeeds on unencrypted FSes)
+    /// and the unlock step would have been skipped. So the
+    /// regression manifests as a probe-classifier-level mistake,
+    /// which this test fences.
+    #[test]
+    fn classify_show_super_does_not_treat_other_errors_as_unlock_needed() {
+        // The exact stderr `bcachefs unlock` produces against an
+        // unencrypted device — used to convince us we needed an
+        // unlock when we really didn't.
+        let stderr = "Error: /dev/sdd is not encrypted";
+        assert_eq!(
+            super::classify_show_super(false, stderr),
+            super::NeedsUnlock::Unknown,
+            "unrelated bcachefs errors must NOT trigger an unlock attempt"
+        );
+        // Common other failure shapes — all map to Unknown (don't
+        // attempt unlock; let mount produce the real error).
+        assert_eq!(
+            super::classify_show_super(false, "Error: opening /dev/sdd: No such file or directory"),
+            super::NeedsUnlock::Unknown
+        );
+        assert_eq!(
+            super::classify_show_super(false, "Error: opening /dev/sdd: Permission denied"),
+            super::NeedsUnlock::Unknown
+        );
+        assert_eq!(
+            super::classify_show_super(false, "Error: not a bcachefs filesystem"),
+            super::NeedsUnlock::Unknown
+        );
+        // Empty stderr on a non-zero exit also stays Unknown.
+        assert_eq!(
+            super::classify_show_super(false, ""),
+            super::NeedsUnlock::Unknown
+        );
+    }
 
     // ── FsMountOptions / state serialisation ───────────────────────
 
