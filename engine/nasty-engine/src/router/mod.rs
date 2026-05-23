@@ -164,8 +164,22 @@ pub(super) fn parse_params<T: serde::de::DeserializeOwned>(request: &Request) ->
 
 /// Check if a method is read-only (safe for ReadOnly role)
 fn is_read_only(method: &str) -> bool {
+    // Suffix heuristics catch the vast majority of pure reads without
+    // forcing every new endpoint to be enumerated below. `.list` /
+    // `.get` were here from the start; `.status` was added after
+    // `fs.tpm.status` triggered a refresh-loop on the Filesystems
+    // page (its event-bus broadcast classified it as a write because
+    // it didn't match any of the read suffixes or the explicit list,
+    // every refresh fired another refresh, the page's `isBusy()`
+    // progress bar blinked indefinitely). Every `.status` endpoint
+    // in the codebase reports state without mutating it
+    // (`fs.scrub.status`, `system.update.status`, `apps.status`,
+    // `system.ssh.status`, `system.nut.status`, `system.acme.status`,
+    // `system.firewall.status`, `system.tls.host_statuses`,
+    // `fs.reconcile.status`, …), so this is safe.
     method.ends_with(".list")
         || method.ends_with(".get")
+        || method.ends_with(".status")
         || matches!(
             method,
             "system.info"
@@ -1175,4 +1189,80 @@ pub(super) async fn read_bcachefs_error_count(uuid: &str) -> u64 {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_read_only;
+
+    /// Regression for the Filesystems-page refresh loop on .71:
+    /// before this fix, `fs.tpm.status` was classified as a write
+    /// because it didn't match `.get` / `.list` / the explicit
+    /// matches!() list. The router's event bus broadcasted a
+    /// "filesystem" event for every "write," the page's event
+    /// handler re-ran `refresh()`, refresh() called
+    /// `fs.tpm.status` again, repeat — the in-flight RPC bar
+    /// blinked indefinitely.
+    #[test]
+    fn fs_tpm_status_is_read_only() {
+        assert!(is_read_only("fs.tpm.status"));
+    }
+
+    /// Every status endpoint in the codebase is a pure read.
+    /// Pinning the suffix heuristic so a new `.status` endpoint
+    /// can't accidentally trigger the same refresh loop.
+    #[test]
+    fn status_suffix_is_read_only() {
+        for m in [
+            "fs.tpm.status",
+            "fs.scrub.status",
+            "fs.reconcile.status",
+            "system.update.status",
+            "system.ssh.status",
+            "system.nut.status",
+            "system.acme.status",
+            "system.firewall.status",
+            "apps.status",
+        ] {
+            assert!(is_read_only(m), "expected {m} to be read-only");
+        }
+    }
+
+    /// Writes must still be classified as writes — the event bus
+    /// depends on this to broadcast and the WebUI depends on the
+    /// broadcasts to refresh after mutations. Don't accidentally
+    /// over-broaden the read-only heuristic.
+    #[test]
+    fn writes_stay_writes() {
+        for m in [
+            "fs.tpm.bind",
+            "fs.tpm.unbind",
+            "fs.create",
+            "fs.destroy",
+            "fs.mount",
+            "fs.unmount",
+            "fs.unlock",
+            "fs.lock",
+            "fs.device.add",
+            "fs.device.remove",
+            "subvolume.create",
+            "snapshot.create",
+            "share.nfs.add",
+            "service.protocol.enable",
+            "system.settings.set",
+        ] {
+            assert!(!is_read_only(m), "expected {m} to be a write");
+        }
+    }
+
+    /// The .list / .get suffix matches that existed before this
+    /// PR continue to work — the suffix list is additive.
+    #[test]
+    fn list_and_get_suffixes_remain_read_only() {
+        assert!(is_read_only("fs.list"));
+        assert!(is_read_only("device.list"));
+        assert!(is_read_only("subvolume.get"));
+        assert!(is_read_only("snapshot.get"));
+        assert!(is_read_only("fs.get"));
+    }
 }
