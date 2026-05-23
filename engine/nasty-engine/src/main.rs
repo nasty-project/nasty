@@ -18,6 +18,7 @@ use tracing_subscriber::{prelude::*, reload};
 mod app_deploy;
 mod auth;
 mod auth_oidc;
+mod boot_status;
 mod fs_dependents;
 mod fs_lock;
 mod ingress_conflict;
@@ -72,6 +73,11 @@ pub struct AppState {
     /// Cached alerts result (timestamp, json value). Avoids re-evaluating
     /// all alert checks on every WebUI poll (called every few seconds).
     pub alerts_cache: tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>,
+    /// Boot-time per-phase status. Populated by main()'s restoration
+    /// sequence; read by `/api/boot_status` so the WebUI can render
+    /// a TrueNAS-style "starting up" overlay on the login screen
+    /// while phases are still running. See #299.
+    pub boot_status: boot_status::BootStatusTracker,
 }
 
 /// Base URL for the nasty-metrics service.
@@ -142,6 +148,30 @@ async fn main() -> anyhow::Result<()> {
         backups: nasty_backup::BackupService::new(),
         firmware: nasty_system::firmware::FirmwareService::new(),
         alerts_cache: tokio::sync::Mutex::new(None),
+        // Pre-register every phase name we'll feed into `run_phase`
+        // below. Pre-registering makes the WebUI's checklist fully
+        // visible from the moment the engine starts answering
+        // /api/boot_status — rows transition Pending → Running →
+        // Ok/Failed in place, no popping-into-existence reflow.
+        // Keep this list in sync with the `run_phase` calls below.
+        boot_status: boot_status::BootStatusTracker::new(&[
+            "filesystems.restore_mounts",
+            "subvolumes.restore_block_devices",
+            "nvmeof.remap_device_paths",
+            "iscsi.remap_device_paths",
+            "protocols.restore",
+            "nvmeof.restore",
+            "vms.restore",
+            "apps.restore",
+            "tailscale.restore",
+            "network.restore_pending_revert",
+            "network.reconcile_orphans",
+            "subvolumes.reconcile_project_ids",
+            "apps.reconcile_app_routes",
+            "firewall.init",
+            "nvmeof.ensure_tailscale_ports",
+            "caches.warm",
+        ]),
     });
 
     // Restore state from previous session:
@@ -166,12 +196,14 @@ async fn main() -> anyhow::Result<()> {
     use std::time::Duration;
     let secs = Duration::from_secs;
 
-    let mount_failures = run_phase(
-        "filesystems.restore_mounts",
-        secs(300), // per-FS 60s device-wait × multi-disk pools, plus mount + possible fsck
-        state.filesystems.restore_mounts(),
-    )
-    .await;
+    let mount_failures = state
+        .boot_status
+        .run_phase(
+            "filesystems.restore_mounts",
+            secs(300), // per-FS 60s device-wait × multi-disk pools, plus mount + possible fsck
+            state.filesystems.restore_mounts(),
+        )
+        .await;
     if !mount_failures.is_empty() {
         error!(
             "CRITICAL: {} filesystem(s) failed to mount: {}",
@@ -183,72 +215,90 @@ async fn main() -> anyhow::Result<()> {
     // Re-attach loop devices and get the current name→device mapping.
     // Loop device numbers change across reboots, so NVMe-oF and iSCSI state
     // files must be patched before their respective restore steps run.
-    let dev_map = run_phase(
-        "subvolumes.restore_block_devices",
-        secs(30), // losetup per block subvolume + state-file write
-        state.subvolumes.restore_block_devices(),
-    )
-    .await;
+    let dev_map = state
+        .boot_status
+        .run_phase(
+            "subvolumes.restore_block_devices",
+            secs(30), // losetup per block subvolume + state-file write
+            state.subvolumes.restore_block_devices(),
+        )
+        .await;
     if !dev_map.is_empty() {
-        run_phase(
-            "nvmeof.remap_device_paths",
-            secs(15), // string substitution + state-file save
-            state.nvmeof.remap_device_paths(&dev_map),
-        )
-        .await;
-        run_phase(
-            "iscsi.remap_device_paths",
-            secs(15),
-            state.iscsi.remap_device_paths(&dev_map),
-        )
-        .await;
+        state
+            .boot_status
+            .run_phase(
+                "nvmeof.remap_device_paths",
+                secs(15), // string substitution + state-file save
+                state.nvmeof.remap_device_paths(&dev_map),
+            )
+            .await;
+        state
+            .boot_status
+            .run_phase(
+                "iscsi.remap_device_paths",
+                secs(15),
+                state.iscsi.remap_device_paths(&dev_map),
+            )
+            .await;
     }
-    run_phase(
-        "protocols.restore",
-        secs(90), // 9 systemd services × up to ~10s each on a bursty box
-        state.protocols.restore(),
-    )
-    .await;
+    state
+        .boot_status
+        .run_phase(
+            "protocols.restore",
+            secs(90), // 9 systemd services × up to ~10s each on a bursty box
+            state.protocols.restore(),
+        )
+        .await;
 
     // SSH password auth is managed via /var/lib/nasty/sshd_override.conf
     // (created by tmpfiles with default "yes", toggled by the WebUI).
 
-    run_phase(
-        "nvmeof.restore",
-        secs(30), // configfs writes — fast unless many subsystems
-        state.nvmeof.restore(),
-    )
-    .await;
-    run_phase(
-        "vms.restore",
-        secs(300), // 10-20s per autostart VM × N
-        state.vms.restore(),
-    )
-    .await;
-    run_phase(
-        "apps.restore",
-        secs(300), // `docker compose up -d` per autostart app, may pull layers
-        state.apps.restore(),
-    )
-    .await;
-    run_phase(
-        "tailscale.restore",
-        secs(60), // network round-trip to login.tailscale.com
-        state.tailscale.restore(),
-    )
-    .await;
+    state
+        .boot_status
+        .run_phase(
+            "nvmeof.restore",
+            secs(30), // configfs writes — fast unless many subsystems
+            state.nvmeof.restore(),
+        )
+        .await;
+    state
+        .boot_status
+        .run_phase(
+            "vms.restore",
+            secs(300), // 10-20s per autostart VM × N
+            state.vms.restore(),
+        )
+        .await;
+    state
+        .boot_status
+        .run_phase(
+            "apps.restore",
+            secs(300), // `docker compose up -d` per autostart app, may pull layers
+            state.apps.restore(),
+        )
+        .await;
+    state
+        .boot_status
+        .run_phase(
+            "tailscale.restore",
+            secs(60), // network round-trip to login.tailscale.com
+            state.tailscale.restore(),
+        )
+        .await;
 
     // If the engine was killed mid-apply (or restarted before the user
     // confirmed a risky network change), restore the prior config from
     // /var/lib/nasty/networking.json.pending-revert. No-op if the file
     // doesn't exist. Runs before the HTTP server starts accepting calls
     // so a confirm can't race the rollback.
-    run_phase(
-        "network.restore_pending_revert",
-        secs(60), // file check is instant; revert path runs nmcli
-        state.network.restore_pending_revert(),
-    )
-    .await;
+    state
+        .boot_status
+        .run_phase(
+            "network.restore_pending_revert",
+            secs(60), // file check is instant; revert path runs nmcli
+            state.network.restore_pending_revert(),
+        )
+        .await;
 
     // Idempotent sweep: drop networking.json `interfaces[]` entries
     // that no longer correspond to any live device or virtual
@@ -259,12 +309,14 @@ async fn main() -> anyhow::Result<()> {
     // engine's apply path doesn't garbage-collect dead profiles
     // otherwise.  Runs before firewall.init so the firewall mirrors
     // the cleaned-on-disk state.
-    run_phase(
-        "network.reconcile_orphans",
-        secs(30), // a handful of NM connection deletes at most
-        state.network.reconcile_orphans(),
-    )
-    .await;
+    state
+        .boot_status
+        .run_phase(
+            "network.reconcile_orphans",
+            secs(30), // a handful of NM connection deletes at most
+            state.network.reconcile_orphans(),
+        )
+        .await;
 
     // Backfill project quota IDs on filesystem subvolumes that
     // predate the always-assign change (#176). Without this, those
@@ -272,12 +324,14 @@ async fn main() -> anyhow::Result<()> {
     // `None` and the WebUI shows `—` forever. Idempotent: scans
     // repquota output and only writes for subvolumes that lack a
     // row. Best-effort; failures are logged and don't block startup.
-    run_phase(
-        "subvolumes.reconcile_project_ids",
-        secs(90), // repquota scan + setproject per subvolume, scales with subvol count
-        state.subvolumes.reconcile_project_ids(),
-    )
-    .await;
+    state
+        .boot_status
+        .run_phase(
+            "subvolumes.reconcile_project_ids",
+            secs(90), // repquota scan + setproject per subvolume, scales with subvol count
+            state.subvolumes.reconcile_project_ids(),
+        )
+        .await;
 
     // Push the engine-known set of app ingresses into Caddy's
     // admin-API config.  Caddy holds these in memory, so a fresh
@@ -286,12 +340,14 @@ async fn main() -> anyhow::Result<()> {
     // recovery: when no live containers exist but the nginx-era
     // /var/lib/nasty/apps-proxy.conf does, the rules are parsed
     // from there.
-    run_phase(
-        "apps.reconcile_app_routes",
-        secs(30), // localhost HTTP to Caddy admin :2019
-        state.apps.reconcile_app_routes(),
-    )
-    .await;
+    state
+        .boot_status
+        .run_phase(
+            "apps.reconcile_app_routes",
+            secs(30), // localhost HTTP to Caddy admin :2019
+            state.apps.reconcile_app_routes(),
+        )
+        .await;
 
     // TLS automation reconcile — push the policy set (main domain +
     // every app subdomain) so Caddy issues certs after a fresh boot or
@@ -318,44 +374,50 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Initialize firewall based on current protocol states
-    run_phase("firewall.init", secs(15), {
-        let state = state.clone();
-        async move {
-            use nasty_system::protocol::Protocol;
-            let mut proto_states = Vec::new();
-            for p in Protocol::ALL {
-                let enabled = state.protocols.is_enabled(*p).await;
-                proto_states.push((*p, enabled));
+    state
+        .boot_status
+        .run_phase("firewall.init", secs(15), {
+            let state = state.clone();
+            async move {
+                use nasty_system::protocol::Protocol;
+                let mut proto_states = Vec::new();
+                for p in Protocol::ALL {
+                    let enabled = state.protocols.is_enabled(*p).await;
+                    proto_states.push((*p, enabled));
+                }
+                state.firewall.init(&proto_states).await;
             }
-            state.firewall.init(&proto_states).await;
-        }
-    })
-    .await;
+        })
+        .await;
 
     // Sync NVMe-oF ports with Tailscale IP (if Tailscale reconnected on boot)
-    run_phase("nvmeof.ensure_tailscale_ports", secs(15), {
-        let state = state.clone();
-        async move {
-            let ts_status = state.tailscale.get().await;
-            if ts_status.connected
-                && let Some(ref ip) = ts_status.ip
-            {
-                state.nvmeof.ensure_tailscale_ports(ip).await;
+    state
+        .boot_status
+        .run_phase("nvmeof.ensure_tailscale_ports", secs(15), {
+            let state = state.clone();
+            async move {
+                let ts_status = state.tailscale.get().await;
+                if ts_status.connected
+                    && let Some(ref ip) = ts_status.ip
+                {
+                    state.nvmeof.ensure_tailscale_ports(ip).await;
+                }
             }
-        }
-    })
-    .await;
+        })
+        .await;
 
     // Pre-warm caches so first page loads are fast.
     // Runs before sd_notify_ready() — Caddy won't serve until this completes.
     info!("Warming caches...");
-    run_phase("caches.warm", secs(30), {
-        let state = state.clone();
-        async move {
-            state.system.info().await;
-        }
-    })
-    .await;
+    state
+        .boot_status
+        .run_phase("caches.warm", secs(30), {
+            let state = state.clone();
+            async move {
+                state.system.info().await;
+            }
+        })
+        .await;
 
     // Seed the cached ACME status from whatever cert Caddy is already
     // serving so the WebUI shows the issuer/expiry on first page load
@@ -399,6 +461,12 @@ async fn main() -> anyhow::Result<()> {
     // Background alert evaluation + notifications
     spawn_alert_notifier(state.clone());
 
+    // Flip boot_status.overall from Booting → Ready / ReadyWithErrors
+    // BEFORE notifying systemd — once we're READY the WebUI is going
+    // to start polling /api/boot_status and we want it to immediately
+    // see the post-boot state, not catch the snapshot mid-transition.
+    state.boot_status.mark_ready().await;
+
     // Signal systemd that startup is complete
     sd_notify_ready();
 
@@ -420,6 +488,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/login", post(login_handler))
         .route("/api/logout", post(logout_handler))
         .route("/api/auth/oidc/available", get(oidc_available_handler))
+        .route("/api/boot_status", get(boot_status_handler))
         .route("/api/auth/oidc/start", get(oidc_start_handler))
         .route("/api/auth/oidc/callback", get(oidc_callback_handler))
         .route(
@@ -618,41 +687,18 @@ fn sd_notify_ready() {
     info!("Notified systemd: READY");
 }
 
-/// Run one boot-time restoration phase with a hard wall-clock cap.
+/// Boot-status snapshot, unauthenticated. Surfaces what the
+/// `boot_status::BootStatusTracker` recorded for every restoration
+/// phase + an overall state the WebUI uses to decide between
+/// rendering the boot overlay or the login form.
 ///
-/// On timeout: log an error and return `default()`. Caller continues
-/// to the next phase. The point is to guarantee `sd_notify_ready()`
-/// eventually fires even if a single restoration step (a hung mount,
-/// an unreachable IdP, a stuck Caddy admin API call, …) misbehaves.
-/// Pre-fix any awaited phase that didn't return on its own took the
-/// whole engine down via systemd's `TimeoutStartSec` — and with it
-/// the WebUI, since nothing was serving on 127.0.0.1:2137.
-///
-/// Phase 1 of #299. Per-phase status aggregation for the WebUI
-/// (`system.boot_status` RPC + booting screen) lands in follow-ups.
-async fn run_phase<T, F>(name: &str, max: std::time::Duration, fut: F) -> T
-where
-    F: std::future::Future<Output = T>,
-    T: Default,
-{
-    let started = std::time::Instant::now();
-    match tokio::time::timeout(max, fut).await {
-        Ok(v) => {
-            info!(
-                "boot phase '{name}' completed in {} ms",
-                started.elapsed().as_millis()
-            );
-            v
-        }
-        Err(_) => {
-            error!(
-                "boot phase '{name}' exceeded {} s budget — continuing without it; \
-                 check the prior log lines for what stalled",
-                max.as_secs()
-            );
-            T::default()
-        }
-    }
+/// No auth on purpose: the operator can't authenticate yet when the
+/// engine is mid-boot, and we still want them to see *what's*
+/// holding things up. The snapshot only exposes phase names,
+/// timestamps relative to process start, and tokio-timeout error
+/// strings — no secrets, no per-user data.
+async fn boot_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.boot_status.snapshot().await)
 }
 
 async fn health() -> impl IntoResponse {

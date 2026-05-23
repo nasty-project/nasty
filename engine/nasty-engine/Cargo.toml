@@ -37,6 +37,7 @@ tokio-util = { workspace = true, features = ["io"] }
 openidconnect = { version = "4", default-features = false, features = ["accept-rfc3339-timestamps", "accept-string-booleans"] }
 http = "1"
 url = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 [dev-dependencies]
 # `test-util` enables tokio::time::pause/start_paused for fs_lock's
