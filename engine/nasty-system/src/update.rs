@@ -3043,8 +3043,8 @@ proc /proc proc rw 0 0\n\
             parsed.get("nasty").map(|p| p.url.as_str()),
             Some("github:nasty-project/nasty/v0.0.9")
         );
-        assert!(parsed.get("nixpkgs").is_none());
-        assert!(parsed.get("bcachefs-tools").is_none());
+        assert!(!parsed.contains_key("nixpkgs"));
+        assert!(!parsed.contains_key("bcachefs-tools"));
     }
 
     #[test]

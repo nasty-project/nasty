@@ -100,33 +100,38 @@ jobs:
           echo "npmDepsHash matches package-lock.json: $ACTUAL"
 
   installer-flake-template:
-    # The installer's system-flake template must reference the same
-    # bcachefs-tools input as the project's flake.nix. The ISO build copies
-    # all transitive nodes from flake.lock into the system flake's lock; if
-    # the template's bcachefs-tools.url drifts from flake.nix, the lock will
-    # hold a different ref than the rendered flake.nix asks for and
-    # nixos-install will bail out with a NAR hash mismatch on first boot.
-    name: Installer template bcachefs-tools URL matches flake.nix
+    # The installer's system-flake template used to own its own
+    # `bcachefs-tools.url` and this job asserted it matched the
+    # project's flake.nix — without that, the ISO's flake.lock would
+    # reference one bcachefs-tools rev while the rendered wrapper
+    # flake.nix asked for another, and nixos-install would bail with
+    # a NAR hash mismatch on first boot.
+    #
+    # That entire failure mode is gone post-#304: the wrapper
+    # template no longer owns bcachefs-tools.url at all, it declares
+    # `bcachefs-tools.follows = "nasty/bcachefs-tools"`. The wrapper
+    # inherits whatever bcachefs-tools rev nasty's flake.lock pins,
+    # transitively — no second URL string, nothing to drift.
+    #
+    # Job retained as a guard the other way: assert the template
+    # really uses `follows` and never quietly grows a `.url` back.
+    name: Installer template bcachefs-tools resolves via follows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Compare URLs
+      - name: Assert template uses follows for bcachefs-tools
         run: |
-          PROJECT=$(grep -oE 'bcachefs-tools\.url = "[^"]+"' flake.nix | head -1)
-          TEMPLATE=$(grep -oE 'bcachefs-tools\.url = "[^"]+"' nixos/system-flake/flake.nix.template | head -1)
-          if [ -z "$PROJECT" ] || [ -z "$TEMPLATE" ]; then
-            echo "::error::could not extract bcachefs-tools.url from one of the files"
-            echo "  flake.nix:                             $PROJECT"
-            echo "  nixos/system-flake/flake.nix.template: $TEMPLATE"
+          if grep -qE 'bcachefs-tools\.url\s*=' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template owns its own bcachefs-tools.url — should follow nasty"
+            echo "Template should declare:"
+            echo "  bcachefs-tools.follows = \"nasty/bcachefs-tools\";"
+            echo "instead of:"
+            grep -nE 'bcachefs-tools\.url' nixos/system-flake/flake.nix.template
             exit 1
           fi
-          if [ "$PROJECT" != "$TEMPLATE" ]; then
-            echo "::error::installer template bcachefs-tools URL is stale"
-            echo "  flake.nix:                             $PROJECT"
-            echo "  nixos/system-flake/flake.nix.template: $TEMPLATE"
-            echo
-            echo "When bumping bcachefs-tools, update both files together."
+          if ! grep -qE 'bcachefs-tools\.follows\s*=\s*"nasty/bcachefs-tools"' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template missing bcachefs-tools.follows = \"nasty/bcachefs-tools\""
             exit 1
           fi
-          echo "Installer template matches flake.nix: $PROJECT"
+          echo "Installer template correctly follows nasty/bcachefs-tools."
