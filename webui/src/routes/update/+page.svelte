@@ -545,6 +545,21 @@
 	</div>
 
 	{#if activeTab === 'version'}
+		{#if info?.last_attempt === 'failed' && status?.state !== 'running'}
+			<Card class="mb-4 border-amber-500/50 bg-amber-500/5">
+				<CardContent class="py-3">
+					<div class="flex items-start gap-3 text-sm">
+						<span class="mt-0.5 text-amber-400">⚠</span>
+						<div class="flex-1">
+							<div class="font-medium text-amber-200">Last upgrade attempt failed</div>
+							<p class="mt-1 text-muted-foreground">
+								The most recent upgrade didn't complete — the system kept running the previous generation. Common causes are <code class="font-mono text-xs">/boot</code> running out of space (try <code class="font-mono text-xs">nix-collect-garbage --delete-older-than 7d</code>) or a panic during activation. Hit Upgrade again to retry; the log below has the journal output from the failed attempt.
+							</p>
+						</div>
+					</div>
+				</CardContent>
+			</Card>
+		{/if}
 		<Card class="mb-6">
 			<CardContent class="pt-6">
 				<div class="rounded-lg border border-border/60 text-sm">
@@ -606,9 +621,9 @@
 												{startingDevUpgrade ? 'Starting...' : 'Upgrade'}
 											</Button>
 										{/if}
-									{:else if taggedReleaseBanner.kind === 'ready' && !taggedReleaseBanner.current_is_latest_standard_url}
+									{:else if taggedReleaseBanner.kind === 'ready' && (!taggedReleaseBanner.current_is_latest_standard_url || info?.last_attempt === 'failed')}
 										<Button size="sm" onclick={upgradeTaggedRelease} disabled={startingUpgrade || status?.state === 'running'}>
-											{startingUpgrade ? 'Starting...' : 'Upgrade'}
+											{startingUpgrade ? 'Starting...' : (info?.last_attempt === 'failed' ? 'Retry Upgrade' : 'Upgrade')}
 										</Button>
 									{/if}
 								</div>
