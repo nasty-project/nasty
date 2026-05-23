@@ -1136,7 +1136,8 @@ in {
         pciutils                     # lspci — PCI passthrough enumeration + hardware page
         usbutils                     # lsusb — USB enumeration for hardware page + VM USB passthrough
         dmidecode                    # DMI tables for /system/hardware (BIOS, baseboard, memory)
-        tpm2-tools                   # tpm2_getcap — engine reads chip vendor/model for the Hardware page (sysfs doesn't expose it on virtualized TPMs or many real drivers)
+        tpm2-tools                   # tpm2_getcap / tpm2_create / tpm2_unseal — Hardware page chip info + the PCR-7 seal/unseal flow for the bcachefs encryption key (#102)
+        keyutils                     # keyctl — fs.lock revokes the bcachefs unlock key from the kernel session keyring; without this the call fails with "No such file or directory" even though every other tool we shell out to is here
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
@@ -1146,6 +1147,14 @@ in {
 
       environment = {
         RUST_LOG = cfg.engine.logLevel;
+        # Pin the TPM2 TCTI to /dev/tpmrm0. Without this every tpm2-tools
+        # invocation (Hardware page vendor probe, the seal/unseal flow
+        # for #102) prints a stderr stanza about failing to dlopen
+        # libtss2-tcti-tabrmd.so.0 — the userspace TPM resource-manager
+        # daemon NixOS doesn't ship — before falling through to the
+        # in-kernel RM. Setting TPM2TOOLS_TCTI cuts straight to /dev/tpmrm0
+        # and keeps the journal readable.
+        TPM2TOOLS_TCTI = "device:/dev/tpmrm0";
       };
 
       serviceConfig = {
