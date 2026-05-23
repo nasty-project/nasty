@@ -1173,28 +1173,46 @@ impl FilesystemService {
 
         let first_device = fs.devices.first().map(|d| d.path.as_str()).unwrap_or("");
 
-        // Unlock encrypted filesystem before mounting. Three paths:
+        // Unlock decision matrix:
         // 1. Stored key (TPM-sealed `.tpm` or plaintext `.key`) exists
-        //    (auto-unlock-on-boot setup) → load it into the session
-        //    keyring via `bcachefs unlock`.
+        //    → load it into the session keyring via `bcachefs unlock`.
+        //    The key file's existence is itself the authoritative
+        //    signal that this filesystem is encrypted; opts.encrypted
+        //    is unreliable at boot (see below) and we must NOT gate
+        //    on it.
         // 2. No stored key BUT the keyring already has the key (user
         //    clicked Unlock with a passphrase earlier this session)
         //    → nothing to do, kernel uses the loaded key at mount.
-        // 3. Neither → genuinely locked, ask user to unlock first.
+        //    Path 2 was missing before — a passphrase-unlocked FS would
+        //    hit the else-error even though the keyring was ready.
+        // 3. Encrypted but neither key file nor keyring entry exists
+        //    → genuinely locked, ask user to unlock first.
         //
-        // Path 2 was missing before — a passphrase-unlocked FS would
-        // hit the else-error even though the keyring was ready, and
-        // the UI would show the FS as Unmounted (correctly: the
-        // `locked` flag is keyring-aware) but Mount would fail.
-        if opts.encrypted == Some(true) {
-            if let Some(bytes) = read_unlock_key(name).await? {
-                bcachefs_unlock_with_key(first_device, &bytes).await?;
-            } else if !is_bcachefs_key_loaded(&fs.uuid).await {
-                return Err(FilesystemError::CommandFailed(format!(
-                    "encrypted filesystem '{name}' is locked — unlock it first, then mount."
-                )));
-            }
-        }
+        // Why key-file-presence is the source of truth, not opts.encrypted:
+        // `opts` is derived from `bcachefs show-super` at runtime, but
+        // show-super needs the encrypted superblock decrypted to report
+        // its options — and that requires the key to already be in the
+        // keyring. At boot the key isn't loaded yet, show-super fails
+        // with "error reading passphrase", and we report defaults
+        // (i.e. opts.encrypted = None). Gating the unlock branch on
+        // `opts.encrypted == Some(true)` therefore SKIPS the auto-unlock
+        // at boot for every encrypted FS, and `bcachefs mount` falls
+        // through to its built-in `systemd-ask-password` prompt which
+        // blocks for 90 s until systemd kills the engine for hitting
+        // TimeoutStartSec. Live regression on 10.10.10.71 after a
+        // reboot; trivial to reproduce on any encrypted FS whose
+        // fs-state.json doesn't carry `encrypted: true` (e.g. ones
+        // created by an older NASty before the field was persisted).
+        let unlocked_via_key_file = if let Some(bytes) = read_unlock_key(name).await? {
+            bcachefs_unlock_with_key(first_device, &bytes).await?;
+            true
+        } else if opts.encrypted == Some(true) && !is_bcachefs_key_loaded(&fs.uuid).await {
+            return Err(FilesystemError::CommandFailed(format!(
+                "encrypted filesystem '{name}' is locked — unlock it first, then mount."
+            )));
+        } else {
+            false
+        };
 
         let device_arg = fs
             .devices
@@ -1217,10 +1235,20 @@ impl FilesystemService {
             warn!("Failed to set I/O scheduler: {e}");
         }
 
-        // Track mount state with identity info for boot reconciliation
+        // Track mount state with identity info for boot reconciliation.
+        // If we successfully unlocked via a stored key, force the
+        // persisted `encrypted` flag to true: opts.encrypted may have
+        // been None (e.g. older NASty versions didn't always persist
+        // it, or a previous boot's show-super failed and the recorded
+        // value got cleared), and we want next boot's auto-unlock
+        // branch to have the right signal without depending on a
+        // possibly-failing show-super.
         let mut saved_opts = opts.clone();
         saved_opts.uuid = Some(fs.uuid.clone());
         saved_opts.devices = fs.devices.iter().map(|d| d.path.clone()).collect();
+        if unlocked_via_key_file {
+            saved_opts.encrypted = Some(true);
+        }
         save_fs_mounted_with_opts(name, saved_opts).await;
 
         self.invalidate_list_cache().await;
