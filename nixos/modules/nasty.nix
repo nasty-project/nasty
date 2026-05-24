@@ -637,6 +637,168 @@ in {
         echo "==> Done. Running: $(cat /var/lib/nasty/version 2>/dev/null || echo unknown)"
       '')
 
+      # `nasty-sync` — the engine-bypass recovery + manual update
+      # CLI. Three modes:
+      #
+      #   nasty-sync                Bump nasty to current main HEAD,
+      #                             rebuild. bcachefs-tools untouched.
+      #   nasty-sync -b [<ref>]     Bump nasty AND bcachefs-tools.
+      #                             Without <ref>: bcachefs adopts the
+      #                             rev nasty's new main HEAD declares
+      #                             (atomic dev-build bundle).
+      #                             With <ref>: bcachefs pinned to
+      #                             <ref> (e.g. v1.37.2 to downgrade
+      #                             when a newer rev regressed).
+      #   nasty-sync -s             Read-only: show current state.
+      #
+      # Why this exists at all: engine-side regressions in
+      # `system.version.switch` / `system.update.apply` can strand a
+      # box on the very RPC path that would deploy the fix (the old
+      # running engine is the one that deploys the new one). The CLI
+      # is safe to run anytime — it's the same `nix flake update` +
+      # `nixos-rebuild switch` dance an operator would type by hand,
+      # just packaged so they don't have to remember it.
+      (writeShellScriptBin "nasty-sync" ''
+        set -euo pipefail
+
+        usage() {
+          cat <<HELP
+        nasty-sync — CLI update / recovery tool for NASty
+
+        Usage:
+          nasty-sync             Bump nasty to current main HEAD and rebuild
+                                 (bcachefs-tools untouched).
+          nasty-sync -b          Bump nasty AND bcachefs-tools together —
+                                 bcachefs adopts whatever rev nasty's new
+                                 main HEAD declares (atomic bundle).
+          nasty-sync -b <ref>    Bump nasty to main HEAD; pin bcachefs-tools
+                                 to <ref> (e.g. v1.37.2 for a downgrade),
+                                 rebuild.
+          nasty-sync -s          Show current state (read-only).
+          nasty-sync -h          This message.
+        HELP
+        }
+
+        mode=update
+        while getopts ":bsh" opt; do
+          case "$opt" in
+            b) mode=update-with-bcachefs ;;
+            s) mode=show ;;
+            h) usage; exit 0 ;;
+            \?) echo "nasty-sync: unknown option -''${OPTARG}" >&2; usage >&2; exit 2 ;;
+          esac
+        done
+        shift $((OPTIND - 1))
+
+        # -s never touches state; everything else writes /etc/nixos
+        # and runs nixos-rebuild, so demands root + a wrapper flake.
+        if [ "$mode" != show ]; then
+          if [ "$(id -u)" -ne 0 ]; then
+            echo "nasty-sync: $mode mode must run as root (writes to /etc/nixos, runs nixos-rebuild)" >&2
+            exit 1
+          fi
+          if [ ! -f /etc/nixos/flake.nix ]; then
+            echo "nasty-sync: /etc/nixos/flake.nix not found — not a NASty box, or the wrapper flake is missing" >&2
+            exit 1
+          fi
+        fi
+
+        case "$mode" in
+          show)
+            JQ=${pkgs.jq}/bin/jq
+            echo "── NASty state ──────────────────────────────────────"
+            if [ -f /etc/nixos/flake.lock ]; then
+              NASTY_REV=$("$JQ" -r '.nodes.nasty.locked.rev // "?"' /etc/nixos/flake.lock 2>/dev/null || echo "?")
+              NASTY_REF=$("$JQ" -r '.nodes.nasty.original.ref // "main"' /etc/nixos/flake.lock 2>/dev/null || echo "?")
+              BCACHEFS_REV=$("$JQ" -r '.nodes["bcachefs-tools"].locked.rev // "?"' /etc/nixos/flake.lock 2>/dev/null || echo "?")
+              BCACHEFS_TAG=$("$JQ" -r '.nodes["bcachefs-tools"].original.ref // "?"' /etc/nixos/flake.lock 2>/dev/null || echo "?")
+              printf "  nasty:          %s (tracking: %s)\n" "''${NASTY_REV:0:12}" "$NASTY_REF"
+              printf "  bcachefs-tools: %s (%s)\n" "$BCACHEFS_TAG" "''${BCACHEFS_REV:0:12}"
+            else
+              echo "  /etc/nixos/flake.lock missing — can't read pinned revs"
+            fi
+            ENGINE_VER=$(cat /etc/nasty-version 2>/dev/null || echo "?")
+            printf "  engine:         %s\n" "$ENGINE_VER"
+            RUNNING_BCACHEFS=$(bcachefs --field version 2>/dev/null | head -1 || echo "?")
+            printf "  bcachefs kernel module: %s\n" "$RUNNING_BCACHEFS"
+            if [ "$RUNNING_BCACHEFS" != "?" ] && [ "$BCACHEFS_TAG" != "?" ]; then
+              BCACHEFS_TAG_BARE=''${BCACHEFS_TAG#v}
+              if [ "$RUNNING_BCACHEFS" = "$BCACHEFS_TAG_BARE" ]; then
+                echo "  → kernel module matches pinned bcachefs-tools."
+              else
+                echo "  → mismatch: kernel module $RUNNING_BCACHEFS vs pinned $BCACHEFS_TAG_BARE (reboot pending?)"
+              fi
+            fi
+            ;;
+
+          update)
+            echo "==> Bumping nasty input to current main HEAD..."
+            cd /etc/nixos
+            nix flake update nasty
+            echo ""
+            echo "==> Rebuilding system..."
+            nixos-rebuild switch --flake /etc/nixos
+            NASTY_REV=$(${pkgs.jq}/bin/jq -r '.nodes["nasty"].locked.rev // empty' /etc/nixos/flake.lock 2>/dev/null || true)
+            [ -n "$NASTY_REV" ] && echo "''${NASTY_REV:0:7}" > /var/lib/nasty/version
+            echo ""
+            echo "==> Done. Now on: $(cat /var/lib/nasty/version 2>/dev/null || echo unknown)"
+            ;;
+
+          update-with-bcachefs)
+            cd /etc/nixos
+            echo "==> Bumping nasty input to current main HEAD..."
+            nix flake update nasty
+            # If a positional <ref> was passed, use it. Otherwise pull
+            # the bcachefs ref the new nasty HEAD declares — read it
+            # directly out of the freshly-fetched nasty source in the
+            # Nix store rather than hitting GitHub again. `nix flake
+            # metadata` gives us the unpacked path.
+            if [ -n "''${1:-}" ]; then
+              BCACHEFS_REF="$1"
+              echo "==> Pinning bcachefs-tools to user-specified ref: $BCACHEFS_REF"
+            else
+              NASTY_SRC=$(nix flake metadata --json /etc/nixos | ${pkgs.jq}/bin/jq -r '.locks.nodes.nasty.locked.path // empty' 2>/dev/null || echo "")
+              if [ -z "$NASTY_SRC" ]; then
+                # `path` isn't populated for github: inputs; resolve via the eval path instead.
+                NASTY_SRC=$(nix eval --raw /etc/nixos#inputs.nasty.outPath 2>/dev/null || echo "")
+              fi
+              if [ -z "$NASTY_SRC" ] || [ ! -f "$NASTY_SRC/flake.nix" ]; then
+                echo "nasty-sync: couldn't locate nasty's flake.nix in /nix/store to read its bcachefs-tools pin" >&2
+                echo "nasty-sync: re-run with an explicit ref, e.g. nasty-sync -b v1.38.3" >&2
+                exit 1
+              fi
+              BCACHEFS_REF=$(grep -oE 'bcachefs-tools\.url = "github:koverstreet/bcachefs-tools/[^"]+"' "$NASTY_SRC/flake.nix" | sed -E 's|.*/([^"]+)"|\1|' | head -1)
+              if [ -z "$BCACHEFS_REF" ]; then
+                echo "nasty-sync: couldn't extract bcachefs-tools ref from nasty's flake.nix" >&2
+                exit 1
+              fi
+              echo "==> Adopting bcachefs-tools ref from nasty's main HEAD: $BCACHEFS_REF"
+            fi
+            # Rewrite the wrapper's bcachefs-tools.url line. Handles
+            # both follows-shape (replaces the `.follows = ...` line)
+            # and url-shape (replaces the URL string). sed is enough
+            # here — the line is single-purpose and not nested.
+            if grep -qE '^\s*bcachefs-tools\.follows\s*=' /etc/nixos/flake.nix; then
+              sed -i -E "s|^(\s*)bcachefs-tools\.follows\s*=\s*\"[^\"]*\"|\1bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/$BCACHEFS_REF\"|" /etc/nixos/flake.nix
+            elif grep -qE '^\s*bcachefs-tools\.url\s*=' /etc/nixos/flake.nix; then
+              sed -i -E "s|^(\s*)bcachefs-tools\.url\s*=\s*\"[^\"]*\"|\1bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/$BCACHEFS_REF\"|" /etc/nixos/flake.nix
+            else
+              echo "nasty-sync: /etc/nixos/flake.nix has no bcachefs-tools declaration to rewrite" >&2
+              exit 1
+            fi
+            echo "==> Re-resolving lock for bcachefs-tools..."
+            nix flake lock
+            echo ""
+            echo "==> Rebuilding system..."
+            nixos-rebuild switch --flake /etc/nixos
+            NASTY_REV=$(${pkgs.jq}/bin/jq -r '.nodes["nasty"].locked.rev // empty' /etc/nixos/flake.lock 2>/dev/null || true)
+            [ -n "$NASTY_REV" ] && echo "''${NASTY_REV:0:7}" > /var/lib/nasty/version
+            echo ""
+            echo "==> Done. nasty: $(cat /var/lib/nasty/version 2>/dev/null || echo unknown), bcachefs-tools: $BCACHEFS_REF"
+            ;;
+        esac
+      '')
+
       (writeShellScriptBin "nasty-report" ''
         # `set -e` is intentionally OFF: this script is meant to be run on
         # broken systems where individual commands will fail. We want each
