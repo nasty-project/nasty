@@ -1215,6 +1215,29 @@ echo "==> Update complete!"
             return Err(UpdateError::AlreadyRunning);
         }
 
+        // Migrate the wrapper to the canonical 0.0.9 shape before
+        // anything else — the input-presence checks below (and
+        // rewrite_flake_input_urls deeper in the call chain) demand
+        // `.url` declarations for both editable inputs. Without this
+        // upfront migration a post-#308 follows-shape wrapper (no
+        // `bcachefs-tools.url`) would error "missing bcachefs-tools.url"
+        // on the very first WebUI dev-build click — the same
+        // self-update strand that #312 set out to fix for nixpkgs but
+        // missed for bcachefs-tools. apply() and upgrade_tagged_release()
+        // already do this migration up-front; doing it here too closes
+        // the third edge of the triangle.
+        //
+        // Best-effort: failure logged as warn, doesn't abort the
+        // request. If the wrapper can't be migrated (fork URL, parse
+        // failure, etc.) the operator gets a clearer error from the
+        // input-presence check below.
+        if let Err(e) = self.maybe_migrate_wrapper_shape().await {
+            warn!(
+                target: "nasty::update",
+                "wrapper migration to canonical shape skipped during version_switch: {e}"
+            );
+        }
+
         let current_urls = read_flake_input_urls().await?;
         let mut seen = HashSet::new();
         let mut requested = HashMap::new();
