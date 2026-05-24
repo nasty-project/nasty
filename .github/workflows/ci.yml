@@ -135,38 +135,3 @@ jobs:
             exit 1
           fi
           echo "Installer template correctly follows nasty/bcachefs-tools."
-
-  nix-engine-build:
-    # Build the nasty-engine Nix package to catch sandbox-visibility
-    # regressions that `cargo build` alone won't see. The PR-time
-    # `cargo` jobs run against the full repo checkout, so a Rust
-    # `include_str!("../../../somewhere/outside/engine/...")` resolves
-    # fine in cargo but fails inside the Nix build sandbox when the
-    # engine's `src` filter only ships `./engine/`. That class of bug
-    # used to slip past PR CI and only blow up in the post-merge
-    # cachix push (e.g. PR #308's wrapper-flake template embed).
-    #
-    # This job is intentionally not gated by `cachix/cachix-action`
-    # auth — it builds without pushing, so it works on forks and
-    # third-party PRs. The cachix push remains on the integration
-    # workflow.
-    name: Nix engine build (sandbox-visibility gate)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: cachix/install-nix-action@v31
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      # Read-only Cachix substituter: pull cached deps to speed the
-      # build (a cold Rust compile of the workspace takes ~20 min on
-      # ubuntu-latest), but don't push.
-      - uses: cachix/cachix-action@v17
-        with:
-          name: nasty
-          skipPush: true
-
-      - name: Build engine package
-        run: nix build .#packages.x86_64-linux.engine --print-build-logs

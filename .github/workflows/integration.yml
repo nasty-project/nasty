@@ -13,6 +13,9 @@ on:
       - 'flake.lock'
 
 permissions:
+  # `id-token: write` required by Magic Nix Cache for OIDC auth against
+  # the GitHub Actions cache (the per-branch incremental Nix cache).
+  id-token: write
   contents: read
 
 concurrency:
@@ -30,6 +33,15 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+
+      # Magic Nix Cache uses GitHub Actions' cache as a Nix binary
+      # cache, layered on top of cachix. Cachix carries main-branch
+      # closures; Magic Nix Cache adds per-branch incremental caching
+      # across PR runs. On a PR that touches one Rust crate, only that
+      # crate + downstream rebuild — the rest substitutes from Actions
+      # cache. Realistic win on this job: ~36 min cold → ~15 min warm
+      # (VM-boot overhead is still ~10 min and uncacheable).
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
 
       # Read-only on PRs and workflow_dispatch; the conditional push step
       # below populates the cache when this run is a push to main. Folding
