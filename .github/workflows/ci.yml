@@ -100,38 +100,65 @@ jobs:
           echo "npmDepsHash matches package-lock.json: $ACTUAL"
 
   installer-flake-template:
-    # The installer's system-flake template used to own its own
-    # `bcachefs-tools.url` and this job asserted it matched the
-    # project's flake.nix — without that, the ISO's flake.lock would
-    # reference one bcachefs-tools rev while the rendered wrapper
-    # flake.nix asked for another, and nixos-install would bail with
-    # a NAR hash mismatch on first boot.
+    # Two invariants on the wrapper-flake template, each load-bearing
+    # for a different reason:
     #
-    # That entire failure mode is gone post-#304: the wrapper
-    # template no longer owns bcachefs-tools.url at all, it declares
-    # `bcachefs-tools.follows = "nasty/bcachefs-tools"`. The wrapper
-    # inherits whatever bcachefs-tools rev nasty's flake.lock pins,
-    # transitively — no second URL string, nothing to drift.
+    # 1. `nixpkgs.follows = "nasty/nixpkgs"` (no own `nixpkgs.url`).
+    #    Every Rust package in nasty's binary closure is built against
+    #    the nixpkgs nasty pinned at CI time and substituted from
+    #    nasty.cachix.org by content hash. If the wrapper drifted to
+    #    its own nixpkgs rev, the substitution would miss and every
+    #    nasty bump would recompile ~92 Rust crates locally on every
+    #    operator's box. follows closes that hole — the wrapper's
+    #    resolved closure is byte-identical to what CI built against.
     #
-    # Job retained as a guard the other way: assert the template
-    # really uses `follows` and never quietly grows a `.url` back.
-    name: Installer template bcachefs-tools resolves via follows
+    # 2. `bcachefs-tools.url = "..."` (an actual ref, NOT a follows).
+    #    Nothing in nasty's binary closure links bcachefs-tools; it's
+    #    used purely as a runtime CLI + kernel module. Pinning it
+    #    independently gives the operator a real escape hatch when an
+    #    upstream bcachefs-tools rev regresses on their hardware —
+    #    they can stay on a known-good version across nasty bumps.
+    #    Following nasty here removes that capability for no cachix
+    #    win, since nasty's binaries don't depend on it.
+    #
+    # The renderer in engine/nasty-system/src/update.rs substitutes
+    # @BCACHEFS_TOOLS_REF@ at template render time; the engine
+    # extracts the canonical default from nasty's own flake.nix.
+    name: Installer template canonical shape (nixpkgs follows, bcachefs.url)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Assert template uses follows for bcachefs-tools
+      - name: Assert template uses follows for nixpkgs
         run: |
-          if grep -qE 'bcachefs-tools\.url\s*=' nixos/system-flake/flake.nix.template; then
-            echo "::error::installer template owns its own bcachefs-tools.url — should follow nasty"
+          if grep -qE '^\s*nixpkgs\.url\s*=' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template owns its own nixpkgs.url — should follow nasty for cachix coverage"
             echo "Template should declare:"
-            echo "  bcachefs-tools.follows = \"nasty/bcachefs-tools\";"
+            echo "  nixpkgs.follows = \"nasty/nixpkgs\";"
             echo "instead of:"
-            grep -nE 'bcachefs-tools\.url' nixos/system-flake/flake.nix.template
+            grep -nE '^\s*nixpkgs\.url' nixos/system-flake/flake.nix.template
             exit 1
           fi
-          if ! grep -qE 'bcachefs-tools\.follows\s*=\s*"nasty/bcachefs-tools"' nixos/system-flake/flake.nix.template; then
-            echo "::error::installer template missing bcachefs-tools.follows = \"nasty/bcachefs-tools\""
+          if ! grep -qE 'nixpkgs\.follows\s*=\s*"nasty/nixpkgs"' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template missing nixpkgs.follows = \"nasty/nixpkgs\""
             exit 1
           fi
-          echo "Installer template correctly follows nasty/bcachefs-tools."
+          echo "Installer template correctly follows nasty/nixpkgs."
+
+      - name: Assert template pins bcachefs-tools with its own .url
+        run: |
+          if grep -qE 'bcachefs-tools\.follows\s*=' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template declares bcachefs-tools.follows — should pin its own .url so operators can independently override"
+            echo "Template should declare:"
+            echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@\";"
+            echo "instead of:"
+            grep -nE 'bcachefs-tools\.follows' nixos/system-flake/flake.nix.template
+            exit 1
+          fi
+          if ! grep -qE 'bcachefs-tools\.url\s*=\s*"github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@"' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template missing bcachefs-tools.url with the @BCACHEFS_TOOLS_REF@ placeholder"
+            echo "Template should declare:"
+            echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@\";"
+            exit 1
+          fi
+          echo "Installer template correctly pins bcachefs-tools.url with @BCACHEFS_TOOLS_REF@ placeholder."

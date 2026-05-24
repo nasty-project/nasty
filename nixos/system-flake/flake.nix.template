@@ -2,26 +2,34 @@
   description = "NASty local system configuration";
 
   inputs = {
-    # The wrapper owns exactly one input: nasty. The blessed nixpkgs
-    # and bcachefs-tools revs for any given NASty release are recorded
-    # in nasty's own flake.lock at that ref, and we follow them from
-    # there. That way the maintainer controls all three versions
-    # through nasty's lock alone, the operator's single
-    # `nix flake update nasty` atomically advances all three on the
-    # wrapper, and the wrapper's resolved closure is byte-identical
-    # to what CI built against — so `nasty.cachix.org` actually
-    # substitutes instead of triggering a full local engine recompile.
+    # Three inputs, split into two control regimes:
     #
-    # Before this template shape (everything before #304-ish), the
-    # wrapper owned its own `nixpkgs.url` and `bcachefs-tools.url`,
-    # and `nasty.inputs.nixpkgs.follows = "nixpkgs"` forced nasty
-    # to use whatever the wrapper had. Any drift in the wrapper's
-    # nixpkgs invalidated cachix coverage — caused every nasty bump
-    # to recompile ~92 Rust crates locally on every box that had
-    # ever run an `nix flake update nixpkgs`.
+    # `nasty` and `bcachefs-tools` are both pinned in the wrapper, so
+    # the operator owns them — pick a nasty ref to track, pick a
+    # bcachefs-tools tag to run. Each is editable by hand or via the
+    # WebUI's Upstream advanced section.
+    #
+    # `nixpkgs.follows = "nasty/nixpkgs"` is a deliberate exception.
+    # Every Rust package in nasty's binary closure (the engine and
+    # everything it links) is built against the nixpkgs nasty pinned
+    # at CI time, and `nasty.cachix.org` substitutes those builds by
+    # content hash. If the wrapper carried its own `nixpkgs.url` and
+    # drifted from nasty's pin, the substitution would miss and every
+    # nasty bump would recompile ~92 Rust crates locally on every
+    # box. Making nixpkgs follow nasty closes that hole — the
+    # wrapper's resolved closure is byte-identical to what CI built
+    # against, cachix hits, no local recompile.
+    #
+    # bcachefs-tools doesn't have the same problem: nasty's binary
+    # closure doesn't link it, it's used purely as a runtime CLI +
+    # kernel module. The cost of the operator pinning a different
+    # bcachefs-tools rev is rebuilding bcachefs-tools itself + the
+    # kernel module — real, but a fair trade for the ability to
+    # stick with a known-good version when an upstream rev regresses
+    # on their hardware.
     nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
     nixpkgs.follows = "nasty/nixpkgs";
-    bcachefs-tools.follows = "nasty/bcachefs-tools";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@";
   };
 
   outputs = { self, nixpkgs, nasty, ... }:

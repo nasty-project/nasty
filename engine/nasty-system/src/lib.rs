@@ -61,7 +61,13 @@ pub struct SystemInfo {
     pub bcachefs_commit: Option<String>,
     /// The ref currently pinned in `/etc/nixos/flake.lock` for `bcachefs-tools`.
     pub bcachefs_pinned_ref: Option<String>,
-    /// True when the RUNNING bcachefs module version differs from the default.
+    /// True when the running bcachefs kernel module version doesn't
+    /// match the wrapper's currently-pinned `bcachefs-tools` ref —
+    /// i.e. an upgrade or pin change has activated a new generation
+    /// but the box hasn't been rebooted into it yet. The WebUI uses
+    /// this to surface a top-bar "reboot pending" cue. False when
+    /// the running version probe fails (unknown) or the wrapper has
+    /// no pinned ref to compare against.
     pub bcachefs_is_custom: bool,
     /// IANA timezone string (e.g. `America/New_York`).
     pub timezone: String,
@@ -132,26 +138,37 @@ impl SystemService {
             }
         }
         // Compute — run subprocess calls in parallel.
-        let (
-            bcachefs_version,
-            bcachefs_commit,
-            (pinned_ref, _),
-            debug_symbols,
-            debug_checks,
-            default_ref,
-        ) = tokio::join!(
+        let (bcachefs_version, bcachefs_commit, (pinned_ref, _), debug_symbols, debug_checks) = tokio::join!(
             bcachefs_version(),
             read_bcachefs_commit(),
             crate::update::read_flake_lock_bcachefs_pub(),
             bcachefs_has_debug_symbols(),
             bcachefs_has_debug_checks(),
-            crate::update::read_flake_nix_default_ref_pub(),
         );
-        // Running state: compare actual loaded module against default.
-        // Strip leading 'v' from default ref for comparison (e.g. "v1.37.2" vs "1.37.2").
-        let default_bare = default_ref.strip_prefix('v').unwrap_or(&default_ref);
-        let bcachefs_is_custom_running =
-            bcachefs_version != default_bare && bcachefs_version != "unknown";
+        // "Pending reboot": the loaded kernel module's bcachefs version
+        // doesn't match the wrapper's currently-pinned bcachefs-tools
+        // ref. Happens after the operator changes the pin (or runs a
+        // tagged-release switch) and nixos-rebuild has activated the
+        // new generation but the box hasn't been rebooted into it yet
+        // — the new kernel module is sitting in /run/booted-system but
+        // not loaded. Surfacing this in the top-bar chip is the cue to
+        // reboot.
+        //
+        // We DON'T trip when:
+        //   - the running version is "unknown" (probe failure — don't
+        //     show a misleading alert based on incomplete data);
+        //   - the pinned ref is missing (no /etc/nixos/flake.lock —
+        //     dev/test environment, nothing to compare against).
+        //
+        // Strip leading 'v' on the pinned ref so `v1.38.3` compares
+        // equal to bcachefs's `1.38.3` runtime output.
+        let bcachefs_is_custom_running = match (&pinned_ref, bcachefs_version.as_str()) {
+            (Some(pin), running) if running != "unknown" => {
+                let pin_bare = pin.strip_prefix('v').unwrap_or(pin);
+                pin_bare != running
+            }
+            _ => false,
+        };
         let info = CachedInfo {
             bcachefs_version,
             bcachefs_commit,

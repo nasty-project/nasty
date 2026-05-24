@@ -23,22 +23,30 @@
 
     mkEngine = system: let
       pkgs = mkPkgs system;
-      # The engine source plus the wrapper-flake template the engine
-      # embeds via `include_str!("../../../nixos/system-flake/flake.nix.template")`
-      # in `engine/nasty-system/src/update.rs`. The path-up navigation
-      # walks out of `engine/` into the repo root, so the Nix sandbox
-      # must contain both subtrees at their canonical relative
-      # positions for `cargo build` to compile the engine.
+      # The engine source plus two files it embeds via `include_str!`
+      # from `engine/nasty-system/src/update.rs`:
+      #   - `nixos/system-flake/flake.nix.template` — the wrapper
+      #     template the engine renders into /etc/nixos/flake.nix on
+      #     install + migration.
+      #   - `flake.nix` (this file) — used to read the canonical
+      #     bcachefs-tools default ref out of nasty's own input
+      #     declaration, avoiding a duplicate constant that could
+      #     drift from `bcachefs-tools.url` here.
+      # Both path-up navigations walk out of `engine/` into the repo
+      # root, so the Nix sandbox must contain both files at their
+      # canonical relative positions for `cargo build` to compile the
+      # engine.
       #
       # Why fileset.toSource (not just `src = ./.;`): the engine
-      # source-hash only depends on engine sources + this one template
-      # file. Adding unrelated repo changes (docs, webui, nixos
-      # modules) doesn't invalidate the Rust build cache.
+      # source-hash only depends on engine sources + these two files.
+      # Adding unrelated repo changes (docs, webui, nixos modules)
+      # doesn't invalidate the Rust build cache.
       engineSrc = pkgs.lib.fileset.toSource {
         root = ./.;
         fileset = pkgs.lib.fileset.unions [
           ./engine
           ./nixos/system-flake/flake.nix.template
+          ./flake.nix
         ];
       };
     in pkgs.rustPlatform.buildRustPackage {

@@ -28,10 +28,26 @@
 		label: string;
 		url: string;
 		rev: string | null;
+		tag: string | null;
 		update: boolean;
 		initialUrl: string;
 		initialRev: string | null;
 	};
+
+	/**
+	 * Pick the user-friendlier label for a flake input's pinned
+	 * version. Prefer the tag (`v1.38.3`) over the 12-char rev SHA
+	 * (`ff765d6b9dea`) when the lock has one; fall back to the rev
+	 * otherwise, then to em-dash. The tag is what nasty's flake.lock
+	 * records under `nodes[<name>].original.ref` — present whenever
+	 * the input was declared as a ref string rather than a raw commit
+	 * hash, which is the common case.
+	 */
+	function pinnedLabel(tag: string | null, rev: string | null): string {
+		if (tag) return tag;
+		if (rev) return rev;
+		return '—';
+	}
 
 	type TaggedReleaseBannerState =
 		| { kind: 'loading' }
@@ -196,7 +212,6 @@
 
 	function versionLabel(name: string): string {
 		switch (name) {
-			case 'nixpkgs': return 'nixpkgs';
 			case 'bcachefs-tools': return 'bcachefs-tools';
 			case 'nasty': return 'nasty';
 			default: return name;
@@ -205,11 +220,12 @@
 
 	/**
 	 * Pull the human-meaningful ref out of a `github:owner/repo/ref` URL.
-	 * For nixpkgs this lands on the branch name (`nixos-unstable`); for
-	 * bcachefs-tools on a tag (`v1.38.3`); for nasty on either depending
-	 * on channel. Fallback: the trailing path segment, or the raw URL
-	 * if we can't parse it (e.g. git+https forks). Used to fill the
-	 * "Tracking / Latest" column on the Current Version summary card.
+	 * For bcachefs-tools this lands on a tag (`v1.38.3`); for nasty on
+	 * either a tag or branch depending on channel. Fallback: the
+	 * trailing path segment, or the raw URL if we can't parse it (e.g.
+	 * git+https forks). nixpkgs isn't surfaced by the engine in
+	 * canonical 0.0.9 shape (it always follows nasty), so it's not
+	 * something this helper has to render.
 	 */
 	function trackingRef(url: string | null | undefined): string {
 		if (!url) return '—';
@@ -224,6 +240,7 @@
 			label: versionLabel(input.name),
 			url: input.url,
 			rev: input.rev,
+			tag: input.tag ?? null,
 			update: false,
 			initialUrl: input.url,
 			initialRev: input.rev
@@ -652,7 +669,7 @@
 											{#each summaryInputs as input}
 												<tr>
 													<td class="pr-4 align-top text-muted-foreground">{versionLabel(input.name)}</td>
-													<td class="pr-4 align-top font-mono font-semibold">{input.rev ?? '—'}</td>
+													<td class="pr-4 align-top font-mono font-semibold">{pinnedLabel(input.tag ?? null, input.rev)}</td>
 													<td class="align-top font-mono">
 														{#if input.name === 'nasty'}
 															{#if !isDevBuild && taggedReleaseBanner.kind === 'ready'}
@@ -764,7 +781,7 @@
 											<div class="font-medium">{row.label}</div>
 											<div class="flex items-center gap-2 text-xs">
 												<span class="text-muted-foreground">locked</span>
-												<Badge variant="secondary" class="font-mono">{row.rev ?? 'unknown'}</Badge>
+												<Badge variant="secondary" class="font-mono">{pinnedLabel(row.tag, row.rev)}</Badge>
 											</div>
 										</div>
 										<div class="flex flex-col gap-3 lg:flex-row lg:items-center">

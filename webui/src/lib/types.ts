@@ -540,6 +540,13 @@ export interface VersionInputInfo {
 	name: string;
 	url: string;
 	rev: string | null;
+	/**
+	 * Human-meaningful ref string from flake.lock's
+	 * `nodes[<name>].original.ref` — typically a tag like `v1.38.3`
+	 * or a branch name like `main`. Prefer this for display over
+	 * `rev` (which is just a 12-char SHA prefix) when present.
+	 */
+	tag?: string;
 }
 
 // ── Boot status (engine /api/boot_status) ─────────────────────

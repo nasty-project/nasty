@@ -30,7 +30,15 @@ const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
 const DEFAULT_NASTY_OWNER: &str = "nasty-project";
 const DEFAULT_NASTY_REPO: &str = "nasty";
 const DEFAULT_NASTY_REF: &str = "main";
-const VERSION_INPUT_NAMES: [&str; 3] = ["nixpkgs", "bcachefs-tools", "nasty"];
+/// Top-level wrapper-flake inputs the operator can edit via the
+/// Update page's Upstream section. nixpkgs is intentionally absent
+/// — it's declared as `nixpkgs.follows = "nasty/nixpkgs"` in the
+/// canonical wrapper shape, so there's no meaningful URL or update
+/// flag for it; editing it would be silently ignored. Showing it
+/// would only invite false expectations. Same reasoning applies to
+/// the engine's `version_info` payload: returning a row for nixpkgs
+/// would imply operator agency that doesn't exist.
+const VERSION_INPUT_NAMES: [&str; 2] = ["bcachefs-tools", "nasty"];
 const SYSTEM_FLAKE_TEMPLATE_PATH: &str = "nixos/system-flake/flake.nix.template";
 
 /// Snapshot of the wrapper-flake template this engine binary was
@@ -44,6 +52,18 @@ const SYSTEM_FLAKE_TEMPLATE_PATH: &str = "nixos/system-flake/flake.nix.template"
 /// migration target.
 const EMBEDDED_WRAPPER_TEMPLATE: &str =
     include_str!("../../../nixos/system-flake/flake.nix.template");
+
+/// nasty's own `flake.nix`, embedded at engine build time. Used to
+/// resolve the default `bcachefs-tools` ref for fresh installs and
+/// migrations: the canonical pin lives in `bcachefs-tools.url = ...`
+/// here, and the engine reads it back via `parse_flake_input_urls`
+/// rather than carrying a duplicate constant that could drift from
+/// the actual flake. When the maintainer bumps the bcachefs-tools
+/// version in `flake.nix`, the embedded copy here updates at the
+/// next engine build, and every install that uses this engine binary
+/// to render its wrapper gets the new default automatically.
+const EMBEDDED_NASTY_FLAKE: &str = include_str!("../../../flake.nix");
+
 const GITHUB_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ── Release channels ────────────────────────────────────────────
@@ -296,12 +316,21 @@ pub struct UpdateBuildDirConfig {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct VersionInputInfo {
-    /// Flake input name (e.g. `nixpkgs`).
+    /// Flake input name (e.g. `bcachefs-tools`, `nasty`).
     pub name: String,
     /// Exact `input.url` string from `/etc/nixos/flake.nix`.
     pub url: String,
     /// Locked commit SHA from `/etc/nixos/flake.lock` (shortened to 12 chars).
     pub rev: Option<String>,
+    /// Human-meaningful ref string from `flake.lock`'s
+    /// `nodes[<name>].original.ref` — typically a tag like `v1.38.3`
+    /// or a branch name like `main`. When present, prefer this for
+    /// display over `rev` (which is just a 12-char SHA prefix).
+    /// `None` when the lock node has no `original.ref` set (e.g.
+    /// inputs referenced by raw commit hash, or inputs the lock
+    /// doesn't carry an `original` block for).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -489,17 +518,24 @@ impl UpdateService {
     /// Read the exact upstream input URLs and locked revs from the live
     /// `/etc/nixos` flake on the installed system.
     ///
-    /// Inputs the wrapper *owns* a `.url` for (today: just `nasty`,
-    /// historically all three) are reported with their literal URL.
-    /// Inputs the wrapper *follows* from nasty (today: `nixpkgs` and
-    /// `bcachefs-tools`) are reported with a synthetic
-    /// `follows:nasty/<name>` marker so the WebUI can distinguish
-    /// "operator owns this version" from "this just tracks nasty."
-    /// In either case `rev` comes from `flake.lock`, which carries
-    /// resolved revs for followed inputs too.
+    /// Only the inputs the operator can edit are returned: `nasty`
+    /// and `bcachefs-tools`. nixpkgs is excluded — it always follows
+    /// nasty (canonical 0.0.9 shape), so there's no operator-facing
+    /// choice to surface; including it would imply agency that
+    /// doesn't exist.
+    ///
+    /// Inputs the wrapper *owns* a `.url` for (the steady state for
+    /// both `nasty` and `bcachefs-tools` after migration) are
+    /// reported with their literal URL. During the transient window
+    /// where a post-#308 wrapper hasn't yet been migrated to canonical
+    /// shape, `bcachefs-tools` may still be a follows declaration —
+    /// in that case it's reported with a synthetic
+    /// `follows:nasty/bcachefs-tools` marker. `rev` always comes from
+    /// `flake.lock`, which carries resolved revs for followed inputs
+    /// too.
     pub async fn version_info(&self) -> Result<VersionInfo, UpdateError> {
         let urls = read_flake_input_urls().await?;
-        let revs = read_flake_lock_revs().await;
+        let lock_entries = read_flake_lock_entries_async().await;
 
         let mut inputs = Vec::with_capacity(VERSION_INPUT_NAMES.len());
         for name in VERSION_INPUT_NAMES {
@@ -514,10 +550,12 @@ impl UpdateService {
                 }
                 None => format!("follows:nasty/{name}"),
             };
+            let entry = lock_entries.get(name).cloned().unwrap_or_default();
             inputs.push(VersionInputInfo {
                 name: name.to_string(),
                 url,
-                rev: revs.get(name).cloned(),
+                rev: entry.rev,
+                tag: entry.tag,
             });
         }
 
@@ -544,16 +582,20 @@ impl UpdateService {
         })
     }
 
-    /// Bootstrap `/etc/nixos/flake.nix` from the latest official tagged
-    /// release's wrapper-flake template, then run a switch rebuild.
-    /// Rewrite `/etc/nixos/flake.nix` in place if it's still in the
-    /// legacy (pre-#304) shape that owns its own `nixpkgs.url` /
-    /// `bcachefs-tools.url`. After migration the wrapper declares
-    /// `nixpkgs.follows = "nasty/nixpkgs"` etc., so a single
-    /// `nix flake update nasty` advances all three inputs and the
-    /// resolved closure matches what CI builds against (cachix hits
-    /// again). Idempotent — calling on an already-follows wrapper
-    /// returns Ok(false) without touching disk.
+    /// Rewrite `/etc/nixos/flake.nix` in place if it's not in the
+    /// canonical 0.0.9 shape (`nixpkgs.follows = "nasty/nixpkgs"` and
+    /// `bcachefs-tools.url = "github:.../<tag>"`). Handles every
+    /// historical starting state:
+    ///
+    /// - Pre-#304 wrappers (own `.url` for both): nixpkgs converted to
+    ///   follows; bcachefs-tools.url preserved with the operator's
+    ///   existing ref.
+    /// - Post-#308 wrappers (`.follows` for both): nixpkgs stays
+    ///   follows; bcachefs-tools rewritten back to `.url`, ref
+    ///   resolved from the current flake.lock's `original.ref` on
+    ///   the followed node.
+    /// - Already-canonical wrappers: no-op, returns Ok(false) without
+    ///   touching disk.
     ///
     /// Returns `Ok(true)` if a write happened, `Ok(false)` if no
     /// migration was needed.
@@ -562,18 +604,19 @@ impl UpdateService {
         let current = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| UpdateError::CommandFailed(format!("read {path}: {e}")))?;
-        if !wrapper_is_legacy_shape(&current) {
+        if wrapper_is_canonical_shape(&current) {
             return Ok(false);
         }
         let local_system = detect_local_system().await?;
-        let migrated = migrate_wrapper_to_follows_shape(&current, &local_system)?;
+        let migrated = migrate_wrapper_to_canonical_shape(&current, &local_system).await?;
         tokio::fs::write(&path, &migrated)
             .await
             .map_err(|e| UpdateError::CommandFailed(format!("write {path}: {e}")))?;
         info!(
-            "Migrated wrapper-flake at {path} from legacy (own-url) shape \
-             to follows shape; next `nix flake update nasty` will resolve \
-             nixpkgs / bcachefs-tools transitively via nasty's lock"
+            "Migrated wrapper-flake at {path} to canonical 0.0.9 shape \
+             (nixpkgs follows nasty for cachix coverage; bcachefs-tools \
+             pinned independently so the operator can stick with a \
+             known-good rev across nasty bumps)"
         );
         Ok(true)
     }
@@ -622,12 +665,37 @@ impl UpdateService {
         let current_flake = tokio::fs::read_to_string(&current_flake_path)
             .await
             .map_err(|e| UpdateError::CommandFailed(format!("read {current_flake_path}: {e}")))?;
+        // Pin the bcachefs-tools rev that the target release was tested
+        // with — overriding whatever the operator had pinned locally.
+        // Release = atomic bundle of (nasty, bcachefs-tools); switching
+        // to a release means accepting the tested combination. Reads
+        // the target release's flake.lock from GitHub, falls back to
+        // the engine's embedded default if the fetch / parse misses
+        // (see fetch_release_bcachefs_ref's doc for the rationale).
+        let bcachefs_ref = fetch_release_bcachefs_ref(
+            token.as_deref(),
+            DEFAULT_NASTY_OWNER,
+            DEFAULT_NASTY_REPO,
+            &release_status.latest_tag,
+        )
+        .await?;
         let next_flake = if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
-            render_system_flake_template(&template, &release_status.latest_tag, &local_system)?
+            render_system_flake_template(
+                &template,
+                &release_status.latest_tag,
+                &bcachefs_ref,
+                &local_system,
+            )?
         } else {
             rewrite_flake_input_urls(
                 &current_flake,
-                &HashMap::from([(String::from("nasty"), release_status.latest_url.clone())]),
+                &HashMap::from([
+                    (String::from("nasty"), release_status.latest_url.clone()),
+                    (
+                        String::from("bcachefs-tools"),
+                        format!("github:koverstreet/bcachefs-tools/{bcachefs_ref}"),
+                    ),
+                ]),
             )?
         };
 
@@ -1151,6 +1219,20 @@ echo "==> Update complete!"
         let mut seen = HashSet::new();
         let mut requested = HashMap::new();
         for input in req.inputs {
+            // nixpkgs is deliberately excluded from VERSION_INPUT_NAMES
+            // — the wrapper declares `nixpkgs.follows = "nasty/nixpkgs"`
+            // for cachix-coverage reasons, so editing its URL or
+            // toggling its update flag here would be inert. Reject
+            // the request rather than silently dropping the entry so
+            // clients fail loudly during development. (WebUI is wired
+            // not to send nixpkgs in the canonical 0.0.9 UI.)
+            if input.name == "nixpkgs" {
+                return Err(UpdateError::CommandFailed(
+                    "nixpkgs is not an editable input — it follows nasty's lock for cachix \
+                     coverage. Remove the nixpkgs entry from this version_switch request."
+                        .into(),
+                ));
+            }
             if !VERSION_INPUT_NAMES.contains(&input.name.as_str()) {
                 return Err(UpdateError::CommandFailed(format!(
                     "unknown input: {}",
@@ -1216,21 +1298,14 @@ echo "==> Update complete!"
         // Whether we rebootstrap (re-render the wrapper flake from the
         // upstream template) depends on whether the user's nasty URL
         // points at a canonical ref in nasty-project/nasty. For any
-        // canonical ref — release tag or branch — we fetch the template
-        // from that ref and compare wrapper-flake content hashes. The
-        // URL-preservation policy then forks on tag vs branch:
-        //
-        // - Release tag: preserve the request's nixpkgs + bcachefs-tools
-        //   URLs. The user is pinning to an exact release and explicitly
-        //   chose those URLs in the WebUI form.
-        // - Branch (e.g. `main`): adopt the template's URLs. The user is
-        //   saying "give me what main has" — which includes upstream
-        //   bumps to nixpkgs/bcachefs-tools the maintainer baked into
-        //   the template. Without this branch, dev-build trackers stay
-        //   stuck on whatever URLs their /etc/nixos/flake.nix happened
-        //   to be installed with.
+        // canonical ref we fetch the template from that ref and compare
+        // wrapper-flake content hashes; on drift, re-render with the
+        // operator's chosen nasty + bcachefs-tools refs as inputs.
+        // nixpkgs isn't an input the operator controls — it follows
+        // nasty's lock unconditionally, see the template comment for
+        // the cachix-coverage rationale.
         let rewritten_flake = match parse_official_nasty_ref(&requested_nasty_url) {
-            Some((nasty_ref, is_release_tag)) => {
+            Some((nasty_ref, _is_release_tag)) => {
                 let token = read_github_token().await;
                 let template = fetch_github_text_file(
                     token.as_deref(),
@@ -1243,43 +1318,24 @@ echo "==> Update complete!"
 
                 if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
                     let local_system = detect_local_system().await?;
-                    let bootstrapped_flake = render_system_flake_template_with_ref(
+                    let bcachefs_ref = requested
+                        .get("bcachefs-tools")
+                        .and_then(|i| i.url.rsplit('/').next())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| {
+                            UpdateError::CommandFailed(
+                                "version_switch request has no parseable bcachefs-tools URL — \
+                                 expected `github:owner/repo/<ref>` shape"
+                                    .into(),
+                            )
+                        })?;
+                    render_system_flake_template_with_ref(
                         &template,
                         &nasty_ref,
+                        &bcachefs_ref,
                         &local_system,
-                    )?;
-                    if is_release_tag {
-                        let preserved_urls = HashMap::from([
-                            (
-                                String::from("nixpkgs"),
-                                requested
-                                    .get("nixpkgs")
-                                    .ok_or_else(|| {
-                                        UpdateError::CommandFailed(
-                                            "missing request entry for nixpkgs".into(),
-                                        )
-                                    })?
-                                    .url
-                                    .clone(),
-                            ),
-                            (
-                                String::from("bcachefs-tools"),
-                                requested
-                                    .get("bcachefs-tools")
-                                    .ok_or_else(|| {
-                                        UpdateError::CommandFailed(
-                                            "missing request entry for bcachefs-tools".into(),
-                                        )
-                                    })?
-                                    .url
-                                    .clone(),
-                            ),
-                        ]);
-                        rewrite_flake_input_urls(&bootstrapped_flake, &preserved_urls)?
-                    } else {
-                        // Branch-tracker: keep the template's URLs as-is.
-                        bootstrapped_flake
-                    }
+                    )?
                 } else {
                     let flake_replacements = url_changes
                         .iter()
@@ -1875,7 +1931,9 @@ pub async fn bootstrap_system_flake_from_template(
     nasty_version: &str,
     local_system: &str,
 ) -> Result<BootstrapSystemFlakeResult, UpdateError> {
-    let rendered = render_system_flake_template(template, nasty_version, local_system)?;
+    let bcachefs_ref = embedded_default_bcachefs_tools_ref()?;
+    let rendered =
+        render_system_flake_template(template, nasty_version, &bcachefs_ref, local_system)?;
     tokio::fs::create_dir_all(dest_dir)
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("mkdir {dest_dir}: {e}")))?;
@@ -1886,6 +1944,38 @@ pub async fn bootstrap_system_flake_from_template(
     Ok(BootstrapSystemFlakeResult { flake_path })
 }
 
+/// The default `bcachefs-tools` ref to use when bootstrapping a
+/// fresh wrapper or when no explicit ref is available — extracted
+/// from the embedded copy of nasty's own `flake.nix` so it always
+/// matches what the engine binary was built against. This is the
+/// "canonical bundled" rev: every release tag of nasty has its own
+/// embedded flake.nix and thus its own default; fresh installs land
+/// on the rev nasty's CI tested with.
+///
+/// Returns `Err` if the embedded flake.nix doesn't parse or doesn't
+/// declare a `bcachefs-tools.url` — both of which should be caught
+/// by tests in this same module before any binary ships.
+fn embedded_default_bcachefs_tools_ref() -> Result<String, UpdateError> {
+    let urls = parse_flake_input_urls(EMBEDDED_NASTY_FLAKE)?;
+    let input = urls.get("bcachefs-tools").ok_or_else(|| {
+        UpdateError::CommandFailed(
+            "embedded nasty flake.nix has no bcachefs-tools.url to extract default ref from".into(),
+        )
+    })?;
+    input
+        .url
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            UpdateError::CommandFailed(format!(
+                "embedded nasty flake.nix bcachefs-tools.url ({}) has no ref path segment",
+                input.url
+            ))
+        })
+}
+
 /// Render the wrapper-flake template, normalizing the nasty version
 /// to a leading-`v` semver tag. Used by the install-time bootstrap
 /// path (and a few legacy callers) that pass the engine's Cargo
@@ -1893,10 +1983,11 @@ pub async fn bootstrap_system_flake_from_template(
 fn render_system_flake_template(
     template: &str,
     nasty_version: &str,
+    bcachefs_tools_ref: &str,
     local_system: &str,
 ) -> Result<String, UpdateError> {
     let nasty_tag = normalize_release_tag(nasty_version)?;
-    render_system_flake_template_with_ref(template, &nasty_tag, local_system)
+    render_system_flake_template_with_ref(template, &nasty_tag, bcachefs_tools_ref, local_system)
 }
 
 /// Render the wrapper-flake template with the nasty ref passed
@@ -1907,6 +1998,7 @@ fn render_system_flake_template(
 fn render_system_flake_template_with_ref(
     template: &str,
     nasty_ref: &str,
+    bcachefs_tools_ref: &str,
     local_system: &str,
 ) -> Result<String, UpdateError> {
     if !template.contains("@NASTY_VERSION@") {
@@ -1924,50 +2016,90 @@ fn render_system_flake_template_with_ref(
             "system flake template is missing @WRAPPER_FLAKE_VERSION@ placeholder".into(),
         ));
     }
+    if !template.contains("@BCACHEFS_TOOLS_REF@") {
+        return Err(UpdateError::CommandFailed(
+            "system flake template is missing @BCACHEFS_TOOLS_REF@ placeholder".into(),
+        ));
+    }
     if nasty_ref.is_empty() {
         return Err(UpdateError::CommandFailed(
             "nasty ref must not be empty".into(),
+        ));
+    }
+    if bcachefs_tools_ref.is_empty() {
+        return Err(UpdateError::CommandFailed(
+            "bcachefs-tools ref must not be empty".into(),
         ));
     }
     let wrapper_version = wrapper_flake_content_hash(template);
 
     Ok(template
         .replace("@NASTY_VERSION@", nasty_ref)
+        .replace("@BCACHEFS_TOOLS_REF@", bcachefs_tools_ref)
         .replace("@LOCAL_SYSTEM@", local_system)
         .replace("@WRAPPER_FLAKE_VERSION@", &wrapper_version))
 }
 
-/// Whether the given wrapper-flake content predates #304's follows
-/// refactor — owns its own `nixpkgs.url` or `bcachefs-tools.url`
-/// instead of declaring those as `follows = "nasty/<input>"`.
-/// Detection is conservative: a parse failure returns false so we
-/// don't accidentally rewrite a customized wrapper. Pure: testable
-/// on synthetic inputs without touching disk.
-fn wrapper_is_legacy_shape(content: &str) -> bool {
+/// Whether the wrapper is in the canonical 0.0.9 shape:
+/// `nixpkgs.follows = "nasty/nixpkgs"` (no `.url`) AND
+/// `bcachefs-tools.url = "..."` (no `.follows`).
+///
+/// Returns true when both invariants hold, OR when the content
+/// fails to parse, OR when no inputs are declared at all. The two
+/// "can't reason" cases are conservative on purpose: don't rewrite
+/// a wrapper we can't make sense of, leave operator customizations
+/// alone.
+fn wrapper_is_canonical_shape(content: &str) -> bool {
     let Ok(urls) = parse_flake_input_urls(content) else {
-        return false;
+        return true;
     };
-    urls.contains_key("nixpkgs") || urls.contains_key("bcachefs-tools")
+    // Empty (no inputs found at all) → can't reason about shape;
+    // claim canonical so the migration skips it.
+    if urls.is_empty() {
+        return true;
+    }
+    // nixpkgs must have no .url (so it's either follows or missing).
+    if urls.contains_key("nixpkgs") {
+        return false;
+    }
+    // bcachefs-tools must have a .url.
+    if !urls.contains_key("bcachefs-tools") {
+        return false;
+    }
+    true
 }
 
-/// Re-render an existing wrapper-flake into the follows shape by
-/// reusing the embedded template, preserving the operator's chosen
-/// `nasty` ref. No-op when the wrapper is already in follows shape.
+/// Re-render the wrapper-flake into the canonical 0.0.9 shape by
+/// reusing the embedded template. Preserves the operator's chosen
+/// `nasty` ref and `bcachefs-tools` ref. No-op when the wrapper is
+/// already canonical.
 ///
-/// Returns the new content. Caller is responsible for writing it to
-/// disk and triggering `nix flake lock` (or relying on the next
+/// `bcachefs-tools` ref resolution priority:
+///   1. Existing `bcachefs-tools.url` in the wrapper (legacy /
+///      pre-#304 wrappers — preserve the ref the operator had,
+///      including any custom pin).
+///   2. `nodes["bcachefs-tools"].original.ref` from
+///      `/etc/nixos/flake.lock` (post-#308 follows-shape wrappers —
+///      no `.url` in flake.nix, but Nix wrote the resolved ref on
+///      the followed node).
+///   3. Engine's embedded default (fresh / lockless boxes — falls
+///      back to whatever nasty's bundled flake.nix declares for
+///      this engine binary).
+///
+/// Caller is responsible for writing the result to disk and
+/// triggering `nix flake lock` (or relying on the next
 /// `nixos-rebuild`'s implicit lock refresh) to settle the new
-/// follows resolution.
+/// resolution.
 ///
 /// Fails when the wrapper's `nasty.url` is a non-canonical (fork)
-/// URL we can't parse a ref out of — in that case the operator
-/// is running an unusual setup we shouldn't second-guess; they
-/// can migrate by hand.
-fn migrate_wrapper_to_follows_shape(
+/// URL we can't parse a ref out of — in that case the operator is
+/// running an unusual setup we shouldn't second-guess; they can
+/// migrate by hand.
+async fn migrate_wrapper_to_canonical_shape(
     current_content: &str,
     local_system: &str,
 ) -> Result<String, UpdateError> {
-    if !wrapper_is_legacy_shape(current_content) {
+    if wrapper_is_canonical_shape(current_content) {
         return Ok(current_content.to_string());
     }
     let urls = parse_flake_input_urls(current_content)?;
@@ -1980,10 +2112,36 @@ fn migrate_wrapper_to_follows_shape(
             "wrapper's nasty.url ({nasty_url}) is not a canonical \
              github:nasty-project/nasty/<ref> URL — refusing to migrate \
              automatically. Edit /etc/nixos/flake.nix by hand if you \
-             want the follows-shape inputs."
+             want the canonical-shape inputs."
         ))
     })?;
-    render_system_flake_template_with_ref(EMBEDDED_WRAPPER_TEMPLATE, &nasty_ref, local_system)
+    let bcachefs_ref = if let Some(input) = urls.get("bcachefs-tools") {
+        input
+            .url
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                UpdateError::CommandFailed(format!(
+                    "wrapper has bcachefs-tools.url ({}) but its \
+                     trailing path segment is empty",
+                    input.url
+                ))
+            })?
+    } else {
+        let (pinned_ref, _) = read_flake_lock_bcachefs().await;
+        match pinned_ref {
+            Some(r) => r,
+            None => embedded_default_bcachefs_tools_ref()?,
+        }
+    };
+    render_system_flake_template_with_ref(
+        EMBEDDED_WRAPPER_TEMPLATE,
+        &nasty_ref,
+        &bcachefs_ref,
+        local_system,
+    )
 }
 
 /// Check whether the upstream wrapper-flake template at the given
@@ -2159,6 +2317,60 @@ async fn fetch_github_text_file(
         .map_err(|e| UpdateError::CommandFailed(format!("GitHub file is not valid UTF-8: {e}")))
 }
 
+/// Fetch the bcachefs-tools ref pinned by nasty at the given canonical
+/// release ref. Reads the project's `flake.lock` from GitHub at that
+/// ref and pulls `nodes["bcachefs-tools"].original.ref` out of it
+/// (the tag string the maintainer pinned, e.g. `v1.38.3`).
+///
+/// Returns the engine's embedded default on any failure — network,
+/// parse, missing node — because switching to a release shouldn't
+/// fail just because the bcachefs-rev lookup hit a snag. The embedded
+/// default is the rev THIS engine binary's nasty pinned at build
+/// time, which is usually close enough to what the target release
+/// pins (most release-to-release bcachefs changes are small or none).
+/// Warns to the journal when falling back so a degraded result is
+/// visible at debug time.
+async fn fetch_release_bcachefs_ref(
+    token: Option<&str>,
+    owner: &str,
+    repo: &str,
+    release_ref: &str,
+) -> Result<String, UpdateError> {
+    let fallback = || embedded_default_bcachefs_tools_ref();
+    let content = match fetch_github_text_file(token, owner, repo, "flake.lock", release_ref).await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "couldn't fetch flake.lock at {release_ref} ({e}); \
+                 using engine's embedded default bcachefs-tools ref"
+            );
+            return fallback();
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "flake.lock at {release_ref} didn't parse ({e}); \
+                 using engine's embedded default bcachefs-tools ref"
+            );
+            return fallback();
+        }
+    };
+    match v["nodes"]["bcachefs-tools"]["original"]["ref"].as_str() {
+        Some(r) if !r.is_empty() => Ok(r.to_string()),
+        _ => {
+            warn!(
+                "flake.lock at {release_ref} has no \
+                 nodes[bcachefs-tools].original.ref; using engine's \
+                 embedded default bcachefs-tools ref"
+            );
+            fallback()
+        }
+    }
+}
+
 fn github_http_client() -> Result<reqwest::Client, UpdateError> {
     reqwest::Client::builder()
         .timeout(GITHUB_FETCH_TIMEOUT)
@@ -2330,10 +2542,6 @@ fn local_flake() -> &'static str {
     LOCAL_FLAKE_TARGET
 }
 
-pub async fn read_flake_nix_default_ref_pub() -> String {
-    read_flake_nix_default_ref().await
-}
-
 pub async fn read_flake_lock_bcachefs_pub() -> (Option<String>, Option<String>) {
     read_flake_lock_bcachefs().await
 }
@@ -2364,12 +2572,19 @@ async fn save_generation_labels(
     Ok(())
 }
 
+/// Parse every top-level `<input>.url = "..."` assignment out of a
+/// flake.nix-style file. Name-agnostic: returns all URL declarations
+/// (nasty, nixpkgs, bcachefs-tools, forks, whatever) so callers can
+/// decide which ones they care about. Pure parser — no presence
+/// invariants imposed here; the wrapper-specific async wrapper
+/// `read_flake_input_urls` enforces `nasty.url` must exist on the
+/// operator's `/etc/nixos/flake.nix`.
 fn parse_flake_input_urls(content: &str) -> Result<HashMap<String, ParsedFlakeInput>, UpdateError> {
     let parsed = rnix::Root::parse(content);
     if !parsed.errors().is_empty() {
         let first = parsed.errors()[0].to_string();
         return Err(UpdateError::CommandFailed(format!(
-            "failed to parse {NIXOS_FLAKE_DIR}/flake.nix: {first}"
+            "failed to parse flake.nix: {first}"
         )));
     }
 
@@ -2390,12 +2605,15 @@ fn parse_flake_input_urls(content: &str) -> Result<HashMap<String, ParsedFlakeIn
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect::<String>();
-        let Some(name) = VERSION_INPUT_NAMES
-            .iter()
-            .find(|candidate| normalized_path == format!("{candidate}.url"))
-        else {
+        // Match exactly `<name>.url` where <name> is a single attribute
+        // segment (no nested paths like `nasty.inputs.nixpkgs.follows`).
+        // Splitting on '.' and requiring exactly two parts ending in
+        // "url" enforces the top-level shape we care about.
+        let parts: Vec<&str> = normalized_path.split('.').collect();
+        if parts.len() != 2 || parts[1] != "url" {
             continue;
-        };
+        }
+        let name = parts[0].to_string();
         let Some(value) = node.value() else { continue };
         let raw_value = value.syntax().text().to_string();
         let Some(url) = unquote_nix_string(&raw_value) else {
@@ -2403,28 +2621,13 @@ fn parse_flake_input_urls(content: &str) -> Result<HashMap<String, ParsedFlakeIn
         };
         let range = value.syntax().text_range();
         urls.insert(
-            (*name).to_string(),
+            name,
             ParsedFlakeInput {
                 url,
                 value_start: u32::from(range.start()) as usize,
                 value_end: u32::from(range.end()) as usize,
             },
         );
-    }
-
-    // `nasty.url` is the one input the wrapper *must* own — it's what
-    // pins the release the operator is tracking. `nixpkgs.url` and
-    // `bcachefs-tools.url` used to also be required, but the modern
-    // template (post wrapper-follows refactor) declares them as
-    // `nixpkgs.follows = "nasty/nixpkgs"` instead — the wrapper no
-    // longer owns those URLs, it inherits whatever nasty's flake.lock
-    // pins. Their absence here just means "this wrapper uses the
-    // follows pattern"; callers handle that explicitly by checking
-    // the returned map for presence.
-    if !urls.contains_key("nasty") {
-        return Err(UpdateError::CommandFailed(format!(
-            "missing nasty.url in {NIXOS_FLAKE_DIR}/flake.nix"
-        )));
     }
 
     Ok(urls)
@@ -2581,40 +2784,64 @@ async fn read_flake_input_urls() -> Result<HashMap<String, String>, UpdateError>
     let content = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("read {path}: {e}")))?;
-    Ok(parse_flake_input_urls(&content)?
+    let urls = parse_flake_input_urls(&content)?;
+    // `nasty.url` is the one input the wrapper *must* own — it's what
+    // pins the release the operator is tracking. Other inputs may be
+    // declared as `<input>.follows = "nasty/<input>"` (no `.url`),
+    // which is fine and expected for nixpkgs in canonical 0.0.9
+    // shape. Callers handle that explicitly by checking the returned
+    // map for presence of each name they care about.
+    if !urls.contains_key("nasty") {
+        return Err(UpdateError::CommandFailed(format!(
+            "missing nasty.url in {NIXOS_FLAKE_DIR}/flake.nix"
+        )));
+    }
+    Ok(urls
         .into_iter()
         .map(|(name, parsed)| (name, parsed.url))
         .collect())
 }
 
-async fn read_flake_lock_revs() -> HashMap<String, String> {
+/// Per-input lock-file snapshot for the editable inputs: the
+/// 12-char rev SHA (always present when the node is locked) and the
+/// human-meaningful `original.ref` (a tag like `v1.38.3` or a branch
+/// name like `main`) when the node carries one. Returns the empty
+/// map on read / parse failure so callers degrade gracefully.
+fn read_flake_lock_entries(content: &str) -> HashMap<String, FlakeLockEntry> {
+    let v: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    let mut entries = HashMap::new();
+    for name in VERSION_INPUT_NAMES {
+        let node = &v["nodes"][name];
+        let rev = node["locked"]["rev"]
+            .as_str()
+            .map(|r| r[..r.len().min(12)].to_string());
+        let tag = node["original"]["ref"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        if rev.is_some() || tag.is_some() {
+            entries.insert(name.to_string(), FlakeLockEntry { rev, tag });
+        }
+    }
+    entries
+}
+
+#[derive(Debug, Clone, Default)]
+struct FlakeLockEntry {
+    rev: Option<String>,
+    tag: Option<String>,
+}
+
+async fn read_flake_lock_entries_async() -> HashMap<String, FlakeLockEntry> {
     let path = format!("{NIXOS_FLAKE_DIR}/flake.lock");
     let content = match tokio::fs::read_to_string(&path).await {
         Ok(c) => c,
         Err(_) => return HashMap::new(),
     };
-    let v: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
-
-    let mut revs = HashMap::new();
-    for name in VERSION_INPUT_NAMES {
-        if let Some(rev) = v["nodes"][name]["locked"]["rev"].as_str() {
-            revs.insert(name.to_string(), rev[..rev.len().min(12)].to_string());
-        }
-    }
-    revs
-}
-
-/// Parse flake.nix to extract the default bcachefs-tools ref from the input URL.
-async fn read_flake_nix_default_ref() -> String {
-    read_flake_input_urls()
-        .await
-        .ok()
-        .and_then(|urls| urls.get("bcachefs-tools").cloned())
-        .and_then(|url| url.rsplit('/').next().map(|s| s.to_string()))
-        .unwrap_or_else(|| "unknown".to_string())
+    read_flake_lock_entries(&content)
 }
 
 async fn read_nasty_input_source() -> NastyInputSource {
@@ -2922,7 +3149,10 @@ body = true;
     #[test]
     fn renders_system_flake_template() {
         let template = r#"
-inputs = { nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@"; };
+inputs = {
+  nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
+  bcachefs-tools.url = "github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@";
+};
 wrapperFlakeVersion = "@WRAPPER_FLAKE_VERSION@";
 "#
         .to_string()
@@ -2931,25 +3161,37 @@ outputs = { nixpkgs, nasty, ... }: {
   nixosConfigurations.nasty = nixpkgs.lib.nixosSystem { system = "@LOCAL_SYSTEM@"; };
 };
 "#;
-        let rendered = super::render_system_flake_template(&template, "0.0.3", "x86_64-linux")
-            .expect("rendered");
+        let rendered =
+            super::render_system_flake_template(&template, "0.0.3", "v1.38.3", "x86_64-linux")
+                .expect("rendered");
         assert!(rendered.contains("github:nasty-project/nasty/v0.0.3"));
+        assert!(rendered.contains("github:koverstreet/bcachefs-tools/v1.38.3"));
         assert!(rendered.contains("\"x86_64-linux\""));
         // The placeholder must be substituted with a content hash.
         assert!(!rendered.contains("@WRAPPER_FLAKE_VERSION@"));
+        assert!(!rendered.contains("@BCACHEFS_TOOLS_REF@"));
         assert!(rendered.contains("wrapperFlakeVersion = \"sha256-"));
         // Rendering twice yields the same hash (deterministic).
-        let rendered2 = super::render_system_flake_template(&template, "0.0.3", "x86_64-linux")
-            .expect("rendered");
+        let rendered2 =
+            super::render_system_flake_template(&template, "0.0.3", "v1.38.3", "x86_64-linux")
+                .expect("rendered");
         assert_eq!(rendered, rendered2);
     }
 
     #[test]
     fn render_fails_without_wrapper_placeholder() {
-        let template = "inputs = { nasty.url = \"github:nasty-project/nasty/@NASTY_VERSION@\"; };\nsystem = \"@LOCAL_SYSTEM@\";\n";
-        let err = super::render_system_flake_template(template, "0.0.3", "x86_64-linux")
+        let template = "inputs = {\n  nasty.url = \"github:nasty-project/nasty/@NASTY_VERSION@\";\n  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@\";\n};\nsystem = \"@LOCAL_SYSTEM@\";\n";
+        let err = super::render_system_flake_template(template, "0.0.3", "v1.38.3", "x86_64-linux")
             .expect_err("placeholder enforcement");
         assert!(format!("{err:?}").contains("@WRAPPER_FLAKE_VERSION@"));
+    }
+
+    #[test]
+    fn render_fails_without_bcachefs_tools_placeholder() {
+        let template = "inputs = { nasty.url = \"github:nasty-project/nasty/@NASTY_VERSION@\"; };\nwrapperFlakeVersion = \"@WRAPPER_FLAKE_VERSION@\";\nsystem = \"@LOCAL_SYSTEM@\";\n";
+        let err = super::render_system_flake_template(template, "0.0.3", "v1.38.3", "x86_64-linux")
+            .expect_err("placeholder enforcement");
+        assert!(format!("{err:?}").contains("@BCACHEFS_TOOLS_REF@"));
     }
 
     // ── systemd state mapping ──────────────────────────────────────
@@ -3039,14 +3281,27 @@ outputs = { nixpkgs, nasty, ... }: {
         );
     }
 
-    // ── wrapper-shape migration (legacy → follows) ─────────────────
+    // ── wrapper-shape migration (→ canonical 0.0.9 shape) ──────────
 
-    /// Pre-#304 wrappers owned their own `nixpkgs.url` and
-    /// `bcachefs-tools.url`. The detector should mark those as
-    /// needing migration regardless of which legacy fields are
-    /// present (it's enough that ANY non-nasty input has a url).
     #[test]
-    fn wrapper_is_legacy_shape_detects_own_nixpkgs_url() {
+    fn wrapper_is_canonical_shape_accepts_canonical() {
+        // The 0.0.9 canonical shape: nasty.url, nixpkgs.follows,
+        // bcachefs-tools.url. nixpkgs must NOT have a .url; bcachefs
+        // MUST have one.
+        let canonical = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+  };
+}"#;
+        assert!(super::wrapper_is_canonical_shape(canonical));
+    }
+
+    #[test]
+    fn wrapper_is_canonical_shape_rejects_legacy_own_nixpkgs() {
+        // Pre-#304 wrapper: nixpkgs has its own .url. Needs migration
+        // to follows-shape for cachix-coverage reasons.
         let legacy = r#"{
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -3054,95 +3309,88 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/main";
   };
 }"#;
-        assert!(super::wrapper_is_legacy_shape(legacy));
+        assert!(!super::wrapper_is_canonical_shape(legacy));
     }
 
     #[test]
-    fn wrapper_is_legacy_shape_returns_false_for_follows_shape() {
-        // The new (post-#304) shape: only nasty has a .url at top
-        // level; nixpkgs and bcachefs-tools are declared as follows.
-        let follows = r#"{
+    fn wrapper_is_canonical_shape_rejects_post_308_follows_for_bcachefs() {
+        // Post-#308 wrapper: BOTH inputs were follows. bcachefs needs
+        // to come back to .url so the operator can independently pin
+        // a known-good rev across nasty bumps.
+        let follows_both = r#"{
   inputs = {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.follows = "nasty/bcachefs-tools";
   };
 }"#;
-        assert!(!super::wrapper_is_legacy_shape(follows));
+        assert!(!super::wrapper_is_canonical_shape(follows_both));
     }
 
     #[test]
-    fn wrapper_is_legacy_shape_returns_false_for_unparseable_content() {
-        // Garbage in → no migration attempted. Safer default than
-        // rewriting whatever the operator has there.
-        assert!(!super::wrapper_is_legacy_shape("not a flake at all"));
+    fn wrapper_is_canonical_shape_returns_true_for_unparseable_content() {
+        // Garbage in → don't claim "needs migration" and accidentally
+        // rewrite whatever the operator has there. Safer default.
+        assert!(super::wrapper_is_canonical_shape("not a flake at all"));
     }
 
-    #[test]
-    fn migrate_wrapper_preserves_nasty_ref_and_swaps_shape() {
+    #[tokio::test]
+    async fn migrate_wrapper_preserves_legacy_bcachefs_ref() {
+        // Legacy/pre-#304 wrapper that had its OWN bcachefs.url pinned
+        // to a specific rev — possibly the operator's preferred
+        // version, possibly just the original install default. Either
+        // way, the migration must NOT silently swap to nasty's
+        // bundled default; preserve what the operator had.
         let legacy = r#"{
   description = "NASty local system configuration";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.37.2";
     nasty.url = "github:nasty-project/nasty/main";
     nasty.inputs.nixpkgs.follows = "nixpkgs";
   };
   outputs = { ... }: {};
 }"#;
-        let migrated = super::migrate_wrapper_to_follows_shape(legacy, "x86_64-linux")
+        let migrated = super::migrate_wrapper_to_canonical_shape(legacy, "x86_64-linux")
+            .await
             .expect("migration succeeds");
         // The operator's chosen nasty ref survives:
         assert!(migrated.contains("github:nasty-project/nasty/main"));
-        // Legacy URL declarations are gone. Parser-level check
-        // because the new template's prose comment mentions
-        // "nixpkgs.url" while explaining the migration's history —
-        // a substring match would falsely trip on that comment.
-        // parse_flake_input_urls only walks top-level `.url =`
-        // attribute assignments, so it's specific to actual input
-        // declarations.
+        // The legacy nixpkgs.url is gone (replaced by follows) but the
+        // legacy bcachefs.url ref is preserved exactly.
         let parsed = super::parse_flake_input_urls(&migrated).expect("migrated output parses");
         assert!(
             !parsed.contains_key("nixpkgs"),
             "migrated wrapper must not own nixpkgs.url"
         );
-        assert!(
-            !parsed.contains_key("bcachefs-tools"),
-            "migrated wrapper must not own bcachefs-tools.url"
+        let bcachefs = parsed
+            .get("bcachefs-tools")
+            .expect("migrated wrapper must declare bcachefs-tools.url");
+        assert_eq!(
+            bcachefs.url, "github:koverstreet/bcachefs-tools/v1.37.2",
+            "operator's bcachefs pin must survive the migration"
         );
-        // Follows is in place at the input declarations:
+        // Follows is in place for nixpkgs:
         assert!(migrated.contains(r#"nixpkgs.follows = "nasty/nixpkgs""#));
-        assert!(migrated.contains(r#"bcachefs-tools.follows = "nasty/bcachefs-tools""#));
-        // The backwards `nasty.inputs.nixpkgs.follows = "nixpkgs"`
-        // declaration that used to force nasty to consume the
-        // wrapper's nixpkgs is no longer in the inputs block by
-        // construction: the embedded template defines only the
-        // three lines covered above, and the parser-level asserts
-        // already prove no other top-level `.url` exists. We don't
-        // also string-match "nasty.inputs.nixpkgs.follows" here
-        // because the template's prose comment legitimately
-        // mentions it while explaining the migration's history.
     }
 
-    #[test]
-    fn migrate_wrapper_is_a_noop_for_follows_shape() {
-        let follows = r#"{
+    #[tokio::test]
+    async fn migrate_wrapper_is_a_noop_for_canonical_shape() {
+        let canonical = r#"{
   inputs = {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
-    bcachefs-tools.follows = "nasty/bcachefs-tools";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
   };
 }"#;
-        let out = super::migrate_wrapper_to_follows_shape(follows, "x86_64-linux")
+        let out = super::migrate_wrapper_to_canonical_shape(canonical, "x86_64-linux")
+            .await
             .expect("noop succeeds");
-        assert_eq!(
-            out, follows,
-            "follows-shape wrapper passes through unchanged"
-        );
+        assert_eq!(out, canonical, "canonical wrapper passes through unchanged");
     }
 
-    #[test]
-    fn migrate_wrapper_refuses_non_canonical_nasty_url() {
+    #[tokio::test]
+    async fn migrate_wrapper_refuses_non_canonical_nasty_url() {
         // Fork URLs (or anything that isn't github:nasty-project/nasty)
         // get a clear error instead of being silently rewritten —
         // operators running forks know what they're doing and can
@@ -3154,12 +3402,27 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:my-fork/nasty/main";
   };
 }"#;
-        let err = super::migrate_wrapper_to_follows_shape(fork, "x86_64-linux")
+        let err = super::migrate_wrapper_to_canonical_shape(fork, "x86_64-linux")
+            .await
             .expect_err("fork URL should refuse migration");
         let msg = format!("{err:?}");
         assert!(
             msg.contains("my-fork") || msg.contains("canonical"),
             "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn embedded_default_bcachefs_tools_ref_parses_from_nasty_flake() {
+        // The engine's embedded copy of nasty's flake.nix MUST declare
+        // a parseable `bcachefs-tools.url`. If a maintainer ever
+        // accidentally converts it to a follows declaration, this
+        // test fires before binaries ship.
+        let r = super::embedded_default_bcachefs_tools_ref()
+            .expect("embedded default ref extraction works");
+        assert!(
+            r.starts_with('v') && r.contains('.'),
+            "embedded default ref should look like a semver tag, got: {r}"
         );
     }
 
@@ -3291,15 +3554,34 @@ proc /proc proc rw 0 0\n\
     }
 
     #[test]
-    fn parse_flake_input_urls_errors_when_a_required_input_is_missing() {
-        let missing_nasty = r#"{
+    fn parse_flake_input_urls_is_pure_no_required_input() {
+        // The parser is name-agnostic: it picks up whatever top-level
+        // `<input>.url = "..."` declarations are present, and that's
+        // it. "nasty must exist" is a wrapper-specific invariant
+        // enforced one level up in `read_flake_input_urls` (the async
+        // wrapper that's only called against `/etc/nixos/flake.nix`).
+        // Decoupling means the same parser can run against nasty's
+        // own flake.nix (which has no `nasty.url`) for the
+        // embedded-default-ref lookup.
+        let no_nasty = r#"{
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.2";
   };
 }"#;
-        let err = parse_flake_input_urls(missing_nasty).unwrap_err();
-        assert!(format!("{err:?}").contains("nasty"));
+        let parsed = parse_flake_input_urls(no_nasty).expect("parser doesn't require nasty");
+        assert!(
+            parsed.contains_key("nixpkgs"),
+            "parser should still pick up other inputs"
+        );
+        assert!(
+            parsed.contains_key("bcachefs-tools"),
+            "parser should still pick up other inputs"
+        );
+        assert!(
+            !parsed.contains_key("nasty"),
+            "parser shouldn't fabricate inputs that aren't declared"
+        );
     }
 
     /// The current wrapper-flake shape (post wrapper-follows refactor)

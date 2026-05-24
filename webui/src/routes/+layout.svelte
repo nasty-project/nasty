@@ -965,7 +965,7 @@
 						>
 							<span>bcachefs</span>
 							<span class="flex items-center gap-1.5">
-								<span title="Custom version"><Settings size={14} class={sysInfo.bcachefs_is_custom ? 'text-amber-400' : 'text-muted-foreground/30'} /></span>
+								<span title="Reboot pending to load the new bcachefs kernel module"><Settings size={14} class={sysInfo.bcachefs_is_custom ? 'text-amber-400' : 'text-muted-foreground/30'} /></span>
 								<span title="Debug checks"><Bug size={14} class={sysInfo.bcachefs_debug_checks ? 'text-blue-400' : 'text-muted-foreground/30'} /></span>
 							</span>
 						</a>
