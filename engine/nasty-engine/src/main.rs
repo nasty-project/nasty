@@ -12,7 +12,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use serde::Deserialize;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::{prelude::*, reload};
 
 mod app_deploy;
@@ -336,10 +336,7 @@ async fn main() -> anyhow::Result<()> {
     // Push the engine-known set of app ingresses into Caddy's
     // admin-API config.  Caddy holds these in memory, so a fresh
     // boot or `systemctl restart caddy` would otherwise drop every
-    // `/apps/<name>/` route.  Also folds in the v0.0.7 → v0.0.8
-    // recovery: when no live containers exist but the nginx-era
-    // /var/lib/nasty/apps-proxy.conf does, the rules are parsed
-    // from there.
+    // `/apps/<name>/` route.
     state
         .boot_status
         .run_phase(
@@ -360,17 +357,6 @@ async fn main() -> anyhow::Result<()> {
     // catches up.
     tokio::spawn(async {
         nasty_system::settings::reapply_tls_from_disk().await;
-    });
-
-    // Migration: archive `/var/lib/nasty/lego/` once on the first boot
-    // after upgrading to admin-API TLS. The lego tree carried the
-    // pre-Caddy ACME account + issued cert, both of which are now
-    // managed by Caddy itself. We MOVE (not delete) so a NixOS
-    // generation rollback can recover by symlinking it back, per the
-    // operator guidance that nothing should be destroyed irreversibly
-    // during an upgrade. Idempotent via a flag file.
-    tokio::spawn(async {
-        archive_lego_dir_once().await;
     });
 
     // Initialize firewall based on current protocol states
@@ -574,107 +560,6 @@ fn required_flag_value(args: &[String], flag: &str) -> anyhow::Result<String> {
 }
 
 /// Notify systemd that the service is ready (Type=notify).
-/// First-boot-after-upgrade cleanup for state files made obsolete by
-/// the admin-API TLS migration. Currently:
-///   1. `/var/lib/nasty/lego/` → archive (carried the pre-Caddy ACME
-///      account key + issued cert).
-///   2. `/var/lib/nasty/caddy/vhosts.conf` → archive when non-empty
-///      (engine used to render the per-domain ACME vhost into this
-///      file; the Caddyfile no longer imports it).
-///
-/// All moves use rename to a timestamped sibling path. The operator
-/// rule is that nothing irreversible happens during an upgrade — a
-/// rollback to the previous NixOS generation can recover by renaming
-/// the archive back in place.
-///
-/// Each step is independently gated by its own flag file so a partial
-/// failure (one archive succeeded, the next didn't) is correctly
-/// retried on the next boot.
-async fn archive_lego_dir_once() {
-    archive_path_once(
-        "/var/lib/nasty/lego",
-        "/var/lib/nasty/.lego-archived-v1",
-        "lego",
-    )
-    .await;
-    archive_path_once(
-        "/var/lib/nasty/caddy/vhosts.conf",
-        "/var/lib/nasty/.vhosts-archived-v1",
-        "caddy vhosts.conf",
-    )
-    .await;
-    // The static cert.pem / key.pem at /var/lib/nasty/tls/ are
-    // obsolete now that the Caddyfile uses `tls internal`. They
-    // carry the user's old LE cert content for ACME-enabled 0.0.7
-    // boxes, so archive (not delete) so a rollback can recover.
-    archive_path_once(
-        "/var/lib/nasty/tls/cert.pem",
-        "/var/lib/nasty/.tls-cert-archived-v1",
-        "static tls cert",
-    )
-    .await;
-    archive_path_once(
-        "/var/lib/nasty/tls/key.pem",
-        "/var/lib/nasty/.tls-key-archived-v1",
-        "static tls key",
-    )
-    .await;
-}
-
-/// Move `path` to a timestamped sibling (`<path>.archived.<unix-ts>`)
-/// the first time we observe it post-upgrade, recording the action in
-/// `flag`. Best-effort; any failure logs a warning and leaves state
-/// for the next boot to retry.
-///
-/// `label` is a short human-readable name used in the log line.
-async fn archive_path_once(path: &str, flag: &str, label: &str) {
-    if tokio::fs::metadata(flag).await.is_ok() {
-        return;
-    }
-    let meta = match tokio::fs::metadata(path).await {
-        Ok(m) => m,
-        Err(_) => {
-            // Path absent — write the flag so we don't keep
-            // re-stating it every boot.
-            let _ = tokio::fs::write(
-                flag,
-                format!("{label}: no {path} found on first run\n").as_bytes(),
-            )
-            .await;
-            return;
-        }
-    };
-    // Skip empty files — vhosts.conf is created empty by the NixOS
-    // tmpfiles entry on every boot, and archiving an empty file would
-    // be noise. The flag write still records the migration as done.
-    if meta.is_file() && meta.len() == 0 {
-        let _ = tokio::fs::write(
-            flag,
-            format!("{label}: {path} was empty, nothing to archive\n").as_bytes(),
-        )
-        .await;
-        return;
-    }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_else(|_| "unknown".into());
-    let archive_path = format!("{path}.archived.{ts}");
-    match tokio::fs::rename(path, &archive_path).await {
-        Ok(()) => {
-            info!(
-                "{label} migration: moved {path} → {archive_path}. \
-                 Safe to delete once Caddy admin-API TLS is confirmed working."
-            );
-            let _ =
-                tokio::fs::write(flag, format!("archived to {archive_path}\n").as_bytes()).await;
-        }
-        Err(e) => {
-            warn!("{label} migration: rename {path} → {archive_path} failed: {e}");
-        }
-    }
-}
-
 fn sd_notify_ready() {
     let Some(sock_path) = std::env::var_os("NOTIFY_SOCKET") else {
         return;

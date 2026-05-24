@@ -686,9 +686,8 @@ fn build_acme_issuer_json(issuer: &TlsIssuer) -> Value {
         // negative cache (the prior NXDOMAIN for `_acme-challenge.X`
         // is cached for the SOA's MINIMUM TTL — often 1 hour for
         // Cloudflare), sees no record, retries on a backoff that
-        // never converges within the propagation timeout. 30s
-        // matches what the lego flow used (`--dns.propagation-wait`)
-        // and is the default when `tls_dns_propagation_wait` is unset.
+        // never converges within the propagation timeout. 30s is the
+        // default when `tls_dns_propagation_wait` is unset.
         let resolvers: Vec<String> = issuer
             .dns_resolvers
             .clone()
@@ -1341,8 +1340,7 @@ mod tests {
         // resolver list, certmagic queries 127.0.0.53, may not see the
         // freshly-set TXT record for minutes, and gives up. Pin to
         // Cloudflare + Google so issuance doesn't depend on whatever
-        // DNS the operator has wired up locally. Mirrors what the
-        // lego flow did with `--dns.resolvers` before the switch.
+        // DNS the operator has wired up locally.
         let body = build_tls_automation_json(
             &[TlsPolicy {
                 host: "h.example".into(),

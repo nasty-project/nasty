@@ -679,8 +679,7 @@ async fn save(settings: &Settings) -> Result<(), std::io::Error> {
 //
 // Caddy's built-in ACME issuer handles HTTP-01, TLS-ALPN-01 and
 // (with the right plugin compiled in) DNS-01 — including renewals,
-// retries, OCSP stapling, and the multi-stepped state machine that
-// used to live in this file as a 250-line `lego` subprocess wrapper.
+// retries, OCSP stapling, and the full issuance state machine.
 //
 // The engine's job here is reduced to:
 //   1. Write the user's DNS-provider credentials to the
@@ -1109,10 +1108,10 @@ pub async fn refresh_acme_status_from_disk(settings: &Settings) {
     }
 }
 
-/// Engine-startup hook (replaces the old lego-driven `check_acme_renewal`).
-/// Caddy auto-renews internally — there's nothing for us to *do* here, just
-/// seed the cached status so the WebUI shows cert details immediately rather
-/// than after the first user-triggered apply.
+/// Engine-startup hook. Caddy auto-renews internally — there's nothing
+/// for us to *do* here, just seed the cached status so the WebUI shows
+/// cert details immediately rather than after the first user-triggered
+/// apply.
 pub async fn check_acme_renewal() {
     let settings = load().await;
     refresh_acme_status_from_disk(&settings).await;
