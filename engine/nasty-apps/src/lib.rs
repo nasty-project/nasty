@@ -3045,13 +3045,6 @@ impl AppsService {
     /// makes Docker / labelled-container state the source of truth
     /// and pushes the resulting set to Caddy.
     ///
-    /// Also folds in the v0.0.7 → v0.0.8 migration: if the engine
-    /// has no live containers (e.g. apps service was never enabled)
-    /// but the legacy `/var/lib/nasty/apps-proxy.conf` exists with
-    /// `# app:X port:Y` comments from the nginx era, recover the
-    /// list from there.  Once Caddy has routes, future installs
-    /// keep them in sync directly.
-    ///
     /// Best-effort: log and continue on failure.  Engine startup
     /// must not block on Caddy being healthy.
     pub async fn reconcile_app_routes(&self) {
@@ -3079,21 +3072,11 @@ impl AppsService {
         }
     }
 
-    /// Source-of-truth resolver for what app ingresses should exist.
-    /// Prefer live state (managed containers from Docker); fall back
-    /// to the legacy nginx-era file on first-boot-after-upgrade.
+    /// Source-of-truth resolver for what app ingresses should exist:
+    /// ask Docker about managed-labelled containers and derive the
+    /// route set from their host-port mappings.
     async fn compute_desired_routes(&self) -> Vec<AppRoute> {
-        const LEGACY_PROXY_CONF: &str = "/var/lib/nasty/apps-proxy.conf";
-
-        // Live state: ask Docker about labelled containers with a
-        // TCP port mapping, then look up the host port for each.
-        // If we successfully enumerated *any* managed apps, treat the
-        // resulting route set as authoritative — even when it's empty
-        // after filtering (e.g. all apps have proxy_disabled_reason
-        // set). Falling back to the legacy file in that case would
-        // resurrect routes the probe explicitly killed.
         if let Ok(apps) = self.list().await {
-            let saw_managed_apps = !apps.is_empty();
             let mut routes = Vec::new();
             for app in apps {
                 // The post-install probe disables path-prefix ingress
@@ -3135,33 +3118,7 @@ impl AppsService {
                     subdomain,
                 });
             }
-            if saw_managed_apps {
-                return routes;
-            }
-        }
-
-        // Legacy file fallback: v0.0.7 → v0.0.8 upgrade where
-        // Docker is up but apps haven't been re-listed yet, or
-        // an installation method that bypassed the apps service.
-        if let Ok(legacy) = tokio::fs::read_to_string(LEGACY_PROXY_CONF).await {
-            let rules = parse_ingress_comments(&legacy);
-            if !rules.is_empty() {
-                info!(
-                    "apps: recovered {} ingress rule(s) from legacy {}",
-                    rules.len(),
-                    LEGACY_PROXY_CONF
-                );
-                return rules
-                    .into_iter()
-                    .map(|r| AppRoute {
-                        name: r.name,
-                        host_port: r.host_port,
-                        // Legacy nginx-era config doesn't encode subdomain
-                        // mode — recovered routes default to path-prefix.
-                        subdomain: None,
-                    })
-                    .collect();
-            }
+            return routes;
         }
         Vec::new()
     }
@@ -4003,38 +3960,6 @@ async fn find_container_shell(container: &str) -> Option<&'static str> {
         }
     }
     None
-}
-
-/// Pull `AppIngress` rules out of a proxy-config file's `# app:X port:Y`
-/// comments.  Same parser for the legacy nginx-era `apps-proxy.conf`
-/// and the current `apps-proxy.caddy`, since `write_proxy_conf` emits
-/// the same comment header for both formats.
-fn parse_ingress_comments(content: &str) -> Vec<AppIngress> {
-    let mut rules = Vec::new();
-    for line in content.lines() {
-        let Some(comment) = line.strip_prefix("# app:") else {
-            continue;
-        };
-        let parts: Vec<&str> = comment.split_whitespace().collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let name = parts[0].to_string();
-        let Some(port_str) = parts[1].strip_prefix("port:") else {
-            continue;
-        };
-        let Ok(port) = port_str.parse::<u16>() else {
-            continue;
-        };
-        rules.push(AppIngress {
-            path: format!("/apps/{name}/"),
-            name,
-            host_port: port,
-            // Legacy nginx-era format never recorded subdomain mode.
-            subdomain: None,
-        });
-    }
-    rules
 }
 
 /// One row parsed from `ss -tlnp` output.

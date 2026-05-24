@@ -9,8 +9,7 @@ let
   # Caddy serves those for the :443 catch-all. Otherwise we use Caddy's
   # `tls internal` directive — Caddy's "Local Authority" issues a
   # self-signed cert into its own state dir (`/var/lib/caddy/...`) and
-  # auto-renews it. No more `nasty-selfsigned-cert.service`, no more
-  # cert.pem at /var/lib/nasty/tls/.
+  # auto-renews it.
   useUserCert = cfg.tls.certFile != null && cfg.tls.keyFile != null;
   caddyTlsDirective =
     if useUserCert
@@ -968,17 +967,9 @@ in {
 
     systemd.tmpfiles.rules = [
       "d /var/lib/nasty 0751 root root -"
-      # /var/lib/nasty/tls/ used to hold the static self-signed cert.
-      # `tls internal` in the Caddyfile now puts that under Caddy's
-      # own state dir; the directory entry below is kept so the
-      # engine's archive_path_once migration can find the old files
-      # to move them aside without racing the tmpfiles-creation step.
-      "d /var/lib/nasty/tls 0750 root caddy -"
       # acme.env feeds DNS-01 provider creds into Caddy via
       # EnvironmentFile. Seeded empty so Caddy can start before the
-      # engine has had a chance to write it. (vhosts.conf is no longer
-      # written — TLS automation is driven through the admin API; the
-      # engine's first-boot migration archives any leftover file.)
+      # engine has had a chance to write it.
       # /var/lib/nasty/reports/ holds rotated nasty-report dumps.
       # Surviving boot-generation rollbacks is the point — operator
       # generates a report on a broken system, rolls back to a working
@@ -994,8 +985,8 @@ in {
       "d /var/lib/nasty/shares/iscsi 0750 root root -"
       "d /var/lib/nasty/shares/nvmeof 0750 root root -"
       "d /var/lib/nasty/vms 0750 root root -"
-      # Note: no `apps-proxy.caddy` tmpfile — apps ingress lives in
-      # Caddy's admin-API config, not on disk.  The engine PATCHes
+      # No apps-proxy tmpfile: apps ingress lives in Caddy's admin-API
+      # config, not on disk. The engine PATCHes
       # `/config/apps/http/servers/.../routes` directly on install /
       # remove.
       "C /var/lib/nasty/sshd_override.conf 0644 root root - ${pkgs.writeText "sshd-default" "PasswordAuthentication yes\n"}"
@@ -1007,14 +998,6 @@ in {
       "d /var/lib/nasty/nut 0750 root root -"
       "d /var/state/ups 0750 root root -"
     ];
-
-    # The static `:443` fallback is now `tls internal` by default
-    # (Caddy's Local Authority issues + auto-renews a self-signed cert
-    # into its own state dir). The old `nasty-selfsigned-cert.service`
-    # that generated /var/lib/nasty/tls/cert.pem on first boot is gone.
-    # Existing boxes carry the old cert.pem until the engine's first-
-    # boot migration archives it (see `archive_lego_dir_once` in
-    # nasty-engine).
 
     # ── NASty Metrics service ────────────────────────────────
 
@@ -1581,11 +1564,9 @@ in {
           # engine WS route that might be added without a
           # corresponding nasty.nix update — without it, a new
           # `/ws/foo` route would silently 404 through the SPA
-          # fallback (the exact bug that broke `/ws/apps/deploy` and
-          # `/ws/system/logs` after the nginx → Caddy swap).  Caddy
-          # evaluates routes in declaration order, so the specific
-          # handlers above still win for their paths; this one only
-          # catches what nothing else claimed.
+          # fallback.  Caddy evaluates routes in declaration order,
+          # so the specific handlers above still win for their paths;
+          # this one only catches what nothing else claimed.
           handle /ws/terminal {
             reverse_proxy 127.0.0.1:${toString cfg.engine.port} {
               header_up X-Real-IP {remote_host}
