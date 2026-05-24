@@ -104,6 +104,12 @@ async fn handle_terminal(
     };
     cmd.env("TERM", "xterm-256color");
     cmd.env("HOME", "/root");
+    // Marker for any in-PTY script to detect "this shell is hosted
+    // by the engine; if you restart the engine, this shell dies and
+    // takes me with it." Scripts that do `nixos-rebuild switch`
+    // (nasty-sync in particular) check for this and detach via
+    // systemd-run so the rebuild outlives the terminal session.
+    cmd.env("NASTY_WEBUI_TERMINAL", "1");
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
