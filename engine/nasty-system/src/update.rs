@@ -32,6 +32,18 @@ const DEFAULT_NASTY_REPO: &str = "nasty";
 const DEFAULT_NASTY_REF: &str = "main";
 const VERSION_INPUT_NAMES: [&str; 3] = ["nixpkgs", "bcachefs-tools", "nasty"];
 const SYSTEM_FLAKE_TEMPLATE_PATH: &str = "nixos/system-flake/flake.nix.template";
+
+/// Snapshot of the wrapper-flake template this engine binary was
+/// built with. Drives the legacy-wrapper migration: when an
+/// existing install still has the pre-#304 wrapper shape (owns its
+/// own `nixpkgs.url` and `bcachefs-tools.url`), the engine
+/// re-renders the wrapper from this embedded copy on the next
+/// engine-driven upgrade — independent of GitHub reachability, no
+/// dependency on tagged-release rebootstrap firing. Since the
+/// template ships with the engine, every release pins a known-good
+/// migration target.
+const EMBEDDED_WRAPPER_TEMPLATE: &str =
+    include_str!("../../../nixos/system-flake/flake.nix.template");
 const GITHUB_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ── Release channels ────────────────────────────────────────────
@@ -534,10 +546,59 @@ impl UpdateService {
 
     /// Bootstrap `/etc/nixos/flake.nix` from the latest official tagged
     /// release's wrapper-flake template, then run a switch rebuild.
+    /// Rewrite `/etc/nixos/flake.nix` in place if it's still in the
+    /// legacy (pre-#304) shape that owns its own `nixpkgs.url` /
+    /// `bcachefs-tools.url`. After migration the wrapper declares
+    /// `nixpkgs.follows = "nasty/nixpkgs"` etc., so a single
+    /// `nix flake update nasty` advances all three inputs and the
+    /// resolved closure matches what CI builds against (cachix hits
+    /// again). Idempotent — calling on an already-follows wrapper
+    /// returns Ok(false) without touching disk.
+    ///
+    /// Returns `Ok(true)` if a write happened, `Ok(false)` if no
+    /// migration was needed.
+    pub async fn maybe_migrate_wrapper_shape(&self) -> Result<bool, UpdateError> {
+        let path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
+        let current = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| UpdateError::CommandFailed(format!("read {path}: {e}")))?;
+        if !wrapper_is_legacy_shape(&current) {
+            return Ok(false);
+        }
+        let local_system = detect_local_system().await?;
+        let migrated = migrate_wrapper_to_follows_shape(&current, &local_system)?;
+        tokio::fs::write(&path, &migrated)
+            .await
+            .map_err(|e| UpdateError::CommandFailed(format!("write {path}: {e}")))?;
+        info!(
+            "Migrated wrapper-flake at {path} from legacy (own-url) shape \
+             to follows shape; next `nix flake update nasty` will resolve \
+             nixpkgs / bcachefs-tools transitively via nasty's lock"
+        );
+        Ok(true)
+    }
+
     pub async fn upgrade_tagged_release(&self) -> Result<(), UpdateError> {
         let update_status = self.status().await;
         if update_status.state == "running" {
             return Err(UpdateError::AlreadyRunning);
+        }
+
+        // Belt-and-suspenders to the rebootstrap path further down:
+        // if the wrapper is in legacy (own-url) shape, migrate it to
+        // the follows shape before anything else. The existing
+        // rebootstrap path also detects this case via content-hash
+        // drift between the local wrapper and the upstream template
+        // — but only AFTER the "already at latest tag" early-exit
+        // below. Running the migration up front means a user pinned
+        // at the latest tag can still get reshaped even when there's
+        // no version bump to apply. No-op when already in follows
+        // shape.
+        if let Err(e) = self.maybe_migrate_wrapper_shape().await {
+            warn!(
+                target: "nasty::update",
+                "wrapper migration to follows shape skipped: {e}"
+            );
         }
 
         let release_status = self.version_tagged_release_status().await?;
@@ -892,10 +953,27 @@ echo "==> Update complete!"
         nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
         nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
+        // Opportunistically migrate legacy-shape wrappers (own
+        // nixpkgs.url + bcachefs-tools.url) to the follows shape
+        // (#304) BEFORE running the upgrade. After this the
+        // wrapper's single `nix flake update nasty` step also
+        // resolves the followed inputs, putting the resolved
+        // closure back in cachix range and ending the per-bump
+        // 92-Rust-crate recompile that drifted boxes had been
+        // hitting. No-op when the wrapper is already in follows
+        // shape, so safe to call every time.
+        if let Err(e) = self.maybe_migrate_wrapper_shape().await {
+            warn!(
+                target: "nasty::update",
+                "wrapper migration to follows shape skipped: {e}"
+            );
+        }
+
         // Build the update script:
         // 1. Update the local wrapper flake inputs (channel-specific:
         //    Mild/Spicy pin nasty to a release tag, Nasty refreshes
-        //    nixpkgs + bcachefs-tools + nasty)
+        //    nasty only — followed nixpkgs + bcachefs-tools move
+        //    transitively via nasty's lock)
         // 2. Rebuild from local flake (which keeps hardware-configuration.nix)
         let channel = read_channel().await;
         let token = read_github_token().await;
@@ -1859,6 +1937,55 @@ fn render_system_flake_template_with_ref(
         .replace("@WRAPPER_FLAKE_VERSION@", &wrapper_version))
 }
 
+/// Whether the given wrapper-flake content predates #304's follows
+/// refactor — owns its own `nixpkgs.url` or `bcachefs-tools.url`
+/// instead of declaring those as `follows = "nasty/<input>"`.
+/// Detection is conservative: a parse failure returns false so we
+/// don't accidentally rewrite a customized wrapper. Pure: testable
+/// on synthetic inputs without touching disk.
+fn wrapper_is_legacy_shape(content: &str) -> bool {
+    let Ok(urls) = parse_flake_input_urls(content) else {
+        return false;
+    };
+    urls.contains_key("nixpkgs") || urls.contains_key("bcachefs-tools")
+}
+
+/// Re-render an existing wrapper-flake into the follows shape by
+/// reusing the embedded template, preserving the operator's chosen
+/// `nasty` ref. No-op when the wrapper is already in follows shape.
+///
+/// Returns the new content. Caller is responsible for writing it to
+/// disk and triggering `nix flake lock` (or relying on the next
+/// `nixos-rebuild`'s implicit lock refresh) to settle the new
+/// follows resolution.
+///
+/// Fails when the wrapper's `nasty.url` is a non-canonical (fork)
+/// URL we can't parse a ref out of — in that case the operator
+/// is running an unusual setup we shouldn't second-guess; they
+/// can migrate by hand.
+fn migrate_wrapper_to_follows_shape(
+    current_content: &str,
+    local_system: &str,
+) -> Result<String, UpdateError> {
+    if !wrapper_is_legacy_shape(current_content) {
+        return Ok(current_content.to_string());
+    }
+    let urls = parse_flake_input_urls(current_content)?;
+    let nasty_url = &urls
+        .get("nasty")
+        .ok_or_else(|| UpdateError::CommandFailed("wrapper has no nasty.url to migrate".into()))?
+        .url;
+    let (nasty_ref, _is_tag) = parse_official_nasty_ref(nasty_url).ok_or_else(|| {
+        UpdateError::CommandFailed(format!(
+            "wrapper's nasty.url ({nasty_url}) is not a canonical \
+             github:nasty-project/nasty/<ref> URL — refusing to migrate \
+             automatically. Edit /etc/nixos/flake.nix by hand if you \
+             want the follows-shape inputs."
+        ))
+    })?;
+    render_system_flake_template_with_ref(EMBEDDED_WRAPPER_TEMPLATE, &nasty_ref, local_system)
+}
+
 /// Check whether the upstream wrapper-flake template at the given
 /// canonical ref differs from what's baked into the local
 /// /etc/nixos/flake.nix. Used by system.update.check to surface
@@ -2105,24 +2232,39 @@ async fn check_via_git_ls_remote(
 async fn read_current_version() -> String {
     // Priority is "closest to ground truth first":
     //
-    // 1. `/var/lib/nasty/version` — written by the upgrade script on its
-    //    final line, only reached after `nixos-rebuild switch` returned 0.
-    //    Reflects intentional state when the upgrade flow drives things.
+    // 1. `/run/booted-system/etc/nasty-system-flake/flake.lock` —
+    //    the wrapper-flake snapshot baked into the NixOS generation
+    //    we actually booted. recover-generation-flake.service copies
+    //    the wrapper flake.nix + flake.lock that produced the system
+    //    into this path at activation; reading the `nasty` rev from
+    //    that lock answers "what nasty are we ACTUALLY running"
+    //    without any side-effect-driven sync. Independent of
+    //    `/var/lib/nasty/version` stamps, safe across manual
+    //    `nixos-rebuild` invocations (we hit this repeatedly during
+    //    debug sessions — the stamp drifted, UI lied), and immune
+    //    to the half-applied-upgrade case where flake.lock holds
+    //    the target rev but the running system is on the prior one.
     //
-    // 2. `/etc/nasty-version` — baked into the booted NixOS generation
-    //    via `environment.etc."nasty-version"`. Becomes the active /etc
-    //    only after `switch-to-configuration` succeeds, so this file
-    //    matches what the kernel and engine actually are.
+    // 2. `/var/lib/nasty/version` — kept for backward compat with
+    //    older boxes whose booted system doesn't carry the
+    //    nasty-system-flake snapshot. Written by the upgrade
+    //    script's final line, so reflects intentional state when
+    //    present.
     //
-    // 3. `flake.lock` — aspirational. `nix flake update` rewrites it
-    //    BEFORE the rebuild runs, so on a half-applied upgrade (ENOSPC
-    //    on /boot, kernel panic during activation, …) the lock points
-    //    at the new tag while the running system is still on the old
-    //    one. Used to be priority #2 here, which is the bug that made
-    //    a failed v0.0.7→v0.0.8 attempt report "v0.0.8 — up to date"
-    //    and hide the retry button.
+    // 3. `/etc/nasty-version` — the literal `nasty-version` arg the
+    //    wrapper passed to the NixOS module. Usually the release
+    //    tag string like "0.0.8" rather than a commit SHA, but
+    //    matches the active generation.
     //
-    // 4. `"dev"` — last-resort sentinel for unmanaged builds.
+    // 4. `flake.lock` of `/etc/nixos` — aspirational. `nix flake
+    //    update` rewrites this BEFORE the rebuild runs, so on a
+    //    half-applied upgrade the lock points at the new tag while
+    //    the running system is still on the old one.
+    //
+    // 5. `"dev"` — last-resort sentinel for unmanaged builds.
+    if let Some(rev) = read_booted_nasty_rev().await {
+        return rev;
+    }
     if let Ok(s) = tokio::fs::read_to_string(VERSION_PATH).await {
         let s = s.trim().to_string();
         if !s.is_empty() {
@@ -2139,6 +2281,18 @@ async fn read_current_version() -> String {
         return version;
     }
     "dev".to_string()
+}
+
+/// Read the locked `nasty` input rev from the wrapper-flake
+/// snapshot baked into the currently-booted NixOS generation.
+/// Returns the short (7-char) SHA, or None if the snapshot path
+/// doesn't exist (older systems pre-`recover-generation-flake`).
+async fn read_booted_nasty_rev() -> Option<String> {
+    let lock_path = "/run/booted-system/etc/nasty-system-flake/flake.lock";
+    let content = tokio::fs::read_to_string(lock_path).await.ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let rev = v["nodes"]["nasty"]["locked"]["rev"].as_str()?;
+    Some(rev[..rev.len().min(7)].to_string())
 }
 
 /// Check if the booted kernel or kernel modules differ from the activated system.
@@ -2882,6 +3036,130 @@ outputs = { nixpkgs, nasty, ... }: {
         assert_eq!(
             classify_last_upgrade_attempt("failed", "timeout"),
             Some("failed")
+        );
+    }
+
+    // ── wrapper-shape migration (legacy → follows) ─────────────────
+
+    /// Pre-#304 wrappers owned their own `nixpkgs.url` and
+    /// `bcachefs-tools.url`. The detector should mark those as
+    /// needing migration regardless of which legacy fields are
+    /// present (it's enough that ANY non-nasty input has a url).
+    #[test]
+    fn wrapper_is_legacy_shape_detects_own_nixpkgs_url() {
+        let legacy = r#"{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    nasty.url = "github:nasty-project/nasty/main";
+  };
+}"#;
+        assert!(super::wrapper_is_legacy_shape(legacy));
+    }
+
+    #[test]
+    fn wrapper_is_legacy_shape_returns_false_for_follows_shape() {
+        // The new (post-#304) shape: only nasty has a .url at top
+        // level; nixpkgs and bcachefs-tools are declared as follows.
+        let follows = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.follows = "nasty/bcachefs-tools";
+  };
+}"#;
+        assert!(!super::wrapper_is_legacy_shape(follows));
+    }
+
+    #[test]
+    fn wrapper_is_legacy_shape_returns_false_for_unparseable_content() {
+        // Garbage in → no migration attempted. Safer default than
+        // rewriting whatever the operator has there.
+        assert!(!super::wrapper_is_legacy_shape("not a flake at all"));
+    }
+
+    #[test]
+    fn migrate_wrapper_preserves_nasty_ref_and_swaps_shape() {
+        let legacy = r#"{
+  description = "NASty local system configuration";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    nasty.url = "github:nasty-project/nasty/main";
+    nasty.inputs.nixpkgs.follows = "nixpkgs";
+  };
+  outputs = { ... }: {};
+}"#;
+        let migrated = super::migrate_wrapper_to_follows_shape(legacy, "x86_64-linux")
+            .expect("migration succeeds");
+        // The operator's chosen nasty ref survives:
+        assert!(migrated.contains("github:nasty-project/nasty/main"));
+        // Legacy URL declarations are gone. Parser-level check
+        // because the new template's prose comment mentions
+        // "nixpkgs.url" while explaining the migration's history —
+        // a substring match would falsely trip on that comment.
+        // parse_flake_input_urls only walks top-level `.url =`
+        // attribute assignments, so it's specific to actual input
+        // declarations.
+        let parsed = super::parse_flake_input_urls(&migrated).expect("migrated output parses");
+        assert!(
+            !parsed.contains_key("nixpkgs"),
+            "migrated wrapper must not own nixpkgs.url"
+        );
+        assert!(
+            !parsed.contains_key("bcachefs-tools"),
+            "migrated wrapper must not own bcachefs-tools.url"
+        );
+        // Follows is in place at the input declarations:
+        assert!(migrated.contains(r#"nixpkgs.follows = "nasty/nixpkgs""#));
+        assert!(migrated.contains(r#"bcachefs-tools.follows = "nasty/bcachefs-tools""#));
+        // The backwards `nasty.inputs.nixpkgs.follows = "nixpkgs"`
+        // declaration that used to force nasty to consume the
+        // wrapper's nixpkgs is no longer in the inputs block by
+        // construction: the embedded template defines only the
+        // three lines covered above, and the parser-level asserts
+        // already prove no other top-level `.url` exists. We don't
+        // also string-match "nasty.inputs.nixpkgs.follows" here
+        // because the template's prose comment legitimately
+        // mentions it while explaining the migration's history.
+    }
+
+    #[test]
+    fn migrate_wrapper_is_a_noop_for_follows_shape() {
+        let follows = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.follows = "nasty/bcachefs-tools";
+  };
+}"#;
+        let out = super::migrate_wrapper_to_follows_shape(follows, "x86_64-linux")
+            .expect("noop succeeds");
+        assert_eq!(
+            out, follows,
+            "follows-shape wrapper passes through unchanged"
+        );
+    }
+
+    #[test]
+    fn migrate_wrapper_refuses_non_canonical_nasty_url() {
+        // Fork URLs (or anything that isn't github:nasty-project/nasty)
+        // get a clear error instead of being silently rewritten —
+        // operators running forks know what they're doing and can
+        // migrate by hand.
+        let fork = r#"{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    nasty.url = "github:my-fork/nasty/main";
+  };
+}"#;
+        let err = super::migrate_wrapper_to_follows_shape(fork, "x86_64-linux")
+            .expect_err("fork URL should refuse migration");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("my-fork") || msg.contains("canonical"),
+            "got: {msg}"
         );
     }
 
