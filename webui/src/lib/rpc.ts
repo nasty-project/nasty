@@ -36,6 +36,32 @@ export class NastyClient {
 	private reconnectDelayMs = 1000;
 	private static readonly RECONNECT_DELAY_FLOOR_MS = 1000;
 	private static readonly RECONNECT_DELAY_CEIL_MS = 30_000;
+	/** Number of consecutive failed reconnect attempts since the last
+	 *  successful auth. Drives the page-reload escape hatch below. */
+	private consecutiveFailedReconnects = 0;
+	/** After this many consecutive failed reconnect attempts, force a
+	 *  full page reload instead of scheduling yet another retry.
+	 *
+	 *  Why this exists: a WebSocket TLS handshake can fail silently in
+	 *  the browser (most commonly when the box rebooted and Caddy
+	 *  re-issued a self-signed leaf with a new fingerprint — the prior
+	 *  browser exception is keyed to the old fingerprint and the new
+	 *  one is silently rejected with no cert-warning UI, because the
+	 *  WebSocket API doesn't surface that prompt). The reconnect loop
+	 *  then spins forever — "Reconnecting..." with no progress.
+	 *  `location.reload()` does a full HTML navigation which DOES
+	 *  surface the cert-warning UI; once the operator clicks through,
+	 *  the WS connects fine on the reloaded page. The same escape
+	 *  hatch also unblocks "box has moved to a new IP", "server
+	 *  config changed in a way that breaks the WS endpoint", and any
+	 *  other persistent reconnect failure — the user gets a clear
+	 *  browser-level error state instead of a spinner.
+	 *
+	 *  Threshold sized so a normal reboot (~30–90 s downtime) recovers
+	 *  via the normal reconnect path without ever tripping reload, but
+	 *  a stuck state unblocks within ~3 minutes. Backoff totals at
+	 *  the 10th attempt: 1+2+4+8+16+30+30+30+30+30 = 181 s. */
+	private static readonly MAX_RECONNECT_ATTEMPTS_BEFORE_RELOAD = 10;
 	private _authenticated = false;
 	/** Set to true after the first successful auth; cleared by disconnect(). */
 	private _shouldReconnect = false;
@@ -76,8 +102,11 @@ export class NastyClient {
 						this._authenticated = true;
 						this._shouldReconnect = true;
 						// Successful connect — reset the backoff so the next
-						// disconnect retries quickly.
+						// disconnect retries quickly, and clear the
+						// failed-reconnect counter so the reload escape hatch
+						// only fires after a fresh streak of failures.
 						this.reconnectDelayMs = NastyClient.RECONNECT_DELAY_FLOOR_MS;
+						this.consecutiveFailedReconnects = 0;
 						this._readyResolve?.();
 						this._readyResolve = null;
 						if (wasReconnect) {
@@ -198,8 +227,19 @@ export class NastyClient {
 					location.reload();
 					return;
 				}
-				// Connection failed (server still down) — schedule another attempt
+				// Connection failed (server still down, or silent TLS reject
+				// after leaf-cert rotation, or any other persistent failure).
+				// After enough attempts, reload the page — see
+				// MAX_RECONNECT_ATTEMPTS_BEFORE_RELOAD for the rationale.
 				if (this._shouldReconnect) {
+					this.consecutiveFailedReconnects += 1;
+					if (
+						this.consecutiveFailedReconnects
+						>= NastyClient.MAX_RECONNECT_ATTEMPTS_BEFORE_RELOAD
+					) {
+						location.reload();
+						return;
+					}
 					this._scheduleReconnect();
 				}
 			});

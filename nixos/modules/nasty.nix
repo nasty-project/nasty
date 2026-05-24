@@ -10,6 +10,15 @@ let
   # `tls internal` directive — Caddy's "Local Authority" issues a
   # self-signed cert into its own state dir (`/var/lib/caddy/...`) and
   # auto-renews it.
+  #
+  # The internal-CA leaf TTL is overridden to 7 days via the engine's
+  # `apps.tls.automation` admin-API push (see `build_tls_automation_json`
+  # in engine/nasty-apps/src/caddy.rs) — Caddyfile's long-form
+  # `tls { issuer internal { lifetime ... } }` creates a second
+  # automation policy for `nasty.local` and conflicts with the one
+  # auto-generated from the site address, so we keep the Caddyfile in
+  # its short-form `tls internal` shape and lift the lifetime override
+  # into the engine's runtime PATCH instead.
   useUserCert = cfg.tls.certFile != null && cfg.tls.keyFile != null;
   caddyTlsDirective =
     if useUserCert

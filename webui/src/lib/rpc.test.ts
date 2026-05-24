@@ -243,6 +243,124 @@ describe('connection lifecycle', () => {
 		expect(mockInstances).toHaveLength(1);
 	});
 
+	test('forces page reload after enough consecutive failed reconnects', async () => {
+		// The escape hatch for the silent-TLS-reject case: when Caddy
+		// re-issues a self-signed leaf with a new fingerprint after a
+		// reboot, the browser silently refuses the WS handshake (no
+		// cert-warning UI for WebSockets — that's gated to full-page
+		// navigations). Without this reload, the reconnect loop spins
+		// forever. The full HTML reload that this triggers does surface
+		// the cert UI, so the operator can click through and the next
+		// connection succeeds.
+		vi.useFakeTimers();
+		const reload = vi.fn();
+		vi.stubGlobal('location', { reload });
+		try {
+			const client = new NastyClient('ws://localhost/api');
+			const initial = client.connect();
+			mockInstances[0].open();
+			mockInstances[0].receive({ authenticated: true, username: 'admin', role: 'admin' });
+			await initial;
+
+			// Drop the connection to enter the reconnect loop.
+			mockInstances[0].fireClose();
+
+			// Drive 10 consecutive failed reconnect attempts. Each cycle:
+			// advance past the (capped) backoff to fire the timer, then
+			// fail the freshly-constructed WS to simulate the silent TLS
+			// reject. Microtask flush happens inside advanceTimersByTimeAsync.
+			for (let attempt = 1; attempt <= 10; attempt++) {
+				await vi.advanceTimersByTimeAsync(30_000);
+				const mock = mockInstances[mockInstances.length - 1];
+				mock.fireError();
+				// Let the connect()'s catch handler run.
+				await vi.advanceTimersByTimeAsync(0);
+			}
+
+			expect(reload).toHaveBeenCalled();
+		} finally {
+			vi.unstubAllGlobals();
+			vi.useRealTimers();
+		}
+	});
+
+	test('does not force reload while under the failed-reconnect threshold', async () => {
+		vi.useFakeTimers();
+		const reload = vi.fn();
+		vi.stubGlobal('location', { reload });
+		try {
+			const client = new NastyClient('ws://localhost/api');
+			const initial = client.connect();
+			mockInstances[0].open();
+			mockInstances[0].receive({ authenticated: true, username: 'admin', role: 'admin' });
+			await initial;
+
+			mockInstances[0].fireClose();
+
+			// Five failed attempts — well under the 10-attempt threshold.
+			for (let attempt = 1; attempt <= 5; attempt++) {
+				await vi.advanceTimersByTimeAsync(30_000);
+				const mock = mockInstances[mockInstances.length - 1];
+				mock.fireError();
+				await vi.advanceTimersByTimeAsync(0);
+			}
+
+			expect(reload).not.toHaveBeenCalled();
+		} finally {
+			vi.unstubAllGlobals();
+			vi.useRealTimers();
+		}
+	});
+
+	test('successful reconnect resets the failed-attempt counter', async () => {
+		// After a streak of failures, a successful reconnect must clear
+		// the counter so a later, unrelated streak doesn't trip reload
+		// before reaching the full threshold.
+		vi.useFakeTimers();
+		const reload = vi.fn();
+		vi.stubGlobal('location', { reload });
+		try {
+			const client = new NastyClient('ws://localhost/api');
+			const initial = client.connect();
+			mockInstances[0].open();
+			mockInstances[0].receive({ authenticated: true, username: 'admin', role: 'admin' });
+			await initial;
+
+			// Drop, then fail 8 times (just under the threshold).
+			mockInstances[0].fireClose();
+			for (let attempt = 1; attempt <= 8; attempt++) {
+				await vi.advanceTimersByTimeAsync(30_000);
+				const mock = mockInstances[mockInstances.length - 1];
+				mock.fireError();
+				await vi.advanceTimersByTimeAsync(0);
+			}
+			expect(reload).not.toHaveBeenCalled();
+
+			// The next attempt succeeds — this should reset the counter.
+			await vi.advanceTimersByTimeAsync(30_000);
+			const reconnected = mockInstances[mockInstances.length - 1];
+			reconnected.open();
+			reconnected.receive({ authenticated: true, username: 'admin', role: 'admin' });
+			await vi.advanceTimersByTimeAsync(0);
+
+			// Drop again, fail 9 times — with a working reset, this is
+			// also under the threshold and shouldn't reload. (Without
+			// the reset, we'd be at 8+9=17 ≥ 10 and reload would fire.)
+			reconnected.fireClose();
+			for (let attempt = 1; attempt <= 9; attempt++) {
+				await vi.advanceTimersByTimeAsync(30_000);
+				const mock = mockInstances[mockInstances.length - 1];
+				mock.fireError();
+				await vi.advanceTimersByTimeAsync(0);
+			}
+
+			expect(reload).not.toHaveBeenCalled();
+		} finally {
+			vi.unstubAllGlobals();
+			vi.useRealTimers();
+		}
+	});
+
 	test('reconnect is scheduled on drop and onReconnect fires on re-auth', async () => {
 		vi.useFakeTimers();
 		try {
