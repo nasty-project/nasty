@@ -1,0 +1,66 @@
+name: Nix engine build
+
+# Sandbox-visibility gate for the engine derivation. Catches the class
+# of regression where a Rust `include_str!("../../../somewhere")`
+# resolves fine in cargo (which sees the full repo checkout) but fails
+# inside the Nix build sandbox when the engine's `src` filter only
+# ships `./engine/`. PR #308 hit exactly this; the gate was added in
+# #310 alongside the fix.
+#
+# Lives in its own workflow file (not ci.yml) so the `paths:` filter
+# below can skip the slow Nix build entirely for PRs that touch only
+# WebUI, docs, or other unrelated files. ci.yml stays as the
+# always-on cargo+npm gate.
+
+on:
+  pull_request:
+    paths:
+      - 'engine/**'
+      - 'nixos/system-flake/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/nix-engine-build.yml'
+  push:
+    branches: [main]
+
+permissions:
+  # `id-token: write` is required by Magic Nix Cache to authenticate
+  # against the GitHub Actions cache via OIDC.
+  id-token: write
+  contents: read
+
+concurrency:
+  group: nix-engine-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix-engine-build:
+    name: Nix engine build (sandbox-visibility gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Magic Nix Cache uses the GitHub Actions cache as a Nix binary
+      # cache. Layered on top of cachix (which holds main-branch
+      # closures) to give per-branch incremental caching across PR
+      # runs: when only one Rust crate changes, only that crate +
+      # downstream rebuild, the rest substitutes from Actions cache.
+      # Realistic win on this job: ~17 min cold → ~5-8 min warm.
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      # Read-only Cachix substituter: pull cached deps to speed cold
+      # builds (rustc, openssl, etc. all come from cachix), but don't
+      # push. Works on forks and PRs without secrets.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: nasty
+          skipPush: true
+
+      - name: Build engine package
+        run: nix build .#packages.x86_64-linux.engine --print-build-logs
