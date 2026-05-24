@@ -121,9 +121,17 @@ jobs:
     #    Following nasty here removes that capability for no cachix
     #    win, since nasty's binaries don't depend on it.
     #
-    # The renderer in engine/nasty-system/src/update.rs substitutes
-    # @BCACHEFS_TOOLS_REF@ at template render time; the engine
-    # extracts the canonical default from nasty's own flake.nix.
+    # The bcachefs-tools URL is hardcoded with a real ref (e.g.
+    # "v1.38.3") rather than a `@BCACHEFS_TOOLS_REF@` placeholder.
+    # The placeholder approach (#312) was a forward-compat trap:
+    # pre-#312 engines (notably v0.0.8) don't know about the
+    # placeholder, silently no-op when substituting it, and ship
+    # the literal text into `bcachefs-tools.url` during rebootstrap
+    # — breaking the next `nix flake update`. Hardcoding the ref
+    # means every historical renderer (going back to v0.0.5) writes
+    # a clean wrapper. Per-operator bcachefs-tools customization
+    # happens via a post-render `rewrite_flake_input_urls` pass on
+    # the caller side (see update.rs).
     name: Installer template canonical shape (nixpkgs follows, bcachefs.url)
     runs-on: ubuntu-latest
     steps:
@@ -145,20 +153,28 @@ jobs:
           fi
           echo "Installer template correctly follows nasty/nixpkgs."
 
-      - name: Assert template pins bcachefs-tools with its own .url
+      - name: Assert template pins bcachefs-tools with its own .url (hardcoded ref, no placeholder)
         run: |
           if grep -qE 'bcachefs-tools\.follows\s*=' nixos/system-flake/flake.nix.template; then
             echo "::error::installer template declares bcachefs-tools.follows — should pin its own .url so operators can independently override"
             echo "Template should declare:"
-            echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@\";"
+            echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/<vX.Y.Z>\";"
             echo "instead of:"
             grep -nE 'bcachefs-tools\.follows' nixos/system-flake/flake.nix.template
             exit 1
           fi
-          if ! grep -qE 'bcachefs-tools\.url\s*=\s*"github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@"' nixos/system-flake/flake.nix.template; then
-            echo "::error::installer template missing bcachefs-tools.url with the @BCACHEFS_TOOLS_REF@ placeholder"
-            echo "Template should declare:"
-            echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@\";"
+          if grep -qE 'bcachefs-tools\.url\s*=\s*"[^"]*@[A-Z_]+@' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template's bcachefs-tools.url contains an @PLACEHOLDER@ — pre-#312 engines (v0.0.8) silently no-op on unknown placeholders and ship the literal text into the wrapper, breaking the next nix flake update"
+            echo "Template should hardcode a real ref:"
+            echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/<vX.Y.Z>\";"
+            echo "Current declaration:"
+            grep -nE 'bcachefs-tools\.url' nixos/system-flake/flake.nix.template
             exit 1
           fi
-          echo "Installer template correctly pins bcachefs-tools.url with @BCACHEFS_TOOLS_REF@ placeholder."
+          if ! grep -qE 'bcachefs-tools\.url\s*=\s*"github:koverstreet/bcachefs-tools/v[0-9]+\.[0-9]+\.[0-9]+"' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template missing bcachefs-tools.url with a hardcoded semver tag (e.g. v1.38.3)"
+            echo "Template should declare:"
+            echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/v1.38.3\";"
+            exit 1
+          fi
+          echo "Installer template correctly pins bcachefs-tools.url with a hardcoded semver tag."
