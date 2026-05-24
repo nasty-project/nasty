@@ -31,6 +31,12 @@ const ADMIN_URL: &str = "http://127.0.0.1:2019";
 /// route list is left alone — that's the static Caddyfile content.
 const ROUTE_ID_PREFIX: &str = "nasty-app-";
 
+/// Leaf-cert lifetime for the internal-CA fallback (`nasty.local`).
+/// Caddy duration string format; passed through into the
+/// `automation.policies[].issuers[].lifetime` JSON field. See
+/// `build_tls_automation_json` for the full rationale.
+const INTERNAL_LEAF_LIFETIME: &str = "168h";
+
 /// One ingress rule, ready to be turned into a Caddy route object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppRoute {
@@ -636,7 +642,37 @@ fn build_tls_automation_json(
     }
     policy_values.push(json!({
         "subjects": fallback_subjects,
-        "issuers": [{ "module": "internal" }],
+        // `lifetime` overrides Caddy's 12-hour default for internal-CA
+        // leaf certs. The short default means Caddy re-issues the
+        // `nasty.local` leaf any time the box is rebooted after more
+        // than ~8 hours of downtime (Caddy renews at ~2/3 lifetime),
+        // which gives the new leaf a fresh SHA-256 fingerprint and
+        // invalidates whatever browser exception the operator had
+        // clicked through — "your connection is not private" returns
+        // on every reboot, and the WebUI WebSocket reconnect hangs
+        // silently because TLS handshake failures don't surface a
+        // prompt for WebSocket connections (the rpc.ts
+        // reload-after-N-failed-reconnects path is the WebUI-side
+        // cover for this; this lifetime bump is the prevention).
+        //
+        // 7 days catches most operator reboot cadences (kernel
+        // updates, power outages) without re-issuing in between.
+        // TLS-hygiene cost: longer-lived leaf, bigger blast radius
+        // if the private key under /var/lib/caddy/ leaks — acceptable
+        // trade for a NAS appliance. Operators who want zero warnings
+        // forever should import the local-CA root (10-year lifetime,
+        // doesn't rotate) via the WebUI's "Download CA Root" button.
+        //
+        // Pushed here rather than in the Caddyfile because Caddy
+        // rejects the long-form `tls { issuer internal { lifetime ... } }`
+        // when it duplicates a hostname covered by an
+        // auto-generated policy (the site-address-derived one for
+        // `nasty.local`) — "hostname appears in more than one
+        // automation policy". The short-form `tls internal` in the
+        // Caddyfile folds into the auto-generated policy; this
+        // admin-API PATCH then replaces it with the lifetime-bearing
+        // version.
+        "issuers": [{ "module": "internal", "lifetime": INTERNAL_LEAF_LIFETIME }],
     }));
     json!({ "policies": policy_values })
 }
@@ -1154,6 +1190,21 @@ mod tests {
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0]["subjects"][0], "nasty.local");
         assert_eq!(policies[0]["issuers"][0]["module"], "internal");
+    }
+
+    #[test]
+    fn tls_automation_internal_issuer_carries_lifetime_override() {
+        // The internal-CA fallback policy must include `lifetime` on
+        // its issuer block — Caddy's 12 h default rotates the leaf on
+        // most box reboots and blows the operator's stored browser
+        // exception. This admin-API field is the only place we can
+        // set it (the Caddyfile's long-form `tls { issuer internal
+        // { lifetime ... } }` is rejected because it duplicates the
+        // auto-generated automation policy for nasty.local).
+        let body = build_tls_automation_json(&[], &TlsIssuer::default(), &[]);
+        let fallback = &body["policies"][0];
+        assert_eq!(fallback["issuers"][0]["module"], "internal");
+        assert_eq!(fallback["issuers"][0]["lifetime"], INTERNAL_LEAF_LIFETIME);
     }
 
     #[test]
