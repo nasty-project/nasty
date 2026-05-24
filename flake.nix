@@ -57,6 +57,16 @@
       # subdirectory so it finds the workspace Cargo.toml.
       sourceRoot = "source/engine";
       cargoLock.lockFile = ./engine/Cargo.lock;
+      # Bake the flake's source rev into the engine binary as
+      # NASTY_GIT_SHA, picked up by engine/nasty-system/build.rs and
+      # exposed at runtime via option_env!. The engine uses this as
+      # the authoritative answer to "what nasty rev am I" — see the
+      # check() flow in update.rs. `self.rev` is set when the flake
+      # tree is clean (committed); `self.dirtyRev` is set when
+      # uncommitted changes are present (cargo / dev iteration); the
+      # final "unknown" fallback is for flakes evaluated without git
+      # at all (extremely unusual but possible).
+      NASTY_GIT_SHA = self.rev or self.dirtyRev or "unknown";
       meta = {
         description = "NASty NAS engine";
         license = pkgs.lib.licenses.gpl3Only;
