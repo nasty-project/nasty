@@ -2464,39 +2464,38 @@ async fn check_via_git_ls_remote(
         .unwrap_or_else(|| "unknown".to_string()))
 }
 
+/// The git commit this engine binary was built from, baked in at
+/// build time by `engine/nasty-system/build.rs`. `None` when the
+/// build environment couldn't determine the SHA (no Nix-set env var
+/// AND no usable git checkout — extremely unusual but possible for
+/// dev-loop builds in weird sandboxes).
+const ENGINE_BUILD_REV: Option<&str> = option_env!("NASTY_GIT_SHA");
+
 async fn read_current_version() -> String {
-    // Priority is "closest to ground truth first":
+    // The engine binary's own embedded build commit is the ground
+    // truth: this binary literally was built from that commit, so
+    // by definition that's what's running. No proxy chain to drift
+    // or lag — in particular, no waiting on `/run/booted-system` to
+    // refresh after a reboot (which used to be the top priority
+    // here and caused the "Upgrade keeps being available even after
+    // I clicked it" loop: the operator activates a new generation,
+    // engine restarts on the new closure, but `/run/booted-system`
+    // still points at the previously-booted closure until reboot →
+    // engine reports the OLD rev as "current" → check() says
+    // upgrade available → forever).
     //
-    // 1. `/run/booted-system/etc/nasty-system-flake/flake.lock` —
-    //    the wrapper-flake snapshot baked into the NixOS generation
-    //    we actually booted. recover-generation-flake.service copies
-    //    the wrapper flake.nix + flake.lock that produced the system
-    //    into this path at activation; reading the `nasty` rev from
-    //    that lock answers "what nasty are we ACTUALLY running"
-    //    without any side-effect-driven sync. Independent of
-    //    `/var/lib/nasty/version` stamps, safe across manual
-    //    `nixos-rebuild` invocations (we hit this repeatedly during
-    //    debug sessions — the stamp drifted, UI lied), and immune
-    //    to the half-applied-upgrade case where flake.lock holds
-    //    the target rev but the running system is on the prior one.
-    //
-    // 2. `/var/lib/nasty/version` — kept for backward compat with
-    //    older boxes whose booted system doesn't carry the
-    //    nasty-system-flake snapshot. Written by the upgrade
-    //    script's final line, so reflects intentional state when
-    //    present.
-    //
-    // 3. `/etc/nasty-version` — the literal `nasty-version` arg the
-    //    wrapper passed to the NixOS module. Usually the release
-    //    tag string like "0.0.8" rather than a commit SHA, but
-    //    matches the active generation.
-    //
-    // 4. `flake.lock` of `/etc/nixos` — aspirational. `nix flake
-    //    update` rewrites this BEFORE the rebuild runs, so on a
-    //    half-applied upgrade the lock points at the new tag while
-    //    the running system is still on the old one.
-    //
-    // 5. `"dev"` — last-resort sentinel for unmanaged builds.
+    // The fallback chain below is kept for boxes whose engine was
+    // built without the SHA bake (dev-loop cargo builds in weird
+    // sandboxes, or pre-fix engine binaries doing a self-update).
+    // None of the fallback sources is as good as the bake — they
+    // all drift in one direction or another — but they're better
+    // than "dev" sentinel.
+    if let Some(rev) = ENGINE_BUILD_REV {
+        let trimmed = rev.trim();
+        if !trimmed.is_empty() && trimmed != "unknown" {
+            return trimmed[..7.min(trimmed.len())].to_string();
+        }
+    }
     if let Some(rev) = read_booted_nasty_rev().await {
         return rev;
     }
