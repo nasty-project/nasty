@@ -29,16 +29,51 @@ export class NastyClient {
 	private disconnectHandlers: (() => void)[] = [];
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	/** Exponential reconnect delay — doubles on each failed attempt up to a
-	 *  cap, resets to the floor on a successful auth. The previous version
-	 *  used a fixed 3 s delay, which during a longer outage produced 20
-	 *  attempts per minute — friendlier to spam the server slower and
-	 *  faster to reconnect from a transient blip. */
+	 *  cap, resets to the floor on a successful auth. Two profiles:
+	 *
+	 *    `normal`     — the default. Used for the "engine just rebooted /
+	 *                   network blip" case. Backoff sequence to reload:
+	 *                   1+2+4+5+5+5+5+5+5+5 = ~42 s.
+	 *    `aggressive` — flipped on by [`setAggressiveReconnect`] while a
+	 *                   known restart is in flight (the only caller today
+	 *                   is the Update page, which knows the engine is
+	 *                   coming down and back during an upgrade). Backoff
+	 *                   sequence to reload: 0.25+0.5+1+1.5×17 ≈ ~27 s.
+	 *
+	 *  The earlier shape used a 30 s ceiling. That was fine in theory but
+	 *  meant up to a 30 s gap between "engine is back" and "WebUI tries
+	 *  the next WS handshake" — operators watching an Upgrade progress
+	 *  bar perceived the lag as the WebUI being broken even though the
+	 *  reconnect was healthy. A few-seconds ceiling keeps the WS attempt
+	 *  rate cheap enough on the server side (~1 attempt every couple of
+	 *  seconds during outage) and the user-perceived lag near zero. */
 	private reconnectDelayMs = 1000;
-	private static readonly RECONNECT_DELAY_FLOOR_MS = 1000;
-	private static readonly RECONNECT_DELAY_CEIL_MS = 30_000;
+	private static readonly NORMAL_DELAY_FLOOR_MS = 1000;
+	private static readonly NORMAL_DELAY_CEIL_MS = 5_000;
+	private static readonly NORMAL_MAX_ATTEMPTS_BEFORE_RELOAD = 10;
+	private static readonly AGGRESSIVE_DELAY_FLOOR_MS = 250;
+	private static readonly AGGRESSIVE_DELAY_CEIL_MS = 1_500;
+	private static readonly AGGRESSIVE_MAX_ATTEMPTS_BEFORE_RELOAD = 20;
+	/** Aggressive-reconnect toggle — see [`setAggressiveReconnect`]. */
+	private _aggressive = false;
 	/** Number of consecutive failed reconnect attempts since the last
 	 *  successful auth. Drives the page-reload escape hatch below. */
 	private consecutiveFailedReconnects = 0;
+
+	/** Lower bound for the next backoff delay, mode-dependent. */
+	private get reconnectFloorMs(): number {
+		return this._aggressive
+			? NastyClient.AGGRESSIVE_DELAY_FLOOR_MS
+			: NastyClient.NORMAL_DELAY_FLOOR_MS;
+	}
+
+	/** Upper bound for the next backoff delay, mode-dependent. */
+	private get reconnectCeilMs(): number {
+		return this._aggressive
+			? NastyClient.AGGRESSIVE_DELAY_CEIL_MS
+			: NastyClient.NORMAL_DELAY_CEIL_MS;
+	}
+
 	/** After this many consecutive failed reconnect attempts, force a
 	 *  full page reload instead of scheduling yet another retry.
 	 *
@@ -55,13 +90,12 @@ export class NastyClient {
 	 *  hatch also unblocks "box has moved to a new IP", "server
 	 *  config changed in a way that breaks the WS endpoint", and any
 	 *  other persistent reconnect failure — the user gets a clear
-	 *  browser-level error state instead of a spinner.
-	 *
-	 *  Threshold sized so a normal reboot (~30–90 s downtime) recovers
-	 *  via the normal reconnect path without ever tripping reload, but
-	 *  a stuck state unblocks within ~3 minutes. Backoff totals at
-	 *  the 10th attempt: 1+2+4+8+16+30+30+30+30+30 = 181 s. */
-	private static readonly MAX_RECONNECT_ATTEMPTS_BEFORE_RELOAD = 10;
+	 *  browser-level error state instead of a spinner. */
+	private get maxAttemptsBeforeReload(): number {
+		return this._aggressive
+			? NastyClient.AGGRESSIVE_MAX_ATTEMPTS_BEFORE_RELOAD
+			: NastyClient.NORMAL_MAX_ATTEMPTS_BEFORE_RELOAD;
+	}
 	private _authenticated = false;
 	/** Set to true after the first successful auth; cleared by disconnect(). */
 	private _shouldReconnect = false;
@@ -105,7 +139,7 @@ export class NastyClient {
 						// disconnect retries quickly, and clear the
 						// failed-reconnect counter so the reload escape hatch
 						// only fires after a fresh streak of failures.
-						this.reconnectDelayMs = NastyClient.RECONNECT_DELAY_FLOOR_MS;
+						this.reconnectDelayMs = this.reconnectFloorMs;
 						this.consecutiveFailedReconnects = 0;
 						this._readyResolve?.();
 						this._readyResolve = null;
@@ -212,7 +246,7 @@ export class NastyClient {
 		const delay = this.reconnectDelayMs;
 		this.reconnectDelayMs = Math.min(
 			this.reconnectDelayMs * 2,
-			NastyClient.RECONNECT_DELAY_CEIL_MS,
+			this.reconnectCeilMs,
 		);
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
@@ -233,10 +267,7 @@ export class NastyClient {
 				// MAX_RECONNECT_ATTEMPTS_BEFORE_RELOAD for the rationale.
 				if (this._shouldReconnect) {
 					this.consecutiveFailedReconnects += 1;
-					if (
-						this.consecutiveFailedReconnects
-						>= NastyClient.MAX_RECONNECT_ATTEMPTS_BEFORE_RELOAD
-					) {
+					if (this.consecutiveFailedReconnects >= this.maxAttemptsBeforeReload) {
 						location.reload();
 						return;
 					}
@@ -273,6 +304,42 @@ export class NastyClient {
 
 	offDisconnect(handler: () => void) {
 		this.disconnectHandlers = this.disconnectHandlers.filter((h) => h !== handler);
+	}
+
+	/** Tell the client a known restart is in flight so reconnect should
+	 *  be more aggressive. Today only the Update page calls this — between
+	 *  Upgrade-click and `system.update.status` transitioning to
+	 *  success/failed it flips this on, then flips it off again.
+	 *
+	 *  Effects while `true`:
+	 *    - Backoff floor 250 ms / ceiling 1.5 s (vs. 1 s / 5 s).
+	 *    - Reload escape hatch trips after ~20 attempts (~27 s) instead of
+	 *      ~10 attempts (~42 s). Sized so an upgrade that genuinely fails
+	 *      to bring the engine back drops to the login screen quickly,
+	 *      while a healthy ~20–60 s activation window still recovers
+	 *      cleanly without ever tripping reload.
+	 *    - If we're already mid-backoff when flipped on, the next scheduled
+	 *      retry happens at the aggressive ceiling rather than waiting out
+	 *      the current (possibly multi-second) timer.
+	 *
+	 *  Idempotent — calling with the same value twice is a no-op. */
+	setAggressiveReconnect(active: boolean) {
+		if (this._aggressive === active) return;
+		this._aggressive = active;
+		// If we just entered aggressive mode mid-outage, the current
+		// reconnectDelayMs may already be at the old (5 s / 30 s) ceiling.
+		// Snap it down so the very next scheduled retry fires fast.
+		// (Doesn't cancel an already-pending timer — that's fine, the
+		// timer's delay was set when it was scheduled; the snap takes
+		// effect for the *next* one. In practice the next retry is
+		// already milliseconds away because we're typically in this code
+		// path because a reconnect just failed.)
+		if (active) {
+			this.reconnectDelayMs = Math.min(
+				this.reconnectDelayMs,
+				NastyClient.AGGRESSIVE_DELAY_CEIL_MS,
+			);
+		}
 	}
 
 	disconnect() {

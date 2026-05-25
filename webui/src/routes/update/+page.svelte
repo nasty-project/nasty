@@ -461,6 +461,11 @@
 
 	function startPolling() {
 		stopPolling();
+		// Tell the RPC client an engine restart is imminent — the activate
+		// phase will tear down the WebSocket and the reconnect should be
+		// aggressive (sub-second retries, fast reload escape hatch) instead
+		// of the normal 1-5 s backoff. See rpc.ts:setAggressiveReconnect.
+		client.setAggressiveReconnect(true);
 		pollInterval = setInterval(async () => {
 			try {
 					status = await client.call<UpdateStatus>('system.update.status');
@@ -486,6 +491,9 @@
 			clearInterval(pollInterval);
 			pollInterval = null;
 		}
+		// Restart window over (success / failed / cancelled / navigated away)
+		// — go back to the normal reconnect cadence.
+		client.setAggressiveReconnect(false);
 	}
 
 	function formatLog(log: string): string {

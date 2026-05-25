@@ -391,4 +391,85 @@ describe('connection lifecycle', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	test('aggressive-reconnect mode trips the reload escape hatch faster', async () => {
+		// The whole reason aggressive mode exists: during a known engine
+		// restart (Update flow), an upgrade that genuinely fails to bring
+		// the engine back should drop to the login screen quickly rather
+		// than sitting on a spinner for ~42 s. The aggressive threshold is
+		// 20 attempts; reaching it in the test verifies the mode-aware
+		// reload gate.
+		vi.useFakeTimers();
+		const reload = vi.fn();
+		vi.stubGlobal('location', { reload });
+		try {
+			const client = new NastyClient('ws://localhost/api');
+			const initial = client.connect();
+			mockInstances[0].open();
+			mockInstances[0].receive({ authenticated: true, username: 'admin', role: 'admin' });
+			await initial;
+
+			client.setAggressiveReconnect(true);
+
+			mockInstances[0].fireClose();
+
+			// 10 failed attempts — that's the normal-mode threshold, but
+			// with aggressive on it shouldn't reload yet.
+			for (let attempt = 1; attempt <= 10; attempt++) {
+				await vi.advanceTimersByTimeAsync(5_000);
+				const mock = mockInstances[mockInstances.length - 1];
+				mock.fireError();
+				await vi.advanceTimersByTimeAsync(0);
+			}
+			expect(reload).not.toHaveBeenCalled();
+
+			// Push through to attempt 20 — that's the aggressive threshold.
+			for (let attempt = 11; attempt <= 20; attempt++) {
+				await vi.advanceTimersByTimeAsync(5_000);
+				const mock = mockInstances[mockInstances.length - 1];
+				mock.fireError();
+				await vi.advanceTimersByTimeAsync(0);
+			}
+			expect(reload).toHaveBeenCalled();
+		} finally {
+			vi.unstubAllGlobals();
+			vi.useRealTimers();
+		}
+	});
+
+	test('setAggressiveReconnect is idempotent and reversible', async () => {
+		// Flipping aggressive off mid-outage must restore the normal
+		// reload threshold (10 attempts), not leave the aggressive
+		// threshold (20) stuck in place. Otherwise a future Update flow
+		// that crashed cleanup would leave the rest of the app in
+		// aggressive mode forever.
+		vi.useFakeTimers();
+		const reload = vi.fn();
+		vi.stubGlobal('location', { reload });
+		try {
+			const client = new NastyClient('ws://localhost/api');
+			const initial = client.connect();
+			mockInstances[0].open();
+			mockInstances[0].receive({ authenticated: true, username: 'admin', role: 'admin' });
+			await initial;
+
+			client.setAggressiveReconnect(true);
+			client.setAggressiveReconnect(true); // idempotent no-op
+			client.setAggressiveReconnect(false);
+
+			mockInstances[0].fireClose();
+
+			// In normal mode the reload trips at 10 attempts.
+			for (let attempt = 1; attempt <= 10; attempt++) {
+				await vi.advanceTimersByTimeAsync(5_000);
+				const mock = mockInstances[mockInstances.length - 1];
+				mock.fireError();
+				await vi.advanceTimersByTimeAsync(0);
+			}
+			expect(reload).toHaveBeenCalled();
+		} finally {
+			vi.unstubAllGlobals();
+			vi.useRealTimers();
+		}
+	});
 });
