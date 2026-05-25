@@ -594,6 +594,7 @@ in {
       qemu              # QEMU/KVM for virtual machines
       pciutils          # lspci for passthrough device discovery
       tpm2-tools        # tpm2_getcap, tpm2_pcrread, tpm2_unseal — engine reads vendor info via tpm2_getcap, operators use the rest for TPM debugging
+      sbctl             # Secure Boot state inspection (sbctl status --json). Read-only use by the engine; signing/enrollment stays lanzaboote's territory.
       docker-compose    # Docker Compose for multi-container apps
       croc              # peer-to-peer file transfer for sending debug reports
       rustic             # deduplicating encrypted backups (restic-compatible)
@@ -1450,6 +1451,7 @@ in {
         usbutils                     # lsusb — USB enumeration for hardware page + VM USB passthrough
         dmidecode                    # DMI tables for /system/hardware (BIOS, baseboard, memory)
         tpm2-tools                   # tpm2_getcap / tpm2_create / tpm2_unseal — Hardware page chip info + the PCR-7 seal/unseal flow for the bcachefs encryption key (#102)
+        sbctl                        # sbctl status --json — Secure Boot state for Hardware page. Read-only; signing/enrollment is lanzaboote's job, not ours.
         keyutils                     # keyctl — fs.lock revokes the bcachefs unlock key from the kernel session keyring; without this the call fails with "No such file or directory" even though every other tool we shell out to is here
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
