@@ -366,6 +366,14 @@ pub struct CreateFilesystemRequest {
     /// When false, user must enter passphrase via WebUI after every reboot.
     #[serde(default = "default_store_key")]
     pub store_key: Option<bool>,
+    /// Whether to seal the stored key with the host's TPM2 immediately
+    /// after creation (PCR-7 bound, same shape as `fs.tpm.bind`). Saves
+    /// the operator the WebUI "Bind to TPM" round-trip and avoids the
+    /// brief window between FS creation and binding when the plaintext
+    /// `.key` exists alone on disk. Requires `encryption == true`,
+    /// `store_key != false`, and a usable TPM2 on the host — request
+    /// is rejected upfront when any are missing.
+    pub bind_to_tpm: Option<bool>,
     /// Filesystem-wide label (used as default when no per-device labels set).
     pub label: Option<String>,
     /// Tiering targets set at format time.
@@ -889,6 +897,35 @@ impl FilesystemService {
             return Err(FilesystemError::NoDevices);
         }
 
+        // Upfront validation of `bind_to_tpm`. Fails the request before
+        // touching disk when prerequisites aren't met, so the operator
+        // doesn't end up with a half-baked FS (formatted but never
+        // sealed) after picking an inconsistent option set in the
+        // WebUI. The post-format tpm_bind call near the bottom of
+        // create() can still fail at runtime (e.g. tpm2-tools missing
+        // unexpectedly) — in that case the FS exists and the operator
+        // can retry via the WebUI's "Bind to TPM" affordance.
+        if req.bind_to_tpm == Some(true) {
+            if req.encryption != Some(true) {
+                return Err(FilesystemError::InvalidInput(
+                    "bind_to_tpm requires encryption=true (there's nothing to seal otherwise)"
+                        .into(),
+                ));
+            }
+            if req.store_key == Some(false) {
+                return Err(FilesystemError::InvalidInput(
+                    "bind_to_tpm requires store_key=true (the .key file is the input to the TPM seal)"
+                        .into(),
+                ));
+            }
+            if !nasty_common::tpm::is_available().await {
+                return Err(FilesystemError::InvalidInput(
+                    "bind_to_tpm requested but no TPM2 is available on this host (/dev/tpmrm0 missing)"
+                        .into(),
+                ));
+            }
+        }
+
         // Resolve ":free" virtual devices — create a new partition in free space
         for dev in &mut req.devices {
             if let Some(disk_path) = dev.path.strip_suffix(":free") {
@@ -1163,6 +1200,33 @@ impl FilesystemService {
             .collect();
 
         self.invalidate_list_cache().await;
+
+        // Bind the freshly-stored key to the host TPM2 when the
+        // operator asked for it. Prerequisites (encryption,
+        // store_key, TPM availability) were verified upfront so a
+        // failure here is unexpected — log + return error with a
+        // hint to the WebUI's manual Bind affordance rather than
+        // rolling back the format. The FS exists on disk with valid
+        // data either way; the operator just needs to retry the
+        // bind step.
+        if req.bind_to_tpm == Some(true) {
+            if let Err(e) = self.tpm_bind(&req.name).await {
+                warn!(
+                    "Filesystem '{}' was created but TPM bind failed: {e}. \
+                     The plaintext .key remains on disk; retry via the WebUI's \
+                     'Bind to TPM' button on the Filesystems page.",
+                    req.name
+                );
+                return Err(FilesystemError::CommandFailed(format!(
+                    "filesystem '{}' created but TPM seal failed: {e}",
+                    req.name
+                )));
+            }
+            info!(
+                "Filesystem '{}' created with key sealed to TPM2 (PCR-7 bound)",
+                req.name
+            );
+        }
 
         Ok(Filesystem {
             name: req.name.clone(),
