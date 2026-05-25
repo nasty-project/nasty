@@ -28,6 +28,12 @@
 	let filesystems: Filesystem[] = $state([]);
 	let devices: BlockDevice[] = $state([]);
 	let tpmStatus: Record<string, TpmBindStatus> = $state({});
+	// Host-level TPM availability — same value across every FS on
+	// this box. Cached at refresh time so the create-wizard's "Bind
+	// to TPM" checkbox can be conditionally shown even before the
+	// first encrypted FS exists. Falls back to `false` until the
+	// first probe completes.
+	let hostTpmAvailable = $state(false);
 	let wizardStep: 0 | 1 | 2 | 3 = $state(0); // 0=hidden, 1=name+devices, 2=profile, 3=review
 	let loading = $state(true);
 
@@ -44,6 +50,7 @@
 	let passphrase = $state('');
 	let passphraseConfirm = $state('');
 	let storeKey = $state(true);
+	let bindToTpm = $state(false);
 	let dataChecksum = $state('');
 	let metadataChecksum = $state('');
 	let bucketSize = $state('');
@@ -177,6 +184,25 @@
 		const next: Record<string, TpmBindStatus> = {};
 		for (const r of results) if (r) next[r[0]] = r[1];
 		tpmStatus = next;
+		// Probe host-level TPM availability: re-use any existing
+		// status if we have one (same value across all FSes), or
+		// fire a one-off `fs.tpm.status` against a sentinel name
+		// when no encrypted FS exists yet (the engine's tpm_status
+		// doesn't actually require the FS to exist — it just reports
+		// the host's `/dev/tpmrm0` presence). Without this, the
+		// create-wizard's "Bind to TPM" checkbox would be hidden on
+		// every fresh box that hasn't created an FS yet.
+		const anyStatus = Object.values(next)[0];
+		if (anyStatus) {
+			hostTpmAvailable = anyStatus.tpm_available;
+		} else {
+			try {
+				const probe = await client.call<TpmBindStatus>('fs.tpm.status', { name: '__host_probe' });
+				hostTpmAvailable = probe.tpm_available;
+			} catch {
+				hostTpmAvailable = false;
+			}
+		}
 	}
 
 	async function bindTpm(fs: Filesystem) {
@@ -415,6 +441,7 @@
 				encryption: encryption || undefined,
 				passphrase: encryption ? passphrase : undefined,
 				store_key: encryption ? storeKey : undefined,
+				bind_to_tpm: encryption && storeKey && bindToTpm ? true : undefined,
 				data_checksum: dataChecksum || undefined,
 				metadata_checksum: metadataChecksum || undefined,
 				bucket_size: bucketSize || undefined,
@@ -441,6 +468,7 @@
 			passphrase = '';
 			passphraseConfirm = '';
 			storeKey = true;
+			bindToTpm = false;
 			dataChecksum = '';
 			metadataChecksum = '';
 			bucketSize = '';
@@ -1224,6 +1252,19 @@
 							{/if}
 						</p>
 						<p class="mt-2 text-xs text-amber-400">Warning: losing the passphrase with no stored key means permanent data loss.</p>
+						{#if hostTpmAvailable && storeKey}
+							<label class="mt-3 flex cursor-pointer items-center gap-2 text-sm">
+								<input type="checkbox" bind:checked={bindToTpm} class="h-4 w-4" />
+								Seal key to TPM2 (PCR-7 bound)
+							</label>
+							<p class="mt-1 text-xs text-muted-foreground">
+								{#if bindToTpm}
+									Key is sealed to this host's TPM right after creation. Auto-unlock on boot prefers the sealed copy; the plaintext key file stays as a recovery fallback (remove later via Export Key → Destroy Key if you want pure TPM-only).
+								{:else}
+									Key stays plaintext on the boot drive. You can still bind it to the TPM later via the row's "Bind to TPM" button on the Filesystems page.
+								{/if}
+							</p>
+						{/if}
 					{:else}
 						<p class="mt-1 text-xs text-muted-foreground">Data at rest will not be encrypted.</p>
 					{/if}
