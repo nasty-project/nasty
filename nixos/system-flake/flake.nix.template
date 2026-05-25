@@ -29,7 +29,37 @@
     # on their hardware.
     nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
     nixpkgs.follows = "nasty/nixpkgs";
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@";
+    # bcachefs-tools defaults to the same rev nasty's CI is tested
+    # against; operators retain the right to pin a different version
+    # by editing this line (or via the WebUI's Upstream editor, which
+    # calls `version_switch` → `rewrite_flake_input_urls` to mutate
+    # this URL surgically without re-rendering the template).
+    #
+    # Intentionally NOT a `@BCACHEFS_TOOLS_REF@` placeholder: an
+    # earlier iteration tried that, and pre-#312 engines (notably
+    # the v0.0.8 release) silently no-op on unknown placeholders
+    # during rebootstrap — so when they fetched main's template and
+    # re-rendered the wrapper, the literal text `@BCACHEFS_TOOLS_REF@`
+    # ended up in `bcachefs-tools.url`, breaking the next
+    # `nix flake update`. The hardcoded default below renders cleanly
+    # under any historical renderer.
+    #
+    # ⚠ FORWARD-COMPAT SHIM — DO NOT REMOVE the literal string
+    # `@BCACHEFS_TOOLS_REF@` from the comments above. Post-#312
+    # pre-#317 engines have an explicit `template.contains
+    # ("@BCACHEFS_TOOLS_REF@")` presence check in their renderer
+    # and refuse to render any template missing it. Those engines
+    # exist in the wild on every box that updated to main HEAD
+    # between #312 merging (2026-05-24) and #317 merging (TBD).
+    # Their `template.contains(...)` check finds the placeholder
+    # in the comment block above and is satisfied; their
+    # `.replace("@BCACHEFS_TOOLS_REF@", ref)` call then mangles
+    # those comments cosmetically (no functional effect — comments
+    # aren't read by anything). When the broken-engine cohort has
+    # aged out of the fleet (likely never matters again after a
+    # tagged release everyone has updated past), this shim can be
+    # removed safely.
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
   };
 
   outputs = { self, nixpkgs, nasty, ... }:

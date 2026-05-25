@@ -679,25 +679,28 @@ impl UpdateService {
             &release_status.latest_tag,
         )
         .await?;
+        // Render is now placeholder-free for bcachefs (template
+        // carries a hardcoded default). The release's actual
+        // bcachefs ref gets baked in via a post-render
+        // `rewrite_flake_input_urls` pass below — works on every
+        // historical engine version because rewrite_flake_input_urls
+        // predates the placeholder mechanism. Same code path
+        // whether we rebootstrapped or just URL-rewrote.
         let next_flake = if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
-            render_system_flake_template(
-                &template,
-                &release_status.latest_tag,
-                &bcachefs_ref,
-                &local_system,
-            )?
+            render_system_flake_template(&template, &release_status.latest_tag, &local_system)?
         } else {
-            rewrite_flake_input_urls(
-                &current_flake,
-                &HashMap::from([
-                    (String::from("nasty"), release_status.latest_url.clone()),
-                    (
-                        String::from("bcachefs-tools"),
-                        format!("github:koverstreet/bcachefs-tools/{bcachefs_ref}"),
-                    ),
-                ]),
-            )?
+            current_flake.clone()
         };
+        let next_flake = rewrite_flake_input_urls(
+            &next_flake,
+            &HashMap::from([
+                (String::from("nasty"), release_status.latest_url.clone()),
+                (
+                    String::from("bcachefs-tools"),
+                    format!("github:koverstreet/bcachefs-tools/{bcachefs_ref}"),
+                ),
+            ]),
+        )?;
 
         // Best-effort cleanup of any prior unit state. `try_run` logs spawn
         // failures and non-zero exits at warn! — a missing-unit "exited 5"
@@ -1339,32 +1342,42 @@ echo "==> Update complete!"
                 )
                 .await?;
 
-                if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
+                // Render is placeholder-free — the template carries
+                // a hardcoded bcachefs default. The operator's
+                // requested bcachefs URL is applied as a post-render
+                // URL rewrite (same code path that handles the
+                // no-rebootstrap case), which works on every
+                // historical engine version.
+                let base = if should_rebootstrap_wrapper_flake(&current_flake, &template)? {
                     let local_system = detect_local_system().await?;
-                    let bcachefs_ref = requested
-                        .get("bcachefs-tools")
-                        .and_then(|i| i.url.rsplit('/').next())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| {
-                            UpdateError::CommandFailed(
-                                "version_switch request has no parseable bcachefs-tools URL — \
-                                 expected `github:owner/repo/<ref>` shape"
-                                    .into(),
-                            )
-                        })?;
-                    render_system_flake_template_with_ref(
-                        &template,
-                        &nasty_ref,
-                        &bcachefs_ref,
-                        &local_system,
-                    )?
+                    render_system_flake_template_with_ref(&template, &nasty_ref, &local_system)?
                 } else {
-                    let flake_replacements = url_changes
-                        .iter()
-                        .map(|(name, url)| (name.clone(), url.clone()))
-                        .collect::<HashMap<_, _>>();
-                    rewrite_flake_input_urls(&current_flake, &flake_replacements)?
+                    current_flake.clone()
+                };
+                // Preserve operator's existing bcachefs-tools pin
+                // across rebootstrap. Without this, a template-hash
+                // change (e.g., a maintainer-side bcachefs default
+                // bump) would silently overwrite the operator's
+                // custom pin with the template's new default. The
+                // request's bcachefs URL is what the operator
+                // actually wants (the WebUI populates it from
+                // version_info, which read the current wrapper);
+                // ensure it's in the rewrite map even when the
+                // request URL matches current state (so url_changes
+                // is empty for it).
+                let mut flake_replacements: HashMap<String, String> = url_changes
+                    .iter()
+                    .map(|(name, url)| (name.clone(), url.clone()))
+                    .collect();
+                if let Some(bcachefs_input) = requested.get("bcachefs-tools") {
+                    flake_replacements
+                        .entry(String::from("bcachefs-tools"))
+                        .or_insert_with(|| bcachefs_input.url.clone());
+                }
+                if flake_replacements.is_empty() {
+                    base
+                } else {
+                    rewrite_flake_input_urls(&base, &flake_replacements)?
                 }
             }
             None => {
@@ -1954,9 +1967,11 @@ pub async fn bootstrap_system_flake_from_template(
     nasty_version: &str,
     local_system: &str,
 ) -> Result<BootstrapSystemFlakeResult, UpdateError> {
-    let bcachefs_ref = embedded_default_bcachefs_tools_ref()?;
-    let rendered =
-        render_system_flake_template(template, nasty_version, &bcachefs_ref, local_system)?;
+    // Template carries a hardcoded bcachefs-tools URL default; no
+    // per-render substitution needed here. Caller can mutate the
+    // bcachefs ref later via `rewrite_flake_input_urls` if they
+    // need a non-default pin (the tagged-release path does this).
+    let rendered = render_system_flake_template(template, nasty_version, local_system)?;
     tokio::fs::create_dir_all(dest_dir)
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("mkdir {dest_dir}: {e}")))?;
@@ -2006,11 +2021,10 @@ fn embedded_default_bcachefs_tools_ref() -> Result<String, UpdateError> {
 fn render_system_flake_template(
     template: &str,
     nasty_version: &str,
-    bcachefs_tools_ref: &str,
     local_system: &str,
 ) -> Result<String, UpdateError> {
     let nasty_tag = normalize_release_tag(nasty_version)?;
-    render_system_flake_template_with_ref(template, &nasty_tag, bcachefs_tools_ref, local_system)
+    render_system_flake_template_with_ref(template, &nasty_tag, local_system)
 }
 
 /// Render the wrapper-flake template with the nasty ref passed
@@ -2018,10 +2032,20 @@ fn render_system_flake_template(
 /// `render_system_flake_template` would reject them — but they're
 /// valid GitHub refs and we want main-trackers to be able to
 /// rebootstrap too.
+///
+/// **Backwards-compat invariant** (the v0.0.8-strand lesson): the
+/// only placeholders this renderer substitutes are the three below
+/// — `@NASTY_VERSION@`, `@LOCAL_SYSTEM@`, `@WRAPPER_FLAKE_VERSION@`.
+/// Older engines (notably v0.0.8) substitute the same three and
+/// silently no-op on anything else, leaving any unknown `@FOO@`
+/// literal in the wrapper they write to disk. So the canonical
+/// template MUST NOT add a fourth placeholder — operator inputs
+/// that need to vary per render (like the bcachefs-tools ref) are
+/// handled by a post-render `rewrite_flake_input_urls` pass on
+/// the caller side, NOT here.
 fn render_system_flake_template_with_ref(
     template: &str,
     nasty_ref: &str,
-    bcachefs_tools_ref: &str,
     local_system: &str,
 ) -> Result<String, UpdateError> {
     if !template.contains("@NASTY_VERSION@") {
@@ -2039,28 +2063,19 @@ fn render_system_flake_template_with_ref(
             "system flake template is missing @WRAPPER_FLAKE_VERSION@ placeholder".into(),
         ));
     }
-    if !template.contains("@BCACHEFS_TOOLS_REF@") {
-        return Err(UpdateError::CommandFailed(
-            "system flake template is missing @BCACHEFS_TOOLS_REF@ placeholder".into(),
-        ));
-    }
     if nasty_ref.is_empty() {
         return Err(UpdateError::CommandFailed(
             "nasty ref must not be empty".into(),
         ));
     }
-    if bcachefs_tools_ref.is_empty() {
-        return Err(UpdateError::CommandFailed(
-            "bcachefs-tools ref must not be empty".into(),
-        ));
-    }
     let wrapper_version = wrapper_flake_content_hash(template);
 
-    Ok(template
+    let rendered = template
         .replace("@NASTY_VERSION@", nasty_ref)
-        .replace("@BCACHEFS_TOOLS_REF@", bcachefs_tools_ref)
         .replace("@LOCAL_SYSTEM@", local_system)
-        .replace("@WRAPPER_FLAKE_VERSION@", &wrapper_version))
+        .replace("@WRAPPER_FLAKE_VERSION@", &wrapper_version);
+
+    Ok(rendered)
 }
 
 /// Whether the wrapper is in the canonical 0.0.9 shape:
@@ -2138,6 +2153,14 @@ async fn migrate_wrapper_to_canonical_shape(
              want the canonical-shape inputs."
         ))
     })?;
+    // Resolve the bcachefs ref to PRESERVE across migration. Three
+    // sources, in priority:
+    //   1. operator's existing `bcachefs-tools.url` (legacy / pre-#304
+    //      wrappers that had their own pin),
+    //   2. `flake.lock`'s `nodes["bcachefs-tools"].original.ref`
+    //      (post-#308 follows-shape wrappers — Nix wrote the
+    //      resolved ref on the followed node),
+    //   3. embedded default (lock-less fresh installs).
     let bcachefs_ref = if let Some(input) = urls.get("bcachefs-tools") {
         input
             .url
@@ -2159,11 +2182,18 @@ async fn migrate_wrapper_to_canonical_shape(
             None => embedded_default_bcachefs_tools_ref()?,
         }
     };
-    render_system_flake_template_with_ref(
-        EMBEDDED_WRAPPER_TEMPLATE,
-        &nasty_ref,
-        &bcachefs_ref,
-        local_system,
+    // Render is placeholder-free (template has a hardcoded bcachefs
+    // default). Then rewrite the bcachefs URL to the operator's
+    // preserved ref — same rewrite-after-render pattern as
+    // upgrade_tagged_release and version_switch.
+    let rendered =
+        render_system_flake_template_with_ref(EMBEDDED_WRAPPER_TEMPLATE, &nasty_ref, local_system)?;
+    rewrite_flake_input_urls(
+        &rendered,
+        &HashMap::from([(
+            String::from("bcachefs-tools"),
+            format!("github:koverstreet/bcachefs-tools/{bcachefs_ref}"),
+        )]),
     )
 }
 
@@ -3173,7 +3203,7 @@ body = true;
         let template = r#"
 inputs = {
   nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
-  bcachefs-tools.url = "github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@";
+  bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
 };
 wrapperFlakeVersion = "@WRAPPER_FLAKE_VERSION@";
 "#
@@ -3183,37 +3213,28 @@ outputs = { nixpkgs, nasty, ... }: {
   nixosConfigurations.nasty = nixpkgs.lib.nixosSystem { system = "@LOCAL_SYSTEM@"; };
 };
 "#;
-        let rendered =
-            super::render_system_flake_template(&template, "0.0.3", "v1.38.3", "x86_64-linux")
-                .expect("rendered");
+        let rendered = super::render_system_flake_template(&template, "0.0.3", "x86_64-linux")
+            .expect("rendered");
         assert!(rendered.contains("github:nasty-project/nasty/v0.0.3"));
+        // bcachefs-tools URL is hardcoded in the template (no
+        // placeholder) — passes through unchanged.
         assert!(rendered.contains("github:koverstreet/bcachefs-tools/v1.38.3"));
         assert!(rendered.contains("\"x86_64-linux\""));
-        // The placeholder must be substituted with a content hash.
+        // The hash placeholder must be substituted with a content hash.
         assert!(!rendered.contains("@WRAPPER_FLAKE_VERSION@"));
-        assert!(!rendered.contains("@BCACHEFS_TOOLS_REF@"));
         assert!(rendered.contains("wrapperFlakeVersion = \"sha256-"));
         // Rendering twice yields the same hash (deterministic).
-        let rendered2 =
-            super::render_system_flake_template(&template, "0.0.3", "v1.38.3", "x86_64-linux")
-                .expect("rendered");
+        let rendered2 = super::render_system_flake_template(&template, "0.0.3", "x86_64-linux")
+            .expect("rendered");
         assert_eq!(rendered, rendered2);
     }
 
     #[test]
     fn render_fails_without_wrapper_placeholder() {
-        let template = "inputs = {\n  nasty.url = \"github:nasty-project/nasty/@NASTY_VERSION@\";\n  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/@BCACHEFS_TOOLS_REF@\";\n};\nsystem = \"@LOCAL_SYSTEM@\";\n";
-        let err = super::render_system_flake_template(template, "0.0.3", "v1.38.3", "x86_64-linux")
+        let template = "inputs = {\n  nasty.url = \"github:nasty-project/nasty/@NASTY_VERSION@\";\n  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/v1.38.3\";\n};\nsystem = \"@LOCAL_SYSTEM@\";\n";
+        let err = super::render_system_flake_template(template, "0.0.3", "x86_64-linux")
             .expect_err("placeholder enforcement");
         assert!(format!("{err:?}").contains("@WRAPPER_FLAKE_VERSION@"));
-    }
-
-    #[test]
-    fn render_fails_without_bcachefs_tools_placeholder() {
-        let template = "inputs = { nasty.url = \"github:nasty-project/nasty/@NASTY_VERSION@\"; };\nwrapperFlakeVersion = \"@WRAPPER_FLAKE_VERSION@\";\nsystem = \"@LOCAL_SYSTEM@\";\n";
-        let err = super::render_system_flake_template(template, "0.0.3", "v1.38.3", "x86_64-linux")
-            .expect_err("placeholder enforcement");
-        assert!(format!("{err:?}").contains("@BCACHEFS_TOOLS_REF@"));
     }
 
     // ── systemd state mapping ──────────────────────────────────────
