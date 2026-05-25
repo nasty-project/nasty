@@ -1354,10 +1354,26 @@ echo "==> Update complete!"
                 } else {
                     current_flake.clone()
                 };
-                let flake_replacements = url_changes
+                // Preserve operator's existing bcachefs-tools pin
+                // across rebootstrap. Without this, a template-hash
+                // change (e.g., a maintainer-side bcachefs default
+                // bump) would silently overwrite the operator's
+                // custom pin with the template's new default. The
+                // request's bcachefs URL is what the operator
+                // actually wants (the WebUI populates it from
+                // version_info, which read the current wrapper);
+                // ensure it's in the rewrite map even when the
+                // request URL matches current state (so url_changes
+                // is empty for it).
+                let mut flake_replacements: HashMap<String, String> = url_changes
                     .iter()
                     .map(|(name, url)| (name.clone(), url.clone()))
-                    .collect::<HashMap<_, _>>();
+                    .collect();
+                if let Some(bcachefs_input) = requested.get("bcachefs-tools") {
+                    flake_replacements
+                        .entry(String::from("bcachefs-tools"))
+                        .or_insert_with(|| bcachefs_input.url.clone());
+                }
                 if flake_replacements.is_empty() {
                     base
                 } else {
