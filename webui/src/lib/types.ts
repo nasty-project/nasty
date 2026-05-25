@@ -52,6 +52,18 @@ export interface HardwareSummary {
 	memory: MemorySummary;
 	usb: UsbDevice[];
 	tpm: TpmInfo | null;
+	secure_boot: SecureBootStatus;
+}
+
+/** Result of `sbctl status --json`. All fields degrade to null when
+ * the box isn't UEFI, sbctl isn't installed, or sbctl errored — those
+ * failure modes surface as `enabled: null` with a human-readable
+ * `note`, not as a missing field. */
+export interface SecureBootStatus {
+	enabled: boolean | null;
+	setup_mode: boolean | null;
+	sbctl_installed: boolean | null;
+	note: string | null;
 }
 
 export interface TpmInfo {

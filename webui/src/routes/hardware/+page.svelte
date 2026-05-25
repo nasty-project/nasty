@@ -330,6 +330,40 @@
 				{/if}
 			</CardContent>
 		</Card>
+
+		<Card>
+			<CardContent class="pt-4 pb-3">
+				<h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+					Secure Boot
+				</h3>
+				{#if summary?.secure_boot.enabled === true}
+					<div class="text-sm font-medium">
+						Enabled
+						<span class="ml-1 text-xs text-emerald-400">· enforcing</span>
+					</div>
+					{#if summary.secure_boot.setup_mode === true}
+						<div class="mt-1 text-xs text-amber-500">
+							Firmware in setup mode — accepts unsigned key enrollment.
+						</div>
+					{/if}
+				{:else if summary?.secure_boot.enabled === false}
+					<div class="text-sm font-medium">
+						Disabled
+						<span class="ml-1 text-xs text-amber-500">· not enforcing</span>
+					</div>
+					<div class="mt-1 text-xs text-muted-foreground">
+						TPM PCR-7 sealing still works but is significantly weaker
+						without a measured boot chain. Enable Secure Boot in firmware
+						to harden the seal.
+					</div>
+				{:else}
+					<div class="text-sm font-medium">Unknown</div>
+					<div class="mt-1 text-xs text-muted-foreground">
+						{summary?.secure_boot.note ?? 'No status reported.'}
+					</div>
+				{/if}
+			</CardContent>
+		</Card>
 	</div>
 
 	<!-- ── DIMM detail (collapsed by default) ──────────────────────── -->

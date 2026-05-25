@@ -278,6 +278,12 @@ pub struct HardwareSummary {
     /// is enumerated by the kernel at all (no chip, disabled in
     /// firmware, missing driver).
     pub tpm: Option<TpmInfo>,
+    /// Secure Boot state as reported by `sbctl status --json`. Always
+    /// present — failure modes (BIOS boot, sbctl missing, sbctl
+    /// errored) collapse into a struct with `enabled = None` and a
+    /// human-readable `note` rather than an absent field. The WebUI
+    /// renders one of: enabled / disabled / unknown.
+    pub secure_boot: nasty_common::secure_boot::SecureBootStatus,
 }
 
 /// Snapshot of the host's first TPM device — what the kernel sees at
@@ -425,6 +431,7 @@ async fn build_summary() -> HardwareSummary {
     let cpu = read_cpu_info().await;
     let usb = read_usb_devices().await;
     let tpm = read_tpm_info().await;
+    let secure_boot = nasty_common::secure_boot::status().await;
     HardwareSummary {
         system,
         bios,
@@ -432,6 +439,7 @@ async fn build_summary() -> HardwareSummary {
         memory,
         usb,
         tpm,
+        secure_boot,
     }
 }
 
