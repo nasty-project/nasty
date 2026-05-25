@@ -686,14 +686,18 @@ in {
         nasty-sync — CLI update / recovery tool for NASty
 
         Usage:
-          nasty-sync             Bump nasty to current main HEAD and rebuild
+          nasty-sync             Bump nasty to current ref's HEAD and rebuild
                                  (bcachefs-tools untouched).
+          nasty-sync -n <ref>    Switch nasty.url's ref to <ref> (a branch
+                                 like \"main\", a tag like \"v0.0.9\", or
+                                 a PR branch name), then bump + rebuild.
+                                 Useful for testing PR branches, switching
+                                 channels, or rolling back to a tag.
           nasty-sync -b          Bump nasty AND bcachefs-tools together —
                                  bcachefs adopts whatever rev nasty's new
-                                 main HEAD declares (atomic bundle).
-          nasty-sync -b <ref>    Bump nasty to main HEAD; pin bcachefs-tools
-                                 to <ref> (e.g. v1.37.2 for a downgrade),
-                                 rebuild.
+                                 HEAD declares (atomic bundle).
+          nasty-sync -b <ref>    Bump nasty; pin bcachefs-tools to <ref>
+                                 (e.g. v1.37.2 for a downgrade), rebuild.
           nasty-sync -r          Recovery: canonicalize the wrapper back to
                                  \`bcachefs-tools.url\` shape using the rev
                                  in flake.lock (handles follows-shape AND
@@ -704,6 +708,11 @@ in {
           nasty-sync -s          Show current state (read-only).
           nasty-sync -h          This message.
 
+        \`-n\` composes with the other modes: \`nasty-sync -n <ref> -b\` or
+        \`nasty-sync -n <ref> -r\` first rewrites nasty.url, then runs the
+        requested mode. \`-n\` followed by another mode flag in either
+        order is fine — getopts handles the parse.
+
         When invoked from the WebUI terminal, the rebuild is auto-detached
         to a systemd transient unit (\`nasty-sync-rebuild.service\`) so it
         survives the engine restart that nixos-rebuild triggers. Follow
@@ -713,12 +722,15 @@ in {
         }
 
         mode=update
-        while getopts ":brsh" opt; do
+        nasty_ref=""
+        while getopts ":brshn:" opt; do
           case "$opt" in
             b) mode=update-with-bcachefs ;;
             r) mode=rescue ;;
             s) mode=show ;;
+            n) nasty_ref="$OPTARG" ;;
             h) usage; exit 0 ;;
+            :) echo "nasty-sync: option -''${OPTARG} requires a value (e.g. -n main)" >&2; usage >&2; exit 2 ;;
             \?) echo "nasty-sync: unknown option -''${OPTARG}" >&2; usage >&2; exit 2 ;;
           esac
         done
@@ -735,6 +747,40 @@ in {
             echo "nasty-sync: /etc/nixos/flake.nix not found — not a NASty box, or the wrapper flake is missing" >&2
             exit 1
           fi
+        fi
+        if [ -n "$nasty_ref" ] && [ "$mode" = show ]; then
+          echo "nasty-sync: -n is for modifying the wrapper; combine it with the default mode, -b, or -r (not -s)" >&2
+          exit 2
+        fi
+
+        # When `-n <ref>` was passed: rewrite nasty.url's ref segment
+        # in /etc/nixos/flake.nix BEFORE doing any update / rebuild
+        # work. The rewrite preserves the github:nasty-project/nasty/
+        # path prefix (so this only retargets within the canonical
+        # nasty repo — for forks, edit by hand). The downstream
+        # `nix flake update nasty` step then fetches the new ref.
+        #
+        # `#` as sed delimiter to dodge collision with the `/` inside
+        # `github:nasty-project/nasty/...`. Branch names with
+        # special regex chars aren't supported — keep it
+        # github-branch-name-clean (alphanumeric + dash + underscore
+        # + slash + dot).
+        if [ -n "$nasty_ref" ]; then
+          # Reject inputs with shell-meaningful characters that could
+          # break out of the sed quoting. Branch / tag names don't
+          # need any of these.
+          case "$nasty_ref" in
+            *[\"\$\\\`\|\&\;\<\>\(\)\{\}\[\]\*\?]*)
+              echo "nasty-sync: ref '$nasty_ref' contains characters not allowed in a git ref" >&2
+              exit 2
+              ;;
+          esac
+          if ! grep -qE '^\s*nasty\.url\s*=\s*"github:nasty-project/nasty/' /etc/nixos/flake.nix; then
+            echo "nasty-sync: /etc/nixos/flake.nix doesn't declare nasty.url with the canonical github:nasty-project/nasty/<ref> shape — refusing to rewrite (operator is on a fork; edit by hand)" >&2
+            exit 1
+          fi
+          echo "==> Switching nasty.url ref to: $nasty_ref"
+          sed -i -E "s#^(\s*nasty\.url\s*=\s*\")github:nasty-project/nasty/[^\"]+(\")#\1github:nasty-project/nasty/$nasty_ref\2#" /etc/nixos/flake.nix
         fi
 
         # Run the actual rebuild work — either inline (from a real SSH
