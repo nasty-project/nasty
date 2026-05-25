@@ -346,6 +346,21 @@
 							Firmware in setup mode — accepts unsigned key enrollment.
 						</div>
 					{/if}
+					{#if summary.secure_boot.measured_uki === true}
+						<div class="mt-1 text-xs text-emerald-400">
+							Measured UKI · kernel and initrd measured into the PCR chain.
+						</div>
+					{/if}
+				{:else if summary?.secure_boot.unsupported === true}
+					<div class="text-sm font-medium">
+						Unsupported
+						<span class="ml-1 text-xs text-muted-foreground">· firmware lacks SB</span>
+					</div>
+					<div class="mt-1 text-xs text-muted-foreground">
+						This UEFI build doesn't support Secure Boot (common on default
+						QEMU OVMF). Nothing to enable in firmware — TPM PCR-7 sealing
+						still works, just without the measured-boot reinforcement.
+					</div>
 				{:else if summary?.secure_boot.enabled === false}
 					<div class="text-sm font-medium">
 						Disabled

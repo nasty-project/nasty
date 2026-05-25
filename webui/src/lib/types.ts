@@ -55,14 +55,19 @@ export interface HardwareSummary {
 	secure_boot: SecureBootStatus;
 }
 
-/** Result of `sbctl status --json`. All fields degrade to null when
- * the box isn't UEFI, sbctl isn't installed, or sbctl errored — those
- * failure modes surface as `enabled: null` with a human-readable
- * `note`, not as a missing field. */
+/** Sourced from `bootctl status` on the engine. All fields degrade
+ * to null when the box isn't UEFI, bootctl is missing, or its output
+ * lacks the Secure Boot line — those failure modes surface as
+ * `enabled: null` with a human-readable `note`, never as a missing
+ * field. `unsupported = true` distinguishes "firmware can't do SB"
+ * from "firmware can but operator hasn't enabled it", so the WebUI
+ * doesn't nudge the operator toward a firmware setting that isn't
+ * there. */
 export interface SecureBootStatus {
 	enabled: boolean | null;
 	setup_mode: boolean | null;
-	sbctl_installed: boolean | null;
+	unsupported: boolean | null;
+	measured_uki: boolean | null;
 	note: string | null;
 }
 
