@@ -60,9 +60,18 @@
     # tagged release everyone has updated past), this shim can be
     # removed safely.
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+
+    # Secure Boot integration. Pinned by NASty (operators shouldn't
+    # pick a lanzaboote rev — its protocol with sd-stub, the firmware
+    # key formats, and the install-hook contract are all things NASty
+    # tests against). Inert until the operator sets
+    # `nasty.secureBoot.enable = true` per box; on boxes that never
+    # opt in this is just a flake.lock entry, no boot path changes.
+    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
+    lanzaboote.inputs.nixpkgs.follows = "nasty/nixpkgs";
   };
 
-  outputs = { self, nixpkgs, nasty, ... }:
+  outputs = { self, nixpkgs, nasty, lanzaboote, ... }:
     let
       nasty-version =
         (builtins.fromTOML (builtins.readFile "${nasty}/engine/Cargo.toml")).workspace.package.version;
@@ -84,7 +93,7 @@
             nasty-webui = nasty.packages.${system}.webui;
             nasty-version = nasty-version;
             nasty-bcachefs-tools = nasty.packages.${system}.bcachefs-tools;
-            inherit nastySystemFlakeSnapshot;
+            inherit nastySystemFlakeSnapshot lanzaboote;
           };
           modules = [
             "${nasty}/nixos/binary-cache.nix"

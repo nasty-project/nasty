@@ -5,6 +5,17 @@ let
   inherit (lib) mkEnableOption mkOption mkIf types;
   nastySystemFlakeSnapshot = args.nastySystemFlakeSnapshot or null;
 
+  # Secure Boot integration is opt-in per box. The wrapper flake at
+  # /etc/nixos/flake.nix passes the lanzaboote input through as a
+  # specialArg when it has the input declared; pre-#324-era wrappers
+  # don't, in which case lanzaboote stays null and any attempt to set
+  # `services.nasty.secureBoot.enable = true` trips a clear assertion
+  # (rather than failing with a cryptic "option boot.lanzaboote.enable
+  # does not exist" message). The fix path is to re-render the wrapper
+  # by running any upgrade once on the new engine.
+  lanzaboote = args.lanzaboote or null;
+  lanzabooteAvailable = lanzaboote != null;
+
   # When the operator supplies a cert + key (cfg.tls.certFile/keyFile),
   # Caddy serves those for the :443 catch-all. Otherwise we use Caddy's
   # `tls internal` directive — Caddy's "Local Authority" issues a
@@ -86,6 +97,21 @@ EOF
   };
 
 in {
+  # Import the lanzaboote NixOS module — and the small sub-module
+  # that uses its options — only when the wrapper passed lanzaboote
+  # through. Splitting the lanzaboote-using config into a separate
+  # file (`./nasty-secure-boot.nix`) keeps `boot.lanzaboote.*`
+  # references out of this file's evaluation, so configurations
+  # that import `nasty.nix` without threading lanzaboote (notably
+  # the integration tests in `nixos/tests/`) don't trip
+  # option-existence validation. On older wrappers without the
+  # input, this is just `[]` — the option below stays unflippable
+  # and the assertion catches anyone who flips it anyway.
+  imports = lib.optionals lanzabooteAvailable [
+    lanzaboote.nixosModules.lanzaboote
+    ./nasty-secure-boot.nix
+  ];
+
   options.services.nasty = {
     enable = mkEnableOption "NASty NAS management system";
 
@@ -167,9 +193,64 @@ in {
 
     # VPN — not enabled by default (requires Tailscale auth key)
     tailscale.enable = mkEnableOption "Tailscale VPN for NASty";
+
+    # ── Secure Boot (opt-in, per box) ──────────────────────────
+    # Lanzaboote-backed UEFI Secure Boot. Off by default everywhere;
+    # operators flip it on per-box only after their firmware is in
+    # Setup Mode and the on-box `sbctl enroll-keys` ceremony has
+    # been arranged. Without SB on, NASty's TPM2 sealing of bcachefs
+    # keys is bound to PCR-7 — which on a stock NixOS install is
+    # essentially a constant (PCR-7 measures Secure Boot policy, and
+    # "SB disabled" is the same value on every box). The seal looks
+    # right but a box-theft attacker can boot any OS and still
+    # unseal. With SB on, PCR-7 binds to NASty-owned firmware keys,
+    # so an attacker can't satisfy the policy without booting the
+    # signed NASty stub.
+    #
+    # See `docs/adr/0001-secure-boot-via-lanzaboote.md` for the full
+    # picture; PR #2 (enrollment ceremony) is the operator-facing
+    # half of the workflow.
+    secureBoot.enable = mkEnableOption "lanzaboote-backed UEFI Secure Boot (opt-in, per box)";
   };
 
-  config = mkIf cfg.enable {
+  config = lib.mkMerge [
+
+    # ── Secure Boot: bits that touch stock NixOS options only ───
+    # The lanzaboote-specific settings (`boot.lanzaboote.*`) live in
+    # `./nasty-secure-boot.nix`, which is only imported when
+    # lanzaboote was actually passed through — so they don't trip
+    # option-existence validation in test configurations.
+    # `boot.loader.systemd-boot.enable` is a stock NixOS option and
+    # is always safe to set here.
+    (mkIf (cfg.enable && cfg.secureBoot.enable && lanzabooteAvailable) {
+      # Lanzaboote installs systemd-boot itself (signed); the NixOS
+      # `boot.loader.systemd-boot.enable` option conflicts with that
+      # install path, so it must be forced off when lanzaboote takes
+      # over the loader.
+      boot.loader.systemd-boot.enable = lib.mkForce false;
+    })
+
+    # ── Catch operator-error: SB enabled on a wrapper that doesn't
+    # carry the lanzaboote input. Pre-this-PR wrappers will hit this
+    # if someone flips the knob; the fix is to run any upgrade once
+    # so the new engine re-renders the wrapper template with the
+    # `lanzaboote.url` input added.
+    (mkIf (cfg.enable && cfg.secureBoot.enable && !lanzabooteAvailable) {
+      assertions = [
+        {
+          assertion = false;
+          message = ''
+            services.nasty.secureBoot.enable = true requires the wrapper
+            flake at /etc/nixos/flake.nix to declare the lanzaboote input.
+            Your wrapper is out of date — run any upgrade once on the new
+            NASty engine to re-render it (the new template includes the
+            lanzaboote input), then this option will work.
+          '';
+        }
+      ];
+    })
+
+    (mkIf cfg.enable {
 
     # ── Required kernel support ────────────────────────────────
     # bcachefs kernel module + tools live in modules/bcachefs.nix
@@ -594,6 +675,7 @@ in {
       qemu              # QEMU/KVM for virtual machines
       pciutils          # lspci for passthrough device discovery
       tpm2-tools        # tpm2_getcap, tpm2_pcrread, tpm2_unseal — engine reads vendor info via tpm2_getcap, operators use the rest for TPM debugging
+      sbctl             # Secure Boot key + signing-state inspector. Used by operators directly (`sbctl status`, `sbctl verify`, `sbctl list-enrolled-keys`); the lanzaboote module also drives it via the `autoGenerateKeys` install hook to create `/var/lib/sbctl` keys on first boot. NASty itself only ever reads — signing/enrollment writes go through lanzaboote, never direct sbctl calls.
       docker-compose    # Docker Compose for multi-container apps
       croc              # peer-to-peer file transfer for sending debug reports
       rustic             # deduplicating encrypted backups (restic-compatible)
@@ -1451,6 +1533,7 @@ in {
         dmidecode                    # DMI tables for /system/hardware (BIOS, baseboard, memory)
         tpm2-tools                   # tpm2_getcap / tpm2_create / tpm2_unseal — Hardware page chip info + the PCR-7 seal/unseal flow for the bcachefs encryption key (#102)
         systemd                      # bootctl — Secure Boot + Measured UKI state for the Hardware page. systemd is PID 1 already; this just puts its bin/ on the engine's path so the engine's restricted PATH can find bootctl without an absolute store path.
+        sbctl                        # SB enrollment + signing-state checks for PR #2's WebUI ceremony (`sbctl verify`, `sbctl list-enrolled-keys`). Read paths only from the engine; writes go through lanzaboote's install hooks, never direct sbctl-from-engine calls.
         keyutils                     # keyctl — fs.lock revokes the bcachefs unlock key from the kernel session keyring; without this the call fails with "No such file or directory" even though every other tool we shell out to is here
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
         ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
@@ -2109,5 +2192,6 @@ in {
       "interface-name:cni*"
       "interface-name:flannel*"
     ];
-  };
+    })
+  ];
 }
