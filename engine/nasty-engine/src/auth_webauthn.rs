@@ -376,9 +376,10 @@ mod tests {
     use super::*;
 
     fn settings_with_domain(domain: Option<&str>) -> nasty_system::settings::Settings {
-        let mut s = nasty_system::settings::Settings::default();
-        s.tls_domain = domain.map(str::to_string);
-        s
+        nasty_system::settings::Settings {
+            tls_domain: domain.map(str::to_string),
+            ..Default::default()
+        }
     }
 
     #[test]
