@@ -1,6 +1,6 @@
 # ADR 0001 — Secure Boot via lanzaboote
 
-- **Status:** Proposed (research complete; awaiting hardware validation before any code lands)
+- **Status:** Accepted, staged rollout. Opt-in per box from day one.
 - **Date:** 2026-05-25
 - **Deciders:** @fenio
 - **Supersedes:** —
@@ -93,22 +93,19 @@ Ranked by how much they should worry us, descending:
 
 ## Decision
 
-**Not yet a decision — proposed direction with a gating step.**
+Pursue lanzaboote as the path to real measured-boot binding on NASty, **as an opt-in per-box feature from day one** — same pattern TPM2 sealing already follows. Boxes that physically can't do SB (BIOS/legacy, OVMF without SB, firmware in a bricked state) just don't get opted in; the Hardware-card states added in PR #323 already distinguish `Unsupported` from `Disabled` from `Unknown` cleanly so the operator sees the signal they need.
 
-Direction: pursue lanzaboote as the path to genuine Secure Boot on NASty, but only after a hardware validation pass on representative server boards and only via a staged rollout that decouples shipping infrastructure from asking operators to migrate.
+No fleet-wide validation gate, no readiness-probe PR. Validation happens organically as Bartosz implements the toggle on his own boxes (`.74` is the natural first target); the operator on any other box validates by flipping the toggle and watching what happens.
 
-Gating step: Bartosz manually validates lanzaboote 1.0.0 boots cleanly on at least one Supermicro server board, one ASRock Rack EPYC board, and one consumer board (e.g., ASUS Pro WS). Capture `bootctl status`, `sbctl verify` output, and PCR-7 stability across one `fwupdmgr` run on each. **Without this datapoint everything below is speculation.**
+## Recommended sequencing
 
-## Recommended sequencing (post-validation)
+Two PRs:
 
-Each item is roughly PR-shaped.
+1. **`nasty.secureBoot.enable` — opt-in lanzaboote module.** Imports lanzaboote 1.0.0 with `pkiBundle = /var/lib/sbctl`, `autoGenerateKeys.enable = true`, `autoEnrollKeys` **off**, and `boot.loader.systemd-boot.enable = lib.mkForce false`. Fold the seal-format-versioning audit inline — a small `policy_kind` enum on `SealedBlob` before any field semantics shift so future PCR-policy changes can be discriminated. Default off across the fleet; opt-in per box. Rollback while keys aren't yet enrolled is one Nix rebuild — no firmware visit needed at this stage.
 
-1. **Hardware validation pass** (manual, no code). Gating; results go in this ADR as an appendix.
-2. **Readiness probe (read-only PR).** Engine parses `sbctl verify`; Hardware-page SB card grows to a small panel showing "ESP artifacts signed? sbctl keys present? Microsoft keys present in firmware?". Zero behavior change; lets fleet collect readiness telemetry without any operator opting in.
-3. **Seal-format versioning audit.** Verify `SealedBlob.pcrs` is sufficient to discriminate "PCR-7 pre-SB" / "PCR-7 post-SB" / "future pcrlock policy". Add a `policy_kind` enum if needed before any field semantics shift.
-4. **Opt-in lanzaboote module, no auto-enroll.** NASty config knob (e.g., `nasty.secureBoot.enable`) imports lanzaboote with `autoGenerateKeys.enable = true` but `autoEnrollKeys` off. Existing seals untouched; ESP artifacts become signed.
-5. **WebUI enrollment ceremony.** Guided per-box flow: hardware-specific BIOS hints (Supermicro / ASRock Rack IPMI), Setup-Mode confirmation, auto-enroll, post-enroll passphrase prompt, re-seal in place.
-6. **Defer measured boot (PCR-4 + `systemd-pcrlock`) to v2.** Wait for [lanzaboote#584](https://github.com/nix-community/lanzaboote/issues/584) (PCR-7 prediction) and pcrlock to graduate out of experimental upstream. Engine would also need to move off `tpm2-tools` toward `systemd-cryptenroll` for this.
+2. **WebUI enrollment ceremony.** Once #1 boots cleanly, the operator UX: hardware-specific BIOS hints, Setup-Mode confirmation gate, auto-enroll flip, post-enroll passphrase prompt, re-seal-in-place under the new PCR-7. This is the per-box ceremony for moving from "signed ESP, SB off" to "SB enforcing with NASty-owned keys + re-sealed bcachefs blobs."
+
+**Deferred (post-launch, not v1):** PCR-4 + `systemd-pcrlock` measured boot. Wait for [lanzaboote#584](https://github.com/nix-community/lanzaboote/issues/584) (PCR-7 prediction drift on AMD) and pcrlock to graduate out of experimental upstream. The engine would also need to move off `tpm2-tools` toward `systemd-cryptenroll` for this — bigger refactor than #1 + #2 combined.
 
 ## Consequences
 
@@ -131,11 +128,10 @@ Each item is roughly PR-shaped.
 
 ## Open questions
 
-- **Hardware validation outcome** (gating). Specifically: does enrollment + signed boot work on Supermicro X11SSL/X11SCH class boards and ASRock Rack ROMED8-2T? What's the IPMI iKVM ergonomics for Setup Mode entry?
-- **What to do about kexec.** If NASty ever relies on kexec for fast upgrades, document the regression or stay on systemd-boot for kexec-relevant boxes.
-- **AMD fleet ratio.** How many of Bartosz's known NASty deployments are AMD? If material, [lanzaboote#584](https://github.com/nix-community/lanzaboote/issues/584) needs an upstream resolution before step 5.
-- **ESP sizing in the NASty installer.** Current default is sufficient for systemd-boot; under lanzaboote + 8 generations it may not be. Either bump the default or require a pre-flight check in the WebUI opt-in step.
-- **Where does the keystore back up?** `/var/lib/sbctl` is per-box and unencrypted on the system partition. Operator workflow: include it in the existing "back up your master key" guidance, or build a separate flow?
+- **What to do about kexec.** If NASty ever relies on kexec for fast upgrades, document the regression in the SB toggle's WebUI copy or detect-and-warn at opt-in time.
+- **ESP sizing.** Current installer default is sufficient for systemd-boot; under lanzaboote + 8 generations it may not be. PR #1 should add a pre-flight `df /boot` check at opt-in time and refuse to enable if there isn't headroom.
+- **Where does the keystore back up?** `/var/lib/sbctl` is per-box and unencrypted on the system partition. Operator workflow: include it in the existing "back up your master key" guidance, or build a separate flow? Probably worth surfacing in the enrollment-ceremony WebUI copy.
+- **AMD PCR-7 prediction drift** ([lanzaboote#584](https://github.com/nix-community/lanzaboote/issues/584)) — material for any AMD-based opt-in. Acceptable for v1 because re-seal happens at enrollment time (we read the actual post-enroll PCR-7 value, not the predicted one), but blocks the deferred PCR-4 + pcrlock work.
 
 ## Sources
 
