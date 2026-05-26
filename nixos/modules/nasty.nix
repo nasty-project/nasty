@@ -97,11 +97,20 @@ EOF
   };
 
 in {
-  # Import the lanzaboote NixOS module if the wrapper passed it
-  # through; on older wrappers without the input, this is just
-  # `[]` and nothing happens — the option above stays unflippable
-  # and the assertion below catches anyone who flips it anyway.
-  imports = lib.optionals lanzabooteAvailable [ lanzaboote.nixosModules.lanzaboote ];
+  # Import the lanzaboote NixOS module — and the small sub-module
+  # that uses its options — only when the wrapper passed lanzaboote
+  # through. Splitting the lanzaboote-using config into a separate
+  # file (`./nasty-secure-boot.nix`) keeps `boot.lanzaboote.*`
+  # references out of this file's evaluation, so configurations
+  # that import `nasty.nix` without threading lanzaboote (notably
+  # the integration tests in `nixos/tests/`) don't trip
+  # option-existence validation. On older wrappers without the
+  # input, this is just `[]` — the option below stays unflippable
+  # and the assertion catches anyone who flips it anyway.
+  imports = lib.optionals lanzabooteAvailable [
+    lanzaboote.nixosModules.lanzaboote
+    ./nasty-secure-boot.nix
+  ];
 
   options.services.nasty = {
     enable = mkEnableOption "NASty NAS management system";
@@ -206,21 +215,14 @@ in {
 
   config = lib.mkMerge [
 
-    # ── Secure Boot opt-in (when lanzaboote was passed by the wrapper) ──
-    # Setting these options under mkMerge with the precise enabling
-    # condition means: when secureBoot is off, this whole sub-attrset
-    # is never evaluated, so the `boot.lanzaboote.*` option references
-    # don't blow up on old wrappers (where lanzaboote = null and the
-    # lanzaboote module wasn't imported).
+    # ── Secure Boot: bits that touch stock NixOS options only ───
+    # The lanzaboote-specific settings (`boot.lanzaboote.*`) live in
+    # `./nasty-secure-boot.nix`, which is only imported when
+    # lanzaboote was actually passed through — so they don't trip
+    # option-existence validation in test configurations.
+    # `boot.loader.systemd-boot.enable` is a stock NixOS option and
+    # is always safe to set here.
     (mkIf (cfg.enable && cfg.secureBoot.enable && lanzabooteAvailable) {
-      boot.lanzaboote.enable = true;
-      boot.lanzaboote.pkiBundle = "/var/lib/sbctl";
-      # First boot generates the PKI under pkiBundle if it isn't there
-      # already. Operator (or PR #3's installer) still has to enroll
-      # PK/KEK/db into firmware via a Setup-Mode visit — auto-enroll
-      # stays off here so flipping this knob doesn't surprise an
-      # operator with a firmware-state change.
-      boot.lanzaboote.autoGenerateKeys.enable = true;
       # Lanzaboote installs systemd-boot itself (signed); the NixOS
       # `boot.loader.systemd-boot.enable` option conflicts with that
       # install path, so it must be forced off when lanzaboote takes
