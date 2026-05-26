@@ -18,6 +18,7 @@ use tracing_subscriber::{prelude::*, reload};
 mod app_deploy;
 mod auth;
 mod auth_oidc;
+mod auth_webauthn;
 mod boot_status;
 mod fs_dependents;
 mod fs_lock;
@@ -44,6 +45,7 @@ pub type EventBus = tokio::sync::broadcast::Sender<String>;
 pub struct AppState {
     pub auth: AuthService,
     pub oidc: auth_oidc::OidcHolder,
+    pub webauthn: auth_webauthn::WebauthnService,
     pub events: EventBus,
     pub log_reload: LogReloadHandle,
     pub system: nasty_system::SystemService,
@@ -119,13 +121,40 @@ async fn main() -> anyhow::Result<()> {
     ));
     let nvmeof = Arc::new(nasty_sharing::NvmeofService::new());
 
+    // Settings service is built before AppState so we can derive the
+    // WebAuthn RP ID from the operator's configured `tls_domain` (same
+    // hostname Caddy issues certs for). Changes to tls_domain after
+    // boot don't propagate to a running engine's WebauthnService —
+    // doing so would void every registered credential (RP ID is part
+    // of each credential's signed binding). Operators who rename their
+    // domain re-register their security keys; PR #3 will surface this
+    // explicitly in the settings UI.
+    let settings_service = nasty_system::settings::SettingsService::new().await;
+    let webauthn_rp_id = {
+        let s = settings_service.get().await;
+        auth_webauthn::WebauthnService::rp_id_from_settings(&s)
+    };
+    let webauthn = match auth_webauthn::WebauthnService::new(&webauthn_rp_id) {
+        Ok(w) => w,
+        Err(e) => {
+            error!(
+                "Failed to construct WebauthnService for RP ID '{webauthn_rp_id}': {e}; \
+                 falling back to default '{}'",
+                auth_webauthn::DEFAULT_RP_ID
+            );
+            auth_webauthn::WebauthnService::new(auth_webauthn::DEFAULT_RP_ID)
+                .expect("default RP ID must always construct")
+        }
+    };
+
     let state = Arc::new(AppState {
         auth: AuthService::new().await,
         oidc: auth_oidc::OidcHolder::default(),
+        webauthn,
         events: event_tx,
         log_reload: reload_handle,
         system: nasty_system::SystemService::new(None, Some(built.to_string())),
-        settings: nasty_system::settings::SettingsService::new().await,
+        settings: settings_service,
         tuning: nasty_system::tuning::TuningService::new().await,
         nut: nasty_system::nut::NutService::new().await,
         alerts: nasty_system::alerts::AlertService::new().await,

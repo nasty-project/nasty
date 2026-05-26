@@ -166,6 +166,70 @@ pub(super) async fn try_route(
                 Err(e) => err(req, e),
             }
         }
+        // ── WebAuthn (issue #289 PR #1: registration management) ──
+        // Login via webauthn lands in PR #2; for now these only let
+        // an authenticated user enroll and manage their own keys.
+        "auth.webauthn.register.start" => {
+            #[derive(Deserialize)]
+            struct P {
+                label: String,
+            }
+            match parse_params::<P>(req) {
+                Ok(p) => match state
+                    .webauthn
+                    .register_start(&state.auth, &session.username, &p.label)
+                    .await
+                {
+                    Ok(r) => ok(req, r),
+                    Err(e) => err(req, e.to_string()),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "auth.webauthn.register.finish" => {
+            #[derive(Deserialize)]
+            struct P {
+                registration_id: String,
+                response: webauthn_rs::prelude::RegisterPublicKeyCredential,
+            }
+            match parse_params::<P>(req) {
+                Ok(p) => match state
+                    .webauthn
+                    .register_finish(
+                        &state.auth,
+                        &session.username,
+                        &p.registration_id,
+                        &p.response,
+                    )
+                    .await
+                {
+                    Ok(r) => ok(req, r),
+                    Err(e) => err(req, e.to_string()),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "auth.webauthn.list" => ok(
+            req,
+            state.webauthn.list(&state.auth, &session.username).await,
+        ),
+        "auth.webauthn.delete" => {
+            #[derive(Deserialize)]
+            struct P {
+                credential_id: String,
+            }
+            match parse_params::<P>(req) {
+                Ok(p) => match state
+                    .webauthn
+                    .delete(&state.auth, &session.username, &p.credential_id)
+                    .await
+                {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e.to_string()),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         _ => return None,
     })
 }

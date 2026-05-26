@@ -35,6 +35,13 @@ fn is_universally_allowed(method: &str) -> bool {
             // couldn't log out or change their own password — the
             // engine would deny them with "Permission denied".
             "auth.logout" | "auth.change_password"
+            // Self-managed WebAuthn credentials (#289 PR #1). Same
+            // logic as change_password: every authenticated user
+            // gets to manage their own security keys, regardless
+            // of role.
+            | "auth.webauthn.register.start"
+            | "auth.webauthn.register.finish"
+            | "auth.webauthn.delete"
         )
 }
 
@@ -265,6 +272,7 @@ fn is_read_only(method: &str) -> bool {
                 | "backup.status"
                 | "backup.snapshots"
                 | "auth.oidc.config_status"
+                | "auth.webauthn.list"
         )
 }
 

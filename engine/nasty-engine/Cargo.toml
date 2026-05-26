@@ -38,6 +38,11 @@ openidconnect = { version = "4", default-features = false, features = ["accept-r
 http = "1"
 url = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# WebAuthn third login backend (issue #289). 0.5 is the current
+# stable line; `prf` feature is intentionally NOT enabled here —
+# that's reserved for issue #17 (volume unlock via hmac-secret),
+# which is a separate user flow with different storage shape.
+webauthn-rs = "0.5"
 
 [dev-dependencies]
 # `test-util` enables tokio::time::pause/start_paused for fs_lock's
