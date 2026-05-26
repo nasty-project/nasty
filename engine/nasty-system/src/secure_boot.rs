@@ -215,10 +215,11 @@ fn statvfs_free_bytes(path: &str) -> Option<u64> {
         return None;
     }
     let stat = unsafe { buf.assume_init() };
-    // f_bavail is u32 in the libc bindings on this target; f_frsize is
-    // already u64 (the alerts.rs path multiplies as f64 so it dodges
-    // the type mismatch). One explicit widen is enough.
-    Some(stat.f_bavail as u64 * stat.f_frsize)
+    // libc::statvfs's `f_bavail` is `u64` on Linux glibc but `u32` on
+    // macOS — `u64::from(_)` widens portably (identity on u64,
+    // infallible widen on u32) without tripping clippy's
+    // unnecessary-cast lint either way. `f_frsize` is u64 on both.
+    Some(u64::from(stat.f_bavail) * stat.f_frsize)
 }
 
 /// Scan `/etc/nixos/flake.nix` for a top-level `lanzaboote.url`
