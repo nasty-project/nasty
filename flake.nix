@@ -11,9 +11,28 @@
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
+    # ── lanzaboote (Secure Boot for NixOS) ─────────────────────────
+    # Pinned but inert by default. The lanzaboote module is loaded
+    # into every NASty NixOS configuration so the `boot.lanzaboote.*`
+    # option space exists, but `boot.lanzaboote.enable` stays false
+    # unless the operator flips `nasty.secureBoot.enable = true`
+    # (per-box opt-in, same shape as TPM2 binding). On boxes that
+    # never opt in this is just a `flake.lock` entry and a few option
+    # declarations — no boot path changes, no `lzbt` in the closure.
+    #
+    # Why pinned in nasty (not just in the wrapper): operators
+    # shouldn't pick a lanzaboote rev — its protocol with sd-stub /
+    # the firmware key formats / the install-hook contract are all
+    # things NASty needs to test against, so we own the version.
+    #
+    # nixpkgs.follows: keeps lanzaboote's nixpkgs aligned with
+    # nasty's, so cachix-substituted artifacts match by content
+    # hash and we don't ship a second nixpkgs in the closure.
+    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
+    lanzaboote.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, bcachefs-tools, ... }: let
+  outputs = { self, nixpkgs, bcachefs-tools, lanzaboote, ... }: let
     # Helper to build packages for a given system
     mkPkgs = system: nixpkgs.legacyPackages.${system};
     nasty-version = (builtins.fromTOML (builtins.readFile ./engine/Cargo.toml)).workspace.package.version;
@@ -161,12 +180,14 @@
             };
             inputs = {
               bcachefs-tools = [ "bcachefs-tools" ];
+              lanzaboote = [ "lanzaboote" ];
               nixpkgs = [ "nixpkgs" ];
             };
           };
           root = {
             inputs = {
               bcachefs-tools = "bcachefs-tools";
+              lanzaboote = "lanzaboote";
               nasty = "nasty";
               nixpkgs = "nixpkgs";
             };
@@ -189,7 +210,7 @@
       # Full NASty appliance configuration
       nasty = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot lanzaboote; };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -201,7 +222,7 @@
 
       nasty-rootfs = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot lanzaboote; };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -269,7 +290,7 @@
       # QEMU VM for testing
       nasty-vm = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot lanzaboote; };
         modules = [
           ./nixos/modules/bcachefs.nix
           ./nixos/modules/linuxquota.nix
@@ -283,7 +304,7 @@
       # Cloud/CI disk image (Oracle Cloud compatible)
       nasty-cloud = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot; };
+        specialArgs = { inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nastySystemFlakeSnapshot lanzaboote; };
         modules = [
           "${nixpkgs}/nixos/modules/virtualisation/oci-image.nix"
           ./nixos/modules/bcachefs.nix

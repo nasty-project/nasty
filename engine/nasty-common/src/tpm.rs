@@ -45,12 +45,50 @@ pub enum TpmError {
     Blob(String),
 }
 
+/// Categorises which policy shape a [`SealedBlob`] was built under.
+/// Today every blob is `PolicyKind::Pcr7Static` (a fixed PCR-7
+/// reading captured at seal time). Future shapes — multi-PCR static
+/// (e.g. PCRs 0+4+7 once lanzaboote + measured boot land), or a
+/// `systemd-pcrlock`-backed signed policy — will get their own
+/// variants. Having the discriminant on disk lets the unseal path
+/// route to the right replay logic instead of inferring it from the
+/// `pcrs` string, and lets the engine refuse to load blobs sealed
+/// under a policy this version doesn't understand.
+///
+/// `#[serde(other)]` on `Unknown` makes deserialisation tolerant of
+/// future variants: an older engine reading a future blob produces
+/// `Unknown`, which the unseal path rejects cleanly with a useful
+/// error rather than panicking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyKind {
+    /// Single-PCR static reading (today: PCR-7 only). The `pcrs` field
+    /// names the selection (e.g. `"sha256:7"`); the blob was sealed
+    /// against the exact PCR value at seal time.
+    Pcr7Static,
+    /// Reserved — any policy this engine version doesn't recognise.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Default for legacy blobs written before this field existed.
+/// Serde uses this when deserialising a file that lacks `policy_kind`,
+/// so blobs written by pre-lanzaboote engines continue to load.
+fn default_policy_kind() -> PolicyKind {
+    PolicyKind::Pcr7Static
+}
+
 /// On-disk wrapper around the raw TPM2 blobs. Stored next to the
 /// plaintext `.key` file as `<name>.tpm`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedBlob {
     /// Format version of this struct — see [`BLOB_VERSION`].
     pub version: u32,
+    /// Which policy shape this blob was built under. Defaults to
+    /// `Pcr7Static` for backward compat with blobs that pre-date this
+    /// field (every blob ever written by NASty so far is PCR-7 static).
+    #[serde(default = "default_policy_kind")]
+    pub policy_kind: PolicyKind,
     /// PCR selection string the policy was built against
     /// (e.g. `"sha256:7"`). Mirrored into the file so a future change
     /// to [`PCR_SELECTION`] doesn't silently break already-sealed
@@ -155,6 +193,7 @@ pub async fn seal_with_pcr7(plaintext: &[u8]) -> Result<SealedBlob, TpmError> {
     let engine = base64::engine::general_purpose::STANDARD;
     Ok(SealedBlob {
         version: BLOB_VERSION,
+        policy_kind: PolicyKind::Pcr7Static,
         pcrs: PCR_SELECTION.to_string(),
         pub_b64: engine.encode(&pub_bytes),
         priv_b64: engine.encode(&priv_bytes),
@@ -349,6 +388,7 @@ mod tests {
     fn sealed_blob_json_roundtrip() {
         let blob = SealedBlob {
             version: BLOB_VERSION,
+            policy_kind: PolicyKind::Pcr7Static,
             pcrs: PCR_SELECTION.to_string(),
             pub_b64: "AAEC".into(),
             priv_b64: "AwQF".into(),
@@ -356,9 +396,42 @@ mod tests {
         let json = serde_json::to_string(&blob).expect("serialize");
         let back: SealedBlob = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.version, BLOB_VERSION);
+        assert_eq!(back.policy_kind, PolicyKind::Pcr7Static);
         assert_eq!(back.pcrs, PCR_SELECTION);
         assert_eq!(back.pub_b64, "AAEC");
         assert_eq!(back.priv_b64, "AwQF");
+    }
+
+    #[test]
+    fn legacy_blob_without_policy_kind_loads_as_pcr7_static() {
+        // Pre-lanzaboote NASty engines wrote blobs without a
+        // `policy_kind` field; serde defaults must produce
+        // `Pcr7Static` so existing on-disk seals continue to load.
+        let legacy_json = r#"{
+            "version": 1,
+            "pcrs": "sha256:7",
+            "pub_b64": "AAEC",
+            "priv_b64": "AwQF"
+        }"#;
+        let blob: SealedBlob = serde_json::from_str(legacy_json).expect("legacy deserialize");
+        assert_eq!(blob.policy_kind, PolicyKind::Pcr7Static);
+    }
+
+    #[test]
+    fn unknown_policy_kind_deserialises_as_unknown_variant() {
+        // Forward-compat: a future blob written with a policy kind
+        // this engine version doesn't know about must deserialise as
+        // `Unknown` rather than failing parse outright. The unseal
+        // path is then expected to refuse it explicitly.
+        let future_json = r#"{
+            "version": 1,
+            "policy_kind": "pcrlock_signed",
+            "pcrs": "sha256:0,4,7",
+            "pub_b64": "AAEC",
+            "priv_b64": "AwQF"
+        }"#;
+        let blob: SealedBlob = serde_json::from_str(future_json).expect("future deserialize");
+        assert_eq!(blob.policy_kind, PolicyKind::Unknown);
     }
 
     #[tokio::test]
@@ -371,6 +444,7 @@ mod tests {
     async fn unseal_rejects_unsupported_version() {
         let blob = SealedBlob {
             version: 99,
+            policy_kind: PolicyKind::Pcr7Static,
             pcrs: PCR_SELECTION.to_string(),
             pub_b64: "AAEC".into(),
             priv_b64: "AwQF".into(),
