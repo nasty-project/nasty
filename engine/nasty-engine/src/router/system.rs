@@ -21,6 +21,7 @@ pub(super) async fn try_route(
         "system.health" => ok(req, state.system.health().await),
         "system.hardware.iommu" => ok(req, nasty_system::hardware::iommu_groups().await),
         "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
+        "system.secure_boot.readiness" => ok(req, nasty_system::secure_boot::readiness().await),
         "system.passthrough.get" => ok(req, nasty_system::passthrough::load().await),
         "system.passthrough.update" => {
             match parse_params::<nasty_system::passthrough::PassthroughUpdate>(req) {

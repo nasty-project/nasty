@@ -7,6 +7,7 @@ pub mod notifications;
 pub mod nut;
 pub mod passthrough;
 pub mod protocol;
+pub mod secure_boot;
 pub mod settings;
 pub mod tailscale;
 pub mod tuning;

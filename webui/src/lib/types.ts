@@ -71,6 +71,26 @@ export interface SecureBootStatus {
 	note: string | null;
 }
 
+/** Structured checklist returned by `system.secure_boot.readiness`.
+ * Drives the Hardware-page panel that shows whether a box is ready
+ * for the lanzaboote opt-in. `ready === true` means every check
+ * passes and the (PR #2b) "Enable Secure Boot" affordance is
+ * available; otherwise `blocker` names the obstacle. Each individual
+ * field exposes the underlying signal so the UI can render an
+ * itemised checklist with pass/fail/not-applicable per row. */
+export interface SecureBootReadinessReport {
+	ready: boolean;
+	blocker: string | null;
+	uefi_boot: boolean;
+	sb_supported_by_firmware: boolean | null;
+	sb_currently_off: boolean | null;
+	tpm2_available: boolean;
+	esp_free_bytes: number | null;
+	esp_required_bytes: number;
+	wrapper_has_lanzaboote_input: boolean | null;
+	sbctl_keys_already_generated: boolean;
+}
+
 export interface TpmInfo {
 	/** 1 = TPM 1.2 (incompatible with planned sealing), 2 = TPM 2.0. */
 	version_major: number | null;

@@ -10,6 +10,7 @@
 		IommuGroup,
 		PassthroughConfig,
 		PciDevice,
+		SecureBootReadinessReport,
 	} from '$lib/types';
 	import { formatBytes } from '$lib/format';
 	import { rebootState } from '$lib/reboot.svelte';
@@ -22,6 +23,12 @@
 	let expanded = $state(new Set<number>());
 	let filter = $state('');
 	let showAllDimms = $state(false);
+	// Readiness probe for the lanzaboote opt-in. Fetched lazily — only
+	// when the SB card resolves to a state where opting in could be
+	// possible (UEFI + SB currently off + supported). Boxes that
+	// can't do SB never trigger this call.
+	let sbReadiness: SecureBootReadinessReport | null = $state(null);
+	let sbReadinessLoading = $state(false);
 
 	// TPM2_PT_MANUFACTURER 4-char ASCII codes → human-readable vendor names.
 	// Source: TCG Vendor ID Registry (the assigned-numbers table that the
@@ -75,6 +82,28 @@
 			groups = [];
 			passthroughConfig = { ids: [] };
 			pending = new Set();
+		}
+		// Only probe SB readiness when the firmware-state read suggests
+		// it's worth showing the checklist — i.e. SB is currently off
+		// and the firmware can do SB at all. Boxes in `Enabled`,
+		// `Unsupported`, or `Unknown` states skip the call entirely,
+		// keeping the Hardware page cheap on hardware that can never
+		// opt in.
+		const sb = summary?.secure_boot;
+		const shouldProbe =
+			sb?.enabled === false && sb?.unsupported !== true;
+		if (shouldProbe) {
+			sbReadinessLoading = true;
+			try {
+				sbReadiness = await client.call<SecureBootReadinessReport>(
+					'system.secure_boot.readiness',
+				);
+			} catch {
+				sbReadiness = null;
+			}
+			sbReadinessLoading = false;
+		} else {
+			sbReadiness = null;
 		}
 		loading = false;
 	}
@@ -368,9 +397,19 @@
 					</div>
 					<div class="mt-1 text-xs text-muted-foreground">
 						TPM PCR-7 sealing still works but is significantly weaker
-						without a measured boot chain. Enable Secure Boot in firmware
-						to harden the seal.
+						without a measured boot chain.
 					</div>
+					{#if sbReadinessLoading}
+						<div class="mt-2 text-xs text-muted-foreground">Checking readiness…</div>
+					{:else if sbReadiness?.ready}
+						<div class="mt-2 text-xs text-emerald-400">
+							✓ Ready to enable — see checklist below.
+						</div>
+					{:else if sbReadiness}
+						<div class="mt-2 text-xs text-amber-500">
+							Not ready — see checklist below.
+						</div>
+					{/if}
 				{:else}
 					<div class="text-sm font-medium">Unknown</div>
 					<div class="mt-1 text-xs text-muted-foreground">
@@ -380,6 +419,129 @@
 			</CardContent>
 		</Card>
 	</div>
+
+	<!-- ── Secure Boot readiness checklist (only when SB is currently off + capable) ─── -->
+	{#if sbReadiness}
+		<Card class="mb-6">
+			<CardContent class="pt-4 pb-3">
+				<div class="mb-3 flex items-baseline justify-between">
+					<h3 class="text-sm font-semibold">Secure Boot · readiness</h3>
+					{#if sbReadiness.ready}
+						<span class="text-xs text-emerald-400">All checks pass</span>
+					{:else}
+						<span class="text-xs text-amber-500">Not ready</span>
+					{/if}
+				</div>
+
+				{#if !sbReadiness.ready && sbReadiness.blocker}
+					<div class="mb-3 rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+						<strong>Blocker:</strong> {sbReadiness.blocker}
+					</div>
+				{/if}
+
+				<!-- Per-check rows. Each row is one of ✓ (pass), ✗ (fail),
+					 or — (not applicable / unknown). Inlined rather than
+					 abstracted into a snippet because each row's params
+					 are short and the local repetition is more readable
+					 than a typed snippet helper. -->
+				<div class="flex items-start gap-3 py-1 text-xs">
+					<span class="w-4 shrink-0 font-mono">
+						{#if sbReadiness.uefi_boot}<span class="text-emerald-400">✓</span>
+						{:else}<span class="text-amber-500">✗</span>{/if}
+					</span>
+					<span class="flex-1">UEFI boot</span>
+				</div>
+
+				<div class="flex items-start gap-3 py-1 text-xs">
+					<span class="w-4 shrink-0 font-mono">
+						{#if sbReadiness.sb_supported_by_firmware === true}<span class="text-emerald-400">✓</span>
+						{:else if sbReadiness.sb_supported_by_firmware === false}<span class="text-amber-500">✗</span>
+						{:else}<span class="text-muted-foreground">—</span>{/if}
+					</span>
+					<span class="flex-1">Firmware supports Secure Boot</span>
+				</div>
+
+				<div class="flex items-start gap-3 py-1 text-xs">
+					<span class="w-4 shrink-0 font-mono">
+						{#if sbReadiness.sb_currently_off === true}<span class="text-emerald-400">✓</span>
+						{:else if sbReadiness.sb_currently_off === false}<span class="text-amber-500">✗</span>
+						{:else}<span class="text-muted-foreground">—</span>{/if}
+					</span>
+					<span class="flex-1">Secure Boot currently off (ready to enable)</span>
+				</div>
+
+				<div class="flex items-start gap-3 py-1 text-xs">
+					<span class="w-4 shrink-0 font-mono">
+						{#if sbReadiness.tpm2_available}<span class="text-emerald-400">✓</span>
+						{:else}<span class="text-amber-500">✗</span>{/if}
+					</span>
+					<span class="flex-1">TPM2 available</span>
+				</div>
+
+				<div class="flex items-start gap-3 py-1 text-xs">
+					<span class="w-4 shrink-0 font-mono">
+						{#if sbReadiness.esp_free_bytes === null}<span class="text-muted-foreground">—</span>
+						{:else if sbReadiness.esp_free_bytes >= sbReadiness.esp_required_bytes}<span class="text-emerald-400">✓</span>
+						{:else}<span class="text-amber-500">✗</span>{/if}
+					</span>
+					<span class="flex-1">
+						ESP headroom
+						{#if sbReadiness.esp_free_bytes !== null}
+							<span class="ml-1 text-muted-foreground">
+								· {formatBytes(sbReadiness.esp_free_bytes)} free ·
+								{formatBytes(sbReadiness.esp_required_bytes)} required
+							</span>
+						{:else}
+							<span class="ml-1 text-muted-foreground">· /boot not a separate mount</span>
+						{/if}
+					</span>
+				</div>
+
+				<div class="flex items-start gap-3 py-1 text-xs">
+					<span class="w-4 shrink-0 font-mono">
+						{#if sbReadiness.wrapper_has_lanzaboote_input === true}<span class="text-emerald-400">✓</span>
+						{:else if sbReadiness.wrapper_has_lanzaboote_input === false}<span class="text-amber-500">✗</span>
+						{:else}<span class="text-muted-foreground">—</span>{/if}
+					</span>
+					<span class="flex-1">
+						Wrapper flake declares lanzaboote input
+						{#if sbReadiness.wrapper_has_lanzaboote_input === false}
+							<span class="ml-1 text-muted-foreground">
+								· run any upgrade once to re-render /etc/nixos/flake.nix
+							</span>
+						{/if}
+					</span>
+				</div>
+
+				<div class="flex items-start gap-3 py-1 text-xs">
+					<span class="w-4 shrink-0 font-mono">
+						{#if sbReadiness.sbctl_keys_already_generated}<span class="text-emerald-400">✓</span>
+						{:else}<span class="text-muted-foreground">—</span>{/if}
+					</span>
+					<span class="flex-1">
+						sbctl keys already generated
+						{#if !sbReadiness.sbctl_keys_already_generated}
+							<span class="ml-1 text-muted-foreground">
+								· will be created on first SB-enabled boot
+							</span>
+						{/if}
+					</span>
+				</div>
+
+				<div class="mt-3 border-t border-border/40 pt-3 text-xs text-muted-foreground">
+					{#if sbReadiness.ready}
+						This box meets every prerequisite for enabling Secure Boot via
+						lanzaboote. The "Enable Secure Boot" action that walks operators
+						through the BIOS Setup-Mode visit and re-seal will land in a
+						follow-up PR.
+					{:else}
+						Once the blockers above are resolved, the "Enable Secure Boot"
+						action will become available here.
+					{/if}
+				</div>
+			</CardContent>
+		</Card>
+	{/if}
 
 	<!-- ── DIMM detail (collapsed by default) ──────────────────────── -->
 	{#if summary && summary.memory.dimms.length > 0}
