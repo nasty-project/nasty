@@ -62,3 +62,65 @@ export async function logout(): Promise<void> {
 	// Set-Cookie with Max-Age=0 to drop the cookie.
 	await fetch('/api/logout', { method: 'POST' }).catch(() => {});
 }
+
+/** Sign in via a registered WebAuthn credential (issue #289 PR #2).
+ * The browser side of the ceremony — fetch a challenge from the
+ * engine, hand it to @simplewebauthn's `startAuthentication`, post
+ * the resulting assertion back to the engine, which mints a
+ * `nasty_session` cookie just like the password path. On any
+ * failure (no creds registered, user dismissed the prompt, wrong
+ * key, etc.) the caller catches and surfaces the message. */
+export async function loginWebauthn(username: string): Promise<void> {
+	const { startAuthentication } = await import('@simplewebauthn/browser');
+	let startRes: Response;
+	try {
+		startRes = await fetch('/api/auth/webauthn/login/start', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ username }),
+		});
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		throw new Error(`Can't reach server: ${msg}`);
+	}
+	if (!startRes.ok) {
+		const body = await startRes.json().catch(() => ({}));
+		const detail = (body as { error?: string }).error;
+		throw new Error(
+			detail
+				?? (startRes.status === 401 || startRes.status === 403
+					? 'No security keys registered for this account.'
+					: `Login failed (HTTP ${startRes.status}).`),
+		);
+	}
+	const { auth_id, request_options } = await startRes.json();
+
+	// simplewebauthn handles the JSON ↔ ArrayBuffer dance. The
+	// engine sends webauthn-rs's `RequestChallengeResponse` shape
+	// directly; same JSON form simplewebauthn accepts.
+	let response;
+	try {
+		response = await startAuthentication({
+			optionsJSON: (request_options as { publicKey?: unknown }).publicKey ?? request_options,
+		} as Parameters<typeof startAuthentication>[0]);
+	} catch (e) {
+		// Most common: NotAllowedError (user dismissed prompt, wrong
+		// key, no matching credential on the authenticator). Short
+		// message is friendlier than the raw DOMException string.
+		const msg = e instanceof Error ? e.message : String(e);
+		throw new Error(`Security key prompt failed: ${msg}`);
+	}
+
+	const finishRes = await fetch('/api/auth/webauthn/login/finish', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ username, auth_id, response }),
+	});
+	if (!finishRes.ok) {
+		const body = await finishRes.json().catch(() => ({}));
+		const detail = (body as { error?: string }).error;
+		throw new Error(detail ?? `Login failed (HTTP ${finishRes.status}).`);
+	}
+	// Session cookie is set by the engine. Caller's job is to refresh
+	// the connection.
+}

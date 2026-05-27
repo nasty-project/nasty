@@ -44,7 +44,8 @@ use uuid::Uuid;
 use webauthn_rs::Webauthn;
 use webauthn_rs::WebauthnBuilder;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, CredentialID, PasskeyRegistration, RegisterPublicKeyCredential,
+    CreationChallengeResponse, CredentialID, PasskeyAuthentication, PasskeyRegistration,
+    PublicKeyCredential, RegisterPublicKeyCredential, RequestChallengeResponse,
 };
 
 use crate::auth::{AuthService, WebauthnCredential};
@@ -76,12 +77,16 @@ pub enum WebauthnError {
     Backend(#[from] webauthn_rs::prelude::WebauthnError),
     #[error("no in-flight registration for id {0}")]
     UnknownRegistration(String),
+    #[error("no in-flight authentication for id {0}")]
+    UnknownAuthentication(String),
     #[error("label is empty")]
     EmptyLabel,
     #[error("label too long (max {MAX_LABEL_LEN} chars)")]
     LabelTooLong,
     #[error("credential not found")]
     CredentialNotFound,
+    #[error("user has no registered security keys")]
+    NoCredentials,
     #[error("auth state I/O failed: {0}")]
     Auth(String),
 }
@@ -98,12 +103,24 @@ pub struct WebauthnService {
     webauthn: Webauthn,
     rp_id: String,
     pending: Arc<Mutex<HashMap<String, PendingRegistration>>>,
+    /// In-flight authentication challenges, keyed by the per-request
+    /// `auth_id` the WebUI round-trips between login.start and
+    /// login.finish. Same TTL + per-user cap as the registration cache;
+    /// kept separate because the lifecycle and `PasskeyAuthentication`
+    /// shape differ from registration.
+    pending_auth: Arc<Mutex<HashMap<String, PendingAuthentication>>>,
 }
 
 struct PendingRegistration {
     username: String,
     label: String,
     state: PasskeyRegistration,
+    started_at: Instant,
+}
+
+struct PendingAuthentication {
+    username: String,
+    state: PasskeyAuthentication,
     started_at: Instant,
 }
 
@@ -135,6 +152,17 @@ pub struct WebauthnConfig {
     pub rp_id: String,
 }
 
+/// Wire shape returned by `/api/auth/webauthn/login/start`. The
+/// `request_options` goes straight into `@simplewebauthn/browser`'s
+/// `startAuthentication`; the `auth_id` round-trips back via
+/// `login/finish` so we can pair the browser's response with the
+/// matching server-side `PasskeyAuthentication` state.
+#[derive(Debug, Serialize)]
+pub struct LoginStartResponse {
+    pub auth_id: String,
+    pub request_options: RequestChallengeResponse,
+}
+
 /// Wire shape for `auth.webauthn.list`. Each row is the metadata
 /// the operator sees in account settings — no public key, no
 /// internal webauthn-rs state.
@@ -164,6 +192,7 @@ impl WebauthnService {
             webauthn,
             rp_id: rp_id.to_string(),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_auth: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -370,9 +399,114 @@ impl WebauthnService {
                 other => WebauthnError::Auth(other.to_string()),
             })
     }
+
+    /// Step 1 of WebAuthn login: build an assertion challenge bound to
+    /// the named user's existing credentials. The `allowCredentials`
+    /// list (built from the user's registered passkeys) tells the
+    /// browser which keys are acceptable for this assertion; the
+    /// authenticator that the operator taps must own one of them.
+    ///
+    /// `NoCredentials` when the user has no registered keys — caller
+    /// surfaces this as "this account has no security key set up,
+    /// use a password." We could mask it to avoid user enumeration
+    /// but `/api/login` already enumerates via its 401 response so
+    /// the added information here is negligible.
+    pub async fn login_start(
+        &self,
+        auth: &AuthService,
+        username: &str,
+    ) -> Result<LoginStartResponse, WebauthnError> {
+        let stored = auth.webauthn_credentials_for(username).await;
+        if stored.is_empty() {
+            return Err(WebauthnError::NoCredentials);
+        }
+        let passkeys: Vec<_> = stored.iter().map(|c| c.passkey.clone()).collect();
+        let (request_options, state) = self.webauthn.start_passkey_authentication(&passkeys)?;
+
+        let auth_id = base64_token();
+        let mut pending = self.pending_auth.lock().await;
+        prune_expired_auth(&mut pending);
+        let same_user_count = pending.values().filter(|p| p.username == username).count();
+        if same_user_count >= MAX_IN_FLIGHT_PER_USER {
+            warn!(
+                target: "nasty::webauthn",
+                "user '{username}' has {same_user_count} pending authentications; refusing new one"
+            );
+            return Err(WebauthnError::Auth(format!(
+                "too many in-flight authentications for {username} (limit {MAX_IN_FLIGHT_PER_USER})",
+            )));
+        }
+        pending.insert(
+            auth_id.clone(),
+            PendingAuthentication {
+                username: username.to_string(),
+                state,
+                started_at: Instant::now(),
+            },
+        );
+        debug!(
+            target: "nasty::webauthn",
+            "started authentication {auth_id} for user '{username}'"
+        );
+        Ok(LoginStartResponse {
+            auth_id,
+            request_options,
+        })
+    }
+
+    /// Step 2 of WebAuthn login: verify the browser's assertion
+    /// against the stored credential. On success, persists the
+    /// updated `sign_count` (replay protection — webauthn-rs's
+    /// `finish_passkey_authentication` rejects assertions whose
+    /// sign_count is ≤ the stored value, so we must save the new
+    /// one or every subsequent assertion on the same credential
+    /// would fail) and returns the verified username so the REST
+    /// handler can mint a session token.
+    pub async fn login_finish(
+        &self,
+        auth: &AuthService,
+        auth_id: &str,
+        response: &PublicKeyCredential,
+    ) -> Result<String, WebauthnError> {
+        let pending_entry = {
+            let mut pending = self.pending_auth.lock().await;
+            prune_expired_auth(&mut pending);
+            pending.remove(auth_id)
+        };
+        let pending_entry = pending_entry
+            .ok_or_else(|| WebauthnError::UnknownAuthentication(auth_id.to_string()))?;
+
+        let auth_result = self
+            .webauthn
+            .finish_passkey_authentication(response, &pending_entry.state)?;
+
+        // Update the matching credential's sign_count in place. The
+        // operator's other credentials are untouched. Failure here
+        // (concurrent delete, state corruption) is logged but not
+        // fatal — the assertion itself was valid, so we proceed with
+        // session minting; the next assertion will simply hit the
+        // sign_count check freshly.
+        if let Err(e) = auth
+            .update_webauthn_sign_count(&pending_entry.username, &auth_result)
+            .await
+        {
+            warn!(
+                target: "nasty::webauthn",
+                "post-assertion sign_count update for '{}' failed: {e}",
+                pending_entry.username,
+            );
+        }
+
+        Ok(pending_entry.username)
+    }
 }
 
 fn prune_expired(pending: &mut HashMap<String, PendingRegistration>) {
+    let now = Instant::now();
+    pending.retain(|_, p| now.duration_since(p.started_at) < REGISTRATION_TTL);
+}
+
+fn prune_expired_auth(pending: &mut HashMap<String, PendingAuthentication>) {
     let now = Instant::now();
     pending.retain(|_, p| now.duration_since(p.started_at) < REGISTRATION_TTL);
 }

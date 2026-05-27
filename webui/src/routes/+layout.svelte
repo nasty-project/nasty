@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getClient, resetClient } from '$lib/client';
-	import { login as doLogin, logout as doLogout } from '$lib/auth';
+	import { login as doLogin, logout as doLogout, loginWebauthn as doLoginWebauthn } from '$lib/auth';
 	import { error as showError, isBusy } from '$lib/toast.svelte';
 	import Toasts from '$lib/components/Toasts.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -480,6 +480,38 @@
 		}
 	}
 
+	// WebAuthn sign-in (issue #289 PR #2). Visible alongside the
+	// password form when the browser exposes the WebAuthn API and
+	// the operator has typed a username. Same lockout/audit machinery
+	// on the server side as the password path, so this isn't an
+	// alternative "bypass" — just a credential-only login flow.
+	let webauthnPending = $state(false);
+	const webauthnLoginSupported = $derived(
+		typeof window !== 'undefined'
+			&& 'PublicKeyCredential' in window
+			&& typeof navigator !== 'undefined'
+			&& !!navigator.credentials?.get,
+	);
+
+	async function handleWebauthnLogin() {
+		loginError = '';
+		const username = loginUser.trim();
+		if (!username) {
+			loginError = 'Enter your username first.';
+			return;
+		}
+		webauthnPending = true;
+		try {
+			await doLoginWebauthn(username);
+			loginPass = '';
+			await tryConnect();
+		} catch (e) {
+			loginError = e instanceof Error ? e.message : 'Sign-in failed';
+		} finally {
+			webauthnPending = false;
+		}
+	}
+
 	async function handlePasswordChange() {
 		passwordError = '';
 		if (newPassword.length < 8) {
@@ -727,14 +759,27 @@
 					<Label for="password">Password</Label>
 					<Input id="password" type="password" bind:value={loginPass} autocomplete="current-password" class="mt-1" />
 				</div>
-				<Button type="submit" class="w-full">Sign In</Button>
+				<Button type="submit" class="w-full" disabled={webauthnPending}>Sign In</Button>
 			</form>
-			{#if ssoEnabled}
+			{#if webauthnLoginSupported || ssoEnabled}
 				<div class="my-4 flex items-center gap-3 text-xs text-muted-foreground">
 					<div class="h-px flex-1 bg-border"></div>
 					<span>or</span>
 					<div class="h-px flex-1 bg-border"></div>
 				</div>
+			{/if}
+			{#if webauthnLoginSupported}
+				<Button
+					type="button"
+					variant="outline"
+					class="w-full {ssoEnabled ? 'mb-2' : ''}"
+					disabled={webauthnPending}
+					onclick={handleWebauthnLogin}
+				>
+					{#if webauthnPending}Tap your security key…{:else}Sign in with security key{/if}
+				</Button>
+			{/if}
+			{#if ssoEnabled}
 				<Button type="button" variant="outline" class="w-full" onclick={startSso}>Sign in with SSO</Button>
 			{/if}
 		</div>

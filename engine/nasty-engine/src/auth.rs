@@ -942,6 +942,154 @@ impl AuthService {
         save_state(&state).await?;
         Ok(())
     }
+
+    /// Persist the new `sign_count` (and any other counter / backup
+    /// state) into the matching credential after a successful
+    /// assertion. Without this, every subsequent assertion would
+    /// be rejected by webauthn-rs's `finish_passkey_authentication`
+    /// — that function checks the incoming sign_count is strictly
+    /// greater than the stored value as replay protection.
+    pub async fn update_webauthn_sign_count(
+        &self,
+        username: &str,
+        auth_result: &webauthn_rs::prelude::AuthenticationResult,
+    ) -> Result<(), AuthError> {
+        let mut state = self.state.write().await;
+        let user = state
+            .users
+            .iter_mut()
+            .find(|u| u.username == username)
+            .ok_or(AuthError::UserNotFound)?;
+        let cred = user
+            .webauthn_credentials
+            .iter_mut()
+            .find(|c| c.passkey.cred_id() == auth_result.cred_id())
+            .ok_or(AuthError::NotFound)?;
+        // `update_credential` consumes the auth result's counter +
+        // backup-state and returns whether anything actually changed.
+        // We persist regardless of the return value — saving an
+        // unchanged record is cheap and avoids a branch for
+        // "credential is identical, skip the disk write" that's
+        // hard to verify.
+        cred.passkey.update_credential(auth_result);
+        save_state(&state).await?;
+        Ok(())
+    }
+
+    /// Mint a fresh session for a user whose identity has already
+    /// been verified out-of-band (today: WebAuthn assertion; PR #2
+    /// of issue #289). Mirrors the lockout + session-pruning logic
+    /// from `login` so a WebAuthn-only attacker spamming bad
+    /// assertions hits the same per-IP / per-username limits the
+    /// password path uses. The username **must** be one this engine
+    /// has already authenticated (the caller's job, not this
+    /// function's) — there's no credential check here.
+    pub async fn mint_session_for_webauthn(
+        &self,
+        username: &str,
+        client_ip: &str,
+    ) -> Result<String, AuthError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Same per-IP lockout as `login` — a WebAuthn-only attacker
+        // can't get around it by switching from password to webauthn
+        // attempts.
+        if client_ip != "unknown" {
+            let rl = self.rate_limit.read().await;
+            let ip_fails = rl.ip_failures(client_ip, now);
+            if ip_fails >= MAX_IP_FAILED_ATTEMPTS {
+                tracing::warn!(
+                    "WebAuthn login blocked from {client_ip}: {ip_fails} failed attempts in the last hour"
+                );
+                audit(
+                    "login_webauthn_ip_locked",
+                    username,
+                    client_ip,
+                    &format!("{ip_fails} failed attempts"),
+                );
+                return Err(AuthError::AccountLocked);
+            }
+        }
+
+        // Per-username lockout — same suppression rule for the
+        // last-admin case as `login`, since locking the last admin
+        // out of every login path would brick the appliance.
+        let only_admin = self.is_only_local_admin(username).await;
+        {
+            let rl = self.rate_limit.read().await;
+            let user_fails = rl.user_failures(username, now);
+            if user_fails >= MAX_FAILED_ATTEMPTS && !only_admin {
+                tracing::warn!(
+                    "WebAuthn login blocked for '{}': {} failed attempts in last {} minutes",
+                    username,
+                    user_fails,
+                    LOCKOUT_WINDOW_SECS / 60
+                );
+                audit(
+                    "login_webauthn_locked",
+                    username,
+                    client_ip,
+                    &format!("{user_fails} failed attempts"),
+                );
+                return Err(AuthError::AccountLocked);
+            }
+        }
+
+        let mut state = self.state.write().await;
+        let user = state
+            .users
+            .iter()
+            .find(|u| u.username == username)
+            .ok_or(AuthError::UserNotFound)?;
+
+        let token = generate_token();
+        let session = Session {
+            token: token.clone(),
+            username: user.username.clone(),
+            role: user.role.clone(),
+            filesystem: None,
+            owner: None,
+            created_at: now,
+            // WebAuthn-verified sessions don't trigger the
+            // password-change wall — the operator already proved
+            // possession of a registered credential. If their local
+            // password is still flagged for change they can do it
+            // from /users when they want to.
+            must_change_password: false,
+            client_ip: Some(client_ip.to_string()),
+        };
+
+        state
+            .sessions
+            .retain(|s| now - s.created_at <= SESSION_TTL_SECS);
+        state.sessions.push(session);
+        save_state(&state).await?;
+
+        // Webauthn success clears the per-username failure bucket
+        // (mirrors the password path); per-IP failures stay so a
+        // single redeemed username doesn't whitewash an attacker's
+        // spray across other accounts.
+        self.clear_failed_attempts(username).await;
+        audit("login_webauthn_success", username, client_ip, "");
+        info!("User '{}' logged in via WebAuthn", username);
+        Ok(token)
+    }
+
+    /// Counterpart to `mint_session_for_webauthn` for the failure
+    /// case — bumps the per-user + per-IP lockout counters so a
+    /// stream of bad WebAuthn assertions feeds the same rate limit
+    /// as a stream of bad passwords. Exposed publicly so the REST
+    /// handler can call it after `login_finish` fails.
+    pub async fn record_webauthn_failure(&self, username: &str, client_ip: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.record_failed_attempt(username, client_ip, now).await;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
