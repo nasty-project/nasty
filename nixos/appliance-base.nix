@@ -11,6 +11,21 @@
   # Boot loader — systemd-boot (UEFI)
   boot.loader.systemd-boot.enable = true;
   boot.loader.systemd-boot.configurationLimit = 20;
+  # Memtest86+ EFI binary added as a sibling menu entry. ~1 MB on
+  # the ESP, no closure-size impact on boxes that never boot into
+  # it — but when an operator needs it (flaky RAM, ECC errors, post-
+  # hardware-change sanity check) it's right there in the boot
+  # menu instead of requiring a USB stick. Works on x86_64 and
+  # aarch64; the systemd-boot module silently no-ops on architectures
+  # without a memtest86+ build available.
+  #
+  # Note for future Secure Boot work: memtest86+ isn't signed by
+  # NASty's keys, so under SB it will refuse to launch. The
+  # systemd-boot module documents that the entry stays visible but
+  # the boot attempt fails; that's acceptable since SB-protected
+  # boxes are the ones where memtest's "unsigned-but-trusted" model
+  # doesn't fit anyway.
+  boot.loader.systemd-boot.memtest86.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
 
   networking.hostName = "nasty";
