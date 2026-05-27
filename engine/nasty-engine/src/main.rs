@@ -502,6 +502,14 @@ async fn main() -> anyhow::Result<()> {
         .merge(ws_routes)
         .route("/api/login", post(login_handler))
         .route("/api/logout", post(logout_handler))
+        .route(
+            "/api/auth/webauthn/login/start",
+            post(webauthn_login_start_handler),
+        )
+        .route(
+            "/api/auth/webauthn/login/finish",
+            post(webauthn_login_finish_handler),
+        )
         .route("/api/auth/oidc/available", get(oidc_available_handler))
         .route("/api/boot_status", get(boot_status_handler))
         .route("/api/auth/oidc/start", get(oidc_start_handler))
@@ -1995,6 +2003,151 @@ async fn files_content_put_handler(
 struct LoginRequest {
     username: String,
     password: String,
+}
+
+#[derive(Deserialize)]
+struct WebauthnLoginStartRequest {
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct WebauthnLoginFinishRequest {
+    username: String,
+    auth_id: String,
+    response: webauthn_rs::prelude::PublicKeyCredential,
+}
+
+/// Build the assertion challenge for a WebAuthn login. Pre-auth —
+/// the WebUI hits this before any session exists. Echoes the
+/// per-IP lockout from `AuthService::login`, so an attacker hosing
+/// the box with bad assertions hits the same per-IP cap as a
+/// password sprayer.
+async fn webauthn_login_start_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<WebauthnLoginStartRequest>,
+) -> impl IntoResponse {
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    match state
+        .webauthn
+        .login_start(&state.auth, &req.username)
+        .await
+    {
+        Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(&resp).unwrap())).into_response(),
+        Err(e) => {
+            tracing::warn!(
+                "WebAuthn login.start failed for '{}' from {}: {e}",
+                req.username,
+                client_ip
+            );
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Verify the browser's WebAuthn assertion and mint a session. The
+/// username in the body has to match the one bound to the
+/// in-flight `auth_id` — `WebauthnService::login_finish` enforces
+/// that. On any failure we audit + record the per-IP / per-user
+/// failure so the assertion path can't be used to dodge lockouts.
+async fn webauthn_login_finish_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<WebauthnLoginFinishRequest>,
+) -> impl IntoResponse {
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    let verified_username = match state
+        .webauthn
+        .login_finish(&state.auth, &req.auth_id, &req.response)
+        .await
+    {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(
+                "WebAuthn login.finish failed for '{}' from {}: {e}",
+                req.username,
+                client_ip
+            );
+            state
+                .auth
+                .record_webauthn_failure(&req.username, client_ip)
+                .await;
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    // Defense in depth: the body's claimed username must match the
+    // one bound to the `auth_id` server-side. login_finish already
+    // returns the verified username; we just confirm equality so a
+    // browser bug or replay can't end up minting a session for a
+    // different account than the client thinks.
+    if verified_username != req.username {
+        tracing::warn!(
+            "WebAuthn login.finish: body username '{}' != session username '{}' from {}",
+            req.username,
+            verified_username,
+            client_ip
+        );
+        state
+            .auth
+            .record_webauthn_failure(&req.username, client_ip)
+            .await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "username mismatch" })),
+        )
+            .into_response();
+    }
+
+    match state
+        .auth
+        .mint_session_for_webauthn(&verified_username, client_ip)
+        .await
+    {
+        Ok(token) => {
+            info!(
+                "WebAuthn login successful: user '{}' from {}",
+                verified_username, client_ip
+            );
+            let mut resp_headers = axum::http::HeaderMap::new();
+            resp_headers.insert(
+                axum::http::header::SET_COOKIE,
+                build_session_cookie(&token).parse().unwrap(),
+            );
+            (
+                StatusCode::OK,
+                resp_headers,
+                Json(serde_json::json!({ "token": token, "username": verified_username })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "WebAuthn session mint failed for '{}' from {}: {e}",
+                verified_username,
+                client_ip
+            );
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn login_handler(
