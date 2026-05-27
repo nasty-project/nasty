@@ -76,6 +76,17 @@
       # subdirectory so it finds the workspace Cargo.toml.
       sourceRoot = "source/engine";
       cargoLock.lockFile = ./engine/Cargo.lock;
+      # webauthn-rs (added for #289 PR #1) pulls openssl-sys
+      # transitively via webauthn-rs-core's COSE signature
+      # verification path. The Nix sandbox doesn't expose system
+      # headers, so the `openssl-sys` build script needs pkg-config
+      # to locate the openssl libs the rest of the closure already
+      # depends on. `nativeBuildInputs` is the right home for
+      # pkg-config (it runs at build time on the host); `openssl`
+      # itself goes in `buildInputs` so its dev headers land in the
+      # CFLAGS / LD path the build script reads.
+      nativeBuildInputs = [ pkgs.pkg-config ];
+      buildInputs = [ pkgs.openssl ];
       # Bake the flake's source rev into the engine binary as
       # NASTY_GIT_SHA, picked up by engine/nasty-system/build.rs and
       # exposed at runtime via option_env!. The engine uses this as
@@ -96,7 +107,7 @@
       pname = "nasty-webui";
       version = nasty-version;
       src = ./webui;
-      npmDepsHash = "sha256-eH0wB8PUPzRqjiflIIlxCFyE8Mh9Rl8XbwoQ1J/3e4c=";
+      npmDepsHash = "sha256-bvltVD0IhSUf5U2B5cmjCzYJu+djJ5kAk/Ju365EUM0=";
       npmFlags = [ "--legacy-peer-deps" ];
       buildPhase = ''
         npm run prepare

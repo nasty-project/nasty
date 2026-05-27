@@ -29,6 +29,39 @@ pub struct User {
     /// never collides with an existing user.
     #[serde(default)]
     pub oidc_issuer: Option<String>,
+    /// WebAuthn credentials registered to this user. PR #1 of issue #289 —
+    /// PR #2 wires these into a third login path; PR #1 only manages
+    /// registration/listing/deletion. Empty for users who never enrolled
+    /// a security key. Stored inline in `auth.json` (one user, one
+    /// blob) because the credential count is bounded (operators
+    /// typically register 1–3) and centralising under `User` keeps
+    /// the "delete user wipes everything they own" invariant trivial.
+    #[serde(default)]
+    pub webauthn_credentials: Vec<WebauthnCredential>,
+}
+
+/// One registered WebAuthn credential. Wraps webauthn-rs's `Passkey`
+/// (which carries the credential ID, public key, sign counter,
+/// attestation transports, and the policy bits webauthn-rs needs at
+/// assertion time) with NASty-facing metadata: a free-form label
+/// the operator types ("Personal YubiKey", "Touch ID on laptop")
+/// and the creation timestamp for the management UI.
+///
+/// `Passkey` serializes to a deterministic JSON shape — round-trips
+/// through serde without losing any of webauthn-rs's internal state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebauthnCredential {
+    /// Operator-friendly label shown in account settings. Required;
+    /// the registration UI prompts for it before invoking the
+    /// browser's create() call. Trimmed but not otherwise validated —
+    /// any printable string is fine.
+    pub label: String,
+    /// Unix seconds at registration time, for the "added on …" line
+    /// in the list view.
+    pub created_at: u64,
+    /// The webauthn-rs Passkey blob. Treat as opaque — round-trip
+    /// only, never construct or inspect outside `auth_webauthn.rs`.
+    pub passkey: webauthn_rs::prelude::Passkey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -198,6 +231,7 @@ impl AuthService {
                 must_change_password: true,
                 oidc_subject: None,
                 oidc_issuer: None,
+                webauthn_credentials: Vec::new(),
             });
             st.initialized = true;
             save_state(&st).await.ok();
@@ -411,6 +445,7 @@ impl AuthService {
                 must_change_password: false,
                 oidc_subject: Some(identity.subject.clone()),
                 oidc_issuer: Some(identity.issuer.clone()),
+                webauthn_credentials: Vec::new(),
             });
             existing_idx = Some(state.users.len() - 1);
             audit(
@@ -744,6 +779,7 @@ impl AuthService {
             must_change_password: false,
             oidc_subject: None,
             oidc_issuer: None,
+            webauthn_credentials: Vec::new(),
         });
         save_state(&state).await?;
 
@@ -838,6 +874,74 @@ impl AuthService {
         }
         Ok(session)
     }
+
+    // ── WebAuthn credential management (#289) ─────────────────────
+    //
+    // These methods are the persistence half of `auth_webauthn.rs` —
+    // they live here (not in `auth_webauthn.rs`) because they
+    // mutate `auth.json` under the same lock that protects every
+    // other user-record write. The webauthn module owns the
+    // crypto + challenge state; this module owns the on-disk shape.
+
+    /// Snapshot of a user's registered WebAuthn credentials. Returns
+    /// an empty vec when the user doesn't exist (caller is the
+    /// session-bound user, so a missing entry is degenerate and
+    /// silent is fine).
+    pub async fn webauthn_credentials_for(&self, username: &str) -> Vec<WebauthnCredential> {
+        let state = self.state.read().await;
+        state
+            .users
+            .iter()
+            .find(|u| u.username == username)
+            .map(|u| u.webauthn_credentials.clone())
+            .unwrap_or_default()
+    }
+
+    /// Append a new credential to a user's record and persist. The
+    /// credential ID uniqueness is enforced by webauthn-rs's exclude-
+    /// credentials list at registration time; if a duplicate somehow
+    /// makes it through, the second entry wins (later assertions
+    /// would match either by credential ID anyway).
+    pub async fn add_webauthn_credential(
+        &self,
+        username: &str,
+        credential: WebauthnCredential,
+    ) -> Result<(), AuthError> {
+        let mut state = self.state.write().await;
+        let user = state
+            .users
+            .iter_mut()
+            .find(|u| u.username == username)
+            .ok_or(AuthError::UserNotFound)?;
+        user.webauthn_credentials.push(credential);
+        save_state(&state).await?;
+        Ok(())
+    }
+
+    /// Remove a credential by its raw credential-ID bytes (the
+    /// webauthn-rs `CredentialID`, not the base64url wrapping the
+    /// WebUI uses). Returns `NotFound` when no credential matches —
+    /// the typical "list view was stale" case the WebUI ignores.
+    pub async fn remove_webauthn_credential(
+        &self,
+        username: &str,
+        credential_id: &[u8],
+    ) -> Result<(), AuthError> {
+        let mut state = self.state.write().await;
+        let user = state
+            .users
+            .iter_mut()
+            .find(|u| u.username == username)
+            .ok_or(AuthError::UserNotFound)?;
+        let before = user.webauthn_credentials.len();
+        user.webauthn_credentials
+            .retain(|c| c.passkey.cred_id().as_ref() != credential_id);
+        if user.webauthn_credentials.len() == before {
+            return Err(AuthError::NotFound);
+        }
+        save_state(&state).await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -862,6 +966,8 @@ pub enum AuthError {
     UserNotFound,
     #[error("user already exists")]
     UserExists,
+    #[error("not found")]
+    NotFound,
     #[error("password must be at least 8 characters")]
     WeakPassword,
     #[error("password hash error: {0}")]
@@ -1077,6 +1183,7 @@ mod tests {
             must_change_password: false,
             oidc_subject: None,
             oidc_issuer: None,
+            webauthn_credentials: Vec::new(),
         }
     }
 

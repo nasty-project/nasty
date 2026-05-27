@@ -4,15 +4,27 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
-	import type { UserInfo, ApiTokenInfo, ApiTokenCreated, Filesystem, SmbGroup, OidcSettings } from '$lib/types';
+	import type {
+		UserInfo,
+		ApiTokenInfo,
+		ApiTokenCreated,
+		Filesystem,
+		SmbGroup,
+		OidcSettings,
+		WebauthnConfigInfo,
+		WebauthnCredentialSummary,
+		WebauthnRegisterStart,
+	} from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import { Trash2, Plus } from '@lucide/svelte';
+	import { startRegistration } from '@simplewebauthn/browser';
 
-	let activeTab: 'users' | 'sso' = $state('users');
+	let activeTab: 'users' | 'tokens' | 'sso' = $state('users');
 
 	let users: UserInfo[] = $state([]);
 	let apiTokens: ApiTokenInfo[] = $state([]);
@@ -37,6 +49,61 @@
 	let pwUser = $state<string | null>(null);
 	let pwNew = $state('');
 	let pwConfirm = $state('');
+
+	// ── WebAuthn security keys for the current user (#289 PR #1) ──
+	// Lives here rather than on a separate page because security
+	// keys are an authentication factor — same access-control bucket
+	// as users / tokens / OIDC. List + config are loaded alongside
+	// the rest of the page's data in `refresh()`. Origin-precheck
+	// (IP / non-https / wrong hostname) gates the Add button so the
+	// operator never types a label only to hit a cryptic browser
+	// rejection from a doomed `navigator.credentials.create`.
+	let webauthnCreds: WebauthnCredentialSummary[] = $state([]);
+	let webauthnConfig: WebauthnConfigInfo | null = $state(null);
+	let webauthnShowAdd = $state(false);
+	let webauthnLabel = $state('');
+	let webauthnRegistering = $state(false);
+	let webauthnDeleting = $state<string | null>(null);
+	const webauthnBrowserSupported = $derived(
+		typeof window !== 'undefined'
+			&& 'PublicKeyCredential' in window
+			&& typeof navigator !== 'undefined'
+			&& !!navigator.credentials?.create,
+	);
+	const webauthnIsLikelyIp = $derived.by((): boolean => {
+		if (typeof window === 'undefined') return false;
+		const h = window.location.hostname;
+		return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.startsWith('[');
+	});
+	const webauthnIsSecureContext = $derived(
+		typeof window !== 'undefined'
+			&& (window.isSecureContext || window.location.hostname === 'localhost'),
+	);
+	const webauthnHostnameMatchesRp = $derived.by((): boolean => {
+		if (typeof window === 'undefined' || !webauthnConfig) return true;
+		const h = window.location.hostname.toLowerCase();
+		const rp = webauthnConfig.rp_id.toLowerCase();
+		return h === rp || h.endsWith('.' + rp);
+	});
+	const webauthnOriginBlocker = $derived.by((): string | null => {
+		if (webauthnIsLikelyIp) {
+			return webauthnConfig
+				? `WebAuthn cannot be used over an IP address. Visit https://${webauthnConfig.rp_id} (or a subdomain of it) to register security keys here.`
+				: 'WebAuthn cannot be used over an IP address — visit this NASty by hostname.';
+		}
+		if (!webauthnIsSecureContext) {
+			return webauthnConfig
+				? `WebAuthn requires HTTPS. Visit https://${webauthnConfig.rp_id} to register security keys.`
+				: 'WebAuthn requires HTTPS.';
+		}
+		if (!webauthnHostnameMatchesRp && webauthnConfig) {
+			return `You're on ${window.location.hostname}, but this NASty registers security keys under ${webauthnConfig.rp_id}. Visit https://${webauthnConfig.rp_id} to register here.`;
+		}
+		return null;
+	});
+	const webauthnCanRegister = $derived(
+		webauthnBrowserSupported && webauthnOriginBlocker === null,
+	);
 
 	// System users (protocol access)
 	interface SystemUser { username: string; uid: number; }
@@ -147,14 +214,83 @@
 
 	async function refresh() {
 		await withToast(async () => {
-			[users, apiTokens, filesystems, systemUsers, groups] = await Promise.all([
+			[users, apiTokens, filesystems, systemUsers, groups, webauthnCreds, webauthnConfig] = await Promise.all([
 				client.call<UserInfo[]>('auth.list_users'),
 				client.call<ApiTokenInfo[]>('auth.token.list'),
 				client.call<Filesystem[]>('fs.list'),
 				client.call<SystemUser[]>('smb.user.list').catch(() => [] as SystemUser[]),
 				client.call<SmbGroup[]>('smb.group.list').catch(() => [] as SmbGroup[]),
+				client.call<WebauthnCredentialSummary[]>('auth.webauthn.list').catch(() => [] as WebauthnCredentialSummary[]),
+				client.call<WebauthnConfigInfo>('auth.webauthn.config').catch(() => null),
 			]);
 		});
+	}
+
+	async function webauthnRegister(e: SubmitEvent) {
+		e.preventDefault();
+		const label = webauthnLabel.trim();
+		if (!label) return;
+		webauthnRegistering = true;
+		try {
+			const start = await client.call<WebauthnRegisterStart>(
+				'auth.webauthn.register.start',
+				{ label },
+			);
+			// simplewebauthn handles the WebAuthn JSON ↔ ArrayBuffer
+			// conversion both ways. The engine sends webauthn-rs's
+			// `CreationChallengeResponse` shape directly — same JSON
+			// shape simplewebauthn accepts.
+			const response = await startRegistration({
+				optionsJSON: (start.creation_options as { publicKey?: unknown }).publicKey
+					?? start.creation_options,
+			} as Parameters<typeof startRegistration>[0]);
+			await withToast(
+				() => client.call('auth.webauthn.register.finish', {
+					registration_id: start.registration_id,
+					response,
+				}),
+				`Security key "${label}" registered`,
+			);
+			webauthnLabel = '';
+			webauthnShowAdd = false;
+			await refresh();
+		} catch (err) {
+			// Most common failure: operator dismissed the browser
+			// prompt (NotAllowedError / AbortError). Short toast is
+			// kinder than a stack trace.
+			const msg = err instanceof Error ? err.message : String(err);
+			await withToast(
+				() => Promise.reject(msg),
+				'Security key registration failed',
+			).catch(() => {});
+		} finally {
+			webauthnRegistering = false;
+		}
+	}
+
+	async function webauthnDelete(cred: WebauthnCredentialSummary) {
+		const ok = await confirm(
+			'Delete security key',
+			`Delete "${cred.label}"? You won't be able to use it to sign in again.`,
+			{ confirmLabel: 'Delete' },
+		);
+		if (!ok) return;
+		webauthnDeleting = cred.credential_id;
+		try {
+			await withToast(
+				() => client.call('auth.webauthn.delete', {
+					credential_id: cred.credential_id,
+				}),
+				`Security key "${cred.label}" deleted`,
+			);
+			await refresh();
+		} finally {
+			webauthnDeleting = null;
+		}
+	}
+
+	function webauthnFormatDate(unix: number): string {
+		return new Date(unix * 1000).toLocaleString();
 	}
 
 	async function createUser() {
@@ -357,7 +493,13 @@
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'users'
 			? 'border-b-2 border-primary text-foreground'
 			: 'text-muted-foreground hover:text-foreground'}"
-	>Users &amp; Tokens</button>
+	>Users &amp; Groups</button>
+	<button
+		onclick={() => activeTab = 'tokens'}
+		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'tokens'
+			? 'border-b-2 border-primary text-foreground'
+			: 'text-muted-foreground hover:text-foreground'}"
+	>Tokens &amp; Keys</button>
 	<button
 		onclick={() => activeTab = 'sso'}
 		class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'sso'
@@ -703,6 +845,40 @@
 	</table>
 {/if}
 
+<!-- Change Password Dialog -->
+<Dialog.Root open={pwUser !== null} onOpenChange={(open) => { if (!open) pwUser = null; }}>
+	<Dialog.Content>
+		<Dialog.Header>
+			<Dialog.Title>Change Password for "{pwUser}"</Dialog.Title>
+		</Dialog.Header>
+		{@const pwTooShort = !!pwNew && pwNew.length < 8}
+		{@const pwMismatch = !!pwConfirm && pwNew !== pwConfirm}
+		<div class="mb-4">
+			<Label for="pw-new">New Password {#if !pwNew && changePwTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="pw-new" type="password" bind:value={pwNew} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwNew, changePwTried) || requiredFieldCls(pwTooShort)}" />
+			{#if pwTooShort}
+				<span class="mt-1 block text-xs text-destructive">At least 8 characters required</span>
+			{/if}
+		</div>
+		<div class="mb-4">
+			<Label for="pw-confirm">Confirm Password {#if !pwConfirm && changePwTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+			<Input id="pw-confirm" type="password" bind:value={pwConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwConfirm, changePwTried) || requiredFieldCls(pwMismatch)}" />
+			{#if pwMismatch}
+				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
+			{/if}
+		</div>
+		<Dialog.Footer>
+			<Button size="sm" onclick={changePassword}>
+				Change Password
+			</Button>
+			<Button variant="secondary" size="sm" onclick={() => pwUser = null}>Cancel</Button>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
+{:else if activeTab === 'tokens'}
+
+<!-- API Tokens (admin-managed long-lived credentials) -->
 <h2 class="mb-3 text-xl font-semibold">API Tokens</h2>
 <div class="mb-4 flex items-center gap-3">
 	<Button size="sm" onclick={() => showCreateToken = !showCreateToken}>
@@ -760,9 +936,9 @@
 
 {#if !loading}
 	{#if apiTokens.length === 0}
-		<p class="text-sm text-muted-foreground">No API tokens configured.</p>
+		<p class="mb-10 text-sm text-muted-foreground">No API tokens configured.</p>
 	{:else}
-		<table class="w-full text-sm">
+		<table class="mb-10 w-full text-sm">
 			<thead>
 				<tr>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Name</th>
@@ -804,37 +980,6 @@
 	{/if}
 {/if}
 
-<!-- Change Password Dialog -->
-<Dialog.Root open={pwUser !== null} onOpenChange={(open) => { if (!open) pwUser = null; }}>
-	<Dialog.Content>
-		<Dialog.Header>
-			<Dialog.Title>Change Password for "{pwUser}"</Dialog.Title>
-		</Dialog.Header>
-		{@const pwTooShort = !!pwNew && pwNew.length < 8}
-		{@const pwMismatch = !!pwConfirm && pwNew !== pwConfirm}
-		<div class="mb-4">
-			<Label for="pw-new">New Password {#if !pwNew && changePwTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-			<Input id="pw-new" type="password" bind:value={pwNew} placeholder="Min 8 characters" autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwNew, changePwTried) || requiredFieldCls(pwTooShort)}" />
-			{#if pwTooShort}
-				<span class="mt-1 block text-xs text-destructive">At least 8 characters required</span>
-			{/if}
-		</div>
-		<div class="mb-4">
-			<Label for="pw-confirm">Confirm Password {#if !pwConfirm && changePwTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-			<Input id="pw-confirm" type="password" bind:value={pwConfirm} autocomplete="new-password" class="mt-1 {requiredFieldCls(!pwConfirm, changePwTried) || requiredFieldCls(pwMismatch)}" />
-			{#if pwMismatch}
-				<span class="mt-1 block text-xs text-destructive">Passwords do not match</span>
-			{/if}
-		</div>
-		<Dialog.Footer>
-			<Button size="sm" onclick={changePassword}>
-				Change Password
-			</Button>
-			<Button variant="secondary" size="sm" onclick={() => pwUser = null}>Cancel</Button>
-		</Dialog.Footer>
-	</Dialog.Content>
-</Dialog.Root>
-
 <!-- New Token Created Dialog -->
 <Dialog.Root open={createdToken !== null} onOpenChange={(open) => { if (!open) createdToken = null; }}>
 	<Dialog.Content>
@@ -856,6 +1001,108 @@
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
+
+<!-- Security Keys (current user, self-managed WebAuthn credentials) -->
+<h2 class="mb-3 text-xl font-semibold">Security Keys</h2>
+<p class="mb-4 text-sm text-muted-foreground">
+	Register a hardware key (YubiKey, Solo 2, Trezor), a platform
+	authenticator (Touch ID, Windows Hello), or a syncable passkey.
+	Sign-in via security key arrives in a follow-up; for now,
+	registration only.
+</p>
+
+{#if !webauthnBrowserSupported}
+	<div class="mb-3 rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+		This browser doesn't expose the WebAuthn API. Use an up-to-date
+		browser served over HTTPS to register security keys.
+	</div>
+{:else if webauthnOriginBlocker}
+	<!-- Origin precheck — browser refuses `credentials.create` on
+		 origins that can't satisfy the engine's pinned RP ID (IPs,
+		 plain http://, hostname ≠ rp_id). Surface the real cause
+		 inline so the operator switches origins instead of typing
+		 a label and hitting a cryptic toast. -->
+	<div class="mb-3 rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+		<strong>Can't register security keys on this origin.</strong>
+		<div class="mt-1">{webauthnOriginBlocker}</div>
+	</div>
+{/if}
+
+<div class="mb-4">
+	{#if !webauthnShowAdd && webauthnCanRegister}
+		<Button size="sm" onclick={() => (webauthnShowAdd = true)}>
+			<Plus size={14} />
+			Add security key
+		</Button>
+	{/if}
+</div>
+
+{#if webauthnShowAdd}
+	<form onsubmit={webauthnRegister} class="mb-4 rounded border border-border bg-muted/20 p-4">
+		<Label class="block text-xs font-medium" for="webauthn-label">
+			Label (so you can recognise this key in the list)
+		</Label>
+		<Input
+			id="webauthn-label"
+			bind:value={webauthnLabel}
+			placeholder="e.g. Personal YubiKey, Laptop Touch ID"
+			class="mt-1"
+			disabled={webauthnRegistering}
+			maxlength={128}
+			autocomplete="off"
+		/>
+		<div class="mt-3 flex gap-2">
+			<Button type="submit" size="sm" disabled={webauthnRegistering || !webauthnLabel.trim()}>
+				{#if webauthnRegistering}Tap your key…{:else}Register{/if}
+			</Button>
+			<Button
+				type="button"
+				size="sm"
+				variant="secondary"
+				disabled={webauthnRegistering}
+				onclick={() => {
+					webauthnShowAdd = false;
+					webauthnLabel = '';
+				}}
+			>
+				Cancel
+			</Button>
+		</div>
+	</form>
+{/if}
+
+{#if webauthnCreds.length === 0}
+	<p class="text-sm text-muted-foreground">No security keys registered.</p>
+{:else}
+	<table class="w-full text-sm">
+		<thead>
+			<tr class="text-left text-xs uppercase tracking-wide text-muted-foreground">
+				<th class="pb-2 font-medium">Label</th>
+				<th class="pb-2 font-medium">Added</th>
+				<th class="pb-2 text-right font-medium">Actions</th>
+			</tr>
+		</thead>
+		<tbody>
+			{#each webauthnCreds as cred (cred.credential_id)}
+				<tr class="border-t border-border/40">
+					<td class="py-2"><strong>{cred.label}</strong></td>
+					<td class="py-2 text-xs text-muted-foreground">{webauthnFormatDate(cred.created_at)}</td>
+					<td class="py-2 text-right">
+						<Button
+							size="xs"
+							variant="ghost"
+							disabled={webauthnDeleting === cred.credential_id}
+							onclick={() => webauthnDelete(cred)}
+							title="Delete this security key"
+						>
+							<Trash2 size={14} />
+						</Button>
+					</td>
+				</tr>
+			{/each}
+		</tbody>
+	</table>
+{/if}
 
 {:else if activeTab === 'sso'}
 

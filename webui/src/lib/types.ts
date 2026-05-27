@@ -1,5 +1,42 @@
 // Mirrors engine Rust types
 
+/** One registered WebAuthn credential under the current user. Wire
+ * shape returned by `auth.webauthn.list` and (on a single-row form)
+ * `auth.webauthn.register.finish`. The credential_id is the
+ * base64url stable identifier the WebUI passes back to
+ * `auth.webauthn.delete` — labels aren't unique by intent, so we
+ * key deletion off the cred id. */
+export interface WebauthnCredentialSummary {
+	label: string;
+	created_at: number;
+	credential_id: string;
+}
+
+/** Wire shape of `auth.webauthn.config`. Exposes the engine-pinned
+ * RP ID so the WebUI can pre-check `window.location` before
+ * attempting `navigator.credentials.create` — the browser refuses
+ * to issue a credential when the origin can't satisfy the RP ID
+ * (IP origins, mismatched hostnames, plain http://) and surfaces
+ * the rejection as a cryptic error. */
+export interface WebauthnConfigInfo {
+	rp_id: string;
+}
+
+/** Wire shape of `auth.webauthn.register.start`. `creation_options`
+ * is the spec-shaped JSON `PublicKeyCredentialCreationOptions` —
+ * pass it through `@simplewebauthn/browser`'s `startRegistration`
+ * helper which handles the base64url ↔ ArrayBuffer conversion.
+ * The `registration_id` round-trips back to `register.finish` so
+ * the engine can pair the browser's response with the matching
+ * server-side `PasskeyRegistration` state. */
+export interface WebauthnRegisterStart {
+	registration_id: string;
+	// The shape is webauthn-rs's `CreationChallengeResponse` — treat
+	// as opaque on the WebUI side; only `@simplewebauthn/browser`
+	// reads it.
+	creation_options: unknown;
+}
+
 export interface SystemInfo {
 	hostname: string;
 	version: string;
