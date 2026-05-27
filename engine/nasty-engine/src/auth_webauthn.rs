@@ -426,10 +426,7 @@ impl WebauthnService {
         let auth_id = base64_token();
         let mut pending = self.pending_auth.lock().await;
         prune_expired_auth(&mut pending);
-        let same_user_count = pending
-            .values()
-            .filter(|p| p.username == username)
-            .count();
+        let same_user_count = pending.values().filter(|p| p.username == username).count();
         if same_user_count >= MAX_IN_FLIGHT_PER_USER {
             warn!(
                 target: "nasty::webauthn",

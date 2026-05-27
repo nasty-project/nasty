@@ -2031,11 +2031,7 @@ async fn webauthn_login_start_handler(
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
-    match state
-        .webauthn
-        .login_start(&state.auth, &req.username)
-        .await
-    {
+    match state.webauthn.login_start(&state.auth, &req.username).await {
         Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(&resp).unwrap())).into_response(),
         Err(e) => {
             tracing::warn!(
