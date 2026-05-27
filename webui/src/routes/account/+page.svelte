@@ -6,6 +6,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import type {
+		WebauthnConfigInfo,
 		WebauthnCredentialSummary,
 		WebauthnRegisterStart,
 	} from '$lib/types';
@@ -15,6 +16,7 @@
 	const client = getClient();
 
 	let credentials: WebauthnCredentialSummary[] = $state([]);
+	let webauthnConfig: WebauthnConfigInfo | null = $state(null);
 	let loading = $state(true);
 	let registering = $state(false);
 	let deleting = $state<string | null>(null);
@@ -33,11 +35,61 @@
 			&& !!navigator.credentials?.create,
 	);
 
+	// Origin precheck: WebAuthn rejects every registration on origins
+	// that can't satisfy the engine's pinned RP ID. The browser's own
+	// error ("'rp.id' cannot be used with the current origin") is
+	// useless to operators — surface the real cause inline with the
+	// hostname they need to switch to.
+	const isLikelyIp = $derived.by((): boolean => {
+		if (typeof window === 'undefined') return false;
+		const h = window.location.hostname;
+		// IPv4 dotted-quad, or IPv6 in URL brackets. Cheap regex —
+		// `URL.canParse` doesn't give us "is this an IP" directly.
+		return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.startsWith('[');
+	});
+	const isSecureContext = $derived(
+		typeof window !== 'undefined'
+			&& (window.isSecureContext || window.location.hostname === 'localhost'),
+	);
+	const hostnameMatchesRpId = $derived.by((): boolean => {
+		if (typeof window === 'undefined' || !webauthnConfig) return true;
+		const h = window.location.hostname.toLowerCase();
+		const rp = webauthnConfig.rp_id.toLowerCase();
+		// Spec: RP ID must equal the effective domain or be a
+		// registrable suffix. For NASty's use we accept exact match
+		// or `*.<rp_id>` subdomain — the engine never pins a wider
+		// RP ID than what `tls_domain` / `nasty.local` is set to.
+		return h === rp || h.endsWith('.' + rp);
+	});
+	const originBlocker = $derived.by((): string | null => {
+		if (isLikelyIp) {
+			return webauthnConfig
+				? `WebAuthn cannot be used over an IP address. Visit https://${webauthnConfig.rp_id} (or a subdomain of it) to register security keys here.`
+				: 'WebAuthn cannot be used over an IP address — visit this NASty by hostname.';
+		}
+		if (!isSecureContext) {
+			return webauthnConfig
+				? `WebAuthn requires HTTPS. Visit https://${webauthnConfig.rp_id} to register security keys.`
+				: 'WebAuthn requires HTTPS.';
+		}
+		if (!hostnameMatchesRpId && webauthnConfig) {
+			return `You're on ${window.location.hostname}, but this NASty registers security keys under ${webauthnConfig.rp_id}. Visit https://${webauthnConfig.rp_id} to register here.`;
+		}
+		return null;
+	});
+	const canRegister = $derived(browserSupported && originBlocker === null);
+
 	async function loadCredentials() {
 		try {
-			credentials = await client.call<WebauthnCredentialSummary[]>('auth.webauthn.list');
+			const [list, config] = await Promise.all([
+				client.call<WebauthnCredentialSummary[]>('auth.webauthn.list'),
+				client.call<WebauthnConfigInfo>('auth.webauthn.config'),
+			]);
+			credentials = list;
+			webauthnConfig = config;
 		} catch {
 			credentials = [];
+			webauthnConfig = null;
 		}
 		loading = false;
 	}
@@ -132,7 +184,7 @@
 			<KeyRound size={18} class="text-muted-foreground" />
 			<h2 class="text-base font-semibold">Security keys</h2>
 		</div>
-		{#if !showAddForm && browserSupported}
+		{#if !showAddForm && canRegister}
 			<Button size="sm" onclick={() => (showAddForm = true)}>
 				<Plus size={14} />
 				Add security key
@@ -148,9 +200,18 @@
 	</p>
 
 	{#if !browserSupported}
-		<div class="rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+		<div class="mb-3 rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
 			This browser doesn't expose the WebAuthn API. Use an up-to-date
 			browser served over HTTPS to register security keys.
+		</div>
+	{:else if originBlocker}
+		<!-- The browser will reject `navigator.credentials.create`
+			 with a cryptic error on origins that can't satisfy the
+			 engine's pinned RP ID. Surface the actual cause inline
+			 before the operator even types a label. -->
+		<div class="mb-3 rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+			<strong>Can't register security keys on this origin.</strong>
+			<div class="mt-1">{originBlocker}</div>
 		</div>
 	{/if}
 

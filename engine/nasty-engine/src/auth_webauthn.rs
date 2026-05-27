@@ -118,6 +118,23 @@ pub struct RegisterStartResponse {
     pub creation_options: CreationChallengeResponse,
 }
 
+/// Wire shape for `auth.webauthn.config` — the read-only view of
+/// what the engine has pinned at startup, so the WebUI can
+/// pre-check the operator's current origin before attempting
+/// `navigator.credentials.create`. IP origins, mismatched hostnames
+/// and plain http:// all fail at the browser with cryptic errors;
+/// surfacing the RP ID up front lets the UI render an actionable
+/// message ("you're on 10.10.10.74 but this NASty registers
+/// credentials under nasty.local — visit https://nasty.local").
+#[derive(Debug, Serialize)]
+pub struct WebauthnConfig {
+    /// RP ID baked into this engine instance. Operators must access
+    /// NASty via a hostname that equals this string or is a
+    /// subdomain of it; the browser refuses to issue a credential
+    /// for any other origin.
+    pub rp_id: String,
+}
+
 /// Wire shape for `auth.webauthn.list`. Each row is the metadata
 /// the operator sees in account settings — no public key, no
 /// internal webauthn-rs state.
@@ -170,6 +187,15 @@ impl WebauthnService {
 
     pub fn rp_id(&self) -> &str {
         &self.rp_id
+    }
+
+    /// Snapshot the engine-pinned WebAuthn config for the WebUI's
+    /// origin precheck. Read-only — no state to mutate, just
+    /// echoes the RP ID baked at construction.
+    pub fn config(&self) -> WebauthnConfig {
+        WebauthnConfig {
+            rp_id: self.rp_id.clone(),
+        }
     }
 
     /// Step 1 of registration: build a challenge for the browser.

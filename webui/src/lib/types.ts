@@ -12,6 +12,16 @@ export interface WebauthnCredentialSummary {
 	credential_id: string;
 }
 
+/** Wire shape of `auth.webauthn.config`. Exposes the engine-pinned
+ * RP ID so the WebUI can pre-check `window.location` before
+ * attempting `navigator.credentials.create` — the browser refuses
+ * to issue a credential when the origin can't satisfy the RP ID
+ * (IP origins, mismatched hostnames, plain http://) and surfaces
+ * the rejection as a cryptic error. */
+export interface WebauthnConfigInfo {
+	rp_id: string;
+}
+
 /** Wire shape of `auth.webauthn.register.start`. `creation_options`
  * is the spec-shaped JSON `PublicKeyCredentialCreationOptions` —
  * pass it through `@simplewebauthn/browser`'s `startRegistration`

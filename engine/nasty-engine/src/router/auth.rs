@@ -169,6 +169,7 @@ pub(super) async fn try_route(
         // ── WebAuthn (issue #289 PR #1: registration management) ──
         // Login via webauthn lands in PR #2; for now these only let
         // an authenticated user enroll and manage their own keys.
+        "auth.webauthn.config" => ok(req, state.webauthn.config()),
         "auth.webauthn.register.start" => {
             #[derive(Deserialize)]
             struct P {
