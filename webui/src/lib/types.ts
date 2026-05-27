@@ -1,5 +1,13 @@
 // Mirrors engine Rust types
 
+/** Error code emitted by `auth.webauthn.register.start` when the
+ * caller has no fallback factor (no local password and no OIDC
+ * link). Surfaced verbatim by the engine so the WebUI can match on
+ * it without re-translating the user-facing message. Kept as a
+ * substring check on the engine's full error string because the
+ * engine returns a String, not a structured error code. */
+export const WEBAUTHN_NO_FALLBACK_HINT = 'set a password or single sign-on';
+
 /** One registered WebAuthn credential under the current user. Wire
  * shape returned by `auth.webauthn.list` and (on a single-row form)
  * `auth.webauthn.register.finish`. The credential_id is the
@@ -491,6 +499,10 @@ export interface NvmeofPort {
 export interface UserInfo {
 	username: string;
 	role: 'admin' | 'readonly' | 'operator';
+	/** Number of registered WebAuthn credentials. Defaults to 0 for
+	 * compat with engines that pre-date the field. Drives the admin
+	 * "Reset security keys" button visibility on the /users page. */
+	webauthn_credential_count?: number;
 }
 
 export interface ApiTokenInfo {

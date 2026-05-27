@@ -231,6 +231,22 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
+        // Admin recovery for the "user lost every authenticator"
+        // case. AuthService re-checks the admin role; we also gate
+        // here so a non-admin call doesn't even reach the state
+        // mutation path. Audit log written by AuthService.
+        "auth.webauthn.reset_for_user" => {
+            if session.role != Role::Admin {
+                return Some(err(req, "admin only".to_string()));
+            }
+            match require_str(req, "username") {
+                Ok(target) => match state.auth.reset_webauthn_credentials(session, target).await {
+                    Ok(removed) => ok(req, serde_json::json!({ "removed": removed })),
+                    Err(e) => err(req, e),
+                },
+                Err(r) => r,
+            }
+        }
         _ => return None,
     })
 }

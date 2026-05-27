@@ -64,6 +64,8 @@
 	let webauthnLabel = $state('');
 	let webauthnRegistering = $state(false);
 	let webauthnDeleting = $state<string | null>(null);
+	let webauthnResetting = $state<string | null>(null);
+	let webauthnRegisterError = $state<string | null>(null);
 	const webauthnBrowserSupported = $derived(
 		typeof window !== 'undefined'
 			&& 'PublicKeyCredential' in window
@@ -231,6 +233,7 @@
 		const label = webauthnLabel.trim();
 		if (!label) return;
 		webauthnRegistering = true;
+		webauthnRegisterError = null;
 		try {
 			const start = await client.call<WebauthnRegisterStart>(
 				'auth.webauthn.register.start',
@@ -255,16 +258,37 @@
 			webauthnShowAdd = false;
 			await refresh();
 		} catch (err) {
-			// Most common failure: operator dismissed the browser
-			// prompt (NotAllowedError / AbortError). Short toast is
-			// kinder than a stack trace.
-			const msg = err instanceof Error ? err.message : String(err);
-			await withToast(
-				() => Promise.reject(msg),
-				'Security key registration failed',
-			).catch(() => {});
+			// Surface inline so the message is read where the operator
+			// is looking. The fallback-factor error (no password +
+			// no OIDC) and the user-dismissed-prompt error read very
+			// differently; the inline panel gives both room to be
+			// informative without truncating into a toast.
+			webauthnRegisterError = err instanceof Error ? err.message : String(err);
 		} finally {
 			webauthnRegistering = false;
+		}
+	}
+
+	async function webauthnResetForUser(target: UserInfo) {
+		const ok = await confirm(
+			'Reset security keys',
+			`Remove every registered security key for "${target.username}"? They'll need to sign in via password or SSO and re-register a key.`,
+			{ confirmLabel: 'Reset' },
+		);
+		if (!ok) return;
+		webauthnResetting = target.username;
+		try {
+			const result = await withToast(
+				() => client.call<{ removed: number }>('auth.webauthn.reset_for_user', {
+					username: target.username,
+				}),
+				`Security keys for "${target.username}" reset`,
+			);
+			if (result !== undefined) {
+				await refresh();
+			}
+		} finally {
+			webauthnResetting = null;
 		}
 	}
 
@@ -590,6 +614,22 @@
 							<Button variant="secondary" size="xs" onclick={() => { pwUser = user.username; pwNew = ''; pwConfirm = ''; }}>
 								Change Password
 							</Button>
+							{#if (user.webauthn_credential_count ?? 0) > 0}
+								<!-- Admin recovery for the "lost every security key"
+									 case. Visible only on rows that actually have
+									 keys to reset; the button is a no-op otherwise
+									 and clutters the row. Engine enforces admin-
+									 only on the server side. -->
+								<Button
+									variant="secondary"
+									size="xs"
+									disabled={webauthnResetting === user.username}
+									onclick={() => webauthnResetForUser(user)}
+									title="Remove all WebAuthn credentials for this user"
+								>
+									{webauthnResetting === user.username ? 'Resetting…' : `Reset Keys (${user.webauthn_credential_count})`}
+								</Button>
+							{/if}
 							{#if !(user.role === 'admin' && users.filter(u => u.role === 'admin').length === 1)}
 								<Button variant="destructive" size="xs" onclick={() => deleteUser(user.username)}>Delete</Button>
 							{/if}
@@ -1051,6 +1091,15 @@
 			maxlength={128}
 			autocomplete="off"
 		/>
+		{#if webauthnRegisterError}
+			<!-- Engine-side errors that the operator needs to see in
+				 context: the fallback-factor refusal, label-too-long,
+				 in-flight cap, etc. Toast wouldn't give them room to be
+				 useful. -->
+			<div class="mt-3 rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+				{webauthnRegisterError}
+			</div>
+		{/if}
 		<div class="mt-3 flex gap-2">
 			<Button type="submit" size="sm" disabled={webauthnRegistering || !webauthnLabel.trim()}>
 				{#if webauthnRegistering}Tap your key…{:else}Register{/if}
@@ -1063,6 +1112,7 @@
 				onclick={() => {
 					webauthnShowAdd = false;
 					webauthnLabel = '';
+					webauthnRegisterError = null;
 				}}
 			>
 				Cancel

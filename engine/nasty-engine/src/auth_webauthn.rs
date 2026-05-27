@@ -87,6 +87,10 @@ pub enum WebauthnError {
     CredentialNotFound,
     #[error("user has no registered security keys")]
     NoCredentials,
+    #[error(
+        "set a password or single sign-on for this account before adding a security key — otherwise losing every authenticator would lock you out permanently"
+    )]
+    NoFallbackFactor,
     #[error("auth state I/O failed: {0}")]
     Auth(String),
 }
@@ -243,6 +247,16 @@ impl WebauthnService {
         }
         if label.len() > MAX_LABEL_LEN {
             return Err(WebauthnError::LabelTooLong);
+        }
+
+        // Fallback-factor precheck (#289 PR #3). Refuse to register
+        // a security key for a user who has neither a local password
+        // nor an OIDC link — without one of those, losing every
+        // authenticator would lock them out permanently with no
+        // recovery path the operator (or even an admin) can take
+        // short of editing auth.json by hand.
+        if !auth.has_non_webauthn_factor(username).await {
+            return Err(WebauthnError::NoFallbackFactor);
         }
 
         // Exclude credentials already registered to this user. Mirrors

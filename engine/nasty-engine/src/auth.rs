@@ -826,6 +826,7 @@ impl AuthService {
             .map(|u| UserInfo {
                 username: u.username.clone(),
                 role: u.role.clone(),
+                webauthn_credential_count: u.webauthn_credentials.len(),
             })
             .collect()
     }
@@ -941,6 +942,65 @@ impl AuthService {
         }
         save_state(&state).await?;
         Ok(())
+    }
+
+    /// True iff the user has at least one non-WebAuthn factor
+    /// (a local password OR an OIDC link). Used as the registration
+    /// precheck: a user with only WebAuthn credentials who loses
+    /// every authenticator is locked out, so we require a
+    /// recoverable fallback before letting them register the first
+    /// security key. Today's user-creation paths always set one of
+    /// the two, but this check guards against future API additions
+    /// that might break that invariant (e.g. an "unlink OIDC" RPC
+    /// without a matching "but the user has WebAuthn-only" check).
+    pub async fn has_non_webauthn_factor(&self, username: &str) -> bool {
+        let state = self.state.read().await;
+        state
+            .users
+            .iter()
+            .find(|u| u.username == username)
+            .map(|u| {
+                u.password_hash.is_some() || (u.oidc_subject.is_some() && u.oidc_issuer.is_some())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Admin recovery for the "lost every WebAuthn authenticator"
+    /// case — wipes every credential under the named user. Audit
+    /// log records the actor + target so a malicious admin can't
+    /// quietly clear someone else's keys without a trail. Returns
+    /// the number of credentials removed (0 when the user existed
+    /// but had no credentials; this is not an error — admin UI
+    /// surfaces it as a no-op).
+    pub async fn reset_webauthn_credentials(
+        &self,
+        actor: &Session,
+        target_username: &str,
+    ) -> Result<usize, AuthError> {
+        if actor.role != Role::Admin {
+            return Err(AuthError::Forbidden);
+        }
+        let mut state = self.state.write().await;
+        let user = state
+            .users
+            .iter_mut()
+            .find(|u| u.username == target_username)
+            .ok_or(AuthError::UserNotFound)?;
+        let removed = user.webauthn_credentials.len();
+        user.webauthn_credentials.clear();
+        save_state(&state).await?;
+        drop(state);
+        audit(
+            "webauthn_reset_for_user",
+            &actor.username,
+            actor.client_ip.as_deref().unwrap_or(""),
+            &format!("target={target_username} removed={removed}"),
+        );
+        info!(
+            "admin '{}' reset {} WebAuthn credential(s) for user '{}'",
+            actor.username, removed, target_username
+        );
+        Ok(removed)
     }
 
     /// Persist the new `sign_count` (and any other counter / backup
@@ -1096,6 +1156,13 @@ impl AuthService {
 pub struct UserInfo {
     pub username: String,
     pub role: Role,
+    /// How many WebAuthn credentials are registered to this user.
+    /// Drives the admin "Reset security keys" affordance on the
+    /// /users page — admins only see the button on rows where
+    /// there are credentials to reset, instead of a no-op button
+    /// on every row.
+    #[serde(default)]
+    pub webauthn_credential_count: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
