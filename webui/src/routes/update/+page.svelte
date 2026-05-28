@@ -9,6 +9,7 @@
 		Generation,
 		FirmwareDevice,
 		FirmwareUpdateResult,
+		FirmwareConstraints,
 		VersionInfo,
 		VersionInputInfo,
 		VersionTaggedReleaseStatus,
@@ -99,6 +100,11 @@
 	let firmwareLoading = $state(false);
 	let firmwareLoaded = $state(false);
 	let firmwareUpdating: Record<string, boolean> = $state({});
+	// Apply-side blockers (today: Secure Boot enforcing — upstream
+	// lanzaboote#591 breaks fwupd's EFI-capsule shim). Engine owns
+	// the reason string; we render it verbatim in the banner and
+	// tooltip so the wording stays consistent across surfaces.
+	let firmwareConstraints: FirmwareConstraints | null = $state(null);
 
 	const phases = [
 		{ label: 'Fetch', marker: '==> Updating local system flake' },
@@ -564,7 +570,12 @@
 		try {
 			firmwareAvailable = await client.call<boolean>('firmware.available');
 			if (firmwareAvailable) {
-				firmwareDevices = await client.call<FirmwareDevice[]>('firmware.check');
+				const [devices, constraints] = await Promise.all([
+					client.call<FirmwareDevice[]>('firmware.check'),
+					client.call<FirmwareConstraints>('firmware.constraints'),
+				]);
+				firmwareDevices = devices;
+				firmwareConstraints = constraints;
 			}
 		} catch {
 			// Ignore fwupd errors in the page shell.
@@ -1142,6 +1153,17 @@
 						</Button>
 					</div>
 
+					{#if firmwareConstraints?.sb_blocks_apply}
+						<!-- Apply path is broken under Secure Boot (upstream
+							 lanzaboote#591). Listing + check still work, so
+							 the table renders normally; only the Apply button
+							 is replaced with a tooltip explaining why. -->
+						<div class="mb-4 rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+							<strong>Firmware apply is blocked.</strong>
+							<div class="mt-1">{firmwareConstraints.sb_blocks_apply_reason}</div>
+						</div>
+					{/if}
+
 					{#if firmwareDevices.length === 0}
 						<p class="text-sm text-muted-foreground">No firmware-capable devices detected.</p>
 					{:else}
@@ -1173,7 +1195,14 @@
 										</td>
 										<td class="p-3">
 											{#if dev.update_available}
-												<Button size="xs" onclick={() => updateFirmware(dev.device_id)} disabled={firmwareUpdating[dev.device_id]}>
+												<Button
+													size="xs"
+													onclick={() => updateFirmware(dev.device_id)}
+													disabled={firmwareUpdating[dev.device_id] || firmwareConstraints?.sb_blocks_apply}
+													title={firmwareConstraints?.sb_blocks_apply
+														? firmwareConstraints.sb_blocks_apply_reason
+														: undefined}
+												>
 													{firmwareUpdating[dev.device_id] ? 'Updating...' : 'Update'}
 												</Button>
 											{/if}

@@ -650,6 +650,17 @@ export interface FirmwareUpdateResult {
 	reboot_required: boolean;
 }
 
+/** Returned by `firmware.constraints`. Today only Secure Boot is
+ * tracked — the EFI-capsule shim fwupd uses to apply updates
+ * doesn't work under enforcing SB (upstream lanzaboote#591), so
+ * the Apply button gates on `sb_blocks_apply` and renders the
+ * `sb_blocks_apply_reason` string verbatim in a tooltip / banner
+ * (no client-side translation; the engine owns the copy). */
+export interface FirmwareConstraints {
+	sb_blocks_apply: boolean;
+	sb_blocks_apply_reason: string;
+}
+
 export type ReleaseChannel = 'mild' | 'spicy' | 'nasty';
 
 export interface UpdateInfo {

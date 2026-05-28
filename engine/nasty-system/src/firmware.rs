@@ -36,6 +36,29 @@ pub struct FirmwareUpdateResult {
     pub reboot_required: bool,
 }
 
+/// Constraints on firmware updates from the surrounding system —
+/// today, just whether Secure Boot is blocking the apply path.
+/// Returned by `firmware.constraints` so the WebUI can disable the
+/// per-row Apply button (with an explanatory tooltip) instead of
+/// letting the operator click and surface the error in a toast.
+///
+/// SB-blocking exists because of upstream lanzaboote#591: the
+/// EFI-capsule shim fwupd uses to apply updates can't be launched
+/// from a lanzaboote-managed boot chain under enforcing Secure Boot.
+/// Listing devices / refreshing metadata still works — only the
+/// final `fwupdmgr update` step breaks.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FirmwareConstraints {
+    /// True when the engine has detected Secure Boot is enforcing.
+    /// The Apply UI surfaces a banner + per-row disable when set;
+    /// `firmware.update` itself rejects the call as well.
+    pub sb_blocks_apply: bool,
+    /// Operator-facing reason string, suitable for surfacing
+    /// verbatim in a tooltip or banner. Empty when
+    /// `sb_blocks_apply` is false (the WebUI hides the banner).
+    pub sb_blocks_apply_reason: String,
+}
+
 pub struct FirmwareService;
 
 impl Default for FirmwareService {
@@ -152,7 +175,52 @@ impl FirmwareService {
     }
 
     /// Apply a firmware update to a specific device.
+    /// Snapshot of update-blocking constraints. Today only Secure
+    /// Boot is in play (upstream lanzaboote#591 breaks fwupd's
+    /// capsule-apply path); future constraints — pending reboot
+    /// already queued, disk-space gates, etc. — would slot in
+    /// here so the WebUI gets them in one call.
+    pub async fn constraints(&self) -> FirmwareConstraints {
+        let sb = nasty_common::secure_boot::status().await;
+        if sb.enabled == Some(true) {
+            FirmwareConstraints {
+                sb_blocks_apply: true,
+                sb_blocks_apply_reason:
+                    "Firmware updates can't be applied while Secure Boot is enforcing — \
+                     fwupd's EFI-capsule shim isn't compatible with lanzaboote's \
+                     boot chain (upstream issue lanzaboote#591). Disable Secure \
+                     Boot in firmware to apply updates, then re-enroll afterward."
+                        .to_string(),
+            }
+        } else {
+            FirmwareConstraints {
+                sb_blocks_apply: false,
+                sb_blocks_apply_reason: String::new(),
+            }
+        }
+    }
+
     pub async fn update_device(&self, device_id: &str) -> FirmwareUpdateResult {
+        // Belt-and-suspenders: the WebUI disables the Apply button when
+        // SB blocks updates, but a direct RPC client (curl, scripted
+        // automation) wouldn't see that gate. Refuse here too with the
+        // same message so the failure mode is consistent and the
+        // operator doesn't waste time chasing a fwupd error that's
+        // actually upstream-broken.
+        let constraints = self.constraints().await;
+        if constraints.sb_blocks_apply {
+            warn!(
+                target: "nasty::firmware",
+                "firmware.update refused for {device_id}: Secure Boot enforcing (lanzaboote#591)"
+            );
+            return FirmwareUpdateResult {
+                device_name: device_id.to_string(),
+                success: false,
+                message: constraints.sb_blocks_apply_reason,
+                reboot_required: false,
+            };
+        }
+
         info!("Applying firmware update to device {device_id}");
 
         let output = Command::new("fwupdmgr")

@@ -259,6 +259,7 @@ fn is_read_only(method: &str) -> bool {
                 | "vm.capabilities"
                 | "vm.images.import_info"
                 | "firmware.available"
+                | "firmware.constraints"
                 | "firmware.check"
                 | "firmware.devices"
                 | "notifications.config.get"

@@ -579,6 +579,7 @@ pub(super) async fn try_route(
             Err(e) => invalid(req, e),
         },
         "firmware.available" => ok(req, state.firmware.is_available().await),
+        "firmware.constraints" => ok(req, state.firmware.constraints().await),
         "firmware.devices" => ok(req, state.firmware.list_devices().await),
         "firmware.check" => ok(req, state.firmware.check_updates().await),
         "firmware.update" => match require_str(req, "device_id") {
