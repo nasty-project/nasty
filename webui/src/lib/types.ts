@@ -131,6 +131,32 @@ export type SecureBootEnrollmentPhase =
 export interface SecureBootEnrollmentState {
 	phase: SecureBootEnrollmentPhase;
 	initiated_by: string | null;
+	/** Unix seconds when the wizard's Rebuild button last fired.
+	 * `null` until the operator clicks Rebuild for the first time
+	 * in a given ceremony. The Abort dialog uses this to decide
+	 * whether "you'll need to rebuild once more to revert" applies
+	 * (rebuild_triggered_at = number) or "abort is clean, nothing
+	 * was applied" (null). Cleared on each Begin. */
+	rebuild_triggered_at: number | null;
+}
+
+/** Live snapshot of the wizard-driven `nasty-rebuild` unit, queried
+ * via systemctl on every status call. The wizard polls this every
+ * few seconds while a rebuild is in flight; we don't try to
+ * persist it because systemd is the source of truth and survives
+ * engine restarts on its own. */
+export interface SecureBootRebuildSnapshot {
+	status: 'not_run' | 'running' | 'succeeded' | 'failed';
+	exit_code: number | null;
+	journal_tail: string[];
+}
+
+/** Combined response from `system.secure_boot.enrollment.status`.
+ * `state` carries the persistent enrollment state; `rebuild` is
+ * the live systemd-driven progress that the wizard renders next
+ * to the per-phase step copy. */
+export interface SecureBootEnrollmentStatusResponse extends SecureBootEnrollmentState {
+	rebuild: SecureBootRebuildSnapshot;
 }
 
 /** Structured checklist returned by `system.secure_boot.readiness`.

@@ -50,6 +50,15 @@ pub(super) async fn try_route(
                 Err(e) => err(req, e.to_string()),
             }
         }
+        "system.secure_boot.enrollment.rebuild" => {
+            if session.role != Role::Admin {
+                return Some(err(req, "admin only".to_string()));
+            }
+            match state.secure_boot_enrollment.rebuild().await {
+                Ok(()) => ok(req, serde_json::json!({ "triggered": true })),
+                Err(e) => err(req, e.to_string()),
+            }
+        }
         "system.secure_boot.enrollment.complete" => {
             if session.role != Role::Admin {
                 return Some(err(req, "admin only".to_string()));

@@ -51,8 +51,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+
+const REBUILD_UNIT: &str = "nasty-secureboot-rebuild";
 
 const STATE_PATH: &str = "/var/lib/nasty/secure-boot-enrollment.json";
 const STATE_DIR: &str = "/var/lib/nasty";
@@ -115,6 +118,61 @@ pub struct EnrollmentState {
     /// enrollment.
     #[serde(default)]
     pub initiated_by: Option<String>,
+    /// Unix seconds when the most recent wizard-driven
+    /// `nasty-rebuild` was triggered. `None` until the operator
+    /// clicks Rebuild from the wizard. Cleared back to `None` on
+    /// every `begin()` / `abort()` so each fresh ceremony starts
+    /// without a stale marker. The Abort copy reads this to
+    /// decide whether "the overlay was never applied" or "you
+    /// need to rebuild once more to revert" is accurate.
+    #[serde(default)]
+    pub rebuild_triggered_at: Option<u64>,
+}
+
+/// Live snapshot of the wizard-driven rebuild, queried via
+/// `systemctl show` on every status call (we don't persist the
+/// status — systemd is the source of truth for what's running).
+/// Returned as a sibling field of `EnrollmentState` from the
+/// `status` RPC.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RebuildSnapshot {
+    /// `running` / `succeeded` / `failed` / `not_run`. Last
+    /// transition is also visible on the wizard's polled UI.
+    pub status: RebuildStatus,
+    /// Exit code from the last finished run, if any. Useful for
+    /// the failed-rebuild error toast.
+    pub exit_code: Option<i32>,
+    /// Tail of the unit's journal (last ~20 lines), surfaced
+    /// verbatim in the wizard's "rebuild output" expandable.
+    /// Empty when the unit was never started, or when journalctl
+    /// failed (we log + skip rather than abort the status call).
+    pub journal_tail: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RebuildStatus {
+    /// systemd doesn't know the unit (never triggered through this
+    /// engine instance, or `systemctl reset-failed` cleared it).
+    #[default]
+    NotRun,
+    /// `systemctl is-active` says the unit is still doing work.
+    Running,
+    /// Unit exited with status 0.
+    Succeeded,
+    /// Unit exited non-zero. `exit_code` field carries the number.
+    Failed,
+}
+
+/// Combined response from `system.secure_boot.enrollment.status` —
+/// the persistent enrollment state plus the live rebuild snapshot
+/// in a single shape so the wizard doesn't need a second round-
+/// trip on every poll.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct EnrollmentStatusResponse {
+    #[serde(flatten)]
+    pub state: EnrollmentState,
+    pub rebuild: RebuildSnapshot,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -159,8 +217,14 @@ impl SecureBootEnrollmentService {
         svc
     }
 
-    pub async fn status(&self) -> EnrollmentState {
-        self.state.read().await.clone()
+    /// Combined enrollment state + live rebuild snapshot. Wizard
+    /// polls this every few seconds; the rebuild snapshot is
+    /// re-queried from systemd on each call (cheap — two
+    /// `systemctl` / `journalctl` invocations).
+    pub async fn status(&self) -> EnrollmentStatusResponse {
+        let state = self.state.read().await.clone();
+        let rebuild = query_rebuild_snapshot().await;
+        EnrollmentStatusResponse { state, rebuild }
     }
 
     /// Start the ceremony: write the Nix overlay that enables
@@ -176,11 +240,17 @@ impl SecureBootEnrollmentService {
             }
         }
         write_overlay_file().await?;
+        // Best-effort: clear any leftover systemd unit state from a
+        // previous ceremony so the new ceremony's rebuild snapshot
+        // starts from `not_run`. Ignored on failure (unit may not
+        // exist yet on a fresh install).
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", REBUILD_UNIT]).await;
         let new_state = EnrollmentState {
             phase: EnrollmentPhase::OverlayWritten {
                 overlay_at: unix_now(),
             },
             initiated_by: Some(actor.to_string()),
+            rebuild_triggered_at: None,
         };
         *self.state.write().await = new_state.clone();
         save_state(&new_state).await?;
@@ -220,6 +290,13 @@ impl SecureBootEnrollmentService {
                 reason: reason.to_string(),
             },
             initiated_by: Some(actor.to_string()),
+            // Don't clear `rebuild_triggered_at` here — the WebUI's
+            // Abort dialog reads it to decide whether the operator
+            // needs to run nasty-rebuild once more to revert
+            // (rebuild_triggered_at = Some) or whether abort is
+            // clean because the overlay was never applied
+            // (rebuild_triggered_at = None).
+            rebuild_triggered_at: self.state.read().await.rebuild_triggered_at,
         };
         *self.state.write().await = new_state.clone();
         save_state(&new_state).await?;
@@ -246,6 +323,7 @@ impl SecureBootEnrollmentService {
                 completed_at: unix_now(),
             },
             initiated_by: Some(actor.to_string()),
+            rebuild_triggered_at: self.state.read().await.rebuild_triggered_at,
         };
         *self.state.write().await = new_state.clone();
         save_state(&new_state).await?;
@@ -254,6 +332,67 @@ impl SecureBootEnrollmentService {
             "enrollment marked complete by {actor}"
         );
         Ok(new_state)
+    }
+
+    /// Trigger `nasty-rebuild` via systemd-run so the operator
+    /// doesn't have to SSH or use the Terminal page to apply the
+    /// overlay the wizard just wrote. The unit runs detached
+    /// (--no-block --collect), so the engine survives nixos-rebuild
+    /// restarting services mid-switch; the wizard polls
+    /// `status()` to see the rebuild's live state.
+    ///
+    /// Only valid from `OverlayWritten`. Re-runnable (idempotent
+    /// `reset-failed` + new systemd-run) so an operator who hit a
+    /// transient failure can retry without aborting first.
+    pub async fn rebuild(&self) -> Result<(), EnrollmentError> {
+        {
+            let current = self.state.read().await;
+            if !matches!(current.phase, EnrollmentPhase::OverlayWritten { .. }) {
+                return Err(EnrollmentError::AlreadyInProgress);
+            }
+        }
+        // Clear any prior unit state — without this, a previous
+        // failed run leaves the unit in `failed` and systemd-run
+        // rejects the new --unit invocation. `try_run` logs
+        // failures but doesn't propagate, which is exactly what we
+        // want here (the unit might not exist on first use).
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", REBUILD_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", REBUILD_UNIT]).await;
+
+        // `nasty-rebuild` is the shell wrapper in nasty.nix's
+        // systemPackages. Same script the Terminal page invocation
+        // would run; --collect cleans the unit after exit so a
+        // future ceremony starts from a clean state.
+        let output = Command::new("systemd-run")
+            .args([
+                "--unit",
+                REBUILD_UNIT,
+                "--collect",
+                "--no-block",
+                "--description=NASty Secure Boot enrollment rebuild",
+                "/run/current-system/sw/bin/nasty-rebuild",
+            ])
+            .output()
+            .await
+            .map_err(|e| EnrollmentError::Io(format!("systemd-run: {e}")))?;
+        if !output.status.success() {
+            return Err(EnrollmentError::Io(format!(
+                "systemd-run exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        let mut state = self.state.write().await;
+        state.rebuild_triggered_at = Some(unix_now());
+        let snapshot = state.clone();
+        drop(state);
+        save_state(&snapshot).await?;
+        info!(
+            target: "nasty::secure_boot_enrollment",
+            "secure-boot enrollment rebuild triggered via systemd-run"
+        );
+        Ok(())
     }
 
     /// Engine-startup check: if we left off in `OverlayWritten`
@@ -280,6 +419,7 @@ impl SecureBootEnrollmentService {
                 stale_tpm_bindings: stale,
             },
             initiated_by: self.state.read().await.initiated_by.clone(),
+            rebuild_triggered_at: self.state.read().await.rebuild_triggered_at,
         };
         *self.state.write().await = new_state.clone();
         if let Err(e) = save_state(&new_state).await {
@@ -344,6 +484,91 @@ async fn remove_overlay_file() -> Result<(), EnrollmentError> {
 /// `.tpm`). Filenames not matching the expected shape are skipped
 /// silently — keys/ is shared with `.key` and other future per-FS
 /// artifacts.
+/// Query systemd for the wizard-driven rebuild's live state.
+/// Always succeeds; failure modes (systemctl missing, unit
+/// unknown, journalctl unhappy) all collapse to `NotRun` /
+/// empty-tail so the wizard always has something to render.
+async fn query_rebuild_snapshot() -> RebuildSnapshot {
+    let show = Command::new("systemctl")
+        .args([
+            "show",
+            REBUILD_UNIT,
+            "--property=ActiveState,Result,ExecMainStatus",
+        ])
+        .output()
+        .await;
+    let mut active_state = String::new();
+    let mut result_field = String::new();
+    let mut exec_status: Option<i32> = None;
+    if let Ok(out) = &show {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some(v) = line.strip_prefix("ActiveState=") {
+                active_state = v.to_string();
+            } else if let Some(v) = line.strip_prefix("Result=") {
+                result_field = v.to_string();
+            } else if let Some(v) = line.strip_prefix("ExecMainStatus=") {
+                exec_status = v.parse().ok();
+            }
+        }
+    }
+
+    let status = match active_state.as_str() {
+        "" | "inactive" => {
+            // No record of the unit (never run, or fully cleaned up
+            // by --collect). Distinguish "ran and succeeded" from
+            // "never ran" via the Result field — systemd remembers
+            // it briefly even after the unit terminates.
+            if result_field == "success" && exec_status == Some(0) {
+                RebuildStatus::Succeeded
+            } else if result_field == "exit-code" || exec_status.unwrap_or(0) != 0 {
+                RebuildStatus::Failed
+            } else {
+                RebuildStatus::NotRun
+            }
+        }
+        "active" | "activating" | "reloading" | "deactivating" => RebuildStatus::Running,
+        "failed" => RebuildStatus::Failed,
+        _ => RebuildStatus::NotRun,
+    };
+
+    // Tail of the unit's journal — cheap to fetch, surfaces real
+    // error messages when the rebuild failed. Capped at 20 lines
+    // so a runaway rebuild doesn't pump the RPC response full of
+    // log spam.
+    let journal = Command::new("journalctl")
+        .args([
+            "-u",
+            REBUILD_UNIT,
+            "-n",
+            "20",
+            "--no-pager",
+            "--output",
+            "short-iso",
+        ])
+        .output()
+        .await;
+    let journal_tail = match journal {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| !l.starts_with("-- "))
+            .map(|s| s.to_string())
+            .collect(),
+        Err(e) => {
+            warn!(
+                target: "nasty::secure_boot_enrollment",
+                "journalctl -u {REBUILD_UNIT}: {e}"
+            );
+            Vec::new()
+        }
+    };
+
+    RebuildSnapshot {
+        status,
+        exit_code: exec_status,
+        journal_tail,
+    }
+}
+
 async fn enumerate_tpm_bindings() -> Vec<String> {
     let mut out = Vec::new();
     let mut entries = match tokio::fs::read_dir(NASTY_KEYS_DIR).await {

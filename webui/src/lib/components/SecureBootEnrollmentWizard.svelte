@@ -17,29 +17,30 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { rebootState } from '$lib/reboot.svelte';
-	import type { SecureBootEnrollmentState } from '$lib/types';
-	import { ShieldCheck, ShieldAlert, AlertTriangle } from '@lucide/svelte';
+	import type { SecureBootEnrollmentStatusResponse } from '$lib/types';
+	import { ShieldCheck, AlertTriangle, RefreshCw } from '@lucide/svelte';
 
-	type Props = {
+	interface Props {
 		/** Parent gates visibility — typically true when readiness is
 		 * green or when enrollment is already in flight. */
 		visible: boolean;
 		/** `summary.system?.manufacturer` from system.hardware.summary.
 		 * Used to pick the vendor-specific BIOS hint. */
 		manufacturer: string | null | undefined;
-	};
+	}
 	const { visible, manufacturer }: Props = $props();
 
 	const client = getClient();
 
-	let enrollment: SecureBootEnrollmentState | null = $state(null);
+	let enrollment: SecureBootEnrollmentStatusResponse | null = $state(null);
 	let loading = $state(true);
 	let busy = $state(false);
+	let showJournal = $state(false);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 	async function refresh() {
 		try {
-			enrollment = await client.call<SecureBootEnrollmentState>(
+			enrollment = await client.call<SecureBootEnrollmentStatusResponse>(
 				'system.secure_boot.enrollment.status',
 			);
 		} catch {
@@ -70,7 +71,7 @@
 		if (!ok) return;
 		busy = true;
 		const result = await withToast(
-			() => client.call<SecureBootEnrollmentState>('system.secure_boot.enrollment.begin'),
+			() => client.call<SecureBootEnrollmentStatusResponse>('system.secure_boot.enrollment.begin'),
 			'Secure Boot enrollment started — overlay written.',
 		);
 		busy = false;
@@ -81,27 +82,50 @@
 	}
 
 	async function abort() {
-		const ok = await confirm(
-			'Abort enrollment',
-			'Removes the Nix overlay. You’ll still need to run nasty-rebuild to undo any pending boot-loader changes. OK to abort?',
-			{ confirmLabel: 'Abort' },
-		);
+		// Abort copy depends on whether a rebuild has actually
+		// happened in this ceremony. Without that distinction the
+		// dialog used to tell every operator they'd need to run
+		// nasty-rebuild again to revert — even when the overlay
+		// file was the only thing written and the running system
+		// was untouched. The engine tracks rebuild_triggered_at;
+		// we just branch on it.
+		const rebuilt = enrollment?.rebuild_triggered_at !== null
+			&& enrollment?.rebuild_triggered_at !== undefined;
+		const msg = rebuilt
+			? 'You already ran the Rebuild step earlier — the running system has lanzaboote-signed boot artifacts on the ESP. Aborting removes the Nix overlay, but you\'ll need to run Rebuild once more (or click Update) to revert those artifacts before they activate at next reboot. OK to abort?'
+			: 'Removes the Nix overlay file. Nothing else was applied yet — the running system is unchanged. OK to abort?';
+		const ok = await confirm('Abort enrollment', msg, { confirmLabel: 'Abort' });
 		if (!ok) return;
 		busy = true;
 		const result = await withToast(
-			() => client.call<SecureBootEnrollmentState>('system.secure_boot.enrollment.abort', {
-				reason: 'operator aborted via wizard',
-			}),
+			() => client.call<SecureBootEnrollmentStatusResponse>(
+				'system.secure_boot.enrollment.abort',
+				{ reason: 'operator aborted via wizard' },
+			),
 			'Secure Boot enrollment aborted.',
 		);
 		busy = false;
 		if (result) enrollment = result;
 	}
 
+	async function rebuild() {
+		busy = true;
+		const result = await withToast(
+			() => client.call<{ triggered: boolean }>('system.secure_boot.enrollment.rebuild'),
+			'Rebuild started — this will take several minutes.',
+		);
+		busy = false;
+		if (result) {
+			// Bump the poll immediately so the status flips to
+			// `running` without waiting the 5 s tick.
+			await refresh();
+		}
+	}
+
 	async function complete() {
 		busy = true;
 		const result = await withToast(
-			() => client.call<SecureBootEnrollmentState>('system.secure_boot.enrollment.complete'),
+			() => client.call<SecureBootEnrollmentStatusResponse>('system.secure_boot.enrollment.complete'),
 			'Secure Boot enrollment marked complete.',
 		);
 		busy = false;
@@ -236,12 +260,53 @@
 					{busy ? 'Starting…' : 'Begin enrollment'}
 				</Button>
 			{:else if enrollment.phase.kind === 'overlay_written'}
-				<ol class="mb-4 list-decimal space-y-3 pl-5 text-sm">
+				{@const rebuildStatus = enrollment.rebuild.status}
+				{@const rebuildRunning = rebuildStatus === 'running'}
+				{@const rebuildSucceeded = rebuildStatus === 'succeeded'}
+				{@const rebuildFailed = rebuildStatus === 'failed'}
+
+				<ol class="mb-4 list-decimal space-y-4 pl-5 text-sm">
 					<li>
-						<strong>Run <code class="rounded bg-muted px-1 font-mono text-xs">nasty-rebuild</code> in a terminal</strong>
-						(or via the Update page). This installs lanzaboote-signed boot artifacts on your ESP and stages the platform keys for firmware enrollment.
+						<strong>Apply the overlay.</strong>
+						Engine wrote the Nix overlay during Begin; this step actually runs <code class="rounded bg-muted px-1 font-mono text-xs">nasty-rebuild</code> so lanzaboote-signed boot artifacts land on your ESP and the platform keys get staged for firmware auto-enrollment.
+						<div class="mt-2 flex flex-wrap items-center gap-2">
+							{#if !rebuildRunning && !rebuildSucceeded}
+								<Button size="sm" disabled={busy} onclick={rebuild}>
+									{rebuildFailed ? 'Retry rebuild' : 'Rebuild now'}
+								</Button>
+							{:else if rebuildRunning}
+								<span class="inline-flex items-center gap-2 text-xs text-amber-300">
+									<RefreshCw size={14} class="animate-spin" />
+									Rebuilding… (several minutes; the engine may briefly disconnect during the switch)
+								</span>
+							{:else if rebuildSucceeded}
+								<span class="inline-flex items-center gap-2 text-xs text-emerald-400">
+									<ShieldCheck size={14} />
+									Rebuild succeeded — signed boot artifacts on ESP.
+								</span>
+							{/if}
+							{#if rebuildFailed}
+								<span class="text-xs text-amber-300">
+									Rebuild failed{enrollment.rebuild.exit_code !== null
+										? ` (exit ${enrollment.rebuild.exit_code})`
+										: ''}.
+								</span>
+							{/if}
+							{#if enrollment.rebuild.journal_tail.length > 0}
+								<button
+									type="button"
+									class="text-xs underline text-muted-foreground hover:text-foreground"
+									onclick={() => (showJournal = !showJournal)}
+								>
+									{showJournal ? 'Hide' : 'Show'} rebuild output
+								</button>
+							{/if}
+						</div>
+						{#if showJournal && enrollment.rebuild.journal_tail.length > 0}
+							<pre class="mt-2 max-h-64 overflow-auto rounded border border-border bg-black/50 p-2 text-[10px] leading-tight text-muted-foreground">{enrollment.rebuild.journal_tail.join('\n')}</pre>
+						{/if}
 					</li>
-					<li>
+					<li class:opacity-50={!rebuildSucceeded}>
 						<strong>Reboot into BIOS / UEFI setup</strong> and put firmware in <em>Setup Mode</em>.
 						{#if hint}
 							<div class="mt-2 rounded border border-border bg-muted/30 p-3 text-xs">
@@ -256,7 +321,7 @@
 							</div>
 						</div>
 					</li>
-					<li>
+					<li class:opacity-50={!rebuildSucceeded}>
 						<strong>Reboot back into NASty.</strong>
 						systemd-boot will auto-enroll the staged keys on this boot (Setup Mode is required for the firmware to accept them). NASty's engine detects the transition automatically; this wizard will advance to the post-enrollment step.
 					</li>
@@ -271,7 +336,11 @@
 					</Button>
 				</div>
 				<p class="mt-2 text-xs text-muted-foreground">
-					<strong>Abort is possible</strong> at this stage — firmware hasn’t enrolled any keys yet. After your next reboot with Setup Mode, the firmware-level commit is irreversible from software.
+					{#if enrollment.rebuild_triggered_at === null}
+						<strong>Abort is clean</strong> at this point — nothing has been applied to the running system. Aborting just removes the Nix overlay.
+					{:else}
+						<strong>Abort still possible</strong> — the rebuild has run, so abort + the next reboot are still entirely reversible from software. After your reboot with Setup Mode active, the firmware-level commit becomes irreversible.
+					{/if}
 				</p>
 			{:else if enrollment.phase.kind === 'post_enrollment'}
 				<div class="mb-3 flex items-start gap-2 rounded border border-emerald-700/40 bg-emerald-950/40 px-3 py-2 text-xs text-emerald-200">
