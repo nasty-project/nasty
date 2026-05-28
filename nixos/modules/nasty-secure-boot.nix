@@ -29,5 +29,27 @@ in {
     # off here so flipping `secureBoot.enable` doesn't surprise an
     # operator with a firmware-state change.
     boot.lanzaboote.autoGenerateKeys.enable = true;
+
+    # ── Defensive disables for known-broken paths under SB ──────
+    #
+    # kexec: lanzaboote-produced UKI stubs aren't PE-loadable by
+    # `kexec --load` (upstream issue lanzaboote#143, open since
+    # 2023). `systemctl kexec` and `kexec -e` would either fail
+    # outright or load garbage and panic. The signed-kernel +
+    # SB-on combination also typically enables kernel lockdown
+    # which blocks the kexec_load syscall on its own, but pinning
+    # the sysctl explicitly makes the disable visible in NixOS
+    # config rather than relying on lockdown's runtime detection.
+    # `kexec_load_disabled` is one-way (settable to 1, never back
+    # to 0 without a reboot) — exactly the property we want.
+    boot.kernel.sysctl."kernel.kexec_load_disabled" = 1;
+
+    # fwupd intentionally NOT disabled. Listing devices / refreshing
+    # metadata still works under SB; what's broken is the EFI-capsule
+    # APPLY path (upstream lanzaboote#591). NASty's Firmware page
+    # uses fwupdmgr for device enumeration and would go blank if
+    # services.fwupd.enable were forced off here. Gating the apply-
+    # update RPC on SB state is a separate WebUI concern — tracked
+    # for a follow-up to this PR.
   };
 }
