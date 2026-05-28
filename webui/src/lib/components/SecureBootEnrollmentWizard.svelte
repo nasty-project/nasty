@@ -379,11 +379,55 @@
 				<p class="mt-2 text-xs text-muted-foreground">
 					Marking complete just dismisses the wizard. You can re-run any of the listed re-bindings later from the Filesystems page.
 				</p>
+
+				<details class="mt-4 rounded border border-border bg-muted/10 p-3 text-xs">
+					<summary class="cursor-pointer font-semibold">Manual unenrollment (if you ever want to back out)</summary>
+					<div class="mt-2 space-y-2 text-muted-foreground">
+						<p>
+							There isn't a one-click un-enroll yet — the engine can revert the Nix side, but it can't disable Secure Boot in firmware on your behalf (that step is physical / IPMI by definition). To roll back:
+						</p>
+						<ol class="list-decimal space-y-1 pl-5">
+							<li><strong>Disable Secure Boot in firmware.</strong> BIOS / UEFI setup → Secure Boot → Disabled. On Proxmox VMs, toggle in the VM's BIOS config. On real hardware that ships with vendor PKs, you may want "Reset to Setup Mode" / "Clear Secure Boot Keys" instead, which leaves the firmware ready to be re-enrolled later.</li>
+							<li>
+								<strong>Drop the overlay + state file</strong> from a terminal:
+								<pre class="mt-1 rounded bg-black/40 p-2 text-[10px] leading-tight">rm /etc/nixos/secure-boot.nix /var/lib/nasty/secure-boot-enrollment.json</pre>
+							</li>
+							<li>
+								<strong>Rebuild:</strong>
+								<pre class="mt-1 rounded bg-black/40 p-2 text-[10px] leading-tight">nasty-rebuild</pre>
+								This flips <code class="rounded bg-muted px-1">services.nasty.secureBoot.enable</code> back to false, disables lanzaboote, restores plain systemd-boot.
+							</li>
+							<li><strong>Re-bind any TPM-sealed filesystems.</strong> PCR-7 changes again when SB flips off, so existing <code class="rounded bg-muted px-1">.tpm</code> blobs are stale a second time — same fix as after enrollment, click <em>Bind to TPM</em> on each row at /filesystems.</li>
+						</ol>
+					</div>
+				</details>
 			{:else if enrollment.phase.kind === 'complete'}
 				<div class="rounded border border-emerald-700/40 bg-emerald-950/40 px-3 py-2 text-xs text-emerald-200">
 					<ShieldCheck size={14} class="mr-1 inline" />
 					Secure Boot enrollment complete on {new Date(enrollment.phase.completed_at * 1000).toLocaleString()}.
 				</div>
+
+				<details class="mt-4 rounded border border-border bg-muted/10 p-3 text-xs">
+					<summary class="cursor-pointer font-semibold">Manual unenrollment (if you ever want to back out)</summary>
+					<div class="mt-2 space-y-2 text-muted-foreground">
+						<p>
+							There isn't a one-click un-enroll yet — the engine can revert the Nix side, but it can't disable Secure Boot in firmware on your behalf (that step is physical / IPMI by definition). To roll back:
+						</p>
+						<ol class="list-decimal space-y-1 pl-5">
+							<li><strong>Disable Secure Boot in firmware.</strong> BIOS / UEFI setup → Secure Boot → Disabled. On Proxmox VMs, toggle in the VM's BIOS config. On real hardware that ships with vendor PKs, you may want "Reset to Setup Mode" / "Clear Secure Boot Keys" instead, which leaves the firmware ready to be re-enrolled later.</li>
+							<li>
+								<strong>Drop the overlay + state file</strong> from a terminal:
+								<pre class="mt-1 rounded bg-black/40 p-2 text-[10px] leading-tight">rm /etc/nixos/secure-boot.nix /var/lib/nasty/secure-boot-enrollment.json</pre>
+							</li>
+							<li>
+								<strong>Rebuild:</strong>
+								<pre class="mt-1 rounded bg-black/40 p-2 text-[10px] leading-tight">nasty-rebuild</pre>
+								This flips <code class="rounded bg-muted px-1">services.nasty.secureBoot.enable</code> back to false, disables lanzaboote, restores plain systemd-boot.
+							</li>
+							<li><strong>Re-bind any TPM-sealed filesystems.</strong> PCR-7 changes again when SB flips off, so existing <code class="rounded bg-muted px-1">.tpm</code> blobs are stale a second time — same fix as after enrollment, click <em>Bind to TPM</em> on each row at /filesystems.</li>
+						</ol>
+					</div>
+				</details>
 			{/if}
 		</CardContent>
 	</Card>
