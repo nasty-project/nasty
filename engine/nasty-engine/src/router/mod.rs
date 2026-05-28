@@ -194,6 +194,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.hardware.iommu"
                 | "system.hardware.summary"
                 | "system.secure_boot.enrollment.status"
+                | "system.secure_boot.readiness"
                 | "system.passthrough.get"
                 | "system.stats"
                 | "system.disks"
