@@ -15,17 +15,26 @@
   # the ESP, no closure-size impact on boxes that never boot into
   # it — but when an operator needs it (flaky RAM, ECC errors, post-
   # hardware-change sanity check) it's right there in the boot
-  # menu instead of requiring a USB stick. Works on x86_64 and
-  # aarch64; the systemd-boot module silently no-ops on architectures
-  # without a memtest86+ build available.
+  # menu instead of requiring a USB stick.
+  #
+  # Gated on x86 because nixpkgs's memtest86+ package declares
+  # `meta.platforms = [ "x86_64-linux" "i686-linux" ]` only — and
+  # the systemd-boot module does NOT silently skip platforms it
+  # can't satisfy, despite earlier comments here implying it would.
+  # Setting `memtest86.enable = true` on aarch64 triggers a hard
+  # eval failure ("Refusing to evaluate package 'memtest86+-8.00'
+  # because it is not available on the requested hostPlatform").
+  # The `pkgs.stdenv.hostPlatform.isx86` check makes the option
+  # value depend on architecture: true on x86_64 / i686, false on
+  # aarch64 et al.
   #
   # Note for future Secure Boot work: memtest86+ isn't signed by
   # NASty's keys, so under SB it will refuse to launch. The
-  # systemd-boot module documents that the entry stays visible but
-  # the boot attempt fails; that's acceptable since SB-protected
-  # boxes are the ones where memtest's "unsigned-but-trusted" model
-  # doesn't fit anyway.
-  boot.loader.systemd-boot.memtest86.enable = true;
+  # systemd-boot module keeps the entry visible but the boot
+  # attempt fails; that's acceptable since SB-protected boxes are
+  # the ones where memtest's "unsigned-but-trusted" model doesn't
+  # fit anyway.
+  boot.loader.systemd-boot.memtest86.enable = pkgs.stdenv.hostPlatform.isx86;
   boot.loader.efi.canTouchEfiVariables = true;
 
   networking.hostName = "nasty";
