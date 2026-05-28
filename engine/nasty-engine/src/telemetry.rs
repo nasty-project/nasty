@@ -18,6 +18,23 @@ struct Report {
     drives: usize,
     total_bytes: u64,
     used_bytes: u64,
+    version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit: Option<String>,
+    vms: usize,
+    apps: usize,
+    arch: &'static str,
+}
+
+/// Short git SHA this engine was built from. `None` for dev cargo
+/// builds outside Nix where `NASTY_GIT_SHA` wasn't injected. Matches
+/// the 7-char form used elsewhere (see `nasty-system::update`).
+fn build_commit() -> Option<String> {
+    let raw = option_env!("NASTY_GIT_SHA")?.trim();
+    if raw.is_empty() || raw == "unknown" {
+        return None;
+    }
+    Some(raw[..7.min(raw.len())].to_string())
 }
 
 /// Get or create the persistent instance ID.
@@ -66,11 +83,19 @@ async fn collect_report(state: &AppState) -> Option<Report> {
         used_bytes += fs.used_bytes;
     }
 
+    let vms = state.vms.list().await.map(|v| v.len()).unwrap_or(0);
+    let apps = state.apps.list().await.map(|a| a.len()).unwrap_or(0);
+
     Some(Report {
         instance_id: id,
         drives,
         total_bytes,
         used_bytes,
+        version: env!("CARGO_PKG_VERSION"),
+        commit: build_commit(),
+        vms,
+        apps,
+        arch: std::env::consts::ARCH,
     })
 }
 
@@ -87,8 +112,15 @@ pub async fn send_report(state: &AppState) -> bool {
     };
 
     debug!(
-        "Sending telemetry: drives={}, total={}B, used={}B",
-        report.drives, report.total_bytes, report.used_bytes
+        "Sending telemetry: drives={}, total={}B, used={}B, vms={}, apps={}, arch={}, version={}, commit={:?}",
+        report.drives,
+        report.total_bytes,
+        report.used_bytes,
+        report.vms,
+        report.apps,
+        report.arch,
+        report.version,
+        report.commit
     );
 
     match state
