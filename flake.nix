@@ -33,8 +33,30 @@
   };
 
   outputs = { self, nixpkgs, bcachefs-tools, lanzaboote, ... }: let
-    # Helper to build packages for a given system
-    mkPkgs = system: nixpkgs.legacyPackages.${system};
+    # Helper to build packages for a given system.
+    #
+    # The overlay wraps `fetchurl` so every curl invocation sends an
+    # identifying User-Agent. crates.io enforces its long-standing
+    # crawler policy (https://crates.io/policies) by rejecting
+    # unidentifying UAs — `curl/X.Y.Z` is on the blocklist as of early
+    # 2026, which makes `rustPlatform.importCargoLock` fail with HTTP
+    # 403 for any crate tarball not already in the binary cache.
+    # nixpkgs has a fix in flight (NixOS/nixpkgs#512735) but it will
+    # take weeks to propagate; until then this overlay keeps every
+    # PR that bumps a crate version unblocked.
+    #
+    # The UA matches the policy's recommended shape
+    # (`appname (contact)`) so we don't need to dodge enforcement
+    # again next time it tightens.
+    mkPkgs = system: import nixpkgs {
+      inherit system;
+      overlays = [ (final: prev: {
+        fetchurl = args: prev.fetchurl (args // {
+          curlOptsList = (args.curlOptsList or []) ++
+            [ "-A" "nasty-engine-build (github.com/nasty-project/nasty)" ];
+        });
+      }) ];
+    };
     nasty-version = (builtins.fromTOML (builtins.readFile ./engine/Cargo.toml)).workspace.package.version;
     rootLock = builtins.fromJSON (builtins.readFile ./flake.lock);
     installerNastyOwner = "nasty-project";
