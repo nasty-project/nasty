@@ -15,6 +15,7 @@
 	import { formatBytes } from '$lib/format';
 	import { rebootState } from '$lib/reboot.svelte';
 	import { ChevronDown, ChevronRight, RefreshCw } from '@lucide/svelte';
+	import SecureBootEnrollmentWizard from '$lib/components/SecureBootEnrollmentWizard.svelte';
 
 	let summary: HardwareSummary | null = $state(null);
 	let groups: IommuGroup[] = $state([]);
@@ -542,6 +543,19 @@
 			</CardContent>
 		</Card>
 	{/if}
+
+	<!-- ── Secure Boot enrollment ceremony (experimental) ─────────────
+		 Renders when readiness is all-green (the SB-capable box can
+		 take the next step) OR when an enrollment is already in flight
+		 (so the wizard remains visible after the operator's reboot
+		 dance even if readiness now reports SB-already-on, which would
+		 hide the readiness card). The component itself decides what
+		 to show per phase. -->
+	<SecureBootEnrollmentWizard
+		visible={sbReadiness?.ready === true
+			|| (summary?.secure_boot.enabled === true)}
+		manufacturer={summary?.system?.manufacturer}
+	/>
 
 	<!-- ── DIMM detail (collapsed by default) ──────────────────────── -->
 	{#if summary && summary.memory.dimms.length > 0}

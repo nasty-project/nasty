@@ -50,6 +50,13 @@ pub struct AppState {
     pub log_reload: LogReloadHandle,
     pub system: nasty_system::SystemService,
     pub settings: nasty_system::settings::SettingsService,
+    /// Secure Boot enrollment ceremony state (ADR #324). Service
+    /// is stateful — survives engine restarts via a small JSON file
+    /// at /var/lib/nasty/secure-boot-enrollment.json — and auto-
+    /// detects the SB transition on startup (`bootctl status` flips
+    /// from disabled to enabled across a reboot ⇒ phase advances
+    /// to PostEnrollment).
+    pub secure_boot_enrollment: nasty_system::secure_boot_enrollment::SecureBootEnrollmentService,
     pub tuning: nasty_system::tuning::TuningService,
     pub nut: nasty_system::nut::NutService,
     pub alerts: nasty_system::alerts::AlertService,
@@ -155,6 +162,8 @@ async fn main() -> anyhow::Result<()> {
         log_reload: reload_handle,
         system: nasty_system::SystemService::new(None, Some(built.to_string())),
         settings: settings_service,
+        secure_boot_enrollment:
+            nasty_system::secure_boot_enrollment::SecureBootEnrollmentService::new().await,
         tuning: nasty_system::tuning::TuningService::new().await,
         nut: nasty_system::nut::NutService::new().await,
         alerts: nasty_system::alerts::AlertService::new().await,

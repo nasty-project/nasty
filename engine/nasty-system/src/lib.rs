@@ -8,6 +8,7 @@ pub mod nut;
 pub mod passthrough;
 pub mod protocol;
 pub mod secure_boot;
+pub mod secure_boot_enrollment;
 pub mod settings;
 pub mod tailscale;
 pub mod tuning;

@@ -22,6 +22,56 @@ pub(super) async fn try_route(
         "system.hardware.iommu" => ok(req, nasty_system::hardware::iommu_groups().await),
         "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
         "system.secure_boot.readiness" => ok(req, nasty_system::secure_boot::readiness().await),
+        "system.secure_boot.enrollment.status" => {
+            ok(req, state.secure_boot_enrollment.status().await)
+        }
+        "system.secure_boot.enrollment.begin" => {
+            if session.role != Role::Admin {
+                return Some(err(req, "admin only".to_string()));
+            }
+            match state.secure_boot_enrollment.begin(&session.username).await {
+                Ok(s) => ok(req, s),
+                Err(e) => err(req, e.to_string()),
+            }
+        }
+        "system.secure_boot.enrollment.abort" => {
+            if session.role != Role::Admin {
+                return Some(err(req, "admin only".to_string()));
+            }
+            let reason = str_param(req, "reason")
+                .unwrap_or("operator aborted")
+                .to_string();
+            match state
+                .secure_boot_enrollment
+                .abort(&session.username, &reason)
+                .await
+            {
+                Ok(s) => ok(req, s),
+                Err(e) => err(req, e.to_string()),
+            }
+        }
+        "system.secure_boot.enrollment.rebuild" => {
+            if session.role != Role::Admin {
+                return Some(err(req, "admin only".to_string()));
+            }
+            match state.secure_boot_enrollment.rebuild().await {
+                Ok(()) => ok(req, serde_json::json!({ "triggered": true })),
+                Err(e) => err(req, e.to_string()),
+            }
+        }
+        "system.secure_boot.enrollment.complete" => {
+            if session.role != Role::Admin {
+                return Some(err(req, "admin only".to_string()));
+            }
+            match state
+                .secure_boot_enrollment
+                .complete(&session.username)
+                .await
+            {
+                Ok(s) => ok(req, s),
+                Err(e) => err(req, e.to_string()),
+            }
+        }
         "system.passthrough.get" => ok(req, nasty_system::passthrough::load().await),
         "system.passthrough.update" => {
             match parse_params::<nasty_system::passthrough::PassthroughUpdate>(req) {

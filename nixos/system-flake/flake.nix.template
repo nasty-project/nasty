@@ -104,7 +104,16 @@
             # Machine-local overlay files live directly under /etc/nixos.
             ./hardware-configuration.nix
             ./networking.nix
-          ] ++ nixpkgs.lib.optional (builtins.pathExists ./passthrough.nix) ./passthrough.nix;
+          ]
+          ++ nixpkgs.lib.optional (builtins.pathExists ./passthrough.nix) ./passthrough.nix
+          # Secure Boot enrollment overlay — written by the engine
+          # when the operator clicks "Begin enrollment" in the
+          # Hardware page's experimental SB wizard. Sets
+          # `services.nasty.secureBoot.enable = true` plus the
+          # lanzaboote auto-enroll knobs. Absent on every fresh
+          # install (the wizard hasn't run); `pathExists` keeps
+          # the import optional so eval doesn't fail.
+          ++ nixpkgs.lib.optional (builtins.pathExists ./secure-boot.nix) ./secure-boot.nix;
         };
     in {
       # Content-hash placeholder substituted at render time by

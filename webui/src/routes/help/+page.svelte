@@ -253,6 +253,46 @@
 					summary: 'Append-only record of every action operators take on the box.',
 					detail: 'Lives at /var/lib/nasty/audit.log (mode 0600) and is mirrored to journald with target "audit", so tampering with the file still leaves a trail. Every state-changing RPC the engine accepts is recorded with the username, client IP, method name, and a safelist-filtered parameter summary (secrets like passwords / API tokens / TLS DNS credentials never make it in). Logged in addition to mutations: every login attempt (success and failure), permission denials, terminal / VM-console / log-stream opens, and unsafe app deploys — anything an auditor would want to reconstruct after the fact. Read it via the audit.list RPC or the Logs page in the WebUI; rotated by logrotate at 10 MB.',
 				},
+				{
+					term: 'WebAuthn / Passkey / Security Key',
+					summary: 'A non-password authentication factor — Touch ID, YubiKey, Windows Hello, etc.',
+					detail: 'WebAuthn is a browser standard for proving who you are without a password. The "credential" lives on a device you control: a hardware key (YubiKey, Solo 2, Trezor — sometimes called a security key), a platform authenticator (Touch ID on a Mac, Windows Hello on a PC), or a syncable passkey (iCloud Keychain, 1Password, Bitwarden). NASty supports them as a third login backend alongside local password and SSO. Each credential is bound to one origin (a hostname like nasty.local) — moving NASty to a different hostname silently invalidates registered credentials, and IP-based access can never use them by spec. Register and manage your own under Access Control → Tokens & Keys.',
+				},
+				{
+					term: 'TPM2',
+					summary: 'A small chip on the motherboard that holds secrets and measurements.',
+					detail: 'The Trusted Platform Module v2.0 is a discrete security chip (or firmware-emulated equivalent like Intel PTT, AMD fTPM, swtpm on QEMU) that stores keys in tamper-resistant hardware and can release them only when system state matches what you sealed against. NASty uses it to "seal" the bcachefs encryption key so an encrypted filesystem can auto-unlock at boot without the operator typing a passphrase — but only when the box looks the way it did at seal time. Without a TPM2 chip the auto-unlock can\'t work; manual passphrase entry stays as a fallback.',
+				},
+				{
+					term: 'PCR (Platform Configuration Register)',
+					summary: 'TPM-internal registers that record what booted, in a way that can\'t be rewound or faked.',
+					detail: 'PCRs are 24 (or 32) hash values inside the TPM that accumulate measurements during boot. Every component — firmware, bootloader, kernel, initrd, key databases — gets hashed and "extended" into one of these registers. Once a value is extended you can\'t set it back; the only way for a PCR to read a given value is for the boot chain to produce that exact value organically. NASty seals encryption keys against specific PCRs: PCR-7 covers the Secure Boot policy (which keys the firmware trusts), so the seal opens only when the firmware is still trusting NASty\'s keys. Future work extends to PCR-4 (the bootloader + kernel binaries themselves) so the seal binds the whole boot chain, not just the policy.',
+				},
+				{
+					term: 'Secure Boot',
+					summary: 'Firmware-level signature checking on the bootloader, kernel, and initrd.',
+					detail: 'When Secure Boot is on, the UEFI firmware refuses to launch any boot artifact that isn\'t signed by a key in its trust database. NASty\'s SB integration uses lanzaboote to bundle the kernel + initrd + cmdline into a signed PE stub the firmware verifies before handing off control. Enrollment is a one-time per-box ceremony (BIOS Setup Mode → NASty\'s platform key gets installed → next reboot enforces). Once enrolled, every kernel and initrd update is auto-signed on rebuild; an attacker booting an unsigned rescue image (memtest, live USB) fails at the firmware stage. SB also strengthens TPM2 sealing — without it PCR-7 is constant across stock NixOS installs, so a sealed key would unseal anywhere. Highly experimental in NASty today; see the Hardware page.',
+				},
+				{
+					term: 'Setup Mode',
+					summary: 'A UEFI firmware state where it accepts new platform keys without an existing signing chain.',
+					detail: 'A fresh-from-factory or "PK-cleared" UEFI is in Setup Mode: PK (Platform Key) is empty, and the firmware will accept any key enrolled by the operating system without a higher-trust signature. Once a PK is enrolled the firmware leaves Setup Mode and starts enforcing the full SB chain. NASty\'s enrollment ceremony requires the operator to reset firmware to Setup Mode (via BIOS — vendor-specific path documented in the wizard) so that on the next boot, systemd-boot\'s auto-enrollment can install NASty\'s keys without needing a Microsoft-signed bridge. After enrollment, firmware exits Setup Mode automatically.',
+				},
+				{
+					term: 'Measured UKI',
+					summary: 'A Unified Kernel Image whose load is recorded into a PCR.',
+					detail: 'A UKI bundles the kernel, initrd, and command line into a single PE binary. When the firmware loads it and Secure Boot is on, the firmware records the binary\'s hash into PCR-4 — so a different kernel produces a different PCR-4 reading. lanzaboote produces measured UKIs on every NixOS rebuild; bootctl status reports "Measured UKI: yes" when this is active. This is what lets future work seal keys against PCR-4 to bind the entire boot chain (not just the SB policy in PCR-7).',
+				},
+				{
+					term: 'lanzaboote',
+					summary: 'The NixOS-native Secure Boot toolchain.',
+					detail: 'lanzaboote (https://github.com/nix-community/lanzaboote) replaces systemd-boot\'s normal install with a flow that signs every kernel + initrd + UKI for the firmware to verify. NASty pins lanzaboote v1.0.0 as a flake input and ships sbctl alongside as the read-only inspector. Pin and key management live entirely inside the NASty install — operators don\'t pick a lanzaboote rev (the protocol with sd-stub and the install-hook contract are nasty-test-matrix dependent). See the experimental Secure Boot enrollment wizard on the Hardware page.',
+				},
+				{
+					term: 'sbctl',
+					summary: 'CLI tool for inspecting Secure Boot state — keys, signatures, enrollment status.',
+					detail: 'NASty includes sbctl on the system path so operators can inspect SB state by hand (`sbctl status`, `sbctl verify`, `sbctl list-enrolled-keys`). The engine itself uses it as a read-only inspector — signing and key enrollment go through lanzaboote, never direct sbctl writes. Run it from a terminal if you want raw vendor / key-fingerprint data the WebUI doesn\'t surface.',
+				},
 			],
 		},
 		{
