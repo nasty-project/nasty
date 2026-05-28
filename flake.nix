@@ -51,10 +51,19 @@
     mkPkgs = system: import nixpkgs {
       inherit system;
       overlays = [ (final: prev: {
-        fetchurl = args: prev.fetchurl (args // {
-          curlOptsList = (args.curlOptsList or []) ++
-            [ "-A" "nasty-engine-build (github.com/nasty-project/nasty)" ];
-        });
+        fetchurl = args:
+          # Guard with isAttrs because some callers in nixpkgs (e.g.
+          # makeOverridable wrappers / callPackage auto-call) pass a
+          # function-shaped value here at evaluation time; only
+          # actual fetch requests (attribute sets carrying url + hash)
+          # get the User-Agent injection.
+          if builtins.isAttrs args then
+            prev.fetchurl (args // {
+              curlOptsList = (args.curlOptsList or []) ++
+                [ "-A" "nasty-engine-build (github.com/nasty-project/nasty)" ];
+            })
+          else
+            prev.fetchurl args;
       }) ];
     };
     nasty-version = (builtins.fromTOML (builtins.readFile ./engine/Cargo.toml)).workspace.package.version;
