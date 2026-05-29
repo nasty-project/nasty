@@ -25,6 +25,13 @@ const UPDATE_UNIT: &str = "nasty-update";
 const LOCAL_FLAKE_TARGET: &str = "/etc/nixos#nasty";
 const LOCAL_REPO: &str = "/etc/nixos";
 const NIXOS_FLAKE_DIR: &str = "/etc/nixos";
+/// Per-box opt-in Secure Boot overlay written by the SB enrollment
+/// ceremony (see `secure_boot_enrollment`). Its on-disk presence is
+/// the signal that the wrapper-flake should also carry a lanzaboote
+/// input — `wrapper_is_canonical_shape` rejects either-or drift,
+/// `migrate_wrapper_to_canonical_shape` reconciles by re-injecting
+/// lanzaboote during a re-render when the overlay is present.
+const SECURE_BOOT_OVERLAY_PATH: &str = "/etc/nixos/secure-boot.nix";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
 const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
 const DEFAULT_NASTY_OWNER: &str = "nasty-project";
@@ -604,11 +611,15 @@ impl UpdateService {
         let current = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| UpdateError::CommandFailed(format!("read {path}: {e}")))?;
-        if wrapper_is_canonical_shape(&current) {
+        let overlay_present = tokio::fs::try_exists(SECURE_BOOT_OVERLAY_PATH)
+            .await
+            .unwrap_or(false);
+        if wrapper_is_canonical_shape(&current, overlay_present) {
             return Ok(false);
         }
         let local_system = detect_local_system().await?;
-        let migrated = migrate_wrapper_to_canonical_shape(&current, &local_system).await?;
+        let migrated =
+            migrate_wrapper_to_canonical_shape(&current, &local_system, overlay_present).await?;
         tokio::fs::write(&path, &migrated)
             .await
             .map_err(|e| UpdateError::CommandFailed(format!("write {path}: {e}")))?;
@@ -2080,14 +2091,17 @@ fn render_system_flake_template_with_ref(
 
 /// Whether the wrapper is in the canonical 0.0.9 shape:
 /// `nixpkgs.follows = "nasty/nixpkgs"` (no `.url`) AND
-/// `bcachefs-tools.url = "..."` (no `.follows`).
+/// `bcachefs-tools.url = "..."` (no `.follows`) AND lanzaboote's
+/// presence matches the SB overlay's presence (declared iff
+/// `secure-boot.nix` exists on disk, since lanzaboote is engine-
+/// injected per-box at enrollment).
 ///
-/// Returns true when both invariants hold, OR when the content
+/// Returns true when all invariants hold, OR when the content
 /// fails to parse, OR when no inputs are declared at all. The two
 /// "can't reason" cases are conservative on purpose: don't rewrite
 /// a wrapper we can't make sense of, leave operator customizations
 /// alone.
-fn wrapper_is_canonical_shape(content: &str) -> bool {
+fn wrapper_is_canonical_shape(content: &str, overlay_present: bool) -> bool {
     let Ok(urls) = parse_flake_input_urls(content) else {
         return true;
     };
@@ -2102,6 +2116,14 @@ fn wrapper_is_canonical_shape(content: &str) -> bool {
     }
     // bcachefs-tools must have a .url.
     if !urls.contains_key("bcachefs-tools") {
+        return false;
+    }
+    // Lanzaboote must be present iff the SB overlay is on disk.
+    // Drift in either direction (overlay without input, or input
+    // without overlay) is non-canonical and needs reconciliation
+    // by `migrate_wrapper_to_canonical_shape`.
+    let lanzaboote_present = urls.contains_key("lanzaboote");
+    if overlay_present != lanzaboote_present {
         return false;
     }
     true
@@ -2136,8 +2158,9 @@ fn wrapper_is_canonical_shape(content: &str) -> bool {
 async fn migrate_wrapper_to_canonical_shape(
     current_content: &str,
     local_system: &str,
+    overlay_present: bool,
 ) -> Result<String, UpdateError> {
-    if wrapper_is_canonical_shape(current_content) {
+    if wrapper_is_canonical_shape(current_content, overlay_present) {
         return Ok(current_content.to_string());
     }
     let urls = parse_flake_input_urls(current_content)?;
@@ -2188,13 +2211,170 @@ async fn migrate_wrapper_to_canonical_shape(
     // upgrade_tagged_release and version_switch.
     let rendered =
         render_system_flake_template_with_ref(EMBEDDED_WRAPPER_TEMPLATE, &nasty_ref, local_system)?;
-    rewrite_flake_input_urls(
+    let after_bcachefs = rewrite_flake_input_urls(
         &rendered,
         &HashMap::from([(
             String::from("bcachefs-tools"),
             format!("github:koverstreet/bcachefs-tools/{bcachefs_ref}"),
         )]),
-    )
+    )?;
+    // Lanzaboote reconciliation: the wrapper template no longer
+    // declares lanzaboote unconditionally (per-box opt-in — engine
+    // injects on enrollment, strips on abort). If the SB overlay is
+    // present on this box, re-inject the input here so a re-render
+    // doesn't strip the enrolled box's SB stack out from under it.
+    // If the overlay is absent and a stale lanzaboote.url somehow
+    // survives from an earlier wrapper shape, the freshly-rendered
+    // template won't carry it forward (the template's inputs block
+    // has no lanzaboote line to preserve). So the symmetric "strip
+    // when no overlay" branch is implicit in the render itself.
+    if overlay_present {
+        inject_lanzaboote_input(&after_bcachefs)
+    } else {
+        Ok(after_bcachefs)
+    }
+}
+
+/// Lanzaboote input lines as injected into the wrapper-flake
+/// `inputs` block by `add_lanzaboote_input_to_wrapper`. Pinned to
+/// `v1.0.0` here (same rev nasty's own flake.nix pins) so the lock
+/// stays consistent across nasty/wrapper. The `.inputs.nixpkgs.follows`
+/// keeps lanzaboote on nasty's pinned nixpkgs so cachix substitution
+/// hits.
+const LANZABOOTE_INPUT_BLOCK: &str = "\
+    lanzaboote.url = \"github:nix-community/lanzaboote/v1.0.0\";\n\
+    lanzaboote.inputs.nixpkgs.follows = \"nasty/nixpkgs\";\n";
+
+/// Inject lanzaboote as a top-level flake input into the wrapper at
+/// `wrapper_path`. Called by the SecureBoot enrollment ceremony when
+/// the operator begins enrollment; pair with
+/// `remove_lanzaboote_input_from_wrapper` on abort.
+///
+/// Idempotent: returns `Ok(())` with no change when lanzaboote is
+/// already declared. Does NOT run `nix flake lock` — caller is
+/// responsible (typically immediately after this, so the lanzaboote
+/// sources actually get fetched).
+pub async fn add_lanzaboote_input_to_wrapper(wrapper_path: &str) -> Result<(), UpdateError> {
+    let content = tokio::fs::read_to_string(wrapper_path)
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("read {wrapper_path}: {e}")))?;
+    let urls = parse_flake_input_urls(&content)?;
+    if urls.contains_key("lanzaboote") {
+        return Ok(());
+    }
+    let mutated = inject_lanzaboote_input(&content)?;
+    tokio::fs::write(wrapper_path, mutated)
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("write {wrapper_path}: {e}")))
+}
+
+/// Strip lanzaboote from the wrapper at `wrapper_path`. Removes the
+/// `lanzaboote.url` line and any `lanzaboote.inputs.*` lines.
+/// Called by the SecureBoot enrollment ceremony on abort.
+///
+/// Idempotent: returns `Ok(())` with no change when lanzaboote is
+/// already absent. Does NOT run `nix flake lock` — the dead lock
+/// entries get pruned on the operator's next update; eager pruning
+/// here would add a network requirement to abort, which we'd rather
+/// keep best-effort.
+pub async fn remove_lanzaboote_input_from_wrapper(wrapper_path: &str) -> Result<(), UpdateError> {
+    let content = tokio::fs::read_to_string(wrapper_path)
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("read {wrapper_path}: {e}")))?;
+    let urls = parse_flake_input_urls(&content)?;
+    if !urls.contains_key("lanzaboote") {
+        return Ok(());
+    }
+    let mutated = strip_lanzaboote_input(&content);
+    tokio::fs::write(wrapper_path, mutated)
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("write {wrapper_path}: {e}")))
+}
+
+/// Locate the wrapper's `inputs = { ... };` attrset and splice the
+/// two lanzaboote lines in just before the closing brace. Uses the
+/// same rnix-based parsing as `parse_flake_input_urls` so the
+/// insertion point is robust to whatever the operator did to the
+/// inputs block (extra comments, reordering, etc.).
+fn inject_lanzaboote_input(content: &str) -> Result<String, UpdateError> {
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        let first = parsed.errors()[0].to_string();
+        return Err(UpdateError::CommandFailed(format!(
+            "failed to parse flake.nix: {first}"
+        )));
+    }
+    let root = parsed.tree();
+    // Find the top-level `inputs = { ... };` attrset's closing
+    // brace position. The inputs attrset is the AttrSet value of an
+    // AttrpathValue whose attrpath is literally "inputs".
+    for node in root
+        .syntax()
+        .descendants()
+        .filter_map(ast::AttrpathValue::cast)
+    {
+        let Some(attrpath) = node.attrpath() else {
+            continue;
+        };
+        let normalized_path = attrpath
+            .syntax()
+            .text()
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        if normalized_path != "inputs" {
+            continue;
+        }
+        let Some(value) = node.value() else { continue };
+        // The value is the `{ ... }` AttrSet. We want to insert
+        // immediately before the line that holds the closing `}`,
+        // so the existing indentation of that closing-brace line
+        // stays put and the new lanzaboote lines sit at the same
+        // indent as their siblings inside the block. Inserting at
+        // `end - 1` (the `}` byte itself) would pull the
+        // closing-brace line's leading whitespace into our
+        // injection and leave `};` un-indented.
+        let range = value.syntax().text_range();
+        let end = u32::from(range.end()) as usize;
+        if content.as_bytes().get(end.wrapping_sub(1)) != Some(&b'}') {
+            return Err(UpdateError::CommandFailed(
+                "wrapper inputs block doesn't end in '}' as expected".into(),
+            ));
+        }
+        // Walk backward from the `}` to find the newline that
+        // starts the closing-brace line. If there's no newline
+        // (single-line `inputs = { ... };`) we fall back to
+        // inserting just before the `}` — produces ugly formatting
+        // but stays correct.
+        let insert_at = content[..end - 1]
+            .rfind('\n')
+            .map(|n| n + 1)
+            .unwrap_or(end - 1);
+        let mut out = String::with_capacity(content.len() + LANZABOOTE_INPUT_BLOCK.len());
+        out.push_str(&content[..insert_at]);
+        out.push_str(LANZABOOTE_INPUT_BLOCK);
+        out.push_str(&content[insert_at..]);
+        return Ok(out);
+    }
+    Err(UpdateError::CommandFailed(
+        "wrapper has no top-level `inputs = { ... }` attrset to inject into".into(),
+    ))
+}
+
+/// Strip every line that declares a lanzaboote input attribute
+/// (`lanzaboote.url`, `lanzaboote.inputs.<…>`). Pure text op — keeps
+/// surrounding whitespace and comments untouched.
+fn strip_lanzaboote_input(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("lanzaboote.url") || trimmed.starts_with("lanzaboote.inputs.") {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 /// Check whether the upstream wrapper-flake template at the given
@@ -3330,7 +3510,7 @@ outputs = { nixpkgs, nasty, ... }: {
     fn wrapper_is_canonical_shape_accepts_canonical() {
         // The 0.0.9 canonical shape: nasty.url, nixpkgs.follows,
         // bcachefs-tools.url. nixpkgs must NOT have a .url; bcachefs
-        // MUST have one.
+        // MUST have one. No SB overlay on disk → no lanzaboote.
         let canonical = r#"{
   inputs = {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
@@ -3338,7 +3518,53 @@ outputs = { nixpkgs, nasty, ... }: {
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
   };
 }"#;
-        assert!(super::wrapper_is_canonical_shape(canonical));
+        assert!(super::wrapper_is_canonical_shape(canonical, false));
+    }
+
+    #[test]
+    fn wrapper_is_canonical_shape_accepts_canonical_with_lanzaboote_when_overlay_present() {
+        // Enrolled box: SB overlay on disk AND lanzaboote injected
+        // into the wrapper inputs. Both halves match → canonical.
+        let enrolled = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
+    lanzaboote.inputs.nixpkgs.follows = "nasty/nixpkgs";
+  };
+}"#;
+        assert!(super::wrapper_is_canonical_shape(enrolled, true));
+    }
+
+    #[test]
+    fn wrapper_is_canonical_shape_rejects_lanzaboote_without_overlay() {
+        // Lanzaboote in the wrapper but no SB overlay → drift.
+        // Migration should strip lanzaboote (the re-render won't
+        // carry it forward).
+        let drift = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
+  };
+}"#;
+        assert!(!super::wrapper_is_canonical_shape(drift, false));
+    }
+
+    #[test]
+    fn wrapper_is_canonical_shape_rejects_overlay_without_lanzaboote() {
+        // SB overlay on disk but no lanzaboote input → drift.
+        // Migration should re-inject lanzaboote.
+        let drift = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+  };
+}"#;
+        assert!(!super::wrapper_is_canonical_shape(drift, true));
     }
 
     #[test]
@@ -3352,7 +3578,7 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/main";
   };
 }"#;
-        assert!(!super::wrapper_is_canonical_shape(legacy));
+        assert!(!super::wrapper_is_canonical_shape(legacy, false));
     }
 
     #[test]
@@ -3367,14 +3593,97 @@ outputs = { nixpkgs, nasty, ... }: {
     bcachefs-tools.follows = "nasty/bcachefs-tools";
   };
 }"#;
-        assert!(!super::wrapper_is_canonical_shape(follows_both));
+        assert!(!super::wrapper_is_canonical_shape(follows_both, false));
     }
 
     #[test]
     fn wrapper_is_canonical_shape_returns_true_for_unparseable_content() {
         // Garbage in → don't claim "needs migration" and accidentally
         // rewrite whatever the operator has there. Safer default.
-        assert!(super::wrapper_is_canonical_shape("not a flake at all"));
+        assert!(super::wrapper_is_canonical_shape(
+            "not a flake at all",
+            false
+        ));
+    }
+
+    // ── lanzaboote injection / stripping (per-box opt-in SB) ────────
+
+    #[test]
+    fn inject_lanzaboote_input_adds_both_lines_before_closing_brace() {
+        let wrapper = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+  };
+}"#;
+        let out = super::inject_lanzaboote_input(wrapper).expect("inject");
+        assert!(out.contains("lanzaboote.url = \"github:nix-community/lanzaboote/v1.0.0\""));
+        assert!(out.contains("lanzaboote.inputs.nixpkgs.follows = \"nasty/nixpkgs\""));
+        // Pre-existing inputs must still be there.
+        assert!(out.contains("nasty.url = \"github:nasty-project/nasty/v0.0.9\""));
+        assert!(out.contains("bcachefs-tools.url ="));
+    }
+
+    #[test]
+    fn strip_lanzaboote_input_removes_url_and_follows_lines() {
+        let wrapper = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
+    lanzaboote.inputs.nixpkgs.follows = "nasty/nixpkgs";
+  };
+}"#;
+        let out = super::strip_lanzaboote_input(wrapper);
+        assert!(!out.contains("lanzaboote.url"));
+        assert!(!out.contains("lanzaboote.inputs"));
+        assert!(out.contains("nasty.url"));
+        assert!(out.contains("bcachefs-tools.url"));
+    }
+
+    #[test]
+    fn strip_lanzaboote_input_is_idempotent_on_clean_wrapper() {
+        let wrapper = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+  };
+}"#;
+        assert_eq!(super::strip_lanzaboote_input(wrapper), wrapper);
+    }
+
+    #[test]
+    fn inject_then_strip_lanzaboote_returns_original_content() {
+        let wrapper = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+  };
+}"#;
+        let injected = super::inject_lanzaboote_input(wrapper).expect("inject");
+        let round_tripped = super::strip_lanzaboote_input(&injected);
+        assert_eq!(round_tripped, wrapper);
+    }
+
+    #[test]
+    fn inject_lanzaboote_input_preserves_canonical_shape_when_overlay_present() {
+        // After injection the wrapper plus an overlay-present claim
+        // should reach canonical. The previous canonical shape (no
+        // lanzaboote) is non-canonical under overlay-present.
+        let pre = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+  };
+}"#;
+        assert!(!super::wrapper_is_canonical_shape(pre, true));
+        let injected = super::inject_lanzaboote_input(pre).expect("inject");
+        assert!(super::wrapper_is_canonical_shape(&injected, true));
     }
 
     #[tokio::test]
@@ -3394,7 +3703,7 @@ outputs = { nixpkgs, nasty, ... }: {
   };
   outputs = { ... }: {};
 }"#;
-        let migrated = super::migrate_wrapper_to_canonical_shape(legacy, "x86_64-linux")
+        let migrated = super::migrate_wrapper_to_canonical_shape(legacy, "x86_64-linux", false)
             .await
             .expect("migration succeeds");
         // The operator's chosen nasty ref survives:
@@ -3426,10 +3735,58 @@ outputs = { nixpkgs, nasty, ... }: {
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
   };
 }"#;
-        let out = super::migrate_wrapper_to_canonical_shape(canonical, "x86_64-linux")
+        let out = super::migrate_wrapper_to_canonical_shape(canonical, "x86_64-linux", false)
             .await
             .expect("noop succeeds");
         assert_eq!(out, canonical, "canonical wrapper passes through unchanged");
+    }
+
+    #[tokio::test]
+    async fn migrate_wrapper_reinjects_lanzaboote_when_overlay_present() {
+        // Re-render path with the SB overlay on disk: the freshly-
+        // rendered template (no lanzaboote) gets the lanzaboote
+        // input re-injected so an enrolled box doesn't lose its SB
+        // stack on a wrapper-shape migration.
+        let bare = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+  };
+}"#;
+        let out = super::migrate_wrapper_to_canonical_shape(bare, "x86_64-linux", true)
+            .await
+            .expect("migration with overlay present succeeds");
+        let parsed = super::parse_flake_input_urls(&out).expect("output parses");
+        assert!(
+            parsed.contains_key("lanzaboote"),
+            "overlay-present box must end up with lanzaboote declared after migration"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_wrapper_strips_lanzaboote_when_overlay_absent() {
+        // Drift case: wrapper has lanzaboote but no SB overlay on
+        // disk. Re-render drops lanzaboote (the template doesn't
+        // carry it forward), and with overlay_present=false the
+        // migrator doesn't re-inject. Net effect: dead lanzaboote
+        // gets cleaned up.
+        let drift = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.9";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
+  };
+}"#;
+        let out = super::migrate_wrapper_to_canonical_shape(drift, "x86_64-linux", false)
+            .await
+            .expect("migration without overlay succeeds");
+        let parsed = super::parse_flake_input_urls(&out).expect("output parses");
+        assert!(
+            !parsed.contains_key("lanzaboote"),
+            "no-overlay box must end up without a lanzaboote declaration after migration"
+        );
     }
 
     #[tokio::test]
@@ -3445,7 +3802,7 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:my-fork/nasty/main";
   };
 }"#;
-        let err = super::migrate_wrapper_to_canonical_shape(fork, "x86_64-linux")
+        let err = super::migrate_wrapper_to_canonical_shape(fork, "x86_64-linux", false)
             .await
             .expect_err("fork URL should refuse migration");
         let msg = format!("{err:?}");

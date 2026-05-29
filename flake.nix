@@ -206,6 +206,14 @@
       installerSystemFlakeLock = builtins.toJSON {
         version = rootLock.version;
         root = "root";
+        # Inherit nasty's own lock nodes verbatim (nasty's `nixpkgs`,
+        # `bcachefs-tools`, `lanzaboote`, and all their transitive
+        # deps), then layer in a `nasty` node pointing at nasty's
+        # bundled source path, plus a wrapper `root` that declares
+        # the three inputs the rendered wrapper template will read.
+        # lanzaboote is NOT declared at the wrapper root — Secure
+        # Boot is per-box opt-in and the engine injects the
+        # lanzaboote input + locks it at enrollment time.
         nodes = (builtins.removeAttrs rootLock.nodes [ "root" ]) // {
           nasty = {
             locked = {
@@ -220,18 +228,27 @@
               repo = installerNastyRepo;
               ref = installerNastyRef;
             };
+            # Direct refs to the inherited top-level nodes — matches
+            # what nasty's OWN flake.lock declares for its root.inputs,
+            # so the inherited subgraph stays internally consistent.
             inputs = {
-              bcachefs-tools = [ "bcachefs-tools" ];
-              lanzaboote = [ "lanzaboote" ];
-              nixpkgs = [ "nixpkgs" ];
+              bcachefs-tools = "bcachefs-tools";
+              lanzaboote = "lanzaboote";
+              nixpkgs = "nixpkgs";
             };
           };
           root = {
             inputs = {
-              bcachefs-tools = "bcachefs-tools";
-              lanzaboote = "lanzaboote";
               nasty = "nasty";
-              nixpkgs = "nixpkgs";
+              # Follows path matches the template's
+              # `nixpkgs.follows = "nasty/nixpkgs"` declaration.
+              # Without this representation, nix at install time
+              # detects a shape mismatch and triggers a relock,
+              # which rewrites flake.lock mid-evaluation and
+              # invalidates a `path:/mnt/etc/nixos` narHash that
+              # nix had already cached for the wrapper snapshot.
+              nixpkgs = [ "nasty" "nixpkgs" ];
+              bcachefs-tools = "bcachefs-tools";
             };
           };
         };

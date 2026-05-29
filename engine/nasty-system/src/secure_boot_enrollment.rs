@@ -60,6 +60,8 @@ const REBUILD_UNIT: &str = "nasty-secureboot-rebuild";
 const STATE_PATH: &str = "/var/lib/nasty/secure-boot-enrollment.json";
 const STATE_DIR: &str = "/var/lib/nasty";
 const NIX_OVERLAY_PATH: &str = "/etc/nixos/secure-boot.nix";
+const WRAPPER_FLAKE_PATH: &str = "/etc/nixos/flake.nix";
+const NIXOS_FLAKE_DIR: &str = "/etc/nixos";
 const NASTY_KEYS_DIR: &str = "/var/lib/nasty/keys";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -240,6 +242,29 @@ impl SecureBootEnrollmentService {
             }
         }
         write_overlay_file().await?;
+        // Lanzaboote is per-box opt-in: the wrapper-flake template
+        // does NOT declare it. Inject it now (and lock it below) so
+        // the upcoming `nasty-rebuild` can actually evaluate
+        // `boot.lanzaboote.*` options. If injection or lock fails,
+        // roll the overlay back so the box doesn't end up half-
+        // configured (overlay says "enable SB" but the input that
+        // provides the option space is missing → eval error on
+        // rebuild). Rollback is best-effort; if it fails the
+        // operator sees the original error and a stale overlay,
+        // which `abort()` can clean up.
+        if let Err(e) = crate::update::add_lanzaboote_input_to_wrapper(WRAPPER_FLAKE_PATH).await {
+            let _ = remove_overlay_file().await;
+            return Err(EnrollmentError::Io(format!(
+                "inject lanzaboote input into wrapper: {e}"
+            )));
+        }
+        if let Err(e) = run_nix_flake_lock().await {
+            let _ = crate::update::remove_lanzaboote_input_from_wrapper(WRAPPER_FLAKE_PATH).await;
+            let _ = remove_overlay_file().await;
+            return Err(EnrollmentError::Io(format!(
+                "lock lanzaboote input (network required): {e}"
+            )));
+        }
         // Best-effort: clear any leftover systemd unit state from a
         // previous ceremony so the new ceremony's rebuild snapshot
         // starts from `not_run`. Ignored on failure (unit may not
@@ -284,6 +309,23 @@ impl SecureBootEnrollmentService {
             }
         }
         remove_overlay_file().await?;
+        // Strip the lanzaboote input that `begin()` injected. Best-
+        // effort: a failure here leaves the input declaration in
+        // place but the overlay gone, so SB stays off (the lanzaboote
+        // closure remains in the lock until the next operator-driven
+        // update prunes it). Surface the failure so the wizard can
+        // show it, but don't bounce the abort back — the operator's
+        // intent (cancel) succeeded at the SB-config level.
+        if let Err(e) =
+            crate::update::remove_lanzaboote_input_from_wrapper(WRAPPER_FLAKE_PATH).await
+        {
+            warn!(
+                target: "nasty::secure_boot_enrollment",
+                "abort: failed to strip lanzaboote input from wrapper: {e} \
+                 (overlay removed, SB will not engage on next rebuild — \
+                 lanzaboote lock entries persist until next update)"
+            );
+        }
         let new_state = EnrollmentState {
             phase: EnrollmentPhase::Aborted {
                 aborted_at: unix_now(),
@@ -475,6 +517,33 @@ async fn remove_overlay_file() -> Result<(), EnrollmentError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Run `nix flake lock` against the wrapper at `/etc/nixos`. Used
+/// after injecting the lanzaboote input so the new declaration
+/// actually pulls a locked rev (and its transitive deps) into
+/// `/etc/nixos/flake.lock`. Network-bound — fails when the box is
+/// offline; the caller surfaces the failure to the operator.
+async fn run_nix_flake_lock() -> Result<(), EnrollmentError> {
+    let out = Command::new("nix")
+        .args([
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "flake",
+            "lock",
+            NIXOS_FLAKE_DIR,
+        ])
+        .output()
+        .await
+        .map_err(|e| EnrollmentError::Io(format!("spawn nix flake lock: {e}")))?;
+    if !out.status.success() {
+        return Err(EnrollmentError::Io(format!(
+            "nix flake lock exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 /// Enumerate filesystems that currently have a `.tpm` blob in
