@@ -203,18 +203,46 @@
         [ "@NASTY_VERSION@" "@LOCAL_SYSTEM@" ]
         [ installerNastyRef system ]
         (builtins.readFile ./nixos/system-flake/flake.nix.template);
+      # Rewrite a follows path so it resolves correctly when nasty's
+      # lock subgraph is transplanted into the wrapper's lock. In
+      # nasty's own lock context, `["lanzaboote", …]` means "from
+      # nasty's root, take lanzaboote, then …". In the wrapper's
+      # lock context, lanzaboote isn't at wrapper-root (it's per-
+      # box opt-in: the engine injects the input + lock entries
+      # only at SB enrollment). It's still reachable via
+      # `nasty/lanzaboote`, so the rewrite prefixes the path with
+      # `nasty`. The other top-level names in nasty's own lock
+      # (nixpkgs, bcachefs-tools) ARE present at wrapper-root (the
+      # wrapper has its own nixpkgs.follows + bcachefs-tools.url),
+      # so paths starting with those are left alone — they resolve
+      # in the wrapper to the same content nasty's lock pointed at.
+      rewriteFollowForWrapper = path:
+        if path != [] && (builtins.head path) == "lanzaboote"
+        then [ "nasty" ] ++ path
+        else path;
+      rewriteInputRef = v:
+        if builtins.isList v then rewriteFollowForWrapper v else v;
+      rewriteNodeInputs = node:
+        if node ? inputs
+        then node // { inputs = builtins.mapAttrs (_: rewriteInputRef) node.inputs; }
+        else node;
+      inheritedNastyNodes = builtins.mapAttrs
+        (_: rewriteNodeInputs)
+        (builtins.removeAttrs rootLock.nodes [ "root" ]);
       installerSystemFlakeLock = builtins.toJSON {
         version = rootLock.version;
         root = "root";
-        # Inherit nasty's own lock nodes verbatim (nasty's `nixpkgs`,
+        # Inherit nasty's own lock nodes (nasty's `nixpkgs`,
         # `bcachefs-tools`, `lanzaboote`, and all their transitive
         # deps), then layer in a `nasty` node pointing at nasty's
-        # bundled source path, plus a wrapper `root` that declares
-        # the three inputs the rendered wrapper template will read.
-        # lanzaboote is NOT declared at the wrapper root — Secure
-        # Boot is per-box opt-in and the engine injects the
-        # lanzaboote input + locks it at enrollment time.
-        nodes = (builtins.removeAttrs rootLock.nodes [ "root" ]) // {
+        # bundled source path, plus a wrapper `root`. Follows paths
+        # inside the inherited subgraph that pointed through nasty's
+        # root-level `lanzaboote` are rewritten to go through
+        # `nasty/lanzaboote` (see `rewriteFollowForWrapper` above)
+        # because the wrapper doesn't declare lanzaboote at its own
+        # root — Secure Boot is per-box opt-in and the engine
+        # injects the input + lock entries at enrollment time.
+        nodes = inheritedNastyNodes // {
           nasty = {
             locked = {
               type = "path";
