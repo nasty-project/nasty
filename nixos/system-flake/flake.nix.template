@@ -61,18 +61,27 @@
     # removed safely.
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
 
-    # Secure Boot integration. Pinned by NASty (operators shouldn't
-    # pick a lanzaboote rev — its protocol with sd-stub, the firmware
-    # key formats, and the install-hook contract are all things NASty
-    # tests against). Inert until the operator sets
-    # `nasty.secureBoot.enable = true` per box; on boxes that never
-    # opt in this is just a flake.lock entry, no boot path changes.
-    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
-    lanzaboote.inputs.nixpkgs.follows = "nasty/nixpkgs";
+    # NOTE: lanzaboote is intentionally NOT declared as a top-level
+    # input here. Secure Boot is per-box opt-in: when the operator
+    # begins the enrollment ceremony from the Hardware page, the
+    # engine writes `secure-boot.nix` (consumed via the optional
+    # import below) AND injects the lanzaboote input into this
+    # flake.nix in the inputs block above. On unenroll, the engine
+    # strips it back out. Boxes that never opt in carry zero
+    # lanzaboote-related lock entries.
   };
 
-  outputs = { self, nixpkgs, nasty, lanzaboote, ... }:
+  outputs = inputs @ { self, nixpkgs, nasty, ... }:
     let
+      # lanzaboote is engine-injected when the operator enrolls in
+      # Secure Boot (see comment in `inputs` above). Absent on every
+      # non-SB box. nasty.nix:16 accepts the null and the conditional
+      # imports there keep boot.lanzaboote.* out of the option space
+      # until the input lands. nasty-secure-boot.nix is gated on the
+      # presence of `secure-boot.nix` and assertion-checks that
+      # lanzaboote is non-null before flipping the SB knobs.
+      lanzaboote = inputs.lanzaboote or null;
+
       nasty-version =
         (builtins.fromTOML (builtins.readFile "${nasty}/engine/Cargo.toml")).workspace.package.version;
 
