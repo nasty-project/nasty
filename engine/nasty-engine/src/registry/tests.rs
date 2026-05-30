@@ -154,6 +154,29 @@ fn render_properties_returns_none_for_empty_object() {
 }
 
 #[test]
+fn translation_produces_no_collisions_across_registry() {
+    // Every registered method must translate to a unique (verb, path) pair —
+    // otherwise the REST gateway can't route requests unambiguously.
+    use super::paths::translate;
+    use std::collections::HashMap;
+    let (_g, groups) = super::build_full_registry();
+    let mut seen: HashMap<(super::paths::HttpVerb, String), &'static str> = HashMap::new();
+    for (_, methods) in &groups {
+        for m in methods {
+            let key = translate(m.name);
+            if let Some(prior) = seen.insert(key.clone(), m.name) {
+                panic!(
+                    "translation collision: `{prior}` and `{}` both map to {} {}",
+                    m.name,
+                    key.0.as_str().to_uppercase(),
+                    key.1
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn registry_builds_without_panic() {
     // Smoke test: build the full registry. Catches schema-derivation
     // panics from any registered type — schemars sometimes throws on
