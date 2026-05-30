@@ -2538,18 +2538,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nasty-apidoc"
-version = "0.0.9"
-dependencies = [
- "nasty-sharing",
- "nasty-storage",
- "nasty-system",
- "schemars 1.2.1",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "nasty-apps"
 version = "0.0.9"
 dependencies = [
