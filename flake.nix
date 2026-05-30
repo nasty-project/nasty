@@ -222,46 +222,42 @@
         [ "@NASTY_VERSION@" "@LOCAL_SYSTEM@" ]
         [ installerNastyRef system ]
         (builtins.readFile ./nixos/system-flake/flake.nix.template);
-      # Rewrite a follows path so it resolves correctly when nasty's
-      # lock subgraph is transplanted into the wrapper's lock. In
-      # nasty's own lock context, `["lanzaboote", …]` means "from
-      # nasty's root, take lanzaboote, then …". In the wrapper's
-      # lock context, lanzaboote isn't at wrapper-root (it's per-
-      # box opt-in: the engine injects the input + lock entries
-      # only at SB enrollment). It's still reachable via
-      # `nasty/lanzaboote`, so the rewrite prefixes the path with
-      # `nasty`. The other top-level names in nasty's own lock
-      # (nixpkgs, bcachefs-tools) ARE present at wrapper-root (the
-      # wrapper has its own nixpkgs.follows + bcachefs-tools.url),
-      # so paths starting with those are left alone — they resolve
-      # in the wrapper to the same content nasty's lock pointed at.
-      rewriteFollowForWrapper = path:
-        if path != [] && (builtins.head path) == "lanzaboote"
-        then [ "nasty" ] ++ path
-        else path;
-      rewriteInputRef = v:
-        if builtins.isList v then rewriteFollowForWrapper v else v;
-      rewriteNodeInputs = node:
-        if node ? inputs
-        then node // { inputs = builtins.mapAttrs (_: rewriteInputRef) node.inputs; }
-        else node;
-      inheritedNastyNodes = builtins.mapAttrs
-        (_: rewriteNodeInputs)
-        (builtins.removeAttrs rootLock.nodes [ "root" ]);
+      # Minimal seed lock for the freshly-installed wrapper at
+      # /mnt/etc/nixos. Declares ONLY the nasty input, pre-resolved
+      # to nasty's bundled source path in the ISO's nix store — so
+      # the install-time `nix flake lock` step in iso.nix doesn't
+      # need to fetch nasty from GitHub (it already has it locally
+      # via `installerNastySource`).
+      #
+      # The other inputs the wrapper template declares (`nixpkgs`
+      # follows, `bcachefs-tools.url`) are deliberately NOT
+      # pre-populated here. iso.nix runs `nix flake lock` as an
+      # explicit pass AFTER bootstrap-system-flake writes flake.nix
+      # and BEFORE nixos-install starts evaluating. That pass adds
+      # the missing inputs cleanly based on what flake.nix declares,
+      # producing a lock that exactly matches the rendered template's
+      # shape. nixos-install then evaluates against a stable lock —
+      # the path:/mnt/etc/nixos narHash captured by
+      # `nastySystemFlakeSnapshot` stays valid throughout evaluation
+      # (no mid-eval lock rewrite invalidating it).
+      #
+      # Previous iterations tried to bundle the full transitive graph
+      # by hand (inheriting nasty's own lock nodes, rewriting follows
+      # paths for transplantation, etc). Each fix uncovered another
+      # sub-case of nix's lock-shape invariants: PR #340 (missing
+      # lanzaboote node), PR #341 (dangling lanzaboote follows in
+      # inherited subgraph), then the bcachefs-tools transitive-
+      # subtree sub-case. Letting `nix flake lock` build the rest
+      # at install time eliminates the entire class of bug.
       installerSystemFlakeLock = builtins.toJSON {
         version = rootLock.version;
         root = "root";
-        # Inherit nasty's own lock nodes (nasty's `nixpkgs`,
-        # `bcachefs-tools`, `lanzaboote`, and all their transitive
-        # deps), then layer in a `nasty` node pointing at nasty's
-        # bundled source path, plus a wrapper `root`. Follows paths
-        # inside the inherited subgraph that pointed through nasty's
-        # root-level `lanzaboote` are rewritten to go through
-        # `nasty/lanzaboote` (see `rewriteFollowForWrapper` above)
-        # because the wrapper doesn't declare lanzaboote at its own
-        # root — Secure Boot is per-box opt-in and the engine
-        # injects the input + lock entries at enrollment time.
-        nodes = inheritedNastyNodes // {
+        nodes = {
+          root = {
+            inputs = {
+              nasty = "nasty";
+            };
+          };
           nasty = {
             locked = {
               type = "path";
@@ -274,28 +270,6 @@
               owner = installerNastyOwner;
               repo = installerNastyRepo;
               ref = installerNastyRef;
-            };
-            # Direct refs to the inherited top-level nodes — matches
-            # what nasty's OWN flake.lock declares for its root.inputs,
-            # so the inherited subgraph stays internally consistent.
-            inputs = {
-              bcachefs-tools = "bcachefs-tools";
-              lanzaboote = "lanzaboote";
-              nixpkgs = "nixpkgs";
-            };
-          };
-          root = {
-            inputs = {
-              nasty = "nasty";
-              # Follows path matches the template's
-              # `nixpkgs.follows = "nasty/nixpkgs"` declaration.
-              # Without this representation, nix at install time
-              # detects a shape mismatch and triggers a relock,
-              # which rewrites flake.lock mid-evaluation and
-              # invalidates a `path:/mnt/etc/nixos` narHash that
-              # nix had already cached for the wrapper snapshot.
-              nixpkgs = [ "nasty" "nixpkgs" ];
-              bcachefs-tools = "bcachefs-tools";
             };
           };
         };

@@ -367,6 +367,21 @@ in
         *) [ -n "$NASTY_REV" ] && echo "''${NASTY_REV:0:7}" > /mnt/var/lib/nasty/version || true ;;
       esac
 
+      # Settle the wrapper's flake.lock against the rendered
+      # flake.nix BEFORE nixos-install starts evaluating. The seed
+      # lock shipped on the ISO declares only nasty (pre-resolved
+      # to its bundled source path); this pass adds the wrapper's
+      # other declared inputs (nixpkgs follows + bcachefs-tools)
+      # cleanly. Without this explicit pass, nixos-install would
+      # detect the lock-vs-flake.nix shape mismatch and rewrite the
+      # lock mid-evaluation, which invalidates the
+      # `path:/mnt/etc/nixos` narHash that nastySystemFlakeSnapshot
+      # captures during eval and produces the cryptic NAR hash
+      # mismatch errors that bit v0.0.9 (see PR #340 history).
+      echo "==> Locking wrapper flake inputs..."
+      nix --extra-experimental-features 'nix-command flakes' \
+        flake lock /mnt/etc/nixos
+
       echo "==> Installing NASty..."
       echo "    (this may take a while on first install)"
       nixos-install --flake /mnt/etc/nixos#nasty --no-root-passwd
