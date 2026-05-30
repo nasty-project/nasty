@@ -76,6 +76,20 @@
 	let connected = $state(false);
 	let authInfo: AuthResult | null = $state(null);
 
+	// Debug helper for the reconnect / power-cycle state machine.
+	// Mirrors `NastyClient.debug` in `rpc.ts` — both are gated on the
+	// same localStorage flag (`localStorage.setItem('nasty-debug', '1')`
+	// then reload). Used to trace the path through `onDisconnect` →
+	// 800ms timer → `reconnecting = true` → `onReconnect`, which is
+	// load-bearing for the "Reconnecting…" spinner appearing during
+	// reboots. Cached at module load — set the flag then reload.
+	const _uiDebug =
+		typeof localStorage !== 'undefined'
+		&& localStorage.getItem('nasty-debug') === '1';
+	function dbg(...args: unknown[]) {
+		if (_uiDebug) console.debug('[ui]', ...args);
+	}
+
 	// Login form
 	let showLogin = $state(false);
 	let loginUser = $state('admin');
@@ -359,6 +373,7 @@
 	onMount(() => {
 		tryConnect();
 		const onReconnect = async () => {
+			dbg(`reconnect cb fired — clearing powering=${powering}, reconnecting=${reconnecting}, timer=${reconnectingTimer ? 'armed' : 'none'}`);
 			powering = false;
 			if (reconnectingTimer) {
 				clearTimeout(reconnectingTimer);
@@ -385,8 +400,10 @@
 			sysInfoRefresh.trigger();
 		};
 		const onDisconnect = () => {
+			dbg(`disconnect cb fired — arming ${RECONNECT_OVERLAY_DELAY_MS}ms reconnect-overlay timer (powering=${powering}, prior timer=${reconnectingTimer ? 'rearming' : 'fresh'})`);
 			if (reconnectingTimer) clearTimeout(reconnectingTimer);
 			reconnectingTimer = setTimeout(() => {
+				dbg(`reconnect-overlay timer fired — reconnecting=true (powering=${powering})`);
 				reconnecting = true;
 				reconnectingTimer = null;
 			}, RECONNECT_OVERLAY_DELAY_MS);
@@ -552,9 +569,32 @@
 	async function handleRestart() {
 		powerOpen = false;
 		if (!await confirm('Restart NASty?', 'All active connections will be dropped.')) return;
+		dbg('handleRestart — powering=true, calling system.reboot');
 		powering = true;
 		rebootState.clear();
+		// Safety net: the spinner relies on `onDisconnect` firing and
+		// arming the 800ms overlay timer. If anything in that path
+		// silently breaks (we hit this once on a first-reboot post-
+		// upgrade — couldn't repro deterministically), the operator
+		// stares at "Shutting down…" forever with no motion.
+		// Promote `reconnecting` to true after 5s regardless if
+		// `powering` is still set; cleared cleanly by `onReconnect`
+		// when the engine comes back. Costs nothing on the normal
+		// path because `onReconnect` clears both flags long before 5s.
+		const safetyTimer = setTimeout(() => {
+			if (powering && !reconnecting) {
+				console.warn(
+					'[nasty] reboot: spinner safety net fired at 5s — onDisconnect path did not arm the reconnect overlay. Enable nasty-debug for a state-machine trace.'
+				);
+				reconnecting = true;
+			}
+		}, 5000);
 		try { await getClient().call('system.reboot'); } catch { /* expected — engine dies */ }
+		// Don't clear the safety timer on RPC completion — the engine
+		// returning success here doesn't mean the reboot finished, just
+		// that the request was accepted. The timer self-cancels via the
+		// `powering` check if `onReconnect` has already cleared things.
+		void safetyTimer;
 	}
 
 	async function handleShutdown() {

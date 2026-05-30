@@ -143,6 +143,11 @@ export class NastyClient {
 						this.consecutiveFailedReconnects = 0;
 						this._readyResolve?.();
 						this._readyResolve = null;
+						if (NastyClient.debug) {
+							console.debug(
+								`[rpc] auth ok (wasReconnect=${wasReconnect}, firing ${this.reconnectHandlers.length} reconnect handlers)`
+							);
+						}
 						if (wasReconnect) {
 							for (const h of this.reconnectHandlers) h();
 						}
@@ -170,13 +175,18 @@ export class NastyClient {
 				}
 			};
 
-			this.ws.onclose = () => {
+			this.ws.onclose = (ev) => {
 				this._authenticated = false;
 				// Reject all pending calls so awaiting code doesn't hang forever
 				for (const pending of this.pending.values()) {
 					pending.reject({ code: -32000, message: 'WebSocket disconnected' });
 				}
 				this.pending.clear();
+				if (NastyClient.debug) {
+					console.debug(
+						`[rpc] ws closed (code=${ev.code}, reason="${ev.reason}", clean=${ev.wasClean}, _shouldReconnect=${this._shouldReconnect}, firing ${this._shouldReconnect ? this.disconnectHandlers.length : 0} disconnect handlers)`
+					);
+				}
 				// Keep retrying as long as we haven't been explicitly disconnected.
 				if (this._shouldReconnect) {
 					for (const h of this.disconnectHandlers) h();
@@ -248,6 +258,11 @@ export class NastyClient {
 			this.reconnectDelayMs * 2,
 			this.reconnectCeilMs,
 		);
+		if (NastyClient.debug) {
+			console.debug(
+				`[rpc] scheduling reconnect in ${delay}ms (next ceiling: ${this.reconnectDelayMs}ms, consecutive failures: ${this.consecutiveFailedReconnects}, aggressive=${this._aggressive})`
+			);
+		}
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = null;
 			this.connect().catch((err) => {
@@ -326,6 +341,11 @@ export class NastyClient {
 	setAggressiveReconnect(active: boolean) {
 		if (this._aggressive === active) return;
 		this._aggressive = active;
+		if (NastyClient.debug) {
+			console.debug(
+				`[rpc] setAggressiveReconnect(${active}) — floor=${this.reconnectFloorMs}ms, ceiling=${this.reconnectCeilMs}ms`
+			);
+		}
 		// If we just entered aggressive mode mid-outage, the current
 		// reconnectDelayMs may already be at the old (5 s / 30 s) ceiling.
 		// Snap it down so the very next scheduled retry fires fast.
