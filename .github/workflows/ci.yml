@@ -178,3 +178,86 @@ jobs:
             exit 1
           fi
           echo "Installer template correctly pins bcachefs-tools.url with a hardcoded semver tag."
+
+  installer-lock-shape:
+    # The dynamic counterpart to `installer-flake-template` above.
+    # The static checks there assert what the rendered template
+    # textually declares; this job actually runs `nix flake lock`
+    # against the rendered template and asserts the resulting lock
+    # is stable across a second pass.
+    #
+    # Why this exists: install-time `nixos-install` builds the
+    # wrapper-flake lock from the rendered template. If the lock
+    # construction and the template's input declarations disagree
+    # on shape, nix silently rewrites the lock mid-evaluation —
+    # which invalidates the `path:/mnt/etc/nixos` narHash that
+    # `nastySystemFlakeSnapshot` captures during the same eval pass
+    # and surfaces as the cryptic "NAR hash mismatch in input
+    # 'path:...'" errors. v0.0.9 cycle burned five PRs (#340-#344)
+    # chasing successive sub-cases of this class before #344 landed
+    # the "no bundled lock, regenerate at install time" fix that
+    # this check protects.
+    #
+    # Mechanism: render the template with sed substitutions matching
+    # what `render_system_flake_template_with_ref` does, point
+    # `nasty.url` at this checkout (so we test THIS commit, not a
+    # tagged release), then run `nix flake lock` twice. If pass 2
+    # reports `Added input` or `Updated input` lines, the lock that
+    # pass 1 produced doesn't match what nix's own resolver would
+    # produce — i.e. the template + lock-construction code have
+    # drifted out of shape with each other.
+    name: Installer wrapper-lock shape stable (nix flake lock idempotent)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Render wrapper template + run two nix-flake-lock passes
+        run: |
+          set -euo pipefail
+          TMP=$(mktemp -d)
+          # Match `render_system_flake_template_with_ref`'s substitutions.
+          # Rewrite `nasty.url` to a path: pointing at this checkout so we
+          # test the current commit's flake shape (and avoid hammering
+          # github on every CI run for what is essentially a self-test).
+          sed -e 's|"github:nasty-project/nasty/@NASTY_VERSION@"|"path:'"$GITHUB_WORKSPACE"'"|' \
+              -e 's|@LOCAL_SYSTEM@|x86_64-linux|g' \
+              -e 's|@WRAPPER_FLAKE_VERSION@|ci-render|g' \
+              nixos/system-flake/flake.nix.template > "$TMP/flake.nix"
+
+          # The template imports these optionally; nix needs them to
+          # exist when evaluating, even though we won't actually use
+          # the configurations they'd contribute.
+          cat > "$TMP/hardware-configuration.nix" <<'STUB'
+          { ... }: { }
+          STUB
+          cat > "$TMP/networking.nix" <<'STUB'
+          { ... }: { }
+          STUB
+
+          cd "$TMP"
+
+          echo "::group::Pass 1: nix flake lock (build the lock from the rendered template)"
+          nix flake lock 2>&1 | tee pass-1.log
+          echo "::endgroup::"
+
+          echo "::group::Pass 2: nix flake lock (must be a no-op)"
+          nix flake lock 2>&1 | tee pass-2.log
+          echo "::endgroup::"
+
+          if grep -qE 'Added input|Updated input' pass-2.log; then
+            echo "::error::Wrapper-lock shape is not stable — pass 2 of nix flake lock made changes."
+            echo "Without this stability, install-time nixos-install would do the same lock work mid-evaluation"
+            echo "and invalidate the path:/mnt/etc/nixos narHash that nastySystemFlakeSnapshot captures,"
+            echo "producing the NAR hash mismatch errors that bit the v0.0.9 cycle (PRs #340-#344)."
+            echo ""
+            echo "Pass 2 made these changes:"
+            grep -E 'Added input|Updated input' pass-2.log
+            exit 1
+          fi
+
+          echo "Wrapper-lock shape is stable across two consecutive nix flake lock passes."
