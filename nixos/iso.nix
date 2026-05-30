@@ -270,7 +270,10 @@ in
 
       echo "==> Bootstrapping local system flake..."
       mkdir -p /mnt/etc/nixos
-      cp /etc/nasty-system-flake/flake.lock /mnt/etc/nixos/flake.lock
+      # No seed flake.lock — the explicit `nix flake lock` step at
+      # the bottom of this script builds the entire transitive lock
+      # graph from the rendered template's input declarations. See
+      # flake.nix's installerSystemFlake comment for why.
 
       echo "==> Detecting local system identifier..."
       LOCAL_SYSTEM=$(nix --extra-experimental-features 'nix-command flakes' eval --impure --raw --expr builtins.currentSystem)
@@ -359,6 +362,27 @@ in
           > /mnt/var/lib/nasty/networking.json
       fi
 
+      # Settle the wrapper's flake.lock against the rendered
+      # flake.nix BEFORE nixos-install starts evaluating. There's no
+      # seed lock to start from (flake.nix bundles only flake.nix
+      # itself, no flake.lock — see installerSystemFlake), so this
+      # pass builds the whole transitive lock graph from upstream:
+      # nasty + nixpkgs + bcachefs-tools. Network-bound; the install
+      # already needs network for binary cache substitution.
+      #
+      # Without this explicit pass, nixos-install would do the same
+      # lock work mid-evaluation, which invalidates the
+      # `path:/mnt/etc/nixos` narHash that nastySystemFlakeSnapshot
+      # captures during eval and produces the cryptic NAR hash
+      # mismatch errors that bit v0.0.9. PR #340 history walks
+      # through three earlier attempts that tried to hand-construct
+      # a complete bundled lock; each missed a different sub-case of
+      # nix's lock-shape invariants. Letting nix build the lock at
+      # install time eliminates the whole class.
+      echo "==> Locking wrapper flake inputs..."
+      nix --extra-experimental-features 'nix-command flakes' \
+        flake lock /mnt/etc/nixos
+
       echo "==> Recording installed NASty version..."
       NASTY_REF=$(jq -r '.nodes["nasty"].original.ref // empty' /mnt/etc/nixos/flake.lock 2>/dev/null || true)
       NASTY_REV=$(jq -r '.nodes["nasty"].locked.rev // empty' /mnt/etc/nixos/flake.lock 2>/dev/null || true)
@@ -366,21 +390,6 @@ in
         v*|s*) echo "$NASTY_REF" > /mnt/var/lib/nasty/version ;;
         *) [ -n "$NASTY_REV" ] && echo "''${NASTY_REV:0:7}" > /mnt/var/lib/nasty/version || true ;;
       esac
-
-      # Settle the wrapper's flake.lock against the rendered
-      # flake.nix BEFORE nixos-install starts evaluating. The seed
-      # lock shipped on the ISO declares only nasty (pre-resolved
-      # to its bundled source path); this pass adds the wrapper's
-      # other declared inputs (nixpkgs follows + bcachefs-tools)
-      # cleanly. Without this explicit pass, nixos-install would
-      # detect the lock-vs-flake.nix shape mismatch and rewrite the
-      # lock mid-evaluation, which invalidates the
-      # `path:/mnt/etc/nixos` narHash that nastySystemFlakeSnapshot
-      # captures during eval and produces the cryptic NAR hash
-      # mismatch errors that bit v0.0.9 (see PR #340 history).
-      echo "==> Locking wrapper flake inputs..."
-      nix --extra-experimental-features 'nix-command flakes' \
-        flake lock /mnt/etc/nixos
 
       echo "==> Installing NASty..."
       echo "    (this may take a while on first install)"

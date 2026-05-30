@@ -222,58 +222,22 @@
         [ "@NASTY_VERSION@" "@LOCAL_SYSTEM@" ]
         [ installerNastyRef system ]
         (builtins.readFile ./nixos/system-flake/flake.nix.template);
-      # Minimal seed lock for the freshly-installed wrapper at
-      # /mnt/etc/nixos. Declares ONLY the nasty input, pre-resolved
-      # to nasty's bundled source path in the ISO's nix store — so
-      # the install-time `nix flake lock` step in iso.nix doesn't
-      # need to fetch nasty from GitHub (it already has it locally
-      # via `installerNastySource`).
+      # No seed flake.lock is bundled. PR #343 tried a minimal seed
+      # (just nasty pre-resolved); install-time `nix flake lock` then
+      # tripped on `nixpkgs follows non-existent input nasty/nixpkgs`
+      # because nasty's own input subgraph wasn't in the wrapper's
+      # lock either. Iterating the bundle further reintroduces the
+      # follows-shape gymnastics PRs #340/#341 went through and the
+      # class of bug they kept missing.
       #
-      # The other inputs the wrapper template declares (`nixpkgs`
-      # follows, `bcachefs-tools.url`) are deliberately NOT
-      # pre-populated here. iso.nix runs `nix flake lock` as an
-      # explicit pass AFTER bootstrap-system-flake writes flake.nix
-      # and BEFORE nixos-install starts evaluating. That pass adds
-      # the missing inputs cleanly based on what flake.nix declares,
-      # producing a lock that exactly matches the rendered template's
-      # shape. nixos-install then evaluates against a stable lock —
-      # the path:/mnt/etc/nixos narHash captured by
-      # `nastySystemFlakeSnapshot` stays valid throughout evaluation
-      # (no mid-eval lock rewrite invalidating it).
-      #
-      # Previous iterations tried to bundle the full transitive graph
-      # by hand (inheriting nasty's own lock nodes, rewriting follows
-      # paths for transplantation, etc). Each fix uncovered another
-      # sub-case of nix's lock-shape invariants: PR #340 (missing
-      # lanzaboote node), PR #341 (dangling lanzaboote follows in
-      # inherited subgraph), then the bcachefs-tools transitive-
-      # subtree sub-case. Letting `nix flake lock` build the rest
-      # at install time eliminates the entire class of bug.
-      installerSystemFlakeLock = builtins.toJSON {
-        version = rootLock.version;
-        root = "root";
-        nodes = {
-          root = {
-            inputs = {
-              nasty = "nasty";
-            };
-          };
-          nasty = {
-            locked = {
-              type = "path";
-              path = self.outPath;
-              narHash = self.narHash;
-              lastModified = self.lastModified;
-            };
-            original = {
-              type = "github";
-              owner = installerNastyOwner;
-              repo = installerNastyRepo;
-              ref = installerNastyRef;
-            };
-          };
-        };
-      };
+      # iso.nix runs `nix flake lock` after bootstrap-system-flake
+      # writes flake.nix and before nixos-install starts. Without a
+      # seed lock to disagree with, nix builds the entire transitive
+      # graph from the rendered template's input declarations
+      # — fetching nasty + nixpkgs + bcachefs-tools from upstream.
+      # That's ~20s of install-time network the operator's box can
+      # afford (the install already needs network for binary cache
+      # substitution).
       nastySystemFlakeSnapshot = pkgs.runCommand "nasty-system-flake-snapshot" {} ''
         mkdir -p "$out"
         cp ${self}/flake.nix "$out/flake.nix"
@@ -284,7 +248,6 @@
         cp ${./nixos/system-flake/hardware-configuration.nix} "$out/hardware-configuration.nix"
         cp ${./nixos/system-flake/networking.nix} "$out/networking.nix"
         cp ${pkgs.writeText "nasty-system-flake.nix" installerSystemFlakeNix} "$out/flake.nix"
-        cp ${pkgs.writeText "nasty-system-flake.lock" installerSystemFlakeLock} "$out/flake.lock"
       '';
     in rec {
       # Full NASty appliance configuration
