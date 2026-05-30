@@ -24,6 +24,7 @@ mod fs_dependents;
 mod fs_lock;
 mod ingress_conflict;
 mod log_stream;
+mod registry;
 mod router;
 mod subvolume_dependents;
 mod telemetry;
@@ -109,6 +110,22 @@ async fn main() -> anyhow::Result<()> {
         Some("bootstrap-system-flake")
     ) {
         run_bootstrap_system_flake_cli(&args[2..]).await?;
+        return Ok(());
+    }
+
+    // Docs generator. Replaces the standalone `nasty-apidoc` binary —
+    // writes docs/api.md straight out of the in-engine method registry, so
+    // the docs and the dispatcher live in the same crate and stop drifting.
+    if matches!(args.get(1).map(String::as_str), Some("--dump-docs")) {
+        let out_dir = args
+            .get(2)
+            .ok_or_else(|| anyhow::anyhow!("--dump-docs requires an output directory argument"))?;
+        let (_g, groups) = registry::build_full_registry();
+        let md = registry::render_markdown(&groups);
+        let out_path = std::path::Path::new(out_dir).join("api.md");
+        std::fs::create_dir_all(out_path.parent().unwrap())?;
+        std::fs::write(&out_path, &md)?;
+        println!("Written {} ({} bytes)", out_path.display(), md.len());
         return Ok(());
     }
 
