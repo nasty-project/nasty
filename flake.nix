@@ -118,6 +118,25 @@
       # CFLAGS / LD path the build script reads.
       nativeBuildInputs = [ pkgs.pkg-config ];
       buildInputs = [ pkgs.openssl ];
+      # `rustPlatform.buildRustPackage` defaults to `doCheck = true`,
+      # which runs `cargo test` in the test profile after the build
+      # phase has already compiled everything in the release profile.
+      # Different cargo profile → different cfg → different artifact
+      # hashes → no sharing between phases → every crate gets compiled
+      # twice (test-profile then release-profile). ~9 minutes per arch
+      # on the CI runners.
+      #
+      # The test pass/fail signal is already covered by the standalone
+      # `Engine (fmt, clippy, test)` CI job, which runs
+      # `cargo test --workspace --all-targets` on a vanilla Ubuntu
+      # runner. The Nix sandbox build phase still runs (this only
+      # gates the check phase), so the sandbox-visibility gate — the
+      # point of `nix-engine-build.yml`, catching `-sys` crates with
+      # missing nix-side deps like openssl-sys → pkg-config + openssl
+      # above — is unaffected. What's lost is narrowly "tests pass
+      # even inside the hermetic sandbox", and the engine's test suite
+      # isn't sandbox-fragile.
+      doCheck = false;
       # Bake the flake's source rev into the engine binary as
       # NASTY_GIT_SHA, picked up by engine/nasty-system/build.rs and
       # exposed at runtime via option_env!. The engine uses this as
