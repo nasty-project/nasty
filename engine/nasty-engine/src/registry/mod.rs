@@ -17,6 +17,11 @@ use serde_json::Value;
 
 mod markdown;
 mod methods;
+mod openapi;
+mod paths;
+
+pub use openapi::render_openapi;
+pub use paths::{HttpVerb, method_from_segments, translate};
 
 #[cfg(test)]
 mod tests;

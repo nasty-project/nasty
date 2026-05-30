@@ -25,6 +25,7 @@ mod fs_lock;
 mod ingress_conflict;
 mod log_stream;
 mod registry;
+mod rest_gateway;
 mod router;
 mod subvolume_dependents;
 mod telemetry;
@@ -121,11 +122,22 @@ async fn main() -> anyhow::Result<()> {
             .get(2)
             .ok_or_else(|| anyhow::anyhow!("--dump-docs requires an output directory argument"))?;
         let (_g, groups) = registry::build_full_registry();
+        std::fs::create_dir_all(out_dir)?;
+
         let md = registry::render_markdown(&groups);
-        let out_path = std::path::Path::new(out_dir).join("api.md");
-        std::fs::create_dir_all(out_path.parent().unwrap())?;
-        std::fs::write(&out_path, &md)?;
-        println!("Written {} ({} bytes)", out_path.display(), md.len());
+        let md_path = std::path::Path::new(out_dir).join("api.md");
+        std::fs::write(&md_path, &md)?;
+        println!("Written {} ({} bytes)", md_path.display(), md.len());
+
+        let openapi = registry::render_openapi(version, &groups);
+        let openapi_text = serde_json::to_string_pretty(&openapi)?;
+        let openapi_path = std::path::Path::new(out_dir).join("openapi.json");
+        std::fs::write(&openapi_path, &openapi_text)?;
+        println!(
+            "Written {} ({} bytes)",
+            openapi_path.display(),
+            openapi_text.len()
+        );
         return Ok(());
     }
 
@@ -526,6 +538,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .merge(ws_routes)
+        .merge(rest_gateway::routes())
+        .route("/api/openapi.json", get(openapi_handler))
         .route("/api/login", post(login_handler))
         .route("/api/logout", post(logout_handler))
         .route(
@@ -2440,6 +2454,19 @@ async fn ws_origin_check(
         }
     }
     Ok(next.run(req).await)
+}
+
+/// Serve the OpenAPI 3.1 document describing the REST gateway. Built once on
+/// first request (schemars walk is expensive) and cached for the process lifetime.
+async fn openapi_handler() -> impl IntoResponse {
+    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let body = CACHED.get_or_init(|| {
+        let version = env!("CARGO_PKG_VERSION");
+        let (_g, groups) = registry::build_full_registry();
+        let doc = registry::render_openapi(version, &groups);
+        serde_json::to_string(&doc).expect("OpenAPI doc must serialize")
+    });
+    ([("content-type", "application/json")], body.clone())
 }
 
 async fn ws_handler(
