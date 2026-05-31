@@ -3,6 +3,7 @@ name = "nasty-snapshot"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 nasty-storage = { path = "../nasty-storage" }
