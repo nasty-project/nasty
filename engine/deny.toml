@@ -1,0 +1,84 @@
+# cargo-deny configuration.
+#
+# Three concerns bundled into one tool:
+#   1. RustSec advisory scanning (`advisories`) — security CVEs in deps.
+#      The must-have. Failing CI on a published vulnerability with no
+#      mitigation is the whole point of having this in CI at all.
+#   2. License compliance (`licenses`) — every dep's license must be on
+#      our allow-list. NASty itself is GPL-3.0, but most of our deps are
+#      permissive (MIT / Apache-2.0); flagging anything outside the
+#      common set surfaces unexpected copyleft pulls before they ship.
+#   3. Source provenance (`sources`) — only crates.io. No surprise git
+#      deps or third-party registries sneaking in.
+#
+# Bans (duplicate-version detection) is enabled at `warn` rather than
+# `deny` — version duplication is endemic in the Rust ecosystem and the
+# only sane way to clear it is upstream coordination, not blocking
+# local PRs. The warning still surfaces it for cleanup work.
+#
+# See https://embarkstudios.github.io/cargo-deny/ for the schema.
+
+[graph]
+# Restrict checks to the targets NASty actually builds for. Without this
+# cargo-deny walks platform-specific deps (e.g. Windows-only crates) and
+# reports findings against code paths we never compile.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+all-features = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# `yanked` = a published version the author later withdrew. Usually a
+# signal to upgrade, but not always a security issue — warn rather than
+# fail so we don't block on minor pin lag.
+yanked = "warn"
+# Add RUSTSEC IDs here if a specific advisory has been evaluated and
+# accepted (with a rationale). Empty list means: fail on anything new.
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    # NASty itself ships under GPL-3.0; engine crates importing GPL deps
+    # are fine. Keep `GPL-3.0-only` distinct from `GPL-3.0-or-later` —
+    # latter would be a directional widening.
+    "GPL-3.0",
+    "GPL-3.0-only",
+    # Common no-rights-reserved style licenses used by a few popular
+    # crates (e.g. `unicode-ident`, `humansize`).
+    "CC0-1.0",
+    "0BSD",
+]
+# How confidently cargo-deny needs to match a crate's LICENSE file to a
+# known SPDX id. 0.8 is the upstream default; lower would catch more
+# files but also produce more false positives.
+confidence-threshold = 0.8
+
+[bans]
+# Same crate, multiple versions in the dep graph — common in Rust where
+# crates pin different versions of `syn`, `bitflags`, etc. Warn but
+# don't fail; cleanup is upstream work.
+multiple-versions = "warn"
+# `foo = "*"` deps make supply-chain analysis impossible — fail.
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git deps in the engine workspace today; if any get added later
+# they'd need entries here.
+allow-git = []

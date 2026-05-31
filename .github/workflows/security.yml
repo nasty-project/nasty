@@ -1,0 +1,109 @@
+# Security scanning, separate from the build/test gate in ci.yml so
+# scheduled runs don't bring the rest of CI along.
+#
+# Three jobs, three different jobs they do:
+#   - cargo-deny: RustSec advisories + license + source policy for the
+#     engine workspace. Fail-gates on PRs (high-signal, low false-positive).
+#   - npm-audit: same idea for the WebUI's npm tree. Fails on `high` or
+#     `critical` only — `moderate` and below are too noisy in the npm
+#     ecosystem (lots of advisories against dev-only deps).
+#   - cargo-geiger: counts unsafe blocks across the engine and its
+#     transitive deps. Slow (full debug build), not a fail-gate, runs
+#     on schedule + manual trigger and uploads the report as an artifact
+#     for periodic review.
+
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Monday 04:17 UTC — catches advisories disclosed since last weekday's
+    # CI, without overlapping the 04:00 nasty-docs regen.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (advisories, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Official action: pins cargo-deny version, downloads a prebuilt
+      # binary (no `cargo install` compile penalty), and runs `check`.
+      # `manifest-path` points at the engine workspace root since deny.toml
+      # lives alongside it.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: engine/Cargo.toml
+          command: check
+          arguments: --all-features
+
+  npm-audit:
+    name: npm audit (webui)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install
+        run: npm ci --legacy-peer-deps
+
+      # `--audit-level=high` fails the step on any advisory at high or
+      # critical severity. Low/moderate are reported but don't fail —
+      # the npm ecosystem produces too many transitive moderate
+      # advisories for that to be sustainable as a hard gate.
+      - name: Audit
+        run: npm audit --audit-level=high
+
+  cargo-geiger:
+    name: cargo-geiger (unsafe-code accounting)
+    runs-on: ubuntu-latest
+    # Geiger does a full debug build of every dep — ~5-10 min cold. Not
+    # worth running on every PR, only on schedule, on direct pushes to
+    # main, and on manual dispatch.
+    if: github.event_name != 'pull_request'
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-geiger
+
+      # Geiger has no built-in fail mode — it reports counts, doesn't
+      # gate. We capture the output to an artifact for periodic review
+      # (newly-added crates pulling in `unsafe` show up here).
+      - name: Run geiger
+        run: cargo geiger --workspace --output-format Ascii > /tmp/geiger.txt 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cargo-geiger-report
+          path: /tmp/geiger.txt
+          retention-days: 30
