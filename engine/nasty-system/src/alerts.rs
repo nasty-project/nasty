@@ -351,8 +351,19 @@ fn evaluate_rules(
                 }
             }
             AlertMetric::SmartHealth => {
-                // threshold=1 means "alert when health_passed == false"
+                // threshold=1 means "alert when health_passed == false".
+                // Skip disks where SMART itself is UNAVAILABLE (USB-SATA
+                // bridge without `-d sat`, controller that doesn't proxy
+                // SMART, unsupported transport, …) — "no data" isn't
+                // "FAILED", and firing a critical alert on every disk
+                // the metrics service can't read SMART for would be a
+                // false-positive storm. The disk still appears in the
+                // WebUI Disks page with status UNAVAILABLE, so the
+                // operator sees the gap.
                 for disk in disk_health {
+                    if disk.smart_status == "UNAVAILABLE" {
+                        continue;
+                    }
                     if !disk.health_passed {
                         alerts.push(ActiveAlert {
                             rule_id: rule.id.clone(),
@@ -573,6 +584,11 @@ pub struct DiskHealthSummary {
     pub device: String,
     pub temperature_c: Option<i32>,
     pub health_passed: bool,
+    /// Mirror of `DiskHealth::smart_status`. Carried into the summary so
+    /// the `SmartHealth` alert rule can distinguish "FAILED" (alert) from
+    /// "UNAVAILABLE" (don't alert — smartctl couldn't read SMART, that's
+    /// not the same as a confirmed health failure).
+    pub smart_status: String,
 }
 
 /// Kernel error data for alert evaluation.
@@ -1050,16 +1066,19 @@ mod tests {
                 device: "sda".into(),
                 temperature_c: Some(60),
                 health_passed: true,
+                smart_status: "PASSED".into(),
             },
             DiskHealthSummary {
                 device: "sdb".into(),
                 temperature_c: None, // skipped
                 health_passed: true,
+                smart_status: "PASSED".into(),
             },
             DiskHealthSummary {
                 device: "sdc".into(),
                 temperature_c: Some(45), // below threshold
                 health_passed: true,
+                smart_status: "PASSED".into(),
             },
         ];
         let alerts = evaluate_rules(
@@ -1083,11 +1102,13 @@ mod tests {
                 device: "sda".into(),
                 temperature_c: None,
                 health_passed: true,
+                smart_status: "PASSED".into(),
             },
             DiskHealthSummary {
                 device: "sdb".into(),
                 temperature_c: None,
                 health_passed: false,
+                smart_status: "FAILED".into(),
             },
         ];
         let alerts = evaluate_rules(
@@ -1101,6 +1122,36 @@ mod tests {
         );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source, "sdb");
+    }
+
+    #[test]
+    fn evaluate_rules_smart_health_skips_unavailable_disks() {
+        // Regression for #349: disks with smart_status="UNAVAILABLE"
+        // (smartctl couldn't read SMART — USB-SATA bridge that needs
+        // -d sat, controller that doesn't proxy SMART, fresh disk
+        // before kernel finished initializing) carry health_passed=false
+        // by construction, but that's "unknown" not "FAILED". The
+        // SmartHealth rule must not fire on them.
+        let r = rule(AlertMetric::SmartHealth, AlertCondition::Equals, 1.0);
+        let disks = vec![DiskHealthSummary {
+            device: "sdb".into(),
+            temperature_c: None,
+            health_passed: false,
+            smart_status: "UNAVAILABLE".into(),
+        }];
+        let alerts = evaluate_rules(
+            &[r],
+            &zero_stats(),
+            &[],
+            &disks,
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace::default(),
+        );
+        assert!(
+            alerts.is_empty(),
+            "UNAVAILABLE smart_status must not trigger SmartHealth alerts"
+        );
     }
 
     fn bcachefs_health(devices: Vec<BcachefsDeviceHealth>) -> BcachefsHealth {
