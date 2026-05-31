@@ -11,15 +11,19 @@
 #   3. Source provenance (`sources`) — only crates.io. No surprise git
 #      deps or third-party registries sneaking in.
 #
-# Bans (duplicate-version detection) is enabled at `warn` rather than
-# `deny` — version duplication is endemic in the Rust ecosystem and the
-# only sane way to clear it is upstream coordination, not blocking
-# local PRs. The warning still surfaces it for cleanup work.
+# Bans (duplicate-version detection) is `allow` — version duplication
+# is endemic in the Rust ecosystem and the only way to clear it is
+# upstream coordination across multiple unrelated crates we don't own.
+# An earlier iteration used `warn` to surface them for awareness, but
+# the result was ~30 lines of log noise per CI run that nobody could
+# act on, drowning out actually-actionable signal.
 #
 # `wildcards = deny` covers external crates published with `foo = "*"`,
 # but cargo-deny also categorises workspace `{ path = "../foo" }` deps
 # as wildcards because they lack a version constraint. Those are
-# intentional and safe — `allow-wildcard-paths` carves them out.
+# intentional and safe — `allow-wildcard-paths` carves them out (and
+# only does so for crates marked `publish = false`, which is why each
+# nasty-* member's Cargo.toml carries that flag).
 #
 # See https://embarkstudios.github.io/cargo-deny/ for the schema.
 
@@ -78,14 +82,13 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
     "MPL-2.0",
-    # NASty itself ships under GPL-3.0; engine crates importing GPL deps
-    # are fine. Keep `GPL-3.0-only` distinct from `GPL-3.0-or-later` —
-    # latter would be a directional widening.
-    "GPL-3.0",
+    # NASty itself ships under GPL-3.0-only; engine crates importing
+    # GPL deps are fine. Kept distinct from `GPL-3.0-or-later` because
+    # the latter would be a directional widening (or-later commits us
+    # to forward-compatible relicensing).
     "GPL-3.0-only",
     # Common no-rights-reserved style licenses used by a few popular
     # crates (e.g. `unicode-ident`, `humansize`).
@@ -103,10 +106,9 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
-# Same crate, multiple versions in the dep graph — common in Rust where
-# crates pin different versions of `syn`, `bitflags`, etc. Warn but
-# don't fail; cleanup is upstream work.
-multiple-versions = "warn"
+# See header comment — `allow` rather than `warn` because the warnings
+# are not actionable on our end.
+multiple-versions = "allow"
 # `foo = "*"` deps make supply-chain analysis impossible — fail.
 wildcards = "deny"
 # Workspace-internal `{ path = "../foo" }` deps don't carry a version
