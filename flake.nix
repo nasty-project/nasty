@@ -2,7 +2,7 @@
   description = "NASty - NAS System built on NixOS and bcachefs";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
     # ── bcachefs override (optional) ──────────────────────────────
     # Pinned to v1.38.3 release tag.

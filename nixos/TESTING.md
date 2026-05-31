@@ -82,7 +82,7 @@ Add NASty as a flake input in your system configuration:
 # flake.nix
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     nasty.url = "path:/path/to/NAS"; # or github:your-org/nasty
   };
 
