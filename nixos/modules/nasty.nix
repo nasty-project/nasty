@@ -680,16 +680,25 @@ in {
       croc              # peer-to-peer file transfer for sending debug reports
       rustic             # deduplicating encrypted backups (restic-compatible)
       restic-rest-server # REST API server for receiving backups from other machines
-      (pkgs.rustPlatform.buildRustPackage {
-        pname = "nasty-top";
-        version = "0.0.6";
-        src = pkgs.fetchFromGitHub {
+      (let
+        nastyTopSrc = pkgs.fetchFromGitHub {
           owner = "nasty-project";
           repo = "nasty-top";
           rev = "v0.0.6";
           hash = "sha256-l7pVE7VQinMDr/hp2Nz+VVBrL5euZkcMu2b0fb5dLmc=";
         };
-        cargoHash = "sha256-3HzzaLC6Cvr/n+v9VSmpVDsS1X6WwvOAXiFxuwibKlg=";
+      in pkgs.rustPlatform.buildRustPackage {
+        pname = "nasty-top";
+        version = "0.0.6";
+        src = nastyTopSrc;
+        # Vendor via Cargo.lock instead of a separate cargoHash so a
+        # `cargo update` in nasty-top doesn't silently break this build.
+        # The previous cargoHash had to be recomputed on every release
+        # (last bumped in #362). cargoLock.lockFile has Nix synthesize
+        # one fetchurl per crate keyed on the SHA Cargo wrote into the
+        # lockfile — zero hash to maintain, no drift possible. Mirrors
+        # what nasty-top's own flake does after nasty-top#17.
+        cargoLock.lockFile = "${nastyTopSrc}/Cargo.lock";
         meta.mainProgram = "nasty-top";
       })
 
