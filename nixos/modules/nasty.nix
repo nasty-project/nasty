@@ -2192,6 +2192,30 @@ in {
       "interface-name:cni*"
       "interface-name:flannel*"
     ];
+
+    # mDNS / WS-Discovery fix for engine-created Linux bridges (#291).
+    #
+    # The kernel defaults a fresh bridge to multicast_snooping=1 with no
+    # multicast_querier — fine on a network with an IGMP querier (managed
+    # switch, dedicated router daemon), broken on the typical home LAN
+    # that has neither. Without a querier, IGMP memberships time out
+    # ~5 minutes after the last join and the bridge stops forwarding
+    # multicast (including mDNS / WS-Discovery), so avahi and samba-wsdd
+    # announce successfully right after a restart and then go invisible
+    # to file managers as soon as memberships expire. TrueNAS et al.
+    # don't hit this because they aren't behind a Linux bridge.
+    #
+    # Setting multicast_snooping=0 makes the bridge flood multicast to
+    # all ports unconditionally — which is what every home-LAN deployment
+    # actually wants, and what the operator was already expecting
+    # the moment they put NASty on a bridged interface.
+    #
+    # The KERNEL pattern matches our brN naming convention (br0, br1, …)
+    # and intentionally skips Docker's `br-<hash>` and any tap/veth
+    # interface that happens to expose a `bridge/` subdir.
+    services.udev.extraRules = ''
+      ACTION=="add", SUBSYSTEM=="net", KERNEL=="br[0-9]*", ATTR{bridge/multicast_snooping}="0"
+    '';
     })
   ];
 }
