@@ -73,22 +73,20 @@
 
     mkEngine = system: let
       pkgs = mkPkgs system;
-      # The engine source plus two files it embeds via `include_str!`
-      # from `engine/nasty-system/src/update.rs`:
-      #   - `nixos/system-flake/flake.nix.template` — the wrapper
-      #     template the engine renders into /etc/nixos/flake.nix on
-      #     install + migration.
-      #   - `flake.nix` (this file) — used to read the canonical
-      #     bcachefs-tools default ref out of nasty's own input
-      #     declaration, avoiding a duplicate constant that could
-      #     drift from `bcachefs-tools.url` here.
-      # Both path-up navigations walk out of `engine/` into the repo
-      # root, so the Nix sandbox must contain both files at their
-      # canonical relative positions for `cargo build` to compile the
-      # engine.
+      # The engine source plus the out-of-tree files it pulls in at
+      # compile time:
+      #   - `nixos/system-flake/flake.nix.template` and `flake.nix` are
+      #     embedded via `include_str!` from `engine/nasty-system/src/update.rs`
+      #     (wrapper-flake rendering + canonical bcachefs-tools ref).
+      #   - `vendor/swagger-ui/` is embedded via `include_dir!` from
+      #     `engine/nasty-engine/src/swagger_ui.rs` — the Swagger UI
+      #     assets served at `/api/docs`.
+      # Each path-up navigation walks out of `engine/` into the repo
+      # root, so the Nix sandbox must contain these files at their
+      # canonical relative positions for `cargo build` to compile.
       #
       # Why fileset.toSource (not just `src = ./.;`): the engine
-      # source-hash only depends on engine sources + these two files.
+      # source-hash only depends on engine sources + these few files.
       # Adding unrelated repo changes (docs, webui, nixos modules)
       # doesn't invalidate the Rust build cache.
       engineSrc = pkgs.lib.fileset.toSource {
@@ -97,6 +95,7 @@
           ./engine
           ./nixos/system-flake/flake.nix.template
           ./flake.nix
+          ./vendor/swagger-ui
         ];
       };
     in pkgs.rustPlatform.buildRustPackage {
