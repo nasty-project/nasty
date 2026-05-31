@@ -32,7 +32,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **Block storage** — iSCSI and NVMe-oF with dedicated targets per volume
 - **Subvolumes** — filesystem and block subvolumes with quotas, compression, and tiering per subvolume
 - **Snapshots** — instant, space-efficient point-in-time copies
-- **Encryption lifecycle** — lock and unlock encrypted filesystems from the WebUI, with a dependents preview that lists every app, VM, share, and backup that would break before you confirm
+- **Encryption lifecycle** — lock and unlock encrypted filesystems from the WebUI, with a dependents preview that lists every app, VM, share, and backup that would break before you confirm. Optional **TPM2-sealed keys** auto-unlock on boot when the measured-boot state matches
 - **File browser** — browse, upload, edit, rename, copy, move, and bulk-manage files from the web UI
 - **Backups** — encrypted, deduplicated, incremental backups to local, S3, SFTP, REST, or Backblaze B2 with per-profile schedules and retention
 
@@ -56,9 +56,10 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **Networking** — NetworkManager-based with confirm-or-rollback: edits stage, apply, and auto-revert if you don't confirm in time, so a typo can't lock you out over SSH
 - **Let's Encrypt** — automatic TLS certificates via ACME (TLS-ALPN and DNS challenges)
 - **Tailscale** — built-in VPN with one-click setup
-- **Access control** — local user accounts with role-based permissions, API tokens, OIDC single sign-on, and an append-only audit log of every mutation, login attempt, and privileged-console open
+- **Access control** — local user accounts with role-based permissions, API tokens, OIDC single sign-on, **WebAuthn / passkey** sign-in with admin-side credential reset, and an append-only audit log of every mutation, login attempt, and privileged-console open
 - **UPS monitoring** — NUT integration for graceful shutdown on power loss (opt-in)
 - **Atomic updates** — NixOS-based, with one-click rollback to any previous generation
+- **Secure Boot** _(experimental)_ — per-box opt-in lanzaboote-enforcing boot chain with a guided enrollment wizard from the Hardware page
 - **Binary cache** — fast updates via cachix on both x86_64 and aarch64 (engine, webui, bcachefs-tools pre-built — no Rust + npm compile on Pi / Odroid / Rockchip boxes)
 
 ## Kubernetes
