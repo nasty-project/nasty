@@ -218,6 +218,48 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
         push_addresses(&mut addresses, &name, &vlan.ipv4, &vlan.ipv6);
     }
 
+    // Synthesize Physical links for any bond/bridge member that isn't
+    // declared in the top-level interfaces list (#348).
+    //
+    // The WebUI's "Create Bridge" form lets the operator pick a live NIC
+    // (e.g. `enp1s0`) as a member without first promoting that NIC into
+    // `legacy.interfaces` — which matches the operator's mental model: a
+    // live DHCP-managed NIC isn't "configured" until you do something to
+    // it, and bridging it IS the thing. Without this synthesis the
+    // validator below sees the bridge referencing a name that has no
+    // matching link and rejects the whole apply with "link 'br0'
+    // references missing member 'enp1s0'", which is what #348 reported.
+    //
+    // Synthesized links land as `Physical` with `enabled = true` and no
+    // explicit MTU — the kernel/NM defaults match the live NIC's
+    // existing settings. Real typos (member name that doesn't match any
+    // device) still surface as apply errors downstream from NM rather
+    // than being caught by the structural validator; that's an
+    // acceptable trade because the validator was over-rejecting valid
+    // configs in the common case.
+    let declared: HashSet<String> = links.iter().map(|l| l.name.clone()).collect();
+    let mut synthesized: Vec<Link> = Vec::new();
+    let mut seen = HashSet::new();
+    for link in &links {
+        let members: &[String] = match &link.kind {
+            LinkKind::Bond { members, .. } | LinkKind::Bridge { members, .. } => members,
+            _ => continue,
+        };
+        for m in members {
+            if declared.contains(m) || !seen.insert(m.clone()) {
+                continue;
+            }
+            synthesized.push(Link {
+                name: m.clone(),
+                enabled: true,
+                mtu: None,
+                mac: None,
+                kind: LinkKind::Physical,
+            });
+        }
+    }
+    links.extend(synthesized);
+
     LayeredConfig {
         links,
         addresses,
@@ -653,6 +695,81 @@ mod tests {
             .find(|l| matches!(l.kind, LinkKind::Vlan { .. }))
             .unwrap();
         assert_eq!(vlan_link.name, "eth0.100");
+    }
+
+    #[test]
+    fn to_layered_synthesizes_physical_for_undeclared_bridge_member() {
+        // Issue #348: bridging a live NIC without first declaring it in
+        // `interfaces[]` used to fail validation. The synthesis branch in
+        // `to_layered` now creates a Physical link on demand so the
+        // structural validator passes.
+        let layered = to_layered(&NetworkConfig {
+            interfaces: vec![],
+            bridges: vec![legacy_bridge("br0", &["enp1s0"])],
+            ..Default::default()
+        });
+        assert!(
+            layered
+                .links
+                .iter()
+                .any(|l| l.name == "enp1s0" && matches!(l.kind, LinkKind::Physical)),
+            "expected synthesized Physical link for 'enp1s0', got: {:?}",
+            layered.links.iter().map(|l| &l.name).collect::<Vec<_>>()
+        );
+        // Bridge itself is still present.
+        assert!(
+            layered
+                .links
+                .iter()
+                .any(|l| l.name == "br0" && matches!(l.kind, LinkKind::Bridge { .. })),
+        );
+        // And the validator (the actual sad path from #348) is now happy.
+        validate(&layered).expect("synthesized member should pass validation");
+    }
+
+    #[test]
+    fn to_layered_synthesizes_physical_for_undeclared_bond_member() {
+        let layered = to_layered(&NetworkConfig {
+            interfaces: vec![],
+            bonds: vec![legacy_bond("bond0", &["eth0", "eth1"])],
+            ..Default::default()
+        });
+        assert!(layered.links.iter().any(|l| l.name == "eth0"));
+        assert!(layered.links.iter().any(|l| l.name == "eth1"));
+        validate(&layered).expect("synthesized bond members should pass validation");
+    }
+
+    #[test]
+    fn to_layered_does_not_duplicate_already_declared_member() {
+        // The common case: operator has explicitly configured `eth0` and
+        // also added it to a bridge. We must not emit `eth0` twice — the
+        // validator's first check is "no duplicate link names".
+        let layered = to_layered(&NetworkConfig {
+            interfaces: vec![legacy_iface("eth0")],
+            bridges: vec![legacy_bridge("br0", &["eth0"])],
+            ..Default::default()
+        });
+        let eth0_count = layered.links.iter().filter(|l| l.name == "eth0").count();
+        assert_eq!(eth0_count, 1, "eth0 should appear exactly once");
+        validate(&layered).expect("declared+member should pass validation");
+    }
+
+    #[test]
+    fn to_layered_synthesizes_member_only_once_across_multiple_links() {
+        // Pathological but defensible: same NIC name listed by two
+        // different masters. The validator below catches the
+        // double-enslavement; what we're pinning here is that the
+        // synthesis step doesn't compound the problem by also emitting
+        // duplicate Physical links (which would mask the real error
+        // behind a "duplicate link name" complaint).
+        let layered = to_layered(&NetworkConfig {
+            interfaces: vec![],
+            bonds: vec![legacy_bond("bond0", &["eth0"])],
+            bridges: vec![legacy_bridge("br0", &["eth0"])],
+            ..Default::default()
+        });
+        let eth0_count = layered.links.iter().filter(|l| l.name == "eth0").count();
+        assert_eq!(eth0_count, 1, "eth0 should be synthesized exactly once");
     }
 
     // ── Validation ─────────────────────────────────────────────
