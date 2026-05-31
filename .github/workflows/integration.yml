@@ -41,7 +41,10 @@ jobs:
       # crate + downstream rebuild — the rest substitutes from Actions
       # cache. Realistic win on this job: ~36 min cold → ~15 min warm
       # (VM-boot overhead is still ~10 min and uncacheable).
-      - uses: DeterminateSystems/magic-nix-cache-action@v13
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          # See sibling workflow nix-engine-build.yml for the rationale.
+          use-flakehub: false
 
       # Read-only on PRs and workflow_dispatch; the conditional push step
       # below populates the cache when this run is a push to main. Folding
