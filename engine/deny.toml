@@ -16,6 +16,11 @@
 # only sane way to clear it is upstream coordination, not blocking
 # local PRs. The warning still surfaces it for cleanup work.
 #
+# `wildcards = deny` covers external crates published with `foo = "*"`,
+# but cargo-deny also categorises workspace `{ path = "../foo" }` deps
+# as wildcards because they lack a version constraint. Those are
+# intentional and safe — `allow-wildcard-paths` carves them out.
+#
 # See https://embarkstudios.github.io/cargo-deny/ for the schema.
 
 [graph]
@@ -37,7 +42,32 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 # Add RUSTSEC IDs here if a specific advisory has been evaluated and
 # accepted (with a rationale). Empty list means: fail on anything new.
-ignore = []
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack: timing sidechannel in `rsa`
+    # crate's modular exponentiation, theoretically allowing RSA private-
+    # key recovery by an attacker who can observe timing of many ops.
+    #
+    # Status: upstream RustCrypto/RSA tracking issue #626. No safe
+    # upgrade available — the fix requires a fully constant-time
+    # implementation and that's still under development.
+    #
+    # Reach in our codebase:
+    #   - openidconnect → rsa  (OIDC ID token JWT signature verification)
+    #   - rustic_backend → opendal → reqsign → rsa  (auth for backup targets)
+    #
+    # Exposure model: the attack needs an observer who can collect
+    # timing of many private-key operations over the network. NASty's
+    # OIDC code only PARSES tokens (uses RSA public-key verification,
+    # not private-key signing — the leaky operation), and the backup
+    # path uses rsa for short-lived bearer-token signing against the
+    # operator's chosen target. Neither matches the high-volume,
+    # observer-on-the-wire threat model the Marvin Attack targets.
+    #
+    # Remove this entry when openidconnect / opendal release versions
+    # that no longer transitively depend on rsa < the future patched
+    # release.
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 version = 2
@@ -61,6 +91,11 @@ allow = [
     # crates (e.g. `unicode-ident`, `humansize`).
     "CC0-1.0",
     "0BSD",
+    # `webpki-roots` ships the Mozilla CA root certificate bundle and
+    # licenses the data under CDLA-Permissive-2.0 (Linux Foundation's
+    # Community Data License Agreement, permissive variant). Standard
+    # for crates that ship reference data rather than code.
+    "CDLA-Permissive-2.0",
 ]
 # How confidently cargo-deny needs to match a crate's LICENSE file to a
 # known SPDX id. 0.8 is the upstream default; lower would catch more
@@ -74,6 +109,10 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 # `foo = "*"` deps make supply-chain analysis impossible — fail.
 wildcards = "deny"
+# Workspace-internal `{ path = "../foo" }` deps don't carry a version
+# spec by convention. Without this, every workspace member with a
+# sibling-crate dep counts as a wildcard.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
