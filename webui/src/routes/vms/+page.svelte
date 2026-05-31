@@ -640,7 +640,13 @@
 
 		// Create a new block subvolume if requested
 		if (newDiskCreate && newDiskFs && newDiskSize > 0) {
-			const svName = `vm-${newName}`;
+			// Subvolume name uses a slash so the disk lands at
+			// /fs/<filesystem>/vms/<name> rather than as a top-level
+			// vm-<name> subvolume next to the operator's data subvolumes
+			// (#354). Matches the layout `vms/images` already uses for VM
+			// disk-image uploads and mirrors how apps land under apps/.
+			// subvolume.create auto-creates the `vms/` parent on demand.
+			const svName = `vms/${newName}`;
 			const sizeBytes = newDiskSize * 1024 * 1024 * 1024;
 			const svResult = await withToast(
 				() => client.call('subvolume.create', {
@@ -1157,7 +1163,7 @@
 							<Input type="number" bind:value={newDiskSize} min={1} class="mt-1" />
 						</div>
 					</div>
-					<span class="mt-1 block text-xs text-muted-foreground">A block subvolume named "vm-{newName || '...'}" will be created.</span>
+					<span class="mt-1 block text-xs text-muted-foreground">A block subvolume named "vms/{newName || '...'}" will be created.</span>
 				{:else}
 					<select bind:value={newDisk} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 						<option value="">None (ISO boot only)</option>
@@ -1385,7 +1391,7 @@
 				<span>{newBootOrder}</span>
 				{#if newDisk || newDiskCreate}
 					<span class="text-muted-foreground">Disk</span>
-					<span class="font-mono text-xs">{newDiskCreate ? `vm-${newName} (${newDiskSize} GiB, new)` : newDisk}</span>
+					<span class="font-mono text-xs">{newDiskCreate ? `vms/${newName} (${newDiskSize} GiB, new)` : newDisk}</span>
 				{/if}
 				{#if newIsos.some(Boolean)}
 					{@const selectedIsos = newIsos.filter(Boolean)}
