@@ -348,45 +348,162 @@ struct SmartctlRaw {
     value: i64,
 }
 
-pub async fn disk_health() -> Vec<DiskHealth> {
-    let devices = match tokio::process::Command::new("lsblk")
-        .args(["-dn", "-o", "NAME,TYPE"])
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.lines()
-                .filter_map(|line| {
-                    let mut parts = line.split_whitespace();
-                    let name = parts.next()?;
-                    let dtype = parts.next()?;
-                    if dtype == "disk"
-                        && !name.starts_with("mmcblk")
-                        && !name.starts_with("loop")
-                        && !name.starts_with("ram")
-                        && !name.starts_with("zram")
-                    {
-                        Some(format!("/dev/{name}"))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        }
-        Err(_) => return Vec::new(),
-    };
+/// What lsblk knows about a disk before we ask smartctl anything.
+///
+/// Keeping this around as a separate row means a disk shows up in the
+/// `system.disks` answer even when smartctl can't talk to it — useful for
+/// fresh / unformatted / wonky-USB-bridge drives (#349). Without this the
+/// older code path silently dropped the device, so the operator only saw
+/// disks that had already been formatted.
+struct LsblkDisk {
+    device: String,
+    size_bytes: u64,
+    model: String,
+    serial: String,
+}
 
-    let mut results = Vec::new();
-    for dev in devices {
-        if let Some(health) = query_smartctl(&dev).await {
-            results.push(health);
-        }
+/// Smart status sentinel used when smartctl produced no usable data for
+/// the device. WebUI styles this distinctly from PASSED/FAILED, and the
+/// alert rules (see `nasty_system::alerts::AlertMetric::SmartHealth`)
+/// intentionally don't fire on it — UNAVAILABLE is "unknown", not "bad".
+pub const SMART_STATUS_UNAVAILABLE: &str = "UNAVAILABLE";
+
+pub async fn disk_health() -> Vec<DiskHealth> {
+    let disks = enumerate_disks().await;
+    let mut results = Vec::with_capacity(disks.len());
+    for disk in disks {
+        results.push(build_disk_health(disk).await);
     }
     results
 }
 
-async fn query_smartctl(device: &str) -> Option<DiskHealth> {
+async fn enumerate_disks() -> Vec<LsblkDisk> {
+    // -J = JSON output (parses cleanly even when MODEL has spaces / lsblk
+    // version differs across NixOS releases). -d = top-level only.
+    // -b = bytes. -n = no header. -o = explicit column list.
+    let output = match tokio::process::Command::new("lsblk")
+        .args(["-Jdbno", "NAME,TYPE,SIZE,MODEL,SERIAL"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let parsed: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(arr) = parsed.get("blockdevices").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    arr.iter()
+        .filter_map(|d| {
+            let name = d.get("name").and_then(|v| v.as_str())?;
+            let dtype = d.get("type").and_then(|v| v.as_str())?;
+            if dtype != "disk"
+                || name.starts_with("mmcblk")
+                || name.starts_with("loop")
+                || name.starts_with("ram")
+                || name.starts_with("zram")
+            {
+                return None;
+            }
+            Some(LsblkDisk {
+                device: format!("/dev/{name}"),
+                size_bytes: d
+                    .get("size")
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
+                    .unwrap_or(0),
+                model: d
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                serial: d
+                    .get("serial")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Unknown")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+async fn build_disk_health(disk: LsblkDisk) -> DiskHealth {
+    let dev_name = disk.device.strip_prefix("/dev/").unwrap_or(&disk.device);
+    let (ata_port, controller_pci) = resolve_device_path(dev_name);
+    let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
+
+    match query_smartctl(&disk.device).await {
+        Some(s) => DiskHealth {
+            device: disk.device,
+            ata_port,
+            controller_pci,
+            controller_name,
+            // smartctl's strings are usually more accurate than lsblk's
+            // (lsblk reads sysfs's `model`, which truncates / pads), but
+            // for unfamiliar transports lsblk sometimes wins — prefer
+            // smartctl, fall back to lsblk, then to "Unknown".
+            model: s.model.filter(|s| !s.is_empty()).unwrap_or(disk.model),
+            serial: s.serial.filter(|s| !s.is_empty()).unwrap_or(disk.serial),
+            firmware: s.firmware.unwrap_or_else(|| "Unknown".into()),
+            capacity_bytes: if s.capacity_bytes > 0 {
+                s.capacity_bytes
+            } else {
+                disk.size_bytes
+            },
+            temperature_c: s.temperature_c,
+            power_on_hours: s.power_on_hours,
+            health_passed: s.health_passed,
+            smart_status: if s.health_passed {
+                "PASSED".to_string()
+            } else {
+                "FAILED".to_string()
+            },
+            attributes: s.attributes,
+        },
+        None => DiskHealth {
+            device: disk.device,
+            ata_port,
+            controller_pci,
+            controller_name,
+            model: disk.model,
+            serial: disk.serial,
+            firmware: "Unknown".into(),
+            capacity_bytes: disk.size_bytes,
+            temperature_c: None,
+            power_on_hours: None,
+            // Distinct from FAILED so the WebUI can style + the alert
+            // rules can skip. See SMART_STATUS_UNAVAILABLE.
+            health_passed: false,
+            smart_status: SMART_STATUS_UNAVAILABLE.to_string(),
+            attributes: Vec::new(),
+        },
+    }
+}
+
+/// SMART-derived fields, lifted out of `DiskHealth` so the no-data path
+/// is a clean `None` rather than a half-filled struct.
+struct SmartReport {
+    model: Option<String>,
+    serial: Option<String>,
+    firmware: Option<String>,
+    capacity_bytes: u64,
+    temperature_c: Option<i32>,
+    power_on_hours: Option<u64>,
+    health_passed: bool,
+    attributes: Vec<SmartAttribute>,
+}
+
+async fn query_smartctl(device: &str) -> Option<SmartReport> {
     let output = tokio::process::Command::new("smartctl")
         .args(["-a", "--json=c", device])
         .output()
@@ -395,11 +512,15 @@ async fn query_smartctl(device: &str) -> Option<DiskHealth> {
 
     let json: SmartctlJson = serde_json::from_slice(&output.stdout).ok()?;
 
-    let health_passed = json
-        .smart_status
-        .as_ref()
-        .map(|s| s.passed)
-        .unwrap_or(false);
+    // Treat "no smart_status object at all" as "unavailable" rather than
+    // "FAILED". smartctl returns the object on every supported transport;
+    // its absence means we got JSON back but it carried no SMART payload
+    // (USB-SATA bridge that needs `-d sat`, controller that doesn't
+    // proxy SMART, etc.). Returning None here flows through to the
+    // UNAVAILABLE branch in `build_disk_health` so the disk still
+    // shows up in the WebUI with whatever lsblk could tell us.
+    let smart_status = json.smart_status.as_ref()?;
+    let health_passed = smart_status.passed;
 
     let attributes: Vec<SmartAttribute> = json
         .ata_smart_attributes
@@ -420,29 +541,14 @@ async fn query_smartctl(device: &str) -> Option<DiskHealth> {
         })
         .unwrap_or_default();
 
-    let smart_status = if health_passed {
-        "PASSED".to_string()
-    } else {
-        "FAILED".to_string()
-    };
-
-    let dev_name = device.strip_prefix("/dev/").unwrap_or(device);
-    let (ata_port, controller_pci) = resolve_device_path(dev_name);
-    let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
-
-    Some(DiskHealth {
-        device: device.to_string(),
-        ata_port,
-        controller_pci,
-        controller_name,
-        model: json.model_name.unwrap_or_else(|| "Unknown".into()),
-        serial: json.serial_number.unwrap_or_else(|| "Unknown".into()),
-        firmware: json.firmware_version.unwrap_or_else(|| "Unknown".into()),
+    Some(SmartReport {
+        model: json.model_name,
+        serial: json.serial_number,
+        firmware: json.firmware_version,
         capacity_bytes: json.user_capacity.map(|c| c.bytes).unwrap_or(0),
         temperature_c: json.temperature.and_then(|t| t.current),
         power_on_hours: json.power_on_time.and_then(|p| p.hours),
         health_passed,
-        smart_status,
         attributes,
     })
 }

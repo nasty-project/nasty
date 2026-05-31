@@ -221,10 +221,16 @@
 			<p class="text-sm text-muted-foreground">No disks detected or smartctl not available.</p>
 		{:else}
 			{#each disks as disk}
-				<Card class="mb-4 {!disk.health_passed ? 'border-red-900' : ''}">
+				{@const unavailable = disk.smart_status === 'UNAVAILABLE'}
+				<Card class="mb-4 {!disk.health_passed && !unavailable ? 'border-red-900' : ''}">
 					<CardContent class="pt-5">
 						<div class="mb-4 flex items-center gap-4">
-							<span class="rounded px-2.5 py-1 text-xs font-bold {disk.health_passed ? 'bg-green-950 text-green-400' : 'bg-red-950 text-red-400'}">
+							<span class="rounded px-2.5 py-1 text-xs font-bold
+								{unavailable
+									? 'bg-muted text-muted-foreground'
+									: disk.health_passed
+										? 'bg-green-950 text-green-400'
+										: 'bg-red-950 text-red-400'}">
 								{disk.smart_status}
 							</span>
 							<div class="flex flex-1 items-baseline gap-3">
@@ -348,7 +354,12 @@
 										{formatTemp(disk.temperature_c) ?? '—'}
 									</td>
 									<td class="p-3">
-										<span class="rounded px-2 py-0.5 text-xs font-bold {disk.health_passed ? 'bg-green-950 text-green-400' : 'bg-red-950 text-red-400'}">
+										<span class="rounded px-2 py-0.5 text-xs font-bold
+											{disk.smart_status === 'UNAVAILABLE'
+												? 'bg-muted text-muted-foreground'
+												: disk.health_passed
+													? 'bg-green-950 text-green-400'
+													: 'bg-red-950 text-red-400'}">
 											{disk.smart_status}
 										</span>
 									</td>

@@ -1040,6 +1040,7 @@ pub(crate) async fn evaluate_active_alerts(
             device: d.device,
             temperature_c: d.temperature_c,
             health_passed: d.health_passed,
+            smart_status: d.smart_status,
         })
         .collect();
 
