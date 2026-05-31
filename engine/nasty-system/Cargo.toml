@@ -3,6 +3,7 @@ name = "nasty-system"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 nasty-common = { path = "../nasty-common" }

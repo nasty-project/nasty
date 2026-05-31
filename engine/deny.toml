@@ -1,0 +1,125 @@
+# cargo-deny configuration.
+#
+# Three concerns bundled into one tool:
+#   1. RustSec advisory scanning (`advisories`) — security CVEs in deps.
+#      The must-have. Failing CI on a published vulnerability with no
+#      mitigation is the whole point of having this in CI at all.
+#   2. License compliance (`licenses`) — every dep's license must be on
+#      our allow-list. NASty itself is GPL-3.0, but most of our deps are
+#      permissive (MIT / Apache-2.0); flagging anything outside the
+#      common set surfaces unexpected copyleft pulls before they ship.
+#   3. Source provenance (`sources`) — only crates.io. No surprise git
+#      deps or third-party registries sneaking in.
+#
+# Bans (duplicate-version detection) is `allow` — version duplication
+# is endemic in the Rust ecosystem and the only way to clear it is
+# upstream coordination across multiple unrelated crates we don't own.
+# An earlier iteration used `warn` to surface them for awareness, but
+# the result was ~30 lines of log noise per CI run that nobody could
+# act on, drowning out actually-actionable signal.
+#
+# `wildcards = deny` covers external crates published with `foo = "*"`,
+# but cargo-deny also categorises workspace `{ path = "../foo" }` deps
+# as wildcards because they lack a version constraint. Those are
+# intentional and safe — `allow-wildcard-paths` carves them out (and
+# only does so for crates marked `publish = false`, which is why each
+# nasty-* member's Cargo.toml carries that flag).
+#
+# See https://embarkstudios.github.io/cargo-deny/ for the schema.
+
+[graph]
+# Restrict checks to the targets NASty actually builds for. Without this
+# cargo-deny walks platform-specific deps (e.g. Windows-only crates) and
+# reports findings against code paths we never compile.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+all-features = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# `yanked` = a published version the author later withdrew. Usually a
+# signal to upgrade, but not always a security issue — warn rather than
+# fail so we don't block on minor pin lag.
+yanked = "warn"
+# Add RUSTSEC IDs here if a specific advisory has been evaluated and
+# accepted (with a rationale). Empty list means: fail on anything new.
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack: timing sidechannel in `rsa`
+    # crate's modular exponentiation, theoretically allowing RSA private-
+    # key recovery by an attacker who can observe timing of many ops.
+    #
+    # Status: upstream RustCrypto/RSA tracking issue #626. No safe
+    # upgrade available — the fix requires a fully constant-time
+    # implementation and that's still under development.
+    #
+    # Reach in our codebase:
+    #   - openidconnect → rsa  (OIDC ID token JWT signature verification)
+    #   - rustic_backend → opendal → reqsign → rsa  (auth for backup targets)
+    #
+    # Exposure model: the attack needs an observer who can collect
+    # timing of many private-key operations over the network. NASty's
+    # OIDC code only PARSES tokens (uses RSA public-key verification,
+    # not private-key signing — the leaky operation), and the backup
+    # path uses rsa for short-lived bearer-token signing against the
+    # operator's chosen target. Neither matches the high-volume,
+    # observer-on-the-wire threat model the Marvin Attack targets.
+    #
+    # Remove this entry when openidconnect / opendal release versions
+    # that no longer transitively depend on rsa < the future patched
+    # release.
+    "RUSTSEC-2023-0071",
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    # NASty itself ships under GPL-3.0-only; engine crates importing
+    # GPL deps are fine. Kept distinct from `GPL-3.0-or-later` because
+    # the latter would be a directional widening (or-later commits us
+    # to forward-compatible relicensing).
+    "GPL-3.0-only",
+    # Common no-rights-reserved style licenses used by a few popular
+    # crates (e.g. `unicode-ident`, `humansize`).
+    "CC0-1.0",
+    "0BSD",
+    # `webpki-roots` ships the Mozilla CA root certificate bundle and
+    # licenses the data under CDLA-Permissive-2.0 (Linux Foundation's
+    # Community Data License Agreement, permissive variant). Standard
+    # for crates that ship reference data rather than code.
+    "CDLA-Permissive-2.0",
+]
+# How confidently cargo-deny needs to match a crate's LICENSE file to a
+# known SPDX id. 0.8 is the upstream default; lower would catch more
+# files but also produce more false positives.
+confidence-threshold = 0.8
+
+[bans]
+# See header comment — `allow` rather than `warn` because the warnings
+# are not actionable on our end.
+multiple-versions = "allow"
+# `foo = "*"` deps make supply-chain analysis impossible — fail.
+wildcards = "deny"
+# Workspace-internal `{ path = "../foo" }` deps don't carry a version
+# spec by convention. Without this, every workspace member with a
+# sibling-crate dep counts as a wildcard.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git deps in the engine workspace today; if any get added later
+# they'd need entries here.
+allow-git = []
