@@ -682,14 +682,14 @@ in {
       restic-rest-server # REST API server for receiving backups from other machines
       (pkgs.rustPlatform.buildRustPackage {
         pname = "nasty-top";
-        version = "0.0.5";
+        version = "0.0.6";
         src = pkgs.fetchFromGitHub {
           owner = "nasty-project";
           repo = "nasty-top";
-          rev = "v0.0.5";
-          hash = "sha256-8oefkH5hRIYYuECdmVUsbCtqnTJxC3IgwGoPQppmTYc=";
+          rev = "v0.0.6";
+          hash = "sha256-l7pVE7VQinMDr/hp2Nz+VVBrL5euZkcMu2b0fb5dLmc=";
         };
-        cargoHash = "sha256-d1gVWeQMLx03/qE62qY4Yk+Xqa/bWfdpIg8sjV4XX50=";
+        cargoHash = "sha256-3HzzaLC6Cvr/n+v9VSmpVDsS1X6WwvOAXiFxuwibKlg=";
         meta.mainProgram = "nasty-top";
       })
 
