@@ -696,6 +696,7 @@
 				{@const link = group.pcieLink}
 				{@const linkMbps = link ? pcieTotalMbps(link) : null}
 				{@const linkDowngraded = link ? pcieLinkDowngraded(link) : false}
+				{@const chipsetIntegrated = !link && group.pci !== 'unknown'}
 				<div class="mb-6">
 					<div class="mb-3 flex items-baseline gap-3">
 						<h3 class="text-sm font-semibold text-foreground">{group.name}</h3>
@@ -708,6 +709,13 @@
 									: 'Upstream PCIe link to the host CPU. Total bandwidth = per-lane MB/s × width.'}
 							>
 								{formatPcieLink(link)}{#if linkMbps != null} ({linkMbps.toLocaleString()} MB/s){/if}
+							</span>
+						{:else if chipsetIntegrated}
+							<span
+								class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground italic"
+								title={'The kernel exposes no individual PCIe link for this controller — it\'s a chipset-integrated function (Intel PCH / AMD FCH), wired into the chipset\'s internal fabric rather than a discrete PCIe link. Aggregate bandwidth is the chipset\'s upstream DMI link, shared with every other chipset function (USB, integrated NICs, audio). Look up the chipset spec for the actual number.'}
+							>
+								chipset-integrated
 							</span>
 						{/if}
 					</div>
