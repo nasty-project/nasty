@@ -628,6 +628,7 @@ export interface DiskHealth {
 	smart_status: string;
 	attributes: SmartAttribute[];
 	nvme?: NvmeHealth;
+	scsi?: ScsiHealth;
 }
 
 export interface SmartAttribute {
@@ -662,6 +663,55 @@ export interface NvmeHealth {
 	warning_temp_minutes: number;
 	critical_comp_minutes: number;
 	temperature_sensors_c: (number | null)[];
+}
+
+/** SCSI / SAS health information. Populated only on SAS / SCSI drives,
+ * including SAS drives reached via `-d megaraid,N`. Field names trace
+ * back to the SCSI Primary Commands / Block Commands standards so they
+ * match what `smartctl -a` prints. */
+export interface ScsiHealth {
+	transport_protocol?: string;
+	scsi_version?: string;
+	/** Rotation rate in RPM. `0` = SSD; typical SAS spinners: 7200,
+	 * 10500/10033, 15000. */
+	rotation_rate?: number;
+	form_factor?: string;
+	logical_unit_id?: string;
+	/** Drive-trip temperature — the controller's hard shutdown threshold. */
+	drive_trip_temp_c?: number;
+	year_of_manufacture?: string;
+	week_of_manufacture?: string;
+	/** Sectors moved to spare blocks since manufacture. Non-zero is
+	 * normal on aging drives; rate of growth matters more than count. */
+	grown_defect_list?: number;
+	power_on_minutes_since_format?: number;
+	start_stop_cycles?: number;
+	start_stop_cycles_designed?: number;
+	load_unload_cycles?: number;
+	load_unload_cycles_designed?: number;
+	read_errors: ScsiErrorCounters;
+	write_errors: ScsiErrorCounters;
+	verify_errors: ScsiErrorCounters;
+	/** Most recent entry from the SCSI Self-Test rolling log. */
+	last_self_test?: ScsiSelfTestEntry;
+	self_test_count: number;
+}
+
+export interface ScsiErrorCounters {
+	corrected_total: number;
+	/** Non-zero values are the failure signal — drive has lost or
+	 * returned bad data. Engine flips `health_passed` to false when
+	 * any I/O type's uncorrected_total > 0. */
+	uncorrected_total: number;
+	gigabytes_processed: number;
+}
+
+export interface ScsiSelfTestEntry {
+	code: string;
+	result: string;
+	passed: boolean;
+	power_on_hours?: number;
+	in_progress: boolean;
 }
 
 export interface FirmwareDevice {

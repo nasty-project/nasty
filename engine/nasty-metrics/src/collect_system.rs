@@ -300,6 +300,129 @@ struct SmartctlJson {
     /// inspect what the errors were.
     #[serde(default)]
     nvme_error_information_log: Option<SmartctlNvmeErrorLog>,
+
+    // SCSI / SAS — populated when smartctl talks to a SAS drive
+    // directly (`type: "scsi"`) or via a controller passthrough
+    // (`type: "megaraid,N"` for pure SCSI behind megaraid, vs the
+    // `"sat+megaraid,N"` we already see for SATA-tunneled).
+    #[serde(default)]
+    scsi_revision: Option<String>,
+    #[serde(default)]
+    scsi_version: Option<String>,
+    #[serde(default)]
+    rotation_rate: Option<u32>,
+    #[serde(default)]
+    form_factor: Option<SmartctlFormFactor>,
+    #[serde(default)]
+    logical_unit_id: Option<String>,
+    #[serde(default)]
+    scsi_transport_protocol: Option<SmartctlScsiTransport>,
+    #[serde(default)]
+    scsi_grown_defect_list: Option<u64>,
+    #[serde(default)]
+    scsi_format_status: Option<SmartctlScsiFormatStatus>,
+    #[serde(default)]
+    scsi_start_stop_cycle_counter: Option<SmartctlScsiCycleCounter>,
+    #[serde(default)]
+    scsi_error_counter_log: Option<SmartctlScsiErrorCounterLog>,
+
+    // SCSI self-test entries are emitted as numbered top-level keys
+    // (`scsi_self_test_0`, `scsi_self_test_1`, …) rather than an
+    // array, so we capture them via `#[serde(flatten)]` and walk the
+    // raw map after the typed parse. Drives we've seen carry 4–14
+    // entries; the SCSI standard caps at 20.
+    #[serde(flatten)]
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlFormFactor {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScsiTransport {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScsiFormatStatus {
+    #[serde(default)]
+    power_on_minutes_since_format: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScsiCycleCounter {
+    #[serde(default)]
+    year_of_manufacture: Option<String>,
+    #[serde(default)]
+    week_of_manufacture: Option<String>,
+    #[serde(default)]
+    specified_cycle_count_over_device_lifetime: Option<u64>,
+    #[serde(default)]
+    accumulated_start_stop_cycles: Option<u64>,
+    #[serde(default)]
+    specified_load_unload_count_over_device_lifetime: Option<u64>,
+    #[serde(default)]
+    accumulated_load_unload_cycles: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScsiErrorCounterLog {
+    #[serde(default)]
+    read: Option<SmartctlScsiErrorCounters>,
+    #[serde(default)]
+    write: Option<SmartctlScsiErrorCounters>,
+    #[serde(default)]
+    verify: Option<SmartctlScsiErrorCounters>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScsiErrorCounters {
+    #[serde(default)]
+    total_errors_corrected: u64,
+    #[serde(default)]
+    total_uncorrected_errors: u64,
+    /// smartctl emits this as a string with decimals
+    /// (e.g. `"1112235.529"`) so we deserialize via string then parse.
+    #[serde(default)]
+    gigabytes_processed: String,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScsiSelfTestEntry {
+    #[serde(default)]
+    code: Option<SmartctlScsiTestCode>,
+    #[serde(default)]
+    result: Option<SmartctlScsiTestResult>,
+    /// Some smartctl versions report `self_test_in_progress: true` on
+    /// the active entry rather than embedding it in the result string.
+    #[serde(default)]
+    self_test_in_progress: bool,
+    /// Newer smartctl emits `power_on_time: {hours, aka}`; we also
+    /// accept plain `power_on_hours` for forward compatibility.
+    #[serde(default)]
+    power_on_time: Option<SmartctlPowerOn>,
+    #[serde(default)]
+    power_on_hours: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScsiTestCode {
+    #[serde(default)]
+    string: String,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScsiTestResult {
+    #[serde(default)]
+    string: String,
+    /// smartctl reports 0 = completed cleanly; non-zero codes for
+    /// aborted, in-progress, or failed outcomes.
+    #[serde(default)]
+    value: i64,
 }
 
 #[derive(Deserialize)]
@@ -374,6 +497,12 @@ struct SmartctlStatus {
 struct SmartctlTemp {
     #[serde(default)]
     current: Option<i32>,
+    /// Drive's hard shutdown temperature in °C. SAS drives populate
+    /// this from the SCSI Informational Exceptions log; NVMe drives
+    /// expose `nvme_composite_temperature_threshold` separately and
+    /// leave this `None`.
+    #[serde(default)]
+    drive_trip: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -684,6 +813,7 @@ async fn build_disk_health(
             },
             attributes: s.attributes,
             nvme: s.nvme,
+            scsi: s.scsi,
         },
         None => build_disk_health_unreachable_for_endpoint(endpoint, lsblk_hint),
     }
@@ -725,6 +855,7 @@ fn build_disk_health_unreachable_for_endpoint(
         smart_status: SMART_STATUS_UNAVAILABLE.to_string(),
         attributes: Vec::new(),
         nvme: None,
+        scsi: None,
     }
 }
 
@@ -748,6 +879,7 @@ struct SmartReport {
     health_passed: bool,
     attributes: Vec<SmartAttribute>,
     nvme: Option<NvmeHealth>,
+    scsi: Option<ScsiHealth>,
 }
 
 async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartReport> {
@@ -771,6 +903,25 @@ async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartRe
     let smart_status = json.smart_status.as_ref()?;
     let health_passed = smart_status.passed;
 
+    // All borrow-based extractions happen BEFORE any `.map()` that
+    // moves a field out of `json`. build_scsi_health borrows the
+    // whole struct and most_recent_error borrows the NVMe error log;
+    // both need to complete before we start consuming fields below.
+    let scsi = build_scsi_health(&json);
+
+    // smartctl returns table entries newest-first when sorted by
+    // error_count, so the head is the most recent event we have a
+    // string for. Skip blank strings (some firmware reports an entry
+    // with a numeric status_code but no decoded text) — surfacing an
+    // empty string in the UI would just be noise.
+    let most_recent_error = json
+        .nvme_error_information_log
+        .as_ref()
+        .and_then(|log| log.table.first())
+        .and_then(|entry| entry.status_field.as_ref())
+        .map(|sf| sf.string.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let attributes: Vec<SmartAttribute> = json
         .ata_smart_attributes
         .map(|attrs| {
@@ -790,18 +941,22 @@ async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartRe
         })
         .unwrap_or_default();
 
-    // smartctl returns table entries newest-first when sorted by
-    // error_count, so the head is the most recent event we have a
-    // string for. Skip blank strings (some firmware reports an entry
-    // with a numeric status_code but no decoded text) — surfacing an
-    // empty string in the UI would just be noise.
-    let most_recent_error = json
-        .nvme_error_information_log
-        .as_ref()
-        .and_then(|log| log.table.first())
-        .and_then(|entry| entry.status_field.as_ref())
-        .map(|sf| sf.string.trim().to_string())
-        .filter(|s| !s.is_empty());
+    // smart_status.passed is the drive's own self-assessment, but for
+    // SAS drives that bar is set so high that drives with eight
+    // uncorrected write errors and nine remapped sectors still report
+    // PASSED — by the time it flips, you've already lost data. Override
+    // health to FAILED when any I/O type shows uncorrected errors so
+    // the existing SmartHealth alert + WebUI badge fire while there's
+    // still time to plan a replacement. We deliberately don't trigger
+    // on grown_defect_list alone: a non-zero defect list is normal on
+    // aging drives and would generate too many false positives; the
+    // trend matters more than the absolute count.
+    let scsi_failure_override = scsi.as_ref().is_some_and(|s| {
+        s.read_errors.uncorrected_total > 0
+            || s.write_errors.uncorrected_total > 0
+            || s.verify_errors.uncorrected_total > 0
+    });
+    let health_passed = health_passed && !scsi_failure_override;
 
     let nvme = json.nvme_log.map(|n| NvmeHealth {
         critical_warning: n.critical_warning,
@@ -826,14 +981,174 @@ async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartRe
     Some(SmartReport {
         model: json.model_name,
         serial: json.serial_number,
-        firmware: json.firmware_version,
+        // SAS dumps don't populate `firmware_version`; the SCSI Inquiry
+        // exposes the same string as `scsi_revision`. Fall through so
+        // SAS drives stop showing "Unknown" firmware.
+        firmware: json.firmware_version.or(json.scsi_revision),
         capacity_bytes: json.user_capacity.map(|c| c.bytes).unwrap_or(0),
         temperature_c: json.temperature.and_then(|t| t.current),
         power_on_hours: json.power_on_time.and_then(|p| p.hours),
         health_passed,
         attributes,
         nvme,
+        scsi,
     })
+}
+
+/// Build the SAS / SCSI health block from a parsed smartctl dump.
+/// Returns `None` when the dump carries no SCSI-specific fields — i.e.
+/// the drive is ATA or NVMe — so the resulting `DiskHealth.scsi` field
+/// stays absent in the API response.
+fn build_scsi_health(json: &SmartctlJson) -> Option<ScsiHealth> {
+    // Heuristic for "this is a SAS / SCSI drive": at least one of the
+    // SCSI-flavoured fields is populated. We don't gate on a single
+    // field because real-world dumps vary — an old drive may lack
+    // scsi_format_status, a fresh drive may lack scsi_grown_defect_list,
+    // etc. Drives via megaraid don't carry `scsi_transport_protocol`
+    // either, so combine several signals.
+    let looks_scsi = json.scsi_revision.is_some()
+        || json.scsi_version.is_some()
+        || json.scsi_transport_protocol.is_some()
+        || json.scsi_grown_defect_list.is_some()
+        || json.scsi_error_counter_log.is_some()
+        || json.scsi_start_stop_cycle_counter.is_some();
+    if !looks_scsi {
+        return None;
+    }
+
+    let cycle = &json.scsi_start_stop_cycle_counter;
+    let read_errors = json
+        .scsi_error_counter_log
+        .as_ref()
+        .and_then(|l| l.read.as_ref())
+        .map(scsi_error_counters_from)
+        .unwrap_or_default();
+    let write_errors = json
+        .scsi_error_counter_log
+        .as_ref()
+        .and_then(|l| l.write.as_ref())
+        .map(scsi_error_counters_from)
+        .unwrap_or_default();
+    let verify_errors = json
+        .scsi_error_counter_log
+        .as_ref()
+        .and_then(|l| l.verify.as_ref())
+        .map(scsi_error_counters_from)
+        .unwrap_or_default();
+
+    let (self_test_count, last_self_test) = collect_scsi_self_tests(&json.extra);
+
+    Some(ScsiHealth {
+        transport_protocol: json
+            .scsi_transport_protocol
+            .as_ref()
+            .map(|t| t.name.clone())
+            .filter(|s| !s.is_empty()),
+        scsi_version: json.scsi_version.clone().filter(|s| !s.is_empty()),
+        rotation_rate: json.rotation_rate,
+        form_factor: json
+            .form_factor
+            .as_ref()
+            .map(|f| f.name.clone())
+            .filter(|s| !s.is_empty()),
+        logical_unit_id: json.logical_unit_id.clone().filter(|s| !s.is_empty()),
+        drive_trip_temp_c: json.temperature.as_ref().and_then(|t| t.drive_trip),
+        year_of_manufacture: cycle
+            .as_ref()
+            .and_then(|c| c.year_of_manufacture.clone())
+            .filter(|s| !s.is_empty()),
+        week_of_manufacture: cycle
+            .as_ref()
+            .and_then(|c| c.week_of_manufacture.clone())
+            .filter(|s| !s.is_empty()),
+        grown_defect_list: json.scsi_grown_defect_list,
+        power_on_minutes_since_format: json
+            .scsi_format_status
+            .as_ref()
+            .and_then(|f| f.power_on_minutes_since_format),
+        start_stop_cycles: cycle.as_ref().and_then(|c| c.accumulated_start_stop_cycles),
+        start_stop_cycles_designed: cycle
+            .as_ref()
+            .and_then(|c| c.specified_cycle_count_over_device_lifetime),
+        load_unload_cycles: cycle
+            .as_ref()
+            .and_then(|c| c.accumulated_load_unload_cycles),
+        load_unload_cycles_designed: cycle
+            .as_ref()
+            .and_then(|c| c.specified_load_unload_count_over_device_lifetime),
+        read_errors,
+        write_errors,
+        verify_errors,
+        last_self_test,
+        self_test_count,
+    })
+}
+
+fn scsi_error_counters_from(c: &SmartctlScsiErrorCounters) -> ScsiErrorCounters {
+    ScsiErrorCounters {
+        corrected_total: c.total_errors_corrected,
+        uncorrected_total: c.total_uncorrected_errors,
+        // smartctl writes the I/O volume as a decimal-quoted string
+        // ("1112235.529"). Round-tripping through f64 keeps the
+        // precision the operator cares about (we display 1 decimal at
+        // most). On parse failure default to 0.0 — better than failing
+        // the whole SCSI block over a single field.
+        gigabytes_processed: c.gigabytes_processed.parse().unwrap_or(0.0),
+    }
+}
+
+/// Walk the flattened map of unknown keys for `scsi_self_test_N` entries,
+/// returning (total_count, most_recent_entry). Drives we've seen carry
+/// 4–14 entries; smartctl numbers them 0 = newest, N = oldest.
+fn collect_scsi_self_tests(
+    extra: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> (u32, Option<ScsiSelfTestEntry>) {
+    let mut count: u32 = 0;
+    let mut most_recent: Option<ScsiSelfTestEntry> = None;
+    // BTreeMap is sorted lexically; scsi_self_test_0..scsi_self_test_9
+    // come before _10.._19 numerically too, so the first-by-index entry
+    // is what we want for "most recent".
+    for n in 0..20 {
+        let key = format!("scsi_self_test_{n}");
+        let Some(value) = extra.get(&key) else {
+            continue;
+        };
+        count += 1;
+        if most_recent.is_some() {
+            continue;
+        }
+        if let Ok(parsed) = serde_json::from_value::<SmartctlScsiSelfTestEntry>(value.clone()) {
+            most_recent = Some(ScsiSelfTestEntry {
+                code: parsed
+                    .code
+                    .as_ref()
+                    .map(|c| c.code_string())
+                    .unwrap_or_default(),
+                result: parsed
+                    .result
+                    .as_ref()
+                    .map(|r| r.string.clone())
+                    .unwrap_or_default(),
+                // result.value 0 = "Completed without error" / "Completed".
+                // Anything else (aborted, in progress, failed) is not a
+                // healthy passed-test signal.
+                passed: parsed.result.as_ref().is_some_and(|r| r.value == 0),
+                power_on_hours: parsed
+                    .power_on_time
+                    .as_ref()
+                    .and_then(|p| p.hours)
+                    .or(parsed.power_on_hours),
+                in_progress: parsed.self_test_in_progress,
+            });
+        }
+    }
+    (count, most_recent)
+}
+
+impl SmartctlScsiTestCode {
+    fn code_string(&self) -> String {
+        self.string.clone()
+    }
 }
 
 /// Resolve ATA port and PCI controller address from sysfs device path.
@@ -1089,5 +1404,118 @@ mod tests {
             Some("sat+megaraid,7".to_string())
         );
         assert_eq!(parse_transport("areca,3"), Some("areca,3".to_string()));
+    }
+
+    // ── SAS / SCSI ─────────────────────────────────────────────────
+    //
+    // Two real-world SAS dumps capture the operator-relevant range:
+    //   * sas_seagate_clean    — healthy 4TB 7200 RPM SAS spinner,
+    //                            5+ years powered on, all zero error
+    //                            counters, mid-self-test (proves the
+    //                            in-progress entry doesn't break the
+    //                            parser).
+    //   * sas_seagate_failing  — dying 400GB 10K RPM SAS spinner
+    //                            behind megaraid: 9 grown defects,
+    //                            8 uncorrected write errors. smartctl
+    //                            STILL says smart_status.passed=true
+    //                            on this drive, which is the entire
+    //                            reason we need the health override.
+
+    #[test]
+    fn sas_clean_drive_parses_complete_scsi_block() {
+        let j = parse(include_str!("../fixtures/sas_seagate_clean.json"));
+        let s = build_scsi_health(&j).expect("SCSI block present");
+
+        assert_eq!(s.transport_protocol.as_deref(), Some("SAS (SPL-4)"));
+        assert_eq!(s.scsi_version.as_deref(), Some("SPC-3"));
+        assert_eq!(s.rotation_rate, Some(7200));
+        assert_eq!(s.form_factor.as_deref(), Some("3.5 inches"));
+        assert_eq!(s.drive_trip_temp_c, Some(68));
+        assert_eq!(s.grown_defect_list, Some(0));
+        assert_eq!(s.year_of_manufacture.as_deref(), Some("2019"));
+        assert_eq!(s.week_of_manufacture.as_deref(), Some("18"));
+        assert_eq!(s.power_on_minutes_since_format, Some(221818));
+        assert_eq!(s.start_stop_cycles, Some(97));
+        assert_eq!(s.start_stop_cycles_designed, Some(10000));
+        assert_eq!(s.load_unload_cycles, Some(1959));
+
+        // All error counters zero on a healthy drive.
+        assert_eq!(s.read_errors.uncorrected_total, 0);
+        assert_eq!(s.write_errors.uncorrected_total, 0);
+        assert_eq!(s.verify_errors.uncorrected_total, 0);
+        // gigabytes_processed is parsed from its string representation.
+        assert!((s.read_errors.gigabytes_processed - 1_112_235.529).abs() < 0.001);
+
+        // 14 self-test entries (0 through 13). The most recent (entry 0)
+        // is mid-test: must parse the in_progress flag correctly.
+        assert_eq!(s.self_test_count, 14);
+        let last = s.last_self_test.expect("most-recent self-test present");
+        assert!(
+            last.in_progress,
+            "scsi_self_test_0 has self_test_in_progress=true"
+        );
+        assert_eq!(last.code, "Background long");
+    }
+
+    #[test]
+    fn sas_failing_drive_triggers_health_override() {
+        // This is the entire reason the SAS PR exists. The drive
+        // reports smart_status.passed=true (smartctl's own bar is
+        // way too high for SAS) but has 8 uncorrected write errors
+        // and 9 grown defects. Our override flips health_passed to
+        // false so the SmartHealth alert fires and the operator
+        // sees a FAILED badge while there's still time to replace it.
+        let raw = include_str!("../fixtures/sas_seagate_failing.json");
+        let j: SmartctlJson = serde_json::from_str(raw).expect("parse failing SAS dump");
+
+        // Drive's own self-assessment: still PASSED. Operator would
+        // never know without us digging deeper.
+        assert!(j.smart_status.as_ref().is_some_and(|s| s.passed));
+
+        let scsi = build_scsi_health(&j).expect("SCSI block present");
+        assert_eq!(scsi.grown_defect_list, Some(9));
+        assert_eq!(scsi.write_errors.uncorrected_total, 8);
+        assert_eq!(scsi.read_errors.uncorrected_total, 0);
+        assert_eq!(scsi.verify_errors.uncorrected_total, 0);
+
+        // The override condition we apply in query_smartctl:
+        // health flips to false if ANY I/O type has uncorrected errors.
+        let failure_override = scsi.read_errors.uncorrected_total > 0
+            || scsi.write_errors.uncorrected_total > 0
+            || scsi.verify_errors.uncorrected_total > 0;
+        assert!(
+            failure_override,
+            "uncorrected-error override must fire on this drive"
+        );
+
+        // Drive is behind megaraid: no scsi_format_status, no
+        // scsi_start_stop_cycle_counter. Our deserializer must
+        // tolerate the absence and leave the corresponding ScsiHealth
+        // fields None (rather than failing the whole SCSI parse).
+        assert_eq!(scsi.power_on_minutes_since_format, None);
+        assert_eq!(scsi.year_of_manufacture, None);
+        assert_eq!(scsi.start_stop_cycles, None);
+    }
+
+    #[test]
+    fn scsi_revision_falls_back_when_firmware_version_absent() {
+        // SAS dumps don't populate `firmware_version`. The SCSI
+        // Inquiry exposes the same field as `scsi_revision`. Without
+        // this fallback every SAS drive would show "Unknown" firmware.
+        let j = parse(include_str!("../fixtures/sas_seagate_clean.json"));
+        assert!(j.firmware_version.is_none());
+        assert_eq!(j.scsi_revision.as_deref(), Some("BS03"));
+        // Mirror the query_smartctl fallback logic.
+        let firmware = j.firmware_version.or(j.scsi_revision);
+        assert_eq!(firmware.as_deref(), Some("BS03"));
+    }
+
+    #[test]
+    fn nvme_drive_has_no_scsi_block() {
+        // The detection heuristic in build_scsi_health must NOT
+        // misfire on a pure NVMe dump — none of the scsi_* fields
+        // are present.
+        let j = parse(include_str!("../fixtures/nvme_samsung_980_pro.json"));
+        assert!(build_scsi_health(&j).is_none());
     }
 }
