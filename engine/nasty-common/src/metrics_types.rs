@@ -112,6 +112,13 @@ pub struct DiskHealth {
     /// Human-readable controller name (e.g. `ASMedia ASM1166`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_name: Option<String>,
+    /// PCIe link state for the controller. Carried per-disk for
+    /// schema simplicity (every drive on the same controller carries
+    /// the same value); the WebUI dedupes via its existing
+    /// controller-grouping logic in the Topology view. `None` for
+    /// non-PCIe-attached drives (USB bridges, virtio in VMs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pcie_link: Option<PcieLink>,
     /// Drive model name reported by SMART.
     pub model: String,
     /// Drive serial number.
@@ -172,6 +179,31 @@ pub struct AtaHealth {
     /// through a smartctl earlier than 7.5.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endurance_used_percent: Option<u32>,
+}
+
+/// PCIe link state for a storage controller, sourced from
+/// `/sys/bus/pci/devices/<bdf>/{current,max}_link_{speed,width}`.
+/// When `current_*` is below `max_*` the link has trained down — common
+/// causes include PCIe ASPM power saving keeping the link in a low
+/// state during idle (transient — not always a real issue), broken
+/// bifurcation in a U.2 backplane, a flaky PCIe riser cable, or a
+/// physical x4 slot wired internally as x1.
+///
+/// The speed strings are passed through verbatim from sysfs
+/// (e.g. `"8.0 GT/s PCIe"`) so the WebUI displays the same text
+/// `lspci -vv` would. Conversion to per-lane MB/s and total bandwidth
+/// happens client-side from a small lookup table; that keeps API
+/// surface minimal and lets the UI choose precision.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PcieLink {
+    /// Negotiated link speed (e.g. `"8.0 GT/s PCIe"` for PCIe 3.0).
+    pub current_speed: String,
+    /// Maximum link speed the device + slot can negotiate.
+    pub max_speed: String,
+    /// Currently active lane count (1, 2, 4, 8, 16, …).
+    pub current_width: u8,
+    /// Maximum lane count the device + slot supports.
+    pub max_width: u8,
 }
 
 /// NVMe SMART health information, parsed from smartctl's

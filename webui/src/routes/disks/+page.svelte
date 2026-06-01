@@ -173,6 +173,7 @@
 	interface ControllerGroup {
 		pci: string;
 		name: string;
+		pcieLink?: import('$lib/types').PcieLink;
 		disks: DiskHealth[];
 	}
 
@@ -182,12 +183,56 @@
 			const pci = disk.controller_pci ?? 'unknown';
 			const name = disk.controller_name ?? 'Unknown Controller';
 			if (!groups.has(pci)) {
-				groups.set(pci, { pci, name, disks: [] });
+				// PCIe link state is per-controller; every disk on the
+				// same controller carries the same value, so the first
+				// non-null wins.
+				groups.set(pci, { pci, name, pcieLink: disk.pcie_link, disks: [] });
 			}
 			groups.get(pci)!.disks.push(disk);
 		}
 		// Sort groups: known controllers first, then by PCI address
 		return [...groups.values()].sort((a, b) => a.pci.localeCompare(b.pci));
+	}
+
+	// PCIe per-lane bandwidth lookup. Values are the spec's effective
+	// data rates (after 128b/130b for gen3+ and 8b/10b for gen1/2),
+	// rounded to whole MB/s. Matches what `lspci -vv` reports as
+	// "LnkSta:" bandwidth and what operators see on every PCIe-spec
+	// reference page.
+	function pcieLaneMbps(speedStr: string): number | null {
+		// Kernel emits forms like "8.0 GT/s PCIe" or "8 GT/s" — take
+		// the leading number, ignore the unit + suffix.
+		const m = speedStr.match(/^([\d.]+)/);
+		if (!m) return null;
+		const gtps = parseFloat(m[1]);
+		// Gen 1: 2.5 GT/s, 2: 5.0, 3: 8.0, 4: 16.0, 5: 32.0, 6: 64.0
+		// Effective MB/s per lane (rounded): 250, 500, 985, 1969, 3938, 7877
+		const table: Record<number, number> = {
+			2.5: 250, 5: 500, 8: 985, 16: 1969, 32: 3938, 64: 7877,
+		};
+		return table[gtps] ?? null;
+	}
+
+	function formatPcieLink(link: import('$lib/types').PcieLink): string {
+		// Show generation if we can derive it ("PCIe 3.0 x2"), else
+		// fall back to the raw kernel string. PCIe 3.0 = 8 GT/s, etc.
+		const m = link.current_speed.match(/^([\d.]+)/);
+		const gtps = m ? parseFloat(m[1]) : null;
+		const genTable: Record<number, string> = {
+			2.5: '1.0', 5: '2.0', 8: '3.0', 16: '4.0', 32: '5.0', 64: '6.0',
+		};
+		const gen = gtps != null ? genTable[gtps] : null;
+		const speed = gen ? `PCIe ${gen}` : link.current_speed;
+		return `${speed} x${link.current_width}`;
+	}
+
+	function pcieTotalMbps(link: import('$lib/types').PcieLink): number | null {
+		const perLane = pcieLaneMbps(link.current_speed);
+		return perLane != null ? perLane * link.current_width : null;
+	}
+
+	function pcieLinkDowngraded(link: import('$lib/types').PcieLink): boolean {
+		return link.current_speed !== link.max_speed || link.current_width !== link.max_width;
 	}
 </script>
 
@@ -648,10 +693,23 @@
 	{:else if activeTab === 'topology'}
 		{#if smartProtocol?.enabled && disks.length > 0}
 			{#each groupByController(disks) as group}
+				{@const link = group.pcieLink}
+				{@const linkMbps = link ? pcieTotalMbps(link) : null}
+				{@const linkDowngraded = link ? pcieLinkDowngraded(link) : false}
 				<div class="mb-6">
 					<div class="mb-3 flex items-baseline gap-3">
 						<h3 class="text-sm font-semibold text-foreground">{group.name}</h3>
 						<span class="rounded bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground">PCI {group.pci}</span>
+						{#if link}
+							<span
+								class="rounded px-2 py-0.5 font-mono text-xs {linkDowngraded ? 'bg-amber-950 text-amber-400' : 'bg-muted text-muted-foreground'}"
+								title={linkDowngraded
+									? `Link trained down — max ${link.max_speed} x${link.max_width}. Common causes: PCIe ASPM power saving, broken backplane bifurcation, riser cable issue, or slot wired narrower than physically advertised.`
+									: 'Upstream PCIe link to the host CPU. Total bandwidth = per-lane MB/s × width.'}
+							>
+								{formatPcieLink(link)}{#if linkMbps != null} ({linkMbps.toLocaleString()} MB/s){/if}
+							</span>
+						{/if}
 					</div>
 					<table class="w-full text-sm">
 						<thead>

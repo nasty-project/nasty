@@ -618,6 +618,7 @@ export interface DiskHealth {
 	ata_port?: string;
 	controller_pci?: string;
 	controller_name?: string;
+	pcie_link?: PcieLink;
 	model: string;
 	serial: string;
 	firmware: string;
@@ -630,6 +631,20 @@ export interface DiskHealth {
 	nvme?: NvmeHealth;
 	scsi?: ScsiHealth;
 	ata?: AtaHealth;
+}
+
+/** PCIe link state for a storage controller, sourced from
+ * `/sys/bus/pci/devices/<bdf>/{current,max}_link_{speed,width}`.
+ * When `current_*` is below `max_*` the link has trained down — common
+ * causes include PCIe ASPM power saving, broken bifurcation in a U.2
+ * backplane, a flaky riser cable, or a slot wired narrower than
+ * physically advertised. Speed strings are passed through verbatim
+ * from sysfs (e.g. `"8.0 GT/s PCIe"`). */
+export interface PcieLink {
+	current_speed: string;
+	max_speed: string;
+	current_width: number;
+	max_width: number;
 }
 
 /** ATA / SATA summary fields complementing the generic SMART attribute

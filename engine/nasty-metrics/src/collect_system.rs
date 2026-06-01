@@ -812,6 +812,7 @@ async fn build_disk_health(
         (None, None)
     };
     let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
+    let pcie_link = controller_pci.as_deref().and_then(resolve_pcie_link);
 
     match query_smartctl(&endpoint.device, endpoint.transport.as_deref()).await {
         Some(s) => DiskHealth {
@@ -820,6 +821,7 @@ async fn build_disk_health(
             ata_port,
             controller_pci,
             controller_name,
+            pcie_link,
             // smartctl's strings are usually more accurate than lsblk's
             // (lsblk reads sysfs's `model`, which truncates / pads), but
             // for unfamiliar transports lsblk sometimes wins — prefer
@@ -874,12 +876,14 @@ fn build_disk_health_unreachable_for_endpoint(
         (None, None)
     };
     let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
+    let pcie_link = controller_pci.as_deref().and_then(resolve_pcie_link);
     DiskHealth {
         device: endpoint.device.clone(),
         transport: endpoint.transport.clone(),
         ata_port,
         controller_pci,
         controller_name,
+        pcie_link,
         model: lsblk_hint
             .map(|d| d.model.clone())
             .unwrap_or_else(|| "Unknown".into()),
@@ -1304,6 +1308,65 @@ fn resolve_pci_name(pci_addr: &str) -> Option<String> {
     }
 }
 
+/// Read PCIe link state for a storage controller from sysfs. Returns
+/// `None` when the controller isn't found, lacks the link files (some
+/// virtual PCIe devices, very old kernels), or returns malformed data.
+///
+/// `pci_addr` is the short BDF form (e.g. `"03:00.0"`) — we prepend the
+/// canonical `0000:` domain when looking up the sysfs path because
+/// that's what `resolve_device_path()` returns elsewhere in this file
+/// and we want consistency.
+fn resolve_pcie_link(pci_addr: &str) -> Option<PcieLink> {
+    let base = format!("/sys/bus/pci/devices/0000:{pci_addr}");
+    parse_pcie_link(
+        &std::fs::read_to_string(format!("{base}/current_link_speed")).ok()?,
+        &std::fs::read_to_string(format!("{base}/max_link_speed")).ok()?,
+        &std::fs::read_to_string(format!("{base}/current_link_width")).ok()?,
+        &std::fs::read_to_string(format!("{base}/max_link_width")).ok()?,
+    )
+}
+
+/// Pure-data parser for PCIe link sysfs strings. Split out from
+/// `resolve_pcie_link` so the parser can be unit-tested without a real
+/// `/sys` tree to point at.
+///
+/// Kernels normalize speed strings to forms like `"8.0 GT/s PCIe"`
+/// (recent) or `"8.0 GT/s"` (older); both pass through verbatim after
+/// whitespace-trimming. Width files contain a bare decimal. Any value
+/// that fails to parse (or returns the literal `"Unknown"` some
+/// kernels emit for downed links) makes the whole block return `None`
+/// — we don't surface a half-populated link record.
+fn parse_pcie_link(
+    cur_speed: &str,
+    max_speed: &str,
+    cur_width: &str,
+    max_width: &str,
+) -> Option<PcieLink> {
+    let cur_speed = cur_speed.trim();
+    let max_speed = max_speed.trim();
+    if cur_speed.is_empty()
+        || max_speed.is_empty()
+        || cur_speed.eq_ignore_ascii_case("Unknown")
+        || max_speed.eq_ignore_ascii_case("Unknown")
+    {
+        return None;
+    }
+    let cur_width: u8 = cur_width.trim().parse().ok()?;
+    let max_width: u8 = max_width.trim().parse().ok()?;
+    // A zero width means the link is in some degenerate state (e.g.
+    // device powered off, hot-removed). Reporting "PCIe x0" would be
+    // misleading; drop the record entirely.
+    if cur_width == 0 || max_width == 0 {
+        return None;
+    }
+    Some(PcieLink {
+        current_speed: cur_speed.to_string(),
+        max_speed: max_speed.to_string(),
+        current_width: cur_width,
+        max_width,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1682,6 +1745,52 @@ mod tests {
         let ata = build_ata_health(&j).expect("ATA block present");
         assert_eq!(ata.endurance_used_percent, None);
         assert!(ata.interface_speed_current.is_some());
+    }
+
+    // ── PCIe link state ───────────────────────────────────────────
+
+    #[test]
+    fn parse_pcie_link_typical_modern_kernel_output() {
+        // What `cat /sys/bus/pci/devices/0000:03:00.0/current_link_speed`
+        // emits on a recent kernel — single newline, "PCIe" suffix.
+        let link = parse_pcie_link("8.0 GT/s PCIe\n", "8.0 GT/s PCIe\n", "2\n", "2\n")
+            .expect("link present");
+        assert_eq!(link.current_speed, "8.0 GT/s PCIe");
+        assert_eq!(link.max_speed, "8.0 GT/s PCIe");
+        assert_eq!(link.current_width, 2);
+        assert_eq!(link.max_width, 2);
+    }
+
+    #[test]
+    fn parse_pcie_link_handles_older_kernel_format_without_pcie_suffix() {
+        // Older kernels emit "8 GT/s" without the "PCIe" suffix —
+        // accept verbatim, don't try to normalize.
+        let link = parse_pcie_link("8 GT/s\n", "8 GT/s\n", "4\n", "4\n").expect("link present");
+        assert_eq!(link.current_speed, "8 GT/s");
+        assert_eq!(link.max_width, 4);
+    }
+
+    #[test]
+    fn parse_pcie_link_detects_downgrade() {
+        // Trained-down case — controller could do 16 GT/s x4 but the
+        // slot or cable only negotiated 8 GT/s x2. WebUI flags this
+        // amber.
+        let link = parse_pcie_link("8.0 GT/s\n", "16.0 GT/s\n", "2\n", "4\n").expect("link");
+        assert_ne!(link.current_speed, link.max_speed);
+        assert_ne!(link.current_width, link.max_width);
+    }
+
+    #[test]
+    fn parse_pcie_link_rejects_degenerate_states() {
+        // Kernel sometimes reports "Unknown" speed during a power-state
+        // transition. Reporting "PCIe Unknown x0" would be worse than
+        // hiding the chip entirely.
+        assert!(parse_pcie_link("Unknown\n", "8.0 GT/s\n", "2\n", "2\n").is_none());
+        assert!(parse_pcie_link("8.0 GT/s\n", "8.0 GT/s\n", "0\n", "2\n").is_none());
+        // Empty / missing files — caller passes empty strings.
+        assert!(parse_pcie_link("\n", "\n", "0\n", "0\n").is_none());
+        // Garbage in width files (non-numeric).
+        assert!(parse_pcie_link("8.0 GT/s\n", "8.0 GT/s\n", "x4\n", "4\n").is_none());
     }
 
     #[test]
