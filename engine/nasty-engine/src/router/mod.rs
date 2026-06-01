@@ -1036,12 +1036,35 @@ pub(crate) async fn evaluate_active_alerts(
 
     let disk_summary: Vec<alerts::DiskHealthSummary> = disk_health
         .into_iter()
-        .map(|d| alerts::DiskHealthSummary {
-            device: d.device,
-            transport: d.transport,
-            temperature_c: d.temperature_c,
-            health_passed: d.health_passed,
-            smart_status: d.smart_status,
+        .map(|d| {
+            // Pre-filter the critical-attribute set here so the alert
+            // evaluator stays a pure data-in / data-out function with
+            // no knowledge of attribute IDs. Skip when the drive's
+            // SMART is UNAVAILABLE — `attributes` is empty by
+            // construction in that case, but the filter still costs
+            // a closure allocation per attribute and per drive, so
+            // the early-out matters when N drives × ~30 attributes.
+            let critical_attrs_with_value = if d.smart_status == "UNAVAILABLE" {
+                Vec::new()
+            } else {
+                d.attributes
+                    .iter()
+                    .filter_map(|a| {
+                        alerts::CRITICAL_ATA_ATTRIBUTES
+                            .iter()
+                            .any(|(id, _)| *id == a.id)
+                            .then_some((a.id, a.raw_value))
+                    })
+                    .collect()
+            };
+            alerts::DiskHealthSummary {
+                device: d.device,
+                transport: d.transport,
+                temperature_c: d.temperature_c,
+                health_passed: d.health_passed,
+                smart_status: d.smart_status,
+                critical_attrs_with_value,
+            }
         })
         .collect();
 

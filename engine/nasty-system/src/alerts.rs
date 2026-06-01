@@ -32,6 +32,15 @@ pub enum AlertMetric {
     MemoryUsagePercent,
     DiskTemperature,
     SmartHealth,
+    /// One critical ATA SMART attribute has reported a non-zero raw
+    /// value. Distinct from `SmartHealth` (drive's overall self-
+    /// assessment) so operators can tune the two independently — a
+    /// drive can accumulate reallocated sectors long before its
+    /// overall self-assessment trips, and the attribute-level alert
+    /// is where the early-warning signal lives. The "critical" set
+    /// is sourced from Scrutiny's metadata table (Backblaze drive-
+    /// stats failure-rate analysis); see CRITICAL_ATA_ATTRIBUTES.
+    SmartAttribute,
     SwapUsagePercent,
     // bcachefs health (always-on, threshold ignored)
     BcachefsDegraded,
@@ -380,6 +389,50 @@ fn evaluate_rules(
                     }
                 }
             }
+            AlertMetric::SmartAttribute => {
+                // Threshold is the raw_value above which the alert
+                // fires. Default rule uses 0 — i.e. "any non-zero value
+                // on a critical attribute". Operators with drives that
+                // already carry a handful of reallocated sectors and
+                // aren't yet ready to replace can raise the threshold
+                // to "wake me up only when it grows past N".
+                //
+                // We deliberately don't skip UNAVAILABLE here either:
+                // those drives have empty `critical_attrs_with_value`
+                // by construction (no SMART data = no attributes), so
+                // the inner loop naturally skips them without a
+                // special case.
+                for disk in disk_health {
+                    for &(attr_id, raw) in &disk.critical_attrs_with_value {
+                        if raw as f64 <= rule.threshold {
+                            continue;
+                        }
+                        let name = CRITICAL_ATA_ATTRIBUTES
+                            .iter()
+                            .find(|(id, _)| *id == attr_id)
+                            .map(|(_, n)| *n)
+                            .unwrap_or("Unknown");
+                        alerts.push(ActiveAlert {
+                            rule_id: rule.id.clone(),
+                            rule_name: rule.name.clone(),
+                            severity: rule.severity.clone(),
+                            metric: rule.metric.clone(),
+                            message: format!(
+                                "Disk {} attribute {} (id {}) raw value is {} — drive needs attention before SMART overall status flips",
+                                disk.label(),
+                                name,
+                                attr_id,
+                                raw
+                            ),
+                            current_value: raw as f64,
+                            threshold: rule.threshold,
+                            // Per-attribute source so distinct attrs on
+                            // the same drive produce distinct alerts.
+                            source: format!("{}#{}", disk.label(), attr_id),
+                        });
+                    }
+                }
+            }
             // ── bcachefs health checks (always-on, threshold ignored) ──
             AlertMetric::BcachefsDegraded => {
                 for fs in bcachefs_health {
@@ -580,6 +633,36 @@ pub struct FsUsage {
     pub total_bytes: u64,
 }
 
+/// ATA SMART attribute IDs flagged as critical per Scrutiny's
+/// metadata table (`github.com/AnalogJ/scrutiny`), derived from
+/// Backblaze drive-stats failure-rate analysis. Each entry is
+/// `(attribute_id, display_name)`; display_name is used in alert
+/// messages so the operator gets a meaningful identifier instead of
+/// just a number.
+///
+/// **Keep in sync with `webui/src/lib/smart_attribute_metadata.ts`** —
+/// re-run `scripts/extract_smart_attribute_metadata.py` and update
+/// both this list and the TS file together. The script extracts the
+/// `critical: true` entries from upstream; this list is the matching
+/// Rust copy.
+///
+/// For every attribute here, a non-zero raw value is the failure
+/// signal: reallocated sectors, pending sectors, uncorrectable errors,
+/// command timeouts — none should ever be non-zero on a healthy
+/// drive. That's why the alert rule fires on `raw_value > 0` rather
+/// than thresholding.
+pub const CRITICAL_ATA_ATTRIBUTES: &[(u32, &str)] = &[
+    (5, "Reallocated Sectors Count"),
+    (10, "Spin Retry Count"),
+    (184, "End-to-End Error"),
+    (187, "Reported Uncorrectable Errors"),
+    (188, "Command Timeout"),
+    (196, "Reallocation Event Count"),
+    (197, "Current Pending Sector Count"),
+    (198, "Offline Uncorrectable Sector Count"),
+    (201, "Soft Read Error Rate"),
+];
+
 /// Minimal disk info for alert evaluation
 #[derive(Debug)]
 pub struct DiskHealthSummary {
@@ -597,6 +680,14 @@ pub struct DiskHealthSummary {
     /// "UNAVAILABLE" (don't alert — smartctl couldn't read SMART, that's
     /// not the same as a confirmed health failure).
     pub smart_status: String,
+    /// Critical ATA SMART attributes with non-zero raw values, as
+    /// `(attribute_id, raw_value)`. The router constructs this by
+    /// filtering `DiskHealth::attributes` against
+    /// `CRITICAL_ATA_ATTRIBUTES`. Empty on healthy drives, non-NVMe/
+    /// non-SAS drives that don't carry ATA attributes, and on
+    /// UNAVAILABLE drives. The `SmartAttribute` alert iterates this
+    /// list and fires one alert per (drive, attribute) pair.
+    pub critical_attrs_with_value: Vec<(u32, i64)>,
 }
 
 impl DiskHealthSummary {
@@ -743,6 +834,21 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Critical,
+        },
+        AlertRule {
+            // Threshold 0 = fire on any non-zero raw value. Operators
+            // who already run drives with a handful of reallocated
+            // sectors and don't want to be woken up can raise this.
+            // Condition is `Above` rather than `Equals` because we
+            // want the alert to *keep firing* as the counter grows,
+            // not just at the threshold boundary.
+            id: "smart-attribute".into(),
+            name: "SMART critical attribute non-zero".into(),
+            enabled: true,
+            metric: AlertMetric::SmartAttribute,
+            condition: AlertCondition::Above,
+            threshold: 0.0,
+            severity: AlertSeverity::Warning,
         },
         AlertRule {
             id: "memory-warn".into(),
@@ -1089,6 +1195,7 @@ mod tests {
                 temperature_c: Some(60),
                 health_passed: true,
                 smart_status: "PASSED".into(),
+                critical_attrs_with_value: Vec::new(),
             },
             DiskHealthSummary {
                 device: "sdb".into(),
@@ -1096,6 +1203,7 @@ mod tests {
                 temperature_c: None, // skipped
                 health_passed: true,
                 smart_status: "PASSED".into(),
+                critical_attrs_with_value: Vec::new(),
             },
             DiskHealthSummary {
                 device: "sdc".into(),
@@ -1103,6 +1211,7 @@ mod tests {
                 temperature_c: Some(45), // below threshold
                 health_passed: true,
                 smart_status: "PASSED".into(),
+                critical_attrs_with_value: Vec::new(),
             },
         ];
         let alerts = evaluate_rules(
@@ -1128,6 +1237,7 @@ mod tests {
                 temperature_c: None,
                 health_passed: true,
                 smart_status: "PASSED".into(),
+                critical_attrs_with_value: Vec::new(),
             },
             DiskHealthSummary {
                 device: "sdb".into(),
@@ -1135,6 +1245,7 @@ mod tests {
                 temperature_c: None,
                 health_passed: false,
                 smart_status: "FAILED".into(),
+                critical_attrs_with_value: Vec::new(),
             },
         ];
         let alerts = evaluate_rules(
@@ -1167,6 +1278,7 @@ mod tests {
                 temperature_c: None,
                 health_passed: false,
                 smart_status: "FAILED".into(),
+                critical_attrs_with_value: Vec::new(),
             },
             DiskHealthSummary {
                 device: "/dev/sda".into(),
@@ -1174,6 +1286,7 @@ mod tests {
                 temperature_c: None,
                 health_passed: false,
                 smart_status: "FAILED".into(),
+                critical_attrs_with_value: Vec::new(),
             },
         ];
         let alerts = evaluate_rules(
@@ -1205,6 +1318,7 @@ mod tests {
             temperature_c: None,
             health_passed: false,
             smart_status: "UNAVAILABLE".into(),
+            critical_attrs_with_value: Vec::new(),
         }];
         let alerts = evaluate_rules(
             &[r],
@@ -1219,6 +1333,147 @@ mod tests {
             alerts.is_empty(),
             "UNAVAILABLE smart_status must not trigger SmartHealth alerts"
         );
+    }
+
+    #[test]
+    fn evaluate_rules_smart_attribute_fires_only_on_non_zero_critical_attrs() {
+        // The whole point of the metadata-driven alert: a drive can
+        // accumulate reallocated sectors long before its overall
+        // self-assessment trips. `health_passed=true` + non-zero
+        // critical attribute = exactly the early-warning case the
+        // new alert exists to catch.
+        let r = rule(AlertMetric::SmartAttribute, AlertCondition::Above, 0.0);
+        let disks = vec![
+            DiskHealthSummary {
+                device: "sda".into(),
+                transport: None,
+                temperature_c: None,
+                health_passed: true,
+                smart_status: "PASSED".into(),
+                // Healthy drive: empty critical-attr list.
+                critical_attrs_with_value: Vec::new(),
+            },
+            DiskHealthSummary {
+                device: "sdb".into(),
+                transport: None,
+                temperature_c: None,
+                health_passed: true, // SMART still says PASSED!
+                smart_status: "PASSED".into(),
+                // But attribute 5 (Reallocated Sectors) has a non-zero
+                // raw value. This is the case the alert is for.
+                critical_attrs_with_value: vec![(5, 7)],
+            },
+        ];
+        let alerts = evaluate_rules(
+            &[r],
+            &zero_stats(),
+            &[],
+            &disks,
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace::default(),
+        );
+        assert_eq!(alerts.len(), 1, "only the degrading drive fires");
+        assert_eq!(alerts[0].source, "sdb#5");
+        assert_eq!(alerts[0].current_value, 7.0);
+        assert!(
+            alerts[0].message.contains("Reallocated Sectors Count"),
+            "message uses Scrutiny-normalized display name, got: {}",
+            alerts[0].message
+        );
+        assert!(
+            alerts[0].message.contains("(id 5)"),
+            "message names the attribute id, got: {}",
+            alerts[0].message
+        );
+    }
+
+    #[test]
+    fn evaluate_rules_smart_attribute_fires_per_attribute_on_same_drive() {
+        // A drive accumulating multiple critical signals should
+        // produce one alert per (drive, attribute) — operators
+        // need to see which attributes are degrading. Source uses
+        // `{label}#{id}` to keep them distinct in deduplication.
+        let r = rule(AlertMetric::SmartAttribute, AlertCondition::Above, 0.0);
+        let disks = vec![DiskHealthSummary {
+            device: "/dev/sda".into(),
+            transport: None,
+            temperature_c: None,
+            health_passed: true,
+            smart_status: "PASSED".into(),
+            critical_attrs_with_value: vec![
+                (5, 3),   // Reallocated Sectors
+                (197, 2), // Pending Sectors
+            ],
+        }];
+        let alerts = evaluate_rules(
+            &[r],
+            &zero_stats(),
+            &[],
+            &disks,
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace::default(),
+        );
+        assert_eq!(alerts.len(), 2);
+        let sources: Vec<&str> = alerts.iter().map(|a| a.source.as_str()).collect();
+        assert!(sources.contains(&"/dev/sda#5"));
+        assert!(sources.contains(&"/dev/sda#197"));
+    }
+
+    #[test]
+    fn evaluate_rules_smart_attribute_respects_threshold() {
+        // An operator running drives with a couple of reallocated
+        // sectors they've been carrying for years can raise the
+        // threshold so the alert only fires when the counter
+        // *grows past* their tolerance. Threshold 5 = "alert when
+        // raw_value > 5".
+        let r = rule(AlertMetric::SmartAttribute, AlertCondition::Above, 5.0);
+        let disks = vec![
+            DiskHealthSummary {
+                device: "sda".into(),
+                transport: None,
+                temperature_c: None,
+                health_passed: true,
+                smart_status: "PASSED".into(),
+                critical_attrs_with_value: vec![(5, 5)], // exactly at threshold
+            },
+            DiskHealthSummary {
+                device: "sdb".into(),
+                transport: None,
+                temperature_c: None,
+                health_passed: true,
+                smart_status: "PASSED".into(),
+                critical_attrs_with_value: vec![(5, 6)], // one over
+            },
+        ];
+        let alerts = evaluate_rules(
+            &[r],
+            &zero_stats(),
+            &[],
+            &disks,
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace::default(),
+        );
+        assert_eq!(
+            alerts.len(),
+            1,
+            "Above is strict — equal value should not fire"
+        );
+        assert_eq!(alerts[0].source, "sdb#5");
+    }
+
+    #[test]
+    fn critical_attributes_list_matches_scrutiny_set() {
+        // Pin the imported critical-attribute set to exactly Scrutiny's
+        // current list. If upstream Scrutiny updates their table (new
+        // Backblaze quarterly report → new flagged attributes), this
+        // test fails and the operator is reminded to re-run
+        // scripts/extract_smart_attribute_metadata.py and update both
+        // CRITICAL_ATA_ATTRIBUTES here and the WebUI TS file.
+        let ids: Vec<u32> = CRITICAL_ATA_ATTRIBUTES.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![5, 10, 184, 187, 188, 196, 197, 198, 201]);
     }
 
     fn bcachefs_health(devices: Vec<BcachefsDeviceHealth>) -> BcachefsHealth {
