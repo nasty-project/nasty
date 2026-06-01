@@ -137,6 +137,29 @@ pub struct DiskHealth {
     /// including SAS drives reached via `-d megaraid,N`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scsi: Option<ScsiHealth>,
+    /// ATA / SATA-specific summary fields not captured by the generic
+    /// attribute table. `Some` only on ATA drives that smartctl could
+    /// query natively (drives reached via `sat+megaraid` and other
+    /// pass-throughs typically leave `interface_speed` unpopulated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ata: Option<AtaHealth>,
+}
+
+/// ATA / SATA summary fields complementing the generic SMART attribute
+/// table. The attribute table is the source of truth for everything
+/// SMART measures; this struct just carries the few non-attribute fields
+/// (interface link speed today, room to grow) that don't fit there.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AtaHealth {
+    /// Currently-negotiated SATA link speed string as smartctl reports
+    /// it (e.g. `"6.0 Gb/s"`, `"3.0 Gb/s"`). When this is below
+    /// `interface_speed_max` the link has trained down — often a cable,
+    /// backplane, or controller-port problem worth investigating.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_speed_current: Option<String>,
+    /// Maximum link speed the drive can negotiate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_speed_max: Option<String>,
 }
 
 /// NVMe SMART health information, parsed from smartctl's
