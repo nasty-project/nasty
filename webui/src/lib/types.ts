@@ -609,6 +609,12 @@ export interface NetIfStats {
 
 export interface DiskHealth {
 	device: string;
+	/** smartctl transport flag used to reach this drive (`megaraid,0`,
+	 * `sat+megaraid,2`, `areca,3`). `undefined` for drives reachable via
+	 * smartctl's default transport. Together with `device` it uniquely
+	 * identifies a physical drive — multiple drives behind a RAID
+	 * controller share the same path but have distinct transports. */
+	transport?: string;
 	ata_port?: string;
 	controller_pci?: string;
 	controller_name?: string;

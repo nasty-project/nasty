@@ -340,11 +340,13 @@ fn evaluate_rules(
                                 metric: rule.metric.clone(),
                                 message: format!(
                                     "Disk {} temperature at {}°C (threshold: {:.0}°C)",
-                                    disk.device, temp, rule.threshold
+                                    disk.label(),
+                                    temp,
+                                    rule.threshold
                                 ),
                                 current_value: val,
                                 threshold: rule.threshold,
-                                source: disk.device.clone(),
+                                source: disk.label(),
                             });
                         }
                     }
@@ -370,10 +372,10 @@ fn evaluate_rules(
                             rule_name: rule.name.clone(),
                             severity: rule.severity.clone(),
                             metric: rule.metric.clone(),
-                            message: format!("Disk {} SMART health check FAILED", disk.device),
+                            message: format!("Disk {} SMART health check FAILED", disk.label()),
                             current_value: 0.0,
                             threshold: rule.threshold,
-                            source: disk.device.clone(),
+                            source: disk.label(),
                         });
                     }
                 }
@@ -582,6 +584,12 @@ pub struct FsUsage {
 #[derive(Debug)]
 pub struct DiskHealthSummary {
     pub device: String,
+    /// smartctl transport that reached this drive. Mirrors
+    /// `DiskHealth::transport`. Required for alert source uniqueness:
+    /// multiple physical drives behind a RAID controller share the same
+    /// `device` path, so the (device, transport) pair is the actual
+    /// physical-drive key.
+    pub transport: Option<String>,
     pub temperature_c: Option<i32>,
     pub health_passed: bool,
     /// Mirror of `DiskHealth::smart_status`. Carried into the summary so
@@ -589,6 +597,19 @@ pub struct DiskHealthSummary {
     /// "UNAVAILABLE" (don't alert — smartctl couldn't read SMART, that's
     /// not the same as a confirmed health failure).
     pub smart_status: String,
+}
+
+impl DiskHealthSummary {
+    /// Display label for the (device, transport) pair, matching
+    /// smartctl's own `info_name` convention (`/dev/sda [megaraid,0]`).
+    /// Used as the alert `source` so megaraid-attached drives don't
+    /// collapse to one alert per `/dev/sda`.
+    pub fn label(&self) -> String {
+        match &self.transport {
+            Some(t) => format!("{} [{}]", self.device, t),
+            None => self.device.clone(),
+        }
+    }
 }
 
 /// Kernel error data for alert evaluation.
@@ -1064,18 +1085,21 @@ mod tests {
         let disks = vec![
             DiskHealthSummary {
                 device: "sda".into(),
+                transport: None,
                 temperature_c: Some(60),
                 health_passed: true,
                 smart_status: "PASSED".into(),
             },
             DiskHealthSummary {
                 device: "sdb".into(),
+                transport: None,
                 temperature_c: None, // skipped
                 health_passed: true,
                 smart_status: "PASSED".into(),
             },
             DiskHealthSummary {
                 device: "sdc".into(),
+                transport: None,
                 temperature_c: Some(45), // below threshold
                 health_passed: true,
                 smart_status: "PASSED".into(),
@@ -1100,12 +1124,14 @@ mod tests {
         let disks = vec![
             DiskHealthSummary {
                 device: "sda".into(),
+                transport: None,
                 temperature_c: None,
                 health_passed: true,
                 smart_status: "PASSED".into(),
             },
             DiskHealthSummary {
                 device: "sdb".into(),
+                transport: None,
                 temperature_c: None,
                 health_passed: false,
                 smart_status: "FAILED".into(),
@@ -1125,6 +1151,46 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_rules_smart_health_distinguishes_drives_behind_raid_controller() {
+        // Two physical drives behind a single MegaRAID controller share
+        // the same block device path (/dev/sda) but have distinct
+        // smartctl transport flags. If the alert source were just
+        // `device`, a single failing drive would dedupe with the
+        // healthy one and the operator would lose which slot is bad.
+        // The `(device, transport)` pair must produce distinct alert
+        // sources.
+        let r = rule(AlertMetric::SmartHealth, AlertCondition::Equals, 1.0);
+        let disks = vec![
+            DiskHealthSummary {
+                device: "/dev/sda".into(),
+                transport: Some("megaraid,0".into()),
+                temperature_c: None,
+                health_passed: false,
+                smart_status: "FAILED".into(),
+            },
+            DiskHealthSummary {
+                device: "/dev/sda".into(),
+                transport: Some("megaraid,1".into()),
+                temperature_c: None,
+                health_passed: false,
+                smart_status: "FAILED".into(),
+            },
+        ];
+        let alerts = evaluate_rules(
+            &[r],
+            &zero_stats(),
+            &[],
+            &disks,
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace::default(),
+        );
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0].source, "/dev/sda [megaraid,0]");
+        assert_eq!(alerts[1].source, "/dev/sda [megaraid,1]");
+    }
+
+    #[test]
     fn evaluate_rules_smart_health_skips_unavailable_disks() {
         // Regression for #349: disks with smart_status="UNAVAILABLE"
         // (smartctl couldn't read SMART — USB-SATA bridge that needs
@@ -1135,6 +1201,7 @@ mod tests {
         let r = rule(AlertMetric::SmartHealth, AlertCondition::Equals, 1.0);
         let disks = vec![DiskHealthSummary {
             device: "sdb".into(),
+            transport: None,
             temperature_c: None,
             health_passed: false,
             smart_status: "UNAVAILABLE".into(),

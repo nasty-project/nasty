@@ -433,12 +433,138 @@ struct LsblkDisk {
 pub const SMART_STATUS_UNAVAILABLE: &str = "UNAVAILABLE";
 
 pub async fn disk_health() -> Vec<DiskHealth> {
-    let disks = enumerate_disks().await;
-    let mut results = Vec::with_capacity(disks.len());
-    for disk in disks {
-        results.push(build_disk_health(disk).await);
+    // Two-stage enumeration:
+    //   1. `smartctl --scan-open -j` is the authoritative SMART source.
+    //      It's the only way to discover physical drives behind RAID
+    //      controllers (megaraid, areca, 3ware, cciss…) where one block
+    //      device path fronts many drives, each reachable only with a
+    //      transport flag like `-d megaraid,N`. For direct-attach
+    //      SATA/NVMe it returns one endpoint per device.
+    //   2. lsblk-discovered block devices that scan-open did NOT surface
+    //      still get a row with smart_status=UNAVAILABLE. Covers
+    //      USB-SATA bridges that need `-d sat`, fresh / unformatted
+    //      drives smartctl rejects before lsblk does, and any case
+    //      where smartctl is missing entirely. This preserves the #349
+    //      guarantee that every block device shows up somewhere.
+    let endpoints = scan_smartctl_endpoints().await;
+    let lsblk_disks = enumerate_disks().await;
+    let scan_paths: std::collections::HashSet<String> =
+        endpoints.iter().map(|e| e.device.clone()).collect();
+
+    let mut results = Vec::with_capacity(endpoints.len() + lsblk_disks.len());
+    // Index lsblk hits by path so single-endpoint paths can borrow
+    // model/serial/size as fallback when smartctl returns blanks. Multi-
+    // endpoint paths (megaraid) skip the fallback — lsblk only knows the
+    // RAID volume's metadata, not the physical drives behind it.
+    let mut lsblk_by_path: std::collections::HashMap<String, &LsblkDisk> =
+        lsblk_disks.iter().map(|d| (d.device.clone(), d)).collect();
+    let endpoint_count_by_path: std::collections::HashMap<String, usize> = {
+        let mut m: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for e in &endpoints {
+            *m.entry(e.device.clone()).or_default() += 1;
+        }
+        m
+    };
+
+    for endpoint in &endpoints {
+        let hint = if endpoint_count_by_path
+            .get(&endpoint.device)
+            .copied()
+            .unwrap_or(1)
+            == 1
+        {
+            lsblk_by_path.remove(&endpoint.device)
+        } else {
+            None
+        };
+        results.push(build_disk_health(endpoint, hint).await);
+    }
+    for (_, disk) in lsblk_by_path {
+        if scan_paths.contains(&disk.device) {
+            continue;
+        }
+        results.push(build_disk_health_unreachable(disk));
     }
     results
+}
+
+/// One SMART-reachable endpoint discovered by `smartctl --scan-open -j`.
+/// `device` is the block device path smartctl reports; `transport` is
+/// the `-d` flag needed to talk to it (`None` for the default transport).
+#[derive(Debug, Clone)]
+struct SmartctlEndpoint {
+    device: String,
+    transport: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScanResult {
+    #[serde(default)]
+    devices: Vec<SmartctlScanDevice>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlScanDevice {
+    #[serde(default)]
+    name: String,
+    /// smartctl's `type` carries the `-d` flag. Direct-attach SATA shows
+    /// `"sat"`; NVMe shows `"nvme"`; megaraid-tunneled SAT shows
+    /// `"sat+megaraid,0"`. We strip `"sat"` / `"nvme"` (smartctl's
+    /// defaults) so direct-attach drives keep `transport: None`.
+    #[serde(default, rename = "type")]
+    type_: String,
+    /// Empty string when the open succeeded. Non-empty means smartctl
+    /// could enumerate the slot but couldn't open it (drive missing,
+    /// controller refused, slot empty) — skip these.
+    #[serde(default)]
+    open_error: String,
+}
+
+async fn scan_smartctl_endpoints() -> Vec<SmartctlEndpoint> {
+    let output = match tokio::process::Command::new("smartctl")
+        .args(["--scan-open", "-j"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    parse_scan_open(&output.stdout)
+}
+
+fn parse_scan_open(stdout: &[u8]) -> Vec<SmartctlEndpoint> {
+    let scan: SmartctlScanResult = match serde_json::from_slice(stdout) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    scan.devices
+        .into_iter()
+        .filter(|d| d.open_error.is_empty() && !d.name.is_empty())
+        .map(|d| SmartctlEndpoint {
+            device: d.name,
+            transport: parse_transport(&d.type_),
+        })
+        .collect()
+}
+
+/// Strip smartctl's default transports so direct-attach drives stay
+/// `None`. A pure `"sat"`, `"nvme"`, `"ata"` or `"scsi"` carries no
+/// useful info (smartctl would have chosen the same flag by default
+/// for the corresponding protocol); anything else (`megaraid,*`,
+/// `sat+megaraid,*`, `areca,*`, `cciss,*`, …) we keep verbatim so
+/// query_smartctl can pass it through with `-d`.
+fn parse_transport(type_field: &str) -> Option<String> {
+    let trimmed = type_field.trim();
+    if trimmed.is_empty()
+        || trimmed == "sat"
+        || trimmed == "nvme"
+        || trimmed == "ata"
+        || trimmed == "scsi"
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 async fn enumerate_disks() -> Vec<LsblkDisk> {
@@ -501,14 +627,30 @@ async fn enumerate_disks() -> Vec<LsblkDisk> {
         .collect()
 }
 
-async fn build_disk_health(disk: LsblkDisk) -> DiskHealth {
-    let dev_name = disk.device.strip_prefix("/dev/").unwrap_or(&disk.device);
-    let (ata_port, controller_pci) = resolve_device_path(dev_name);
+async fn build_disk_health(
+    endpoint: &SmartctlEndpoint,
+    lsblk_hint: Option<&LsblkDisk>,
+) -> DiskHealth {
+    let dev_name = endpoint
+        .device
+        .strip_prefix("/dev/")
+        .unwrap_or(&endpoint.device);
+    // Sysfs lookups make sense only for direct-attach drives — for
+    // RAID-tunneled drives the block device path is the controller's
+    // logical volume, not the physical drive, so `/sys/block/sda/device`
+    // resolves to the RAID controller (already correct for
+    // controller_pci, but ata_port wouldn't be meaningful).
+    let (ata_port, controller_pci) = if endpoint.transport.is_none() {
+        resolve_device_path(dev_name)
+    } else {
+        (None, None)
+    };
     let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
 
-    match query_smartctl(&disk.device).await {
+    match query_smartctl(&endpoint.device, endpoint.transport.as_deref()).await {
         Some(s) => DiskHealth {
-            device: disk.device,
+            device: endpoint.device.clone(),
+            transport: endpoint.transport.clone(),
             ata_port,
             controller_pci,
             controller_name,
@@ -516,13 +658,21 @@ async fn build_disk_health(disk: LsblkDisk) -> DiskHealth {
             // (lsblk reads sysfs's `model`, which truncates / pads), but
             // for unfamiliar transports lsblk sometimes wins — prefer
             // smartctl, fall back to lsblk, then to "Unknown".
-            model: s.model.filter(|s| !s.is_empty()).unwrap_or(disk.model),
-            serial: s.serial.filter(|s| !s.is_empty()).unwrap_or(disk.serial),
+            model: s
+                .model
+                .filter(|s| !s.is_empty())
+                .or_else(|| lsblk_hint.map(|d| d.model.clone()))
+                .unwrap_or_else(|| "Unknown".into()),
+            serial: s
+                .serial
+                .filter(|s| !s.is_empty())
+                .or_else(|| lsblk_hint.map(|d| d.serial.clone()))
+                .unwrap_or_else(|| "Unknown".into()),
             firmware: s.firmware.unwrap_or_else(|| "Unknown".into()),
             capacity_bytes: if s.capacity_bytes > 0 {
                 s.capacity_bytes
             } else {
-                disk.size_bytes
+                lsblk_hint.map(|d| d.size_bytes).unwrap_or(0)
             },
             temperature_c: s.temperature_c,
             power_on_hours: s.power_on_hours,
@@ -535,25 +685,55 @@ async fn build_disk_health(disk: LsblkDisk) -> DiskHealth {
             attributes: s.attributes,
             nvme: s.nvme,
         },
-        None => DiskHealth {
-            device: disk.device,
-            ata_port,
-            controller_pci,
-            controller_name,
-            model: disk.model,
-            serial: disk.serial,
-            firmware: "Unknown".into(),
-            capacity_bytes: disk.size_bytes,
-            temperature_c: None,
-            power_on_hours: None,
-            // Distinct from FAILED so the WebUI can style + the alert
-            // rules can skip. See SMART_STATUS_UNAVAILABLE.
-            health_passed: false,
-            smart_status: SMART_STATUS_UNAVAILABLE.to_string(),
-            attributes: Vec::new(),
-            nvme: None,
-        },
+        None => build_disk_health_unreachable_for_endpoint(endpoint, lsblk_hint),
     }
+}
+
+fn build_disk_health_unreachable_for_endpoint(
+    endpoint: &SmartctlEndpoint,
+    lsblk_hint: Option<&LsblkDisk>,
+) -> DiskHealth {
+    let dev_name = endpoint
+        .device
+        .strip_prefix("/dev/")
+        .unwrap_or(&endpoint.device);
+    let (ata_port, controller_pci) = if endpoint.transport.is_none() {
+        resolve_device_path(dev_name)
+    } else {
+        (None, None)
+    };
+    let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
+    DiskHealth {
+        device: endpoint.device.clone(),
+        transport: endpoint.transport.clone(),
+        ata_port,
+        controller_pci,
+        controller_name,
+        model: lsblk_hint
+            .map(|d| d.model.clone())
+            .unwrap_or_else(|| "Unknown".into()),
+        serial: lsblk_hint
+            .map(|d| d.serial.clone())
+            .unwrap_or_else(|| "Unknown".into()),
+        firmware: "Unknown".into(),
+        capacity_bytes: lsblk_hint.map(|d| d.size_bytes).unwrap_or(0),
+        temperature_c: None,
+        power_on_hours: None,
+        // Distinct from FAILED so the WebUI can style + the alert
+        // rules can skip. See SMART_STATUS_UNAVAILABLE.
+        health_passed: false,
+        smart_status: SMART_STATUS_UNAVAILABLE.to_string(),
+        attributes: Vec::new(),
+        nvme: None,
+    }
+}
+
+fn build_disk_health_unreachable(disk: &LsblkDisk) -> DiskHealth {
+    let endpoint = SmartctlEndpoint {
+        device: disk.device.clone(),
+        transport: None,
+    };
+    build_disk_health_unreachable_for_endpoint(&endpoint, Some(disk))
 }
 
 /// SMART-derived fields, lifted out of `DiskHealth` so the no-data path
@@ -570,12 +750,14 @@ struct SmartReport {
     nvme: Option<NvmeHealth>,
 }
 
-async fn query_smartctl(device: &str) -> Option<SmartReport> {
-    let output = tokio::process::Command::new("smartctl")
-        .args(["-a", "--json=c", device])
-        .output()
-        .await
-        .ok()?;
+async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartReport> {
+    let mut cmd = tokio::process::Command::new("smartctl");
+    cmd.args(["-a", "--json=c"]);
+    if let Some(t) = transport {
+        cmd.args(["-d", t]);
+    }
+    cmd.arg(device);
+    let output = cmd.output().await.ok()?;
 
     let json: SmartctlJson = serde_json::from_slice(&output.stdout).ok()?;
 
@@ -792,5 +974,120 @@ mod tests {
         let entry = log.table.first().expect("table has at least one entry");
         let status = entry.status_field.as_ref().expect("status_field on entry");
         assert_eq!(status.string, "Invalid Field in Command");
+    }
+
+    #[test]
+    fn parse_scan_open_real_megaraid_dump() {
+        // Real `smartctl --scan-open -j` from a system with a MegaRAID
+        // controller. Two important real-world details the synthetic
+        // fixture got wrong:
+        //   1. Physical megaraid drives address `/dev/bus/0` (the
+        //      smartctl management device), NOT the `/dev/sda` block
+        //      device that holds the RAID volume. We don't dedupe with
+        //      lsblk on these because lsblk doesn't know about
+        //      /dev/bus/N.
+        //   2. The RAID logical volume itself shows up separately as
+        //      `/dev/sda` with `type: "scsi"` — the smartctl default
+        //      for SAS/SCSI targets. `scsi` must strip to `None` so
+        //      the UI doesn't show a redundant `[scsi]` chip next to
+        //      what's already visibly a SCSI device.
+        let raw = include_bytes!("../fixtures/scan_open_megaraid.json");
+        let endpoints = parse_scan_open(raw);
+        assert_eq!(endpoints.len(), 4);
+
+        // RAID logical volume — default scsi transport stripped.
+        let raid_volume = endpoints
+            .iter()
+            .find(|e| e.device == "/dev/sda")
+            .expect("/dev/sda RAID volume entry");
+        assert!(
+            raid_volume.transport.is_none(),
+            "scsi is smartctl's default for SCSI targets — must not chip the UI"
+        );
+
+        // Three physical drives addressed via /dev/bus/0 with distinct
+        // megaraid slot transports. The (device, transport) pair is
+        // the physical drive identity.
+        let megaraid: Vec<&SmartctlEndpoint> = endpoints
+            .iter()
+            .filter(|e| e.device == "/dev/bus/0")
+            .collect();
+        assert_eq!(megaraid.len(), 3);
+        assert_eq!(megaraid[0].transport.as_deref(), Some("sat+megaraid,0"));
+        assert_eq!(megaraid[1].transport.as_deref(), Some("sat+megaraid,1"));
+        assert_eq!(megaraid[2].transport.as_deref(), Some("sat+megaraid,2"));
+    }
+
+    #[test]
+    fn parse_scan_open_filters_endpoints_with_open_error() {
+        // smartctl emits `open_error` on entries it could enumerate
+        // but not open (empty controller slots, drives that returned
+        // an error on probe, etc.). Real smartctl 7.4 omits the field
+        // entirely on successful opens (the megaraid fixture above
+        // has no `open_error` keys at all), so the parser must:
+        //   * treat absent open_error as success (serde default = "")
+        //   * filter out entries where it IS present and non-empty
+        // Inline JSON because no real-world fixture in the set
+        // happens to contain a populated open_error.
+        let raw = br#"{
+            "devices": [
+                {"name": "/dev/sda", "type": "sat"},
+                {"name": "/dev/bus/0", "type": "megaraid,7",
+                 "open_error": "DEVICESCAN failed: empty slot"},
+                {"name": "", "type": "nvme"}
+            ]
+        }"#;
+        let endpoints = parse_scan_open(raw);
+        assert_eq!(endpoints.len(), 1, "only the unfilled-error entry survives");
+        assert_eq!(endpoints[0].device, "/dev/sda");
+    }
+
+    #[test]
+    fn megaraid_tunneled_sat_drive_parses_through_existing_ata_path() {
+        // The whole point of scan-open enumeration: once smartctl is
+        // invoked with the right `-d sat+megaraid,N` flag, the JSON it
+        // returns is ordinary ATA SMART. No new parser needed — the
+        // existing ata_smart_attributes path handles it. This fixture
+        // is a real `smartctl -d megaraid,0 -a /dev/sda --json=c` dump
+        // from a Samsung 860 EVO behind a MegaRAID controller.
+        let j = parse(include_str!("../fixtures/ata_megaraid_sat.json"));
+        let attrs = j.ata_smart_attributes.expect("ata attributes parse").table;
+        // Wear_Leveling_Count (id 177) is the headline operator metric
+        // on Samsung SSDs — normalized value started at 100 and is now
+        // 32, meaning ~68% of the rated write endurance has been used.
+        let wear = attrs
+            .iter()
+            .find(|a| a.id == 177)
+            .expect("wear leveling attribute present");
+        assert_eq!(wear.value, 32);
+        assert_eq!(wear.raw.as_ref().map(|r| r.value), Some(1232));
+        // No NVMe block on an ATA device.
+        assert!(j.nvme_log.is_none());
+    }
+
+    #[test]
+    fn parse_transport_strips_smartctl_defaults() {
+        // Default protocol transports carry no info — keep them as None
+        // so direct-attach drives don't get a useless `[sat]` chip.
+        // `scsi` is included because it's the smartctl default for
+        // SAS / RAID-volume targets — a real /dev/sda RAID volume
+        // shows up as `type: "scsi"` in --scan-open and a redundant
+        // `[scsi]` chip would just be visual noise.
+        assert_eq!(parse_transport(""), None);
+        assert_eq!(parse_transport("sat"), None);
+        assert_eq!(parse_transport("nvme"), None);
+        assert_eq!(parse_transport("ata"), None);
+        assert_eq!(parse_transport("scsi"), None);
+        // Anything that needs `-d <flag>` to actually open the device
+        // must round-trip verbatim.
+        assert_eq!(
+            parse_transport("megaraid,0"),
+            Some("megaraid,0".to_string())
+        );
+        assert_eq!(
+            parse_transport("sat+megaraid,7"),
+            Some("sat+megaraid,7".to_string())
+        );
+        assert_eq!(parse_transport("areca,3"), Some("areca,3".to_string()));
     }
 }

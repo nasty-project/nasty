@@ -95,6 +95,14 @@ pub struct NetIfStats {
 pub struct DiskHealth {
     /// Block device path (e.g. `/dev/sda`).
     pub device: String,
+    /// smartctl transport flag used to reach this drive, e.g.
+    /// `megaraid,0`, `sat+megaraid,2`, `areca,3`. `None` for drives
+    /// reachable via smartctl's default transport (direct-attach
+    /// SATA/NVMe). The pair `(device, transport)` uniquely identifies a
+    /// physical drive — multiple drives behind a RAID controller share
+    /// the same block device path but have distinct transport flags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
     /// ATA/SATA port identifier (e.g. `ata5`), if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ata_port: Option<String>,

@@ -131,6 +131,19 @@
 		return disks.find(d => d.device === dev.path || dev.path.startsWith(d.device));
 	}
 
+	// Identity for expand/collapse and Svelte keying. A block-device path
+	// is no longer unique because RAID-tunneled drives share /dev/sda;
+	// the (device, transport) pair is the physical-drive key.
+	function diskKey(d: DiskHealth): string {
+		return d.transport ? `${d.device}@${d.transport}` : d.device;
+	}
+
+	// Display label matching smartctl's own `info_name` convention so
+	// operators see the same string they'd see running smartctl by hand.
+	function diskLabel(d: DiskHealth): string {
+		return d.transport ? `${d.device} [${d.transport}]` : d.device;
+	}
+
 	// Group disks by controller for Topology tab
 	interface ControllerGroup {
 		pci: string;
@@ -240,8 +253,9 @@
 		{:else if disks.length === 0}
 			<p class="text-sm text-muted-foreground">No disks detected or smartctl not available.</p>
 		{:else}
-			{#each disks as disk}
+			{#each disks as disk (diskKey(disk))}
 				{@const unavailable = disk.smart_status === 'UNAVAILABLE'}
+				{@const key = diskKey(disk)}
 				<Card class="mb-4 {!disk.health_passed && !unavailable ? 'border-red-900' : ''}">
 					<CardContent class="pt-5">
 						<div class="mb-4 flex items-center gap-4">
@@ -255,13 +269,16 @@
 							</span>
 							<div class="flex flex-1 items-baseline gap-3">
 								<strong class="font-mono">{disk.device}</strong>
+								{#if disk.transport}
+									<span class="rounded bg-muted px-1.5 py-0.5 text-xs font-mono text-muted-foreground" title="smartctl transport flag — physical drive behind a RAID controller">{disk.transport}</span>
+								{/if}
 								{#if disk.ata_port}
 									<span class="rounded bg-muted px-1.5 py-0.5 text-xs font-mono text-muted-foreground">{disk.ata_port}</span>
 								{/if}
 								<span class="text-sm text-muted-foreground">{disk.model}</span>
 							</div>
-							<Button variant="secondary" size="xs" onclick={() => expandedDisk = expandedDisk === disk.device ? null : disk.device}>
-								{expandedDisk === disk.device ? 'Hide' : 'Details'}
+							<Button variant="secondary" size="xs" onclick={() => expandedDisk = expandedDisk === key ? null : key}>
+								{expandedDisk === key ? 'Hide' : 'Details'}
 							</Button>
 						</div>
 
@@ -294,7 +311,7 @@
 							{/if}
 						</div>
 
-						{#if expandedDisk === disk.device && disk.attributes.length > 0}
+						{#if expandedDisk === key && disk.attributes.length > 0}
 							<div class="mt-5 border-t border-border pt-4">
 								<h4 class="mb-3 text-xs uppercase tracking-wide text-muted-foreground">SMART Attributes</h4>
 								<table class="w-full text-xs">
@@ -332,7 +349,7 @@
 									</tbody>
 								</table>
 							</div>
-						{:else if expandedDisk === disk.device && disk.nvme}
+						{:else if expandedDisk === key && disk.nvme}
 							{@const n = disk.nvme}
 							{@const spareLow = n.available_spare_percent <= n.available_spare_threshold_percent}
 							<div class="mt-5 border-t border-border pt-4">
@@ -409,7 +426,7 @@
 									{/if}
 								</div>
 							</div>
-						{:else if expandedDisk === disk.device}
+						{:else if expandedDisk === key}
 							<p class="mt-4 text-sm text-muted-foreground">No SMART attributes available (SAS drives use a different format).</p>
 						{/if}
 					</CardContent>
@@ -440,10 +457,10 @@
 							</tr>
 						</thead>
 						<tbody>
-							{#each group.disks as disk}
+							{#each group.disks as disk (diskKey(disk))}
 								<tr class="border-b border-border">
 									<td class="p-3 font-mono text-sm font-semibold">{disk.ata_port ?? '—'}</td>
-									<td class="p-3 font-mono text-sm">{disk.device}</td>
+									<td class="p-3 font-mono text-sm">{diskLabel(disk)}</td>
 									<td class="p-3 text-sm">{disk.model}</td>
 									<td class="p-3 font-mono text-xs text-muted-foreground">{disk.serial}</td>
 									<td class="p-3 text-sm">{formatBytes(disk.capacity_bytes)}</td>
