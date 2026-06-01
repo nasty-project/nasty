@@ -1865,8 +1865,7 @@ impl FilesystemService {
 
                     // Transport needs to be resolved before classify so the
                     // SAS path can use it.
-                    let (rotational, device_class) =
-                        classify(name, rota, transport.as_deref());
+                    let (rotational, device_class) = classify(name, rota, transport.as_deref());
 
                     if dev_type == "disk" || dev_type == "part" {
                         let path = format!("/dev/{name}");
