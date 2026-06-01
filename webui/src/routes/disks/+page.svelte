@@ -95,6 +95,23 @@
 		return `${hours}h`;
 	}
 
+	// NVMe "data units" are 1000 × 512-byte LBAs per spec (512,000 bytes
+	// per unit). Most consumer drives still report in this fixed unit
+	// regardless of formatted_lba_size, so the multiplication is safe.
+	const NVME_DATA_UNIT_BYTES = 512_000;
+	function formatNvmeDataUnits(units: number): string {
+		return formatBytes(units * NVME_DATA_UNIT_BYTES);
+	}
+
+	function formatMinutes(minutes: number): string {
+		if (minutes === 0) return '0';
+		const days = Math.floor(minutes / 1440);
+		const hours = Math.floor((minutes % 1440) / 60);
+		if (days > 0) return `${days}d ${hours}h`;
+		if (hours > 0) return `${hours}h ${minutes % 60}m`;
+		return `${minutes}m`;
+	}
+
 	function deviceClassBadge(cls: string): string {
 		switch (cls) {
 			case 'nvme': return 'bg-purple-950 text-purple-400';
@@ -315,8 +332,82 @@
 									</tbody>
 								</table>
 							</div>
+						{:else if expandedDisk === disk.device && disk.nvme}
+							{@const n = disk.nvme}
+							{@const spareLow = n.available_spare_percent <= n.available_spare_threshold_percent}
+							<div class="mt-5 border-t border-border pt-4">
+								<h4 class="mb-3 text-xs uppercase tracking-wide text-muted-foreground">NVMe Health</h4>
+								<div class="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-3 lg:grid-cols-4">
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Endurance Used</span>
+										<span class="text-sm font-semibold {n.percentage_used >= 100 ? 'text-red-400' : n.percentage_used >= 80 ? 'text-amber-500' : ''}">
+											{n.percentage_used}%
+										</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Available Spare</span>
+										<span class="text-sm font-semibold {spareLow ? 'text-red-400' : ''}">
+											{n.available_spare_percent}% <span class="text-xs text-muted-foreground">(threshold {n.available_spare_threshold_percent}%)</span>
+										</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Critical Warning</span>
+										<span class="text-sm font-semibold {n.critical_warning !== 0 ? 'text-red-400' : 'text-green-400'}">
+											{n.critical_warning === 0 ? 'None' : `0x${n.critical_warning.toString(16).padStart(2, '0')}`}
+										</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Media Errors</span>
+										<span class="text-sm font-semibold {n.media_errors > 0 ? 'text-red-400' : ''}">{n.media_errors}</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Data Written</span>
+										<span class="text-sm font-semibold">{formatNvmeDataUnits(n.data_units_written)}</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Data Read</span>
+										<span class="text-sm font-semibold">{formatNvmeDataUnits(n.data_units_read)}</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Power Cycles</span>
+										<span class="text-sm font-semibold">{n.power_cycles.toLocaleString()}</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Unsafe Shutdowns</span>
+										<span class="text-sm font-semibold">{n.unsafe_shutdowns.toLocaleString()}</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Controller Busy</span>
+										<span class="text-sm font-semibold">{formatMinutes(n.controller_busy_minutes)}</span>
+									</div>
+									<div class="flex flex-col">
+										<span class="text-[0.7rem] uppercase text-muted-foreground">Error Log Entries</span>
+										<span class="text-sm font-semibold">{n.num_err_log_entries.toLocaleString()}</span>
+									</div>
+									{#if n.warning_temp_minutes > 0}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Above Warning Temp</span>
+											<span class="text-sm font-semibold text-amber-500">{formatMinutes(n.warning_temp_minutes)}</span>
+										</div>
+									{/if}
+									{#if n.critical_comp_minutes > 0}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Above Critical Temp</span>
+											<span class="text-sm font-semibold text-red-400">{formatMinutes(n.critical_comp_minutes)}</span>
+										</div>
+									{/if}
+									{#if n.temperature_sensors_c.length > 1}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Sensors</span>
+											<span class="text-sm font-semibold">
+												{n.temperature_sensors_c.map((t, i) => t == null ? `S${i + 1}: —` : `S${i + 1}: ${formatTemp(t)}`).join('  ')}
+											</span>
+										</div>
+									{/if}
+								</div>
+							</div>
 						{:else if expandedDisk === disk.device}
-							<p class="mt-4 text-sm text-muted-foreground">No SMART attributes available (NVMe and SAS drives use a different format).</p>
+							<p class="mt-4 text-sm text-muted-foreground">No SMART attributes available (SAS drives use a different format).</p>
 						{/if}
 					</CardContent>
 				</Card>

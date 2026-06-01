@@ -229,6 +229,96 @@ fn render_smart(out: &mut String, disks: &[DiskHealth]) {
             );
         }
     }
+    render_smart_nvme(out, disks);
+}
+
+/// NVMe-specific SMART metrics. Emitted only when the drive returned an
+/// `nvme_smart_health_information_log`, so SATA / SAS drives produce no
+/// series and Prometheus alerts can match on metric presence.
+fn render_smart_nvme(out: &mut String, disks: &[DiskHealth]) {
+    if !disks.iter().any(|d| d.nvme.is_some()) {
+        return;
+    }
+    header(
+        out,
+        "nasty_disk_nvme_percentage_used",
+        "gauge",
+        "NVMe endurance consumed (0=new, 100=nominal end of life)",
+    );
+    for d in disks {
+        if let Some(n) = &d.nvme {
+            metric_line(
+                out,
+                "nasty_disk_nvme_percentage_used",
+                &[("device", &d.device)],
+                n.percentage_used as f64,
+            );
+        }
+    }
+    header(
+        out,
+        "nasty_disk_nvme_available_spare_percent",
+        "gauge",
+        "NVMe remaining spare blocks as a percentage of initial reserve",
+    );
+    for d in disks {
+        if let Some(n) = &d.nvme {
+            metric_line(
+                out,
+                "nasty_disk_nvme_available_spare_percent",
+                &[("device", &d.device)],
+                n.available_spare_percent as f64,
+            );
+        }
+    }
+    header(
+        out,
+        "nasty_disk_nvme_media_errors_total",
+        "counter",
+        "NVMe media and data integrity errors detected by the controller",
+    );
+    for d in disks {
+        if let Some(n) = &d.nvme {
+            metric_line(
+                out,
+                "nasty_disk_nvme_media_errors_total",
+                &[("device", &d.device)],
+                n.media_errors as f64,
+            );
+        }
+    }
+    header(
+        out,
+        "nasty_disk_nvme_unsafe_shutdowns_total",
+        "counter",
+        "NVMe shutdowns where the drive lost power without graceful notify",
+    );
+    for d in disks {
+        if let Some(n) = &d.nvme {
+            metric_line(
+                out,
+                "nasty_disk_nvme_unsafe_shutdowns_total",
+                &[("device", &d.device)],
+                n.unsafe_shutdowns as f64,
+            );
+        }
+    }
+    header(
+        out,
+        "nasty_disk_nvme_critical_warning",
+        "gauge",
+        "NVMe critical-warning bit field (0=healthy, non-zero=alarm)",
+    );
+    for d in disks {
+        if let Some(n) = &d.nvme {
+            metric_line(
+                out,
+                "nasty_disk_nvme_critical_warning",
+                &[("device", &d.device)],
+                n.critical_warning as f64,
+            );
+        }
+    }
 }
 
 // ── bcachefs metrics ────────────────────────────────────────────
