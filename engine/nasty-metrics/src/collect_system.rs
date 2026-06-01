@@ -801,15 +801,21 @@ async fn build_disk_health(
         .device
         .strip_prefix("/dev/")
         .unwrap_or(&endpoint.device);
-    // Sysfs lookups make sense only for direct-attach drives — for
-    // RAID-tunneled drives the block device path is the controller's
-    // logical volume, not the physical drive, so `/sys/block/sda/device`
-    // resolves to the RAID controller (already correct for
-    // controller_pci, but ata_port wouldn't be meaningful).
+    // Resolution differs by how smartctl reaches the drive:
+    //   * Direct-attach (transport=None): walk /sys/block/<name>/device
+    //     for both ata_port and controller_pci.
+    //   * RAID-tunneled (transport=Some("megaraid,N"), etc.): the
+    //     "device" is /dev/bus/N, a smartctl management node — not a
+    //     block device, so /sys/block lookup is meaningless. The drive
+    //     has no meaningful ata_port (it's behind a SAS / SATA-tunneled
+    //     backplane), but the host controller IS a PCIe device and its
+    //     upstream link is the actual bandwidth ceiling for every
+    //     physical drive behind it. Walk /sys/class/scsi_host/hostN to
+    //     reach it.
     let (ata_port, controller_pci) = if endpoint.transport.is_none() {
         resolve_device_path(dev_name)
     } else {
-        (None, None)
+        (None, resolve_raid_host_pci(&endpoint.device))
     };
     let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
     let pcie_link = controller_pci.as_deref().and_then(resolve_pcie_link);
@@ -873,7 +879,7 @@ fn build_disk_health_unreachable_for_endpoint(
     let (ata_port, controller_pci) = if endpoint.transport.is_none() {
         resolve_device_path(dev_name)
     } else {
-        (None, None)
+        (None, resolve_raid_host_pci(&endpoint.device))
     };
     let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
     let pcie_link = controller_pci.as_deref().and_then(resolve_pcie_link);
@@ -1306,6 +1312,41 @@ fn resolve_pci_name(pci_addr: &str) -> Option<String> {
     } else {
         Some(desc.to_string())
     }
+}
+
+/// Resolve the PCI BDF for the SCSI host backing a RAID-tunneled
+/// smartctl device. Smartctl reaches drives behind a megaraid (or
+/// areca / cciss / 3ware) controller via `/dev/bus/N` — a management
+/// node, not a block device — so `/sys/block` lookups don't apply.
+/// Instead, walk `/sys/class/scsi_host/hostN` back to the kernel's
+/// PCI device representation of the controller.
+///
+/// Today this only handles the `/dev/bus/N` form smartctl uses for
+/// megaraid; areca / cciss / 3ware use different device-name
+/// conventions (`/dev/sgN`, `/dev/cciss/cNd0`, `/dev/twaN`) and would
+/// each need their own host-number extraction. The sysfs walk itself
+/// is generic — only the device → host-number translation differs.
+fn resolve_raid_host_pci(device: &str) -> Option<String> {
+    let host_num = device.strip_prefix("/dev/bus/")?.parse::<u32>().ok()?;
+    let resolved = std::fs::canonicalize(format!("/sys/class/scsi_host/host{host_num}")).ok()?;
+    extract_deepest_pci_bdf(resolved.to_str()?)
+}
+
+/// Pull the deepest (most-specific, leaf-ward) PCI BDF out of a sysfs
+/// device path. The kernel formats PCI components as full domain BDFs
+/// `0000:03:00.0`; we strip the canonical `0000:` domain to match the
+/// short-form BDF used by `resolve_device_path` and consumed by the
+/// lspci wrapper. Returns `None` for paths with no PCI components
+/// (devices on non-PCI buses — software iSCSI hosts, virtio, etc.).
+fn extract_deepest_pci_bdf(path: &str) -> Option<String> {
+    // Walk components leaf-to-root, return the first short-form BDF
+    // we find. "Last" semantically — but iterating in reverse lets
+    // us short-circuit on first hit.
+    path.split('/')
+        .rev()
+        .filter_map(|c| c.strip_prefix("0000:"))
+        .find(|s| s.contains(':') && s.contains('.'))
+        .map(str::to_string)
 }
 
 /// Read PCIe link state for a storage controller from sysfs. Returns
@@ -1791,6 +1832,41 @@ mod tests {
         assert!(parse_pcie_link("\n", "\n", "0\n", "0\n").is_none());
         // Garbage in width files (non-numeric).
         assert!(parse_pcie_link("8.0 GT/s\n", "8.0 GT/s\n", "x4\n", "4\n").is_none());
+    }
+
+    #[test]
+    fn extract_pci_bdf_picks_deepest_controller_in_path() {
+        // Real canonical sysfs path for a megaraid host. The walk
+        // should return the megaraid controller's BDF (01:00.0), not
+        // the upstream root-port (00:01.1). resolve_pcie_link will
+        // then read /sys/bus/pci/devices/0000:01:00.0/{current,max}_*.
+        let path = "/sys/devices/pci0000:00/0000:00:01.1/0000:01:00.0/host0";
+        assert_eq!(extract_deepest_pci_bdf(path).as_deref(), Some("01:00.0"));
+    }
+
+    #[test]
+    fn extract_pci_bdf_strips_canonical_domain_prefix() {
+        // Sysfs always emits the full domain (0000:); the rest of
+        // the codebase uses the short BDF form. Verify we hand back
+        // the short form so resolve_pcie_link / resolve_pci_name
+        // don't double-prefix the domain when building their paths.
+        let path = "/sys/devices/pci0000:00/0000:03:00.0/ata5/host5";
+        let bdf = extract_deepest_pci_bdf(path).expect("BDF present");
+        assert!(!bdf.starts_with("0000:"));
+        assert_eq!(bdf, "03:00.0");
+    }
+
+    #[test]
+    fn extract_pci_bdf_handles_paths_without_pci_components() {
+        // Software iSCSI hosts, virtio devices in some configs, and
+        // other non-PCI bus types yield paths with no BDF components.
+        // Return None so the caller's chain (controller_pci → name +
+        // pcie_link) all stays empty rather than spuriously firing.
+        assert_eq!(
+            extract_deepest_pci_bdf("/sys/devices/platform/some_iscsi/host7"),
+            None
+        );
+        assert_eq!(extract_deepest_pci_bdf(""), None);
     }
 
     #[test]
