@@ -6,6 +6,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { BlockDevice, DiskHealth, ProtocolStatus, SmartAttribute } from '$lib/types';
+	import { ataAttributeMetadata } from '$lib/smart_attribute_metadata';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -125,11 +126,14 @@
 		}
 	}
 
-	// SMART attribute IDs that warrant highlighting in the attribute
-	// table. 22 = Helium_Level (HGST/WD helium-filled spinners) — when
-	// it crosses its threshold the drive fails; treating it as critical
-	// matches how operators of He10/He12 drives think about it.
-	const criticalIds = new Set([5, 10, 22, 187, 188, 196, 197, 198]);
+	// "Critical" attribute flagging comes from `ATA_ATTRIBUTE_METADATA`
+	// — Scrutiny's table backed by Backblaze drive-stats failure-rate
+	// analysis. Helium_Level (id 22) is deliberately NOT in the set
+	// despite being failure-relevant: helium drift is gradual and
+	// detectable months ahead, and the dedicated Helium tile in the
+	// ATA panel does threshold-aware coloring; the row-highlight here
+	// is reserved for the attributes Backblaze's data shows are
+	// statistical predictors of imminent failure.
 
 	// A small subset of SMART attribute IDs we surface as ATA-panel
 	// tiles. The numbers are vendor-stable enough that picking by ID
@@ -410,13 +414,17 @@
 									</thead>
 									<tbody>
 										{#each disk.attributes as attr}
-											<tr class="{criticalIds.has(attr.id) ? 'bg-amber-500/5' : ''} {attr.failing ? 'bg-red-400/10' : ''}">
+											{@const meta = ataAttributeMetadata(attr.id, attr.name)}
+											{@const tooltip = meta.description + (meta.ideal === 'low' ? '\n\nHigher raw values indicate degradation.' : meta.ideal === 'high' ? '\n\nLower raw values indicate degradation.' : '')}
+											<tr class="{meta.critical ? 'bg-amber-500/5' : ''} {attr.failing ? 'bg-red-400/10' : ''}">
 												<td class="p-2 font-mono">{attr.id}</td>
-												<td class="p-2">{attr.name}</td>
+												<td class="p-2" title={tooltip}>{meta.name}</td>
 												<td class="p-2">{attr.value}</td>
 												<td class="p-2">{attr.worst}</td>
 												<td class="p-2">{attr.threshold}</td>
-												<td class="p-2 font-mono">{attr.raw_value}</td>
+												<td class="p-2 font-mono">
+													{attr.raw_value}{#if meta.ideal === 'low'}<span class="ml-1 text-[0.65rem] text-muted-foreground" title="Higher values indicate degradation">↑✗</span>{:else if meta.ideal === 'high'}<span class="ml-1 text-[0.65rem] text-muted-foreground" title="Lower values indicate degradation">↓✗</span>{/if}
+												</td>
 												<td class="p-2">
 													{#if attr.failing}
 														<span class="rounded bg-red-950 px-1.5 py-0.5 text-[0.7rem] font-bold text-red-400">FAIL</span>
