@@ -120,8 +120,71 @@ pub struct DiskHealth {
     pub health_passed: bool,
     /// Human-readable SMART health status (`PASSED` or `FAILED`).
     pub smart_status: String,
-    /// ATA SMART attribute table (may be empty for NVMe drives).
+    /// ATA SMART attribute table (empty for NVMe and SAS drives).
     pub attributes: Vec<SmartAttribute>,
+    /// NVMe SMART health information log (`Some` only on NVMe drives).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvme: Option<NvmeHealth>,
+}
+
+/// NVMe SMART health information, parsed from smartctl's
+/// `nvme_smart_health_information_log` block. Fields preserve the NVMe
+/// spec / smartctl names so operators familiar with `smartctl -a` see
+/// the same identifiers in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NvmeHealth {
+    /// Critical-warning bit field. `0` is healthy; non-zero bits flag
+    /// spare-below-threshold (0x1), temperature (0x2), reliability (0x4),
+    /// read-only (0x8), volatile-backup-failed (0x10), persistent-memory-
+    /// region-RO (0x20).
+    pub critical_warning: u8,
+    /// Remaining spare blocks as a percentage of the initial reserve.
+    /// Decreases as the drive remaps failed NAND cells.
+    pub available_spare_percent: u8,
+    /// Vendor-set threshold (typically 10%, sometimes higher) below which
+    /// `available_spare_percent` triggers the spare-low critical warning.
+    pub available_spare_threshold_percent: u8,
+    /// Endurance estimate: 0 = new, 100 = nominal end of life. May exceed
+    /// 100 on drives operated past their rated DWPD. Not a hard limit.
+    pub percentage_used: u32,
+    /// Read volume reported in NVMe "data units" (1 unit = 1000 × 512-byte
+    /// LBAs = 512,000 bytes per spec). UI multiplies for human-readable
+    /// totals.
+    pub data_units_read: u64,
+    /// Write volume in NVMe data units (see `data_units_read`).
+    pub data_units_written: u64,
+    /// Total host read commands issued to the controller.
+    pub host_reads: u64,
+    /// Total host write commands issued to the controller.
+    pub host_writes: u64,
+    /// Controller busy time in minutes.
+    pub controller_busy_minutes: u64,
+    /// Number of power cycles.
+    pub power_cycles: u64,
+    /// Number of unclean shutdowns (drive lost power without a graceful
+    /// shutdown notify).
+    pub unsafe_shutdowns: u64,
+    /// Media and data integrity errors detected by the controller.
+    pub media_errors: u64,
+    /// Number of entries in the controller error information log.
+    pub num_err_log_entries: u64,
+    /// Human-readable status string of the most recent entry in the
+    /// error information log table, when smartctl returned one. The
+    /// table itself is only emitted by smartctl 7.4+; older versions
+    /// give just the count above with no way to see what the errors
+    /// actually were. `None` when the log is empty or unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub most_recent_error: Option<String>,
+    /// Cumulative minutes the controller spent above the warning
+    /// temperature threshold.
+    pub warning_temp_minutes: u64,
+    /// Cumulative minutes the controller spent above the critical
+    /// temperature threshold.
+    pub critical_comp_minutes: u64,
+    /// Per-zone temperatures in degrees Celsius. Some drives only wire up
+    /// a subset of sensors and report `null` for the rest (e.g. Kingston
+    /// SNV3S reports `[null, 43]`).
+    pub temperature_sensors_c: Vec<Option<i32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

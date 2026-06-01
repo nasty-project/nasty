@@ -292,6 +292,70 @@ struct SmartctlJson {
     power_on_time: Option<SmartctlPowerOn>,
     #[serde(default)]
     ata_smart_attributes: Option<SmartctlAtaAttrs>,
+    #[serde(default, rename = "nvme_smart_health_information_log")]
+    nvme_log: Option<SmartctlNvmeLog>,
+    /// Sibling block of `nvme_smart_health_information_log`. Carries the
+    /// actual error events behind the count. Only emitted by smartctl
+    /// 7.4+; on 7.3 we just get the count in `nvme_log` with no way to
+    /// inspect what the errors were.
+    #[serde(default)]
+    nvme_error_information_log: Option<SmartctlNvmeErrorLog>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlNvmeErrorLog {
+    #[serde(default)]
+    table: Vec<SmartctlNvmeErrorEntry>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlNvmeErrorEntry {
+    #[serde(default)]
+    status_field: Option<SmartctlNvmeErrorStatus>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlNvmeErrorStatus {
+    #[serde(default)]
+    string: String,
+}
+
+#[derive(Deserialize)]
+struct SmartctlNvmeLog {
+    #[serde(default)]
+    critical_warning: u8,
+    #[serde(default)]
+    available_spare: u8,
+    #[serde(default)]
+    available_spare_threshold: u8,
+    #[serde(default)]
+    percentage_used: u32,
+    #[serde(default)]
+    data_units_read: u64,
+    #[serde(default)]
+    data_units_written: u64,
+    #[serde(default)]
+    host_reads: u64,
+    #[serde(default)]
+    host_writes: u64,
+    #[serde(default)]
+    controller_busy_time: u64,
+    #[serde(default)]
+    power_cycles: u64,
+    #[serde(default)]
+    unsafe_shutdowns: u64,
+    #[serde(default)]
+    media_errors: u64,
+    #[serde(default)]
+    num_err_log_entries: u64,
+    #[serde(default)]
+    warning_temp_time: u64,
+    #[serde(default)]
+    critical_comp_time: u64,
+    // Vendors with un-wired sensors emit `null` entries (e.g. Kingston
+    // SNV3S → `[null, 43]`). Use Option<i32> so the deserialize succeeds.
+    #[serde(default)]
+    temperature_sensors: Vec<Option<i32>>,
 }
 
 #[derive(Deserialize)]
@@ -469,6 +533,7 @@ async fn build_disk_health(disk: LsblkDisk) -> DiskHealth {
                 "FAILED".to_string()
             },
             attributes: s.attributes,
+            nvme: s.nvme,
         },
         None => DiskHealth {
             device: disk.device,
@@ -486,6 +551,7 @@ async fn build_disk_health(disk: LsblkDisk) -> DiskHealth {
             health_passed: false,
             smart_status: SMART_STATUS_UNAVAILABLE.to_string(),
             attributes: Vec::new(),
+            nvme: None,
         },
     }
 }
@@ -501,6 +567,7 @@ struct SmartReport {
     power_on_hours: Option<u64>,
     health_passed: bool,
     attributes: Vec<SmartAttribute>,
+    nvme: Option<NvmeHealth>,
 }
 
 async fn query_smartctl(device: &str) -> Option<SmartReport> {
@@ -541,6 +608,39 @@ async fn query_smartctl(device: &str) -> Option<SmartReport> {
         })
         .unwrap_or_default();
 
+    // smartctl returns table entries newest-first when sorted by
+    // error_count, so the head is the most recent event we have a
+    // string for. Skip blank strings (some firmware reports an entry
+    // with a numeric status_code but no decoded text) — surfacing an
+    // empty string in the UI would just be noise.
+    let most_recent_error = json
+        .nvme_error_information_log
+        .as_ref()
+        .and_then(|log| log.table.first())
+        .and_then(|entry| entry.status_field.as_ref())
+        .map(|sf| sf.string.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let nvme = json.nvme_log.map(|n| NvmeHealth {
+        critical_warning: n.critical_warning,
+        available_spare_percent: n.available_spare,
+        available_spare_threshold_percent: n.available_spare_threshold,
+        percentage_used: n.percentage_used,
+        data_units_read: n.data_units_read,
+        data_units_written: n.data_units_written,
+        host_reads: n.host_reads,
+        host_writes: n.host_writes,
+        controller_busy_minutes: n.controller_busy_time,
+        power_cycles: n.power_cycles,
+        unsafe_shutdowns: n.unsafe_shutdowns,
+        media_errors: n.media_errors,
+        num_err_log_entries: n.num_err_log_entries,
+        warning_temp_minutes: n.warning_temp_time,
+        critical_comp_minutes: n.critical_comp_time,
+        temperature_sensors_c: n.temperature_sensors,
+        most_recent_error,
+    });
+
     Some(SmartReport {
         model: json.model_name,
         serial: json.serial_number,
@@ -550,6 +650,7 @@ async fn query_smartctl(device: &str) -> Option<SmartReport> {
         power_on_hours: json.power_on_time.and_then(|p| p.hours),
         health_passed,
         attributes,
+        nvme,
     })
 }
 
@@ -606,5 +707,90 @@ fn resolve_pci_name(pci_addr: &str) -> Option<String> {
         Some(desc[pos + 2..].trim().to_string())
     } else {
         Some(desc.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Real-world `smartctl -a --json=c` payloads collected from four
+    // independent NVMe vendors so the parser keeps working when smartctl
+    // versions, vendor firmware, or namespace layouts shift. Each fixture
+    // captures one schema quirk worth pinning:
+    //   * Samsung 980 PRO   — baseline smartctl 7.3 layout
+    //   * Samsung 980       — smartctl 7.4 (adds nvme_error_information_log
+    //                         and nvme_self_test_log siblings)
+    //   * Kingston SNV3S    — temperature_sensors with a `null` entry,
+    //                         the only field that ever blocked us
+    //   * SK hynix BC901    — vendor-specific spare threshold (50 vs 10)
+    //                         and the first sample with non-zero
+    //                         num_err_log_entries
+
+    fn parse(raw: &str) -> SmartctlJson {
+        serde_json::from_str(raw).expect("smartctl fixture must parse")
+    }
+
+    #[test]
+    fn parses_samsung_980_pro() {
+        let j = parse(include_str!("../fixtures/nvme_samsung_980_pro.json"));
+        let n = j.nvme_log.expect("nvme block present");
+        assert_eq!(n.percentage_used, 3);
+        assert_eq!(n.available_spare, 100);
+        assert_eq!(n.media_errors, 0);
+        assert_eq!(n.temperature_sensors, vec![Some(58), Some(60)]);
+    }
+
+    #[test]
+    fn parses_samsung_980_with_smartctl_7_4_extras() {
+        let j = parse(include_str!("../fixtures/nvme_samsung_980.json"));
+        let n = j.nvme_log.expect("nvme block present");
+        // 62% worn — the operator-actionable sample in the set.
+        assert_eq!(n.percentage_used, 62);
+        // 19,451 minutes above warning threshold (~13.5 days).
+        assert_eq!(n.warning_temp_time, 19451);
+    }
+
+    #[test]
+    fn parses_kingston_with_null_temperature_sensor() {
+        // The only fixture where temperature_sensors contains `null`.
+        // If this stops parsing, the type of `temperature_sensors` in
+        // `SmartctlNvmeLog` regressed from Vec<Option<i32>> to Vec<i32>.
+        let j = parse(include_str!("../fixtures/nvme_kingston_snv3s.json"));
+        let n = j.nvme_log.expect("nvme block present");
+        assert_eq!(n.temperature_sensors, vec![None, Some(43)]);
+    }
+
+    #[test]
+    fn parses_hynix_with_nondefault_spare_threshold() {
+        let j = parse(include_str!("../fixtures/nvme_hynix_bc901.json"));
+        let n = j.nvme_log.expect("nvme block present");
+        // Vendor-specific: most drives report 10; SK hynix reports 50.
+        assert_eq!(n.available_spare_threshold, 50);
+        assert_eq!(n.num_err_log_entries, 3);
+    }
+
+    #[test]
+    fn parses_goodram_irdm_with_populated_error_log_table() {
+        // GoodRam IRDM IRP-SSDPR — first fixture in the set with a
+        // non-zero error log AND smartctl 7.5 emitting the actual
+        // table behind the count. The smartctl 7.5 schema also adds
+        // a leading `nsid: -1` field in nvme_smart_health_information_log
+        // which our parser must silently tolerate (serde ignores
+        // unknown fields by default; this fixture guards against a
+        // future #[serde(deny_unknown_fields)] regression).
+        let j = parse(include_str!("../fixtures/nvme_goodram_irdm.json"));
+        let n = j.nvme_log.expect("nvme block present");
+        assert_eq!(n.num_err_log_entries, 1033);
+        // Yet another spare threshold — confirms the value is
+        // genuinely vendor-specific (we've now seen 5, 10, 50).
+        assert_eq!(n.available_spare_threshold, 5);
+
+        let log = j
+            .nvme_error_information_log
+            .expect("smartctl 7.4+ emits the error log table");
+        let entry = log.table.first().expect("table has at least one entry");
+        let status = entry.status_field.as_ref().expect("status_field on entry");
+        assert_eq!(status.string, "Invalid Field in Command");
     }
 }
