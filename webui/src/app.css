@@ -5,6 +5,14 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  /* Tells the browser to render native form controls (select dropdowns,
+   * date pickers, checkboxes, scrollbars) using its light theme. Without
+   * this, Chromium on Linux ignores our CSS for the *popup* of a <select>
+   * and renders it with a white background — so dark-mode page CSS that
+   * sets white-on-dark text inherits into the popup as white-on-white
+   * and the options become invisible. Firefox + Safari handle this
+   * automatically; only Chromium needs the explicit hint. See #377. */
+  color-scheme: light;
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
@@ -40,6 +48,10 @@
 }
 
 .dark {
+  /* See note in :root — switches the native form-control theme to
+   * match our dark mode so Chromium renders <select> popups with
+   * a dark background instead of white. */
+  color-scheme: dark;
   --background: oklch(0.141 0.005 285.823);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.21 0.006 285.885);
