@@ -382,7 +382,10 @@
 									</div>
 									<div class="flex flex-col">
 										<span class="text-[0.7rem] uppercase text-muted-foreground">Error Log Entries</span>
-										<span class="text-sm font-semibold">{n.num_err_log_entries.toLocaleString()}</span>
+										<span class="text-sm font-semibold {n.num_err_log_entries > 0 ? 'text-amber-500' : ''}">{n.num_err_log_entries.toLocaleString()}</span>
+										{#if n.most_recent_error}
+											<span class="text-xs text-muted-foreground" title="Status of the most recent entry in the NVMe error information log">{n.most_recent_error}</span>
+										{/if}
 									</div>
 									{#if n.warning_temp_minutes > 0}
 										<div class="flex flex-col">

@@ -648,6 +648,11 @@ export interface NvmeHealth {
 	unsafe_shutdowns: number;
 	media_errors: number;
 	num_err_log_entries: number;
+	/** Human-readable status of the most recent error log entry (e.g.
+	 * `"Invalid Field in Command"`). Only smartctl 7.4+ surfaces the
+	 * actual table behind `num_err_log_entries`; older smartctl + drives
+	 * with an empty log report `undefined`. */
+	most_recent_error?: string;
 	warning_temp_minutes: number;
 	critical_comp_minutes: number;
 	temperature_sensors_c: (number | null)[];

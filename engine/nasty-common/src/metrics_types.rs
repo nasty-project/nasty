@@ -168,6 +168,13 @@ pub struct NvmeHealth {
     pub media_errors: u64,
     /// Number of entries in the controller error information log.
     pub num_err_log_entries: u64,
+    /// Human-readable status string of the most recent entry in the
+    /// error information log table, when smartctl returned one. The
+    /// table itself is only emitted by smartctl 7.4+; older versions
+    /// give just the count above with no way to see what the errors
+    /// actually were. `None` when the log is empty or unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub most_recent_error: Option<String>,
     /// Cumulative minutes the controller spent above the warning
     /// temperature threshold.
     pub warning_temp_minutes: u64,
