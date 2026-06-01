@@ -133,6 +133,10 @@ pub struct DiskHealth {
     /// NVMe SMART health information log (`Some` only on NVMe drives).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvme: Option<NvmeHealth>,
+    /// SCSI / SAS health information (`Some` only on SAS / SCSI drives,
+    /// including SAS drives reached via `-d megaraid,N`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scsi: Option<ScsiHealth>,
 }
 
 /// NVMe SMART health information, parsed from smartctl's
@@ -211,6 +215,124 @@ pub struct SmartAttribute {
     pub raw_value: i64,
     /// Whether this attribute is currently at or below its failure threshold.
     pub failing: bool,
+}
+
+/// SCSI / SAS health information, populated from the `scsi_*` family of
+/// top-level fields smartctl emits when talking to a SAS or SCSI drive.
+/// Field names trace back to the SCSI Primary Commands (SPC) standard
+/// and the SCSI Block Commands (SBC) Log Page 2 / 3 / 6 definitions, so
+/// operators reading vendor documentation find the same identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ScsiHealth {
+    /// Transport protocol description (e.g. `"SAS (SPL-4)"`,
+    /// `"SAS (SPL-3)"`, `"Fibre Channel"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_protocol: Option<String>,
+    /// SCSI standard version (e.g. `"SPC-3"`, `"SPC-4"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scsi_version: Option<String>,
+    /// Rotation rate in RPM. `0` = SSD; typical SAS spinner values are
+    /// 7200, 10500 / 10033, 15000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_rate: Option<u32>,
+    /// Drive form factor as smartctl reports it (e.g. `"3.5 inches"`,
+    /// `"2.5 inches"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form_factor: Option<String>,
+    /// World-Wide Name / Logical Unit Identifier (hex string).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logical_unit_id: Option<String>,
+    /// Drive-trip temperature in °C — the controller's hard shutdown
+    /// threshold. Useful context next to `temperature_c` so operators
+    /// see how much headroom they have before the drive bails out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive_trip_temp_c: Option<i32>,
+    /// Year of manufacture (e.g. `"2019"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year_of_manufacture: Option<String>,
+    /// Week of manufacture within that year (`"01"` – `"52"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub week_of_manufacture: Option<String>,
+    /// Number of sectors moved to spare blocks since manufacture
+    /// (SCSI Log Page 3 — Read Defect Data, grown defect list count).
+    /// Non-zero means the drive has had to remap failing sectors; the
+    /// rate of growth matters more than the absolute number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grown_defect_list: Option<u64>,
+    /// Accumulated power-on minutes since the last format. Distinct
+    /// from `power_on_hours` which counts since manufacture. The gap
+    /// between the two shows pre-deployment burn-in time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_on_minutes_since_format: Option<u64>,
+    /// Start/stop cycles accumulated vs the drive's design lifetime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_stop_cycles: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_stop_cycles_designed: Option<u64>,
+    /// Load/unload cycles accumulated vs the drive's design lifetime.
+    /// SAS drives self-park heads on idle so this typically grows much
+    /// faster than start/stop cycles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_unload_cycles: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_unload_cycles_designed: Option<u64>,
+    /// Per-I/O-type error counts from SCSI Log Page 2/3/5.
+    pub read_errors: ScsiErrorCounters,
+    pub write_errors: ScsiErrorCounters,
+    pub verify_errors: ScsiErrorCounters,
+    /// Most recent entry from the rolling SCSI self-test log (Log Page
+    /// 0x10). `None` when no tests have been recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_self_test: Option<ScsiSelfTestEntry>,
+    /// Number of completed self-test entries in the rolling log
+    /// (smartctl numbers them `scsi_self_test_0` ‥ `scsi_self_test_19`).
+    pub self_test_count: u32,
+}
+
+/// SCSI per-I/O-type error counters drawn from Log Page 0x02 (Write),
+/// 0x03 (Read), and 0x05 (Verify). The `gigabytes_processed` field
+/// gives the denominator so operators can reason about error *rates*
+/// rather than raw counts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ScsiErrorCounters {
+    /// Errors the drive recovered from automatically (ECC, rereads,
+    /// rewrites). Informational — large values are normal on long-lived
+    /// drives and don't indicate failure.
+    pub corrected_total: u64,
+    /// **Uncorrected errors are the failure signal.** Any non-zero
+    /// value on the write or verify counter means the drive has lost
+    /// or returned bad data. Even small counts warrant replacement
+    /// planning — they don't decrease, and the rate tends to accelerate.
+    pub uncorrected_total: u64,
+    /// I/O volume in gigabytes processed since the counter was last
+    /// reset (typically since drive format). Lets the UI show error
+    /// rates as "N errors per TB" instead of raw counts.
+    pub gigabytes_processed: f64,
+}
+
+/// One entry from the SCSI Self-Test rolling log (smartctl numbers them
+/// `scsi_self_test_0` … `scsi_self_test_19`). We surface the most recent
+/// only; deeper history is one `smartctl -a` away.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ScsiSelfTestEntry {
+    /// Test type — e.g. `"Background long"`, `"Background short"`,
+    /// `"Foreground long"`.
+    pub code: String,
+    /// Result string — e.g. `"Completed"`, `"Aborted (device reset ?)"`,
+    /// `"Self test in progress ..."`, `"Read element of test failed"`.
+    pub result: String,
+    /// Whether this entry represents a healthy outcome. True when the
+    /// drive reported the test as successfully completed; false when
+    /// it aborted, failed, or is still in progress.
+    pub passed: bool,
+    /// Drive's accumulated power-on hours when the test ran. Lets the
+    /// UI render "X hours ago" relative to the drive's current
+    /// `power_on_hours`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_on_hours: Option<u64>,
+    /// True if smartctl reports a self-test is currently running. Only
+    /// ever set on the most-recent entry.
+    pub in_progress: bool,
 }
 
 // ── Kernel errors ──────────────────────────────────────────────

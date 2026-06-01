@@ -426,8 +426,119 @@
 									{/if}
 								</div>
 							</div>
+						{:else if expandedDisk === key && disk.scsi}
+							{@const s = disk.scsi}
+							{@const anyUncorrected = s.read_errors.uncorrected_total + s.write_errors.uncorrected_total + s.verify_errors.uncorrected_total > 0}
+							<div class="mt-5 border-t border-border pt-4">
+								<h4 class="mb-3 text-xs uppercase tracking-wide text-muted-foreground">SAS / SCSI Health</h4>
+								<div class="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-3 lg:grid-cols-4">
+									{#if s.transport_protocol}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Transport</span>
+											<span class="text-sm font-semibold">{s.transport_protocol}</span>
+										</div>
+									{/if}
+									{#if s.scsi_version}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">SCSI Version</span>
+											<span class="text-sm font-semibold">{s.scsi_version}</span>
+										</div>
+									{/if}
+									{#if s.rotation_rate != null}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Rotation</span>
+											<span class="text-sm font-semibold">{s.rotation_rate === 0 ? 'SSD' : `${s.rotation_rate.toLocaleString()} RPM`}</span>
+										</div>
+									{/if}
+									{#if s.form_factor}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Form Factor</span>
+											<span class="text-sm font-semibold">{s.form_factor}</span>
+										</div>
+									{/if}
+									{#if s.drive_trip_temp_c != null}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Drive Trip Temp</span>
+											<span class="text-sm font-semibold">{formatTemp(s.drive_trip_temp_c)}</span>
+										</div>
+									{/if}
+									{#if s.year_of_manufacture}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Manufactured</span>
+											<span class="text-sm font-semibold">{s.year_of_manufacture}{s.week_of_manufacture ? ` w${s.week_of_manufacture}` : ''}</span>
+										</div>
+									{/if}
+									{#if s.grown_defect_list != null}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Grown Defects</span>
+											<span class="text-sm font-semibold {s.grown_defect_list > 10 ? 'text-red-400' : s.grown_defect_list > 0 ? 'text-amber-500' : ''}" title="Sectors moved to spare blocks since manufacture. Non-zero is normal on aging drives; sudden growth indicates wear.">{s.grown_defect_list.toLocaleString()}</span>
+										</div>
+									{/if}
+									{#if s.power_on_minutes_since_format != null}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Hours Since Format</span>
+											<span class="text-sm font-semibold">{Math.floor(s.power_on_minutes_since_format / 60).toLocaleString()}h</span>
+										</div>
+									{/if}
+									{#if s.start_stop_cycles != null}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Start/Stop Cycles</span>
+											<span class="text-sm font-semibold">
+												{s.start_stop_cycles.toLocaleString()}{#if s.start_stop_cycles_designed}<span class="text-xs text-muted-foreground"> / {s.start_stop_cycles_designed.toLocaleString()}</span>{/if}
+											</span>
+										</div>
+									{/if}
+									{#if s.load_unload_cycles != null}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Load/Unload Cycles</span>
+											<span class="text-sm font-semibold">
+												{s.load_unload_cycles.toLocaleString()}{#if s.load_unload_cycles_designed}<span class="text-xs text-muted-foreground"> / {s.load_unload_cycles_designed.toLocaleString()}</span>{/if}
+											</span>
+										</div>
+									{/if}
+								</div>
+
+								<h5 class="mt-5 mb-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground">I/O Error Counters {#if anyUncorrected}<span class="ml-2 rounded bg-red-950 px-1.5 py-0.5 text-[0.65rem] font-bold text-red-400">UNCORRECTED ERRORS</span>{/if}</h5>
+								<table class="w-full text-xs">
+									<thead>
+										<tr>
+											<th class="p-2 text-left text-[0.65rem] uppercase text-muted-foreground"></th>
+											<th class="p-2 text-right text-[0.65rem] uppercase text-muted-foreground">Uncorrected</th>
+											<th class="p-2 text-right text-[0.65rem] uppercase text-muted-foreground">Corrected</th>
+											<th class="p-2 text-right text-[0.65rem] uppercase text-muted-foreground">GB Processed</th>
+										</tr>
+									</thead>
+									<tbody>
+										{#each [{ label: 'Read', e: s.read_errors }, { label: 'Write', e: s.write_errors }, { label: 'Verify', e: s.verify_errors }] as row}
+											<tr class="border-t border-border/30">
+												<td class="p-2 font-semibold">{row.label}</td>
+												<td class="p-2 text-right font-mono {row.e.uncorrected_total > 0 ? 'font-bold text-red-400' : ''}">{row.e.uncorrected_total.toLocaleString()}</td>
+												<td class="p-2 text-right font-mono text-muted-foreground">{row.e.corrected_total.toLocaleString()}</td>
+												<td class="p-2 text-right font-mono text-muted-foreground">{row.e.gigabytes_processed.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+
+								{#if s.last_self_test}
+									{@const t = s.last_self_test}
+									<h5 class="mt-5 mb-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground">Self-Test History ({s.self_test_count} recorded)</h5>
+									<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+										<span class="font-semibold">{t.code}</span>
+										<span class="rounded px-1.5 py-0.5 text-[0.7rem] font-bold {t.in_progress ? 'bg-blue-950 text-blue-400' : t.passed ? 'bg-green-950 text-green-400' : 'bg-amber-950 text-amber-400'}">
+											{t.in_progress ? 'IN PROGRESS' : t.passed ? 'PASSED' : 'ABORTED'}
+										</span>
+										<span class="text-xs text-muted-foreground">{t.result}</span>
+										{#if t.power_on_hours != null && disk.power_on_hours != null}
+											<span class="text-xs text-muted-foreground">
+												— {(disk.power_on_hours - t.power_on_hours).toLocaleString()} hours ago
+											</span>
+										{/if}
+									</div>
+								{/if}
+							</div>
 						{:else if expandedDisk === key}
-							<p class="mt-4 text-sm text-muted-foreground">No SMART attributes available (SAS drives use a different format).</p>
+							<p class="mt-4 text-sm text-muted-foreground">No detailed SMART data available for this drive.</p>
 						{/if}
 					</CardContent>
 				</Card>
