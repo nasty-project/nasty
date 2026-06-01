@@ -629,6 +629,14 @@ export interface DiskHealth {
 	attributes: SmartAttribute[];
 	nvme?: NvmeHealth;
 	scsi?: ScsiHealth;
+	ata?: AtaHealth;
+}
+
+/** ATA / SATA summary fields complementing the generic SMART attribute
+ * table. Populated only on ATA drives smartctl could query natively. */
+export interface AtaHealth {
+	interface_speed_current?: string;
+	interface_speed_max?: string;
 }
 
 export interface SmartAttribute {

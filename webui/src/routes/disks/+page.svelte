@@ -5,7 +5,7 @@
 	import { formatTemp } from '$lib/temperature.svelte';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
-	import type { BlockDevice, DiskHealth, ProtocolStatus } from '$lib/types';
+	import type { BlockDevice, DiskHealth, ProtocolStatus, SmartAttribute } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -125,7 +125,28 @@
 		}
 	}
 
-	const criticalIds = new Set([5, 10, 187, 188, 196, 197, 198]);
+	// SMART attribute IDs that warrant highlighting in the attribute
+	// table. 22 = Helium_Level (HGST/WD helium-filled spinners) — when
+	// it crosses its threshold the drive fails; treating it as critical
+	// matches how operators of He10/He12 drives think about it.
+	const criticalIds = new Set([5, 10, 22, 187, 188, 196, 197, 198]);
+
+	// A small subset of SMART attribute IDs we surface as ATA-panel
+	// tiles. The numbers are vendor-stable enough that picking by ID
+	// rather than scraping by name avoids vendor naming drift
+	// ("Reallocated_Sector_Ct" vs "Reallocated Sector Count" vs ...).
+	const ATA_TILE_IDS = {
+		reallocated: 5,
+		spinRetry: 10,
+		helium: 22,
+		pendingSector: 197,
+		offlineUncorrectable: 198,
+		crcErrors: 199,
+	} as const;
+
+	function findAttr(disk: DiskHealth, id: number): SmartAttribute | undefined {
+		return disk.attributes.find(a => a.id === id);
+	}
 
 	function smartFor(dev: BlockDevice): DiskHealth | undefined {
 		return disks.find(d => d.device === dev.path || dev.path.startsWith(d.device));
@@ -312,6 +333,67 @@
 						</div>
 
 						{#if expandedDisk === key && disk.attributes.length > 0}
+							{@const reallocated = findAttr(disk, ATA_TILE_IDS.reallocated)}
+							{@const pending = findAttr(disk, ATA_TILE_IDS.pendingSector)}
+							{@const offlineUnc = findAttr(disk, ATA_TILE_IDS.offlineUncorrectable)}
+							{@const crc = findAttr(disk, ATA_TILE_IDS.crcErrors)}
+							{@const spinRetry = findAttr(disk, ATA_TILE_IDS.spinRetry)}
+							{@const helium = findAttr(disk, ATA_TILE_IDS.helium)}
+							{@const speedDowngraded = disk.ata?.interface_speed_current
+								&& disk.ata?.interface_speed_max
+								&& disk.ata.interface_speed_current !== disk.ata.interface_speed_max}
+							<div class="mt-5 border-t border-border pt-4">
+								<h4 class="mb-3 text-xs uppercase tracking-wide text-muted-foreground">ATA / SATA Health</h4>
+								<div class="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-3 lg:grid-cols-4">
+									{#if disk.ata?.interface_speed_current}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Interface Speed</span>
+											<span class="text-sm font-semibold {speedDowngraded ? 'text-amber-500' : ''}" title={speedDowngraded ? 'Link trained below max — often a cable, backplane, or controller-port issue' : ''}>
+												{disk.ata.interface_speed_current}{#if disk.ata.interface_speed_max && speedDowngraded}<span class="text-xs text-muted-foreground"> / max {disk.ata.interface_speed_max}</span>{/if}
+											</span>
+										</div>
+									{/if}
+									{#if reallocated}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Reallocated Sectors</span>
+											<span class="text-sm font-semibold {reallocated.raw_value > 0 ? 'text-red-400' : ''}">{reallocated.raw_value.toLocaleString()}</span>
+										</div>
+									{/if}
+									{#if pending}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Pending Sectors</span>
+											<span class="text-sm font-semibold {pending.raw_value > 0 ? 'text-amber-500' : ''}">{pending.raw_value.toLocaleString()}</span>
+										</div>
+									{/if}
+									{#if offlineUnc}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Offline Uncorrectable</span>
+											<span class="text-sm font-semibold {offlineUnc.raw_value > 0 ? 'text-red-400' : ''}">{offlineUnc.raw_value.toLocaleString()}</span>
+										</div>
+									{/if}
+									{#if crc}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">CRC Errors</span>
+											<span class="text-sm font-semibold {crc.raw_value > 0 ? 'text-amber-500' : ''}" title="Transport-level errors on the SATA link — often cable / port issue">{crc.raw_value.toLocaleString()}</span>
+										</div>
+									{/if}
+									{#if spinRetry && spinRetry.raw_value > 0}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Spin Retry Count</span>
+											<span class="text-sm font-semibold text-amber-500">{spinRetry.raw_value.toLocaleString()}</span>
+										</div>
+									{/if}
+									{#if helium}
+										<div class="flex flex-col">
+											<span class="text-[0.7rem] uppercase text-muted-foreground">Helium Level</span>
+											<span class="text-sm font-semibold {helium.value < helium.threshold ? 'text-red-400' : helium.value < helium.threshold * 1.5 ? 'text-amber-500' : ''}" title="Internal helium pressure as a normalized percentage. Drive fails when this drops below its threshold.">
+												{helium.value}% <span class="text-xs text-muted-foreground">(threshold {helium.threshold}%)</span>
+											</span>
+										</div>
+									{/if}
+								</div>
+							</div>
+
 							<div class="mt-5 border-t border-border pt-4">
 								<h4 class="mb-3 text-xs uppercase tracking-wide text-muted-foreground">SMART Attributes</h4>
 								<table class="w-full text-xs">

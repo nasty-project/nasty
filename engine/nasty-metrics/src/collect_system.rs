@@ -326,6 +326,12 @@ struct SmartctlJson {
     #[serde(default)]
     scsi_error_counter_log: Option<SmartctlScsiErrorCounterLog>,
 
+    // ATA — currently just interface_speed. The SMART attribute table
+    // already covers everything else ATA reports; this block exists for
+    // fields outside the attributes payload.
+    #[serde(default)]
+    interface_speed: Option<SmartctlInterfaceSpeed>,
+
     // SCSI self-test entries are emitted as numbered top-level keys
     // (`scsi_self_test_0`, `scsi_self_test_1`, …) rather than an
     // array, so we capture them via `#[serde(flatten)]` and walk the
@@ -333,6 +339,23 @@ struct SmartctlJson {
     // entries; the SCSI standard caps at 20.
     #[serde(flatten)]
     extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlInterfaceSpeed {
+    #[serde(default)]
+    current: Option<SmartctlInterfaceSpeedRate>,
+    #[serde(default)]
+    max: Option<SmartctlInterfaceSpeedRate>,
+}
+
+#[derive(Deserialize)]
+struct SmartctlInterfaceSpeedRate {
+    /// Pre-formatted speed string smartctl emits (e.g. `"6.0 Gb/s"`).
+    /// We could compute it from `units_per_second × bits_per_unit` but
+    /// the string already matches what operators see in `smartctl -a`.
+    #[serde(default)]
+    string: String,
 }
 
 #[derive(Deserialize)]
@@ -786,11 +809,14 @@ async fn build_disk_health(
             // smartctl's strings are usually more accurate than lsblk's
             // (lsblk reads sysfs's `model`, which truncates / pads), but
             // for unfamiliar transports lsblk sometimes wins — prefer
-            // smartctl, fall back to lsblk, then to "Unknown".
+            // smartctl, fall back to lsblk, then to "Unknown". Both
+            // sources can carry padded SCSI Inquiry whitespace; normalize
+            // the lsblk fallback for the same reason we normalize
+            // smartctl's output in `query_smartctl`.
             model: s
                 .model
                 .filter(|s| !s.is_empty())
-                .or_else(|| lsblk_hint.map(|d| d.model.clone()))
+                .or_else(|| lsblk_hint.and_then(|d| normalize_model(&d.model)))
                 .unwrap_or_else(|| "Unknown".into()),
             serial: s
                 .serial
@@ -814,6 +840,7 @@ async fn build_disk_health(
             attributes: s.attributes,
             nvme: s.nvme,
             scsi: s.scsi,
+            ata: s.ata,
         },
         None => build_disk_health_unreachable_for_endpoint(endpoint, lsblk_hint),
     }
@@ -856,6 +883,7 @@ fn build_disk_health_unreachable_for_endpoint(
         attributes: Vec::new(),
         nvme: None,
         scsi: None,
+        ata: None,
     }
 }
 
@@ -880,6 +908,23 @@ struct SmartReport {
     attributes: Vec<SmartAttribute>,
     nvme: Option<NvmeHealth>,
     scsi: Option<ScsiHealth>,
+    ata: Option<AtaHealth>,
+}
+
+/// Normalize a SCSI Inquiry / ATA Identify product string by trimming
+/// edges and collapsing runs of internal whitespace to a single space.
+/// The SCSI Inquiry response pads model fields to a fixed width, so
+/// real-world dumps carry strings like `"MG08ACP1 6TE           SM"`
+/// — left as-is the WebUI displays that gap verbatim. Returns `None`
+/// when the normalized result is empty so the caller can fall through
+/// to its existing fallback chain.
+fn normalize_model(raw: &str) -> Option<String> {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
 }
 
 async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartReport> {
@@ -908,6 +953,7 @@ async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartRe
     // whole struct and most_recent_error borrows the NVMe error log;
     // both need to complete before we start consuming fields below.
     let scsi = build_scsi_health(&json);
+    let ata = build_ata_health(&json);
 
     // smartctl returns table entries newest-first when sorted by
     // error_count, so the head is the most recent event we have a
@@ -979,7 +1025,10 @@ async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartRe
     });
 
     Some(SmartReport {
-        model: json.model_name,
+        // SCSI Inquiry pads model fields to a fixed width — `"MG08ACP1
+        // 6TE           SM"` is real-world output. Normalize so the UI
+        // shows a clean string.
+        model: json.model_name.as_deref().and_then(normalize_model),
         serial: json.serial_number,
         // SAS dumps don't populate `firmware_version`; the SCSI Inquiry
         // exposes the same string as `scsi_revision`. Fall through so
@@ -992,6 +1041,34 @@ async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartRe
         attributes,
         nvme,
         scsi,
+        ata,
+    })
+}
+
+/// Build the ATA / SATA summary block. Returns `None` for non-ATA
+/// drives so DiskHealth.ata stays absent in the JSON for NVMe / SAS.
+fn build_ata_health(json: &SmartctlJson) -> Option<AtaHealth> {
+    // Trigger: smartctl returned an interface_speed object. ATA dumps
+    // emit this; NVMe and SAS dumps don't. We don't gate on the
+    // protocol field because megaraid-tunneled ATA still produces ATA
+    // SMART payloads and the wrapper transport is the bit that knows.
+    let speed = json.interface_speed.as_ref()?;
+    let cur = speed
+        .current
+        .as_ref()
+        .map(|r| r.string.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let max = speed
+        .max
+        .as_ref()
+        .map(|r| r.string.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if cur.is_none() && max.is_none() {
+        return None;
+    }
+    Some(AtaHealth {
+        interface_speed_current: cur,
+        interface_speed_max: max,
     })
 }
 
@@ -1517,5 +1594,78 @@ mod tests {
         // are present.
         let j = parse(include_str!("../fixtures/nvme_samsung_980_pro.json"));
         assert!(build_scsi_health(&j).is_none());
+    }
+
+    // ── ATA ────────────────────────────────────────────────────────
+
+    #[test]
+    fn ata_he10_parses_interface_speed_and_helium_attribute() {
+        // First helium-drive fixture. HGST Ultrastar He10 (10TB SATA
+        // spinner) trained down to 3.0 Gb/s on a 6.0 Gb/s port —
+        // common cable / backplane symptom. Also carries the
+        // vendor-specific Helium_Level attribute (id 22) we want to
+        // call out in the WebUI's criticalIds set.
+        let j = parse(include_str!("../fixtures/ata_hgst_he10.json"));
+
+        // Borrow-based checks first — both ata + scsi build_* take &j.
+        let ata = build_ata_health(&j).expect("ATA block present");
+        assert_eq!(ata.interface_speed_current.as_deref(), Some("3.0 Gb/s"));
+        assert_eq!(ata.interface_speed_max.as_deref(), Some("6.0 Gb/s"));
+        // No SCSI block on an ATA dump.
+        assert!(build_scsi_health(&j).is_none());
+
+        // Helium_Level is just another row in the SMART attribute
+        // table — no special parser path, but pin it so a future
+        // refactor of the attribute parser doesn't silently drop it.
+        let attrs = j.ata_smart_attributes.expect("ata attributes parse").table;
+        let helium = attrs
+            .iter()
+            .find(|a| a.id == 22)
+            .expect("Helium_Level attribute present");
+        assert_eq!(helium.name, "Helium_Level");
+        assert_eq!(helium.value, 100);
+        assert_eq!(helium.thresh, 25);
+    }
+
+    #[test]
+    fn nvme_drive_has_no_ata_block() {
+        // Reverse symmetry of nvme_drive_has_no_scsi_block — NVMe
+        // dumps don't carry interface_speed either.
+        let j = parse(include_str!("../fixtures/nvme_samsung_980_pro.json"));
+        assert!(build_ata_health(&j).is_none());
+    }
+
+    #[test]
+    fn normalize_model_collapses_scsi_inquiry_padding() {
+        // Real Toshiba MG08 SAS dump returns:
+        //   scsi_product:    "6TE           SM"
+        //   model_name:      "MG08ACP1 6TE           SM"
+        // The padded run of spaces is from the SCSI Inquiry's
+        // fixed-width product field — left as-is the WebUI shows
+        // a 13-character gap mid-string.
+        let j = parse(include_str!("../fixtures/sas_toshiba_mg08_padded.json"));
+        let raw = j.model_name.as_deref().expect("model_name present");
+        assert!(
+            raw.contains("           "),
+            "fixture must preserve raw padding"
+        );
+        assert_eq!(normalize_model(raw).as_deref(), Some("MG08ACP1 6TE SM"));
+    }
+
+    #[test]
+    fn normalize_model_handles_edge_cases() {
+        assert_eq!(normalize_model(""), None);
+        assert_eq!(normalize_model("   "), None);
+        assert_eq!(
+            normalize_model("Samsung SSD 980 PRO"),
+            Some("Samsung SSD 980 PRO".into())
+        );
+        // Leading + trailing whitespace gets trimmed; interior runs
+        // collapse to one space (not removed entirely — we still want
+        // word boundaries).
+        assert_eq!(
+            normalize_model("  HGST    HUH721010ALE600  "),
+            Some("HGST HUH721010ALE600".into())
+        );
     }
 }
