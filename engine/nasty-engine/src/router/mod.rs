@@ -1038,6 +1038,7 @@ pub(crate) async fn evaluate_active_alerts(
         .into_iter()
         .map(|d| alerts::DiskHealthSummary {
             device: d.device,
+            transport: d.transport,
             temperature_c: d.temperature_c,
             health_passed: d.health_passed,
             smart_status: d.smart_status,
