@@ -62,20 +62,37 @@ jobs:
           fi
 
       - name: Detect kernel bump
-        # Best-effort: pull the 6.18 LTS version string out of both
-        # nixpkgs commits and surface it in the PR title/body so the
-        # reviewer sees at a glance whether this round brought a
-        # kernel update.
+        # Resolve the kernel version each nixpkgs rev's `linuxPackages`
+        # alias points at, and surface a delta in the PR title/body.
+        #
+        # `linuxPackages` is what `boot.kernelPackages` defaults to when
+        # nothing in NASty overrides it (and we don't override). It's
+        # an alias maintained inside nixpkgs that tracks the channel's
+        # default LTS, so this auto-follows when the default rolls from
+        # one LTS line to the next — no need to come back and bump a
+        # hard-coded version key here.
+        #
+        # Was previously a hard-coded `"6.18"` lookup against
+        # `kernels-org.json` (#370 reviewer noticed it'd silently break
+        # once nixpkgs flips the default LTS away from 6.18).
         id: kernel
         if: steps.update.outputs.changed == 'true'
         run: |
           set -eu
-          BEFORE_VER=$(curl -fsSL "https://raw.githubusercontent.com/NixOS/nixpkgs/${{ steps.update.outputs.before }}/pkgs/os-specific/linux/kernel/kernels-org.json" 2>/dev/null | jq -r '."6.18".version // "unknown"' || echo "unknown")
-          AFTER_VER=$(curl -fsSL "https://raw.githubusercontent.com/NixOS/nixpkgs/${{ steps.update.outputs.after }}/pkgs/os-specific/linux/kernel/kernels-org.json" 2>/dev/null | jq -r '."6.18".version // "unknown"' || echo "unknown")
+          eval_kernel_version() {
+            nix eval --raw --impure --expr "
+              let
+                pkgs = (builtins.getFlake \"github:NixOS/nixpkgs/$1\").legacyPackages.x86_64-linux;
+                tried = builtins.tryEval pkgs.linuxPackages.kernel.version;
+              in if tried.success then tried.value else \"unknown\"
+            " 2>/dev/null || echo "unknown"
+          }
+          BEFORE_VER=$(eval_kernel_version "${{ steps.update.outputs.before }}")
+          AFTER_VER=$(eval_kernel_version "${{ steps.update.outputs.after }}")
           echo "before=$BEFORE_VER" >> "$GITHUB_OUTPUT"
           echo "after=$AFTER_VER" >> "$GITHUB_OUTPUT"
           if [ "$BEFORE_VER" != "$AFTER_VER" ] && [ "$BEFORE_VER" != "unknown" ] && [ "$AFTER_VER" != "unknown" ]; then
-            echo "summary=Linux 6.18: $BEFORE_VER → $AFTER_VER" >> "$GITHUB_OUTPUT"
+            echo "summary=Linux $BEFORE_VER → $AFTER_VER" >> "$GITHUB_OUTPUT"
           else
             echo "summary=" >> "$GITHUB_OUTPUT"
           fi
