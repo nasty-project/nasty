@@ -1221,6 +1221,11 @@ export interface NotificationChannel {
 	// Webhook
 	url?: string;
 	headers?: Record<string, string>;
+	/** Optional HMAC-SHA256 signing key. When set, every webhook POST
+	 * carries an `X-NASty-Signature: sha256=<hex>` header. Receivers
+	 * verify by recomputing HMAC-SHA256 of the raw body with the same
+	 * key — proves the request actually came from NASty. */
+	secret?: string;
 	// ntfy
 	server_url?: string;
 	topic?: string;
