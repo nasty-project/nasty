@@ -37,6 +37,7 @@
 	let nfFrom = $state(''); let nfTo = $state('');
 	let nfBotToken = $state(''); let nfChatId = $state('');
 	let nfUrl = $state('');
+	let nfSecret = $state('');
 	let nfNtfyServer = $state('https://ntfy.sh'); let nfNtfyTopic = $state(''); let nfNtfyToken = $state('');
 	let nfSignalUrl = $state('http://localhost:8080'); let nfSignalFrom = $state(''); let nfSignalTo = $state('');
 
@@ -553,7 +554,7 @@
 		const payload: Record<string, unknown> = { type: ch.type };
 		if (ch.type === 'smtp') Object.assign(payload, { host: ch.host, port: ch.port, username: ch.username, password: ch.password, from: ch.from, to: ch.to });
 		else if (ch.type === 'telegram') Object.assign(payload, { bot_token: ch.bot_token, chat_id: ch.chat_id });
-		else if (ch.type === 'webhook') Object.assign(payload, { url: ch.url, headers: ch.headers || {} });
+		else if (ch.type === 'webhook') Object.assign(payload, { url: ch.url, headers: ch.headers || {}, secret: ch.secret || undefined });
 		else if (ch.type === 'ntfy') Object.assign(payload, { server_url: ch.server_url, topic: ch.topic, token: ch.token });
 		else if (ch.type === 'signal') Object.assign(payload, { api_url: ch.api_url, from_number: ch.from_number, to_number: ch.to_number });
 		await withToast(
@@ -569,7 +570,7 @@
 		const payload: Record<string, unknown> = { type: notifAddType };
 		if (notifAddType === 'smtp') Object.assign(payload, { host: nfHost, port: nfPort, username: nfUser, password: nfPass, from: nfFrom, to: nfTo });
 		else if (notifAddType === 'telegram') Object.assign(payload, { bot_token: nfBotToken, chat_id: nfChatId });
-		else if (notifAddType === 'webhook') Object.assign(payload, { url: nfUrl, headers: {} });
+		else if (notifAddType === 'webhook') Object.assign(payload, { url: nfUrl, headers: {}, secret: nfSecret || undefined });
 		else if (notifAddType === 'ntfy') Object.assign(payload, { server_url: nfNtfyServer, topic: nfNtfyTopic, token: nfNtfyToken || undefined });
 		else if (notifAddType === 'signal') Object.assign(payload, { api_url: nfSignalUrl, from_number: nfSignalFrom, to_number: nfSignalTo });
 		await withToast(
@@ -585,7 +586,7 @@
 		const ch: NotificationChannel = { id, name: nfName, enabled: true, type: notifAddType };
 		if (notifAddType === 'smtp') Object.assign(ch, { host: nfHost, port: nfPort, username: nfUser, password: nfPass, from: nfFrom, to: nfTo });
 		else if (notifAddType === 'telegram') Object.assign(ch, { bot_token: nfBotToken, chat_id: nfChatId });
-		else if (notifAddType === 'webhook') Object.assign(ch, { url: nfUrl, headers: {} });
+		else if (notifAddType === 'webhook') Object.assign(ch, { url: nfUrl, headers: {}, secret: nfSecret || undefined });
 		else if (notifAddType === 'ntfy') Object.assign(ch, { server_url: nfNtfyServer, topic: nfNtfyTopic, token: nfNtfyToken || undefined });
 		else if (notifAddType === 'signal') Object.assign(ch, { api_url: nfSignalUrl, from_number: nfSignalFrom, to_number: nfSignalTo });
 		notifConfig.channels = [...notifConfig.channels, ch];
@@ -607,7 +608,7 @@
 		notifAddType = null; nfName = '';
 		nfHost = ''; nfPort = 587; nfUser = ''; nfPass = ''; nfFrom = ''; nfTo = '';
 		nfBotToken = ''; nfChatId = '';
-		nfUrl = '';
+		nfUrl = ''; nfSecret = '';
 		nfNtfyServer = 'https://ntfy.sh'; nfNtfyTopic = ''; nfNtfyToken = '';
 		nfSignalUrl = 'http://localhost:8080'; nfSignalFrom = ''; nfSignalTo = '';
 	}
@@ -1231,7 +1232,7 @@
 					{:else if notifAddType === 'telegram'}
 						<p class="text-xs text-muted-foreground">Send alerts to a Telegram chat. Create a bot via <a href="https://t.me/BotFather" target="_blank" rel="noopener" class="text-primary hover:underline">@BotFather</a>, copy the token. Then send a message to the bot and get your Chat ID from <code class="font-mono">https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code>.</p>
 					{:else if notifAddType === 'webhook'}
-						<p class="text-xs text-muted-foreground">Send a JSON POST to any URL when alerts fire. The payload includes <code class="font-mono">subject</code>, <code class="font-mono">body</code>, <code class="font-mono">source</code>, and <code class="font-mono">timestamp</code> fields. Works with Discord webhooks, Slack incoming webhooks, Home Assistant, or any custom endpoint.</p>
+						<p class="text-xs text-muted-foreground">Send a JSON POST to any URL when alerts fire. The payload carries both human fields (<code class="font-mono">subject</code>, <code class="font-mono">body</code>) and typed fields (<code class="font-mono">event_type</code>, <code class="font-mono">event_id</code>, <code class="font-mono">data</code>) so integrations can match either way. Set a Signing Secret below to have NASty add an <code class="font-mono">X-NASty-Signature: sha256=&lt;hex&gt;</code> header that the receiver can verify with HMAC-SHA256.</p>
 					{:else if notifAddType === 'ntfy'}
 						<p class="text-xs text-muted-foreground">Push notifications via <a href="https://ntfy.sh" target="_blank" rel="noopener" class="text-primary hover:underline">ntfy</a> — install the ntfy app on your phone, subscribe to your topic, and alerts arrive as push notifications. The free ntfy.sh server works without a token. Self-hosted servers may require one.</p>
 					{:else if notifAddType === 'signal'}
@@ -1283,6 +1284,11 @@
 							<label for="nf-url" class="text-xs text-muted-foreground">URL</label>
 							<input id="nf-url" bind:value={nfUrl} placeholder="https://discord.com/api/webhooks/..." class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
 							<p class="mt-1 text-xs text-muted-foreground">Example: Discord webhook URL, Slack incoming webhook, or any endpoint that accepts JSON POST.</p>
+						</div>
+						<div>
+							<label for="nf-secret" class="text-xs text-muted-foreground">Signing Secret (optional)</label>
+							<input id="nf-secret" bind:value={nfSecret} type="password" placeholder="leave empty for unsigned" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
+							<p class="mt-1 text-xs text-muted-foreground">If set, NASty signs each POST body with HMAC-SHA256 and sends the hex digest in <code class="font-mono">X-NASty-Signature</code>. Receivers in Python: <code class="font-mono">hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()</code> and compare. Discord / Slack webhooks ignore this header — only matters for custom endpoints.</p>
 						</div>
 					{:else if notifAddType === 'ntfy'}
 						<div>

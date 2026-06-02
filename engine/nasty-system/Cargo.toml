@@ -18,6 +18,7 @@ schemars.workspace = true
 libc.workspace = true
 base64.workspace = true
 sha2 = "0.11"
+hmac = "0.13"
 rnix = "0.14"
 x509-parser = "0.18"
 rowan = "0.16"

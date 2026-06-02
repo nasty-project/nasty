@@ -2777,7 +2777,23 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
                             "{}\n\nSource: {}\nValue: {:.1}\nThreshold: {:.1}",
                             alert.message, alert.source, alert.current_value, alert.threshold
                         );
-                        notifications::send(&config, &subject, &body).await;
+                        // Stable event id derived from rule + source +
+                        // current value so the webhook receiver can
+                        // dedupe a retry against the original delivery
+                        // even though we don't persist outbox state.
+                        let event_id = format!(
+                            "alert-{}-{}-{}",
+                            alert.rule_id, alert.source, alert.current_value as i64
+                        );
+                        let data = serde_json::to_value(alert).unwrap_or(serde_json::Value::Null);
+                        let event = notifications::Event {
+                            event_type: "alert.fired",
+                            event_id: &event_id,
+                            subject: &subject,
+                            body: &body,
+                            data,
+                        };
+                        notifications::send_event(&config, &event).await;
                     }
                 }
             }
