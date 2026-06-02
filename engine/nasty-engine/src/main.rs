@@ -2726,12 +2726,96 @@ async fn wait_for_auth(
 
 // ── Background Alert Notifier ──────────────────────────────────
 
+enum AlertLifecycle {
+    /// First time the rule's condition was true for this (rule, source)
+    /// pair since the alert notifier started.
+    Fired,
+    /// The rule's condition stopped being true — the alert cleared.
+    /// The payload carries the ActiveAlert as it was when it last
+    /// fired (not the current state, which by definition no longer
+    /// matches the rule).
+    Resolved,
+}
+
+/// Build the structured webhook payload for an alert lifecycle event
+/// and dispatch through every enabled notification channel. The
+/// `event_id` is the same across both fired and resolved events for
+/// a given alert, so receivers can correlate (and incident-tracking
+/// systems can close the same incident they opened).
+async fn dispatch_alert_event(
+    config: &nasty_system::notifications::NotificationConfig,
+    alert: &nasty_system::alerts::ActiveAlert,
+    lifecycle: AlertLifecycle,
+) {
+    use nasty_system::notifications;
+    let sev = match alert.severity {
+        nasty_system::alerts::AlertSeverity::Warning => "WARNING",
+        nasty_system::alerts::AlertSeverity::Critical => "CRITICAL",
+    };
+    let (event_type, subject_prefix, body_suffix) = match lifecycle {
+        AlertLifecycle::Fired => ("alert.fired", format!("[NASty {sev}]"), String::new()),
+        AlertLifecycle::Resolved => (
+            "alert.resolved",
+            "[NASty RESOLVED]".to_string(),
+            "\n\nThe alert condition is no longer matching — incident has cleared.".to_string(),
+        ),
+    };
+    let subject = format!("{subject_prefix} {}", alert.rule_name);
+    let body = format!(
+        "{}\n\nSource: {}\nValue: {:.1}\nThreshold: {:.1}{}",
+        alert.message, alert.source, alert.current_value, alert.threshold, body_suffix
+    );
+    // Stable event id derived from rule + source + the value the
+    // alert had when it fired. Crucially the resolved event reuses
+    // the same id (we use the original alert's current_value, not
+    // whatever the metric reads now) so receivers can pair the two.
+    let event_id = format!(
+        "alert-{}-{}-{}",
+        alert.rule_id, alert.source, alert.current_value as i64
+    );
+    let mut data = serde_json::to_value(alert).unwrap_or(serde_json::Value::Null);
+    // Embed lifecycle in `data.lifecycle` too — some receivers route
+    // on a single nested field rather than the top-level event_type.
+    if let serde_json::Value::Object(ref mut m) = data {
+        m.insert(
+            "lifecycle".to_string(),
+            serde_json::Value::String(
+                match lifecycle {
+                    AlertLifecycle::Fired => "fired",
+                    AlertLifecycle::Resolved => "resolved",
+                }
+                .to_string(),
+            ),
+        );
+    }
+    let event = notifications::Event {
+        event_type,
+        event_id: &event_id,
+        subject: &subject,
+        body: &body,
+        data,
+    };
+    notifications::send_event(config, &event).await;
+}
+
 fn spawn_alert_notifier(state: Arc<AppState>) {
     let h = tokio::spawn(async move {
+        use nasty_system::alerts::ActiveAlert;
         use nasty_system::notifications;
-        use std::collections::HashSet;
+        use std::collections::HashMap;
 
-        let mut previously_active: HashSet<(String, String)> = HashSet::new();
+        // Keyed map (rule_id, source) → the ActiveAlert as it was when
+        // we first dispatched the alert.fired event. We keep the whole
+        // alert (not just the key) so when the alert resolves we can
+        // emit alert.resolved carrying the same payload — receivers
+        // close the same incident they opened on fire.
+        //
+        // Note: on engine restart this map resets to empty, so any
+        // alerts that resolved during downtime never get a resolved
+        // event. Persisting outbox state across restarts is out of
+        // scope; the same limitation already applies to fired events
+        // (currently-active alerts re-fire after a restart).
+        let mut previously_active: HashMap<(String, String), ActiveAlert> = HashMap::new();
 
         // Wait for the metrics service and the rest of the system to come up
         // before the first evaluation; first-boot stats are noisy.
@@ -2753,52 +2837,43 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
                 *state.alerts_cache.lock().await = Some((std::time::Instant::now(), value));
             }
 
-            // Find newly fired alerts (not previously active)
-            let current_keys: HashSet<(String, String)> = active
+            let current: HashMap<(String, String), ActiveAlert> = active
                 .iter()
-                .map(|a| (a.rule_id.clone(), a.source.clone()))
+                .map(|a| ((a.rule_id.clone(), a.source.clone()), a.clone()))
                 .collect();
 
-            let new_alerts: Vec<_> = active
+            // Newly-fired = in `current` but not in `previously_active`.
+            let new_alerts: Vec<&ActiveAlert> = current
                 .iter()
-                .filter(|a| !previously_active.contains(&(a.rule_id.clone(), a.source.clone())))
+                .filter(|(k, _)| !previously_active.contains_key(k))
+                .map(|(_, a)| a)
                 .collect();
 
-            if !new_alerts.is_empty() {
+            // Resolved = in `previously_active` but not in `current`.
+            // Emit with the original alert payload so the receiver
+            // sees the same `source`, `rule_id`, etc. it opened the
+            // incident with — typical pattern for monitoring systems
+            // (PagerDuty / Opsgenie / Alertmanager) that key incident
+            // close events on the original payload.
+            let resolved_alerts: Vec<&ActiveAlert> = previously_active
+                .iter()
+                .filter(|(k, _)| !current.contains_key(k))
+                .map(|(_, a)| a)
+                .collect();
+
+            if !new_alerts.is_empty() || !resolved_alerts.is_empty() {
                 let config = notifications::NotificationConfig::load();
                 if config.channels.iter().any(|ch| ch.enabled) {
                     for alert in &new_alerts {
-                        let sev = match alert.severity {
-                            nasty_system::alerts::AlertSeverity::Warning => "WARNING",
-                            nasty_system::alerts::AlertSeverity::Critical => "CRITICAL",
-                        };
-                        let subject = format!("[NASty {sev}] {}", alert.rule_name);
-                        let body = format!(
-                            "{}\n\nSource: {}\nValue: {:.1}\nThreshold: {:.1}",
-                            alert.message, alert.source, alert.current_value, alert.threshold
-                        );
-                        // Stable event id derived from rule + source +
-                        // current value so the webhook receiver can
-                        // dedupe a retry against the original delivery
-                        // even though we don't persist outbox state.
-                        let event_id = format!(
-                            "alert-{}-{}-{}",
-                            alert.rule_id, alert.source, alert.current_value as i64
-                        );
-                        let data = serde_json::to_value(alert).unwrap_or(serde_json::Value::Null);
-                        let event = notifications::Event {
-                            event_type: "alert.fired",
-                            event_id: &event_id,
-                            subject: &subject,
-                            body: &body,
-                            data,
-                        };
-                        notifications::send_event(&config, &event).await;
+                        dispatch_alert_event(&config, alert, AlertLifecycle::Fired).await;
+                    }
+                    for alert in &resolved_alerts {
+                        dispatch_alert_event(&config, alert, AlertLifecycle::Resolved).await;
                     }
                 }
             }
 
-            previously_active = current_keys;
+            previously_active = current;
         }
     });
     // Observer spawn — alert evaluation is supposed to run forever; if
