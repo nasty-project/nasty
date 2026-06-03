@@ -6,6 +6,7 @@
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { requiredFieldCls } from '$lib/utils';
+	import { validateAddressForFamily } from '$lib/network';
 	import {
 		nvme,
 		nvmeToggleSort,
@@ -43,6 +44,24 @@
 		if (!nvme.addHostNqn) { addHostTried = true; return; }
 		addHostTried = false;
 		await nvmeAddHost();
+	}
+
+	// Per-port-add cross-validation: family selector + address text
+	// input were independent before — operator could pick `ipv6` and
+	// type a v4 address (or vice versa), the engine would reject with
+	// a generic configfs EINVAL. Now we preflight with the same
+	// per-family check as the rest of the network forms.
+	let addPortTried = $state(false);
+	const addPortAddrError = $derived(
+		validateAddressForFamily(
+			nvme.addPortFamily === 'ipv6' ? 'ipv6' : 'ipv4',
+			nvme.addPortAddr,
+		),
+	);
+	async function nvmeAddPortGuarded() {
+		if (!nvme.addPortAddr || addPortAddrError) { addPortTried = true; return; }
+		addPortTried = false;
+		await nvmeAddPort();
 	}
 
 	const nvmeFiltered = $derived(
@@ -211,8 +230,15 @@
 											</div>
 											<div class="grid grid-cols-2 gap-2 mb-2">
 												<div>
-													<Label class="text-xs">Listen Address</Label>
-													<Input bind:value={nvme.addPortAddr} class="mt-1 h-8 text-xs" />
+													<Label class="text-xs">Listen Address {#if !nvme.addPortAddr && addPortTried}<span class="text-amber-500">required</span>{/if}</Label>
+													<Input
+														bind:value={nvme.addPortAddr}
+														placeholder={nvme.addPortFamily === 'ipv6' ? 'fd00::1 or 2001:db8::1' : '192.168.1.10'}
+														class="mt-1 h-8 text-xs {requiredFieldCls(!nvme.addPortAddr, addPortTried)} {addPortAddrError ? 'border-red-400' : ''}"
+													/>
+													{#if addPortAddrError}
+														<p class="mt-1 text-[0.7rem] text-red-400">{addPortAddrError}</p>
+													{/if}
 												</div>
 												<div>
 													<Label class="text-xs">Port</Label>
@@ -220,8 +246,8 @@
 												</div>
 											</div>
 											<div class="flex gap-2">
-												<Button size="xs" onclick={nvmeAddPort}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { nvme.addPortSubsys = ''; }}>Cancel</Button>
+												<Button size="xs" onclick={nvmeAddPortGuarded}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { nvme.addPortSubsys = ''; addPortTried = false; }}>Cancel</Button>
 											</div>
 										</div>
 									{:else}

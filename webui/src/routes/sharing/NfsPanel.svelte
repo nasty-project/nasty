@@ -5,6 +5,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { requiredFieldCls } from '$lib/utils';
+	import { validateNfsHost } from '$lib/network';
 	import {
 		nfs,
 		nfsToggleSort,
@@ -23,8 +24,9 @@
 	 * collapses (showAddClientShare is cleared elsewhere). */
 	let addClientTried = $state(false);
 
+	const addClientHostError = $derived(validateNfsHost(nfs.addClientHost));
 	async function nfsAddClickHost(share: Parameters<typeof nfsAddClient>[0]) {
-		if (!nfs.addClientHost) { addClientTried = true; return; }
+		if (!nfs.addClientHost || addClientHostError) { addClientTried = true; return; }
 		addClientTried = false;
 		await nfsAddClient(share);
 	}
@@ -121,7 +123,14 @@
 								<div class="flex items-end gap-2">
 									<div>
 										<Label class="text-xs">Host / Network {#if !nfs.addClientHost && addClientTried}<span class="text-amber-500">required</span>{/if}</Label>
-										<Input bind:value={nfs.addClientHost} placeholder="192.168.1.0/24" class="mt-1 h-8 w-44 text-xs {requiredFieldCls(!nfs.addClientHost, addClientTried)}" />
+										<Input
+											bind:value={nfs.addClientHost}
+											placeholder="192.168.1.0/24, fd00::/64, *, or host.example.com"
+											class="mt-1 h-8 w-72 text-xs {requiredFieldCls(!nfs.addClientHost, addClientTried)} {addClientHostError ? 'border-red-400' : ''}"
+										/>
+										{#if addClientHostError}
+											<p class="mt-1 text-[0.7rem] text-red-400">{addClientHostError}</p>
+										{/if}
 									</div>
 									<div>
 										<Label class="text-xs">Options</Label>
