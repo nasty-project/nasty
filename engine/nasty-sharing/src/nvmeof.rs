@@ -393,15 +393,53 @@ impl NvmeofService {
 
             // Add a port when a namespace was created
             if subsystem.ports.is_empty() {
+                let svc_port = req.port.unwrap_or(4420);
+                let explicit_addr = req.addr.clone();
                 subsystem = self
                     .add_port(AddPortRequest {
                         subsystem_id: subsystem.id.clone(),
                         transport: Some("tcp".to_string()),
                         addr: Some(req.addr.unwrap_or_else(|| "0.0.0.0".to_string())),
-                        service_id: Some(req.port.unwrap_or(4420)),
+                        service_id: Some(svc_port),
                         addr_family: Some("ipv4".to_string()),
                     })
                     .await?;
+
+                // Dual-stack auto-port: when the operator didn't pin a
+                // specific address and the host has a routable v6
+                // source, add a sibling port on the v6 address. Skips
+                // silently on v4-only hosts and on the explicit-addr
+                // path (operator chose v4 deliberately — don't surprise
+                // them by adding a v6 port too).
+                if explicit_addr.is_none()
+                    && let Some(v6) = crate::v6::detect_primary_ipv6().await
+                {
+                    match self
+                        .add_port(AddPortRequest {
+                            subsystem_id: subsystem.id.clone(),
+                            transport: Some("tcp".to_string()),
+                            addr: Some(v6.clone()),
+                            service_id: Some(svc_port),
+                            addr_family: Some("ipv6".to_string()),
+                        })
+                        .await
+                    {
+                        Ok(s) => {
+                            subsystem = s;
+                            info!("Auto-added IPv6 sibling port {v6} for '{}'", subsystem.nqn);
+                        }
+                        Err(e) => {
+                            // Don't fail the whole create — the v4 port
+                            // is up and the subsystem is usable. Log
+                            // and continue so the user gets a working
+                            // (if v4-only) target.
+                            warn!(
+                                "auto-add IPv6 port for '{}' on {v6} failed: {e}",
+                                subsystem.nqn
+                            );
+                        }
+                    }
+                }
             } else {
                 info!(
                     "Subsystem {} already has {} port(s), skipping",
