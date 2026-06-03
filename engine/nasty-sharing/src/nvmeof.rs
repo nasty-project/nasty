@@ -340,6 +340,12 @@ impl NvmeofService {
         &self,
         req: CreateSubsystemRequest,
     ) -> Result<NvmeofSubsystem, NvmeofError> {
+        validate_subsystem_name(&req.name)?;
+        if let Some(ref hosts) = req.allowed_hosts {
+            for host_nqn in hosts {
+                validate_host_nqn(host_nqn)?;
+            }
+        }
         let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
         let nqn = format!("{DEFAULT_NQN_PREFIX}:{}", req.name);
 
@@ -795,6 +801,7 @@ impl NvmeofService {
     }
 
     pub async fn add_host(&self, req: AddHostRequest) -> Result<NvmeofSubsystem, NvmeofError> {
+        validate_host_nqn(&req.host_nqn)?;
         let mut subsys: NvmeofSubsystem = state_dir()
             .load(&req.subsystem_id)
             .await
@@ -978,4 +985,148 @@ async fn detect_primary_ip() -> Option<String> {
         }
     }
     None
+}
+
+/// Validate the user-supplied portion of an NVMe-oF subsystem name.
+/// The engine builds the full NQN as `nqn.2137-04.storage.nasty:<name>`
+/// and uses that string as a configfs directory name. NVMe-oF (NVMe
+/// base spec 1.4 §7.9) requires NQNs to be UTF-8 within 223 bytes —
+/// but configfs is far less forgiving. Restrict to the same conservative
+/// set as iSCSI target names (A-Z, a-z, 0-9, '-', '.', '_', ':') so a
+/// name can't escape the subsystem directory via '/' or smuggle
+/// newlines into state files.
+fn validate_subsystem_name(name: &str) -> Result<(), NvmeofError> {
+    if name.is_empty() {
+        return Err(NvmeofError::ConfigFs(
+            "NVMe-oF subsystem name is empty".to_string(),
+        ));
+    }
+    if name.len() > 200 {
+        return Err(NvmeofError::ConfigFs(
+            "NVMe-oF subsystem name exceeds 200 chars".to_string(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
+    {
+        return Err(NvmeofError::ConfigFs(format!(
+            "NVMe-oF subsystem name '{name}' contains invalid characters \
+             (allowed: A-Z, a-z, 0-9, '-', '.', '_', ':')"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate an allowed-host NQN string. Unlike the subsystem name, the
+/// host NQN is a full NQN supplied by the caller (initiators identify
+/// themselves with strings like `nqn.2014-08.org.nvmexpress:uuid:...`).
+/// We can't enforce the full NQN grammar here without breaking valid
+/// initiator names, but we *can* reject the characters that would
+/// escape the configfs hosts directory or break the `allowed_hosts`
+/// symlink path.
+fn validate_host_nqn(nqn: &str) -> Result<(), NvmeofError> {
+    if nqn.is_empty() {
+        return Err(NvmeofError::ConfigFs("host NQN is empty".to_string()));
+    }
+    if nqn.len() > 223 {
+        // NVMe base spec 1.4 §7.9: NQN is at most 223 bytes.
+        return Err(NvmeofError::ConfigFs(
+            "host NQN exceeds 223 chars (NVMe spec limit)".to_string(),
+        ));
+    }
+    if !nqn.starts_with("nqn.") {
+        return Err(NvmeofError::ConfigFs(format!(
+            "host NQN '{nqn}' must start with 'nqn.' (per NVMe spec)"
+        )));
+    }
+    if nqn.contains('/') || nqn.contains('\\') || nqn.chars().any(|c| c.is_control() || c == ' ') {
+        return Err(NvmeofError::ConfigFs(format!(
+            "host NQN '{nqn}' contains invalid characters \
+             (must not contain '/', '\\', whitespace, or control characters)"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_subsystem_name_accepts_typical_names() {
+        assert!(validate_subsystem_name("faststore").is_ok());
+        assert!(validate_subsystem_name("DB-01").is_ok());
+        assert!(validate_subsystem_name("vmware.cluster.prod").is_ok());
+        assert!(validate_subsystem_name("ns_2024").is_ok());
+        assert!(validate_subsystem_name("host:purpose").is_ok());
+    }
+
+    #[test]
+    fn validate_subsystem_name_rejects_configfs_escape() {
+        assert!(validate_subsystem_name("../escape").is_err());
+        assert!(validate_subsystem_name("with/slash").is_err());
+        assert!(validate_subsystem_name("with\\backslash").is_err());
+    }
+
+    #[test]
+    fn validate_subsystem_name_rejects_control_and_whitespace() {
+        assert!(validate_subsystem_name("with newline\n").is_err());
+        assert!(validate_subsystem_name("with space").is_err());
+        assert!(validate_subsystem_name("with\x00null").is_err());
+    }
+
+    #[test]
+    fn validate_subsystem_name_rejects_empty_and_oversize() {
+        assert!(validate_subsystem_name("").is_err());
+        assert!(validate_subsystem_name(&"x".repeat(201)).is_err());
+        assert!(validate_subsystem_name(&"x".repeat(200)).is_ok());
+    }
+
+    #[test]
+    fn validate_host_nqn_accepts_standard_initiator_forms() {
+        // The two common forms an initiator's host NQN takes in the wild.
+        assert!(
+            validate_host_nqn(
+                "nqn.2014-08.org.nvmexpress:uuid:8e69b1d0-1234-5678-9abc-def012345678"
+            )
+            .is_ok()
+        );
+        assert!(validate_host_nqn("nqn.2024-01.com.example:client01").is_ok());
+    }
+
+    #[test]
+    fn validate_host_nqn_requires_nqn_prefix() {
+        // Per NVMe base spec §7.9, every NQN starts with "nqn.YYYY-MM"
+        // — anything else is either an initiator typo or a hostname
+        // being passed where an NQN should go.
+        assert!(validate_host_nqn("example.com:client").is_err());
+        assert!(validate_host_nqn("client01").is_err());
+    }
+
+    #[test]
+    fn validate_host_nqn_rejects_path_escape() {
+        // Slash would escape the configfs hosts directory.
+        assert!(validate_host_nqn("nqn.../etc/passwd").is_err());
+        assert!(validate_host_nqn("nqn.2024-01.com.example:a\\b").is_err());
+    }
+
+    #[test]
+    fn validate_host_nqn_rejects_whitespace_and_control() {
+        // Whitespace would break the configfs symlink path; control
+        // characters would smuggle into state files.
+        assert!(validate_host_nqn("nqn.2024-01.example com").is_err());
+        assert!(validate_host_nqn("nqn.2024-01.example\nnewline").is_err());
+        assert!(validate_host_nqn("nqn.2024-01.example\x00null").is_err());
+    }
+
+    #[test]
+    fn validate_host_nqn_rejects_oversize() {
+        // 224 chars exceeds the NVMe spec's 223-byte ceiling.
+        let oversize = format!("nqn.2024-01.{}", "x".repeat(212));
+        assert!(validate_host_nqn(&oversize).is_err());
+        let at_limit = format!("nqn.2024-01.{}", "x".repeat(211));
+        assert_eq!(at_limit.len(), 223);
+        assert!(validate_host_nqn(&at_limit).is_ok());
+    }
 }
