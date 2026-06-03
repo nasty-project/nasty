@@ -592,7 +592,7 @@ impl IscsiService {
 
         if let (Some(userid), Some(password)) = (&req.userid, &req.password) {
             configfs_write(&format!("{acl_path}/auth/userid"), userid).await?;
-            configfs_write(&format!("{acl_path}/auth/password"), password).await?;
+            configfs_write_secret(&format!("{acl_path}/auth/password"), password).await?;
         }
 
         // Disable generate_node_acls when explicit ACLs are added
@@ -731,6 +731,17 @@ async fn configfs_write(path: &str, value: &str) -> Result<(), IscsiError> {
     tokio::fs::write(path, value)
         .await
         .map_err(|e| IscsiError::ConfigFs(format!("write {path}={value}: {e}")))
+}
+
+/// Like `configfs_write` but redacts `value` in the error message so
+/// secret payloads (CHAP passwords, future DH-CHAP keys) don't end up
+/// in tracing output / journald. Use for any write where the value is
+/// confidential — the path stays in the error so the operator can
+/// still tell which target/ACL the failure was on.
+async fn configfs_write_secret(path: &str, value: &str) -> Result<(), IscsiError> {
+    tokio::fs::write(path, value)
+        .await
+        .map_err(|e| IscsiError::ConfigFs(format!("write {path}=<redacted>: {e}")))
 }
 
 async fn configfs_symlink(target: &str, link: &str) -> Result<(), IscsiError> {
@@ -1063,5 +1074,55 @@ mod tests {
         assert!(validate_target_name("").is_err());
         assert!(validate_target_name(&"x".repeat(201)).is_err());
         assert!(validate_target_name(&"x".repeat(200)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn configfs_write_secret_redacts_value_in_error() {
+        // Target a path that's guaranteed to fail (no /sys outside Linux,
+        // and on Linux the test process won't have configfs mounted at a
+        // bogus path). The failure path is what we care about — we want
+        // to confirm the resulting error message names the path but does
+        // NOT contain the secret value.
+        let bogus_path = "/sys/this/does/not/exist/auth/password";
+        let secret = "super-secret-chap-password-do-not-leak";
+
+        let err = configfs_write_secret(bogus_path, secret)
+            .await
+            .expect_err("write to nonexistent path must fail");
+        let msg = format!("{err}");
+
+        assert!(
+            msg.contains(bogus_path),
+            "error must surface the path so operator can identify the target: {msg}"
+        );
+        assert!(
+            msg.contains("<redacted>"),
+            "error must mark the value as redacted: {msg}"
+        );
+        assert!(
+            !msg.contains(secret),
+            "SECURITY: error message leaked the secret value: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn configfs_write_keeps_value_in_error_for_diagnostics() {
+        // The non-secret variant intentionally includes the value in
+        // the error — it's how operators debug "why did the write of
+        // '0' to /sys/.../enable fail?". Pin that behavior so a future
+        // over-eager redaction pass doesn't lose the diagnostic.
+        let bogus_path = "/sys/this/does/not/exist/enable";
+        let non_secret_value = "1";
+
+        let err = configfs_write(bogus_path, non_secret_value)
+            .await
+            .expect_err("write to nonexistent path must fail");
+        let msg = format!("{err}");
+
+        assert!(msg.contains(bogus_path));
+        assert!(
+            msg.contains(non_secret_value),
+            "non-secret values must surface in errors for diagnostics: {msg}"
+        );
     }
 }
