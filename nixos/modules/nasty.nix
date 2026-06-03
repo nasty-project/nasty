@@ -1972,12 +1972,27 @@ in {
           # 'unsafe-inline' for now because SvelteKit emits inline
           # bootstrap + theme-detection scripts in index.html;
           # nonces / hashes are a follow-up.
+          #
+          # Permissions-Policy denies every powerful browser feature
+          # — a NAS dashboard has no business asking for camera,
+          # microphone, geolocation, etc., so if a future XSS slips
+          # through CSP, the browser still won't prompt the operator
+          # for those permissions. `interest-cohort=()` opts out of
+          # FLoC / Topics for the same defense-in-depth reason.
+          #
+          # COOP `same-origin` severs the `window.opener` channel for
+          # any popup we open. NASty doesn't deliberately open external
+          # popups today, but the cost of pre-committing to the
+          # tighter policy is zero and it eliminates a future-XSS
+          # pivot point.
           header {
             Strict-Transport-Security "max-age=31536000; includeSubDomains"
             X-Content-Type-Options "nosniff"
             X-Frame-Options "DENY"
             Referrer-Policy "same-origin"
             Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' ws: wss:; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+            Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), interest-cohort=()"
+            Cross-Origin-Opener-Policy "same-origin"
           }
 
           # File-content preview: same engine endpoint, but a much
