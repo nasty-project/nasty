@@ -287,3 +287,76 @@ export function validateAddressForFamily(
 	}
 	return validateIpv4Address(value);
 }
+
+/** A single option in the listen-address picker dropdown. `key` is a
+ * stable string identifier used as the `<option value=...>`, `addr` is
+ * the bare address to push into the address field on selection, and
+ * `family` decides which v4/v6 selector value to mirror. */
+export interface ListenAddressOption {
+	key: string;
+	label: string;
+	addr: string;
+	family: 'ipv4' | 'ipv6';
+}
+
+/** Derive picker options from the live interface list. Used by the
+ * shared `<ListenAddressPicker>` to populate its dropdown.
+ *
+ * `allowWildcards` controls whether `0.0.0.0` / `::` are offered — iSCSI
+ * accepts both (configfs creates the np entries without complaint),
+ * NVMe-oF rejects them with EINVAL when the subsystem-to-port symlink
+ * is created, so the picker hides them on the NVMe-oF panel.
+ *
+ * Filters: skip link-local v6 (`fe80::/10`) since it requires a zone
+ * id the picker doesn't carry; skip loopback addresses since binding
+ * a network share to `127.0.0.1` or `::1` is almost always a mistake;
+ * skip interfaces with `up: false` — picking an address on a down
+ * interface would succeed in configfs but accept no connections. */
+export function listenAddressOptions(
+	interfaces: import('./types').LiveInterface[],
+	allowWildcards: boolean,
+): ListenAddressOption[] {
+	const opts: ListenAddressOption[] = [];
+
+	if (allowWildcards) {
+		opts.push({
+			key: 'wild:0.0.0.0',
+			label: 'All IPv4 interfaces (0.0.0.0)',
+			addr: '0.0.0.0',
+			family: 'ipv4',
+		});
+		opts.push({
+			key: 'wild:::',
+			label: 'All IPv6 interfaces (::)',
+			addr: '::',
+			family: 'ipv6',
+		});
+	}
+
+	for (const iface of interfaces) {
+		if (!iface.up) continue;
+		for (const cidr of iface.ipv4_addresses ?? []) {
+			const bare = cidr.split('/')[0];
+			if (bare === '127.0.0.1' || bare.startsWith('127.')) continue;
+			opts.push({
+				key: `if:${iface.name}:v4:${bare}`,
+				label: `${iface.name} — ${bare}`,
+				addr: bare,
+				family: 'ipv4',
+			});
+		}
+		for (const cidr of iface.ipv6_addresses ?? []) {
+			const bare = cidr.split('/')[0];
+			if (bare === '::1') continue;
+			if (bare.toLowerCase().startsWith('fe80')) continue;
+			opts.push({
+				key: `if:${iface.name}:v6:${bare}`,
+				label: `${iface.name} — ${bare}`,
+				addr: bare,
+				family: 'ipv6',
+			});
+		}
+	}
+
+	return opts;
+}

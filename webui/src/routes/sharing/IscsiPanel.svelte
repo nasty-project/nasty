@@ -6,6 +6,7 @@
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 	import { validateAddressForFamily } from '$lib/network';
+	import ListenAddressPicker from '$lib/components/ListenAddressPicker.svelte';
 	import {
 		iscsi,
 		iscsiToggleSort,
@@ -158,22 +159,15 @@
 									{/if}
 									{#if iscsi.addPortalTarget === target.id}
 										<div class="mt-3 rounded border p-3">
-											<div class="flex flex-wrap items-end gap-2">
-												<div>
-													<Label class="text-xs">Family</Label>
-													<select bind:value={iscsi.addPortalFamily} class="mt-1 h-8 rounded-md border border-input bg-transparent px-2 text-xs">
-														<option value="ipv4">IPv4</option>
-														<option value="ipv6">IPv6</option>
-													</select>
-												</div>
-												<div>
-													<Label class="text-xs">Listen Address {#if !iscsi.addPortalIp && addPortalTried}<span class="text-amber-500">required</span>{/if}</Label>
-													<Input
-														bind:value={iscsi.addPortalIp}
-														placeholder={iscsi.addPortalFamily === 'ipv6' ? ':: or fd00::1' : '0.0.0.0 or 192.168.1.10'}
-														class="mt-1 h-8 w-56 text-xs {requiredFieldCls(!iscsi.addPortalIp, addPortalTried)} {addPortalIpError ? 'border-red-400' : ''}"
-													/>
-												</div>
+											<ListenAddressPicker
+												bind:address={iscsi.addPortalIp}
+												bind:family={iscsi.addPortalFamily}
+												allowWildcards
+												error={addPortalTried ? addPortalIpError : null}
+												placeholderV4="0.0.0.0 or 192.168.1.10"
+												placeholderV6=":: or fd00::1"
+											/>
+											<div class="mt-3 flex items-end gap-2">
 												<div>
 													<Label class="text-xs">Port</Label>
 													<Input type="number" bind:value={iscsi.addPortalPort} class="mt-1 h-8 w-24 text-xs" />
@@ -181,12 +175,9 @@
 												<Button size="xs" onclick={iscsiAddPortalGuarded}>Add</Button>
 												<Button size="xs" variant="ghost" onclick={() => { iscsi.addPortalTarget = ''; addPortalTried = false; }}>Cancel</Button>
 											</div>
-											{#if addPortalIpError}
-												<p class="mt-1 text-[0.7rem] text-red-400">{addPortalIpError}</p>
+											{#if !iscsi.addPortalIp && addPortalTried}
+												<p class="mt-1 text-[0.7rem] text-amber-500">Listen address is required.</p>
 											{/if}
-											<p class="mt-2 text-[0.7rem] text-muted-foreground">
-												Use <code>0.0.0.0</code> for all IPv4 interfaces, <code>::</code> for all IPv6 interfaces, or a specific host address for a single-NIC bind.
-											</p>
 										</div>
 									{:else}
 										<Button size="xs" variant="outline" class="mt-2" onclick={() => { iscsi.addPortalTarget = target.id; iscsi.addPortalIp = ''; iscsi.addPortalPort = 3260; iscsi.addPortalFamily = 'ipv4'; }}>+ Add Portal</Button>

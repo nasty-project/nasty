@@ -29,7 +29,7 @@ export const nvme = $state({
 	addPortTransport: 'tcp',
 	addPortAddr: '0.0.0.0',
 	addPortSvcId: 4420,
-	addPortFamily: 'ipv4',
+	addPortFamily: 'ipv4' as 'ipv4' | 'ipv6',
 	addHostSubsys: '',
 	addHostNqn: '',
 	search: '',

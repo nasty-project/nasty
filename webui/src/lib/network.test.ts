@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	findOrphanInterfaces,
+	listenAddressOptions,
 	promoteOrphanedMembers,
 	stripInterfaces,
 	validateAddressForFamily,
@@ -447,5 +448,89 @@ describe('validateAddressForFamily', () => {
 	it('passes empty input as null', () => {
 		expect(validateAddressForFamily('ipv4', '')).toBeNull();
 		expect(validateAddressForFamily('ipv6', '')).toBeNull();
+	});
+});
+
+describe('listenAddressOptions', () => {
+	function iface(name: string, v4: string[] = [], v6: string[] = [], up = true): LiveInterface {
+		return {
+			name,
+			mac: '00:00:00:00:00:00',
+			up,
+			speed_mbps: null,
+			carrier: up,
+			ipv4_addresses: v4,
+			ipv6_addresses: v6,
+			mtu: 1500,
+			kind: 'ethernet',
+		};
+	}
+
+	it('prepends wildcards when allowed', () => {
+		const opts = listenAddressOptions([], true);
+		expect(opts.map((o) => o.addr)).toEqual(['0.0.0.0', '::']);
+		expect(opts[0].family).toBe('ipv4');
+		expect(opts[1].family).toBe('ipv6');
+	});
+
+	it('skips wildcards for NVMe-oF (configfs EINVAL on ::)', () => {
+		const opts = listenAddressOptions([iface('eth0', ['10.0.0.5/24'])], false);
+		expect(opts.map((o) => o.addr)).toEqual(['10.0.0.5']);
+	});
+
+	it('strips CIDR suffix from interface addresses', () => {
+		// LiveInterface carries CIDR ("10.0.0.5/24"), the engine wants
+		// a bare address — picker has to strip so the operator doesn't
+		// end up posting "10.0.0.5/24" to add_portal.
+		const opts = listenAddressOptions([iface('eth0', ['10.0.0.5/24'])], false);
+		expect(opts[0].addr).toBe('10.0.0.5');
+	});
+
+	it('filters loopback addresses', () => {
+		// Binding a network share to 127.0.0.1 / ::1 is almost always
+		// a mistake — hide them so the picker doesn't suggest them.
+		const opts = listenAddressOptions(
+			[iface('lo', ['127.0.0.1/8'], ['::1/128'])],
+			false,
+		);
+		expect(opts).toEqual([]);
+	});
+
+	it('filters link-local v6 (no zone id in picker payload)', () => {
+		const opts = listenAddressOptions(
+			[iface('eth0', [], ['fe80::1/64', 'fd00::1/64'])],
+			false,
+		);
+		expect(opts.map((o) => o.addr)).toEqual(['fd00::1']);
+	});
+
+	it('hides down interfaces', () => {
+		// An address on a down interface would bind successfully in
+		// configfs but accept no connections — don't tempt the operator.
+		const opts = listenAddressOptions(
+			[iface('eth0', ['10.0.0.5/24'], [], /* up */ false)],
+			false,
+		);
+		expect(opts).toEqual([]);
+	});
+
+	it('labels and tags family for each interface address', () => {
+		const opts = listenAddressOptions(
+			[iface('eth0', ['10.0.0.5/24'], ['fd00::1/64'])],
+			false,
+		);
+		expect(opts).toHaveLength(2);
+		expect(opts[0]).toMatchObject({ label: 'eth0 — 10.0.0.5', family: 'ipv4' });
+		expect(opts[1]).toMatchObject({ label: 'eth0 — fd00::1', family: 'ipv6' });
+		// keys are unique + stable across renders (used as <option value=...>)
+		expect(new Set(opts.map((o) => o.key)).size).toBe(opts.length);
+	});
+
+	it('combines wildcards + interface addresses in order', () => {
+		const opts = listenAddressOptions(
+			[iface('eth0', ['10.0.0.5/24'], ['fd00::1/64'])],
+			true,
+		);
+		expect(opts.map((o) => o.addr)).toEqual(['0.0.0.0', '::', '10.0.0.5', 'fd00::1']);
 	});
 });

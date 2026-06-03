@@ -7,6 +7,7 @@
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 	import { validateAddressForFamily } from '$lib/network';
+	import ListenAddressPicker from '$lib/components/ListenAddressPicker.svelte';
 	import {
 		nvme,
 		nvmeToggleSort,
@@ -212,43 +213,31 @@
 									{/if}
 									{#if nvme.addPortSubsys === subsys.id}
 										<div class="mt-3 rounded border p-3">
-											<div class="grid grid-cols-2 gap-2 mb-2">
-												<div>
-													<Label class="text-xs">Transport</Label>
-													<select bind:value={nvme.addPortTransport} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-														<option value="tcp">TCP</option>
-														<option value="rdma">RDMA</option>
-													</select>
-												</div>
-												<div>
-													<Label class="text-xs">Address Family</Label>
-													<select bind:value={nvme.addPortFamily} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
-														<option value="ipv4">IPv4</option>
-														<option value="ipv6">IPv6</option>
-													</select>
-												</div>
+											<div class="mb-2">
+												<Label class="text-xs">Transport</Label>
+												<select bind:value={nvme.addPortTransport} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
+													<option value="tcp">TCP</option>
+													<option value="rdma">RDMA</option>
+												</select>
 											</div>
-											<div class="grid grid-cols-2 gap-2 mb-2">
-												<div>
-													<Label class="text-xs">Listen Address {#if !nvme.addPortAddr && addPortTried}<span class="text-amber-500">required</span>{/if}</Label>
-													<Input
-														bind:value={nvme.addPortAddr}
-														placeholder={nvme.addPortFamily === 'ipv6' ? 'fd00::1 or 2001:db8::1' : '192.168.1.10'}
-														class="mt-1 h-8 text-xs {requiredFieldCls(!nvme.addPortAddr, addPortTried)} {addPortAddrError ? 'border-red-400' : ''}"
-													/>
-													{#if addPortAddrError}
-														<p class="mt-1 text-[0.7rem] text-red-400">{addPortAddrError}</p>
-													{/if}
-												</div>
+											<ListenAddressPicker
+												bind:address={nvme.addPortAddr}
+												bind:family={nvme.addPortFamily}
+												error={addPortTried ? addPortAddrError : null}
+												placeholderV4="192.168.1.10"
+												placeholderV6="fd00::1 or 2001:db8::1"
+											/>
+											<div class="mt-2 flex items-end gap-2">
 												<div>
 													<Label class="text-xs">Port</Label>
-													<Input type="number" bind:value={nvme.addPortSvcId} class="mt-1 h-8 text-xs" />
+													<Input type="number" bind:value={nvme.addPortSvcId} class="mt-1 h-8 w-24 text-xs" />
 												</div>
-											</div>
-											<div class="flex gap-2">
 												<Button size="xs" onclick={nvmeAddPortGuarded}>Add</Button>
 												<Button size="xs" variant="ghost" onclick={() => { nvme.addPortSubsys = ''; addPortTried = false; }}>Cancel</Button>
 											</div>
+											{#if !nvme.addPortAddr && addPortTried}
+												<p class="mt-1 text-[0.7rem] text-amber-500">Listen address is required.</p>
+											{/if}
 										</div>
 									{:else}
 										<Button size="xs" variant="outline" class="mt-2" onclick={() => { nvme.addPortSubsys = subsys.id; }}>+ Add Port</Button>
