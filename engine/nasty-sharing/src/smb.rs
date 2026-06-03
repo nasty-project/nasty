@@ -139,6 +139,7 @@ impl SmbService {
 
     pub async fn create(&self, req: CreateSmbShareRequest) -> Result<SmbShare, SmbError> {
         validate_share_name(&req.name)?;
+        validate_share_path(&req.path)?;
 
         if !Path::new(&req.path).exists() {
             return Err(SmbError::PathNotFound(req.path));
@@ -267,6 +268,32 @@ fn validate_share_name(name: &str) -> Result<(), SmbError> {
     {
         return Err(SmbError::InvalidName(
             "Share name must be 1-80 chars without special characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a share path before it's written into smb.conf as
+/// `path = <path>`. The create/update flow also canonicalizes and
+/// requires the path live under `/fs/`, so this is defense-in-depth:
+/// reject characters that, if present in a real filesystem entry name,
+/// would smuggle a new `include = /etc/passwd` directive into the
+/// rendered share section. Newlines and carriage returns are the
+/// primary concern; the rest are belt-and-braces against weird
+/// filesystem entries (most are syntactically invalid in smb.conf
+/// values anyway but we'd rather fail loudly than render garbage).
+fn validate_share_path(path: &str) -> Result<(), SmbError> {
+    if path.is_empty() {
+        return Err(SmbError::InvalidName("share path is empty".to_string()));
+    }
+    if path
+        .chars()
+        .any(|c| c == '\n' || c == '\r' || c == '\0' || c == '"' || c == '#')
+    {
+        return Err(SmbError::InvalidName(
+            "share path contains characters that would inject smb.conf directives \
+             (newline, CR, NUL, double-quote, '#')"
+                .to_string(),
         ));
     }
     Ok(())
@@ -830,6 +857,33 @@ mod tests {
         for bad in ["a/b", "a\\b", "a[b", "a]b", "a:b", "a|b", "a;b"] {
             assert!(validate_share_name(bad).is_err(), "should reject '{bad}'");
         }
+    }
+
+    #[test]
+    fn validate_share_path_accepts_real_paths() {
+        assert!(validate_share_path("/fs/tank/docs").is_ok());
+        assert!(validate_share_path("/fs/pool/My Files").is_ok());
+        assert!(validate_share_path("/fs/a/b/c-d_e.f").is_ok());
+    }
+
+    #[test]
+    fn validate_share_path_rejects_smb_conf_injection() {
+        // Newline + new key=value smuggles a fresh smb.conf directive
+        // into the rendered share section, e.g. an extra `include = `.
+        assert!(validate_share_path("/fs/tank\ninclude = /etc/passwd").is_err());
+        assert!(validate_share_path("/fs/tank\rinclude").is_err());
+        assert!(validate_share_path("/fs/tank\0bad").is_err());
+        // `#` starts a comment in smb.conf — a path containing it
+        // would silently truncate the path line on parse.
+        assert!(validate_share_path("/fs/tank#comment").is_err());
+        // Double-quote could break a quoted value if the renderer
+        // later switches to quoted style.
+        assert!(validate_share_path("/fs/tank\"quoted").is_err());
+    }
+
+    #[test]
+    fn validate_share_path_rejects_empty() {
+        assert!(validate_share_path("").is_err());
     }
 
     // ── render_share_conf ──────────────────────────────────────────

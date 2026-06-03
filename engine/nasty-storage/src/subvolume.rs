@@ -50,10 +50,90 @@ pub enum SubvolumeError {
     AccessDenied,
     #[error("volsize is required for block subvolumes")]
     VolsizeRequired,
+    #[error("invalid name: {0}")]
+    InvalidName(String),
+    #[error("invalid volsize: {0}")]
+    InvalidVolsize(String),
     #[error("command failed: {0}")]
     CommandFailed(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Hard ceiling on block-subvolume size requests. A NAS volume has no
+/// legitimate reason to need >256 TiB — bcachefs would happily accept
+/// the truncate but the resulting sparse file confuses every downstream
+/// (df, NFS clients, du, backup tools that try to estimate transfer
+/// size). The cap rejects obvious typos (extra zero) and protects
+/// against an Operator-role caller trying to ENOSPC the filesystem by
+/// requesting `u64::MAX`.
+const MAX_VOLSIZE_BYTES: u64 = 256 * 1024 * 1024 * 1024 * 1024; // 256 TiB
+
+/// Validate a subvolume name. Names may contain `/` (intentional —
+/// nested subvolumes like `projects/web` are a supported pattern), but
+/// must not escape the filesystem mount via `..`, must not start with
+/// `/` (we always prefix the mount point), and must not contain `@`
+/// (bcachefs uses `@` as the snapshot separator — colliding here
+/// corrupts snapshot lookups) or control characters (would smuggle
+/// newlines into log lines and config files downstream).
+fn validate_subvolume_name(name: &str) -> Result<(), SubvolumeError> {
+    if name.is_empty() {
+        return Err(SubvolumeError::InvalidName("name is empty".to_string()));
+    }
+    if name.len() > 200 {
+        return Err(SubvolumeError::InvalidName(
+            "name exceeds 200 chars".to_string(),
+        ));
+    }
+    if name.starts_with('/') {
+        return Err(SubvolumeError::InvalidName(
+            "name must not start with '/'".to_string(),
+        ));
+    }
+    if name.starts_with('.') {
+        // Leading dot would create a hidden directory that the WebUI
+        // doesn't surface and that's hard to clean up via shell.
+        return Err(SubvolumeError::InvalidName(
+            "name must not start with '.'".to_string(),
+        ));
+    }
+    for component in name.split('/') {
+        if component.is_empty() {
+            return Err(SubvolumeError::InvalidName(
+                "name must not contain empty path components ('//')".to_string(),
+            ));
+        }
+        if component == ".." || component == "." {
+            return Err(SubvolumeError::InvalidName(
+                "name must not contain '.' or '..' components".to_string(),
+            ));
+        }
+        if component.contains('@') {
+            return Err(SubvolumeError::InvalidName(
+                "name must not contain '@' (reserved for snapshot syntax)".to_string(),
+            ));
+        }
+        if component.chars().any(|c| c.is_control()) {
+            return Err(SubvolumeError::InvalidName(
+                "name must not contain control characters".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_volsize_bytes(bytes: u64) -> Result<(), SubvolumeError> {
+    if bytes == 0 {
+        return Err(SubvolumeError::InvalidVolsize(
+            "volsize must be greater than zero".to_string(),
+        ));
+    }
+    if bytes > MAX_VOLSIZE_BYTES {
+        return Err(SubvolumeError::InvalidVolsize(format!(
+            "volsize {bytes} exceeds maximum {MAX_VOLSIZE_BYTES} (256 TiB)"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -776,11 +856,7 @@ impl SubvolumeService {
         req: CreateSubvolumeRequest,
         owner: Option<String>,
     ) -> Result<Subvolume, SubvolumeError> {
-        if req.name.contains('@') {
-            return Err(SubvolumeError::CommandFailed(
-                "subvolume name may not contain '@'".to_string(),
-            ));
-        }
+        validate_subvolume_name(&req.name)?;
 
         let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let subvol_path = subvol_path(&mount_point, &req.name);
@@ -795,6 +871,9 @@ impl SubvolumeService {
 
         if req.subvolume_type == SubvolumeType::Block && req.volsize_bytes.is_none() {
             return Err(SubvolumeError::VolsizeRequired);
+        }
+        if let Some(bytes) = req.volsize_bytes {
+            validate_volsize_bytes(bytes)?;
         }
 
         // Ensure parent directories exist for nested subvolumes (e.g. "projects/web")
@@ -1063,6 +1142,7 @@ impl SubvolumeService {
         req: ResizeSubvolumeRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
+        validate_volsize_bytes(req.volsize_bytes)?;
         let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         match subvol.subvolume_type {
@@ -1939,4 +2019,90 @@ async fn find_child_subvolumes(mount_point: &str, parent_name: &str) -> Vec<Stri
     // Sort so deeper paths come later — reverse for depth-first deletion
     children.sort();
     children
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_subvolume_name_accepts_typical_names() {
+        assert!(validate_subvolume_name("tank").is_ok());
+        assert!(validate_subvolume_name("My-Docs_2024").is_ok());
+        assert!(validate_subvolume_name("projects/web").is_ok());
+        assert!(validate_subvolume_name("a/b/c/d").is_ok());
+        assert!(validate_subvolume_name("name.with.dots").is_ok());
+    }
+
+    #[test]
+    fn validate_subvolume_name_rejects_traversal() {
+        assert!(validate_subvolume_name("..").is_err());
+        assert!(validate_subvolume_name("../etc").is_err());
+        assert!(validate_subvolume_name("ok/../bad").is_err());
+        assert!(validate_subvolume_name("ok/.").is_err());
+    }
+
+    #[test]
+    fn validate_subvolume_name_rejects_leading_separators() {
+        assert!(validate_subvolume_name("/etc/passwd").is_err());
+        assert!(validate_subvolume_name("//doubled").is_err());
+        // Empty path components from a trailing or doubled `/` are flagged
+        // because the resulting `format!("{mount}/{name}")` would silently
+        // collapse them and confuse later listing/parse code.
+        assert!(validate_subvolume_name("a//b").is_err());
+    }
+
+    #[test]
+    fn validate_subvolume_name_rejects_hidden_prefix() {
+        // Leading dot creates a directory that the WebUI doesn't surface;
+        // the operator has no UI path to clean it up afterwards.
+        assert!(validate_subvolume_name(".hidden").is_err());
+    }
+
+    #[test]
+    fn validate_subvolume_name_rejects_snapshot_collision() {
+        // `@` is bcachefs's snapshot separator (`subvol@snapname`).
+        // Allowing it in the subvolume name would corrupt snapshot
+        // lookups in find_child_subvolumes() and snap_path().
+        assert!(validate_subvolume_name("subvol@snap").is_err());
+        assert!(validate_subvolume_name("nested/@evil").is_err());
+    }
+
+    #[test]
+    fn validate_subvolume_name_rejects_control_chars() {
+        assert!(validate_subvolume_name("name\nwith\nnewline").is_err());
+        assert!(validate_subvolume_name("name\twith\ttab").is_err());
+        assert!(validate_subvolume_name("name\x00with\x00null").is_err());
+    }
+
+    #[test]
+    fn validate_subvolume_name_rejects_empty_and_oversize() {
+        assert!(validate_subvolume_name("").is_err());
+        assert!(validate_subvolume_name(&"x".repeat(201)).is_err());
+        // Boundary is inclusive: 200 chars is accepted.
+        assert!(validate_subvolume_name(&"x".repeat(200)).is_ok());
+    }
+
+    #[test]
+    fn validate_volsize_bytes_accepts_sensible_sizes() {
+        assert!(validate_volsize_bytes(1024).is_ok());
+        assert!(validate_volsize_bytes(1024 * 1024 * 1024).is_ok()); // 1 GiB
+        assert!(validate_volsize_bytes(1024_u64.pow(4)).is_ok()); // 1 TiB
+        assert!(validate_volsize_bytes(MAX_VOLSIZE_BYTES).is_ok()); // boundary
+    }
+
+    #[test]
+    fn validate_volsize_bytes_rejects_zero() {
+        // A zero-byte block subvolume would create a useless backing file
+        // and is almost always a typo or a UI-bind glitch.
+        assert!(validate_volsize_bytes(0).is_err());
+    }
+
+    #[test]
+    fn validate_volsize_bytes_rejects_above_cap() {
+        // 257 TiB > 256 TiB cap. A request of u64::MAX is the canonical
+        // worst case (Operator-role caller trying to ENOSPC the filesystem).
+        assert!(validate_volsize_bytes(MAX_VOLSIZE_BYTES + 1).is_err());
+        assert!(validate_volsize_bytes(u64::MAX).is_err());
+    }
 }

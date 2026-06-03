@@ -263,6 +263,7 @@ impl IscsiService {
     }
 
     pub async fn create(&self, req: CreateTargetRequest) -> Result<IscsiTarget, IscsiError> {
+        validate_target_name(&req.name)?;
         let targets: Vec<IscsiTarget> = state_dir().load_all().await;
         let iqn = format!("{DEFAULT_IQN_PREFIX}:{}", req.name);
 
@@ -910,6 +911,38 @@ fn np_path_for(tpg_path: &str, ip: &str, port: u16) -> String {
     }
 }
 
+/// Validate the user-supplied portion of an iSCSI target name. The
+/// engine builds the full IQN as `iqn.2137-04.storage.nasty:<name>` and
+/// then uses that string as a configfs directory name and a key in
+/// state files. RFC 3720 allows lowercase ASCII letters, digits, and
+/// `-`, `.`, `:` in the user-suffix — we accept the same set plus
+/// uppercase (LIO is case-insensitive in practice) and `_` (common in
+/// existing operator naming conventions). Reject everything else,
+/// notably `/` (would escape the configfs subsystem dir) and control
+/// characters (would smuggle newlines into saveconfig.json).
+fn validate_target_name(name: &str) -> Result<(), IscsiError> {
+    if name.is_empty() {
+        return Err(IscsiError::CommandFailed(
+            "iSCSI target name is empty".to_string(),
+        ));
+    }
+    if name.len() > 200 {
+        return Err(IscsiError::CommandFailed(
+            "iSCSI target name exceeds 200 chars".to_string(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
+    {
+        return Err(IscsiError::CommandFailed(format!(
+            "iSCSI target name '{name}' contains invalid characters \
+             (allowed: A-Z, a-z, 0-9, '-', '.', '_', ':')"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate a portal IP and return it normalized (whitespace-trimmed,
 /// brackets stripped if the operator typed `[fd00::1]`). Both forms
 /// reach the engine in practice — the WebUI sends bare addresses, but
@@ -993,5 +1026,42 @@ mod tests {
         // initiators do their own DNS but the engine writes a numeric
         // address into configfs.
         assert!(validate_portal_ip("example.com").is_err());
+    }
+
+    #[test]
+    fn validate_target_name_accepts_typical_names() {
+        assert!(validate_target_name("tank").is_ok());
+        assert!(validate_target_name("DB-Server-01").is_ok());
+        assert!(validate_target_name("vmware.cluster.prod").is_ok());
+        assert!(validate_target_name("backup_2024").is_ok());
+        // Colon is allowed in the user-suffix per RFC 3720; some shops
+        // use it to mirror their hostname:purpose convention.
+        assert!(validate_target_name("host:purpose").is_ok());
+    }
+
+    #[test]
+    fn validate_target_name_rejects_configfs_escape() {
+        // Slash would escape the configfs subsystem directory,
+        // potentially creating /sys/.../tpgt_1/etc/...
+        assert!(validate_target_name("../escape").is_err());
+        assert!(validate_target_name("with/slash").is_err());
+        assert!(validate_target_name("with\\backslash").is_err());
+    }
+
+    #[test]
+    fn validate_target_name_rejects_control_chars_and_whitespace() {
+        // Newlines would smuggle JSON entries into saveconfig.json;
+        // spaces break shell quoting in legacy targetcli operations.
+        assert!(validate_target_name("with newline\n").is_err());
+        assert!(validate_target_name("with tab\t").is_err());
+        assert!(validate_target_name("with space").is_err());
+        assert!(validate_target_name("with\x00null").is_err());
+    }
+
+    #[test]
+    fn validate_target_name_rejects_empty_and_oversize() {
+        assert!(validate_target_name("").is_err());
+        assert!(validate_target_name(&"x".repeat(201)).is_err());
+        assert!(validate_target_name(&"x".repeat(200)).is_ok());
     }
 }
