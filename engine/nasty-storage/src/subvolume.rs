@@ -54,6 +54,10 @@ pub enum SubvolumeError {
     InvalidName(String),
     #[error("invalid volsize: {0}")]
     InvalidVolsize(String),
+    #[error("could not delete child subvolume(s): {0}")]
+    ChildrenStuck(String),
+    #[error("could not detach loop device {device}: {reason}")]
+    LoopDetachFailed { device: String, reason: String },
     #[error("command failed: {0}")]
     CommandFailed(String),
     #[error("io error: {0}")]
@@ -134,6 +138,17 @@ fn validate_volsize_bytes(bytes: u64) -> Result<(), SubvolumeError> {
         )));
     }
     Ok(())
+}
+
+/// `losetup -d` returns one of a small set of "device wasn't attached
+/// in the first place" errors depending on kernel + util-linux version.
+/// They all mean the same thing to us — there's nothing to detach, so
+/// the cleanup step is already satisfied. Returning `true` lets the
+/// caller treat the failure as success and proceed with the rest of
+/// the delete instead of erroring out on an idempotent retry.
+fn is_already_detached(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("no such device") || lower.contains("not in use")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -1033,13 +1048,30 @@ impl SubvolumeService {
     ) -> Result<(), SubvolumeError> {
         let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
-        // For block subvolumes: detach loop device first
+        // For block subvolumes: detach loop device first. A failure here
+        // (typically EBUSY — something still has the device open) used
+        // to log a warn and continue; the subsequent bcachefs delete
+        // would then fail because the backing file is in use, leaving
+        // the loop device attached to a half-gone subvolume. Fail
+        // loudly with the real cause instead so the operator knows
+        // *which* device is stuck and why, before we touch the
+        // filesystem state.
+        //
+        // Exception: tolerate "No such device" / "not in use" — that's
+        // the shape losetup returns when the device is already detached
+        // (operator cleaned up manually, or a prior failed delete made
+        // it part-way). Treating that as success keeps retries idempotent.
         if subvol.subvolume_type == SubvolumeType::Block
             && let Some(ref loop_dev) = subvol.block_device
         {
             info!("Detaching loop device {} for '{}'", loop_dev, req.name);
-            if let Err(e) = cmd::run_ok("losetup", &["-d", loop_dev]).await {
-                warn!("Failed to detach loop device {loop_dev}: {e}");
+            if let Err(e) = cmd::run_ok("losetup", &["-d", loop_dev]).await
+                && !is_already_detached(&e)
+            {
+                return Err(SubvolumeError::LoopDetachFailed {
+                    device: loop_dev.clone(),
+                    reason: e,
+                });
             }
         }
 
@@ -1052,7 +1084,18 @@ impl SubvolumeService {
 
         // Delete child subvolumes first (depth-first) — bcachefs rejects
         // deleting a subvolume that contains nested subvolumes.
+        //
+        // Try every child even if one fails, so the operator gets the
+        // full list of stuck children in a single round trip instead
+        // of fix-one, retry, fix-next, retry. The partial-deletion
+        // window (some children gone, others not) is unavoidable —
+        // bcachefs has no transactional batch-delete and no "undo".
+        // Erroring out before the parent delete preserves the same
+        // partial state the old warn-and-continue path produced, but
+        // surfaces the real cause instead of a generic
+        // "directory not empty" from the parent attempt.
         let children = find_child_subvolumes(&mount_point, &req.name).await;
+        let mut stuck: Vec<String> = Vec::new();
         for child in children.iter().rev() {
             let child_path = format!("{mount_point}/{child}");
             info!(
@@ -1061,7 +1104,11 @@ impl SubvolumeService {
             );
             if let Err(e) = cmd::run_ok("bcachefs", &["subvolume", "delete", &child_path]).await {
                 warn!("Failed to delete child subvolume '{child}': {e}");
+                stuck.push(format!("{child} ({e})"));
             }
+        }
+        if !stuck.is_empty() {
+            return Err(SubvolumeError::ChildrenStuck(stuck.join("; ")));
         }
 
         info!(
@@ -2104,5 +2151,67 @@ mod tests {
         // worst case (Operator-role caller trying to ENOSPC the filesystem).
         assert!(validate_volsize_bytes(MAX_VOLSIZE_BYTES + 1).is_err());
         assert!(validate_volsize_bytes(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn is_already_detached_matches_real_losetup_errors() {
+        // Strings observed in the wild from util-linux losetup -d on a
+        // device that isn't currently associated with a backing file.
+        // Capitalization varies by version.
+        assert!(is_already_detached(
+            "losetup exited with exit code: 1: losetup: /dev/loop3: detach failed: No such device or address"
+        ));
+        assert!(is_already_detached(
+            "losetup: /dev/loop0: detach failed: no such device"
+        ));
+        assert!(is_already_detached(
+            "losetup: cannot find device /dev/loop9: loop device not in use"
+        ));
+    }
+
+    #[test]
+    fn is_already_detached_rejects_real_failures() {
+        // Device is still in use by something — operator needs to see
+        // this so they can find the process holding it open.
+        assert!(!is_already_detached(
+            "losetup exited with exit code: 1: losetup: /dev/loop3: detach failed: Device or resource busy"
+        ));
+        // Permission denied — a real configuration problem the
+        // operator needs to act on, not an idempotent no-op.
+        assert!(!is_already_detached(
+            "losetup: /dev/loop3: detach failed: Operation not permitted"
+        ));
+        // Unrelated tool failure — log unchanged.
+        assert!(!is_already_detached("failed to spawn losetup: ENOENT"));
+    }
+
+    #[test]
+    fn subvolume_error_display_lists_stuck_children() {
+        // The ChildrenStuck variant is operator-facing: the operator
+        // sees this message in a toast in the WebUI and uses it to
+        // figure out which subvolumes are blocking the parent delete.
+        // Format must surface the names; pin it here so a future
+        // accidental message change shows up as a test failure.
+        let err = SubvolumeError::ChildrenStuck(
+            "projects/web (busy); projects/api (mounted)".to_string(),
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("projects/web"));
+        assert!(msg.contains("projects/api"));
+        assert!(msg.contains("busy"));
+        assert!(msg.contains("mounted"));
+    }
+
+    #[test]
+    fn subvolume_error_display_names_loop_device() {
+        // Same operator-facing constraint as ChildrenStuck — they need
+        // to know *which* device is stuck to run lsof / fuser / debug.
+        let err = SubvolumeError::LoopDetachFailed {
+            device: "/dev/loop7".to_string(),
+            reason: "Device or resource busy".to_string(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("/dev/loop7"));
+        assert!(msg.contains("Device or resource busy"));
     }
 }
