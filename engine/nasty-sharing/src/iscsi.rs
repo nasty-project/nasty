@@ -271,12 +271,27 @@ impl IscsiService {
             return Ok(existing);
         }
 
-        let portals = req.portals.unwrap_or_else(|| {
-            vec![Portal {
-                ip: "0.0.0.0".to_string(),
-                port: 3260,
-            }]
-        });
+        let portals = match req.portals {
+            Some(p) => p,
+            None => {
+                // Dual-stack default: always listen on v4 INADDR_ANY,
+                // additionally listen on v6 IN6ADDR_ANY when the host
+                // actually has a global v6 address. v4-only hosts stay
+                // v4-only — `[::]:3260` would bind successfully but
+                // accept zero connections and confuse `ss -tlnp` output.
+                let mut defaults = vec![Portal {
+                    ip: "0.0.0.0".to_string(),
+                    port: 3260,
+                }];
+                if crate::v6::host_has_global_ipv6().await {
+                    defaults.push(Portal {
+                        ip: "::".to_string(),
+                        port: 3260,
+                    });
+                }
+                defaults
+            }
+        };
 
         // Create target and TPG in configfs
         let tpg_path = format!("{ISCSI_BASE}/{iqn}/tpgt_1");

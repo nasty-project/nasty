@@ -3,6 +3,7 @@
 pub mod iscsi;
 pub mod nfs;
 pub mod nvmeof;
+pub(crate) mod v6;
 pub mod smb;
 
 pub use iscsi::IscsiService;
