@@ -241,3 +241,49 @@ export function validateDnsServer(s: string): string | null {
 	}
 	return validateIpv4Address(value);
 }
+
+/** Validate an NFS client host entry. Mirrors the engine's
+ * `validate_nfs_host` (engine/nasty-sharing/src/nfs.rs): rejects
+ * whitespace, control chars, and the shell-injection-relevant
+ * punctuation (`(`, `)`, `"`, `'`, `;`, `,`, `\`) that could let a
+ * value escape its position in the exports file's
+ * `host(opts) host(opts) ...` grammar.
+ *
+ * Deliberately permissive on what *kind* of host it is — IPv4
+ * addresses, IPv6 addresses (with or without CIDR), hostnames,
+ * `*`, `@netgroup` and the like all pass. Anything that doesn't
+ * trip the injection filter is the engine's job to interpret. */
+export function validateNfsHost(s: string): string | null {
+	const value = s.trim();
+	if (!value) return null;
+	if (/[\s\x00-\x1f()"';,\\]/.test(value)) {
+		return 'Contains invalid characters (whitespace, quotes, parentheses, semicolons, commas, backslashes)';
+	}
+	return null;
+}
+
+/** Validate a listen address picked alongside an explicit address
+ * family selector — used by the NVMe-oF port form, where the operator
+ * picks `ipv4` or `ipv6` from a `<select>` and then types the
+ * matching address. Today the form had no cross-check, so an
+ * `ipv6` family + a v4 string sent the engine a mismatched payload
+ * that errored late with a configfs EINVAL. */
+export function validateAddressForFamily(
+	family: 'ipv4' | 'ipv6',
+	s: string,
+): string | null {
+	const value = s.trim();
+	if (!value) return null;
+	if (family === 'ipv6') {
+		// Accept literal v6 with or without zone id (`fe80::1%eth0`),
+		// reject CIDR — the listen address is a single host.
+		if (value.includes('/')) {
+			return 'Listen address must be a bare address (no CIDR prefix)';
+		}
+		if (!validIpv6Body(value.split('%')[0])) {
+			return `'${value}' is not a valid IPv6 address`;
+		}
+		return null;
+	}
+	return validateIpv4Address(value);
+}

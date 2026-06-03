@@ -3,11 +3,13 @@ import {
 	findOrphanInterfaces,
 	promoteOrphanedMembers,
 	stripInterfaces,
+	validateAddressForFamily,
 	validateDnsServer,
 	validateIpv4Address,
 	validateIpv4Cidr,
 	validateIpv6Address,
 	validateIpv6Cidr,
+	validateNfsHost,
 } from './network';
 import type {
 	BondConfig,
@@ -374,5 +376,76 @@ describe('validateDnsServer', () => {
 		// error message matches what the user wrote.
 		expect(validateDnsServer('not:a:v6')).toMatch(/IPv6/);
 		expect(validateDnsServer('not.a.v4')).toMatch(/IPv4/);
+	});
+});
+
+describe('validateNfsHost', () => {
+	it('accepts the host forms the engine accepts', () => {
+		// Same set the Rust validate_nfs_host unit test covers, ported
+		// here so a future divergence between client and server
+		// surfaces in CI rather than as a confusing runtime error.
+		expect(validateNfsHost('192.168.1.5')).toBeNull();
+		expect(validateNfsHost('192.168.1.0/24')).toBeNull();
+		expect(validateNfsHost('fd00::1/64')).toBeNull();
+		expect(validateNfsHost('client.example.com')).toBeNull();
+		expect(validateNfsHost('*')).toBeNull();
+		expect(validateNfsHost('@netgroup')).toBeNull();
+	});
+
+	it('passes empty input as null (let the required-field check handle it)', () => {
+		expect(validateNfsHost('')).toBeNull();
+		expect(validateNfsHost('   ')).toBeNull();
+	});
+
+	it('rejects shell-injection-relevant punctuation', () => {
+		// Match the engine: whitespace, control chars, parens, quotes,
+		// semicolons, commas, backslashes all forbidden. The exports
+		// file grammar is positional and these characters would let a
+		// value escape into a fresh export entry.
+		expect(validateNfsHost('host with space')).toBeTruthy();
+		expect(validateNfsHost('host\nnewline')).toBeTruthy();
+		expect(validateNfsHost('host(opts)')).toBeTruthy();
+		expect(validateNfsHost('host;evil')).toBeTruthy();
+		expect(validateNfsHost('host"quoted')).toBeTruthy();
+		expect(validateNfsHost('host,other')).toBeTruthy();
+	});
+});
+
+describe('validateAddressForFamily', () => {
+	it('accepts v4 strings under ipv4 family', () => {
+		expect(validateAddressForFamily('ipv4', '192.168.1.10')).toBeNull();
+		expect(validateAddressForFamily('ipv4', '10.0.0.1')).toBeNull();
+	});
+
+	it('accepts v6 strings under ipv6 family', () => {
+		expect(validateAddressForFamily('ipv6', 'fd00::1')).toBeNull();
+		expect(validateAddressForFamily('ipv6', '2001:db8::1')).toBeNull();
+		expect(validateAddressForFamily('ipv6', '::1')).toBeNull();
+	});
+
+	it('catches v6 string typed under ipv4 family', () => {
+		// Operator picked IPv4 in the dropdown but typed an IPv6
+		// address. Before this preflight, the engine would reject
+		// it late with a configfs EINVAL after submission.
+		expect(validateAddressForFamily('ipv4', 'fd00::1')).toBeTruthy();
+	});
+
+	it('catches v4 string typed under ipv6 family', () => {
+		expect(validateAddressForFamily('ipv6', '192.168.1.10')).toBeTruthy();
+	});
+
+	it('rejects a CIDR suffix on a listen address', () => {
+		// portal listen address is a single host — CIDR doesn't make
+		// sense here even though it does for client ACLs.
+		expect(validateAddressForFamily('ipv6', 'fd00::/64')).toMatch(/CIDR/);
+	});
+
+	it('accepts a v6 zone id (link-local interface scope)', () => {
+		expect(validateAddressForFamily('ipv6', 'fe80::1%eth0')).toBeNull();
+	});
+
+	it('passes empty input as null', () => {
+		expect(validateAddressForFamily('ipv4', '')).toBeNull();
+		expect(validateAddressForFamily('ipv6', '')).toBeNull();
 	});
 });
