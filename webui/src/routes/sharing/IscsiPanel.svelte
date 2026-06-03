@@ -5,6 +5,7 @@
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { requiredFieldCls } from '$lib/utils';
+	import { validateAddressForFamily } from '$lib/network';
 	import {
 		iscsi,
 		iscsiToggleSort,
@@ -15,6 +16,8 @@
 		iscsiRemoveLun,
 		iscsiAddAcl,
 		iscsiRemoveAcl,
+		iscsiAddPortal,
+		iscsiRemovePortal,
 		iscsiLoadSubvolumes,
 	} from '$lib/sharing/iscsi.svelte';
 
@@ -25,6 +28,7 @@
 	let createTried = $state(false);
 	let addLunTried = $state(false);
 	let addAclTried = $state(false);
+	let addPortalTried = $state(false);
 
 	async function iscsiCreateGuarded() {
 		if (!iscsi.newName || !iscsi.newDevice) { createTried = true; return; }
@@ -40,6 +44,15 @@
 		if (!iscsi.addAclIqn) { addAclTried = true; return; }
 		addAclTried = false;
 		await iscsiAddAcl();
+	}
+
+	const addPortalIpError = $derived(
+		validateAddressForFamily(iscsi.addPortalFamily, iscsi.addPortalIp),
+	);
+	async function iscsiAddPortalGuarded() {
+		if (!iscsi.addPortalIp || addPortalIpError) { addPortalTried = true; return; }
+		addPortalTried = false;
+		await iscsiAddPortal();
 	}
 
 	const iscsiFiltered = $derived(
@@ -132,11 +145,51 @@
 									{#if target.portals.length === 0}
 										<p class="text-xs text-muted-foreground">None</p>
 									{:else}
-										<div class="flex flex-wrap gap-2">
+										<div class="space-y-1">
 											{#each target.portals as p}
-												<span class="rounded bg-secondary px-2 py-0.5 font-mono text-xs">{p.ip}:{p.port}</span>
+												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
+													<span class="font-mono text-xs">{p.ip.includes(':') && p.ip !== '0.0.0.0' ? `[${p.ip}]` : p.ip}:{p.port}</span>
+													{#if target.portals.length > 1}
+														<Button variant="destructive" size="xs" onclick={() => iscsiRemovePortal(target.id, p.ip, p.port)}>Remove</Button>
+													{/if}
+												</div>
 											{/each}
 										</div>
+									{/if}
+									{#if iscsi.addPortalTarget === target.id}
+										<div class="mt-3 rounded border p-3">
+											<div class="flex flex-wrap items-end gap-2">
+												<div>
+													<Label class="text-xs">Family</Label>
+													<select bind:value={iscsi.addPortalFamily} class="mt-1 h-8 rounded-md border border-input bg-transparent px-2 text-xs">
+														<option value="ipv4">IPv4</option>
+														<option value="ipv6">IPv6</option>
+													</select>
+												</div>
+												<div>
+													<Label class="text-xs">Listen Address {#if !iscsi.addPortalIp && addPortalTried}<span class="text-amber-500">required</span>{/if}</Label>
+													<Input
+														bind:value={iscsi.addPortalIp}
+														placeholder={iscsi.addPortalFamily === 'ipv6' ? ':: or fd00::1' : '0.0.0.0 or 192.168.1.10'}
+														class="mt-1 h-8 w-56 text-xs {requiredFieldCls(!iscsi.addPortalIp, addPortalTried)} {addPortalIpError ? 'border-red-400' : ''}"
+													/>
+												</div>
+												<div>
+													<Label class="text-xs">Port</Label>
+													<Input type="number" bind:value={iscsi.addPortalPort} class="mt-1 h-8 w-24 text-xs" />
+												</div>
+												<Button size="xs" onclick={iscsiAddPortalGuarded}>Add</Button>
+												<Button size="xs" variant="ghost" onclick={() => { iscsi.addPortalTarget = ''; addPortalTried = false; }}>Cancel</Button>
+											</div>
+											{#if addPortalIpError}
+												<p class="mt-1 text-[0.7rem] text-red-400">{addPortalIpError}</p>
+											{/if}
+											<p class="mt-2 text-[0.7rem] text-muted-foreground">
+												Use <code>0.0.0.0</code> for all IPv4 interfaces, <code>::</code> for all IPv6 interfaces, or a specific host address for a single-NIC bind.
+											</p>
+										</div>
+									{:else}
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => { iscsi.addPortalTarget = target.id; iscsi.addPortalIp = ''; iscsi.addPortalPort = 3260; iscsi.addPortalFamily = 'ipv4'; }}>+ Add Portal</Button>
 									{/if}
 								</div>
 

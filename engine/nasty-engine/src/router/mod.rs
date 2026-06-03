@@ -86,6 +86,8 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "share.iscsi.remove_lun"
                 | "share.iscsi.add_acl"
                 | "share.iscsi.remove_acl"
+                | "share.iscsi.add_portal"
+                | "share.iscsi.remove_portal"
                 | "share.nvmeof.create"
                 | "share.nvmeof.delete"
                 | "share.nvmeof.add_namespace"

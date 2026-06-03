@@ -234,6 +234,34 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
+        "share.iscsi.add_portal" => {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
+                return Some(r);
+            }
+            match parse_params(req) {
+                Ok(p) => match state.iscsi.add_portal(p).await {
+                    Ok(v) => ok(req, v),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "share.iscsi.remove_portal" => {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
+                return Some(r);
+            }
+            match parse_params(req) {
+                Ok(p) => match state.iscsi.remove_portal(p).await {
+                    Ok(v) => ok(req, v),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         "share.nvmeof.list" => match state.nvmeof.list().await {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),

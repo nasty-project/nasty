@@ -17,8 +17,8 @@ use nasty_apps::{
 };
 use nasty_backup::{BackupProfile, BackupSnapshot, BackupStatus};
 use nasty_sharing::iscsi::{
-    AddAclRequest, AddLunRequest, CreateTargetRequest, DeleteTargetRequest, IscsiTarget,
-    RemoveAclRequest, RemoveLunRequest,
+    AddAclRequest, AddLunRequest, AddPortalRequest, CreateTargetRequest, DeleteTargetRequest,
+    IscsiTarget, RemoveAclRequest, RemoveLunRequest, RemovePortalRequest,
 };
 use nasty_sharing::nfs::{
     CreateNfsShareRequest, DeleteNfsShareRequest, NfsShare, UpdateNfsShareRequest,
@@ -906,6 +906,20 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     desc: "Remove an iSCSI initiator ACL.",
                     role: MethodRole::Admin,
                     params: MethodParams::Schema(gen_schema::<RemoveAclRequest>(generator)),
+                    result: Some(gen_schema::<IscsiTarget>(generator)),
+                },
+                Method {
+                    name: "share.iscsi.add_portal",
+                    desc: "Add a listening portal (IP:port) to an iSCSI target. Use 0.0.0.0 for all IPv4 interfaces, :: for all IPv6 interfaces, or a specific host address.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<AddPortalRequest>(generator)),
+                    result: Some(gen_schema::<IscsiTarget>(generator)),
+                },
+                Method {
+                    name: "share.iscsi.remove_portal",
+                    desc: "Remove a listening portal from an iSCSI target. The last portal cannot be removed; add a replacement first.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<RemovePortalRequest>(generator)),
                     result: Some(gen_schema::<IscsiTarget>(generator)),
                 },
             ],

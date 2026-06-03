@@ -179,6 +179,28 @@ pub struct RemoveAclRequest {
     pub initiator_iqn: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddPortalRequest {
+    /// ID of the target to add the portal to.
+    pub target_id: String,
+    /// Listening IP address. `0.0.0.0` for all v4 interfaces, `::` for
+    /// all v6 interfaces, or a specific host address.
+    pub ip: String,
+    /// TCP port to listen on. Standard iSCSI port is 3260.
+    pub port: u16,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemovePortalRequest {
+    /// ID of the target from which to remove the portal.
+    pub target_id: String,
+    /// Listen address of the portal to remove. Must match the stored
+    /// value exactly (no normalization).
+    pub ip: String,
+    /// TCP port of the portal to remove.
+    pub port: u16,
+}
+
 fn state_dir() -> StateDir {
     StateDir::new(STATE_DIR)
 }
@@ -262,7 +284,7 @@ impl IscsiService {
 
         // Create portals
         for portal in &portals {
-            let np_path = format!("{tpg_path}/np/{}:{}", portal.ip, portal.port);
+            let np_path = np_path_for(&tpg_path, &portal.ip, portal.port);
             configfs_mkdir(&np_path).await?;
         }
 
@@ -362,7 +384,7 @@ impl IscsiService {
 
         // Remove portals
         for portal in &target.portals {
-            let np_path = format!("{tpg_path}/np/{}:{}", portal.ip, portal.port);
+            let np_path = np_path_for(&tpg_path, &portal.ip, portal.port);
             let _ = configfs_rmdir(&np_path).await;
         }
 
@@ -597,6 +619,82 @@ impl IscsiService {
         info!("Removed ACL from target '{}'", target.iqn);
         Ok(target.redacted())
     }
+
+    pub async fn add_portal(&self, req: AddPortalRequest) -> Result<IscsiTarget, IscsiError> {
+        let mut target: IscsiTarget = state_dir()
+            .load(&req.target_id)
+            .await
+            .ok_or_else(|| IscsiError::NotFound(req.target_id.clone()))?;
+
+        let ip = validate_portal_ip(&req.ip)?;
+
+        if target
+            .portals
+            .iter()
+            .any(|p| p.ip == ip && p.port == req.port)
+        {
+            info!(
+                "Portal {ip}:{} already exists on target '{}', skipping",
+                req.port, target.iqn
+            );
+            return Ok(target.redacted());
+        }
+
+        let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
+        let np_path = np_path_for(&tpg_path, &ip, req.port);
+        configfs_mkdir(&np_path).await?;
+
+        target.portals.push(Portal {
+            ip: ip.clone(),
+            port: req.port,
+        });
+
+        state_dir().save(&target.id, &target).await?;
+        save_lio_config().await;
+
+        info!("Added portal {ip}:{} to target '{}'", req.port, target.iqn);
+        Ok(target.redacted())
+    }
+
+    pub async fn remove_portal(&self, req: RemovePortalRequest) -> Result<IscsiTarget, IscsiError> {
+        let mut target: IscsiTarget = state_dir()
+            .load(&req.target_id)
+            .await
+            .ok_or_else(|| IscsiError::NotFound(req.target_id.clone()))?;
+
+        let portal_idx = target
+            .portals
+            .iter()
+            .position(|p| p.ip == req.ip && p.port == req.port)
+            .ok_or_else(|| {
+                IscsiError::NotFound(format!("portal {}:{} not found", req.ip, req.port))
+            })?;
+
+        // Refuse to remove the last portal — a target with zero portals
+        // is unreachable, and the engine has no UI to recover from that
+        // state short of re-adding via API. Operators wanting to swap
+        // portals should add the replacement first, then remove the old.
+        if target.portals.len() == 1 {
+            return Err(IscsiError::CommandFailed(
+                "Cannot remove the last portal — target would become unreachable. Add a replacement portal first.".to_string(),
+            ));
+        }
+
+        let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
+        let np_path = np_path_for(&tpg_path, &req.ip, req.port);
+        let _ = configfs_rmdir(&np_path).await;
+
+        target.portals.remove(portal_idx);
+
+        state_dir().save(&target.id, &target).await?;
+        save_lio_config().await;
+
+        info!(
+            "Removed portal {}:{} from target '{}'",
+            req.ip, req.port, target.iqn
+        );
+        Ok(target.redacted())
+    }
 }
 
 // ── configfs helpers ────────────────────────────────────────────
@@ -783,5 +881,102 @@ async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
             }
             Err(e) => warn!("Failed to serialize patched saveconfig.json: {e}"),
         }
+    }
+}
+
+/// Build the configfs `np/<addr>` path for a portal. LIO's configfs
+/// expects IPv6 addresses bracketed (`[::]:3260`) so the `:` between
+/// address and port stays unambiguous; IPv4 stays bare.
+fn np_path_for(tpg_path: &str, ip: &str, port: u16) -> String {
+    if ip.contains(':') {
+        format!("{tpg_path}/np/[{ip}]:{port}")
+    } else {
+        format!("{tpg_path}/np/{ip}:{port}")
+    }
+}
+
+/// Validate a portal IP and return it normalized (whitespace-trimmed,
+/// brackets stripped if the operator typed `[fd00::1]`). Both forms
+/// reach the engine in practice — the WebUI sends bare addresses, but
+/// curl users often copy the bracketed form from documentation.
+fn validate_portal_ip(ip: &str) -> Result<String, IscsiError> {
+    let trimmed = ip.trim();
+    if trimmed.is_empty() {
+        return Err(IscsiError::CommandFailed("portal IP is empty".to_string()));
+    }
+    let unwrapped = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    if unwrapped.parse::<std::net::IpAddr>().is_err() {
+        return Err(IscsiError::CommandFailed(format!(
+            "portal IP '{ip}' is not a valid IPv4 or IPv6 address"
+        )));
+    }
+    Ok(unwrapped.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn np_path_brackets_v6_addresses() {
+        assert_eq!(
+            np_path_for("/sys/.../tpgt_1", "0.0.0.0", 3260),
+            "/sys/.../tpgt_1/np/0.0.0.0:3260"
+        );
+        assert_eq!(
+            np_path_for("/sys/.../tpgt_1", "192.168.1.10", 3260),
+            "/sys/.../tpgt_1/np/192.168.1.10:3260"
+        );
+        assert_eq!(
+            np_path_for("/sys/.../tpgt_1", "::", 3260),
+            "/sys/.../tpgt_1/np/[::]:3260"
+        );
+        assert_eq!(
+            np_path_for("/sys/.../tpgt_1", "fd00::1", 3260),
+            "/sys/.../tpgt_1/np/[fd00::1]:3260"
+        );
+        assert_eq!(
+            np_path_for("/sys/.../tpgt_1", "2001:db8::1", 8260),
+            "/sys/.../tpgt_1/np/[2001:db8::1]:8260"
+        );
+    }
+
+    #[test]
+    fn validate_portal_ip_accepts_v4_and_v6() {
+        assert_eq!(validate_portal_ip("0.0.0.0").unwrap(), "0.0.0.0");
+        assert_eq!(validate_portal_ip("192.168.1.10").unwrap(), "192.168.1.10");
+        assert_eq!(validate_portal_ip("::").unwrap(), "::");
+        assert_eq!(validate_portal_ip("fd00::1").unwrap(), "fd00::1");
+        assert_eq!(validate_portal_ip("2001:db8::1").unwrap(), "2001:db8::1");
+    }
+
+    #[test]
+    fn validate_portal_ip_strips_brackets() {
+        // Operators copying `[fd00::1]` from RFC examples should still
+        // get accepted — strip the brackets and store the canonical form
+        // so list/remove lookups stay consistent.
+        assert_eq!(validate_portal_ip("[fd00::1]").unwrap(), "fd00::1");
+        assert_eq!(validate_portal_ip("[::]").unwrap(), "::");
+    }
+
+    #[test]
+    fn validate_portal_ip_trims_whitespace() {
+        assert_eq!(validate_portal_ip("  10.0.0.1  ").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn validate_portal_ip_rejects_garbage() {
+        assert!(validate_portal_ip("").is_err());
+        assert!(validate_portal_ip("   ").is_err());
+        assert!(validate_portal_ip("not.an.ip").is_err());
+        assert!(validate_portal_ip("192.168.1").is_err());
+        assert!(validate_portal_ip("fd00::xyz").is_err());
+        // Hostname rejected — portal must be a numeric address; iSCSI
+        // initiators do their own DNS but the engine writes a numeric
+        // address into configfs.
+        assert!(validate_portal_ip("example.com").is_err());
     }
 }

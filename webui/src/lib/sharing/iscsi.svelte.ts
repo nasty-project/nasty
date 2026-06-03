@@ -29,6 +29,10 @@ export const iscsi = $state({
 	addAclIqn: '',
 	addAclUser: '',
 	addAclPass: '',
+	addPortalTarget: '',
+	addPortalIp: '',
+	addPortalPort: 3260,
+	addPortalFamily: 'ipv4' as 'ipv4' | 'ipv6',
 	search: '',
 	sortDir: 'asc' as 'asc' | 'desc',
 });
@@ -117,6 +121,34 @@ export async function iscsiRemoveAcl(targetId: string, initiatorIqn: string) {
 	await withToast(
 		() => client.call('share.iscsi.remove_acl', { target_id: targetId, initiator_iqn: initiatorIqn }),
 		'ACL removed'
+	);
+	await iscsiRefresh();
+}
+
+export async function iscsiAddPortal() {
+	if (!iscsi.addPortalTarget || !iscsi.addPortalIp) return;
+	const ok = await withToast(
+		() => client.call('share.iscsi.add_portal', {
+			target_id: iscsi.addPortalTarget,
+			ip: iscsi.addPortalIp.trim(),
+			port: iscsi.addPortalPort,
+		}),
+		'Portal added',
+	);
+	if (ok !== undefined) {
+		iscsi.addPortalTarget = '';
+		iscsi.addPortalIp = '';
+		iscsi.addPortalPort = 3260;
+		iscsi.addPortalFamily = 'ipv4';
+		await iscsiRefresh();
+	}
+}
+
+export async function iscsiRemovePortal(targetId: string, ip: string, port: number) {
+	if (!await confirm(`Remove portal ${ip}:${port}?`)) return;
+	await withToast(
+		() => client.call('share.iscsi.remove_portal', { target_id: targetId, ip, port }),
+		'Portal removed',
 	);
 	await iscsiRefresh();
 }
