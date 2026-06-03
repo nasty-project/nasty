@@ -1439,6 +1439,16 @@ in {
         RUST_LOG = "nasty_metrics=info";
       };
 
+      # Cap restart attempts so a deterministic panic (corrupt sysfs
+      # parse, missing tool, divide-by-zero on a metric edge case)
+      # surfaces as a `failed` state in `systemctl status` instead of
+      # tight-looping every RestartSec, burning CPU and filling the
+      # journal. Operator escapes with `systemctl reset-failed`.
+      unitConfig = {
+        StartLimitIntervalSec = 60;
+        StartLimitBurst = 5;
+      };
+
       serviceConfig = {
         Type = "notify";
         ExecStart = "${cfg.engine.package}/bin/nasty-metrics";
@@ -1561,6 +1571,24 @@ in {
         # in-kernel RM. Setting TPM2TOOLS_TCTI cuts straight to /dev/tpmrm0
         # and keeps the journal readable.
         TPM2TOOLS_TCTI = "device:/dev/tpmrm0";
+      };
+
+      # Cap restart attempts so a deterministic panic (corrupt state
+      # file, schema-mismatch on a stored JSON blob, divide-by-zero on
+      # a metric edge case) surfaces as a `failed` state instead of
+      # tight-looping every 5s. Without this, an engine that panics on
+      # boot reload would burn a CPU core and spam the journal until
+      # the operator notices. The boot overlay (boot_status.rs) and
+      # `systemctl status nasty-engine` both surface the failed state
+      # clearly; operator escape is `systemctl reset-failed nasty-engine`
+      # after fixing the underlying cause.
+      #
+      # Headroom: 5 starts in 60s comfortably covers a normal
+      # self-update (1 restart) and an operator debugging session
+      # (manual restart 2-3 times in quick succession).
+      unitConfig = {
+        StartLimitIntervalSec = 60;
+        StartLimitBurst = 5;
       };
 
       serviceConfig = {
@@ -1794,6 +1822,13 @@ in {
       description = "restic REST server for NASty backups";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
+      # Same restart-cap rationale as nasty-engine — a misconfigured
+      # repo path or a port-in-use error would otherwise tight-loop
+      # every 5s once the engine started this on demand.
+      unitConfig = {
+        StartLimitIntervalSec = 60;
+        StartLimitBurst = 5;
+      };
       serviceConfig = {
         Type = "simple";
         ExecStart = pkgs.writeShellScript "nasty-rest-server-start" ''
@@ -2150,6 +2185,13 @@ in {
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       wantedBy = []; # Engine manages lifecycle via systemctl start/stop
+      # Same restart-cap rationale as nasty-engine — a corrupt
+      # tailscaled.state file or an upstream API contract change
+      # would otherwise tight-loop and burn CPU.
+      unitConfig = {
+        StartLimitIntervalSec = 60;
+        StartLimitBurst = 5;
+      };
       serviceConfig = {
         ExecStart = "${pkgs.tailscale}/bin/tailscaled --state=/var/lib/nasty/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock";
         RuntimeDirectory = "tailscale";
