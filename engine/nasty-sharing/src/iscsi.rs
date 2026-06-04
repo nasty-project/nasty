@@ -272,25 +272,26 @@ impl IscsiService {
             return Ok(existing);
         }
 
-        let portals = match req.portals {
-            Some(p) => p,
+        // Split portals into "must succeed" and "best effort" buckets.
+        // Operator-supplied portals are always mandatory — if they
+        // typed `[::]:3260` and it can't bind, they need a loud error,
+        // not silent v4-only. The default v6 portal is best-effort:
+        // host_has_global_ipv6() catches the obvious "v4-only host"
+        // case, but it can't catch the harder ones (LIO compiled
+        // without v6, kernel iSCSI module loaded with ipv6 disabled,
+        // sysctl `net.ipv6.bindv6only=0`, container runtime that
+        // exposes v6 addresses but not v6 sockets). Those all surface
+        // as EINVAL from configfs mkdir of `[::]:3260` and used to
+        // wedge target creation entirely — observed in nasty-csi CI.
+        let (mandatory_portals, opportunistic_v6) = match req.portals {
+            Some(p) => (p, false),
             None => {
-                // Dual-stack default: always listen on v4 INADDR_ANY,
-                // additionally listen on v6 IN6ADDR_ANY when the host
-                // actually has a global v6 address. v4-only hosts stay
-                // v4-only — `[::]:3260` would bind successfully but
-                // accept zero connections and confuse `ss -tlnp` output.
-                let mut defaults = vec![Portal {
+                let defaults = vec![Portal {
                     ip: "0.0.0.0".to_string(),
                     port: 3260,
                 }];
-                if crate::v6::host_has_global_ipv6().await {
-                    defaults.push(Portal {
-                        ip: "::".to_string(),
-                        port: 3260,
-                    });
-                }
-                defaults
+                let try_v6 = crate::v6::host_has_global_ipv6().await;
+                (defaults, try_v6)
             }
         };
 
@@ -298,10 +299,41 @@ impl IscsiService {
         let tpg_path = format!("{ISCSI_BASE}/{iqn}/tpgt_1");
         configfs_mkdir(&tpg_path).await?;
 
-        // Create portals
-        for portal in &portals {
+        // Create mandatory portals first — any failure aborts the
+        // whole create, but we've only created the TPG dir so far,
+        // so cleanup is just rmdir'ing the TPG and the target dir.
+        let mut created_portals = Vec::with_capacity(mandatory_portals.len() + 1);
+        for portal in &mandatory_portals {
             let np_path = np_path_for(&tpg_path, &portal.ip, portal.port);
-            configfs_mkdir(&np_path).await?;
+            if let Err(e) = configfs_mkdir(&np_path).await {
+                // Best-effort cleanup of what we created so far so the
+                // next attempt doesn't trip the idempotency check with
+                // a stale half-target.
+                let _ = configfs_rmdir(&tpg_path).await;
+                let _ = configfs_rmdir(&format!("{ISCSI_BASE}/{iqn}")).await;
+                return Err(e);
+            }
+            created_portals.push(portal.clone());
+        }
+
+        // Best-effort v6 portal — skipped on EINVAL/etc. so v4 stays
+        // up on hosts where LIO can't bind v6. Operator can still add
+        // a specific v6 portal manually via share.iscsi.add_portal,
+        // which surfaces the real error (because that call is opted
+        // into and must not silently no-op).
+        if opportunistic_v6 {
+            let v6_portal = Portal {
+                ip: "::".to_string(),
+                port: 3260,
+            };
+            let np_path = np_path_for(&tpg_path, &v6_portal.ip, v6_portal.port);
+            match configfs_mkdir(&np_path).await {
+                Ok(()) => created_portals.push(v6_portal),
+                Err(e) => warn!(
+                    "iSCSI dual-stack default [::]:3260 portal for {iqn} skipped: {e}; \
+                     v4 portal is up, add a v6 portal manually if needed"
+                ),
+            }
         }
 
         // Disable authentication, allow any initiator, allow writes
@@ -316,7 +348,10 @@ impl IscsiService {
             id: Uuid::new_v4().to_string(),
             iqn: iqn.clone(),
             alias: req.alias,
-            portals,
+            // Stored list is what actually exists in configfs, not what
+            // the operator asked for — keeps state and reality in sync
+            // when the opportunistic v6 portal got skipped.
+            portals: created_portals,
             luns: vec![],
             acls: vec![],
             enabled: true,
