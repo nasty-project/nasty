@@ -38,7 +38,7 @@
 	let newLocalPath = $state('');
 	let newS3Endpoint = $state(''); let newS3Region = $state(''); let newS3Bucket = $state(''); let newS3Key = $state(''); let newS3Secret = $state('');
 	let newSftpHost = $state(''); let newSftpUser = $state(''); let newSftpPath = $state(''); let newSftpPort = $state('');
-	let newRestUrl = $state('');
+	let newRestUrl = $state(''); let newRestUser = $state(''); let newRestPassword = $state('');
 	let newB2Bucket = $state(''); let newB2Id = $state(''); let newB2Key = $state('');
 	/** PEM CA cert text the operator wants this profile to trust on top
 	 * of the system roots. Shown only for network targets — the local
@@ -85,6 +85,8 @@
 		newSftpPath = '';
 		newSftpPort = '';
 		newRestUrl = '';
+		newRestUser = '';
+		newRestPassword = '';
 		newB2Bucket = '';
 		newB2Id = '';
 		newB2Key = '';
@@ -193,7 +195,7 @@
 	let editLocalPath = $state('');
 	let editS3Endpoint = $state(''); let editS3Region = $state(''); let editS3Bucket = $state(''); let editS3Key = $state(''); let editS3Secret = $state('');
 	let editSftpHost = $state(''); let editSftpUser = $state(''); let editSftpPath = $state(''); let editSftpPort = $state('');
-	let editRestUrl = $state('');
+	let editRestUrl = $state(''); let editRestUser = $state(''); let editRestPassword = $state('');
 	let editB2Bucket = $state(''); let editB2Id = $state(''); let editB2Key = $state('');
 	let editTrustedCacert = $state('');
 	/** Snapshot of the target shape at startEdit time, used to detect
@@ -232,7 +234,7 @@
 		editLocalPath = '';
 		editS3Endpoint = ''; editS3Region = ''; editS3Bucket = ''; editS3Key = ''; editS3Secret = '';
 		editSftpHost = ''; editSftpUser = ''; editSftpPath = ''; editSftpPort = '';
-		editRestUrl = '';
+		editRestUrl = ''; editRestUser = ''; editRestPassword = '';
 		editB2Bucket = ''; editB2Id = ''; editB2Key = '';
 		// Round-trip the existing CA cert PEM (engine sends it back
 		// in cleartext — it's a public certificate, not a secret).
@@ -255,6 +257,7 @@
 				break;
 			case 'rest':
 				editRestUrl = p.target.url;
+				editRestUser = p.target.username ?? '';
 				break;
 			case 'b2':
 				editB2Bucket = p.target.bucket;
@@ -295,8 +298,21 @@
 					path: editSftpPath,
 					port: editSftpPort ? parseInt(editSftpPort) : null,
 				} as BackupProfile['target'];
-			case 'rest':
-				return { type: 'rest', url: editRestUrl };
+			case 'rest': {
+				// Same secret-omission shape as S3/B2: only attach
+				// `password` when the operator typed a new one in
+				// the edit form. Omitting both `password` and
+				// `password_encrypted` triggers
+				// carry_forward_existing_secrets in the engine,
+				// keeping the sealed blob from the previous save.
+				const t: BackupProfile['target'] = {
+					type: 'rest',
+					url: editRestUrl,
+					username: editRestUser || null,
+				} as BackupProfile['target'];
+				if (editRestPassword) (t as { password: string }).password = editRestPassword;
+				return t;
+			}
 			case 'b2': {
 				const t: BackupProfile['target'] = {
 					type: 'b2',
@@ -543,7 +559,7 @@
 		const target = newTargetType === 'local' ? { type: 'local' as const, path: newLocalPath }
 			: newTargetType === 's3' ? { type: 's3' as const, endpoint: newS3Endpoint, region: newS3Region || undefined, bucket: newS3Bucket, access_key: newS3Key, secret_key: newS3Secret }
 			: newTargetType === 'sftp' ? { type: 'sftp' as const, host: newSftpHost, user: newSftpUser, path: newSftpPath, port: parseInt(newSftpPort) || undefined }
-			: newTargetType === 'rest' ? { type: 'rest' as const, url: newRestUrl }
+			: newTargetType === 'rest' ? { type: 'rest' as const, url: newRestUrl, username: newRestUser || null, password: newRestPassword || null }
 			: { type: 'b2' as const, bucket: newB2Bucket, account_id: newB2Id, account_key: newB2Key };
 
 		const profile = {
@@ -808,7 +824,15 @@
 						<div><Label for="bk-sftp-p">Path</Label><Input id="bk-sftp-p" bind:value={newSftpPath} placeholder="/backups/nasty" class="mt-1 font-mono" /></div>
 					</div>
 				{:else if newTargetType === 'rest'}
-					<div><Label for="bk-rest">REST URL</Label><Input id="bk-rest" bind:value={newRestUrl} placeholder="https://rest-server:8000/nasty" class="mt-1 font-mono" /></div>
+					<div>
+						<Label for="bk-rest">REST URL</Label>
+						<Input id="bk-rest" bind:value={newRestUrl} placeholder="https://rest-server:8000/nasty" class="mt-1 font-mono" />
+						<p class="mt-1 text-xs text-muted-foreground">Don't include user:password@ in the URL — use the fields below.</p>
+					</div>
+					<div class="grid grid-cols-2 gap-3">
+						<div><Label for="bk-rest-user">Username</Label><Input id="bk-rest-user" bind:value={newRestUser} placeholder="nasty-backup" class="mt-1 font-mono" /></div>
+						<div><Label for="bk-rest-pass">Password</Label><Input id="bk-rest-pass" type="password" bind:value={newRestPassword} class="mt-1 font-mono" /></div>
+					</div>
 				{:else if newTargetType === 'b2'}
 					<div class="grid grid-cols-3 gap-3">
 						<div><Label for="bk-b2-bk">Bucket</Label><Input id="bk-b2-bk" bind:value={newB2Bucket} class="mt-1 font-mono" /></div>
@@ -999,7 +1023,17 @@
 										<div><Label for="ed-sftp-p">Path</Label><Input id="ed-sftp-p" bind:value={editSftpPath} placeholder="/backups/nasty" class="mt-1 font-mono" /></div>
 									</div>
 								{:else if editTargetType === 'rest'}
-									<div><Label for="ed-rest">REST URL</Label><Input id="ed-rest" bind:value={editRestUrl} placeholder="https://rest-server:8000/nasty" class="mt-1 font-mono" /></div>
+									<div>
+										<Label for="ed-rest">REST URL</Label>
+										<Input id="ed-rest" bind:value={editRestUrl} placeholder="https://rest-server:8000/nasty" class="mt-1 font-mono" />
+									</div>
+									<div class="grid grid-cols-2 gap-3">
+										<div><Label for="ed-rest-user">Username</Label><Input id="ed-rest-user" bind:value={editRestUser} placeholder="nasty-backup" class="mt-1 font-mono" /></div>
+										<div>
+											<Label for="ed-rest-pass">Password</Label>
+											<Input id="ed-rest-pass" type="password" bind:value={editRestPassword} placeholder="Leave blank to keep existing" class="mt-1 font-mono" />
+										</div>
+									</div>
 								{:else if editTargetType === 'b2'}
 									<div class="grid grid-cols-3 gap-3">
 										<div><Label for="ed-b2-bk">Bucket</Label><Input id="ed-b2-bk" bind:value={editB2Bucket} class="mt-1 font-mono" /></div>

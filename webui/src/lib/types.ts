@@ -1182,7 +1182,17 @@ export type BackupTarget =
 		region?: string | null;
 	  }
 	| { type: 'sftp'; host: string; user: string; path: string; port?: number | null }
-	| { type: 'rest'; url: string }
+	| {
+		type: 'rest';
+		url: string;
+		/** HTTP basic-auth username; the rest-server requires auth as
+		 * of #408. Empty / null for legacy unauthenticated servers. */
+		username?: string | null;
+		/** Password as the operator supplied it. Round-trips as `"***"`
+		 * on output once the engine has sealed it via systemd-creds —
+		 * same shape as `S3.secret_key` / `B2.account_key`. */
+		password?: string | null;
+	}
 	| {
 		type: 'b2';
 		bucket: string;
