@@ -1,5 +1,105 @@
 # Changelog
 
+## v0.0.10 — 2026-06-05
+
+> **This is the Backups + REST API release.** Backups gained the missing scheduler, encrypted credentials at rest, a job-handle pattern for long-running ops, and a HTTPS+auth-enforcing receiver. The engine's JSON-RPC dispatcher now also speaks REST at `/api/v1/{...}` with OpenAPI 3.1 and a built-in Swagger UI. Disk health gets first-class NVMe, SAS, ATA and PCIe-link panels; alerts fire on critical SMART attributes before the drive's own self-assessment flips. Plus a security pass — input validators, configfs secret redaction, systemd restart hardening, scanner-flagged response headers, two missing destructive-confirm dialogs.
+
+### Headline changes
+
+- **Backup scheduler that actually fires (#402).** The `schedule` field on `BackupProfile` has been stored and displayed since the feature shipped, but nothing in the engine ever read it. A new `nasty_backup::scheduler` parses cron, ticks every 60s, fires each due profile in its own `tokio::spawn` so a slow run can't starve the scheduler, and seeds `last_attempted` to *now* on engine start. Long-running RPCs (`backup.repo.init`, `backup.run`, `backup.repo.check`) now return a `BackupJob` handle and the WebUI polls `backup.jobs.get` every 2s instead of dying at the 10s WS timeout (#404). The Backups page rehydrates in-flight job badges across reloads, edit-form now has the same Hourly/Daily/Weekly chip group as create, and the target is editable post-creation (#405, #406, #410, #416).
+
+- **Backup credentials encrypted at rest (#401, #403).** Repository passwords + S3/B2 cloud secrets used to live in `/var/lib/nasty/backups.json` in plaintext. A new `nasty_common::secrets` wraps `systemd-creds --with-key=auto` (TPM2+host when available, host-only fallback) and seals every secret field before persistence. Boot phase `backups.migrate_secrets` (30s budget) walks existing profiles on first start after upgrade and encrypts whatever's still plaintext, idempotently. Wire shape backward-compatible — plaintext on input still works; output is redacted to `"***"` or absent. A `backup.secrets_status` RPC drives a *Secrets: TPM-protected / encrypted at rest / plaintext* pill in the WebUI. Filesystem encryption keys stay on the existing PCR-7 path (Phase 2, separate review).
+
+- **Backup Server now serves HTTPS with required auth (#407, #408, #409, #411, #412, #417).** The bundled `restic-rest-server` previously ran `--no-auth` on plain HTTP — a profile with `https://` would handshake against a plaintext server and return the cryptic OpenSSL *"wrong version number"* error. The service now reads Caddy's already-issued cert for the box's `tls_domain` and serves HTTPS for free (#407); HTTP basic auth backed by a per-box 32-char alphanumeric password sealed via systemd-creds is required, with a *Receiver credentials* card on /services exposing Show / Copy / Rotate buttons (#408). Source-side profiles get **first-class Username + Password fields** that round-trip as `"***"` and seal to disk via the same systemd-creds path as `BackupProfile.password` (#417) — no more inlining credentials into the URL where they'd leak in cleartext on every list response. Source-side profiles can also paste their own trust anchor PEM into a *Trusted CA certificate* field (#409); the receiver's local CA is exposed inline on /services so the operator doesn't have to bounce through /tls to copy it (#412).
+
+- **In-engine REST API + Swagger UI (#350, #351, #352, #353).** The method registry moved into `nasty-engine` and was backfilled from 106 → **256 methods** — every RPC the dispatcher actually accepts now has typed params, role, and result schemas. Six docs-vs-runtime drift bugs fixed in passing. A new REST gateway at `/api/v1/{path}` translates dotted method names to slash paths with HTTP verbs inferred from the last segment (`*.get/.list/.status` → GET, `*.delete` → DELETE, `*.set/.update` → PUT, else POST). Auth matches `/ws`: `nasty_session` cookie or `Authorization: Bearer`. `/api/openapi.json` emits a ~1.1 MB OpenAPI 3.1 doc covering all 256 methods + 104 component schemas; `/api/docs` mounts Swagger UI v5.17.14 vendored via `include_dir!` — no CDN, works air-gapped, *Try it out* carries the same session cookie as the WebUI.
+
+- **Disk health: full per-protocol detail (#366, #367, #368, #369, #373, #375, #376, #378, #380, #381, #382).** NVMe drives went from "no SMART attributes available" to a full panel reading the controller's health log — endurance %, spare-vs-threshold, critical-warning bits, media errors, host R/W totals, unsafe shutdowns, time above warning/critical temps (#367). SAS drives gained an equivalent SCSI panel including a **health override** that flips `health_passed` to false when any uncorrected R/W/V counter is non-zero — caught a real failing Seagate that smartctl still reported PASSED (#369). ATA drives get a summary panel with interface-speed downgrade detection, reallocated/pending/uncorrectable tiles, SATA SSD endurance via smartctl 7.5 (#373, #378). Topology shows each controller's PCIe gen × width × computed MB/s including for RAID-tunneled drives via `/sys/class/scsi_host/` (#380, #381), with chipset-integrated controllers annotated (#382). Enumeration switched from `lsblk` to `smartctl --scan-open -j` so MegaRAID-tunneled drives finally show up (#368). SMART attribute names + descriptions + critical flags come from a 79-row Backblaze-evidence-backed table adapted from Scrutiny, and a new `SmartAttribute` alert fires the moment any of the 9 statistically-predictive attributes goes non-zero (#375, #376).
+
+### Backups
+
+- Cron-driven scheduler (#402); long-running RPCs return job handles, WebUI polls (#404).
+- Repo passwords + S3/B2 secrets sealed via systemd-creds; boot-time migration converts existing plaintext (#401, #403).
+- Edit the backup target after creation — typo in REST URL no longer means delete-and-recreate (#405).
+- Backup Server: HTTPS via Caddy's cert (#407) + required HTTP basic auth, 32-char generated password sealed at rest (#408).
+- Source-side REST profiles: separate Username + Password fields, sealed-at-rest, same shape as S3/B2 secrets (#417). Pre-existing profiles with userinfo in the URL keep working unchanged — the field-based path is just cleaner and stops leaking the password on list responses.
+- Operator-supplied trust anchor field on source profiles for private-CA / self-signed receivers (#409).
+- `backup.secrets_status` pill on Backups; CA-cert inline on the Backup Server /services panel (#406, #412).
+- Edit form: same chip group as create (#416); no-op edits stop falsely firing the change-target confirm modal (#410); cleaner Save-row + Copy-feedback toast (#411).
+
+### REST API & docs
+
+- `/api/v1/{method-as-path}` for every registered RPC; verb inferred from the trailing segment; GET params via query string, others via JSON body (#352).
+- `/api/openapi.json` — OpenAPI 3.1, 256 methods, 104 schemas, built once and cached process-lifetime (#352).
+- `/api/docs` — Swagger UI vendored into the binary; *Try it out* shares the WebUI session cookie (#353).
+- Method registry moved into `nasty-engine`; six runtime-vs-docs drift bugs fixed; `nasty-apidoc` retired (#350).
+- 150 previously-undocumented methods backfilled — vm.*, apps.*, backup.*, smb.user.*, system.hardware.*, system.secure_boot.*, system.acme.*, etc. (#351).
+
+### Disks & SMART
+
+- `smartctl --scan-open` enumeration surfaces drives behind RAID controllers; per-physical-drive identity keyed on `(device, transport)` so two failing megaraid slots don't dedup into one alert (#368).
+- NVMe health log: endurance, spare-vs-threshold, critical-warning bits, media errors, unsafe shutdowns, time above temp thresholds; Prometheus metrics exposed (#367).
+- SAS/SCSI panel: error counters, grown defects, drive-trip temp, manufacture date, self-test results, plus the uncorrected-error override (#369).
+- ATA summary panel with interface-speed downgrade and Helium_Level tile for HGST/WD He10/He12 drives (#373).
+- SATA SSD endurance via smartctl 7.5's `endurance_used.current_percent` (#378).
+- Topology PCIe gen × width × MB/s next to each controller (#380); resolved for RAID-tunneled drives via `/sys/class/scsi_host/` (#381); chipset-integrated controllers annotated (#382).
+- Drive class `sas` is its own badge, no longer disguised as hdd/ssd (#366).
+- All disks always appear in SMART + Topology even when smartctl returns no usable envelope — status `UNAVAILABLE`, no silent drop; alerts skip UNAVAILABLE (#358, fixes #349).
+- ATA attribute metadata adapted from Scrutiny: normalized names, descriptions, ideal-direction markers, evidence-backed `critical` flag drives row highlight (#375).
+- `SmartAttribute` alert fires `Warning` on any of the 9 Scrutiny-critical attributes going non-zero, stable per-(drive, attribute) source (#376).
+
+### Networking & sharing
+
+- Dual-stack defaults: iSCSI target creation on a v6-capable host lists both `0.0.0.0:3260` and `[::]:3260`; NVMe-oF auto-port adds a probed v6 sibling (#391). The v6 leg is best-effort — LIO IPv6 misconfig logs a warn and skips, keeping nasty-csi happy (#400).
+- iSCSI portal management: per-target add/remove via WebUI + RPC; configfs paths wrap v6 in brackets; last-portal removal refused (#390).
+- Listen-address picker on Add Portal / Add Port: drop-down of host interface addresses (filters down/loopback/link-local), wildcards offered for iSCSI only (#392).
+- IPv6-aware client-side validators on NVMe-oF Add Port + NFS Add Client; engine's `validate_nfs_host` mirrored in JS (#389).
+- Bridge creation with a live-DHCP NIC as member no longer fails the structural validator on first attempt (#357, fixes #348).
+- udev rule disables `multicast_snooping` on engine-created `br[0-9]*` bridges — Avahi / WS-Discovery stay reachable past the ~5-minute IGMP membership timeout on querier-less LANs (#356, fixes #291).
+
+### Security & hardening
+
+- Input validators tightened: subvolume name (`@`, path-traversal, control chars; volsize capped at 256 TiB at create + resize), iSCSI target name (configfs-escape), NVMe-oF subsystem + host NQN (`nqn.` prefix + 223-byte limit), SMB share path (newline / CR / NUL / `"` / `#`) (#393).
+- iSCSI CHAP password redacted in `configfs_write` error logs via a new `configfs_write_secret` helper — username writes still show the failing IQN for diagnostics (#398).
+- Webhook notifications: structured `event_type` / `event_id` / `data` payload (legacy `subject/body/source/timestamp` kept), optional HMAC-SHA256 signing via `X-NASty-Signature`, 3-attempt retry with 5s+30s backoff on 5xx + network (#383). Plus `alert.resolved` events fired symmetrically when an active alert clears, sharing the original `event_id` so receivers auto-close incidents (#384).
+- Subvolume delete: child-delete + `losetup -d` failures surface as `SubvolumeError::ChildrenStuck` / `LoopDetachFailed` naming the specific child / `/dev/loopN` (#395).
+- Two new Caddy response headers: `Permissions-Policy` (denies camera/mic/geo/payment/usb/sensors/interest-cohort), `Cross-Origin-Opener-Policy: same-origin` (#396).
+- Confirm dialog before removing SSH keys (names the key, calls out self-lockout risk) and before unchecking SMB group memberships (reverts the checkbox on cancel) (#397).
+- systemd `StartLimitIntervalSec=60` + `StartLimitBurst=5` on `nasty-engine`, `nasty-metrics`, `nasty-rest-server`, `nasty-tailscale` — deterministic-panic loops now land in `failed` after 25s; escape via `systemctl reset-failed` (#394).
+- Security CI: weekly cargo-deny (advisories + license allow-list + crates.io-only sources + wildcard-dep ban), npm audit at `high+`, cargo-geiger as artifact-only (#364).
+
+### VMs
+
+- New VMs land at `/fs/<filesystem>/vms/<name>` instead of top-level `vm-<name>` — matches the `apps/` layout and the existing `vms/images/` sibling (#360). Existing VMs unaffected (VmConfig stores absolute disk paths); only new ones use the layout.
+
+### WebUI fixes & polish
+
+- Login page hides the *Sign in with security key* button until at least one credential is registered — new unauthenticated `/api/auth/webauthn/available` endpoint mirroring the OIDC pattern (#346).
+- Restart spinner safety-net: 5s timer promotes `reconnecting` if the disconnect callback didn't fire; debug logging on every reconnect state-machine transition behind the `nasty-debug` localStorage flag (#347).
+- Chromium-on-Linux dark mode: `<select>` options were white-on-white; one `color-scheme: light/dark` per theme block (#379, fixes #377).
+
+### Build / CI / packaging
+
+- `nixpkgs` pin moved from rolling `nixos-unstable` to `nixos-26.05` stable; wrapper template's `nixpkgs.follows = "nasty/nixpkgs"` carries every operator box forward on next apply (#355).
+- Bundled `nasty-top` bumped to v0.0.7 — fixes the `0.0/0.0 GiB` top-bar display on bcachefs pools with sparse `dev-N` numbering (#372).
+- `nasty-top` derivation switched from `cargoHash` to `cargoLock.lockFile` (#362).
+- Installer wrapper-lock idempotency gate: renders the template + runs `nix flake lock` twice; second pass must be a no-op (#345).
+- magic-nix-cache-action bumped to v14 (Node 24); `use-flakehub: false` silences the FlakeHub-registration error (#359).
+- Weekly-bump workflow resolves the kernel version via `nix eval pkgs.linuxPackages.kernel.version` rather than hardcoded `"6.18"` (#371).
+- `cron` 0.15 → 0.16 (backup scheduler dep); routine `npm update` + safe cargo bumps (#385, #414, #415).
+- README: Community section with WarlockSyno's Proxmox storage plugin (#399); v0.0.9 features (TPM2 / WebAuthn / Secure Boot) backfilled into Features (#361).
+
+### Upgrade notes
+
+- **Backup credentials migrate automatically.** First boot after upgrade runs `backups.migrate_secrets` (~150ms typical, 30s budget). On-disk format flips from `password: "..."` to `password_encrypted: <systemd-creds blob>`. JSON-RPC output is now redacted to `"***"` or absent.
+- **Backup Server now requires HTTP basic auth.** Operators with existing source-side REST profiles will get **HTTP 401** after the upgrade until they fill in credentials. Open each source profile in /backups → Edit, paste the receiver's username + password from the receiver's /services → Backup Server → *Show* panel into the new Username + Password fields, save. Pre-existing profiles that already inlined creds into the URL (`https://user:pass@host:8000/path`) keep working without changes — the new fields are the cleaner path for everything else. For private-CA / self-signed setups, paste the receiver's CA cert (also exposed inline on the same panel) into the *Trusted CA certificate* field. ACME-served receivers don't need that step.
+- **Backup target now editable.** A field-level destination change on an already-initialized profile prompts a confirm, then resets `repo_initialized=false` so the next run / Init Repo materializes the new target. The old rustic repo at the previous destination is left where it was — operator handles cleanup.
+- **VM disk layout changed for new VMs only.** WebUI creates new VM subvolumes at `vms/<name>` instead of top-level `vm-<name>`. Existing VMs unchanged (paths stored absolute).
+- **iSCSI default portals now dual-stack on v6-capable hosts.** New targets get both `0.0.0.0:3260` and `[::]:3260` by default; existing targets unchanged. v6 leg is best-effort.
+- **Webhook payload gained fields; legacy fields preserved.** New `event_type` / `event_id` / `nasty_version` / `data` fields are additive; HMAC signing via `X-NASty-Signature` only fires when the operator sets a `secret` on the channel. `alert.resolved` is a new event type.
+- **REST API + Swagger UI at `/api/v1/{...}` and `/api/docs`.** Auth uses the same session cookie or `Authorization: Bearer` token as `/ws`. Streaming endpoints (log, terminal, VM console, telemetry, events) stay WebSocket-only.
+- **systemd service restart cap.** Engine + metrics + rest-server + tailscale now allow at most 5 restarts in 60s before landing in `failed`. Recovery is `systemctl reset-failed <unit>`.
+
 ## v0.0.9 — 2026-05-29
 
 > **This is the Secure Boot + Passkeys release.** Boxes can opt into a Secure Boot–enforcing boot chain (lanzaboote) with a guided enrollment ceremony, TPM2-sealed bcachefs encryption keys, and WebAuthn sign-in via passkeys. The v0.0.8 nginx → Caddy migration scaffolding has been removed — boxes upgrading from v0.0.7 should pass through v0.0.8 first.
