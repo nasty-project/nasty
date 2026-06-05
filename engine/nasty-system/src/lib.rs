@@ -7,6 +7,7 @@ pub mod notifications;
 pub mod nut;
 pub mod passthrough;
 pub mod protocol;
+pub mod rest_server;
 pub mod secure_boot;
 pub mod secure_boot_enrollment;
 pub mod settings;

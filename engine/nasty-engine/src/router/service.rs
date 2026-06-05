@@ -85,6 +85,41 @@ pub(super) async fn try_route(
                 .unwrap_or_else(|_| "/var/lib/nasty/rest-server".into());
             ok(req, serde_json::json!({ "path": path.trim() }))
         }
+        "service.rest_server.credentials" => {
+            // Returns the plaintext user + password for the rest-server's
+            // basic auth. The operator pastes these into the source-side
+            // backup profile URL (`https://<user>:<password>@<host>:8000/`).
+            // Lazily generates credentials on first call if the protocol
+            // was enabled before this code shipped — same idempotent
+            // ensure path the protocol-enable hook uses.
+            if let Err(e) = nasty_system::rest_server::ensure_credentials().await {
+                return Some(err(req, format!("ensure credentials: {e}")));
+            }
+            match nasty_system::rest_server::get_credentials().await {
+                Ok(c) => ok(req, c),
+                Err(e) => err(req, e.to_string()),
+            }
+        }
+        "service.rest_server.rotate_credentials" => {
+            // Generate a fresh random password (optionally a new username),
+            // rewrite the htpasswd file, restart the service so it picks
+            // up the new file. Operator follow-up: update every source
+            // profile that points at this rest-server with the new URL.
+            let new_username = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("username"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            match nasty_system::rest_server::rotate_password(new_username).await {
+                Ok(creds) => {
+                    nasty_common::cmd::try_run("systemctl", &["restart", "nasty-rest-server"])
+                        .await;
+                    ok(req, creds)
+                }
+                Err(e) => err(req, e.to_string()),
+            }
+        }
         "service.rest_server.configure" => {
             let path = match require_str(req, "path") {
                 Ok(s) => s.to_string(),

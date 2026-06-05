@@ -184,6 +184,13 @@
 	let restServerPath = $state('');
 	let showRestConfig = $state(false);
 	let restConfigLoaded = $state(false);
+	/** Decrypted basic-auth creds for the rest-server. Loaded lazily
+	 * when the operator clicks Show, never on initial page render —
+	 * the engine returns plaintext from this RPC and we don't want
+	 * it sitting in the WebUI state any longer than needed. */
+	let restCredentials: { username: string; password: string } | null = $state(null);
+	let restCredentialsLoading = $state(false);
+	let restPasswordRevealed = $state(false);
 
 	async function loadRestConfig() {
 		try {
@@ -200,6 +207,38 @@
 		);
 		showRestConfig = false;
 		await refresh();
+	}
+
+	async function loadRestCredentials() {
+		restCredentialsLoading = true;
+		try {
+			restCredentials = await client.call<{ username: string; password: string }>(
+				'service.rest_server.credentials',
+			);
+		} catch { /* leave null; UI shows the error state */ }
+		restCredentialsLoading = false;
+	}
+
+	async function rotateRestCredentials() {
+		if (!await confirm(
+			'Rotate Backup Server credentials?',
+			'A fresh random password is generated and the rest-server is restarted. EVERY source-side backup profile that points at this Backup Server must be updated with the new URL before its next run — otherwise the run will fail with HTTP 401.',
+		)) return;
+		const fresh = await withToast(
+			() => client.call<{ username: string; password: string }>(
+				'service.rest_server.rotate_credentials',
+				{},
+			),
+			'Credentials rotated — update source-side profile URLs',
+		);
+		if (fresh) {
+			restCredentials = fresh;
+			restPasswordRevealed = true;
+		}
+	}
+
+	function copyToClipboard(s: string) {
+		navigator.clipboard?.writeText(s).catch(() => { /* ignore */ });
 	}
 
 	const client = getClient();
@@ -450,14 +489,53 @@
 									</div>
 								</div>
 							{:else if proto.name === 'rest-server'}
-								<div class="flex items-end gap-2">
-									<div class="flex-1 max-w-md">
-										<label for="rest-path" class="text-xs text-muted-foreground">Storage path</label>
-										<input id="rest-path" type="text" bind:value={restServerPath} placeholder="/fs/first/backups"
-											class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm" />
-										<p class="mt-1 text-xs text-muted-foreground">Subvolume created automatically if path is under /fs/.</p>
+								<div class="space-y-4">
+									<div class="flex items-end gap-2">
+										<div class="flex-1 max-w-md">
+											<label for="rest-path" class="text-xs text-muted-foreground">Storage path</label>
+											<input id="rest-path" type="text" bind:value={restServerPath} placeholder="/fs/first/backups"
+												class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm" />
+											<p class="mt-1 text-xs text-muted-foreground">Subvolume created automatically if path is under /fs/.</p>
+										</div>
+										<Button size="sm" onclick={saveRestConfig}>Save</Button>
 									</div>
-									<Button size="sm" onclick={saveRestConfig}>Save</Button>
+
+									<div class="rounded-md border border-border p-3 max-w-md">
+										<div class="flex items-center justify-between gap-3">
+											<div>
+												<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Receiver credentials</p>
+												<p class="mt-1 text-xs text-muted-foreground">Required by source-side NASties pointing backups at this Backup Server. Paste into the backup profile URL: <code class="font-mono">https://&lt;user&gt;:&lt;password&gt;@&lt;host&gt;:8000/&lt;path&gt;</code></p>
+											</div>
+											<div class="flex gap-2">
+												{#if restCredentials}
+													<Button size="xs" variant="secondary" onclick={() => { restPasswordRevealed = !restPasswordRevealed; }}>
+														{restPasswordRevealed ? 'Hide' : 'Show'}
+													</Button>
+												{:else}
+													<Button size="xs" variant="secondary" onclick={loadRestCredentials} disabled={restCredentialsLoading}>
+														{restCredentialsLoading ? 'Loading…' : 'Show'}
+													</Button>
+												{/if}
+												<Button size="xs" variant="destructive" onclick={rotateRestCredentials}>Rotate</Button>
+											</div>
+										</div>
+										{#if restCredentials}
+											<div class="mt-3 space-y-2 text-xs">
+												<div class="flex items-center gap-2">
+													<span class="w-24 text-muted-foreground">Username</span>
+													<code class="flex-1 rounded bg-muted/40 px-2 py-1 font-mono">{restCredentials.username}</code>
+													<Button size="xs" variant="ghost" onclick={() => copyToClipboard(restCredentials!.username)}>Copy</Button>
+												</div>
+												<div class="flex items-center gap-2">
+													<span class="w-24 text-muted-foreground">Password</span>
+													<code class="flex-1 rounded bg-muted/40 px-2 py-1 font-mono">
+														{restPasswordRevealed ? restCredentials.password : '•'.repeat(restCredentials.password.length)}
+													</code>
+													<Button size="xs" variant="ghost" onclick={() => copyToClipboard(restCredentials!.password)}>Copy</Button>
+												</div>
+											</div>
+										{/if}
+									</div>
 								</div>
 							{:else}
 								<p class="text-xs text-muted-foreground">Loading...</p>
