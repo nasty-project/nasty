@@ -532,6 +532,19 @@ async fn main() -> anyhow::Result<()> {
     // Background alert evaluation + notifications
     spawn_alert_notifier(state.clone());
 
+    // Cron-driven backup scheduler. Polls profile list every 60s;
+    // when an enabled profile's cron expression elapses since its
+    // last attempt, fires run_backup as a tokio::spawn so a slow
+    // backup on one profile doesn't block the scheduler advancing
+    // the others. Missed runs during engine downtime are NOT caught
+    // up — see the module docs in nasty_backup::scheduler for why.
+    {
+        let backups = state.backups.clone_for_task();
+        tokio::spawn(async move {
+            nasty_backup::scheduler::run_scheduler_loop(backups).await;
+        });
+    }
+
     // Flip boot_status.overall from Booting → Ready / ReadyWithErrors
     // BEFORE notifying systemd — once we're READY the WebUI is going
     // to start polling /api/boot_status and we want it to immediately

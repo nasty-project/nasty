@@ -3,6 +3,8 @@
 //! Manages backup profiles, scheduling, and execution. Uses rustic_core
 //! library directly for backup operations (restic-compatible repo format).
 
+pub mod scheduler;
+
 use nasty_common::secrets::{self, EncryptedBlob, SecretsStatus};
 use rustic_backend::BackendOptions;
 use rustic_core::{
