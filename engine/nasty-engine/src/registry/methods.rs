@@ -1716,6 +1716,32 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     )),
                     result: None,
                 },
+                Method {
+                    name: "service.rest_server.credentials",
+                    desc: "Return the basic-auth username + password the rest-server requires. Source-side backup profiles need these in their target URL as `https://<user>:<password>@<host>:8000/`. Credentials are generated lazily on first call and persisted (password sealed via systemd-creds). Operators who lose track can re-read this RPC at any time.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(
+                        gen_schema::<nasty_system::rest_server::RestServerCredentials>(generator),
+                    ),
+                },
+                Method {
+                    name: "service.rest_server.rotate_credentials",
+                    desc: "Generate a fresh random password (and optionally a new username), rewrite the htpasswd file, restart `nasty-rest-server` so it picks up the new file. Source-side backup profiles pointing at this rest-server need their URLs updated with the new credentials before the next run, or they'll fail with HTTP 401.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "username": {
+                                "type": "string",
+                                "description": "Optional new username. Omit or pass empty to keep the existing one."
+                            }
+                        }
+                    })),
+                    result: Some(
+                        gen_schema::<nasty_system::rest_server::RestServerCredentials>(generator),
+                    ),
+                },
             ],
         ),
         // ── Telemetry ────────────────────────────────────────────────────

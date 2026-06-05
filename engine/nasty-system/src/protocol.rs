@@ -449,6 +449,19 @@ async fn prepare_protocol(proto: Protocol) {
             warn!("Failed to write NUT config files: {e}");
         }
     }
+    if proto == Protocol::RestServer {
+        // The rest-server systemd unit requires an htpasswd file
+        // (no more --no-auth). Generate the credentials before
+        // starting the service so the start path never sees a
+        // missing file. Idempotent — does nothing when both the
+        // state file and htpasswd are already in place.
+        if let Err(e) = crate::rest_server::ensure_credentials().await {
+            warn!(
+                "Failed to ensure rest-server credentials: {e}. \
+                 The service will fail to start until this is resolved."
+            );
+        }
+    }
 }
 
 async fn systemctl(action: &str, service: &str) -> Result<(), String> {
