@@ -1818,9 +1818,28 @@ in {
     };
 
     # ── Backup REST server (receives backups from other NASties) ─
+    #
+    # TLS handling: the rest-server serves HTTPS using Caddy's
+    # already-issued cert for the box's main TLS domain (the same
+    # one the WebUI uses). Cert + key files are looked up under
+    # /var/lib/caddy/.local/share/caddy/certificates/<issuer>/<domain>/
+    # at service-start time. When Caddy hasn't issued anything yet
+    # (fresh box, no tls_domain configured), the service falls back
+    # to plain HTTP rather than refusing to start — better degraded
+    # than offline.
+    #
+    # Cert renewal: Caddy renews ~30 days before expiry. The rest-
+    # server reads its cert files at startup and doesn't hot-reload.
+    # The old cert stays valid for the 30-day window between renewal
+    # and old-cert-expiry, so backups in flight during a renewal
+    # don't break; the rest-server picks up the new cert on the next
+    # restart (engine restart, NixOS update, or any unrelated
+    # systemctl restart). For the edge case of a long-uninterrupted
+    # run that spans the full 30-day overlap window, operators can
+    # `systemctl restart nasty-rest-server` manually.
     systemd.services.nasty-rest-server = {
       description = "restic REST server for NASty backups";
-      after = [ "network-online.target" ];
+      after = [ "network-online.target" "caddy.service" ];
       wants = [ "network-online.target" ];
       # Same restart-cap rationale as nasty-engine — a misconfigured
       # repo path or a port-in-use error would otherwise tight-loop
@@ -1832,6 +1851,7 @@ in {
       serviceConfig = {
         Type = "simple";
         ExecStart = pkgs.writeShellScript "nasty-rest-server-start" ''
+          set -u
           PATH_FILE="/var/lib/nasty/rest-server-path"
           if [ -f "$PATH_FILE" ]; then
             REPO_PATH=$(cat "$PATH_FILE")
@@ -1839,11 +1859,44 @@ in {
             REPO_PATH="/var/lib/nasty/rest-server"
           fi
           mkdir -p "$REPO_PATH"
-          exec ${pkgs.restic-rest-server}/bin/rest-server --listen :8000 --path "$REPO_PATH" --no-auth
+
+          # Look up Caddy's cert + key for the operator's configured
+          # TLS domain (settings.json's tls_domain field, set via the
+          # TLS page in the WebUI). Glob across the issuer subdirs —
+          # the path includes "local" for Caddy's internal CA and
+          # "acme-v02.api.letsencrypt.org-directory" for ACME, and we
+          # don't know which the operator picked until runtime.
+          TLS_DOMAIN=""
+          if [ -f /var/lib/nasty/settings.json ]; then
+            TLS_DOMAIN=$(${pkgs.jq}/bin/jq -r '.tls_domain // ""' /var/lib/nasty/settings.json 2>/dev/null || echo "")
+          fi
+          TLS_ARGS=""
+          if [ -n "$TLS_DOMAIN" ]; then
+            CERT=$(${pkgs.findutils}/bin/find /var/lib/caddy/.local/share/caddy/certificates \
+              -path "*/$TLS_DOMAIN/$TLS_DOMAIN.crt" 2>/dev/null | head -n1)
+            KEY=$(${pkgs.findutils}/bin/find /var/lib/caddy/.local/share/caddy/certificates \
+              -path "*/$TLS_DOMAIN/$TLS_DOMAIN.key" 2>/dev/null | head -n1)
+            if [ -n "$CERT" ] && [ -n "$KEY" ]; then
+              echo "nasty-rest-server: serving HTTPS with Caddy cert for $TLS_DOMAIN ($CERT)"
+              TLS_ARGS="--tls --tls-cert $CERT --tls-key $KEY"
+            else
+              echo "nasty-rest-server: WARNING tls_domain=$TLS_DOMAIN but Caddy has no matching cert yet — serving HTTP. Backup clients must use http:// URLs, or wait for Caddy to issue the cert and then restart this service." >&2
+            fi
+          else
+            echo "nasty-rest-server: no tls_domain in settings.json — serving HTTP. Configure a TLS domain in the WebUI's TLS page to enable HTTPS." >&2
+          fi
+
+          exec ${pkgs.restic-rest-server}/bin/rest-server \
+            --listen :8000 --path "$REPO_PATH" --no-auth $TLS_ARGS
         '';
         StateDirectory = "nasty/rest-server";
         Restart = "on-failure";
         RestartSec = "5s";
+        # The rest-server needs to read Caddy's cert files. Caddy's
+        # data dir is owned by the caddy user (0700) by default;
+        # rest-server runs as root, so it can read regardless.
+        # If a future refactor drops rest-server to a non-root user,
+        # the cert read path needs a group-read ACL on Caddy's dir.
       };
       wantedBy = lib.mkForce [];  # engine starts on demand
     };
