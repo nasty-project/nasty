@@ -168,8 +168,17 @@
 	let editTrustedCacert = $state('');
 	/** Snapshot of the target shape at startEdit time, used to detect
 	 * "operator changed the destination" so we can warn + reset
-	 * repo_initialized. Compared as JSON strings — order-insensitive
-	 * field changes are rare enough to ignore. */
+	 * repo_initialized. Computed by running the fields through
+	 * `buildEditedTarget()` immediately after they're populated, so
+	 * the comparison at save time is self-consistent: a save with no
+	 * changes produces byte-identical JSON. Comparing against
+	 * `JSON.stringify(p.target)` directly was wrong — the server
+	 * shape includes redacted secret fields (`secret_key: "***"`,
+	 * `account_key: "***"`) that `buildEditedTarget` omits when the
+	 * operator hasn't typed a new secret, so every save fired the
+	 * "Change backup target?" modal for S3/B2 profiles, and the
+	 * Svelte 5 $state proxy made the comparison drift for local
+	 * profiles too. */
 	let editOriginalTargetJson = '';
 
 	function startEdit(p: BackupProfile) {
@@ -221,7 +230,10 @@
 				editB2Id = p.target.account_id;
 				break;
 		}
-		editOriginalTargetJson = JSON.stringify(p.target);
+		// Snapshot through buildEditedTarget so the save-time diff is
+		// against the same shape the save would re-produce — not
+		// against the server's redacted-secret-included shape.
+		editOriginalTargetJson = JSON.stringify(buildEditedTarget());
 	}
 
 	/** Reconstruct the BackupTarget JSON from the edit-form fields,
