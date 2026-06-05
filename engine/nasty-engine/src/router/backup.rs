@@ -53,31 +53,26 @@ pub(super) async fn try_route(
             Err(r) => r,
         },
         "backup.status" => ok(req, state.backups.status().await),
+        // The init / run / check RPCs return a BackupJob handle now.
+        // Long-running ops would otherwise blow through the 10 s
+        // WebSocket request timeout in the WebUI client — observed
+        // with `backup.repo.init` against a remote REST target
+        // taking 32 s. Clients poll backup.jobs.get / backup.jobs.list
+        // to watch the Pending → Running → Succeeded|Failed transition.
         "backup.repo.init" => match require_str(req, "id") {
-            Ok(id) => match state.backups.init_repo(id).await {
-                Ok(msg) => ok(req, msg),
-                Err(e) => err(req, e.to_rpc_error()),
+            Ok(id) => match state.backups.start_init_repo(id).await {
+                Ok(job) => ok(req, job),
+                Err(e) => err(req, e.to_string()),
             },
             Err(r) => r,
         },
-        "backup.run" => {
-            let id = match require_str(req, "id") {
-                Ok(s) => s.to_string(),
-                Err(r) => return Some(r),
-            };
-            // Run in background, return immediately. The RPC ack is just
-            // "we accepted the request" — the actual backup status lands
-            // in the journal, with a per-backup-id error so the user can
-            // grep for *which* backup failed.
-            let backups = state.backups.clone_for_task();
-            let id_for_log = id.clone();
-            tokio::spawn(async move {
-                if let Err(e) = backups.run_backup(&id).await {
-                    tracing::warn!("backup '{id_for_log}' failed: {e}");
-                }
-            });
-            ok(req, "Backup started")
-        }
+        "backup.run" => match require_str(req, "id") {
+            Ok(id) => match state.backups.start_run_backup(id).await {
+                Ok(job) => ok(req, job),
+                Err(e) => err(req, e.to_string()),
+            },
+            Err(r) => r,
+        },
         "backup.snapshots" => match require_str(req, "id") {
             Ok(id) => match state.backups.list_snapshots(id).await {
                 Ok(v) => ok(req, v),
@@ -86,9 +81,26 @@ pub(super) async fn try_route(
             Err(r) => r,
         },
         "backup.repo.check" => match require_str(req, "id") {
-            Ok(id) => match state.backups.check_repo(id).await {
-                Ok(msg) => ok(req, msg),
-                Err(e) => err(req, e.to_rpc_error()),
+            Ok(id) => match state.backups.start_check_repo(id).await {
+                Ok(job) => ok(req, job),
+                Err(e) => err(req, e.to_string()),
+            },
+            Err(r) => r,
+        },
+        "backup.jobs.list" => {
+            // Optional `profile_id` filter — empty / missing returns all.
+            let profile_id = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("profile_id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            ok(req, state.backups.jobs().list(profile_id).await)
+        }
+        "backup.jobs.get" => match require_str(req, "id") {
+            Ok(job_id) => match state.backups.jobs().get(job_id).await {
+                Some(job) => ok(req, job),
+                None => err(req, format!("backup job not found: {job_id}")),
             },
             Err(r) => r,
         },

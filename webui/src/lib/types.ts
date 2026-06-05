@@ -1196,6 +1196,30 @@ export interface BackupStatus {
 	progress: string | null;
 }
 
+/** A long-running backup operation (init / run / check). Returned by
+ * `backup.repo.init`, `backup.run`, `backup.repo.check`; polled via
+ * `backup.jobs.get`/`backup.jobs.list`. The engine starts the work in
+ * a background tokio task and the client watches the state transition
+ * Pending → Running → Succeeded|Failed. Read-only on the client side. */
+export type BackupJobKind = 'init_repo' | 'run_backup' | 'check_repo';
+export type BackupJobState = 'pending' | 'running' | 'succeeded' | 'failed';
+
+export interface BackupJob {
+	id: string;
+	profile_id: string;
+	kind: BackupJobKind;
+	state: BackupJobState;
+	created_at: string;
+	started_at?: string | null;
+	finished_at?: string | null;
+	progress?: string | null;
+	/** Engine result payload on success. For `init_repo`/`check_repo`
+	 * this is a status message string; for `run_backup` it's a
+	 * `BackupRunResult` JSON object (bytes_added, files_new, …). */
+	result?: unknown;
+	error?: string | null;
+}
+
 // ── Notifications ──────────────────────────────────────────
 
 export interface NotificationConfig {

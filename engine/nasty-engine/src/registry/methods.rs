@@ -2091,12 +2091,10 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                 },
                 Method {
                     name: "backup.run",
-                    desc: "Spawn a background task that runs the profile's backup (auto-initializing the repo if needed, then pruning per the retention policy); the RPC returns immediately after accepting the request.",
+                    desc: "Spawn a background task that runs the profile's backup (auto-initializing the repo if needed, then pruning per the retention policy). Returns a BackupJob handle immediately; poll backup.jobs.get / backup.jobs.list to watch the Pending → Running → Succeeded|Failed transition. Returns an `AlreadyRunning` error if another job for the same profile is in flight.",
                     role: MethodRole::Operator,
                     params: MethodParams::AdHoc(ad_hoc_one("id", "Backup profile identifier.")),
-                    result: Some(
-                        serde_json::json!({"type": "string", "description": "Status message — typically \"Backup started\"."}),
-                    ),
+                    result: Some(gen_schema::<nasty_backup::jobs::BackupJob>(generator)),
                 },
                 Method {
                     name: "backup.snapshots",
@@ -2107,21 +2105,42 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                 },
                 Method {
                     name: "backup.repo.init",
-                    desc: "Initialize a fresh rustic repository at the profile's target using its password, then mark the profile as `repo_initialized`.",
+                    desc: "Initialize a fresh rustic repository at the profile's target using its password, then mark the profile as `repo_initialized`. Returns a BackupJob handle immediately; init can take 30+ seconds on remote REST / S3 targets so the actual work runs in the background and the caller polls backup.jobs.get for completion.",
                     role: MethodRole::Operator,
                     params: MethodParams::AdHoc(ad_hoc_one("id", "Backup profile identifier.")),
-                    result: Some(
-                        serde_json::json!({"type": "string", "description": "Status message — typically \"Repository initialized\"."}),
-                    ),
+                    result: Some(gen_schema::<nasty_backup::jobs::BackupJob>(generator)),
                 },
                 Method {
                     name: "backup.repo.check",
-                    desc: "Run a rustic repository integrity check (`repo.check`) on the profile's target repo and return a status message.",
+                    desc: "Run a rustic repository integrity check (`repo.check`) on the profile's target repo. Returns a BackupJob handle immediately; check can take minutes on large repos and the caller polls backup.jobs.get for the result.",
                     role: MethodRole::Operator,
                     params: MethodParams::AdHoc(ad_hoc_one("id", "Backup profile identifier.")),
-                    result: Some(
-                        serde_json::json!({"type": "string", "description": "Status message — typically \"Repository check passed\"."}),
-                    ),
+                    result: Some(gen_schema::<nasty_backup::jobs::BackupJob>(generator)),
+                },
+                Method {
+                    name: "backup.jobs.list",
+                    desc: "List active and recently-finished backup jobs (init / run / check), newest first. Optional `profile_id` filter narrows the list to one profile. Terminal jobs are GC'd one hour after they finish, so this returns a bounded window rather than full history.",
+                    role: MethodRole::Any,
+                    params: MethodParams::AdHoc(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "profile_id": {
+                                "type": "string",
+                                "description": "Optional profile id filter; omit to list jobs across all profiles."
+                            }
+                        }
+                    })),
+                    result: Some(gen_schema::<Vec<nasty_backup::jobs::BackupJob>>(generator)),
+                },
+                Method {
+                    name: "backup.jobs.get",
+                    desc: "Return one backup job by id. 404-equivalent error when the id is unknown (job never existed or was GC'd after its retention window).",
+                    role: MethodRole::Any,
+                    params: MethodParams::AdHoc(ad_hoc_one(
+                        "id",
+                        "Backup job identifier (UUID returned by backup.repo.init / backup.run / backup.repo.check).",
+                    )),
+                    result: Some(gen_schema::<nasty_backup::jobs::BackupJob>(generator)),
                 },
                 Method {
                     name: "backup.secrets_status",

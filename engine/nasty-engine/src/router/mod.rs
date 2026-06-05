@@ -276,6 +276,8 @@ fn is_read_only(method: &str) -> bool {
                 | "backup.profile.get"
                 | "backup.status"
                 | "backup.snapshots"
+                | "backup.jobs.list"
+                | "backup.jobs.get"
                 | "auth.oidc.config_status"
                 | "auth.webauthn.config"
                 | "auth.webauthn.list"

@@ -6,7 +6,7 @@
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 	import { formatBytes } from '$lib/format';
-	import type { BackupProfile, BackupSnapshot, BackupStatus, Subvolume, Filesystem } from '$lib/types';
+	import type { BackupProfile, BackupSnapshot, BackupStatus, BackupJob, Subvolume, Filesystem } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
@@ -200,6 +200,68 @@
 		if (runBackupPoll !== null) { clearInterval(runBackupPoll); runBackupPoll = null; }
 	}
 
+	/** Active backup jobs by profile id — populated by every call to
+	 * startBackupJob, used to render a "Init in progress…", "Backing
+	 * up…", "Checking…" badge inline with each profile. Cleared when
+	 * the job terminates. */
+	let activeJobs: Record<string, BackupJob> = $state({});
+	let jobPollers: Record<string, ReturnType<typeof setInterval>> = {};
+
+	function stopJobPoll(profileId: string) {
+		const t = jobPollers[profileId];
+		if (t !== undefined) {
+			clearInterval(t);
+			delete jobPollers[profileId];
+		}
+	}
+
+	function stopAllJobPolls() {
+		for (const id of Object.keys(jobPollers)) stopJobPoll(id);
+	}
+
+	/** Common path for backup.repo.init / backup.run / backup.repo.check:
+	 * fire the RPC, store the returned BackupJob keyed by profile id,
+	 * then poll backup.jobs.get every 2 s until it lands in a terminal
+	 * state. On success calls onSuccess (typically a list refresh) so
+	 * the operator sees the new repo_initialized / last_run state
+	 * immediately. */
+	async function startBackupJob(
+		profileId: string,
+		method: 'backup.repo.init' | 'backup.run' | 'backup.repo.check',
+		startMessage: string,
+		onSuccess?: () => Promise<void> | void,
+	) {
+		const job = await withToast(
+			() => client.call<BackupJob>(method, { id: profileId }),
+			startMessage,
+		);
+		if (!job) return;
+		activeJobs[profileId] = job;
+		stopJobPoll(profileId);
+		jobPollers[profileId] = setInterval(async () => {
+			try {
+				const updated = await client.call<BackupJob>('backup.jobs.get', { id: job.id });
+				activeJobs[profileId] = updated;
+				if (updated.state === 'succeeded' || updated.state === 'failed') {
+					stopJobPoll(profileId);
+					if (updated.state === 'failed') {
+						await withToast(
+							() => Promise.reject({ message: updated.error ?? 'backup job failed' }),
+							'',
+						);
+					}
+					delete activeJobs[profileId];
+					if (onSuccess) await onSuccess();
+				}
+			} catch {
+				// Job entry was GC'd or engine disconnected — stop
+				// polling rather than hammering a dead endpoint.
+				stopJobPoll(profileId);
+				delete activeJobs[profileId];
+			}
+		}, 2000);
+	}
+
 	onMount(async () => {
 		await refresh();
 		loading = false;
@@ -216,6 +278,7 @@
 
 	onDestroy(() => {
 		stopRunBackupPoll();
+		stopAllJobPolls();
 	});
 
 	let snapshotCounts: Record<string, number> = $state({});
@@ -278,26 +341,15 @@
 	}
 
 	async function initRepo(id: string) {
-		await withToast(() => client.call('backup.repo.init', { id }), 'Repository initialized');
-		await refresh();
+		await startBackupJob(id, 'backup.repo.init', 'Initializing repository…', refresh);
 	}
 
 	async function runBackup(id: string) {
-		await withToast(() => client.call('backup.run', { id }), 'Backup started');
-		// Poll status until the backup finishes — onDestroy cancels this on
-		// SPA navigation so we don't keep polling after the user leaves.
-		stopRunBackupPoll();
-		runBackupPoll = setInterval(async () => {
-			backupStatus = await client.call<BackupStatus>('backup.status');
-			if (!backupStatus?.running) {
-				stopRunBackupPoll();
-				await refresh();
-			}
-		}, 3000);
+		await startBackupJob(id, 'backup.run', 'Backup started', refresh);
 	}
 
 	async function checkRepo(id: string) {
-		await withToast(() => client.call('backup.repo.check', { id }), 'Repository check passed');
+		await startBackupJob(id, 'backup.repo.check', 'Repository check started');
 	}
 
 	async function loadSnapshots(id: string) {
@@ -566,6 +618,12 @@
 									<Badge variant={profile.repo_initialized ? 'default' : 'secondary'} class="text-[0.6rem]">
 										{profile.repo_initialized ? 'Ready' : 'Not initialized'}
 									</Badge>
+									{#if activeJobs[profile.id]}
+										{@const job = activeJobs[profile.id]}
+										<Badge variant="outline" class="text-[0.6rem] animate-pulse">
+											{job.kind === 'init_repo' ? 'Initializing…' : job.kind === 'run_backup' ? 'Backing up…' : 'Checking…'}
+										</Badge>
+									{/if}
 									{#if profile.schedule}
 										<Badge variant="outline" class="text-[0.6rem]">{describeSchedule(profile.schedule)}</Badge>
 										{@const nr = nextRun(profile.schedule)}
@@ -597,14 +655,18 @@
 							</div>
 							<div class="flex gap-2">
 								{#if !profile.repo_initialized}
-									<Button size="xs" onclick={() => initRepo(profile.id)}>Init Repo</Button>
+									<Button size="xs" onclick={() => initRepo(profile.id)} disabled={activeJobs[profile.id] !== undefined}>
+										{activeJobs[profile.id] ? 'Init Repo…' : 'Init Repo'}
+									</Button>
 								{:else}
 									<Button size="xs" variant="secondary" onclick={() => runBackup(profile.id)}
-										disabled={backupStatus?.running === true}>
-										{backupStatus?.running && backupStatus?.profile_id === profile.id ? 'Running...' : 'Run Now'}
+										disabled={activeJobs[profile.id] !== undefined}>
+										{activeJobs[profile.id]?.kind === 'run_backup' ? 'Running…' : 'Run Now'}
 									</Button>
 									<Button size="xs" variant="secondary" onclick={() => loadSnapshots(profile.id)}>Snapshots</Button>
-									<Button size="xs" variant="secondary" onclick={() => checkRepo(profile.id)}>Check</Button>
+									<Button size="xs" variant="secondary" onclick={() => checkRepo(profile.id)} disabled={activeJobs[profile.id] !== undefined}>
+										{activeJobs[profile.id]?.kind === 'check_repo' ? 'Checking…' : 'Check'}
+									</Button>
 								{/if}
 								<Button size="xs" variant="secondary" onclick={() => startEdit(profile)}>Edit</Button>
 								<Button size="xs" variant="destructive" onclick={() => deleteProfile(profile.id)}>Delete</Button>

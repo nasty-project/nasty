@@ -3,8 +3,10 @@
 //! Manages backup profiles, scheduling, and execution. Uses rustic_core
 //! library directly for backup operations (restic-compatible repo format).
 
+pub mod jobs;
 pub mod scheduler;
 
+use jobs::{BackupJob, BackupJobKind, JobError, JobRegistry};
 use nasty_common::secrets::{self, EncryptedBlob, SecretsStatus};
 use rustic_backend::BackendOptions;
 use rustic_core::{
@@ -535,6 +537,10 @@ fn creds(password: &str) -> Credentials {
 pub struct BackupService {
     profiles: std::sync::Arc<tokio::sync::Mutex<Vec<BackupProfile>>>,
     running: std::sync::Arc<tokio::sync::Mutex<Option<String>>>,
+    /// In-memory registry of long-running backup jobs
+    /// (init / run / check). The async start_* methods spawn into
+    /// this. See `jobs.rs` for the lifecycle + GC story.
+    jobs: JobRegistry,
 }
 
 impl Default for BackupService {
@@ -548,6 +554,7 @@ impl BackupService {
         Self {
             profiles: std::sync::Arc::new(tokio::sync::Mutex::new(load_profiles())),
             running: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            jobs: JobRegistry::new(),
         }
     }
 
@@ -555,7 +562,14 @@ impl BackupService {
         Self {
             profiles: self.profiles.clone(),
             running: self.running.clone(),
+            jobs: self.jobs.clone(),
         }
+    }
+
+    /// Read-only access to the job registry — the router uses this
+    /// to expose backup.jobs.list / backup.jobs.get.
+    pub fn jobs(&self) -> &JobRegistry {
+        &self.jobs
     }
 
     pub async fn list_profiles(&self) -> Vec<BackupProfile> {
@@ -702,6 +716,89 @@ impl BackupService {
             profile_id: running_id,
             progress: None,
         }
+    }
+
+    /// Async wrapper around [`init_repo`]: creates a [`BackupJob`],
+    /// spawns the actual work, returns the job handle immediately so
+    /// the caller can poll. Returns `JobError::AlreadyRunning` if a
+    /// non-terminal job for the same profile already exists.
+    pub async fn start_init_repo(&self, id: &str) -> Result<BackupJob, JobError> {
+        let job = self.jobs.start(id, BackupJobKind::InitRepo).await?;
+        let job_id = job.id.clone();
+        let profile_id = id.to_string();
+        let registry = self.jobs.clone();
+        let service = self.clone_for_task();
+        tokio::spawn(async move {
+            registry.mark_running(&job_id).await;
+            match service.init_repo(&profile_id).await {
+                Ok(msg) => {
+                    registry
+                        .mark_succeeded(&job_id, serde_json::Value::String(msg))
+                        .await;
+                }
+                Err(e) => {
+                    registry.mark_failed(&job_id, e.to_string()).await;
+                }
+            }
+        });
+        Ok(job)
+    }
+
+    /// Async wrapper around [`run_backup`]: same shape as
+    /// [`start_init_repo`]. The job's `result` payload on success is
+    /// the serialized [`BackupRunResult`] (bytes_added, files_new,
+    /// etc.) so the WebUI can show what the run actually did.
+    pub async fn start_run_backup(&self, id: &str) -> Result<BackupJob, JobError> {
+        let job = self.jobs.start(id, BackupJobKind::RunBackup).await?;
+        let job_id = job.id.clone();
+        let profile_id = id.to_string();
+        let registry = self.jobs.clone();
+        let service = self.clone_for_task();
+        tokio::spawn(async move {
+            registry.mark_running(&job_id).await;
+            match service.run_backup(&profile_id).await {
+                Ok(result) => {
+                    let value = serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
+                    if result.success {
+                        registry.mark_succeeded(&job_id, value).await;
+                    } else {
+                        // run_backup() returns Ok with success=false
+                        // when rustic reported a failure. Map that to
+                        // a Failed job state so the WebUI's polling
+                        // loop renders it consistently with the
+                        // "engine returned an error" case.
+                        registry.mark_failed(&job_id, result.message.clone()).await;
+                    }
+                }
+                Err(e) => {
+                    registry.mark_failed(&job_id, e.to_string()).await;
+                }
+            }
+        });
+        Ok(job)
+    }
+
+    /// Async wrapper around [`check_repo`].
+    pub async fn start_check_repo(&self, id: &str) -> Result<BackupJob, JobError> {
+        let job = self.jobs.start(id, BackupJobKind::CheckRepo).await?;
+        let job_id = job.id.clone();
+        let profile_id = id.to_string();
+        let registry = self.jobs.clone();
+        let service = self.clone_for_task();
+        tokio::spawn(async move {
+            registry.mark_running(&job_id).await;
+            match service.check_repo(&profile_id).await {
+                Ok(msg) => {
+                    registry
+                        .mark_succeeded(&job_id, serde_json::Value::String(msg))
+                        .await;
+                }
+                Err(e) => {
+                    registry.mark_failed(&job_id, e.to_string()).await;
+                }
+            }
+        });
+        Ok(job)
     }
 
     pub async fn init_repo(&self, id: &str) -> Result<String, BackupError> {
