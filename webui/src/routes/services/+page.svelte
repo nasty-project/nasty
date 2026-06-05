@@ -192,12 +192,67 @@
 	let restCredentialsLoading = $state(false);
 	let restPasswordRevealed = $state(false);
 
+	/** PEM-encoded internal CA cert that signed this box's TLS leaf —
+	 * source boxes pointing backups at this Backup Server paste it
+	 * into the profile's "Trusted CA certificate" textarea so their
+	 * HTTPS connection to the rest-server validates. Loaded lazily
+	 * via `system.tls.local_ca_root` (same RPC the /tls page uses
+	 * for its file download). */
+	let caCertPem: string | null = $state(null);
+	let caCertLoading = $state(false);
+	let caCertExpanded = $state(true);
+	/** `null` until the section opens; drives whether the CA cert
+	 * block defaults to expanded. When ACME succeeded, source boxes
+	 * already trust the leaf via the system root store, so the
+	 * internal CA cert is irrelevant for backups — collapse the
+	 * block but still let the operator open it (some operators run
+	 * mixed trust setups, or want it for parallel non-backup use). */
+	let acmeIsPublic: boolean | null = $state(null);
+
+	async function loadCaCert() {
+		if (caCertPem !== null || caCertLoading) return;
+		caCertLoading = true;
+		try {
+			caCertPem = await client.call<string>('system.tls.local_ca_root');
+		} catch (e) {
+			error(`Load CA cert: ${e}`);
+		}
+		caCertLoading = false;
+	}
+
+	function downloadCaCert() {
+		if (!caCertPem) return;
+		const blob = new Blob([caCertPem], { type: 'application/x-pem-file' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = 'nasty-local-ca.crt';
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+		URL.revokeObjectURL(url);
+	}
+
 	async function loadRestConfig() {
 		try {
 			const cfg = await client.call<{ path: string }>('service.rest_server.config');
 			restServerPath = cfg.path;
 			restConfigLoaded = true;
 		} catch { /* ignore */ }
+		// Best-effort ACME state — only used to decide whether the CA
+		// cert block defaults expanded or collapsed. A failure here
+		// just means we default to expanded (the safer assumption
+		// since the internal-CA case is the only one that actually
+		// needs operator action source-side).
+		try {
+			const acme = await client.call<{ state: string }>('system.acme.status');
+			acmeIsPublic = acme.state === 'success';
+			caCertExpanded = !acmeIsPublic;
+		} catch {
+			acmeIsPublic = false;
+			caCertExpanded = true;
+		}
+		if (caCertExpanded) loadCaCert();
 	}
 
 	async function saveRestConfig() {
@@ -557,6 +612,42 @@
 														{copiedKey === 'rest-password' ? 'Copied!' : 'Copy'}
 													</Button>
 												</div>
+											</div>
+										{/if}
+									</div>
+
+									<div class="rounded-md border border-border p-3 max-w-md">
+										<button type="button"
+											onclick={() => { caCertExpanded = !caCertExpanded; if (caCertExpanded) loadCaCert(); }}
+											class="flex w-full items-start justify-between gap-3 text-left">
+											<div>
+												<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Trusted CA certificate</p>
+												<p class="mt-1 text-xs text-muted-foreground">
+													{#if acmeIsPublic}
+														Not required — this box's TLS leaf is publicly trusted via ACME. Expand only if a source box explicitly needs to pin this CA.
+													{:else}
+														Paste into the source-side backup profile's "Trusted CA certificate" field so its HTTPS connection to this Backup Server validates.
+													{/if}
+												</p>
+											</div>
+											<span class="mt-0.5 shrink-0 text-xs text-muted-foreground">{caCertExpanded ? '▾' : '▸'}</span>
+										</button>
+										{#if caCertExpanded}
+											<div class="mt-3 space-y-2">
+												{#if caCertLoading}
+													<p class="text-xs text-muted-foreground">Loading…</p>
+												{:else if caCertPem}
+													<textarea readonly rows="6" value={caCertPem}
+														class="w-full rounded-md border border-input bg-muted/20 px-3 py-2 font-mono text-xs"></textarea>
+													<div class="flex gap-2">
+														<Button size="xs" variant="ghost" onclick={() => copyToClipboard(caCertPem!, 'ca-cert')}>
+															{copiedKey === 'ca-cert' ? 'Copied!' : 'Copy'}
+														</Button>
+														<Button size="xs" variant="ghost" onclick={downloadCaCert}>Download .crt</Button>
+													</div>
+												{:else}
+													<Button size="xs" variant="secondary" onclick={loadCaCert}>Load certificate</Button>
+												{/if}
 											</div>
 										{/if}
 									</div>
