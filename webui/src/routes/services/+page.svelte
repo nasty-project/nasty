@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/stores';
 	import { getClient } from '$lib/client';
-	import { withToast } from '$lib/toast.svelte';
+	import { withToast, error } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { ProtocolStatus, AppsStatus, Filesystem, TuningConfig, NutConfig, UpsStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
@@ -237,8 +237,28 @@
 		}
 	}
 
-	function copyToClipboard(s: string) {
-		navigator.clipboard?.writeText(s).catch(() => { /* ignore */ });
+	/** Per-button "Copied!" indicator. Holds the caller-supplied key
+	 * (e.g. 'rest-username') for ~1.5s after a successful copy, then
+	 * resets to null. A failed copy (clipboard API unavailable on
+	 * http:// origins, or denied permission) surfaces an error toast
+	 * instead so the operator doesn't paste yesterday's value
+	 * thinking the new one took. */
+	let copiedKey: string | null = $state(null);
+	let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+	async function copyToClipboard(s: string, key: string) {
+		if (!navigator.clipboard?.writeText) {
+			error('Clipboard not available — select the value and copy manually');
+			return;
+		}
+		try {
+			await navigator.clipboard.writeText(s);
+		} catch {
+			error('Copy failed — select the value and copy manually');
+			return;
+		}
+		copiedKey = key;
+		if (copyResetTimer !== null) clearTimeout(copyResetTimer);
+		copyResetTimer = setTimeout(() => { copiedKey = null; }, 1500);
 	}
 
 	const client = getClient();
@@ -490,14 +510,14 @@
 								</div>
 							{:else if proto.name === 'rest-server'}
 								<div class="space-y-4">
-									<div class="flex items-end gap-2">
-										<div class="flex-1 max-w-md">
-											<label for="rest-path" class="text-xs text-muted-foreground">Storage path</label>
+									<div class="max-w-md">
+										<label for="rest-path" class="text-xs text-muted-foreground">Storage path</label>
+										<div class="mt-1 flex items-stretch gap-2">
 											<input id="rest-path" type="text" bind:value={restServerPath} placeholder="/fs/first/backups"
-												class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm" />
-											<p class="mt-1 text-xs text-muted-foreground">Subvolume created automatically if path is under /fs/.</p>
+												class="flex-1 rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm" />
+											<Button size="sm" onclick={saveRestConfig}>Save</Button>
 										</div>
-										<Button size="sm" onclick={saveRestConfig}>Save</Button>
+										<p class="mt-1 text-xs text-muted-foreground">Subvolume created automatically if path is under /fs/.</p>
 									</div>
 
 									<div class="rounded-md border border-border p-3 max-w-md">
@@ -524,14 +544,18 @@
 												<div class="flex items-center gap-2">
 													<span class="w-24 text-muted-foreground">Username</span>
 													<code class="flex-1 rounded bg-muted/40 px-2 py-1 font-mono">{restCredentials.username}</code>
-													<Button size="xs" variant="ghost" onclick={() => copyToClipboard(restCredentials!.username)}>Copy</Button>
+													<Button size="xs" variant="ghost" onclick={() => copyToClipboard(restCredentials!.username, 'rest-username')}>
+														{copiedKey === 'rest-username' ? 'Copied!' : 'Copy'}
+													</Button>
 												</div>
 												<div class="flex items-center gap-2">
 													<span class="w-24 text-muted-foreground">Password</span>
 													<code class="flex-1 rounded bg-muted/40 px-2 py-1 font-mono">
 														{restPasswordRevealed ? restCredentials.password : '•'.repeat(restCredentials.password.length)}
 													</code>
-													<Button size="xs" variant="ghost" onclick={() => copyToClipboard(restCredentials!.password)}>Copy</Button>
+													<Button size="xs" variant="ghost" onclick={() => copyToClipboard(restCredentials!.password, 'rest-password')}>
+														{copiedKey === 'rest-password' ? 'Copied!' : 'Copy'}
+													</Button>
 												</div>
 											</div>
 										{/if}
