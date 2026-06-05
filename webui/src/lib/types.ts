@@ -1220,6 +1220,17 @@ export interface BackupJob {
 	error?: string | null;
 }
 
+/** Returned by `backup.secrets_status`. Tells the WebUI whether
+ * `systemd-creds` is healthy on this host and (when it is) which
+ * backend it picked. Drives the small status pill on the Backups
+ * page so the operator can see at a glance whether their stored
+ * backup passwords / cloud keys are encrypted at rest. */
+export type SecretsBackend = 'tpm-and-host' | 'host-only';
+
+export type SecretsStatus =
+	| { status: 'available'; backend: SecretsBackend }
+	| { status: 'unavailable'; reason: string };
+
 // ── Notifications ──────────────────────────────────────────
 
 export interface NotificationConfig {

@@ -6,7 +6,7 @@
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 	import { formatBytes } from '$lib/format';
-	import type { BackupProfile, BackupSnapshot, BackupStatus, BackupJob, Subvolume, Filesystem } from '$lib/types';
+	import type { BackupProfile, BackupSnapshot, BackupStatus, BackupJob, SecretsStatus, Subvolume, Filesystem } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
@@ -20,6 +20,11 @@
 	let loading = $state(true);
 	let showCreate = $state(false);
 	let backupStatus: BackupStatus | null = $state(null);
+	/** Loaded once on mount from backup.secrets_status — drives the
+	 * small status pill near the page header. `null` means the
+	 * status hasn't been fetched yet (briefly during initial load) or
+	 * the call failed entirely. */
+	let secretsStatus: SecretsStatus | null = $state(null);
 
 	// Create form
 	let newName = $state('');
@@ -265,6 +270,30 @@
 	onMount(async () => {
 		await refresh();
 		loading = false;
+		// Fetch the at-rest secrets backend status (cheap RPC, runs a
+		// systemd-creds probe round-trip server-side) and drop the
+		// result into the page-header pill. Errors degrade silently
+		// to "no pill" — better no badge than a misleading one.
+		try {
+			secretsStatus = await client.call<SecretsStatus>('backup.secrets_status');
+		} catch { /* leave null */ }
+
+		// Re-attach pollers for any backup jobs the engine is still
+		// running. Without this, reloading the Backups page mid-init
+		// or mid-backup loses the in-page activeJobs state and the
+		// progress badge disappears — the operator sees stale-looking
+		// "Not initialized" / button-enabled state until the job
+		// finishes and refresh() pulls the new repo_initialized /
+		// last_run from the engine.
+		try {
+			const activeOnEngine = await client.call<BackupJob[]>('backup.jobs.list');
+			for (const job of activeOnEngine) {
+				if (job.state === 'pending' || job.state === 'running') {
+					rehydrateJobPolling(job);
+				}
+			}
+		} catch { /* engine didn't expose jobs.list; ignore */ }
+
 		// Auto-open create form with config preset from ?create=config
 		if ($page.url.searchParams.get('create') === 'config') {
 			showCreate = true;
@@ -275,6 +304,36 @@
 			loadSourceData();
 		}
 	});
+
+	/** Re-attach a polling timer for a job we discovered server-side
+	 * on page mount (rather than created via startBackupJob in this
+	 * session). The polling-loop body is identical to startBackupJob's
+	 * setInterval callback — same terminal-state handling, same
+	 * cleanup. */
+	function rehydrateJobPolling(job: BackupJob) {
+		activeJobs[job.profile_id] = job;
+		stopJobPoll(job.profile_id);
+		jobPollers[job.profile_id] = setInterval(async () => {
+			try {
+				const updated = await client.call<BackupJob>('backup.jobs.get', { id: job.id });
+				activeJobs[job.profile_id] = updated;
+				if (updated.state === 'succeeded' || updated.state === 'failed') {
+					stopJobPoll(job.profile_id);
+					if (updated.state === 'failed') {
+						await withToast(
+							() => Promise.reject({ message: updated.error ?? 'backup job failed' }),
+							'',
+						);
+					}
+					delete activeJobs[job.profile_id];
+					await refresh();
+				}
+			} catch {
+				stopJobPoll(job.profile_id);
+				delete activeJobs[job.profile_id];
+			}
+		}, 2000);
+	}
 
 	onDestroy(() => {
 		stopRunBackupPoll();
@@ -437,6 +496,24 @@
 		<Button size="sm" onclick={() => { showCreate = !showCreate; if (showCreate) loadSourceData(); }}>
 			{showCreate ? 'Cancel' : 'Create Backup'}
 		</Button>
+		{#if secretsStatus}
+			{#if secretsStatus.status === 'available' && secretsStatus.backend === 'tpm-and-host'}
+				<Badge variant="default" class="text-[0.65rem]"
+					title="Backup passwords + cloud secrets are encrypted at rest with systemd-creds, sealed against both the TPM and the host secret. A stolen disk without TPM access reveals nothing.">
+					Secrets: TPM-protected
+				</Badge>
+			{:else if secretsStatus.status === 'available' && secretsStatus.backend === 'host-only'}
+				<Badge variant="secondary" class="text-[0.65rem]"
+					title="Backup passwords + cloud secrets are encrypted at rest with systemd-creds, sealed against the host secret only (no TPM enrolled). Defense against leaked state files / support tarballs; offers no protection against a root-capable attacker.">
+					Secrets: encrypted at rest
+				</Badge>
+			{:else if secretsStatus.status === 'unavailable'}
+				<Badge variant="destructive" class="text-[0.65rem]"
+					title={`systemd-creds is not usable on this host: ${secretsStatus.reason}. New backup profiles will fall back to storing secrets in plaintext until this is fixed.`}>
+					Secrets: plaintext (encryption unavailable)
+				</Badge>
+			{/if}
+		{/if}
 	</div>
 
 
