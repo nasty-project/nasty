@@ -26,6 +26,8 @@
 	 * the call failed entirely. */
 	let secretsStatus: SecretsStatus | null = $state(null);
 
+	type SchedulePreset = 'hourly' | 'daily' | 'weekly' | 'custom';
+
 	// Create form
 	let newName = $state('');
 	let newSources = $state('');
@@ -54,7 +56,7 @@
 	let subvolumes: Subvolume[] = $state([]);
 	let filesystems: Filesystem[] = $state([]);
 	let selectedSources: Set<string> = $state(new Set());
-	let schedulePreset: 'daily' | 'weekly' | 'hourly' | 'custom' = $state('daily');
+	let schedulePreset: SchedulePreset = $state('daily');
 
 	// Whether the host-path picker dialog is open for the create form
 	// (true) or the edit form (the profile id whose modal is showing).
@@ -136,13 +138,40 @@
 		return parts.join(', ');
 	}
 
-	function applySchedulePreset(preset: typeof schedulePreset) {
+	/** Reverse of {@link applySchedulePreset}: figure out which preset
+	 * chip should be highlighted for an existing cron string. Any
+	 * non-canonical expression (including empty / "manual only")
+	 * falls into Custom so the textarea stays visible and the
+	 * operator can keep editing. */
+	function derivePreset(cron: string): SchedulePreset {
+		switch (cron.trim()) {
+			case '0 * * * *': return 'hourly';
+			case '0 3 * * *': return 'daily';
+			case '0 2 * * 0': return 'weekly';
+			default: return 'custom';
+		}
+	}
+
+	function applySchedulePreset(preset: SchedulePreset) {
 		schedulePreset = preset;
 		switch (preset) {
 			case 'hourly': newSchedule = '0 * * * *'; break;
 			case 'daily': newSchedule = '0 3 * * *'; break;
 			case 'weekly': newSchedule = '0 2 * * 0'; break;
 			case 'custom': newSchedule = ''; break;
+		}
+	}
+
+	function applyEditSchedulePreset(preset: SchedulePreset) {
+		editSchedulePreset = preset;
+		switch (preset) {
+			case 'hourly': editSchedule = '0 * * * *'; break;
+			case 'daily': editSchedule = '0 3 * * *'; break;
+			case 'weekly': editSchedule = '0 2 * * 0'; break;
+			// Custom keeps whatever cron the operator already had —
+			// switching TO custom shouldn't clobber a working cron
+			// string just because the operator clicked the chip.
+			case 'custom': break;
 		}
 	}
 
@@ -154,6 +183,7 @@
 	let editSources = $state('');
 	let editSchedule = $state('');
 	let editPassword = $state('');
+	let editSchedulePreset: SchedulePreset = $state('custom');
 	let editKeepLast = $state('');
 	let editKeepDaily = $state('');
 	let editKeepWeekly = $state('');
@@ -186,6 +216,7 @@
 		editName = p.name;
 		editSources = p.sources.join(', ');
 		editSchedule = p.schedule ?? '';
+		editSchedulePreset = derivePreset(editSchedule);
 		// p.password comes back redacted as "***" or null; leave the
 		// field empty and treat "operator typed nothing" as "keep
 		// existing" at save time. Same applies to S3 / B2 secrets.
@@ -991,15 +1022,25 @@
 									</div>
 								{/if}
 
-								<div class="grid grid-cols-2 gap-3">
-									<div>
-										<Label>Schedule (cron)</Label>
-										<Input bind:value={editSchedule} placeholder="0 3 * * *" class="mt-1 font-mono" />
+								<div>
+									<Label>Schedule</Label>
+									<div class="mt-1 flex w-fit rounded-md border border-border text-xs">
+										{#each [['hourly', 'Hourly'], ['daily', 'Daily (3am)'], ['weekly', 'Weekly (Sun 2am)'], ['custom', 'Custom']] as [val, label]}
+											<button onclick={() => applyEditSchedulePreset(val as SchedulePreset)}
+												class="px-3 py-1.5 font-medium transition-colors first:rounded-l-md last:rounded-r-md {editSchedulePreset === val ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
+											>{label}</button>
+										{/each}
 									</div>
-									<div>
-										<Label>Encryption Password</Label>
-										<Input type="password" bind:value={editPassword} placeholder="Leave blank to keep existing" class="mt-1" />
-									</div>
+									{#if editSchedulePreset === 'custom'}
+										<Input bind:value={editSchedule} placeholder="Leave empty for manual only" class="mt-2 max-w-md font-mono" />
+										<p class="mt-1 text-xs text-muted-foreground">Cron format: minute hour day month weekday. Empty = manual only (use "Run Now").</p>
+									{:else if editSchedule}
+										<p class="mt-2 text-xs text-muted-foreground font-mono">{editSchedule}</p>
+									{/if}
+								</div>
+								<div>
+									<Label>Encryption Password</Label>
+									<Input type="password" bind:value={editPassword} placeholder="Leave blank to keep existing" class="mt-1 max-w-md" />
 								</div>
 								<div>
 									<Label>Retention</Label>
