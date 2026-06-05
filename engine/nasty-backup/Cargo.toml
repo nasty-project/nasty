@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+nasty-common = { path = "../nasty-common" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

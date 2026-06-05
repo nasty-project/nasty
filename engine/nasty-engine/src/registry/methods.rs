@@ -2123,6 +2123,15 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                         serde_json::json!({"type": "string", "description": "Status message — typically \"Repository check passed\"."}),
                     ),
                 },
+                Method {
+                    name: "backup.secrets_status",
+                    desc: "Report whether systemd-creds is available on this host and which backend (`tpm-and-host` / `host-only`) it would use to encrypt new backup secrets. Surfaced as the status pill on the Backups page so operators can tell at a glance whether their stored passwords / cloud keys are encrypted at rest.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<nasty_common::secrets::SecretsStatus>(
+                        generator,
+                    )),
+                },
             ],
         ),
         // ── VMs ──────────────────────────────────────────────────────────
