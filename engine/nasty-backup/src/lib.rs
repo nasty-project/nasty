@@ -703,7 +703,7 @@ impl BackupService {
     }
 
     pub async fn init_repo(&self, id: &str) -> Result<String, BackupError> {
-        let profile = self.get_profile(id).await?;
+        let profile = self.get_profile_internal(id).await?;
         let password = resolve_profile_password(&profile).await?;
         let resolved = profile.target.resolve_secrets(&profile.id).await?;
         tokio::task::spawn_blocking(move || {
@@ -729,7 +729,7 @@ impl BackupService {
     }
 
     pub async fn run_backup(&self, id: &str) -> Result<BackupRunResult, BackupError> {
-        let profile = self.get_profile(id).await?;
+        let profile = self.get_profile_internal(id).await?;
 
         // Auto-init repo if not yet initialized
         if !profile.repo_initialized {
@@ -740,7 +740,7 @@ impl BackupService {
             self.init_repo(id).await?;
         }
 
-        let profile = self.get_profile(id).await?;
+        let profile = self.get_profile_internal(id).await?;
         let password = resolve_profile_password(&profile).await?;
         let resolved = profile.target.resolve_secrets(&profile.id).await?;
         let start = std::time::Instant::now();
@@ -818,7 +818,7 @@ impl BackupService {
     }
 
     pub async fn list_snapshots(&self, id: &str) -> Result<Vec<BackupSnapshot>, BackupError> {
-        let profile = self.get_profile(id).await?;
+        let profile = self.get_profile_internal(id).await?;
         let password = resolve_profile_password(&profile).await?;
         let resolved = profile.target.resolve_secrets(&profile.id).await?;
         tokio::task::spawn_blocking(move || {
@@ -846,7 +846,7 @@ impl BackupService {
     }
 
     async fn prune(&self, id: &str) -> Result<(), BackupError> {
-        let profile = self.get_profile(id).await?;
+        let profile = self.get_profile_internal(id).await?;
         let password = resolve_profile_password(&profile).await?;
         let resolved = profile.target.resolve_secrets(&profile.id).await?;
         let r = profile.retention.clone();
@@ -898,7 +898,7 @@ impl BackupService {
     }
 
     pub async fn check_repo(&self, id: &str) -> Result<String, BackupError> {
-        let profile = self.get_profile(id).await?;
+        let profile = self.get_profile_internal(id).await?;
         let password = resolve_profile_password(&profile).await?;
         let resolved = profile.target.resolve_secrets(&profile.id).await?;
         tokio::task::spawn_blocking(move || {
@@ -1353,6 +1353,56 @@ mod tests {
         assert!(
             result.is_err(),
             "resolve_secret must try encrypted first; got plaintext fallback {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn redacted_post_migration_profile_is_unusable_for_internal_callers() {
+        // Regression pin for the post-migration "neither encrypted nor
+        // plaintext" failure observed on 10.10.10.84 after #401 landed:
+        // migrate_secrets converted a plaintext password into
+        // password_encrypted=Some(blob), leaving password=None. Routing
+        // such a profile through redacted() blanks the encrypted blob,
+        // so a downstream resolve_profile_password reports the profile
+        // as missing both fields.
+        //
+        // The fix is structural — internal callers (init_repo,
+        // run_backup, list_snapshots, prune, check_repo) must use
+        // get_profile_internal, not the redacted-for-API get_profile.
+        // This test pins the *symptom*: a post-migration profile,
+        // round-tripped through redacted(), MUST come out unusable for
+        // backup operations. If a future refactor makes redacted()
+        // keep secrets, this test fails and forces a conversation
+        // about why the JSON-RPC layer is now leaking blobs.
+        let mut profile = baseline_profile(BackupTarget::Local {
+            path: "/srv".into(),
+        });
+        profile.password = None;
+        profile.password_encrypted = Some(test_blob("ENC"));
+
+        let redacted = profile.redacted();
+        assert!(
+            redacted.password.is_none(),
+            "redacted password leaked: {:?}",
+            redacted.password
+        );
+        assert!(
+            redacted.password_encrypted.is_none(),
+            "redacted encrypted blob leaked: {:?}",
+            redacted.password_encrypted
+        );
+
+        // Confirm the symptom: resolve fails on the redacted profile.
+        // Callers that hit this error in production are using the
+        // wrong getter — fix the caller, don't loosen redacted().
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { resolve_profile_password(&redacted).await });
+        assert!(
+            result.is_err(),
+            "redacted post-migration profile must NOT resolve a password \
+             (otherwise internal callers can accidentally backup with '***'); got {:?}",
             result
         );
     }
