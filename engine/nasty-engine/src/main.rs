@@ -236,6 +236,7 @@ async fn main() -> anyhow::Result<()> {
             "network.reconcile_orphans",
             "subvolumes.reconcile_project_ids",
             "apps.reconcile_app_routes",
+            "backups.migrate_secrets",
             "firewall.init",
             "nvmeof.ensure_tailscale_ports",
             "caches.warm",
@@ -398,6 +399,22 @@ async fn main() -> anyhow::Result<()> {
             "subvolumes.reconcile_project_ids",
             secs(90), // repquota scan + setproject per subvolume, scales with subvol count
             state.subvolumes.reconcile_project_ids(),
+        )
+        .await;
+
+    // Encrypt any backup-profile secrets still on disk in plaintext
+    // (legacy state from before nasty-common::secrets landed). Walks
+    // every profile, attempts to seal the password + S3/B2 cloud keys
+    // via systemd-creds, persists the resulting blobs. Idempotent —
+    // profiles whose secrets are already encrypted are skipped. No-op
+    // on hosts where systemd-creds is unavailable (warns once per
+    // profile, leaves plaintext in place so backups keep working).
+    state
+        .boot_status
+        .run_phase(
+            "backups.migrate_secrets",
+            secs(30), // a handful of profiles, each two systemd-creds shellouts
+            state.backups.migrate_secrets(),
         )
         .await;
 

@@ -92,6 +92,7 @@ pub(super) async fn try_route(
             },
             Err(r) => r,
         },
+        "backup.secrets_status" => ok(req, state.backups.secrets_status().await),
         _ => return None,
     })
 }

@@ -3,6 +3,7 @@
 //! Manages backup profiles, scheduling, and execution. Uses rustic_core
 //! library directly for backup operations (restic-compatible repo format).
 
+use nasty_common::secrets::{self, EncryptedBlob, SecretsStatus};
 use rustic_backend::BackendOptions;
 use rustic_core::{
     BackupOptions, CheckOptions, ConfigOptions, Credentials, ForgetGroups, Grouped, KeepOptions,
@@ -29,7 +30,22 @@ pub struct BackupProfile {
     pub schedule: Option<String>,
     #[serde(default)]
     pub retention: RetentionPolicy,
-    pub password: String,
+    /// Repository password as the operator supplied it. On input, the
+    /// engine accepts this field and (when `systemd-creds` is healthy
+    /// on this host) encrypts it into `password_encrypted` before
+    /// persisting. On output, this field is redacted to `***`. The
+    /// field stays as `Option<String>` rather than required so an
+    /// older engine downgrading after the migration can still load
+    /// the JSON state without a serde error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Repository password encrypted at rest via systemd-creds.
+    /// Populated by the engine on create/update when the secrets
+    /// backend is available. Resolution prefers this over the legacy
+    /// plaintext `password` when both are present (during the migration
+    /// window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_encrypted: Option<EncryptedBlob>,
     #[serde(default = "default_true")]
     pub snapshot_before: bool,
     #[serde(default)]
@@ -52,7 +68,17 @@ pub enum BackupTarget {
         endpoint: String,
         bucket: String,
         access_key: String,
-        secret_key: String,
+        /// Cloud secret key as the operator supplied it. Same shape +
+        /// migration story as `BackupProfile.password`: optional on the
+        /// wire so encrypted-only state files load cleanly, redacted
+        /// on output, expected to be empty once `secret_key_encrypted`
+        /// has been populated for this target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret_key: Option<String>,
+        /// Cloud secret key encrypted at rest. Set by the engine when
+        /// `systemd-creds` is healthy on this host.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret_key_encrypted: Option<EncryptedBlob>,
         #[serde(default)]
         region: Option<String>,
     },
@@ -69,26 +95,84 @@ pub enum BackupTarget {
     B2 {
         bucket: String,
         account_id: String,
-        account_key: String,
+        /// B2 application key as the operator supplied it. Same shape
+        /// + migration story as S3.secret_key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_key: Option<String>,
+        /// B2 application key encrypted at rest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_key_encrypted: Option<EncryptedBlob>,
     },
 }
 
+/// Plaintext secrets resolved out of a `BackupTarget`'s encrypted /
+/// legacy fields, ready to be combined with the target shape to build
+/// rustic-compatible backend options. Decryption is async, target
+/// construction must run sync inside `spawn_blocking`, so we resolve
+/// once outside and pass this struct in.
+#[derive(Debug, Default)]
+struct ResolvedTargetSecrets {
+    s3_secret_key: Option<String>,
+    b2_account_key: Option<String>,
+}
+
 impl BackupTarget {
-    fn to_backend_options(&self) -> BackendOptions {
+    /// Decrypt any encrypted secret fields so the caller can use them
+    /// in a sync context. Variants with no secrets (Local, Sftp, Rest)
+    /// return an empty `ResolvedTargetSecrets`.
+    async fn resolve_secrets(&self, target_id: &str) -> Result<ResolvedTargetSecrets, BackupError> {
+        Ok(match self {
+            BackupTarget::S3 {
+                secret_key,
+                secret_key_encrypted,
+                ..
+            } => ResolvedTargetSecrets {
+                s3_secret_key: Some(
+                    resolve_secret(
+                        &format!("nasty.backup.{target_id}.s3.secret_key"),
+                        secret_key.as_deref(),
+                        secret_key_encrypted.as_ref(),
+                    )
+                    .await?,
+                ),
+                ..Default::default()
+            },
+            BackupTarget::B2 {
+                account_key,
+                account_key_encrypted,
+                ..
+            } => ResolvedTargetSecrets {
+                b2_account_key: Some(
+                    resolve_secret(
+                        &format!("nasty.backup.{target_id}.b2.account_key"),
+                        account_key.as_deref(),
+                        account_key_encrypted.as_ref(),
+                    )
+                    .await?,
+                ),
+                ..Default::default()
+            },
+            _ => ResolvedTargetSecrets::default(),
+        })
+    }
+
+    fn to_backend_options(&self, resolved: &ResolvedTargetSecrets) -> BackendOptions {
         match self {
             BackupTarget::Local { path } => BackendOptions::default().repository(path),
             BackupTarget::S3 {
                 endpoint,
                 bucket,
                 access_key,
-                secret_key,
                 region,
+                ..
             } => {
                 let mut opts = BTreeMap::new();
                 opts.insert("bucket".into(), bucket.clone());
                 opts.insert("endpoint".into(), endpoint.clone());
                 opts.insert("access_key_id".into(), access_key.clone());
-                opts.insert("secret_access_key".into(), secret_key.clone());
+                if let Some(secret) = &resolved.s3_secret_key {
+                    opts.insert("secret_access_key".into(), secret.clone());
+                }
                 if let Some(r) = region {
                     opts.insert("region".into(), r.clone());
                 }
@@ -117,20 +201,246 @@ impl BackupTarget {
                 BackendOptions::default().repository(format!("rest:{url}"))
             }
             BackupTarget::B2 {
-                bucket,
-                account_id,
-                account_key,
+                bucket, account_id, ..
             } => {
                 let mut opts = BTreeMap::new();
                 opts.insert("bucket".into(), bucket.clone());
                 opts.insert("account_id".into(), account_id.clone());
-                opts.insert("account_key".into(), account_key.clone());
+                if let Some(key) = &resolved.b2_account_key {
+                    opts.insert("account_key".into(), key.clone());
+                }
                 BackendOptions::default()
                     .repository("opendal:b2")
                     .options(opts)
             }
         }
     }
+}
+
+/// Return a sanitized clone of a profile suitable for JSON-RPC
+/// responses: plaintext password and cloud secrets are replaced with
+/// `"***"` markers when present; encrypted blobs are omitted entirely
+/// so callers can tell whether a secret is set without exposing the
+/// ciphertext (the blob is useless without the host secret, but
+/// echoing it back invites replay-style mistakes).
+impl BackupProfile {
+    pub fn redacted(&self) -> Self {
+        let mut clone = self.clone();
+        if clone.password.is_some() {
+            clone.password = Some("***".to_string());
+        }
+        clone.password_encrypted = None;
+        clone.target = clone.target.redacted();
+        clone
+    }
+}
+
+impl BackupTarget {
+    fn redacted(&self) -> Self {
+        match self {
+            BackupTarget::S3 {
+                endpoint,
+                bucket,
+                access_key,
+                secret_key,
+                secret_key_encrypted: _,
+                region,
+            } => BackupTarget::S3 {
+                endpoint: endpoint.clone(),
+                bucket: bucket.clone(),
+                access_key: access_key.clone(),
+                secret_key: secret_key.as_ref().map(|_| "***".to_string()),
+                secret_key_encrypted: None,
+                region: region.clone(),
+            },
+            BackupTarget::B2 {
+                bucket,
+                account_id,
+                account_key,
+                account_key_encrypted: _,
+            } => BackupTarget::B2 {
+                bucket: bucket.clone(),
+                account_id: account_id.clone(),
+                account_key: account_key.as_ref().map(|_| "***".to_string()),
+                account_key_encrypted: None,
+            },
+            other => other.clone(),
+        }
+    }
+}
+
+/// Encrypt the plaintext secret fields on a profile into their
+/// `_encrypted` siblings, then blank the plaintext. Idempotent:
+/// a profile whose secrets are already encrypted is unchanged.
+/// On systemd-creds failure: log loudly, leave the plaintext field
+/// in place so the profile remains usable. Better degraded than
+/// rejecting the save entirely.
+async fn encrypt_profile_secrets_in_place(profile: &mut BackupProfile) {
+    if profile.password_encrypted.is_none()
+        && let Some(plain) = profile.password.take()
+    {
+        match secrets::encrypt(&profile_password_name(&profile.id), &plain).await {
+            Ok(blob) => {
+                profile.password_encrypted = Some(blob);
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to encrypt password for backup profile '{}' — keeping plaintext: {e}",
+                    profile.id
+                );
+                profile.password = Some(plain);
+            }
+        }
+    }
+    encrypt_target_secrets_in_place(&profile.id, &mut profile.target).await;
+}
+
+async fn encrypt_target_secrets_in_place(target_id: &str, target: &mut BackupTarget) {
+    match target {
+        BackupTarget::S3 {
+            secret_key,
+            secret_key_encrypted,
+            ..
+        } => {
+            if secret_key_encrypted.is_none()
+                && let Some(plain) = secret_key.take()
+            {
+                let name = format!("nasty.backup.{target_id}.s3.secret_key");
+                match secrets::encrypt(&name, &plain).await {
+                    Ok(blob) => *secret_key_encrypted = Some(blob),
+                    Err(e) => {
+                        warn!(
+                            "Failed to encrypt S3 secret_key for '{target_id}' — keeping plaintext: {e}"
+                        );
+                        *secret_key = Some(plain);
+                    }
+                }
+            }
+        }
+        BackupTarget::B2 {
+            account_key,
+            account_key_encrypted,
+            ..
+        } => {
+            if account_key_encrypted.is_none()
+                && let Some(plain) = account_key.take()
+            {
+                let name = format!("nasty.backup.{target_id}.b2.account_key");
+                match secrets::encrypt(&name, &plain).await {
+                    Ok(blob) => *account_key_encrypted = Some(blob),
+                    Err(e) => {
+                        warn!(
+                            "Failed to encrypt B2 account_key for '{target_id}' — keeping plaintext: {e}"
+                        );
+                        *account_key = Some(plain);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Pull encrypted-blob / legacy-plaintext fields from the existing
+/// stored profile into the incoming update when the update doesn't
+/// supply them. This lets the operator submit `{name, schedule}`
+/// changes without having to re-enter the repository password or
+/// cloud credentials every time.
+/// Has the target's encrypted-secret field been populated yet?
+/// Used by the migration to detect whether `encrypt_target_secrets_in_place`
+/// actually changed anything (so the caller can decide whether to
+/// re-save the state file).
+fn encrypted_target_set(target: &BackupTarget) -> bool {
+    matches!(
+        target,
+        BackupTarget::S3 {
+            secret_key_encrypted: Some(_),
+            ..
+        }
+    ) || matches!(
+        target,
+        BackupTarget::B2 {
+            account_key_encrypted: Some(_),
+            ..
+        }
+    )
+}
+
+fn carry_forward_existing_secrets(update: &mut BackupProfile, existing: &BackupProfile) {
+    if update.password.is_none() && update.password_encrypted.is_none() {
+        update.password = existing.password.clone();
+        update.password_encrypted = existing.password_encrypted.clone();
+    }
+    match (&mut update.target, &existing.target) {
+        (
+            BackupTarget::S3 {
+                secret_key,
+                secret_key_encrypted,
+                ..
+            },
+            BackupTarget::S3 {
+                secret_key: existing_plain,
+                secret_key_encrypted: existing_blob,
+                ..
+            },
+        ) if secret_key.is_none() && secret_key_encrypted.is_none() => {
+            *secret_key = existing_plain.clone();
+            *secret_key_encrypted = existing_blob.clone();
+        }
+        (
+            BackupTarget::B2 {
+                account_key,
+                account_key_encrypted,
+                ..
+            },
+            BackupTarget::B2 {
+                account_key: existing_plain,
+                account_key_encrypted: existing_blob,
+                ..
+            },
+        ) if account_key.is_none() && account_key_encrypted.is_none() => {
+            *account_key = existing_plain.clone();
+            *account_key_encrypted = existing_blob.clone();
+        }
+        _ => {}
+    }
+}
+
+/// Resolve a single secret field, preferring the encrypted blob over
+/// the legacy plaintext when both are present. Returns an error when
+/// neither is set — that means the profile is malformed (operator
+/// created it without supplying the field).
+async fn resolve_secret(
+    name: &str,
+    plaintext: Option<&str>,
+    encrypted: Option<&EncryptedBlob>,
+) -> Result<String, BackupError> {
+    if let Some(blob) = encrypted {
+        return secrets::decrypt(name, blob)
+            .await
+            .map_err(|e| BackupError::Failed(format!("decrypt {name}: {e}")));
+    }
+    if let Some(plain) = plaintext {
+        return Ok(plain.to_string());
+    }
+    Err(BackupError::Failed(format!(
+        "secret '{name}' is neither encrypted nor plaintext (profile is missing required field)"
+    )))
+}
+
+/// Resolve the repository password for a profile. Same precedence as
+/// [`resolve_secret`]: encrypted blob beats legacy plaintext.
+async fn resolve_profile_password(profile: &BackupProfile) -> Result<String, BackupError> {
+    resolve_secret(
+        &profile_password_name(&profile.id),
+        profile.password.as_deref(),
+        profile.password_encrypted.as_ref(),
+    )
+    .await
+}
+
+fn profile_password_name(profile_id: &str) -> String {
+    format!("nasty.backup.{profile_id}.password")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -196,11 +506,18 @@ impl BackupError {
 
 // ── Repository helpers ────────────────────────────────────────
 
-/// Build a Repository from a profile's target and password.
-fn make_repo(profile: &BackupProfile) -> Result<Repository<()>, BackupError> {
+/// Build a Repository from a profile's target. The caller is expected
+/// to have already resolved target-side secrets via
+/// `target.resolve_secrets(profile_id).await` and passed them in —
+/// rustic's Repository construction is sync, so the decryption has to
+/// happen outside this function before `spawn_blocking`.
+fn make_repo(
+    profile: &BackupProfile,
+    resolved: &ResolvedTargetSecrets,
+) -> Result<Repository<()>, BackupError> {
     let backends = profile
         .target
-        .to_backend_options()
+        .to_backend_options(resolved)
         .to_backends()
         .map_err(|e| BackupError::Failed(format!("backend: {e}")))?;
     let repo_opts = RepositoryOptions::default();
@@ -240,10 +557,24 @@ impl BackupService {
     }
 
     pub async fn list_profiles(&self) -> Vec<BackupProfile> {
-        self.profiles.lock().await.clone()
+        self.profiles
+            .lock()
+            .await
+            .iter()
+            .map(|p| p.redacted())
+            .collect()
     }
 
     pub async fn get_profile(&self, id: &str) -> Result<BackupProfile, BackupError> {
+        self.get_profile_internal(id).await.map(|p| p.redacted())
+    }
+
+    /// Internal lookup that returns the profile **with secret material
+    /// intact** — used by the run/init/check paths that need to
+    /// resolve secrets. Callers that surface the profile to a JSON-RPC
+    /// caller (the WebUI, external clients) must go through
+    /// [`get_profile`] instead so passwords stay redacted on the wire.
+    async fn get_profile_internal(&self, id: &str) -> Result<BackupProfile, BackupError> {
         self.profiles
             .lock()
             .await
@@ -253,10 +584,68 @@ impl BackupService {
             .ok_or_else(|| BackupError::NotFound(id.into()))
     }
 
+    /// Report whether the secrets backend is available on this host
+    /// and which backend (`tpm-and-host` / `host-only`) `systemd-creds`
+    /// picked. Surfaced in the Backups UI as a status pill so operators
+    /// can tell whether new profiles will have their passwords encrypted
+    /// at rest. Cheap to call — round-trips a probe blob each time.
+    pub async fn secrets_status(&self) -> SecretsStatus {
+        secrets::probe().await
+    }
+
+    /// Eagerly encrypt any profiles still carrying plaintext secrets
+    /// after a state-file load. Called once during engine boot so a
+    /// freshly-upgraded box migrates its existing profiles without
+    /// waiting for the operator to next edit each one. Safe to call
+    /// multiple times — idempotent.
+    ///
+    /// On a host where `systemd-creds` is unavailable, this is a
+    /// no-op (the encrypt call in [`encrypt_profile_secrets_in_place`]
+    /// logs a warning and leaves the plaintext field intact). The
+    /// engine boot does not fail because of a degraded secrets
+    /// backend; backups keep working with plaintext-on-disk until
+    /// the operator fixes the underlying issue.
+    pub async fn migrate_secrets(&self) {
+        let mut profiles = self.profiles.lock().await;
+        let mut changed = false;
+        for profile in profiles.iter_mut() {
+            let before = (
+                profile.password_encrypted.is_some(),
+                encrypted_target_set(&profile.target),
+            );
+            encrypt_profile_secrets_in_place(profile).await;
+            let after = (
+                profile.password_encrypted.is_some(),
+                encrypted_target_set(&profile.target),
+            );
+            if before != after {
+                changed = true;
+                info!(
+                    "Migrated secrets for backup profile '{}' ({})",
+                    profile.name, profile.id
+                );
+            }
+        }
+        if changed {
+            save_profiles(&profiles).await;
+        }
+    }
+
     pub async fn create_profile(
         &self,
         mut profile: BackupProfile,
     ) -> Result<BackupProfile, BackupError> {
+        // Encrypt plaintext secrets before persisting. If the secrets
+        // backend is unavailable on this host (no systemd-creds, broken
+        // TPM enrollment, etc.) we keep the legacy plaintext field
+        // populated and log a warning — refusing to save the profile
+        // would leave the operator unable to configure backups, which
+        // is worse than the existing pre-this-PR behavior.
+        if profile.id.is_empty() {
+            profile.id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        }
+        encrypt_profile_secrets_in_place(&mut profile).await;
+
         let mut profiles = self.profiles.lock().await;
         if profiles
             .iter()
@@ -264,20 +653,24 @@ impl BackupService {
         {
             return Err(BackupError::AlreadyExists(profile.name));
         }
-        if profile.id.is_empty() {
-            profile.id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-        }
         profiles.push(profile.clone());
         save_profiles(&profiles).await;
         info!("Created backup profile '{}' ({})", profile.name, profile.id);
-        Ok(profile)
+        Ok(profile.redacted())
     }
 
     pub async fn update_profile(
         &self,
         id: &str,
-        update: BackupProfile,
+        mut update: BackupProfile,
     ) -> Result<BackupProfile, BackupError> {
+        // Same encryption-on-save invariant as create. The operator
+        // can submit a plaintext password (rotate) or omit it (keep
+        // existing); we carry the existing encrypted value forward
+        // when the update doesn't supply a new one.
+        carry_forward_existing_secrets(&mut update, &self.get_profile_internal(id).await?);
+        encrypt_profile_secrets_in_place(&mut update).await;
+
         let mut profiles = self.profiles.lock().await;
         let idx = profiles
             .iter()
@@ -285,7 +678,7 @@ impl BackupService {
             .ok_or_else(|| BackupError::NotFound(id.into()))?;
         profiles[idx] = update.clone();
         save_profiles(&profiles).await;
-        Ok(update)
+        Ok(update.redacted())
     }
 
     pub async fn delete_profile(&self, id: &str) -> Result<(), BackupError> {
@@ -311,10 +704,12 @@ impl BackupService {
 
     pub async fn init_repo(&self, id: &str) -> Result<String, BackupError> {
         let profile = self.get_profile(id).await?;
+        let password = resolve_profile_password(&profile).await?;
+        let resolved = profile.target.resolve_secrets(&profile.id).await?;
         tokio::task::spawn_blocking(move || {
-            let repo = make_repo(&profile)?;
+            let repo = make_repo(&profile, &resolved)?;
             repo.init(
-                &creds(&profile.password),
+                &creds(&password),
                 &KeyOptions::default(),
                 &ConfigOptions::default(),
             )
@@ -346,14 +741,16 @@ impl BackupService {
         }
 
         let profile = self.get_profile(id).await?;
+        let password = resolve_profile_password(&profile).await?;
+        let resolved = profile.target.resolve_secrets(&profile.id).await?;
         let start = std::time::Instant::now();
         *self.running.lock().await = Some(id.to_string());
 
         let sources = profile.sources.clone();
         let backup_result = tokio::task::spawn_blocking(move || {
-            let repo = make_repo(&profile)?;
+            let repo = make_repo(&profile, &resolved)?;
             let repo = repo
-                .open(&creds(&profile.password))
+                .open(&creds(&password))
                 .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
             let repo = repo
                 .to_indexed_ids()
@@ -422,10 +819,12 @@ impl BackupService {
 
     pub async fn list_snapshots(&self, id: &str) -> Result<Vec<BackupSnapshot>, BackupError> {
         let profile = self.get_profile(id).await?;
+        let password = resolve_profile_password(&profile).await?;
+        let resolved = profile.target.resolve_secrets(&profile.id).await?;
         tokio::task::spawn_blocking(move || {
-            let repo = make_repo(&profile)?;
+            let repo = make_repo(&profile, &resolved)?;
             let repo = repo
-                .open(&creds(&profile.password))
+                .open(&creds(&password))
                 .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
             let snaps: Vec<SnapshotFile> = repo
                 .get_all_snapshots()
@@ -448,12 +847,14 @@ impl BackupService {
 
     async fn prune(&self, id: &str) -> Result<(), BackupError> {
         let profile = self.get_profile(id).await?;
+        let password = resolve_profile_password(&profile).await?;
+        let resolved = profile.target.resolve_secrets(&profile.id).await?;
         let r = profile.retention.clone();
 
         tokio::task::spawn_blocking(move || {
-            let repo = make_repo(&profile)?;
+            let repo = make_repo(&profile, &resolved)?;
             let repo = repo
-                .open(&creds(&profile.password))
+                .open(&creds(&password))
                 .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
 
             let snaps = repo
@@ -498,10 +899,12 @@ impl BackupService {
 
     pub async fn check_repo(&self, id: &str) -> Result<String, BackupError> {
         let profile = self.get_profile(id).await?;
+        let password = resolve_profile_password(&profile).await?;
+        let resolved = profile.target.resolve_secrets(&profile.id).await?;
         tokio::task::spawn_blocking(move || {
-            let repo = make_repo(&profile)?;
+            let repo = make_repo(&profile, &resolved)?;
             let repo = repo
-                .open(&creds(&profile.password))
+                .open(&creds(&password))
                 .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
             repo.check(CheckOptions::default())
                 .map_err(|e| BackupError::Failed(format!("check: {e}")))?;
@@ -547,6 +950,16 @@ async fn save_profiles(profiles: &[BackupProfile]) {
 mod tests {
     use super::*;
 
+    /// Construct an `EncryptedBlob` without going through systemd-creds.
+    /// The blob isn't decryptable — that's fine for tests that just
+    /// need to assert "an encrypted value is present" or that resolve
+    /// errors cleanly when the decrypt fails. Goes via the transparent
+    /// serde representation so we don't have to expose a public ctor
+    /// on EncryptedBlob.
+    fn test_blob(payload: &str) -> EncryptedBlob {
+        serde_json::from_str(&format!("\"{payload}\"")).expect("transparent string parses")
+    }
+
     fn baseline_profile(target: BackupTarget) -> BackupProfile {
         BackupProfile {
             id: "abc12345".into(),
@@ -556,19 +969,58 @@ mod tests {
             target,
             schedule: None,
             retention: RetentionPolicy::default(),
-            password: "hunter2".into(),
+            password: Some("hunter2".into()),
+            password_encrypted: None,
             snapshot_before: true,
             repo_initialized: false,
             last_run: None,
         }
     }
 
+    fn s3_with_plaintext(secret: &str, region: Option<&str>) -> BackupTarget {
+        BackupTarget::S3 {
+            endpoint: "https://s3.example.com".into(),
+            bucket: "my-bucket".into(),
+            access_key: "AKIA".into(),
+            secret_key: Some(secret.into()),
+            secret_key_encrypted: None,
+            region: region.map(String::from),
+        }
+    }
+
+    fn b2_with_plaintext(key: &str) -> BackupTarget {
+        BackupTarget::B2 {
+            bucket: "my-b2".into(),
+            account_id: "abc".into(),
+            account_key: Some(key.into()),
+            account_key_encrypted: None,
+        }
+    }
+
+    /// Most tests want options derived as if secrets were already
+    /// resolved (the live flow does that via `resolve_secrets` in an
+    /// async context). For test purposes, build the resolved bundle
+    /// directly so we can stay in a sync test fn.
+    fn resolve_plaintext_for_test(target: &BackupTarget) -> ResolvedTargetSecrets {
+        match target {
+            BackupTarget::S3 { secret_key, .. } => ResolvedTargetSecrets {
+                s3_secret_key: secret_key.clone(),
+                ..Default::default()
+            },
+            BackupTarget::B2 { account_key, .. } => ResolvedTargetSecrets {
+                b2_account_key: account_key.clone(),
+                ..Default::default()
+            },
+            _ => ResolvedTargetSecrets::default(),
+        }
+    }
+
     #[test]
     fn backend_options_local_uses_plain_path() {
-        let opts = BackupTarget::Local {
+        let target = BackupTarget::Local {
             path: "/srv/backup".into(),
-        }
-        .to_backend_options();
+        };
+        let opts = target.to_backend_options(&ResolvedTargetSecrets::default());
         assert_eq!(opts.repository.as_deref(), Some("/srv/backup"));
         // Local has no extra option keys — repository alone is enough.
         assert!(opts.options.is_empty(), "got {:?}", opts.options);
@@ -576,14 +1028,8 @@ mod tests {
 
     #[test]
     fn backend_options_s3_carries_credentials_and_endpoint() {
-        let opts = BackupTarget::S3 {
-            endpoint: "https://s3.example.com".into(),
-            bucket: "my-bucket".into(),
-            access_key: "AKIA".into(),
-            secret_key: "secret".into(),
-            region: Some("eu-west-1".into()),
-        }
-        .to_backend_options();
+        let target = s3_with_plaintext("secret", Some("eu-west-1"));
+        let opts = target.to_backend_options(&resolve_plaintext_for_test(&target));
         assert_eq!(opts.repository.as_deref(), Some("opendal:s3"));
         assert_eq!(
             opts.options.get("bucket").map(String::as_str),
@@ -612,14 +1058,8 @@ mod tests {
         // The region option is optional. When None, the key should
         // not appear in options at all — rustic/opendal treat absent
         // and empty differently.
-        let opts = BackupTarget::S3 {
-            endpoint: "https://s3.example.com".into(),
-            bucket: "b".into(),
-            access_key: "AKIA".into(),
-            secret_key: "s".into(),
-            region: None,
-        }
-        .to_backend_options();
+        let target = s3_with_plaintext("s", None);
+        let opts = target.to_backend_options(&resolve_plaintext_for_test(&target));
         assert!(
             !opts.options.contains_key("region"),
             "got {:?}",
@@ -628,14 +1068,37 @@ mod tests {
     }
 
     #[test]
+    fn backend_options_s3_omits_secret_key_when_unresolved() {
+        // A profile loaded out of an encrypted state file with a
+        // broken systemd-creds backend would arrive here with no
+        // plaintext secret available. Better to surface an opendal
+        // auth failure than to inject an empty string and confuse
+        // the operator.
+        let target = BackupTarget::S3 {
+            endpoint: "https://s3.example.com".into(),
+            bucket: "b".into(),
+            access_key: "AKIA".into(),
+            secret_key: None,
+            secret_key_encrypted: None,
+            region: None,
+        };
+        let opts = target.to_backend_options(&ResolvedTargetSecrets::default());
+        assert!(
+            !opts.options.contains_key("secret_access_key"),
+            "got {:?}",
+            opts.options
+        );
+    }
+
+    #[test]
     fn backend_options_sftp_defaults_port_to_22() {
-        let opts = BackupTarget::Sftp {
+        let target = BackupTarget::Sftp {
             host: "host.example.com".into(),
             user: "backup".into(),
             path: "/mnt/repo".into(),
             port: None,
-        }
-        .to_backend_options();
+        };
+        let opts = target.to_backend_options(&ResolvedTargetSecrets::default());
         assert_eq!(opts.repository.as_deref(), Some("opendal:sftp"));
         assert_eq!(
             opts.options.get("endpoint").map(String::as_str),
@@ -650,13 +1113,13 @@ mod tests {
 
     #[test]
     fn backend_options_sftp_honours_custom_port() {
-        let opts = BackupTarget::Sftp {
+        let target = BackupTarget::Sftp {
             host: "host.example.com".into(),
             user: "backup".into(),
             path: "/mnt/repo".into(),
             port: Some(2222),
-        }
-        .to_backend_options();
+        };
+        let opts = target.to_backend_options(&ResolvedTargetSecrets::default());
         assert_eq!(
             opts.options.get("endpoint").map(String::as_str),
             Some("host.example.com:2222")
@@ -667,10 +1130,10 @@ mod tests {
     fn backend_options_rest_prefixes_url() {
         // rustic's REST backend wants "rest:<url>" — losing the prefix
         // would silently fall through to opendal and break auth.
-        let opts = BackupTarget::Rest {
+        let target = BackupTarget::Rest {
             url: "https://rest.example.com/repo".into(),
-        }
-        .to_backend_options();
+        };
+        let opts = target.to_backend_options(&ResolvedTargetSecrets::default());
         assert_eq!(
             opts.repository.as_deref(),
             Some("rest:https://rest.example.com/repo")
@@ -679,12 +1142,8 @@ mod tests {
 
     #[test]
     fn backend_options_b2_carries_credentials() {
-        let opts = BackupTarget::B2 {
-            bucket: "my-b2".into(),
-            account_id: "abc".into(),
-            account_key: "def".into(),
-        }
-        .to_backend_options();
+        let target = b2_with_plaintext("def");
+        let opts = target.to_backend_options(&resolve_plaintext_for_test(&target));
         assert_eq!(opts.repository.as_deref(), Some("opendal:b2"));
         assert_eq!(
             opts.options.get("bucket").map(String::as_str),
@@ -755,7 +1214,8 @@ mod tests {
         let json = serde_json::to_string(&BackupTarget::B2 {
             bucket: "x".into(),
             account_id: "y".into(),
-            account_key: "z".into(),
+            account_key: Some("z".into()),
+            account_key_encrypted: None,
         })
         .unwrap();
         assert!(json.contains(r#""type":"b2""#), "got {json}");
@@ -788,5 +1248,112 @@ mod tests {
         // — keep it tied to Display so error variants stay readable.
         let e = BackupError::NotFound("missing-id".into());
         assert_eq!(e.to_rpc_error(), "profile not found: missing-id");
+    }
+
+    #[test]
+    fn redacted_blanks_password_and_cloud_secrets() {
+        // Single most important property of redacted(): the JSON
+        // returned by backup.profile.list / backup.profile.get NEVER
+        // exposes the operator's password or cloud secrets. A regression
+        // here is a credential leak through the read API.
+        let mut profile = baseline_profile(s3_with_plaintext("s3secret", None));
+        // Pretend the migration already ran.
+        profile.password_encrypted = Some(test_blob("ENC"));
+        let redacted = profile.redacted();
+        assert_eq!(redacted.password.as_deref(), Some("***"));
+        assert!(
+            redacted.password_encrypted.is_none(),
+            "encrypted blob must not be echoed back in API responses"
+        );
+        if let BackupTarget::S3 {
+            secret_key,
+            secret_key_encrypted,
+            ..
+        } = redacted.target
+        {
+            assert_eq!(secret_key.as_deref(), Some("***"));
+            assert!(secret_key_encrypted.is_none());
+        } else {
+            panic!("expected S3 variant");
+        }
+    }
+
+    #[test]
+    fn redacted_preserves_no_password_state() {
+        // A profile that genuinely has no plaintext password (e.g.
+        // already-encrypted-only) should redact to `None`, not to
+        // "***". The WebUI uses None vs Some("***") to decide whether
+        // to render the "password is set" badge.
+        let mut profile = baseline_profile(BackupTarget::Local {
+            path: "/srv".into(),
+        });
+        profile.password = None;
+        let redacted = profile.redacted();
+        assert!(redacted.password.is_none());
+    }
+
+    #[test]
+    fn carry_forward_preserves_existing_password_when_update_silent() {
+        // Operator submits an update with no password field (changing
+        // schedule, say). The stored password must not be wiped.
+        let mut existing = baseline_profile(BackupTarget::Local {
+            path: "/srv".into(),
+        });
+        existing.password = None;
+        existing.password_encrypted = Some(test_blob("STORED"));
+
+        let mut update = existing.clone();
+        update.password = None;
+        update.password_encrypted = None;
+        update.name = "renamed".into();
+
+        carry_forward_existing_secrets(&mut update, &existing);
+        assert!(update.password_encrypted.is_some());
+        assert_eq!(update.name, "renamed");
+    }
+
+    #[test]
+    fn carry_forward_lets_operator_rotate_password() {
+        // When the operator DOES submit a new password (rotation),
+        // we must replace — not merge — both fields.
+        let mut existing = baseline_profile(BackupTarget::Local {
+            path: "/srv".into(),
+        });
+        existing.password = None;
+        existing.password_encrypted = Some(test_blob("OLD"));
+
+        let mut update = existing.clone();
+        update.password = Some("new-rotation".into());
+        update.password_encrypted = None;
+
+        carry_forward_existing_secrets(&mut update, &existing);
+        // New plaintext wins — encrypt_profile_secrets_in_place will
+        // seal it before persistence.
+        assert_eq!(update.password.as_deref(), Some("new-rotation"));
+        assert!(update.password_encrypted.is_none());
+    }
+
+    #[test]
+    fn resolve_secret_prefers_encrypted_blob_over_plaintext() {
+        // During the migration window a profile can carry both fields.
+        // Resolution must prefer the encrypted blob — if the encrypted
+        // path errors but plaintext still works we'd silently downgrade
+        // an operator's security posture. The test runs the resolver
+        // with both fields populated; without a real systemd-creds
+        // call we can't decrypt, so we assert the error path is
+        // exercised (which proves encrypted is preferred over the
+        // available plaintext).
+        let blob = test_blob("definitely-not-a-real-blob");
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            resolve_secret("test.name", Some("plaintext-fallback"), Some(&blob)).await
+        });
+        // We expect an error (decrypt failure on a fake blob), NOT the
+        // plaintext-fallback string — that would mean we silently
+        // returned the legacy value when an encrypted one was present.
+        assert!(
+            result.is_err(),
+            "resolve_secret must try encrypted first; got plaintext fallback {:?}",
+            result
+        );
     }
 }

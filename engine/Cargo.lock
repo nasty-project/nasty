@@ -2605,6 +2605,7 @@ version = "0.0.9"
 dependencies = [
  "chrono",
  "jiff",
+ "nasty-common",
  "rustic_backend",
  "rustic_core",
  "schemars 1.2.1",
