@@ -108,7 +108,25 @@ pub enum BackupTarget {
         port: Option<u16>,
     },
     Rest {
+        /// Bare URL of the rest-server, e.g. `https://nasty.0f.ee:8000`.
+        /// Credentials go in the separate username/password fields
+        /// below — the WebUI used to make operators inline them as
+        /// `https://user:pass@host` userinfo, which leaked the
+        /// password in cleartext on every list response.
         url: String,
+        /// HTTP basic auth username. The rest-server requires auth as
+        /// of v0.0.10 (#408) — empty on legacy unauthenticated
+        /// servers is still accepted, in which case no userinfo is
+        /// injected at request time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        /// HTTP basic auth password as the operator supplied it. Same
+        /// shape + migration story as S3.secret_key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+        /// HTTP basic auth password encrypted at rest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password_encrypted: Option<EncryptedBlob>,
     },
     B2 {
         bucket: String,
@@ -134,6 +152,10 @@ pub enum BackupTarget {
 struct ResolvedTargetSecrets {
     s3_secret_key: Option<String>,
     b2_account_key: Option<String>,
+    /// Decrypted HTTP basic-auth password for the rest-server. Empty
+    /// when the operator never set credentials (legacy unauthenticated
+    /// servers) — `to_backend_options` then leaves the URL alone.
+    rest_password: Option<String>,
     /// Absolute path of a PEM file containing the operator-supplied
     /// trusted CA cert (`profile.trusted_cacert`). Materialized by
     /// [`BackupProfile::resolve_runtime`] before the spawn_blocking
@@ -176,6 +198,31 @@ impl BackupTarget {
                     )
                     .await?,
                 ),
+                ..Default::default()
+            },
+            BackupTarget::Rest {
+                username,
+                password,
+                password_encrypted,
+                ..
+            } => ResolvedTargetSecrets {
+                // Username is plaintext on disk (it's a username,
+                // not a secret); the password is what we have to
+                // decrypt. Both can be absent — a legacy operator
+                // with an old unauthenticated rest-server is still
+                // a valid configuration.
+                rest_password: if username.is_some() {
+                    Some(
+                        resolve_secret(
+                            &format!("nasty.backup.{target_id}.rest.password"),
+                            password.as_deref(),
+                            password_encrypted.as_ref(),
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                },
                 ..Default::default()
             },
             _ => ResolvedTargetSecrets::default(),
@@ -223,8 +270,33 @@ impl BackupTarget {
                     .repository("opendal:sftp")
                     .options(opts)
             }
-            BackupTarget::Rest { url } => {
-                let mut opts = BackendOptions::default().repository(format!("rest:{url}"));
+            BackupTarget::Rest { url, username, .. } => {
+                // Inject HTTP basic-auth userinfo into the URL when
+                // the operator provided credentials. `url::Url` does
+                // the percent-encoding for us — copying the
+                // username/password into the URL by string
+                // concatenation would corrupt any `@`, `:`, or `/`
+                // in the password. If the URL is already
+                // malformed we fall back to the bare string and let
+                // rustic_backend surface the error.
+                let repo = match (username.as_deref(), resolved.rest_password.as_deref()) {
+                    (Some(user), Some(pass)) if !user.is_empty() => {
+                        match url::Url::parse(url) {
+                            Ok(mut u) => {
+                                // set_username can fail on opaque-host
+                                // URLs (mailto:, data:, …) which aren't
+                                // valid here anyway; treat as
+                                // pass-through.
+                                let _ = u.set_username(user);
+                                let _ = u.set_password(Some(pass));
+                                format!("rest:{}", u)
+                            }
+                            Err(_) => format!("rest:{url}"),
+                        }
+                    }
+                    _ => format!("rest:{url}"),
+                };
+                let mut opts = BackendOptions::default().repository(repo);
                 // rustic_backend's REST client uses the system trust
                 // store by default and doesn't expose a "skip TLS
                 // verify" knob (`rest.rs:189-206` only accepts
@@ -306,6 +378,17 @@ impl BackupTarget {
                 account_key: account_key.as_ref().map(|_| "***".to_string()),
                 account_key_encrypted: None,
             },
+            BackupTarget::Rest {
+                url,
+                username,
+                password,
+                password_encrypted: _,
+            } => BackupTarget::Rest {
+                url: url.clone(),
+                username: username.clone(),
+                password: password.as_ref().map(|_| "***".to_string()),
+                password_encrypted: None,
+            },
             other => other.clone(),
         }
     }
@@ -379,6 +462,26 @@ async fn encrypt_target_secrets_in_place(target_id: &str, target: &mut BackupTar
                 }
             }
         }
+        BackupTarget::Rest {
+            password,
+            password_encrypted,
+            ..
+        } => {
+            if password_encrypted.is_none()
+                && let Some(plain) = password.take()
+            {
+                let name = format!("nasty.backup.{target_id}.rest.password");
+                match secrets::encrypt(&name, &plain).await {
+                    Ok(blob) => *password_encrypted = Some(blob),
+                    Err(e) => {
+                        warn!(
+                            "Failed to encrypt rest-server password for '{target_id}' — keeping plaintext: {e}"
+                        );
+                        *password = Some(plain);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -403,6 +506,12 @@ fn encrypted_target_set(target: &BackupTarget) -> bool {
         target,
         BackupTarget::B2 {
             account_key_encrypted: Some(_),
+            ..
+        }
+    ) || matches!(
+        target,
+        BackupTarget::Rest {
+            password_encrypted: Some(_),
             ..
         }
     )
@@ -443,6 +552,21 @@ fn carry_forward_existing_secrets(update: &mut BackupProfile, existing: &BackupP
         ) if account_key.is_none() && account_key_encrypted.is_none() => {
             *account_key = existing_plain.clone();
             *account_key_encrypted = existing_blob.clone();
+        }
+        (
+            BackupTarget::Rest {
+                password,
+                password_encrypted,
+                ..
+            },
+            BackupTarget::Rest {
+                password: existing_plain,
+                password_encrypted: existing_blob,
+                ..
+            },
+        ) if password.is_none() && password_encrypted.is_none() => {
+            *password = existing_plain.clone();
+            *password_encrypted = existing_blob.clone();
         }
         _ => {}
     }
@@ -1380,11 +1504,100 @@ mod tests {
         // would silently fall through to opendal and break auth.
         let target = BackupTarget::Rest {
             url: "https://rest.example.com/repo".into(),
+            username: None,
+            password: None,
+            password_encrypted: None,
         };
         let opts = target.to_backend_options(&ResolvedTargetSecrets::default());
         assert_eq!(
             opts.repository.as_deref(),
             Some("rest:https://rest.example.com/repo")
+        );
+    }
+
+    #[test]
+    fn backend_options_rest_injects_userinfo_when_creds_set() {
+        // When username + decrypted password are both present,
+        // to_backend_options inlines them into the URL so rustic's
+        // REST client picks them up as HTTP basic auth. The
+        // userinfo is the only authn channel rustic_backend's REST
+        // client exposes — there's no separate auth option.
+        let target = BackupTarget::Rest {
+            url: "https://rest.example.com/repo".into(),
+            username: Some("nasty-backup".into()),
+            password: None,
+            password_encrypted: None,
+        };
+        let resolved = ResolvedTargetSecrets {
+            rest_password: Some("hunter2".into()),
+            ..Default::default()
+        };
+        let opts = target.to_backend_options(&resolved);
+        assert_eq!(
+            opts.repository.as_deref(),
+            Some("rest:https://nasty-backup:hunter2@rest.example.com/repo")
+        );
+    }
+
+    #[test]
+    fn backend_options_rest_percent_encodes_password_specials() {
+        // Operators paste rest-server passwords directly out of the
+        // /services panel — that generator produces alphanumeric
+        // only, but operator-supplied passwords from rotate or
+        // pre-existing setups can contain `@`, `:`, `/`, `?`, `#`
+        // — every one of which is a URL delimiter that would
+        // truncate or relocate the authority if injected verbatim.
+        // url::Url::set_password is what does the percent-encoding;
+        // this test pins that we're actually delegating to it.
+        let target = BackupTarget::Rest {
+            url: "https://rest.example.com/repo".into(),
+            username: Some("user".into()),
+            password: None,
+            password_encrypted: None,
+        };
+        let resolved = ResolvedTargetSecrets {
+            rest_password: Some("p@ss:wo/rd".into()),
+            ..Default::default()
+        };
+        let opts = target.to_backend_options(&resolved);
+        let repo = opts.repository.as_deref().unwrap();
+        // Either the percent-encoded form or url's canonical form
+        // is fine — what we care about is that the host is still
+        // `rest.example.com`, not `ss:wo` or `rd` (which is what
+        // happens with naive `format!`).
+        let parsed = url::Url::parse(repo.strip_prefix("rest:").unwrap()).unwrap();
+        assert_eq!(parsed.host_str(), Some("rest.example.com"));
+        assert_eq!(parsed.username(), "user");
+        // `Url::password()` returns the percent-encoded form (that's
+        // what's on the wire); rest-server's HTTP Basic decoder
+        // percent-decodes before the htpasswd lookup. Pinning the
+        // encoded form here means a future url-crate revision that
+        // changed the encoding alphabet would surface as a test
+        // failure rather than as silent auth breakage.
+        assert_eq!(parsed.password(), Some("p%40ss%3Awo%2Frd"));
+    }
+
+    #[test]
+    fn backend_options_rest_unauthenticated_passes_url_through() {
+        // A legacy operator with a pre-#408 rest-server still has a
+        // bare URL and no credentials; the backend must use it
+        // unmodified.
+        let target = BackupTarget::Rest {
+            url: "https://legacy.example.com/repo".into(),
+            username: None,
+            password: None,
+            password_encrypted: None,
+        };
+        let resolved = ResolvedTargetSecrets {
+            // Decrypted password is None too — resolve_secrets only
+            // fills rest_password when username.is_some().
+            rest_password: None,
+            ..Default::default()
+        };
+        let opts = target.to_backend_options(&resolved);
+        assert_eq!(
+            opts.repository.as_deref(),
+            Some("rest:https://legacy.example.com/repo")
         );
     }
 
