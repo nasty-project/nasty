@@ -4677,10 +4677,8 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!(
-            "nasty-apps-test-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let p =
+            std::env::temp_dir().join(format!("nasty-apps-test-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         let _ = std::fs::remove_file(&p);
         p
