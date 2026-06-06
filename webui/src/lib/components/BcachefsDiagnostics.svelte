@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { error as showError } from '$lib/toast.svelte';
-	import type { Filesystem } from '$lib/types';
+	import type { Filesystem, ScrubStatus } from '$lib/types';
 	import { RefreshCw, SquareArrowOutUpRight } from '@lucide/svelte';
 
 	type Tab = 'usage' | 'top' | 'timestats' | 'scrub' | 'reconcile';
@@ -56,6 +56,11 @@
 	let scrubOutput = $state('');
 	let scrubRunning = $state(false);
 	let scrubLoading = $state(false);
+	/** Full ScrubStatus from the engine — drives the progress bar,
+	 * last-run summary, and outcome chip. The legacy `scrubOutput` /
+	 * `scrubRunning` state above stays in sync for the existing
+	 * `<pre>` render so the diff is additive rather than a rewrite. */
+	let scrubFull: ScrubStatus | null = $state(null);
 	let reconcileOutput = $state('');
 	let reconcileLoading = $state(false);
 	let reconcileEnabled = $state(true);
@@ -80,13 +85,17 @@
 
 	function startScrubPolling() {
 		if (scrubPollId) return;
+		// 2s while a scrub is in flight so the streamed percent feels
+		// live in the progress bar. scrub_status is cheap (in-memory
+		// hashmap lookup + one pgrep), and a multi-TB scrub gives us
+		// plenty of run-time to see the bar move at this cadence.
 		scrubPollId = setInterval(async () => {
 			await refreshScrub();
 			if (!scrubRunning && scrubPollId) {
 				clearInterval(scrubPollId);
 				scrubPollId = null;
 			}
-		}, 5000);
+		}, 2000);
 	}
 
 	function stopScrubPolling() {
@@ -166,16 +175,39 @@
 		if (!selectedFs) return;
 		scrubLoading = true;
 		try {
-			const result = await getClient().call<{ raw: string; running: boolean }>('fs.scrub.status', { name: selectedFs });
-			scrubOutput = result.raw || 'No scrub data available.';
+			const result = await getClient().call<ScrubStatus>('fs.scrub.status', { name: selectedFs });
+			scrubFull = result;
+			// Prefer the rich last_output (engine-captured transcript)
+			// when present; fall back to the legacy `raw` one-liner for
+			// fresh / never-scrubbed FSes.
+			scrubOutput = result.last_output || result.raw || 'No scrub data available.';
 			scrubRunning = result.running ?? false;
 			if (scrubRunning) startScrubPolling();
 			else stopScrubPolling();
 		} catch (e) {
+			scrubFull = null;
 			scrubOutput = e instanceof Error ? e.message : String(e);
 		} finally {
 			scrubLoading = false;
 		}
+	}
+
+	function formatScrubAgo(unixSecs: number | null | undefined): string {
+		if (!unixSecs) return '';
+		const delta = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+		if (delta < 60) return `${delta}s ago`;
+		if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+		if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+		return `${Math.floor(delta / 86400)}d ago`;
+	}
+
+	function formatScrubDuration(secs: number | null | undefined): string {
+		if (!secs) return '';
+		if (secs < 60) return `${secs}s`;
+		if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+		const h = Math.floor(secs / 3600);
+		const m = Math.floor((secs % 3600) / 60);
+		return m ? `${h}h${m}m` : `${h}h`;
 	}
 
 	async function startScrub() {
@@ -547,9 +579,37 @@
 			{:else}
 				<div class="p-4">
 					{#if scrubRunning}
-						<div class="mb-3 flex items-center gap-2">
-							<span class="inline-block h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span>
-							<span class="text-sm font-medium text-yellow-500">Scrub in progress</span>
+						<div class="mb-3 space-y-2">
+							<div class="flex items-center gap-2">
+								<span class="inline-block h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span>
+								<span class="text-sm font-medium text-yellow-500">
+									Scrub in progress{#if scrubFull?.started_at} · started {formatScrubAgo(scrubFull.started_at)}{/if}
+								</span>
+							</div>
+							{#if scrubFull?.progress_percent != null}
+								<div class="space-y-1">
+									<div class="h-2 w-full overflow-hidden rounded-full bg-secondary">
+										<div
+											class="h-full rounded-full bg-yellow-500 transition-[width] duration-500"
+											style="width: {Math.min(100, Math.max(0, scrubFull.progress_percent))}%"
+										></div>
+									</div>
+									<span class="text-xs text-muted-foreground font-mono">
+										{scrubFull.progress_percent.toFixed(scrubFull.progress_percent >= 10 ? 1 : 2)}%
+									</span>
+								</div>
+							{/if}
+						</div>
+					{:else if scrubFull?.last_run_at}
+						{@const outcome = scrubFull.last_outcome ?? 'ok'}
+						{@const cls = outcome === 'ok' ? 'text-green-500' : outcome === 'errors' ? 'text-amber-500' : 'text-red-500'}
+						{@const label = outcome === 'ok' ? 'completed successfully' : outcome === 'errors' ? 'completed with errors' : 'failed'}
+						<div class="mb-3 flex items-center gap-2 text-sm">
+							<span class="inline-block h-2 w-2 rounded-full {outcome === 'ok' ? 'bg-green-500' : outcome === 'errors' ? 'bg-amber-500' : 'bg-red-500'}"></span>
+							<span class="font-medium {cls}">Last scrub {label}</span>
+							<span class="text-muted-foreground">
+								· {formatScrubAgo(scrubFull.last_run_at)}{#if scrubFull.last_duration_secs} · took {formatScrubDuration(scrubFull.last_duration_secs)}{/if}
+							</span>
 						</div>
 					{/if}
 					<pre class="text-xs font-mono overflow-x-auto whitespace-pre leading-relaxed">{scrubOutput}</pre>

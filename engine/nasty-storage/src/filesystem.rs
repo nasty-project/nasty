@@ -583,6 +583,13 @@ pub struct ScrubStatus {
     /// `running`; cleared on completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
+    /// 0-100 progress of the in-flight scrub, parsed from the
+    /// most recent `XX%` token in bcachefs's streaming output. Only
+    /// populated while `running`; deliberately NOT persisted so an
+    /// engine restart while a scrub is in flight doesn't surface
+    /// a stale percent from a child that's no longer being read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<f32>,
     /// Unix seconds when the most recent completed scrub finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<i64>,
@@ -2451,6 +2458,7 @@ impl FilesystemService {
             let entry = state.entry(fs_name.clone()).or_insert_with(|| ScrubStatus {
                 running: false,
                 started_at: None,
+                progress_percent: None,
                 last_run_at: None,
                 last_duration_secs: None,
                 last_outcome: None,
@@ -2467,44 +2475,14 @@ impl FilesystemService {
         info!("Starting scrub on filesystem '{}'", name);
         tokio::spawn(async move {
             let mount = mount_point;
-            let output = cmd::run("bcachefs", &["scrub", &mount]).await;
+            // Stream stdout+stderr line-by-line so we can pick the
+            // most recent `XX%` token out of bcachefs's progress
+            // updates as it runs. Falls back gracefully when the
+            // binary doesn't print percent at all — the chip just
+            // shows "scrubbing (Nh ago)" via the elapsed timestamp.
+            let (outcome, captured) = stream_scrub_and_collect(&mount, &fs_name, &store).await;
             let end = unix_now_secs();
             let duration = (end - now).max(0) as u64;
-
-            let (outcome, captured) = match output {
-                Ok(out) => {
-                    // Combined output for operator inspection. stderr
-                    // first, then stdout — bcachefs uses stderr for
-                    // progress + error counters and stdout for summary.
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let combined = if stderr.is_empty() {
-                        stdout.into_owned()
-                    } else if stdout.is_empty() {
-                        stderr.into_owned()
-                    } else {
-                        format!("{stderr}\n{stdout}")
-                    };
-                    let classified = if !out.status.success() {
-                        ScrubOutcome::Failed
-                    } else if combined_indicates_errors(&combined) {
-                        ScrubOutcome::Errors
-                    } else {
-                        ScrubOutcome::Ok
-                    };
-                    (classified, combined)
-                }
-                Err(e) => {
-                    // Spawn failure (binary missing, permission denied)
-                    // — treat as Failed and keep the error message
-                    // so the operator can see *why* in the WebUI rather
-                    // than only in the journal.
-                    (
-                        ScrubOutcome::Failed,
-                        format!("failed to spawn bcachefs scrub: {e}"),
-                    )
-                }
-            };
 
             match outcome {
                 ScrubOutcome::Ok => info!("Scrub on '{fs_name}' completed in {duration}s: ok",),
@@ -2527,6 +2505,7 @@ impl FilesystemService {
                 let entry = state.entry(fs_name.clone()).or_insert_with(|| ScrubStatus {
                     running: false,
                     started_at: None,
+                    progress_percent: None,
                     last_run_at: None,
                     last_duration_secs: None,
                     last_outcome: None,
@@ -2535,6 +2514,7 @@ impl FilesystemService {
                 });
                 entry.running = false;
                 entry.started_at = None;
+                entry.progress_percent = None;
                 entry.last_run_at = Some(end);
                 entry.last_duration_secs = Some(duration);
                 entry.last_outcome = Some(outcome);
@@ -2567,6 +2547,7 @@ impl FilesystemService {
             state.get(name).cloned().unwrap_or_else(|| ScrubStatus {
                 running: false,
                 started_at: None,
+                progress_percent: None,
                 last_run_at: None,
                 last_duration_secs: None,
                 last_outcome: None,
@@ -2603,6 +2584,7 @@ impl FilesystemService {
                     .or_insert_with(|| status.clone());
                 entry.running = false;
                 entry.started_at = None;
+                entry.progress_percent = None;
                 entry.last_run_at = Some(end);
                 entry.last_duration_secs = Some(duration);
                 entry.last_outcome = Some(ScrubOutcome::Failed);
@@ -3563,6 +3545,221 @@ fn truncate_tail(s: &str, max: usize) -> String {
     out
 }
 
+/// Extract the last `XX%` / `XX.X%` token in a string. Walks back
+/// from the rightmost `%`, skips optional whitespace, then collects
+/// digits + an optional dot. Returns `None` when no parseable
+/// percent is present, or when the parsed value is out of [0, 100].
+/// Used by the scrub output streamer — bcachefs emits "32.5%" or
+/// similar inside its progress lines.
+fn parse_percent(s: &str) -> Option<f32> {
+    let bytes = s.as_bytes();
+    let percent_pos = bytes.iter().rposition(|&b| b == b'%')?;
+    let mut end = percent_pos;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    std::str::from_utf8(&bytes[start..end])
+        .ok()?
+        .parse::<f32>()
+        .ok()
+        .filter(|p| (0.0..=100.0).contains(p))
+}
+
+/// Cap on how much output we hold in memory during a running scrub.
+/// `bcachefs scrub` on a multi-TB pool can run for hours and chatter
+/// across the entire window; without a cap a particularly noisy run
+/// could balloon the engine's RSS. 1 MiB is well above any expected
+/// real-world transcript and still cheap to hold.
+const SCRUB_CAPTURE_INFLIGHT_CAP: usize = 1024 * 1024;
+
+/// Spawn `bcachefs scrub <mount>` with piped stdout+stderr, stream
+/// every line (and every `\r`-separated progress update — bcachefs
+/// uses carriage returns for in-place percent updates), feed the
+/// most-recent `XX%` token back into the in-memory scrub state, and
+/// return the (outcome, full captured transcript) on process exit.
+async fn stream_scrub_and_collect(
+    mount: &str,
+    fs_name: &str,
+    store: &ScrubStateMap,
+) -> (ScrubOutcome, String) {
+    use tokio::io::AsyncReadExt;
+    use tokio::process::Command;
+
+    let mut child = match Command::new("bcachefs")
+        .args(["scrub", mount])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                ScrubOutcome::Failed,
+                format!("failed to spawn bcachefs scrub: {e}"),
+            );
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let store_for_progress = store.clone();
+    let fs_name_for_progress = fs_name.to_string();
+    let capture = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let capture_for_task = capture.clone();
+
+    // One reader task per stream. Each task accumulates into the
+    // shared capture buffer and updates the in-memory progress
+    // percent whenever it sees a parseable `XX%` token. Streams
+    // run concurrently because stdout (final summary) and stderr
+    // (progress) come on different file descriptors.
+    let drain = async move |handle: Option<tokio::process::ChildStdout>,
+                            err_handle: Option<tokio::process::ChildStderr>| {
+        let store = store_for_progress;
+        let fs_name = fs_name_for_progress;
+        let cap = capture_for_task;
+        let mut stdout_buf = [0u8; 1024];
+        let mut stderr_buf = [0u8; 1024];
+        let mut stdout_pending = String::new();
+        let mut stderr_pending = String::new();
+
+        let mut stdout = handle;
+        let mut stderr = err_handle;
+
+        loop {
+            tokio::select! {
+                read = async {
+                    match stdout.as_mut() {
+                        Some(s) => s.read(&mut stdout_buf).await,
+                        None => Ok(0),
+                    }
+                }, if stdout.is_some() => {
+                    match read {
+                        Ok(0) => { stdout = None; }
+                        Ok(n) => process_chunk(
+                            &stdout_buf[..n],
+                            &mut stdout_pending,
+                            &cap,
+                            &store,
+                            &fs_name,
+                        ).await,
+                        Err(_) => { stdout = None; }
+                    }
+                }
+                read = async {
+                    match stderr.as_mut() {
+                        Some(s) => s.read(&mut stderr_buf).await,
+                        None => Ok(0),
+                    }
+                }, if stderr.is_some() => {
+                    match read {
+                        Ok(0) => { stderr = None; }
+                        Ok(n) => process_chunk(
+                            &stderr_buf[..n],
+                            &mut stderr_pending,
+                            &cap,
+                            &store,
+                            &fs_name,
+                        ).await,
+                        Err(_) => { stderr = None; }
+                    }
+                }
+                else => break,
+            }
+        }
+        // Flush any trailing un-terminated lines.
+        if !stdout_pending.is_empty() {
+            push_line(&stdout_pending, &cap, &store, &fs_name).await;
+        }
+        if !stderr_pending.is_empty() {
+            push_line(&stderr_pending, &cap, &store, &fs_name).await;
+        }
+    };
+
+    let drain_handle = tokio::spawn(drain(stdout, stderr));
+
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = drain_handle.await;
+            return (
+                ScrubOutcome::Failed,
+                format!("bcachefs scrub child wait failed: {e}"),
+            );
+        }
+    };
+    let _ = drain_handle.await;
+
+    let captured = capture.lock().map(|g| g.clone()).unwrap_or_default();
+    let outcome = if !status.success() {
+        ScrubOutcome::Failed
+    } else if combined_indicates_errors(&captured) {
+        ScrubOutcome::Errors
+    } else {
+        ScrubOutcome::Ok
+    };
+    (outcome, captured)
+}
+
+/// Append a freshly-read chunk to the per-stream pending buffer,
+/// then drain any complete lines (split on `\n` or `\r` — bcachefs
+/// uses both, carriage returns for in-place progress updates).
+async fn process_chunk(
+    chunk: &[u8],
+    pending: &mut String,
+    cap: &std::sync::Arc<std::sync::Mutex<String>>,
+    store: &ScrubStateMap,
+    fs_name: &str,
+) {
+    pending.push_str(&String::from_utf8_lossy(chunk));
+    while let Some(boundary) = pending.find(['\n', '\r']) {
+        let line: String = pending.drain(..=boundary).collect();
+        let line = line.trim_end_matches(['\n', '\r']);
+        if line.is_empty() {
+            continue;
+        }
+        push_line(line, cap, store, fs_name).await;
+    }
+}
+
+/// Append one captured line to the in-memory transcript (capped at
+/// `SCRUB_CAPTURE_INFLIGHT_CAP`) and update the in-memory progress
+/// percent when the line carries a `XX%` token.
+async fn push_line(
+    line: &str,
+    cap: &std::sync::Arc<std::sync::Mutex<String>>,
+    store: &ScrubStateMap,
+    fs_name: &str,
+) {
+    if let Ok(mut buf) = cap.lock() {
+        buf.push_str(line);
+        buf.push('\n');
+        if buf.len() > SCRUB_CAPTURE_INFLIGHT_CAP {
+            // Trim from the front, keep the trailing 75% so the
+            // final summary survives whatever bcachefs prints next.
+            let drop = buf.len() - (SCRUB_CAPTURE_INFLIGHT_CAP * 3 / 4);
+            let mut start = drop;
+            while start < buf.len() && !buf.is_char_boundary(start) {
+                start += 1;
+            }
+            *buf = buf[start..].to_string();
+        }
+    }
+    if let Some(pct) = parse_percent(line) {
+        let mut state = store.lock().await;
+        if let Some(entry) = state.get_mut(fs_name) {
+            entry.progress_percent = Some(pct);
+        }
+    }
+}
+
 fn get_fs_mount_options(state: &FsState, name: &str) -> FsMountOptions {
     state.get(name).cloned().unwrap_or_default()
 }
@@ -4111,6 +4308,41 @@ mod tests {
         assert!(trimmed.starts_with("[output truncated]"));
         assert!(trimmed.ends_with("errors: 0\n"));
         assert!(trimmed.len() < chatty.len());
+    }
+
+    #[test]
+    fn scrub_parse_percent_extracts_typical_progress_line() {
+        // bcachefs prints something like "data scrub: 32.5% complete"
+        // (and similar — exact format may vary across tools versions).
+        // The parser walks back from the rightmost `%` so trailing
+        // descriptive text doesn't trip us up.
+        assert_eq!(parse_percent("data scrub: 32.5% complete"), Some(32.5));
+        assert_eq!(parse_percent("47%"), Some(47.0));
+        assert_eq!(parse_percent("scrubbing 100%"), Some(100.0));
+        assert_eq!(parse_percent("0%"), Some(0.0));
+        // Space between number and `%` should still parse — some
+        // tools print "47 %".
+        assert_eq!(parse_percent("47 %"), Some(47.0));
+    }
+
+    #[test]
+    fn scrub_parse_percent_rejects_invalid_or_out_of_range() {
+        assert_eq!(parse_percent("no percent here"), None);
+        assert_eq!(parse_percent(""), None);
+        // 150% is nonsense — clamp by rejecting rather than
+        // displaying a > 100 progress bar that looks broken.
+        assert_eq!(parse_percent("150%"), None);
+        // Bare `%` with no number.
+        assert_eq!(parse_percent("xxx%"), None);
+    }
+
+    #[test]
+    fn scrub_parse_percent_picks_rightmost_when_multiple() {
+        // When a line contains multiple percent tokens, the most
+        // recent one is the operator-meaningful current progress.
+        // (rationale: bcachefs may print "errors: 0%, scrubbing: 47%"
+        // or similar composites in future versions.)
+        assert_eq!(parse_percent("errors: 0%, scrub: 47.5%"), Some(47.5));
     }
 
     #[test]
