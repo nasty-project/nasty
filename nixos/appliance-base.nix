@@ -140,6 +140,19 @@
 
   # Enable SMART monitoring; skip silently on VMs (no SMART-capable devices)
   services.smartd.enable = true;
+  # smartd's default `-a` tracks attribute changes by *normalized* value, so
+  # Temperature_Celsius (194) and Airflow_Temperature_Cel (190) hit the journal
+  # as a 0–253 health value — e.g. "194 Temperature_Celsius changed from 119 to
+  # 120" — which reads like 120 °C and alarms operators who think their disks
+  # are cooking (#424). The real temperature is the attribute's *raw* value
+  # (~30 °C). `-r 194 -r 190` appends that raw value to the change lines so the
+  # actual temperature is visible (e.g. "... [Raw 30]"). NASty's own disk-temp
+  # alerting already reads smartctl's raw °C, so this only de-confuses the log.
+  #
+  # `-r` (report raw alongside the normalized value) — deliberately NOT `-R`,
+  # which would *trigger* a journal line on every raw change, i.e. spam one
+  # entry per 1 °C of drift.
+  services.smartd.defaults.monitored = "-a -r 194 -r 190";
   systemd.services.smartd.unitConfig.ConditionVirtualization = "no";
 
   system.stateVersion = "24.11";
