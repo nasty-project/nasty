@@ -640,6 +640,34 @@ in {
     systemd.services.docker.wantedBy = lib.mkForce [];
     systemd.sockets.docker.wantedBy = lib.mkForce [];
 
+    # Refuse to start dockerd while its data-root symlink is *dangling*
+    # (#424). The engine symlinks /var/lib/docker onto the apps bcachefs
+    # filesystem; when that FS isn't mounted/unlocked at boot the symlink
+    # dangles, and dockerd's startup mkdir fails with "mkdir
+    # /var/lib/docker: file exists", crash-loops into start-limit-hit, and
+    # wedges the apps UI. The engine's restore() guards the path *it*
+    # drives, but docker.service is TriggeredBy=docker.socket — so a client
+    # connecting to the still-listening socket socket-activates dockerd
+    # behind the engine's back. A `Condition` (skip, not assert) covers
+    # every trigger path with no restart counter.
+    #
+    # The two conditions are ORed (the `|` triggering prefix): start docker
+    # iff /var/lib/docker resolves to a directory, OR is not a symlink at
+    # all. That last clause is load-bearing — on a fresh box the path
+    # doesn't exist yet (dockerd creates it on first start), and a plain
+    # ConditionPathIsDirectory would wrongly skip that case (it broke the
+    # appliance-smoke test). ConditionPathIsSymbolicLink uses lstat, so it
+    # distinguishes "absent / real dir" (start) from "dangling symlink"
+    # (skip) — ConditionPathExists/IsDirectory follow the link and can't.
+    #
+    #   absent           → IsDirectory=F, !IsSymlink=T → start (dockerd mkdirs it)
+    #   real dir / valid  → IsDirectory=T               → start
+    #   dangling symlink → IsDirectory=F, !IsSymlink=F → skip
+    systemd.services.docker.unitConfig = {
+      ConditionPathIsDirectory = "|/var/lib/docker";
+      ConditionPathIsSymbolicLink = "|!/var/lib/docker";
+    };
+
     # ── System packages ────────────────────────────────────────
 
     environment.systemPackages = with pkgs; [

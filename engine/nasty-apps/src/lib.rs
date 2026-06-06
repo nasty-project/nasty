@@ -3506,6 +3506,30 @@ impl AppsService {
         if !self.is_enabled() {
             return;
         }
+        // #424: never start Docker against a dangling data-root symlink.
+        // v0.0.10 points /var/lib/docker at the apps bcachefs FS; if that
+        // FS isn't mounted/unlocked yet at boot, dockerd crash-loops on
+        // `mkdir /var/lib/docker: file exists` and wedges the apps UI. The
+        // enable path runs configure_docker_data_root first; this boot path
+        // did not — so guard it here and surface the cause instead of
+        // looping into start-limit-hit.
+        //
+        // This guard only covers the start *we* drive. docker.service is
+        // TriggeredBy=docker.socket, so a client connecting to the socket
+        // can socket-activate dockerd behind our back — that path is
+        // backstopped by `ConditionPathIsDirectory=/var/lib/docker` on
+        // docker.service (nixos/modules/nasty.nix), which skips the unit
+        // cleanly when the symlink dangles. This log line is the operator-
+        // facing half: it explains *why* (filesystem not mounted/unlocked).
+        if let Err(target) = docker_data_root_status(Path::new("/var/lib/docker")) {
+            error!(
+                "Apps enabled but Docker data-root /var/lib/docker -> {target} does not resolve \
+                 — the apps filesystem is not mounted (failed mount or still-locked encrypted FS). \
+                 Not starting Docker to avoid a crash loop; unlock/mount the filesystem, then \
+                 re-enable apps or reboot."
+            );
+            return;
+        }
         info!("Apps runtime enabled — ensuring Docker is running");
         if let Err(e) = run_cmd("systemctl", &["start", DOCKER_SERVICE]).await {
             error!("Failed to start Docker: {e}");
@@ -4309,6 +4333,46 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
     Ok(())
 }
 
+/// Whether Docker's data-root is safe to start dockerd against.
+///
+/// v0.0.10 (`configure_docker_data_root`) replaced `/var/lib/docker`
+/// with a symlink onto the apps bcachefs filesystem. When that
+/// filesystem isn't mounted at boot — a failed mount, a still-locked
+/// encrypted FS, a slow/absent device — the symlink dangles. dockerd's
+/// startup `os.MkdirAll("/var/lib/docker")` then stat-fails the target
+/// and falls through to `mkdir()` on the link inode itself, returning
+/// `mkdir /var/lib/docker: file exists`; systemd retries, hits
+/// `start-limit-hit`, and the apps UI wedges (#424).
+///
+/// The enable path guards this by running `configure_docker_data_root`
+/// first; the boot `restore()` path historically did not. This check
+/// closes that gap so `restore()` starts Docker only when the data-root
+/// is a real directory or a symlink whose target resolves.
+///
+/// Returns `Err(target)` carrying the unresolved link target when the
+/// data-root is a dangling symlink; `Ok(())` otherwise — a real dir, a
+/// resolving symlink, or an absent path (dockerd then creates a plain
+/// dir on the root FS itself, same as a fresh pre-v0.0.10 install).
+fn docker_data_root_status(docker_lib: &Path) -> Result<(), String> {
+    let Ok(link_meta) = std::fs::symlink_metadata(docker_lib) else {
+        // Absent — dockerd creates it. Safe.
+        return Ok(());
+    };
+    if !link_meta.file_type().is_symlink() {
+        // Plain directory (pre-v0.0.10 layout, or non-bcachefs box). Safe.
+        return Ok(());
+    }
+    // Symlink: only safe if the target resolves. `metadata` follows the
+    // link, so an error here means the target is missing (dangling).
+    if std::fs::metadata(docker_lib).is_ok() {
+        return Ok(());
+    }
+    let target = std::fs::read_link(docker_lib)
+        .map(|t| t.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "<unreadable>".to_string());
+    Err(target)
+}
+
 // ── Container image inspection ──────────────────────────────
 
 fn parse_image_ref(image: &str) -> (String, String, String) {
@@ -4612,7 +4676,64 @@ async fn fetch_manifest_json(
 
 #[cfg(test)]
 mod tests {
-    use super::{AppVolume, validate_simple_volumes};
+    use super::{AppVolume, docker_data_root_status, validate_simple_volumes};
+    use std::path::PathBuf;
+
+    /// A process-unique scratch path under the temp dir. The crate has
+    /// no tempfile dev-dep; this keeps tests self-contained.
+    fn unique_tmp(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let p =
+            std::env::temp_dir().join(format!("nasty-apps-test-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn data_root_absent_is_ok() {
+        // Fresh box: no /var/lib/docker yet — dockerd creates it.
+        let missing = unique_tmp("absent").join("docker");
+        assert!(docker_data_root_status(&missing).is_ok());
+    }
+
+    #[test]
+    fn data_root_plain_dir_is_ok() {
+        // Pre-v0.0.10 / non-bcachefs layout: a real directory.
+        let dir = unique_tmp("plaindir");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(docker_data_root_status(&dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn data_root_resolving_symlink_is_ok() {
+        // v0.0.10 happy path: symlink → an existing dir on a mounted FS.
+        let base = unique_tmp("goodlink");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("apps-docker");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = base.join("docker");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(docker_data_root_status(&link).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn data_root_dangling_symlink_is_err() {
+        // #424: FS not mounted/unlocked → symlink target absent. This is
+        // the case that must NOT start Docker.
+        let base = unique_tmp("danglink");
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("not-mounted/apps-docker");
+        let link = base.join("docker");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = docker_data_root_status(&link).expect_err("dangling link must be rejected");
+        assert!(err.contains("not-mounted/apps-docker"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn vol(host_path: &str) -> AppVolume {
         AppVolume {
