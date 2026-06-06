@@ -101,9 +101,14 @@ async fn main() -> anyhow::Result<()> {
     let built = env!("NASTY_BUILD_DATE");
     let args = std::env::args().collect::<Vec<_>>();
 
-    // --version flag
+    // --version flag. Includes the git commit so it can be matched
+    // against a deployed branch/commit — the version alone (0.0.10 on
+    // every branch) can't tell two builds apart.
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("nasty-engine {version} (built: {built})");
+        match telemetry::build_commit() {
+            Some(commit) => println!("nasty-engine {version} ({commit}, built: {built})"),
+            None => println!("nasty-engine {version} (built: {built})"),
+        }
         return Ok(());
     }
 
@@ -703,6 +708,12 @@ async fn health() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        // The git commit is the only field that distinguishes two builds
+        // of the same version (every branch on 0.0.10 reports version
+        // 0.0.10) — so a deploy can poll /health and confirm the running
+        // engine is the exact commit it shipped. `null` on cargo builds
+        // with no SHA available.
+        "commit": telemetry::build_commit(),
         "built": env!("NASTY_BUILD_DATE"),
     }))
 }

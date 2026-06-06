@@ -29,7 +29,9 @@ struct Report {
 /// Short git SHA this engine was built from. `None` for dev cargo
 /// builds outside Nix where `NASTY_GIT_SHA` wasn't injected. Matches
 /// the 7-char form used elsewhere (see `nasty-system::update`).
-fn build_commit() -> Option<String> {
+/// Reused by `/health` and `--version` so all three report the same
+/// commit from the same compile-time source.
+pub(crate) fn build_commit() -> Option<String> {
     let raw = option_env!("NASTY_GIT_SHA")?.trim();
     if raw.is_empty() || raw == "unknown" {
         return None;
