@@ -476,6 +476,16 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
             if let Some(fd) = forward_delay {
                 out.push_str(&format!("forward-delay={fd}\n"));
             }
+            // Disable bridge multicast snooping (#291). The Linux bridge
+            // defaults to multicast_snooping=1 + multicast_querier=0; with
+            // no querier on a typical home LAN, the bridge stops forwarding
+            // multicast ~5 min after the last IGMP membership times out.
+            // That silently kills mDNS (avahi/Finder) and WSD (Windows
+            // Explorer) discovery once a NASty link is enslaved to a bridge:
+            // the SMB data path keeps working but the box vanishes from file
+            // managers. Snooping buys nothing without a querier, so turn it
+            // off on every bridge we manage.
+            out.push_str("multicast-snooping=false\n");
             // Bridge-master MTU lives here, not in [ethernet] (NM ≥1.20).
             if let Some(mtu) = p.mtu {
                 out.push_str(&format!("mtu={mtu}\n"));
@@ -617,6 +627,11 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
                 // NM expects forward-delay as a u32 in seconds.
                 bridge.insert("forward-delay".into(), into_value(u32::from(*fd)));
             }
+            // Disable multicast snooping (#291) — see the keyfile
+            // serializer for the full rationale. Without a querier on the
+            // LAN the bridge stops forwarding multicast after ~5 min,
+            // which kills mDNS/WSD discovery while leaving SMB working.
+            bridge.insert("multicast-snooping".into(), into_value(false));
             // Bridge-master MTU lives in [bridge] (NM ≥1.20). Reported
             // in #96: bond/bridge MTU was being silently dropped because
             // we only emitted MTU under [802-3-ethernet] for Ethernet
@@ -1186,6 +1201,8 @@ mod tests {
         assert!(keyfile.contains("[bridge]"));
         assert!(keyfile.contains("stp=true"));
         assert!(keyfile.contains("forward-delay=4"));
+        // #291: snooping disabled so mDNS/WSD keep flowing without a querier.
+        assert!(keyfile.contains("multicast-snooping=false"));
     }
 
     #[test]
@@ -1465,6 +1482,13 @@ mod tests {
             .unwrap();
         assert!(stp);
         assert_eq!(fd, 7);
+        // #291: multicast snooping disabled on every managed bridge.
+        let snooping: bool = bridge["multicast-snooping"]
+            .try_clone()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(!snooping);
     }
 
     #[test]
