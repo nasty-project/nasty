@@ -382,6 +382,10 @@ export interface ScrubStatus {
 	running: boolean;
 	/** Unix seconds when the current run started; set while running. */
 	started_at?: number | null;
+	/** 0-100 progress of the in-flight scrub, parsed from the most
+	 * recent `XX%` token in bcachefs's streaming output. Only set
+	 * while `running`. */
+	progress_percent?: number | null;
 	/** Unix seconds when the most recent completed scrub finished. */
 	last_run_at?: number | null;
 	/** Duration of the most recent completed scrub, in seconds. */

@@ -146,6 +146,11 @@
 	function updateScrubPolling() {
 		const anyRunning = Object.values(scrubStatuses).some((s) => s.running);
 		if (anyRunning && !scrubPoll) {
+			// 2s while a scrub is in flight so the streamed percent
+			// feels live without hammering the engine. The
+			// scrub_status RPC is cheap (in-memory hashmap lookup +
+			// one pgrep per call); the prior 5s cadence was too slow
+			// to make the new percent-chip feel responsive.
 			scrubPoll = setInterval(async () => {
 				const updates = await Promise.all(
 					filesystems
@@ -161,7 +166,7 @@
 				for (const r of updates) if (r) next[r[0]] = r[1];
 				scrubStatuses = next;
 				updateScrubPolling();
-			}, 5000);
+			}, 2000);
 		} else if (!anyRunning && scrubPoll) {
 			clearInterval(scrubPoll);
 			scrubPoll = null;
@@ -188,12 +193,14 @@
 	function scrubChip(s: ScrubStatus | undefined): { label: string; cls: string; title: string } {
 		if (!s) return { label: 'scrub: —', cls: 'text-muted-foreground', title: 'No scrub data' };
 		if (s.running) {
+			// Prefer the parsed bcachefs percent when we have one;
+			// fall back to elapsed time so a tools build that doesn't
+			// print percent (or hasn't yet) still shows motion.
 			const since = s.started_at ? humanAgo(s.started_at) : 'now';
-			return {
-				label: `scrubbing (${since})`,
-				cls: 'text-blue-400',
-				title: 'Scrub in progress',
-			};
+			const label = s.progress_percent != null
+				? `scrubbing ${s.progress_percent.toFixed(s.progress_percent >= 10 ? 0 : 1)}% (${since})`
+				: `scrubbing (${since})`;
+			return { label, cls: 'text-blue-400', title: 'Scrub in progress' };
 		}
 		if (!s.last_run_at) {
 			return { label: 'never scrubbed', cls: 'text-muted-foreground', title: 'This filesystem has not been scrubbed since the engine started tracking.' };
