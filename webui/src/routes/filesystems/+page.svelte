@@ -28,6 +28,18 @@
 	let filesystems: Filesystem[] = $state([]);
 	let devices: BlockDevice[] = $state([]);
 	let tpmStatus: Record<string, TpmBindStatus> = $state({});
+	/** Per-FS scrub state populated by `refresh()` alongside fs.list, and
+	 * re-polled while any scrub is running. Drives the inline chip +
+	 * Scrub button on every FS row in the Manage view (not just the
+	 * expanded one — the existing `scrubStatus` singleton only loaded
+	 * when an FS was expanded, which is why operators couldn't see
+	 * "last scrubbed N days ago" at a glance). */
+	let scrubStatuses: Record<string, ScrubStatus> = $state({});
+	/** Interval handle for the running-scrub poller. Lazily started
+	 * when any FS reports `running`, cleared when none do. 5s cadence
+	 * is plenty — `bcachefs scrub` on a multi-TB pool runs for
+	 * hours, sub-second progress updates aren't useful. */
+	let scrubPoll: ReturnType<typeof setInterval> | null = null;
 	// Host-level TPM availability — same value across every FS on
 	// this box. Cached at refresh time so the create-wizard's "Bind
 	// to TPM" checkbox can be conditionally shown even before the
@@ -131,6 +143,92 @@
 
 	let evacuationPoll: ReturnType<typeof setInterval> | null = null;
 
+	function updateScrubPolling() {
+		const anyRunning = Object.values(scrubStatuses).some((s) => s.running);
+		if (anyRunning && !scrubPoll) {
+			scrubPoll = setInterval(async () => {
+				const updates = await Promise.all(
+					filesystems
+						.filter((fs) => scrubStatuses[fs.name]?.running)
+						.map(async (fs) => {
+							try {
+								const s = await client.call<ScrubStatus>('fs.scrub.status', { name: fs.name });
+								return [fs.name, s] as const;
+							} catch { return null; }
+						})
+				);
+				const next = { ...scrubStatuses };
+				for (const r of updates) if (r) next[r[0]] = r[1];
+				scrubStatuses = next;
+				updateScrubPolling();
+			}, 5000);
+		} else if (!anyRunning && scrubPoll) {
+			clearInterval(scrubPoll);
+			scrubPoll = null;
+		}
+	}
+
+	async function startScrubInline(fsName: string) {
+		await withToast(
+			() => client.call('fs.scrub.start', { name: fsName }),
+			`Scrub started on "${fsName}"`
+		);
+		try {
+			const s = await client.call<ScrubStatus>('fs.scrub.status', { name: fsName });
+			scrubStatuses = { ...scrubStatuses, [fsName]: s };
+		} catch { /* poll will catch up */ }
+		updateScrubPolling();
+	}
+
+	/** Render the scrub state as a short human chip suitable for the
+	 * row's descriptor line. Designed for the typical case (last run
+	 * was minutes / hours / days ago) — avoids exact timestamps which
+	 * are noisy at a glance. Operators wanting precision can click
+	 * through to the Diagnostics tab. */
+	function scrubChip(s: ScrubStatus | undefined): { label: string; cls: string; title: string } {
+		if (!s) return { label: 'scrub: —', cls: 'text-muted-foreground', title: 'No scrub data' };
+		if (s.running) {
+			const since = s.started_at ? humanAgo(s.started_at) : 'now';
+			return {
+				label: `scrubbing (${since})`,
+				cls: 'text-blue-400',
+				title: 'Scrub in progress',
+			};
+		}
+		if (!s.last_run_at) {
+			return { label: 'never scrubbed', cls: 'text-muted-foreground', title: 'This filesystem has not been scrubbed since the engine started tracking.' };
+		}
+		const ago = humanAgo(s.last_run_at);
+		const outcome = s.last_outcome ?? 'ok';
+		const dur = s.last_duration_secs ? humanDuration(s.last_duration_secs) : '';
+		const cls =
+			outcome === 'ok' ? 'text-green-500' :
+			outcome === 'errors' ? 'text-amber-500' :
+			'text-red-500';
+		const label = outcome === 'ok'
+			? `scrubbed ${ago}, ok`
+			: outcome === 'errors'
+			? `scrubbed ${ago}, errors`
+			: `scrub failed ${ago}`;
+		return { label, cls, title: `${dur ? `Took ${dur}. ` : ''}Click Diagnostics for full output.` };
+	}
+
+	function humanAgo(unixSecs: number): string {
+		const delta = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+		if (delta < 60) return `${delta}s ago`;
+		if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+		if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+		return `${Math.floor(delta / 86400)}d ago`;
+	}
+
+	function humanDuration(secs: number): string {
+		if (secs < 60) return `${secs}s`;
+		if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+		const h = Math.floor(secs / 3600);
+		const m = Math.floor((secs % 3600) / 60);
+		return m ? `${h}h${m}m` : `${h}h`;
+	}
+
 	function startEvacuationPolling() {
 		if (evacuationPoll) return;
 		evacuationPoll = setInterval(async () => {
@@ -160,6 +258,7 @@
 	onDestroy(() => {
 		client.offEvent(handleEvent);
 		if (evacuationPoll) { clearInterval(evacuationPoll); evacuationPoll = null; }
+		if (scrubPoll) { clearInterval(scrubPoll); scrubPoll = null; }
 	});
 
 	async function refresh() {
@@ -184,6 +283,24 @@
 		const next: Record<string, TpmBindStatus> = {};
 		for (const r of results) if (r) next[r[0]] = r[1];
 		tpmStatus = next;
+
+		// Pull scrub state for every FS (including unmounted — the
+		// engine reads from persistent state and only does the
+		// pgrep cross-check for mounted FSes). Errors here are
+		// surfaced as "Never scrubbed" rather than blocking the
+		// page render.
+		const scrubResults = await Promise.all(
+			filesystems.map(async (fs) => {
+				try {
+					const s = await client.call<ScrubStatus>('fs.scrub.status', { name: fs.name });
+					return [fs.name, s] as const;
+				} catch { return null; }
+			})
+		);
+		const nextScrub: Record<string, ScrubStatus> = {};
+		for (const r of scrubResults) if (r) nextScrub[r[0]] = r[1];
+		scrubStatuses = nextScrub;
+		updateScrubPolling();
 		// Probe host-level TPM availability: re-use any existing
 		// status if we have one (same value across all FSes), or
 		// fire a one-off `fs.tpm.status` against a sentinel name
@@ -1474,6 +1591,20 @@
 								</Button>
 							{/if}
 						{/if}
+						{#if fs.mounted}
+							{@const sc = scrubStatuses[fs.name]}
+							<Button
+								variant="secondary"
+								size="xs"
+								onclick={() => startScrubInline(fs.name)}
+								disabled={sc?.running}
+								title={sc?.running
+									? `Scrub in progress${sc.started_at ? ` (started ${humanAgo(sc.started_at)})` : ''}.`
+									: 'Run a full data scrub on this filesystem. Takes hours on multi-TB pools; runs in the background.'}
+							>
+								{sc?.running ? 'Scrubbing…' : 'Scrub'}
+							</Button>
+						{/if}
 						<Button variant="destructive" size="xs" onclick={() => destroyFs(fs.name)}>Destroy</Button>
 					</div>
 				</div>
@@ -1486,6 +1617,7 @@
 						? estimateUsableBytes(fs.total_bytes, fs.devices.length, fsReplicas, fsEc)
 						: fs.total_bytes}
 					{@const deviceCount = fs.devices.length}
+					{@const chip = scrubChip(scrubStatuses[fs.name])}
 					<div class="mt-3">
 						<div class="mb-1 h-1.5 overflow-hidden rounded-full bg-secondary">
 							<div class="h-full rounded-full bg-primary" style="width: {(fs.used_bytes / fs.total_bytes) * 100}%"></div>
@@ -1499,6 +1631,7 @@
 							{#if fs.options.encrypted} · <span title={fs.options.locked ? 'Encrypted, currently locked — unlock to mount.' : 'Encrypted.'}>encrypted{fs.options.locked ? ' · locked' : ''}</span>{/if}
 							{#if fs.options.encrypted && tpmStatus[fs.name]?.bound} · <span title="Encryption key is sealed to this host's TPM2, bound to PCR 7. Auto-unlock prefers the sealed copy and falls back to the plaintext .key on unseal failure.">TPM-bound</span>{/if}
 							{#if fs.options.compression} · {fs.options.compression}{/if}
+							· <span class={chip.cls} title={chip.title}>{chip.label}</span>
 						</span>
 					</div>
 				{/if}

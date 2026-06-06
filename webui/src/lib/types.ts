@@ -376,8 +376,23 @@ export interface FsDeviceUsage {
 	total_bytes: number;
 }
 
+export type ScrubOutcome = 'ok' | 'errors' | 'failed';
+
 export interface ScrubStatus {
 	running: boolean;
+	/** Unix seconds when the current run started; set while running. */
+	started_at?: number | null;
+	/** Unix seconds when the most recent completed scrub finished. */
+	last_run_at?: number | null;
+	/** Duration of the most recent completed scrub, in seconds. */
+	last_duration_secs?: number | null;
+	last_outcome?: ScrubOutcome | null;
+	/** Captured stdout+stderr from the most recent completed scrub
+	 * (trailing 8 KiB), or a one-line note for engine-restart-during-
+	 * scrub. */
+	last_output?: string | null;
+	/** Backward-compat one-line summary the legacy Diagnostics tab
+	 * displays verbatim. New surfaces should prefer the typed fields. */
 	raw: string;
 }
 

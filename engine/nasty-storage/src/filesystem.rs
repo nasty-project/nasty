@@ -13,6 +13,12 @@ use crate::cmd;
 
 const NASTY_MOUNT_BASE: &str = "/fs";
 const FS_STATE_PATH: &str = "/var/lib/nasty/fs-state.json";
+const SCRUB_STATE_PATH: &str = "/var/lib/nasty/scrub-state.json";
+/// Trim the captured scrub output to this many trailing bytes before
+/// persisting. Long scrubs print per-shard counters every few seconds —
+/// keeping the full transcript would bloat the state file without
+/// adding operator value over "what was the final summary".
+const SCRUB_OUTPUT_KEEP_BYTES: usize = 8 * 1024;
 const KEYS_DIR: &str = "/var/lib/nasty/keys";
 const PROC_KEYS_PATH: &str = "/proc/keys";
 
@@ -547,12 +553,53 @@ pub struct DeviceUsage {
     pub total_bytes: u64,
 }
 
-/// Scrub operation status.
+/// Outcome of the most recent completed scrub. Classified from the
+/// child process's exit status + a scan of its combined output for
+/// `error`-shaped lines (bcachefs reports counter increments inline
+/// during the scan). `Failed` is used for non-zero exits *and* for
+/// the engine-restart-during-scrub case where we lost track of the
+/// running child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrubOutcome {
+    /// Exited 0 and no error markers in output.
+    Ok,
+    /// Exited 0 but the scrub reported one or more errors.
+    Errors,
+    /// Non-zero exit, spawn failure, or the engine restarted mid-scrub.
+    Failed,
+}
+
+/// Scrub operation status — both live state ("am I running, since when")
+/// and the last-completed-run summary ("when, how long, outcome,
+/// captured output"). Persisted across engine restarts via
+/// `/var/lib/nasty/scrub-state.json` so the operator's view doesn't
+/// reset every time the engine cycles.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ScrubStatus {
     /// Whether a scrub is currently in progress.
     pub running: bool,
-    /// Raw text output from the bcachefs scrub status command.
+    /// Unix seconds when the current run started. `Some` while
+    /// `running`; cleared on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    /// Unix seconds when the most recent completed scrub finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<i64>,
+    /// Duration of the most recent completed scrub, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_duration_secs: Option<u64>,
+    /// Outcome of the most recent completed scrub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_outcome: Option<ScrubOutcome>,
+    /// Captured stdout+stderr from the most recent completed scrub.
+    /// Truncated to the last `SCRUB_OUTPUT_KEEP_BYTES` so a chatty
+    /// long-running scrub doesn't bloat the state file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output: Option<String>,
+    /// Human-readable summary string — kept for backward compatibility
+    /// with the existing Diagnostics tab renderer (which reads `raw`).
+    /// New WebUI surfaces should prefer the typed fields above.
     pub raw: String,
 }
 
@@ -569,10 +616,18 @@ pub struct ReconcileStatus {
 const FS_LIST_CACHE_TTL: Duration = Duration::from_secs(3);
 
 type ListCache = Arc<Mutex<Option<(Instant, Vec<Filesystem>)>>>;
+type ScrubStateMap = Arc<Mutex<HashMap<String, ScrubStatus>>>;
 
 #[derive(Clone)]
 pub struct FilesystemService {
     list_cache: ListCache,
+    /// Per-filesystem scrub state, loaded from `SCRUB_STATE_PATH` on
+    /// construction. Mutated by `scrub_start` (sets `running` /
+    /// `started_at`) and the spawned scrub task (records completion);
+    /// read by `scrub_status` and `scrub_status_all`. The mutex is
+    /// held only briefly for read/write — the actual `bcachefs scrub`
+    /// child runs detached.
+    scrub_state: ScrubStateMap,
 }
 
 impl Default for FilesystemService {
@@ -583,8 +638,23 @@ impl Default for FilesystemService {
 
 impl FilesystemService {
     pub fn new() -> Self {
+        // Best-effort load; a missing or corrupt file means no
+        // history is surfaced for previously-run scrubs but doesn't
+        // block the engine from accepting new ones.
+        let scrub = match std::fs::read_to_string(SCRUB_STATE_PATH) {
+            Ok(s) => serde_json::from_str::<HashMap<String, ScrubStatus>>(&s).unwrap_or_else(|e| {
+                warn!("parse {SCRUB_STATE_PATH} failed: {e} — starting with empty scrub history");
+                HashMap::new()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => {
+                warn!("read {SCRUB_STATE_PATH} failed: {e} — starting with empty scrub history");
+                HashMap::new()
+            }
+        };
         Self {
             list_cache: Arc::new(Mutex::new(None)),
+            scrub_state: Arc::new(Mutex::new(scrub)),
         }
     }
 
@@ -2354,8 +2424,13 @@ impl FilesystemService {
     }
 
     /// Start a data scrub on a filesystem.
-    /// `bcachefs scrub <mountpoint>`
-    /// Scrub runs synchronously, so we spawn it in the background.
+    /// `bcachefs scrub <mountpoint>`. The bcachefs binary blocks for
+    /// the entire scrub duration (potentially hours on a multi-TB
+    /// pool), so the actual run lives in a detached `tokio::spawn`.
+    /// State (start time + completion result) is persisted to
+    /// `SCRUB_STATE_PATH` so a `scrub_status` call after engine
+    /// restart still surfaces "last scrub finished N hours ago,
+    /// found X errors" rather than the previous "no scrub running".
     pub async fn scrub_start(&self, name: &str) -> Result<(), FilesystemError> {
         let fs = self.get(name).await?;
         if !fs.mounted {
@@ -2364,40 +2439,186 @@ impl FilesystemService {
             ));
         }
         let mount_point = fs.mount_point.as_ref().unwrap().clone();
+        let fs_name = name.to_string();
+        let now = unix_now_secs();
 
+        // Stamp the in-memory state with started_at *before* we spawn,
+        // so a `scrub_status` call landing 50ms later sees `running`.
+        // The completion path below clears started_at and fills the
+        // last_* fields.
+        {
+            let mut state = self.scrub_state.lock().await;
+            let entry = state.entry(fs_name.clone()).or_insert_with(|| ScrubStatus {
+                running: false,
+                started_at: None,
+                last_run_at: None,
+                last_duration_secs: None,
+                last_outcome: None,
+                last_output: None,
+                raw: "No scrub running".into(),
+            });
+            entry.running = true;
+            entry.started_at = Some(now);
+            entry.raw = "Scrub in progress...".into();
+        }
+        persist_scrub_state(&self.scrub_state).await;
+
+        let store = self.scrub_state.clone();
         info!("Starting scrub on filesystem '{}'", name);
         tokio::spawn(async move {
-            match cmd::run_ok("bcachefs", &["scrub", &mount_point]).await {
-                Ok(output) => info!("Scrub completed: {}", output),
-                Err(e) => warn!("Scrub failed: {}", e),
+            let mount = mount_point;
+            let output = cmd::run("bcachefs", &["scrub", &mount]).await;
+            let end = unix_now_secs();
+            let duration = (end - now).max(0) as u64;
+
+            let (outcome, captured) = match output {
+                Ok(out) => {
+                    // Combined output for operator inspection. stderr
+                    // first, then stdout — bcachefs uses stderr for
+                    // progress + error counters and stdout for summary.
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let combined = if stderr.is_empty() {
+                        stdout.into_owned()
+                    } else if stdout.is_empty() {
+                        stderr.into_owned()
+                    } else {
+                        format!("{stderr}\n{stdout}")
+                    };
+                    let classified = if !out.status.success() {
+                        ScrubOutcome::Failed
+                    } else if combined_indicates_errors(&combined) {
+                        ScrubOutcome::Errors
+                    } else {
+                        ScrubOutcome::Ok
+                    };
+                    (classified, combined)
+                }
+                Err(e) => {
+                    // Spawn failure (binary missing, permission denied)
+                    // — treat as Failed and keep the error message
+                    // so the operator can see *why* in the WebUI rather
+                    // than only in the journal.
+                    (
+                        ScrubOutcome::Failed,
+                        format!("failed to spawn bcachefs scrub: {e}"),
+                    )
+                }
+            };
+
+            match outcome {
+                ScrubOutcome::Ok => info!("Scrub on '{fs_name}' completed in {duration}s: ok",),
+                ScrubOutcome::Errors => warn!(
+                    "Scrub on '{fs_name}' completed in {duration}s: errors detected (see WebUI for full output)",
+                ),
+                ScrubOutcome::Failed => {
+                    warn!("Scrub on '{fs_name}' failed after {duration}s: {captured}",)
+                }
             }
+
+            let truncated = truncate_tail(&captured, SCRUB_OUTPUT_KEEP_BYTES);
+            let summary = match outcome {
+                ScrubOutcome::Ok => "Last scrub: ok".to_string(),
+                ScrubOutcome::Errors => "Last scrub: errors detected".to_string(),
+                ScrubOutcome::Failed => "Last scrub: failed".to_string(),
+            };
+            {
+                let mut state = store.lock().await;
+                let entry = state.entry(fs_name.clone()).or_insert_with(|| ScrubStatus {
+                    running: false,
+                    started_at: None,
+                    last_run_at: None,
+                    last_duration_secs: None,
+                    last_outcome: None,
+                    last_output: None,
+                    raw: summary.clone(),
+                });
+                entry.running = false;
+                entry.started_at = None;
+                entry.last_run_at = Some(end);
+                entry.last_duration_secs = Some(duration);
+                entry.last_outcome = Some(outcome);
+                entry.last_output = Some(truncated);
+                entry.raw = summary;
+            }
+            persist_scrub_state(&store).await;
         });
 
         Ok(())
     }
 
-    /// Get scrub status for a filesystem.
-    /// bcachefs scrub is synchronous — we check if a scrub process is running.
+    /// Get scrub status for a filesystem. Merges the persisted state
+    /// (last completion + the engine's view of "running") with a
+    /// `pgrep` cross-check so that an engine restart during a scrub
+    /// (which orphans the bcachefs child to init) is recorded as
+    /// `Failed` rather than leaving the FS forever stuck in "running".
     pub async fn scrub_status(&self, name: &str) -> Result<ScrubStatus, FilesystemError> {
+        // Confirm the FS exists in the catalog (this is the only
+        // input validation we need — historical scrub state is useful
+        // regardless of current mount state, so an operator who
+        // temporarily unmounted can still see "Last scrub: ok, 4d ago"
+        // rather than an error). The pgrep cross-check below requires
+        // a mount point, so we only run it for currently-mounted FSes.
         let fs = self.get(name).await?;
-        if !fs.mounted {
-            return Err(FilesystemError::CommandFailed(
-                "filesystem must be mounted to check scrub status".to_string(),
-            ));
-        }
 
-        // Check if a bcachefs scrub process is running for this filesystem
-        let running = cmd::run_ok("pgrep", &["-f", "bcachefs scrub"])
-            .await
-            .is_ok();
-
-        let raw = if running {
-            "Scrub in progress...".to_string()
-        } else {
-            "No scrub running".to_string()
+        // Snapshot whatever's persisted. Default = never-scrubbed.
+        let mut status = {
+            let state = self.scrub_state.lock().await;
+            state.get(name).cloned().unwrap_or_else(|| ScrubStatus {
+                running: false,
+                started_at: None,
+                last_run_at: None,
+                last_duration_secs: None,
+                last_outcome: None,
+                last_output: None,
+                raw: "Never scrubbed".into(),
+            })
         };
 
-        Ok(ScrubStatus { running, raw })
+        if status.running {
+            // State says running — verify the child still exists. If
+            // the engine restarted mid-scrub the child may have died
+            // or been re-parented; either way the recorded `running`
+            // is stale and we shouldn't lie about it. Cross-check uses
+            // the FS's current mount point — when the FS isn't mounted
+            // at all there's nothing for bcachefs scrub to be running
+            // against, so we treat that as "definitely not alive".
+            let alive = if let Some(mp) = fs.mount_point.as_deref() {
+                cmd::run_ok("pgrep", &["-fa", "bcachefs scrub"])
+                    .await
+                    .map(|out| out.lines().any(|l| l.contains(mp)))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if !alive {
+                let end = unix_now_secs();
+                let duration = status
+                    .started_at
+                    .map(|s| (end - s).max(0) as u64)
+                    .unwrap_or(0);
+                let mut state = self.scrub_state.lock().await;
+                let entry = state
+                    .entry(name.to_string())
+                    .or_insert_with(|| status.clone());
+                entry.running = false;
+                entry.started_at = None;
+                entry.last_run_at = Some(end);
+                entry.last_duration_secs = Some(duration);
+                entry.last_outcome = Some(ScrubOutcome::Failed);
+                entry.last_output = Some(
+                    "engine restarted while scrub was running — the bcachefs child \
+                     was lost; restart the scrub if you want a fresh full pass."
+                        .into(),
+                );
+                entry.raw = "Last scrub: failed (engine restart)".into();
+                status = entry.clone();
+                drop(state);
+                persist_scrub_state(&self.scrub_state).await;
+            }
+        }
+
+        Ok(status)
     }
 
     /// Get reconcile (background work) status for a filesystem.
@@ -3261,6 +3482,87 @@ async fn save_fs_state(state: &FsState) -> Result<(), FilesystemError> {
     Ok(())
 }
 
+/// Persist the in-memory scrub state map to disk. Best-effort: a
+/// write failure is logged but doesn't abort the caller (the in-memory
+/// state is still authoritative for the current engine lifetime).
+async fn persist_scrub_state(store: &ScrubStateMap) {
+    let snapshot = store.lock().await.clone();
+    let json = match serde_json::to_string_pretty(&snapshot) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("serialize scrub state failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = tokio::fs::write(SCRUB_STATE_PATH, json).await {
+        warn!("write {SCRUB_STATE_PATH} failed: {e}");
+    }
+}
+
+fn unix_now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Heuristic: does the captured bcachefs scrub output contain
+/// lines that look like reported errors? We default to "no" because
+/// bcachefs prints "errors: 0" on a clean run and we don't want to
+/// misclassify that as Errors. Matches `errors: N` where N > 0 and
+/// also `error:` / `ERROR` (case-insensitive) as a backup signal.
+fn combined_indicates_errors(s: &str) -> bool {
+    for line in s.lines() {
+        let lower = line.to_ascii_lowercase();
+        // "errors: 0" → false; "errors: 3" → true.
+        if let Some(rest) = lower.strip_prefix("errors:") {
+            let count: u64 = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
+            if count > 0 {
+                return true;
+            }
+            continue;
+        }
+        if lower.contains("errors: ")
+            && let Some(idx) = lower.find("errors: ")
+            && let Some(token) = lower[idx + "errors: ".len()..].split_whitespace().next()
+            && let Ok(count) = token.parse::<u64>()
+            && count > 0
+        {
+            return true;
+        }
+        // Fallback: literal "error:" or "ERROR" tokens. Skip the
+        // standard "errors: 0" line which we already handled above.
+        if (lower.contains("error:") || lower.contains(" error ")) && !lower.contains("errors: 0") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Keep at most the last `max` bytes of `s`, preserving the trailing
+/// content (where bcachefs prints its final summary). Operates on
+/// the byte length but trims to the next char boundary so we never
+/// emit invalid UTF-8.
+fn truncate_tail(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut start = s.len() - max;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut out = String::with_capacity(s.len() - start + 32);
+    out.push_str("[output truncated]\n");
+    out.push_str(&s[start..]);
+    out
+}
+
 fn get_fs_mount_options(state: &FsState, name: &str) -> FsMountOptions {
     state.get(name).cloned().unwrap_or_default()
 }
@@ -3769,5 +4071,53 @@ mod tests {
 ";
         let id = parse_bcachefs_key_id(contents, "dup-uuid");
         assert_eq!(id.as_deref(), Some("16")); // 0x10
+    }
+
+    // ── Scrub output classifier ───────────────────────────────
+
+    #[test]
+    fn scrub_clean_run_classifies_as_ok() {
+        // bcachefs prints a final summary line; a clean run reports
+        // zero errors. We must NOT misclassify "errors: 0" as Errors —
+        // that's exactly what every successful scrub reports.
+        let out = "scrubbing /fs/tank ...\nscrub complete\nerrors: 0\n";
+        assert!(!combined_indicates_errors(out));
+    }
+
+    #[test]
+    fn scrub_nonzero_error_count_classifies_as_errors() {
+        // Any non-zero error count in the summary flips the bullet.
+        let out = "scrubbing /fs/tank ...\nscrub complete\nerrors: 3\n";
+        assert!(combined_indicates_errors(out));
+    }
+
+    #[test]
+    fn scrub_inline_error_token_classifies_as_errors() {
+        // Fallback signal — bcachefs may emit per-shard "error:"
+        // lines during the scan even before the final summary.
+        // Operators looking at the captured output expect Errors.
+        let out = "scrubbing /fs/tank ...\ndev 0: error: io_error reading block 0xabc\nerrors: 1\n";
+        assert!(combined_indicates_errors(out));
+    }
+
+    #[test]
+    fn scrub_truncate_tail_keeps_summary_at_end() {
+        // The summary lives at the end of a chatty scrub. Truncating
+        // from the front (keeping the tail) preserves what the
+        // operator actually needs to see, plus a marker that more
+        // existed.
+        let chatty = "noise\n".repeat(2000) + "scrub complete\nerrors: 0\n";
+        let trimmed = truncate_tail(&chatty, 256);
+        assert!(trimmed.starts_with("[output truncated]"));
+        assert!(trimmed.ends_with("errors: 0\n"));
+        assert!(trimmed.len() < chatty.len());
+    }
+
+    #[test]
+    fn scrub_truncate_tail_short_input_passthrough() {
+        // Below the cap, no truncation marker — operator sees the
+        // exact, untouched output.
+        let s = "scrub complete\nerrors: 0\n";
+        assert_eq!(truncate_tail(s, 1024), s);
     }
 }
