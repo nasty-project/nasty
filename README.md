@@ -86,7 +86,7 @@ Building something with NASty? Open an issue or PR and we'll add it here.
 <p align="center"><em>Dashboard</em></p>
 
 <p align="center">
-  <img src="images/filesystems.jpg" width="800" alt="Filesystems — bcachefs filesystem with 3 devices, scrub status, and per-device actions" />
+  <img src="images/filesystems.jpg" width="800" alt="Filesystems — bcachefs filesystem with compression, replicas, and scrub status" />
 </p>
 <p align="center"><em>Filesystems</em></p>
 
@@ -96,19 +96,24 @@ Building something with NASty? Open an issue or PR and we'll add it here.
 <p align="center"><em>Subvolumes</em></p>
 
 <p align="center">
-  <img src="images/sharing.jpg" width="800" alt="Sharing — iSCSI targets with portals, LUNs, and ACLs" />
+  <img src="images/sharing.jpg" width="800" alt="Sharing — per-subvolume NFS, SMB, iSCSI, and NVMe-oF shares" />
 </p>
 <p align="center"><em>Sharing</em></p>
 
 <p align="center">
-  <img src="images/update.jpg" width="800" alt="Update — NixOS atomic updates with flavor selection and build progress" />
+  <img src="images/apps.jpg" width="800" alt="Apps — Docker containers and compose stacks with live CPU and memory stats" />
 </p>
-<p align="center"><em>Updates</em></p>
+<p align="center"><em>Apps</em></p>
 
 <p align="center">
   <img src="images/terminal.jpg" width="800" alt="Terminal — built-in web shell with bcachefs tools" />
 </p>
 <p align="center"><em>Terminal</em></p>
+
+<p align="center">
+  <img src="images/settings.jpg" width="800" alt="Settings — hostname, timezone, log level, and telemetry" />
+</p>
+<p align="center"><em>Settings</em></p>
 
 ## Getting Started
 
