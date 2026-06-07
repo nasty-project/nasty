@@ -509,13 +509,22 @@ async fn deploy_compose(
         if !is_update {
             let _ = tokio::fs::remove_dir_all(&compose_dir).await;
         }
-        report_error(
-            socket,
-            &req.name,
-            "compose-up",
-            &format!("deploy failed: {e}"),
-        )
-        .await;
+        // #429: docker's "network <x> declared as external, but could not
+        // be found" is opaque when <x> is a host bridge (Settings →
+        // Network) rather than a Docker network. Surface a targeted hint.
+        let hint = host_bridge_network_hint(&e);
+        if let Some(hint) = &hint {
+            let _ = socket
+                .send(Message::Text(
+                    DeployMessage::log(&format!("Hint: {hint}")).into(),
+                ))
+                .await;
+        }
+        let msg = match hint {
+            Some(hint) => format!("deploy failed: {e}\n\nHint: {hint}"),
+            None => format!("deploy failed: {e}"),
+        };
+        report_error(socket, &req.name, "compose-up", &msg).await;
         return;
     }
 
@@ -757,6 +766,52 @@ async fn stream_command(socket: &mut WebSocket, cmd: &str, args: &[&str]) -> Res
     }
 
     Ok(())
+}
+
+/// Parse the network name out of docker compose's
+/// "network <name> declared as external, but could not be found" error.
+/// Returns `None` if the error isn't that shape, or the name isn't a
+/// plausible Linux interface name — the latter guards the sysfs probe in
+/// [`host_bridge_network_hint`] against path traversal / junk.
+fn external_network_name(err: &str) -> Option<&str> {
+    let line = err
+        .lines()
+        .find(|l| l.contains("declared as external, but could not be found"))?;
+    let name = line
+        .split_once("network ")?
+        .1
+        .split_once(" declared as external")?
+        .0
+        .trim();
+    let plausible_ifname = !name.is_empty()
+        && name.len() <= 15 // IFNAMSIZ - 1
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    plausible_ifname.then_some(name)
+}
+
+/// If a compose deploy failed because it referenced an external Docker
+/// network that is actually a *host* Linux bridge (Settings → Network),
+/// return a hint explaining the mismatch (#429). A host bridge isn't a
+/// Docker network, so `networks: { br0: { external: true } }` can never
+/// resolve it — docker's own error ("declared as external, but could not
+/// be found") doesn't say why. We only add the hint when a bridge of that
+/// exact name actually exists, so it can't mislead in the ordinary
+/// typo'd-network-name case.
+fn host_bridge_network_hint(err: &str) -> Option<String> {
+    let name = external_network_name(err)?;
+    // A Linux bridge exposes a `bridge/` subdir under its sysfs node.
+    if !std::path::Path::new(&format!("/sys/class/net/{name}/bridge")).is_dir() {
+        return None;
+    }
+    Some(format!(
+        "'{name}' is a host network bridge (Settings → Network), not a Docker network, so a \
+         compose `networks: {{ {name}: {{ external: true }} }}` can't attach containers to it — \
+         host bridges are for VMs. Either remove the external network and reach the app through \
+         NASty's ingress, or first create a Docker macvlan network on '{name}': \
+         `docker network create -d macvlan --parent={name} --subnet=<cidr> --gateway=<gw> {name}`."
+    ))
 }
 
 /// Sibling file alongside docker-compose.yml (or simple-app json manifest)
@@ -1204,7 +1259,37 @@ async fn pull_image_with_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_compose;
+    use super::{external_network_name, validate_compose};
+
+    #[test]
+    fn external_network_name_parses_docker_error() {
+        let err =
+            "Starting containers...\nnetwork br0 declared as external, but could not be found";
+        assert_eq!(external_network_name(err), Some("br0"));
+    }
+
+    #[test]
+    fn external_network_name_handles_error_prefixed_line() {
+        // The line as it can appear wrapped with docker's ERROR: prefix.
+        let err = "ERROR: network mylan declared as external, but could not be found";
+        assert_eq!(external_network_name(err), Some("mylan"));
+    }
+
+    #[test]
+    fn external_network_name_none_for_unrelated_errors() {
+        assert_eq!(external_network_name("pull failed: manifest unknown"), None);
+        assert_eq!(external_network_name(""), None);
+    }
+
+    #[test]
+    fn external_network_name_rejects_implausible_names() {
+        // Guards the sysfs probe: no path traversal, no over-long names.
+        let traversal = "network ../../etc/shadow declared as external, but could not be found";
+        assert_eq!(external_network_name(traversal), None);
+        let too_long =
+            "network thisnameiswaytoolongforaniface declared as external, but could not be found";
+        assert_eq!(external_network_name(too_long), None);
+    }
 
     fn ok_strict(yaml: &str) {
         assert!(
