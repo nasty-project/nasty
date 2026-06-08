@@ -1,3 +1,4 @@
+use nasty_common::secrets::{self, EncryptedBlob};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
@@ -269,8 +270,15 @@ pub struct OidcSettings {
     #[serde(default)]
     pub client_id: Option<String>,
     /// OAuth client_secret. Returned as a placeholder over RPC; only the engine sees the real value.
+    /// Encrypted into `client_secret_encrypted` at rest when the secrets
+    /// backend is healthy, in which case this field is blanked.
     #[serde(default)]
     pub client_secret: Option<String>,
+    /// OAuth client_secret encrypted at rest via systemd-creds. Populated
+    /// by the engine when the secrets backend is available; preferred over
+    /// the legacy plaintext `client_secret` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_encrypted: Option<EncryptedBlob>,
     /// Absolute redirect URI registered with the IdP (e.g. "https://nasty.local/api/auth/oidc/callback").
     #[serde(default)]
     pub redirect_uri: Option<String>,
@@ -306,6 +314,7 @@ impl Default for OidcSettings {
             issuer_url: None,
             client_id: None,
             client_secret: None,
+            client_secret_encrypted: None,
             redirect_uri: None,
             scopes: default_oidc_scopes(),
             groups_claim: default_oidc_groups_claim(),
@@ -320,14 +329,54 @@ impl Default for OidcSettings {
 /// caller sends this back unchanged, the engine keeps the stored secret.
 pub const OIDC_SECRET_PLACEHOLDER: &str = "<unchanged>";
 
+/// `systemd-creds` AEAD name binding the encrypted OIDC client_secret to
+/// this host + field. There's a single OIDC config, so a constant name
+/// suffices.
+const OIDC_CLIENT_SECRET_NAME: &str = "nasty.oidc.client_secret";
+
 /// Replace the client_secret on a copy of OidcSettings with `<set>` / `<unset>`,
 /// suitable for returning to API callers without leaking the real value.
+/// A secret counts as set whether it's still legacy plaintext or has been
+/// sealed into `client_secret_encrypted`; the ciphertext is never emitted.
 pub fn redact_oidc_secret(mut s: OidcSettings) -> OidcSettings {
-    s.client_secret = match s.client_secret.as_deref() {
-        Some(v) if !v.is_empty() => Some("<set>".into()),
-        _ => Some("<unset>".into()),
-    };
+    let is_set = s.client_secret.as_deref().is_some_and(|v| !v.is_empty())
+        || s.client_secret_encrypted.is_some();
+    s.client_secret = Some(if is_set { "<set>" } else { "<unset>" }.into());
+    s.client_secret_encrypted = None;
     s
+}
+
+/// Encrypt the plaintext `client_secret` into `client_secret_encrypted`
+/// and blank the plaintext. Idempotent (already-encrypted or empty →
+/// no-op). systemd-creds failure is non-fatal: warn and keep plaintext.
+async fn encrypt_oidc_secret_in_place(oidc: &mut OidcSettings) {
+    if oidc.client_secret_encrypted.is_none()
+        && let Some(plain) = oidc.client_secret.as_deref().filter(|s| !s.is_empty())
+    {
+        match secrets::encrypt(OIDC_CLIENT_SECRET_NAME, plain).await {
+            Ok(blob) => {
+                oidc.client_secret_encrypted = Some(blob);
+                oidc.client_secret = None;
+            }
+            Err(e) => warn!("Failed to encrypt OIDC client_secret — keeping plaintext: {e}"),
+        }
+    }
+}
+
+/// Resolve the OIDC client_secret for use, preferring the encrypted blob
+/// over the legacy plaintext. Returns `None` when no secret is configured
+/// (public client) or when decryption fails (logged).
+pub async fn resolve_oidc_client_secret(oidc: &OidcSettings) -> Option<String> {
+    if let Some(blob) = &oidc.client_secret_encrypted {
+        return match secrets::decrypt(OIDC_CLIENT_SECRET_NAME, blob).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                warn!("Failed to decrypt OIDC client_secret: {e}");
+                None
+            }
+        };
+    }
+    oidc.client_secret.clone().filter(|s| !s.is_empty())
 }
 
 fn default_oidc_scopes() -> Vec<String> {
@@ -450,14 +499,47 @@ impl SettingsService {
     pub async fn set_oidc(&self, mut incoming: OidcSettings) -> Result<OidcSettings, String> {
         let mut settings = self.state.write().await;
         if incoming.client_secret.as_deref() == Some(OIDC_SECRET_PLACEHOLDER) {
+            // Keep the stored secret in whichever form it's held.
             incoming.client_secret = settings.oidc.client_secret.clone();
+            incoming.client_secret_encrypted = settings.oidc.client_secret_encrypted.clone();
+        } else {
+            // A new (or cleared) secret arrived as plaintext — drop any
+            // stale ciphertext so it gets re-sealed below.
+            incoming.client_secret_encrypted = None;
         }
         if incoming.scopes.is_empty() {
             incoming.scopes = default_oidc_scopes();
         }
+        // Seal the secret at rest before persisting (no-op when empty,
+        // already encrypted, or the backend is unavailable).
+        encrypt_oidc_secret_in_place(&mut incoming).await;
         settings.oidc = incoming.clone();
         save(&settings).await.map_err(|e| e.to_string())?;
         Ok(redact_oidc_secret(incoming))
+    }
+
+    /// Eagerly seal a plaintext OIDC client_secret left on disk from
+    /// before encrypt-at-rest. Called once on engine boot; idempotent
+    /// and a no-op when already encrypted, empty, or the secrets backend
+    /// is unavailable (boot does not fail in that case).
+    pub async fn migrate_secrets(&self) {
+        let mut settings = self.state.write().await;
+        if settings.oidc.client_secret_encrypted.is_some()
+            || settings
+                .oidc
+                .client_secret
+                .as_deref()
+                .is_none_or(|s| s.is_empty())
+        {
+            return;
+        }
+        encrypt_oidc_secret_in_place(&mut settings.oidc).await;
+        if settings.oidc.client_secret_encrypted.is_some() {
+            match save(&settings).await {
+                Ok(()) => info!("Migrated OIDC client_secret to systemd-creds"),
+                Err(e) => warn!("Failed to persist migrated OIDC secret: {e}"),
+            }
+        }
     }
 
     pub async fn update(&self, update: SettingsUpdate) -> Result<Settings, String> {
@@ -1443,7 +1525,53 @@ async fn read_cert_info(cert_path: &str) -> CertInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, build_policy_set, caddy_acme_env, to_nix_string};
+    use super::{
+        EncryptedBlob, OidcSettings, Settings, build_policy_set, caddy_acme_env,
+        redact_oidc_secret, to_nix_string,
+    };
+
+    fn fake_blob() -> EncryptedBlob {
+        serde_json::from_str("\"c2VhbGVkLWJsb2I=\"").unwrap()
+    }
+
+    #[test]
+    fn redact_oidc_marks_plaintext_secret_as_set() {
+        let s = OidcSettings {
+            client_secret: Some("real-secret".into()),
+            ..Default::default()
+        };
+        let r = redact_oidc_secret(s);
+        assert_eq!(r.client_secret.as_deref(), Some("<set>"));
+        assert!(r.client_secret_encrypted.is_none());
+    }
+
+    #[test]
+    fn redact_oidc_marks_encrypted_only_secret_as_set() {
+        // After sealing, the plaintext is gone but a secret IS configured.
+        let s = OidcSettings {
+            client_secret: None,
+            client_secret_encrypted: Some(fake_blob()),
+            ..Default::default()
+        };
+        let r = redact_oidc_secret(s);
+        assert_eq!(r.client_secret.as_deref(), Some("<set>"));
+        assert!(r.client_secret_encrypted.is_none());
+    }
+
+    #[test]
+    fn redact_oidc_marks_unset_secret_as_unset() {
+        let r = redact_oidc_secret(OidcSettings::default());
+        assert_eq!(r.client_secret.as_deref(), Some("<unset>"));
+        assert!(r.client_secret_encrypted.is_none());
+    }
+
+    #[test]
+    fn oidc_loads_legacy_state_without_encrypted_field() {
+        let json = r#"{ "enabled": true, "client_secret": "legacy" }"#;
+        let s: OidcSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.client_secret.as_deref(), Some("legacy"));
+        assert!(s.client_secret_encrypted.is_none());
+    }
 
     fn acme_enabled_settings(challenge: &str) -> Settings {
         Settings {

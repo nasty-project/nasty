@@ -243,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
             "apps.reconcile_app_routes",
             "backups.migrate_secrets",
             "nut.migrate_secrets",
+            "oidc.migrate_secrets",
             "firewall.init",
             "nvmeof.ensure_tailscale_ports",
             "caches.warm",
@@ -430,6 +431,18 @@ async fn main() -> anyhow::Result<()> {
     state
         .boot_status
         .run_phase("nut.migrate_secrets", secs(15), state.nut.migrate_secrets())
+        .await;
+
+    // Seal a plaintext OIDC client_secret left in settings.json from
+    // before encrypt-at-rest. One config, one systemd-creds shellout;
+    // no-op when empty / already sealed / backend unavailable.
+    state
+        .boot_status
+        .run_phase(
+            "oidc.migrate_secrets",
+            secs(15),
+            state.settings.migrate_secrets(),
+        )
         .await;
 
     // Push the engine-known set of app ingresses into Caddy's

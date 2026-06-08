@@ -201,11 +201,10 @@ impl OidcClient {
         .await
         .map_err(|e| OidcError::Discovery(e.to_string()))?;
 
-        let client_secret = settings
-            .client_secret
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| ClientSecret::new(s.to_string()));
+        // Resolve from the encrypted blob (or legacy plaintext) at rest.
+        let client_secret = nasty_system::settings::resolve_oidc_client_secret(settings)
+            .await
+            .map(ClientSecret::new);
 
         let redirect_url =
             RedirectUrl::new(redirect.to_string()).map_err(|e| OidcError::Config(e.to_string()))?;
