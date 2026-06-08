@@ -78,11 +78,12 @@ pub struct ReadinessReport {
     /// number on its side.
     pub esp_required_bytes: u64,
     /// `Some(true)` when `/etc/nixos/flake.nix` declares
-    /// `lanzaboote.url = ...` at top level. `Some(false)` on pre-
-    /// this-PR wrappers (operator needs to upgrade once so the
-    /// engine re-renders the template). `None` when we couldn't
-    /// read /etc/nixos/flake.nix (operator running an unusual
-    /// install or read failed).
+    /// `lanzaboote.url = ...` at top level — i.e. this box is already
+    /// enrolled (the engine injects the input during the enrollment
+    /// ceremony). `Some(false)` is the normal pre-enrollment state:
+    /// the wrapper template omits the input on purpose and enrollment
+    /// adds it, so this is *not* a blocker. `None` when we couldn't
+    /// read /etc/nixos/flake.nix. Surfaced purely for the checklist.
     pub wrapper_has_lanzaboote_input: Option<bool>,
     /// True iff `/var/lib/sbctl/keys/db/db.key` exists. Purely
     /// informational — when lanzaboote turns on with
@@ -183,21 +184,16 @@ fn compute_blocker(r: &ReadinessReport) -> Option<String> {
         }
         Some(_) => {}
     }
-    match r.wrapper_has_lanzaboote_input {
-        Some(false) => {
-            return Some(
-                "wrapper flake at /etc/nixos/flake.nix doesn't declare the lanzaboote input — \
-                 run any upgrade once on the new engine to re-render it"
-                    .into(),
-            );
-        }
-        None => {
-            return Some(
-                "could not read /etc/nixos/flake.nix to check for the lanzaboote input".into(),
-            );
-        }
-        Some(true) => {}
-    }
+    // NOTE: the `lanzaboote` input in /etc/nixos/flake.nix is
+    // deliberately NOT a readiness precondition. Secure Boot is
+    // per-box opt-in: the wrapper template omits the input, and the
+    // engine injects it as part of the enrollment ceremony (and the
+    // upgrade migration only re-injects it when the SB overlay is
+    // already present). So a non-enrolled box correctly has no input —
+    // blocking on its absence stranded operators who "upgrade to
+    // re-render" forever with nothing to re-render. `readiness` still
+    // surfaces `wrapper_has_lanzaboote_input` for the checklist, but
+    // its absence is normal pre-enrollment state, not a blocker.
     None
 }
 
@@ -335,16 +331,21 @@ mod tests {
     }
 
     #[test]
-    fn blocker_no_lanzaboote_in_wrapper() {
-        let r = ReadinessReport {
-            wrapper_has_lanzaboote_input: Some(false),
-            ..base_report()
-        };
-        assert!(
-            compute_blocker(&r)
-                .unwrap()
-                .contains("doesn't declare the lanzaboote input")
-        );
+    fn lanzaboote_absence_is_not_a_blocker() {
+        // Pre-enrollment boxes have no lanzaboote input by design —
+        // enrollment injects it. Its absence (or an unreadable flake)
+        // must not block readiness, otherwise operators see a "run an
+        // upgrade to re-render" nag that nothing can ever clear.
+        for state in [Some(false), None] {
+            let r = ReadinessReport {
+                wrapper_has_lanzaboote_input: state,
+                ..base_report()
+            };
+            assert!(
+                compute_blocker(&r).is_none(),
+                "lanzaboote state {state:?} should not block readiness",
+            );
+        }
     }
 
     #[test]

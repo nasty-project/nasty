@@ -501,14 +501,17 @@
 				<div class="flex items-start gap-3 py-1 text-xs">
 					<span class="w-4 shrink-0 font-mono">
 						{#if sbReadiness.wrapper_has_lanzaboote_input === true}<span class="text-emerald-400">✓</span>
-						{:else if sbReadiness.wrapper_has_lanzaboote_input === false}<span class="text-amber-500">✗</span>
 						{:else}<span class="text-muted-foreground">—</span>{/if}
 					</span>
 					<span class="flex-1">
 						Wrapper flake declares lanzaboote input
 						{#if sbReadiness.wrapper_has_lanzaboote_input === false}
 							<span class="ml-1 text-muted-foreground">
-								· run any upgrade once to re-render /etc/nixos/flake.nix
+								· added automatically when you enable Secure Boot
+							</span>
+						{:else if sbReadiness.wrapper_has_lanzaboote_input === null}
+							<span class="ml-1 text-muted-foreground">
+								· /etc/nixos/flake.nix could not be read
 							</span>
 						{/if}
 					</span>
