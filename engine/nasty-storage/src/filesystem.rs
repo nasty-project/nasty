@@ -3572,12 +3572,171 @@ fn parse_percent(s: &str) -> Option<f32> {
         .filter(|p| (0.0..=100.0).contains(p))
 }
 
-/// Cap on how much output we hold in memory during a running scrub.
-/// `bcachefs scrub` on a multi-TB pool can run for hours and chatter
-/// across the entire window; without a cap a particularly noisy run
-/// could balloon the engine's RSS. 1 MiB is well above any expected
-/// real-world transcript and still cheap to hold.
-const SCRUB_CAPTURE_INFLIGHT_CAP: usize = 1024 * 1024;
+/// Upper bound on retained screen rows. Normal `bcachefs scrub` output
+/// redraws ~10 rows in place so this is never approached; the cap only
+/// matters if a degraded pool spews many distinct error lines over a
+/// multi-hour run, where it keeps the engine's RSS bounded.
+const SCRUB_SCREEN_MAX_LINES: usize = 4096;
+
+/// Minimal terminal-screen model that reconstructs the *current* frame
+/// from `bcachefs scrub`'s in-place progress output.
+///
+/// bcachefs redraws its per-device table every tick: it erases each row
+/// (`ESC[2K`), returns the cursor (`\r`) and walks it up (`ESC[1A`),
+/// then reprints. Captured as a raw byte stream, that yields a
+/// transcript full of escape litter (`[2K[1A…`) and dozens of
+/// duplicated device rows. Replaying the control codes onto a virtual
+/// screen collapses it back to exactly what a terminal would show — the
+/// latest frame only.
+#[derive(Default)]
+struct ScrubScreen {
+    lines: Vec<Vec<char>>,
+    row: usize,
+    col: usize,
+}
+
+impl ScrubScreen {
+    fn ensure_row(&mut self) {
+        while self.lines.len() <= self.row {
+            self.lines.push(Vec::new());
+        }
+    }
+
+    fn write_char(&mut self, c: char) {
+        self.ensure_row();
+        let line = &mut self.lines[self.row];
+        if self.col < line.len() {
+            line[self.col] = c;
+        } else {
+            while line.len() < self.col {
+                line.push(' ');
+            }
+            line.push(c);
+        }
+        self.col += 1;
+    }
+
+    fn newline(&mut self) {
+        self.row += 1;
+        self.col = 0;
+        self.ensure_row();
+        if self.lines.len() > SCRUB_SCREEN_MAX_LINES {
+            let drop = self.lines.len() - SCRUB_SCREEN_MAX_LINES;
+            self.lines.drain(0..drop);
+            self.row = self.row.saturating_sub(drop);
+        }
+    }
+
+    fn apply_csi(&mut self, params: &str, final_byte: u8) {
+        // First numeric parameter; `max(1)` is applied where the spec
+        // treats an absent/zero count as 1 (cursor moves).
+        let n = params
+            .split(';')
+            .next()
+            .and_then(|p| p.parse::<usize>().ok())
+            .unwrap_or(0);
+        match final_byte {
+            b'A' => self.row = self.row.saturating_sub(n.max(1)),
+            b'B' => {
+                self.row += n.max(1);
+                self.ensure_row();
+            }
+            b'C' => self.col += n.max(1),
+            b'D' => self.col = self.col.saturating_sub(n.max(1)),
+            b'K' => {
+                // Erase in line: 0/absent → to EOL, 1 → to cursor, 2 → all.
+                self.ensure_row();
+                let line = &mut self.lines[self.row];
+                match n {
+                    0 => line.truncate(self.col.min(line.len())),
+                    1 => {
+                        for ch in line.iter_mut().take(self.col) {
+                            *ch = ' ';
+                        }
+                    }
+                    _ => line.clear(),
+                }
+            }
+            b'J' if n >= 2 => {
+                self.lines.clear();
+                self.row = 0;
+                self.col = 0;
+            }
+            // Cursor home. scrub uses relative moves, not absolute
+            // addressing, so the row;col form never appears; treat any
+            // form as a move to the origin.
+            b'H' | b'f' => {
+                self.row = 0;
+                self.col = 0;
+            }
+            // SGR colours ('m') and anything else: no screen effect.
+            _ => {}
+        }
+    }
+
+    /// Apply a chunk of raw output. Returns the trailing slice that
+    /// forms an incomplete escape sequence, so a caller streaming in
+    /// fixed-size reads can prepend it to the next chunk and still parse
+    /// sequences split across a read boundary.
+    fn feed<'a>(&mut self, text: &'a str) -> &'a str {
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                0x1b => {
+                    if i + 1 >= bytes.len() {
+                        return &text[i..]; // lone ESC: wait for more
+                    }
+                    if bytes[i + 1] == b'[' {
+                        // CSI: parameter bytes then a final byte 0x40..=0x7e.
+                        let mut j = i + 2;
+                        while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                            j += 1;
+                        }
+                        if j >= bytes.len() {
+                            return &text[i..]; // incomplete CSI
+                        }
+                        self.apply_csi(&text[i + 2..j], bytes[j]);
+                        i = j + 1;
+                    } else {
+                        // Two-byte escape (e.g. charset select): skip both.
+                        i += 2;
+                    }
+                }
+                b'\n' => {
+                    self.newline();
+                    i += 1;
+                }
+                b'\r' => {
+                    self.col = 0;
+                    i += 1;
+                }
+                // Drop other C0 control bytes (tab, bell, backspace…).
+                b if b < 0x20 => i += 1,
+                _ => {
+                    let c = text[i..].chars().next().unwrap();
+                    self.write_char(c);
+                    i += c.len_utf8();
+                }
+            }
+        }
+        ""
+    }
+
+    /// Render to text: trailing spaces trimmed per line, trailing blank
+    /// lines dropped.
+    fn render(&self) -> String {
+        let mut out: Vec<String> = self
+            .lines
+            .iter()
+            .map(|l| l.iter().collect::<String>().trim_end().to_string())
+            .collect();
+        while matches!(out.last(), Some(l) if l.is_empty()) {
+            out.pop();
+        }
+        out.join("\n")
+    }
+}
 
 /// Spawn `bcachefs scrub <mount>` with piped stdout+stderr, stream
 /// every line (and every `\r`-separated progress update — bcachefs
@@ -3612,7 +3771,7 @@ async fn stream_scrub_and_collect(
 
     let store_for_progress = store.clone();
     let fs_name_for_progress = fs_name.to_string();
-    let capture = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let capture = std::sync::Arc::new(std::sync::Mutex::new(ScrubScreen::default()));
     let capture_for_task = capture.clone();
 
     // One reader task per stream. Each task accumulates into the
@@ -3627,8 +3786,14 @@ async fn stream_scrub_and_collect(
         let cap = capture_for_task;
         let mut stdout_buf = [0u8; 1024];
         let mut stderr_buf = [0u8; 1024];
-        let mut stdout_pending = String::new();
-        let mut stderr_pending = String::new();
+        // Two pending buffers per stream: `*_line` re-splits on \n/\r for
+        // the live percent token (unchanged behaviour); `*_screen` holds
+        // an escape sequence split across a read so the frame model can
+        // reassemble it.
+        let mut stdout_line = String::new();
+        let mut stderr_line = String::new();
+        let mut stdout_screen = String::new();
+        let mut stderr_screen = String::new();
 
         let mut stdout = handle;
         let mut stderr = err_handle;
@@ -3645,7 +3810,8 @@ async fn stream_scrub_and_collect(
                         Ok(0) => { stdout = None; }
                         Ok(n) => process_chunk(
                             &stdout_buf[..n],
-                            &mut stdout_pending,
+                            &mut stdout_line,
+                            &mut stdout_screen,
                             &cap,
                             &store,
                             &fs_name,
@@ -3663,7 +3829,8 @@ async fn stream_scrub_and_collect(
                         Ok(0) => { stderr = None; }
                         Ok(n) => process_chunk(
                             &stderr_buf[..n],
-                            &mut stderr_pending,
+                            &mut stderr_line,
+                            &mut stderr_screen,
                             &cap,
                             &store,
                             &fs_name,
@@ -3674,12 +3841,26 @@ async fn stream_scrub_and_collect(
                 else => break,
             }
         }
-        // Flush any trailing un-terminated lines.
-        if !stdout_pending.is_empty() {
-            push_line(&stdout_pending, &cap, &store, &fs_name).await;
-        }
-        if !stderr_pending.is_empty() {
-            push_line(&stderr_pending, &cap, &store, &fs_name).await;
+        // Flush trailing un-terminated content: feed any remaining raw
+        // bytes to the frame model and parse a final percent from each
+        // stream's leftover line.
+        for (line_pending, screen_pending) in [
+            (&mut stdout_line, &mut stdout_screen),
+            (&mut stderr_line, &mut stderr_screen),
+        ] {
+            if !screen_pending.is_empty()
+                && let Ok(mut screen) = cap.lock()
+            {
+                screen.feed(screen_pending);
+            }
+            if !line_pending.is_empty()
+                && let Some(pct) = parse_percent(&strip_ansi(line_pending))
+            {
+                let mut state = store.lock().await;
+                if let Some(entry) = state.get_mut(&fs_name) {
+                    entry.progress_percent = Some(pct);
+                }
+            }
         }
     };
 
@@ -3697,7 +3878,7 @@ async fn stream_scrub_and_collect(
     };
     let _ = drain_handle.await;
 
-    let captured = capture.lock().map(|g| g.clone()).unwrap_or_default();
+    let captured = capture.lock().map(|g| g.render()).unwrap_or_default();
     let outcome = if !status.success() {
         ScrubOutcome::Failed
     } else if combined_indicates_errors(&captured) {
@@ -3708,54 +3889,48 @@ async fn stream_scrub_and_collect(
     (outcome, captured)
 }
 
-/// Append a freshly-read chunk to the per-stream pending buffer,
-/// then drain any complete lines (split on `\n` or `\r` — bcachefs
-/// uses both, carriage returns for in-place progress updates).
+/// Apply a freshly-read chunk to both consumers of the scrub stream:
+///
+/// 1. The frame model (`ScrubScreen`) — fed the *raw* bytes so it can
+///    replay bcachefs's in-place redraws into a clean current frame.
+///    An escape sequence straddling a read boundary is returned by
+///    `feed` and carried over in `screen_pending`.
+/// 2. The live progress percent — unchanged: re-split on `\n`/`\r` and
+///    take the most recent `XX%` token.
 async fn process_chunk(
     chunk: &[u8],
-    pending: &mut String,
-    cap: &std::sync::Arc<std::sync::Mutex<String>>,
+    line_pending: &mut String,
+    screen_pending: &mut String,
+    cap: &std::sync::Arc<std::sync::Mutex<ScrubScreen>>,
     store: &ScrubStateMap,
     fs_name: &str,
 ) {
-    pending.push_str(&String::from_utf8_lossy(chunk));
-    while let Some(boundary) = pending.find(['\n', '\r']) {
-        let line: String = pending.drain(..=boundary).collect();
+    let text = String::from_utf8_lossy(chunk);
+
+    // 1. Reconstruct the terminal frame for the transcript.
+    {
+        let mut combined = std::mem::take(screen_pending);
+        combined.push_str(&text);
+        if let Ok(mut screen) = cap.lock() {
+            *screen_pending = screen.feed(&combined).to_string();
+        } else {
+            *screen_pending = combined;
+        }
+    }
+
+    // 2. Update the live progress percent (most recent token wins).
+    line_pending.push_str(&text);
+    while let Some(boundary) = line_pending.find(['\n', '\r']) {
+        let line: String = line_pending.drain(..=boundary).collect();
         let line = line.trim_end_matches(['\n', '\r']);
         if line.is_empty() {
             continue;
         }
-        push_line(line, cap, store, fs_name).await;
-    }
-}
-
-/// Append one captured line to the in-memory transcript (capped at
-/// `SCRUB_CAPTURE_INFLIGHT_CAP`) and update the in-memory progress
-/// percent when the line carries a `XX%` token.
-async fn push_line(
-    line: &str,
-    cap: &std::sync::Arc<std::sync::Mutex<String>>,
-    store: &ScrubStateMap,
-    fs_name: &str,
-) {
-    if let Ok(mut buf) = cap.lock() {
-        buf.push_str(line);
-        buf.push('\n');
-        if buf.len() > SCRUB_CAPTURE_INFLIGHT_CAP {
-            // Trim from the front, keep the trailing 75% so the
-            // final summary survives whatever bcachefs prints next.
-            let drop = buf.len() - (SCRUB_CAPTURE_INFLIGHT_CAP * 3 / 4);
-            let mut start = drop;
-            while start < buf.len() && !buf.is_char_boundary(start) {
-                start += 1;
+        if let Some(pct) = parse_percent(&strip_ansi(line)) {
+            let mut state = store.lock().await;
+            if let Some(entry) = state.get_mut(fs_name) {
+                entry.progress_percent = Some(pct);
             }
-            *buf = buf[start..].to_string();
-        }
-    }
-    if let Some(pct) = parse_percent(line) {
-        let mut state = store.lock().await;
-        if let Some(entry) = state.get_mut(fs_name) {
-            entry.progress_percent = Some(pct);
         }
     }
 }
@@ -4351,5 +4526,60 @@ mod tests {
         // exact, untouched output.
         let s = "scrub complete\nerrors: 0\n";
         assert_eq!(truncate_tail(s, 1024), s);
+    }
+
+    #[test]
+    fn scrub_screen_collapses_redraw_to_latest_frame() {
+        // Mirrors real `bcachefs scrub`: a static header, the device
+        // rows (last row not newline-terminated), then the in-place
+        // redraw — per row `ESC[2K \r ESC[1A`, a final `ESC[2K \r`, and
+        // a reprint with updated values.
+        let mut s = ScrubScreen::default();
+        s.feed("Starting scrub on 2 devices: sda sdb\n");
+        s.feed("device   total   %\n");
+        s.feed("sda  100M  10%\nsdb  200M  20%");
+        s.feed("\x1b[2K\r\x1b[1A\x1b[2K\r");
+        s.feed("sda  100M  60%\nsdb  200M  55%");
+        let out = s.render();
+
+        assert_eq!(
+            out,
+            "Starting scrub on 2 devices: sda sdb\ndevice   total   %\nsda  100M  60%\nsdb  200M  55%"
+        );
+        // No escape litter, no duplicated frames, and only the latest
+        // values survive (the redraw replaced the stale ones).
+        assert!(!out.contains('\x1b'), "escape codes leaked: {out:?}");
+        assert!(!out.contains("[2K"), "erase-line litter leaked: {out:?}");
+        assert_eq!(out.lines().count(), 4, "rows duplicated: {out:?}");
+        assert!(out.contains("60%") && out.contains("55%"));
+        assert!(
+            !out.contains("10%") && !out.contains("20%"),
+            "stale frame: {out:?}"
+        );
+    }
+
+    #[test]
+    fn scrub_screen_reassembles_escape_split_across_reads() {
+        // A CSI can land on a 1 KiB read boundary; `feed` returns the
+        // incomplete tail so it can be prepended to the next chunk.
+        let mut s = ScrubScreen::default();
+        s.feed("header\n");
+        s.feed("sda 10%\nsdb 20%");
+
+        let leftover = s.feed("\x1b[2");
+        assert_eq!(leftover, "\x1b[2"); // incomplete CSI, nothing applied yet
+
+        s.feed(&format!("{leftover}K\r\x1b[1A\x1b[2K\r"));
+        s.feed("sda 60%\nsdb 55%");
+
+        assert_eq!(s.render(), "header\nsda 60%\nsdb 55%");
+    }
+
+    #[test]
+    fn scrub_screen_strips_color_codes_without_moving_cursor() {
+        // SGR colour sequences must not affect layout or leak into text.
+        let mut s = ScrubScreen::default();
+        s.feed("\x1b[32msda ok\x1b[0m\n");
+        assert_eq!(s.render(), "sda ok");
     }
 }
