@@ -1788,6 +1788,21 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                         serde_json::json!({"type": "string", "description": "Human-readable confirmation."}),
                     ),
                 },
+                Method {
+                    name: "notifications.test_saved",
+                    desc: "Send a test message through an already-saved channel, identified by id. Sealed secrets are resolved server-side, so the secret never has to round-trip through the client.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(serde_json::json!({
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {
+                            "id": {"type": "string", "description": "Channel id from notifications.config.get."}
+                        }
+                    })),
+                    result: Some(
+                        serde_json::json!({"type": "string", "description": "Human-readable confirmation."}),
+                    ),
+                },
             ],
         ),
         // ── Firmware (fwupd) ─────────────────────────────────────────────

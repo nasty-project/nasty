@@ -550,15 +550,12 @@
 	}
 
 	async function testChannel(ch: NotificationChannel) {
+		// Test the saved channel by id — the engine resolves its (possibly
+		// encrypted) secrets server-side, so we never send the secret back
+		// (and a redacted "***" can't leak into the test).
 		notifTesting = ch.id;
-		const payload: Record<string, unknown> = { type: ch.type };
-		if (ch.type === 'smtp') Object.assign(payload, { host: ch.host, port: ch.port, username: ch.username, password: ch.password, from: ch.from, to: ch.to });
-		else if (ch.type === 'telegram') Object.assign(payload, { bot_token: ch.bot_token, chat_id: ch.chat_id });
-		else if (ch.type === 'webhook') Object.assign(payload, { url: ch.url, headers: ch.headers || {}, secret: ch.secret || undefined });
-		else if (ch.type === 'ntfy') Object.assign(payload, { server_url: ch.server_url, topic: ch.topic, token: ch.token });
-		else if (ch.type === 'signal') Object.assign(payload, { api_url: ch.api_url, from_number: ch.from_number, to_number: ch.to_number });
 		await withToast(
-			() => client.call('notifications.test', payload),
+			() => client.call('notifications.test_saved', { id: ch.id }),
 			'Test notification sent'
 		);
 		notifTesting = null;

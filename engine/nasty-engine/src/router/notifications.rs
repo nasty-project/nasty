@@ -17,12 +17,13 @@ pub(super) async fn try_route(
     session: &Session,
 ) -> Option<Response> {
     Some(match req.method.as_str() {
-        "notifications.config.get" => {
-            ok(req, nasty_system::notifications::NotificationConfig::load())
-        }
+        "notifications.config.get" => ok(
+            req,
+            nasty_system::notifications::NotificationConfig::load().redacted(),
+        ),
         "notifications.config.update" => {
             match parse_params::<nasty_system::notifications::NotificationConfig>(req) {
-                Ok(config) => match config.save().await {
+                Ok(config) => match config.apply_update().await {
                     Ok(()) => ok(req, "ok"),
                     Err(e) => err(req, e),
                 },
@@ -37,6 +38,20 @@ pub(super) async fn try_route(
             },
             Err(e) => err(req, e),
         },
+        // Test a saved channel by id — resolves sealed secrets server-side
+        // so the WebUI never has to send a redacted/real secret back.
+        "notifications.test_saved" => match parse_params::<TestSavedRequest>(req) {
+            Ok(p) => match nasty_system::notifications::test_saved_channel(&p.id).await {
+                Ok(msg) => ok(req, msg),
+                Err(e) => err(req, e),
+            },
+            Err(e) => err(req, e),
+        },
         _ => return None,
     })
+}
+
+#[derive(Deserialize)]
+struct TestSavedRequest {
+    id: String,
 }
