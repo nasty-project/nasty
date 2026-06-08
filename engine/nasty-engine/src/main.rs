@@ -244,6 +244,7 @@ async fn main() -> anyhow::Result<()> {
             "backups.migrate_secrets",
             "nut.migrate_secrets",
             "oidc.migrate_secrets",
+            "iscsi.migrate_secrets",
             "firewall.init",
             "nvmeof.ensure_tailscale_ports",
             "caches.warm",
@@ -442,6 +443,18 @@ async fn main() -> anyhow::Result<()> {
             "oidc.migrate_secrets",
             secs(15),
             state.settings.migrate_secrets(),
+        )
+        .await;
+
+    // Seal plaintext iSCSI CHAP passwords left in per-target state files
+    // from before encrypt-at-rest. A shellout per ACL with a secret;
+    // no-op when empty / already sealed / backend unavailable.
+    state
+        .boot_status
+        .run_phase(
+            "iscsi.migrate_secrets",
+            secs(30),
+            state.iscsi.migrate_secrets(),
         )
         .await;
 

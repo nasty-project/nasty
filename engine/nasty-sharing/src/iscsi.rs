@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use nasty_common::secrets::{self, EncryptedBlob};
 use nasty_common::{HasId, StateDir};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -74,19 +75,60 @@ pub struct Acl {
     pub initiator_iqn: String,
     /// CHAP username for this initiator (optional).
     pub userid: Option<String>,
-    /// CHAP password for this initiator (optional).
-    /// Stored on disk for configfs restore but redacted in API responses.
+    /// CHAP password for this initiator (optional). Legacy plaintext:
+    /// encrypted into `password_encrypted` at rest when the secrets
+    /// backend is healthy, and redacted to `***` in API responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// CHAP password encrypted at rest via systemd-creds. Populated by
+    /// the engine when the secrets backend is available; preferred over
+    /// the legacy plaintext `password`. (The live configfs auth and the
+    /// kernel's saveconfig.json restore carry their own plaintext copy —
+    /// this only seals NASty's state file.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_encrypted: Option<EncryptedBlob>,
 }
 
 impl Acl {
-    /// Return a copy with the password redacted for API responses.
+    /// Return a copy with the password redacted for API responses: `***`
+    /// when a secret is set (plaintext or sealed), ciphertext omitted.
     pub fn redacted(&self) -> Self {
+        let has_secret = self.password.is_some() || self.password_encrypted.is_some();
         Self {
             initiator_iqn: self.initiator_iqn.clone(),
             userid: self.userid.clone(),
-            password: self.password.as_ref().map(|_| "***".to_string()),
+            password: has_secret.then(|| "***".to_string()),
+            password_encrypted: None,
+        }
+    }
+}
+
+/// `systemd-creds` AEAD name binding a CHAP password to this host,
+/// target, and initiator.
+fn chap_secret_name(target_id: &str, initiator_iqn: &str) -> String {
+    format!("nasty.iscsi.{target_id}.{initiator_iqn}.password")
+}
+
+/// Seal a CHAP password for storage in NASty's state file. Returns the
+/// `(password, password_encrypted)` pair to store: `(None, Some(blob))`
+/// on success, `(Some(plain), None)` if the secrets backend is
+/// unavailable (degraded — keep plaintext + warn), `(None, None)` when
+/// no password was supplied.
+async fn seal_chap_password(
+    target_id: &str,
+    initiator_iqn: &str,
+    plaintext: Option<String>,
+) -> (Option<String>, Option<EncryptedBlob>) {
+    let Some(plain) = plaintext.filter(|s| !s.is_empty()) else {
+        return (None, None);
+    };
+    match secrets::encrypt(&chap_secret_name(target_id, initiator_iqn), &plain).await {
+        Ok(blob) => (None, Some(blob)),
+        Err(e) => {
+            warn!(
+                "Failed to encrypt iSCSI CHAP password for {target_id}/{initiator_iqn} — keeping plaintext: {e}"
+            );
+            (Some(plain), None)
         }
     }
 }
@@ -247,6 +289,44 @@ impl IscsiService {
             }
         }
         patch_saveconfig(dev_map).await;
+    }
+
+    /// Eagerly seal plaintext CHAP passwords left in state files from
+    /// before encrypt-at-rest. Called once on engine boot; idempotent,
+    /// and a no-op when already sealed / empty / backend unavailable
+    /// (boot does not fail). The live kernel auth is untouched.
+    pub async fn migrate_secrets(&self) {
+        let mut targets: Vec<IscsiTarget> = state_dir().load_all().await;
+        for target in &mut targets {
+            let mut changed = false;
+            for acl in &mut target.acls {
+                if acl.password_encrypted.is_some() {
+                    continue;
+                }
+                let Some(plain) = acl.password.as_deref().filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let (password, password_encrypted) =
+                    seal_chap_password(&target.id, &acl.initiator_iqn, Some(plain.to_string()))
+                        .await;
+                if password_encrypted.is_some() {
+                    acl.password = password;
+                    acl.password_encrypted = password_encrypted;
+                    changed = true;
+                }
+            }
+            if changed {
+                match state_dir().save(&target.id, target).await {
+                    Ok(()) => info!("Migrated iSCSI CHAP secrets for target '{}'", target.id),
+                    Err(e) => {
+                        warn!(
+                            "Failed to persist migrated iSCSI secrets for '{}': {e}",
+                            target.id
+                        )
+                    }
+                }
+            }
+        }
     }
 
     pub async fn list(&self) -> Result<Vec<IscsiTarget>, IscsiError> {
@@ -634,10 +714,15 @@ impl IscsiService {
         configfs_write(&format!("{tpg_path}/attrib/generate_node_acls"), "0").await?;
         configfs_write(&format!("{tpg_path}/attrib/authentication"), "0").await?;
 
+        // configfs already has the plaintext (written above); seal the
+        // copy we persist in NASty's state file.
+        let (password, password_encrypted) =
+            seal_chap_password(&target.id, &req.initiator_iqn, req.password).await;
         target.acls.push(Acl {
             initiator_iqn: req.initiator_iqn,
             userid: req.userid,
-            password: req.password,
+            password,
+            password_encrypted,
         });
 
         state_dir().save(&target.id, &target).await?;
@@ -1013,6 +1098,48 @@ fn validate_portal_ip(ip: &str) -> Result<String, IscsiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_blob() -> EncryptedBlob {
+        serde_json::from_str("\"c2VhbGVkLWJsb2I=\"").unwrap()
+    }
+
+    fn acl_with(password: Option<&str>, encrypted: bool) -> Acl {
+        Acl {
+            initiator_iqn: "iqn.2020-01.com.example:init".into(),
+            userid: Some("chapuser".into()),
+            password: password.map(|s| s.to_string()),
+            password_encrypted: encrypted.then(fake_blob),
+        }
+    }
+
+    #[test]
+    fn acl_redacted_masks_plaintext_password() {
+        let r = acl_with(Some("chap-secret"), false).redacted();
+        assert_eq!(r.password.as_deref(), Some("***"));
+        assert!(r.password_encrypted.is_none());
+    }
+
+    #[test]
+    fn acl_redacted_masks_encrypted_only_password() {
+        let r = acl_with(None, true).redacted();
+        assert_eq!(r.password.as_deref(), Some("***"));
+        assert!(r.password_encrypted.is_none());
+    }
+
+    #[test]
+    fn acl_redacted_leaves_passwordless_acl_clear() {
+        let r = acl_with(None, false).redacted();
+        assert!(r.password.is_none());
+        assert!(r.password_encrypted.is_none());
+    }
+
+    #[test]
+    fn acl_loads_legacy_state_without_encrypted_field() {
+        let json = r#"{ "initiator_iqn": "iqn.x:y", "userid": "u", "password": "legacy" }"#;
+        let acl: Acl = serde_json::from_str(json).unwrap();
+        assert_eq!(acl.password.as_deref(), Some("legacy"));
+        assert!(acl.password_encrypted.is_none());
+    }
 
     #[test]
     fn np_path_brackets_v6_addresses() {
