@@ -445,10 +445,10 @@ pub(super) async fn try_route(
             },
             Err(e) => invalid(req, e),
         },
-        "system.nut.config.get" => ok(req, state.nut.get_config().await),
+        "system.nut.config.get" => ok(req, state.nut.get_config().await.redacted()),
         "system.nut.config.update" => match parse_params(req) {
             Ok(p) => match state.nut.update_config(p).await {
-                Ok(v) => ok(req, v),
+                Ok(v) => ok(req, v.redacted()),
                 Err(e) => err(req, e),
             },
             Err(e) => invalid(req, e),
