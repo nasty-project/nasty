@@ -1,10 +1,15 @@
 //! Notification channels — SMTP, Telegram, Webhook, ntfy.
 
+use nasty_common::secrets::{self, EncryptedBlob};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 const CONFIG_PATH: &str = "/var/lib/nasty/notifications.json";
+
+/// Placeholder shown in place of a secret over the API. An update that
+/// echoes this value back means "keep the stored secret".
+const REDACTED: &str = "***";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -29,12 +34,24 @@ pub enum ChannelType {
         host: String,
         port: u16,
         username: String,
+        /// Legacy plaintext SMTP password. Encrypted into
+        /// `password_encrypted` at rest when the secrets backend is
+        /// healthy, and redacted to `***` in API responses.
+        #[serde(default)]
         password: String,
+        /// SMTP password encrypted at rest via systemd-creds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password_encrypted: Option<EncryptedBlob>,
         from: String,
         to: String,
     },
     Telegram {
+        /// Legacy plaintext bot token; see `bot_token_encrypted`.
+        #[serde(default)]
         bot_token: String,
+        /// Telegram bot token encrypted at rest via systemd-creds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bot_token_encrypted: Option<EncryptedBlob>,
         chat_id: String,
     },
     Webhook {
@@ -49,12 +66,18 @@ pub enum ChannelType {
         /// still work, just unsigned.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret: Option<String>,
+        /// Signing secret encrypted at rest via systemd-creds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret_encrypted: Option<EncryptedBlob>,
     },
     Ntfy {
         server_url: String,
         topic: String,
         #[serde(default)]
         token: Option<String>,
+        /// Bearer token encrypted at rest via systemd-creds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_encrypted: Option<EncryptedBlob>,
     },
     Signal {
         api_url: String,
@@ -84,6 +107,367 @@ impl NotificationConfig {
             .await
             .map_err(|e| format!("chmod {CONFIG_PATH}: {e}"))
     }
+}
+
+// ── Encrypt-at-rest for channel secrets (systemd-creds) ─────────
+
+/// `systemd-creds` AEAD name binding a channel secret to host + channel + field.
+fn secret_name(channel_id: &str, field: &str) -> String {
+    format!("nasty.notifications.{channel_id}.{field}")
+}
+
+/// Seal one plaintext secret. Empty → `None` (nothing to seal). On
+/// systemd-creds failure, warn and return `None` so the caller keeps
+/// the plaintext (degraded, not broken).
+async fn seal(name: &str, plain: &str) -> Option<EncryptedBlob> {
+    if plain.is_empty() {
+        return None;
+    }
+    match secrets::encrypt(name, plain).await {
+        Ok(blob) => Some(blob),
+        Err(e) => {
+            warn!("Failed to encrypt {name} — keeping plaintext: {e}");
+            None
+        }
+    }
+}
+
+/// Decrypt one secret blob; warn + `None` on failure.
+async fn unseal(name: &str, blob: &EncryptedBlob) -> Option<String> {
+    match secrets::decrypt(name, blob).await {
+        Ok(plain) => Some(plain),
+        Err(e) => {
+            warn!("Failed to decrypt {name}: {e}");
+            None
+        }
+    }
+}
+
+impl ChannelType {
+    /// True when this channel holds a sealed secret blob.
+    fn has_encrypted_secret(&self) -> bool {
+        matches!(
+            self,
+            ChannelType::Smtp {
+                password_encrypted: Some(_),
+                ..
+            } | ChannelType::Telegram {
+                bot_token_encrypted: Some(_),
+                ..
+            } | ChannelType::Webhook {
+                secret_encrypted: Some(_),
+                ..
+            } | ChannelType::Ntfy {
+                token_encrypted: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Copy with secrets masked to `***` (when set) and ciphertext dropped.
+    pub fn redacted(&self) -> ChannelType {
+        let mut c = self.clone();
+        match &mut c {
+            ChannelType::Smtp {
+                password,
+                password_encrypted,
+                ..
+            } => {
+                if !password.is_empty() || password_encrypted.is_some() {
+                    *password = REDACTED.to_string();
+                }
+                *password_encrypted = None;
+            }
+            ChannelType::Telegram {
+                bot_token,
+                bot_token_encrypted,
+                ..
+            } => {
+                if !bot_token.is_empty() || bot_token_encrypted.is_some() {
+                    *bot_token = REDACTED.to_string();
+                }
+                *bot_token_encrypted = None;
+            }
+            ChannelType::Webhook {
+                secret,
+                secret_encrypted,
+                ..
+            } => {
+                if secret.is_some() || secret_encrypted.is_some() {
+                    *secret = Some(REDACTED.to_string());
+                }
+                *secret_encrypted = None;
+            }
+            ChannelType::Ntfy {
+                token,
+                token_encrypted,
+                ..
+            } => {
+                if token.is_some() || token_encrypted.is_some() {
+                    *token = Some(REDACTED.to_string());
+                }
+                *token_encrypted = None;
+            }
+            ChannelType::Signal { .. } => {}
+        }
+        c
+    }
+}
+
+impl ChannelConfig {
+    /// Copy with secrets redacted for API responses.
+    pub fn redacted(&self) -> ChannelConfig {
+        ChannelConfig {
+            channel: self.channel.redacted(),
+            ..self.clone()
+        }
+    }
+
+    /// Seal the channel's plaintext secret at rest before persisting.
+    /// Idempotent (already-sealed → no-op). Degraded backend keeps the
+    /// plaintext (see [`seal`]).
+    async fn encrypt_secrets_in_place(&mut self) {
+        let id = self.id.clone();
+        match &mut self.channel {
+            ChannelType::Smtp {
+                password,
+                password_encrypted,
+                ..
+            } => {
+                if password_encrypted.is_none()
+                    && let Some(blob) = seal(&secret_name(&id, "smtp_password"), password).await
+                {
+                    *password_encrypted = Some(blob);
+                    password.clear();
+                }
+            }
+            ChannelType::Telegram {
+                bot_token,
+                bot_token_encrypted,
+                ..
+            } => {
+                if bot_token_encrypted.is_none()
+                    && let Some(blob) =
+                        seal(&secret_name(&id, "telegram_bot_token"), bot_token).await
+                {
+                    *bot_token_encrypted = Some(blob);
+                    bot_token.clear();
+                }
+            }
+            ChannelType::Webhook {
+                secret,
+                secret_encrypted,
+                ..
+            } => {
+                if secret_encrypted.is_none()
+                    && let Some(plain) = secret.as_deref()
+                    && let Some(blob) = seal(&secret_name(&id, "webhook_secret"), plain).await
+                {
+                    *secret_encrypted = Some(blob);
+                    *secret = None;
+                }
+            }
+            ChannelType::Ntfy {
+                token,
+                token_encrypted,
+                ..
+            } => {
+                if token_encrypted.is_none()
+                    && let Some(plain) = token.as_deref()
+                    && let Some(blob) = seal(&secret_name(&id, "ntfy_token"), plain).await
+                {
+                    *token_encrypted = Some(blob);
+                    *token = None;
+                }
+            }
+            ChannelType::Signal { .. } => {}
+        }
+    }
+
+    /// A copy of the channel with secrets decrypted into the plaintext
+    /// fields, ready for [`send_to_channel`].
+    async fn resolved_channel(&self) -> ChannelType {
+        let id = &self.id;
+        let mut channel = self.channel.clone();
+        match &mut channel {
+            ChannelType::Smtp {
+                password,
+                password_encrypted,
+                ..
+            } => {
+                if let Some(blob) = password_encrypted.take()
+                    && let Some(plain) = unseal(&secret_name(id, "smtp_password"), &blob).await
+                {
+                    *password = plain;
+                }
+            }
+            ChannelType::Telegram {
+                bot_token,
+                bot_token_encrypted,
+                ..
+            } => {
+                if let Some(blob) = bot_token_encrypted.take()
+                    && let Some(plain) = unseal(&secret_name(id, "telegram_bot_token"), &blob).await
+                {
+                    *bot_token = plain;
+                }
+            }
+            ChannelType::Webhook {
+                secret,
+                secret_encrypted,
+                ..
+            } => {
+                if let Some(blob) = secret_encrypted.take()
+                    && let Some(plain) = unseal(&secret_name(id, "webhook_secret"), &blob).await
+                {
+                    *secret = Some(plain);
+                }
+            }
+            ChannelType::Ntfy {
+                token,
+                token_encrypted,
+                ..
+            } => {
+                if let Some(blob) = token_encrypted.take()
+                    && let Some(plain) = unseal(&secret_name(id, "ntfy_token"), &blob).await
+                {
+                    *token = Some(plain);
+                }
+            }
+            ChannelType::Signal { .. } => {}
+        }
+        channel
+    }
+
+    /// Carry forward the stored secret when the incoming update echoed
+    /// the `***` placeholder (operator didn't change it).
+    fn merge_secrets_from(&mut self, existing: &ChannelConfig) {
+        match (&mut self.channel, &existing.channel) {
+            (
+                ChannelType::Smtp {
+                    password,
+                    password_encrypted,
+                    ..
+                },
+                ChannelType::Smtp {
+                    password: ex,
+                    password_encrypted: ex_enc,
+                    ..
+                },
+            ) if password == REDACTED => {
+                *password = ex.clone();
+                *password_encrypted = ex_enc.clone();
+            }
+            (
+                ChannelType::Telegram {
+                    bot_token,
+                    bot_token_encrypted,
+                    ..
+                },
+                ChannelType::Telegram {
+                    bot_token: ex,
+                    bot_token_encrypted: ex_enc,
+                    ..
+                },
+            ) if bot_token == REDACTED => {
+                *bot_token = ex.clone();
+                *bot_token_encrypted = ex_enc.clone();
+            }
+            (
+                ChannelType::Webhook {
+                    secret,
+                    secret_encrypted,
+                    ..
+                },
+                ChannelType::Webhook {
+                    secret: ex,
+                    secret_encrypted: ex_enc,
+                    ..
+                },
+            ) if secret.as_deref() == Some(REDACTED) => {
+                *secret = ex.clone();
+                *secret_encrypted = ex_enc.clone();
+            }
+            (
+                ChannelType::Ntfy {
+                    token,
+                    token_encrypted,
+                    ..
+                },
+                ChannelType::Ntfy {
+                    token: ex,
+                    token_encrypted: ex_enc,
+                    ..
+                },
+            ) if token.as_deref() == Some(REDACTED) => {
+                *token = ex.clone();
+                *token_encrypted = ex_enc.clone();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl NotificationConfig {
+    /// Copy with every channel's secrets redacted for API responses.
+    pub fn redacted(&self) -> NotificationConfig {
+        NotificationConfig {
+            channels: self.channels.iter().map(|c| c.redacted()).collect(),
+        }
+    }
+
+    /// Persist an operator update: carry forward secrets the UI echoed
+    /// as `***`, seal new plaintext secrets at rest, then save.
+    pub async fn apply_update(mut self) -> Result<(), String> {
+        let existing = NotificationConfig::load();
+        let by_id: std::collections::HashMap<&str, &ChannelConfig> = existing
+            .channels
+            .iter()
+            .map(|c| (c.id.as_str(), c))
+            .collect();
+        for ch in &mut self.channels {
+            if let Some(prev) = by_id.get(ch.id.as_str()) {
+                ch.merge_secrets_from(prev);
+            }
+            ch.encrypt_secrets_in_place().await;
+        }
+        self.save().await
+    }
+
+    /// Eagerly seal plaintext secrets left on disk from before
+    /// encrypt-at-rest. Called once on boot; idempotent, no-op when
+    /// already sealed / empty / backend unavailable.
+    pub async fn migrate_secrets() {
+        let mut config = NotificationConfig::load();
+        let mut changed = false;
+        for ch in &mut config.channels {
+            let before = ch.channel.has_encrypted_secret();
+            ch.encrypt_secrets_in_place().await;
+            if ch.channel.has_encrypted_secret() != before {
+                changed = true;
+            }
+        }
+        if changed {
+            match config.save().await {
+                Ok(()) => info!("Migrated notification channel secrets to systemd-creds"),
+                Err(e) => warn!("Failed to persist migrated notification secrets: {e}"),
+            }
+        }
+    }
+}
+
+/// Test a saved channel by id: resolve its sealed secrets, then send a
+/// test event. Used by the WebUI so testing an existing channel never
+/// requires the secret to leave the engine.
+pub async fn test_saved_channel(id: &str) -> Result<String, String> {
+    let config = NotificationConfig::load();
+    let ch = config
+        .channels
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| format!("notification channel '{id}' not found"))?;
+    let resolved = ch.resolved_channel().await;
+    test_channel(&resolved).await
 }
 
 // ── Dispatcher ─────────────────────────────────────────────────
@@ -139,7 +523,9 @@ pub async fn send_event(config: &NotificationConfig, event: &Event<'_>) {
         if !ch.enabled {
             continue;
         }
-        if let Err(e) = send_to_channel(&ch.channel, event).await {
+        // Decrypt sealed secrets into a plaintext copy just for this send.
+        let resolved = ch.resolved_channel().await;
+        if let Err(e) = send_to_channel(&resolved, event).await {
             warn!("Notification to '{}' ({}) failed: {e}", ch.name, ch.id);
         } else {
             info!("Notification sent to '{}' ({})", ch.name, ch.id);
@@ -169,6 +555,7 @@ async fn send_to_channel(channel: &ChannelType, event: &Event<'_>) -> Result<(),
             password,
             from,
             to,
+            ..
         } => {
             send_smtp(
                 host,
@@ -182,18 +569,20 @@ async fn send_to_channel(channel: &ChannelType, event: &Event<'_>) -> Result<(),
             )
             .await
         }
-        ChannelType::Telegram { bot_token, chat_id } => {
-            send_telegram(bot_token, chat_id, event.subject, event.body).await
-        }
+        ChannelType::Telegram {
+            bot_token, chat_id, ..
+        } => send_telegram(bot_token, chat_id, event.subject, event.body).await,
         ChannelType::Webhook {
             url,
             headers,
             secret,
+            ..
         } => send_webhook(url, headers, secret.as_deref(), event).await,
         ChannelType::Ntfy {
             server_url,
             topic,
             token,
+            ..
         } => {
             send_ntfy(
                 server_url,
@@ -511,6 +900,139 @@ async fn send_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_blob() -> EncryptedBlob {
+        serde_json::from_str("\"c2VhbGVkLWJsb2I=\"").unwrap()
+    }
+
+    fn smtp_channel(password: &str, encrypted: bool) -> ChannelConfig {
+        ChannelConfig {
+            id: "ch1".into(),
+            name: "mail".into(),
+            enabled: true,
+            channel: ChannelType::Smtp {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: "user".into(),
+                password: password.into(),
+                password_encrypted: encrypted.then(fake_blob),
+                from: "a@example.com".into(),
+                to: "b@example.com".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn redacted_masks_plaintext_smtp_password() {
+        let r = smtp_channel("hunter2", false).redacted();
+        match r.channel {
+            ChannelType::Smtp {
+                password,
+                password_encrypted,
+                ..
+            } => {
+                assert_eq!(password, REDACTED);
+                assert!(password_encrypted.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn redacted_masks_encrypted_only_smtp_password() {
+        let r = smtp_channel("", true).redacted();
+        match r.channel {
+            ChannelType::Smtp {
+                password,
+                password_encrypted,
+                ..
+            } => {
+                assert_eq!(password, REDACTED);
+                assert!(password_encrypted.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn merge_carries_forward_redacted_smtp_secret() {
+        // UI echoes "***" for an unchanged secret → keep the stored blob.
+        let mut incoming = smtp_channel(REDACTED, false);
+        let existing = smtp_channel("", true);
+        incoming.merge_secrets_from(&existing);
+        match incoming.channel {
+            ChannelType::Smtp {
+                password,
+                password_encrypted,
+                ..
+            } => {
+                assert!(password.is_empty());
+                assert!(
+                    password_encrypted.is_some(),
+                    "stored blob should carry forward"
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn merge_keeps_freshly_entered_smtp_secret() {
+        let mut incoming = smtp_channel("brand-new", false);
+        let existing = smtp_channel("", true);
+        incoming.merge_secrets_from(&existing);
+        match incoming.channel {
+            ChannelType::Smtp {
+                password,
+                password_encrypted,
+                ..
+            } => {
+                assert_eq!(password, "brand-new");
+                assert!(
+                    password_encrypted.is_none(),
+                    "new plaintext must not inherit the old blob"
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn webhook_redacts_and_carries_forward_optional_secret() {
+        let set = ChannelConfig {
+            id: "w".into(),
+            name: "wh".into(),
+            enabled: true,
+            channel: ChannelType::Webhook {
+                url: "https://x".into(),
+                headers: Default::default(),
+                secret: Some("sig".into()),
+                secret_encrypted: None,
+            },
+        };
+        match set.redacted().channel {
+            ChannelType::Webhook { secret, .. } => assert_eq!(secret.as_deref(), Some(REDACTED)),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn loads_legacy_channel_without_encrypted_fields() {
+        let json = r#"{ "id": "x", "name": "n", "enabled": true,
+            "type": "telegram", "bot_token": "legacy", "chat_id": "1" }"#;
+        let ch: ChannelConfig = serde_json::from_str(json).unwrap();
+        match ch.channel {
+            ChannelType::Telegram {
+                bot_token,
+                bot_token_encrypted,
+                ..
+            } => {
+                assert_eq!(bot_token, "legacy");
+                assert!(bot_token_encrypted.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 
     #[test]
     fn hmac_signature_is_stable_for_same_input() {

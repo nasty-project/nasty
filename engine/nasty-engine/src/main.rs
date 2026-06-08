@@ -245,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
             "nut.migrate_secrets",
             "oidc.migrate_secrets",
             "iscsi.migrate_secrets",
+            "notifications.migrate_secrets",
             "firewall.init",
             "nvmeof.ensure_tailscale_ports",
             "caches.warm",
@@ -455,6 +456,19 @@ async fn main() -> anyhow::Result<()> {
             "iscsi.migrate_secrets",
             secs(30),
             state.iscsi.migrate_secrets(),
+        )
+        .await;
+
+    // Seal plaintext notification-channel secrets (SMTP password,
+    // Telegram bot token, webhook signing secret, ntfy token) left in
+    // notifications.json from before encrypt-at-rest. A shellout per
+    // secret; no-op when empty / already sealed / backend unavailable.
+    state
+        .boot_status
+        .run_phase(
+            "notifications.migrate_secrets",
+            secs(30),
+            nasty_system::notifications::NotificationConfig::migrate_secrets(),
         )
         .await;
 
