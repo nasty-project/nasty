@@ -1,3 +1,4 @@
+use nasty_common::secrets::{self, EncryptedBlob};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -7,6 +8,16 @@ use tracing::{info, warn};
 
 const STATE_PATH: &str = "/var/lib/nasty/nut.json";
 const NUT_CONF_DIR: &str = "/var/lib/nasty/nut";
+
+/// `systemd-creds` AEAD name binding the encrypted remote password to
+/// this host + field. There's a single NUT config (no per-profile id),
+/// so a constant name suffices.
+const REMOTE_PASSWORD_NAME: &str = "nasty.nut.remote_password";
+
+/// Placeholder substituted for the remote password in RPC responses.
+/// An update carrying this value back is treated as "keep existing"
+/// rather than literally setting the password to `***`.
+const REDACTED_SECRET: &str = "***";
 
 // ── Config structs ───────────────────────────────────────────
 
@@ -57,8 +68,16 @@ pub struct NutConfig {
     #[serde(default)]
     pub remote_username: String,
     /// Password configured in the remote upsd.users.  Remote mode only.
+    /// Operator-supplied plaintext: redacted to `***` on output and, when
+    /// the secrets backend is healthy, encrypted into
+    /// `remote_password_encrypted` and blanked here before persisting.
     #[serde(default)]
     pub remote_password: String,
+    /// Remote NUT server password encrypted at rest via systemd-creds.
+    /// Populated by the engine when the secrets backend is available;
+    /// preferred over the legacy plaintext `remote_password` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_password_encrypted: Option<EncryptedBlob>,
     /// Initiate shutdown when battery drops below this percentage.
     #[serde(default = "default_shutdown_percent")]
     pub shutdown_on_battery_percent: u32,
@@ -104,11 +123,59 @@ impl Default for NutConfig {
             remote_port: default_remote_port(),
             remote_username: String::new(),
             remote_password: String::new(),
+            remote_password_encrypted: None,
             shutdown_on_battery_percent: default_shutdown_percent(),
             shutdown_on_battery_seconds: default_shutdown_seconds(),
             shutdown_command: default_shutdown_command(),
         }
     }
+}
+
+impl NutConfig {
+    /// Strip secrets for RPC responses: the remote password is shown as
+    /// `***` when set (so the UI can tell it's configured without seeing
+    /// it) and the ciphertext blob is omitted entirely.
+    pub fn redacted(&self) -> Self {
+        let mut c = self.clone();
+        if !c.remote_password.is_empty() || c.remote_password_encrypted.is_some() {
+            c.remote_password = REDACTED_SECRET.to_string();
+        }
+        c.remote_password_encrypted = None;
+        c
+    }
+}
+
+/// Encrypt the plaintext `remote_password` into `remote_password_encrypted`
+/// and blank the plaintext. Idempotent (already-encrypted or empty →
+/// no-op). On systemd-creds failure: warn and leave the plaintext in
+/// place so remote monitoring keeps working — degraded, not broken.
+async fn encrypt_remote_password_in_place(config: &mut NutConfig) {
+    if config.remote_password_encrypted.is_none() && !config.remote_password.is_empty() {
+        match secrets::encrypt(REMOTE_PASSWORD_NAME, &config.remote_password).await {
+            Ok(blob) => {
+                config.remote_password_encrypted = Some(blob);
+                config.remote_password.clear();
+            }
+            Err(e) => warn!("Failed to encrypt NUT remote_password — keeping plaintext: {e}"),
+        }
+    }
+}
+
+/// Resolve the remote password for use, preferring the encrypted blob
+/// over the legacy plaintext. Returns an empty string when neither is
+/// set (no remote auth) or when decryption fails (logged) — the caller
+/// writes it into upsmon.conf either way.
+async fn resolve_remote_password(config: &NutConfig) -> String {
+    if let Some(blob) = &config.remote_password_encrypted {
+        return match secrets::decrypt(REMOTE_PASSWORD_NAME, blob).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Failed to decrypt NUT remote_password: {e}");
+                String::new()
+            }
+        };
+    }
+    config.remote_password.clone()
 }
 
 /// Partial update for NUT configuration.
@@ -171,6 +238,24 @@ impl NutService {
         self.state.read().await.clone()
     }
 
+    /// Eagerly seal a plaintext `remote_password` left on disk from
+    /// before encrypt-at-rest landed. Called once on engine boot;
+    /// idempotent and a no-op when already encrypted, empty, or the
+    /// secrets backend is unavailable (boot does not fail in that case).
+    pub async fn migrate_secrets(&self) {
+        let mut config = self.state.write().await;
+        if config.remote_password_encrypted.is_some() || config.remote_password.is_empty() {
+            return;
+        }
+        encrypt_remote_password_in_place(&mut config).await;
+        if config.remote_password_encrypted.is_some() {
+            match save(&config).await {
+                Ok(()) => info!("Migrated NUT remote_password to systemd-creds"),
+                Err(e) => warn!("Failed to persist migrated NUT secret: {e}"),
+            }
+        }
+    }
+
     pub async fn update_config(&self, update: NutConfigUpdate) -> Result<NutConfig, String> {
         let mut config = self.state.write().await;
 
@@ -201,8 +286,14 @@ impl NutService {
         if let Some(v) = update.remote_username {
             config.remote_username = v;
         }
-        if let Some(v) = update.remote_password {
+        // A new password clears the encrypted blob so it gets re-sealed
+        // below. The redaction placeholder echoed back from the UI means
+        // "unchanged" — keep whatever's already stored.
+        if let Some(v) = update.remote_password
+            && v != REDACTED_SECRET
+        {
             config.remote_password = v;
+            config.remote_password_encrypted = None;
         }
         if let Some(v) = update.shutdown_on_battery_percent {
             if v > 100 {
@@ -221,6 +312,10 @@ impl NutService {
             return Err("remote_host is required when mode = remote".into());
         }
         let new_mode = config.mode;
+
+        // Seal the remote password at rest before persisting (no-op when
+        // empty, already encrypted, or the backend is unavailable).
+        encrypt_remote_password_in_place(&mut config).await;
 
         save(&config).await.map_err(|e| e.to_string())?;
 
@@ -333,6 +428,7 @@ async fn write_remote_configs(config: &NutConfig) -> Result<(), String> {
     // Stale ups.conf/upsd.conf/upsd.users from a prior local-mode
     // session are left in place — nut-driver and nut-server aren't
     // started in remote mode, so they don't get read.
+    let pass = resolve_remote_password(config).await;
     let upsmon_conf = format!(
         concat!(
             "MONITOR {name}@{host}:{port} 1 {user} {pass} secondary\n",
@@ -350,7 +446,7 @@ async fn write_remote_configs(config: &NutConfig) -> Result<(), String> {
         host = config.remote_host,
         port = config.remote_port,
         user = config.remote_username,
-        pass = config.remote_password,
+        pass = pass,
         cmd = config.shutdown_command,
     );
     write_file("upsmon.conf", &upsmon_conf).await?;
@@ -552,4 +648,62 @@ async fn save(config: &NutConfig) -> Result<(), std::io::Error> {
     let json = serde_json::to_string_pretty(config).unwrap();
     tokio::fs::write(STATE_PATH, json).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an `EncryptedBlob` without shelling out to systemd-creds —
+    /// it deserializes transparently from a bare JSON string.
+    fn fake_blob() -> EncryptedBlob {
+        serde_json::from_str("\"c2VhbGVkLWJsb2I=\"").unwrap()
+    }
+
+    #[test]
+    fn redacted_masks_plaintext_password() {
+        let cfg = NutConfig {
+            remote_password: "hunter2".into(),
+            ..Default::default()
+        };
+        let r = cfg.redacted();
+        assert_eq!(r.remote_password, REDACTED_SECRET);
+        assert!(r.remote_password_encrypted.is_none());
+    }
+
+    #[test]
+    fn redacted_masks_when_only_encrypted_present() {
+        // After sealing, the plaintext is blank but a secret IS set —
+        // the UI must still see `***`, never the ciphertext.
+        let cfg = NutConfig {
+            remote_password: String::new(),
+            remote_password_encrypted: Some(fake_blob()),
+            ..Default::default()
+        };
+        let r = cfg.redacted();
+        assert_eq!(r.remote_password, REDACTED_SECRET);
+        assert!(r.remote_password_encrypted.is_none());
+    }
+
+    #[test]
+    fn redacted_leaves_unset_password_empty() {
+        let r = NutConfig::default().redacted();
+        assert_eq!(r.remote_password, "");
+        assert!(r.remote_password_encrypted.is_none());
+    }
+
+    #[test]
+    fn loads_legacy_state_without_encrypted_field() {
+        // Pre-encryption state files have no `remote_password_encrypted`
+        // key — serde default must fill it in rather than erroring.
+        let json = r#"{
+            "mode": "remote",
+            "remote_host": "10.0.0.1",
+            "remote_username": "nasty",
+            "remote_password": "legacy-plaintext"
+        }"#;
+        let cfg: NutConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.remote_password, "legacy-plaintext");
+        assert!(cfg.remote_password_encrypted.is_none());
+    }
 }

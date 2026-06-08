@@ -242,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
             "subvolumes.reconcile_project_ids",
             "apps.reconcile_app_routes",
             "backups.migrate_secrets",
+            "nut.migrate_secrets",
             "firewall.init",
             "nvmeof.ensure_tailscale_ports",
             "caches.warm",
@@ -421,6 +422,14 @@ async fn main() -> anyhow::Result<()> {
             secs(30), // a handful of profiles, each two systemd-creds shellouts
             state.backups.migrate_secrets(),
         )
+        .await;
+
+    // Seal a plaintext NUT remote-server password left on disk from
+    // before encrypt-at-rest. One config, one systemd-creds shellout;
+    // no-op when empty / already sealed / backend unavailable.
+    state
+        .boot_status
+        .run_phase("nut.migrate_secrets", secs(15), state.nut.migrate_secrets())
         .await;
 
     // Push the engine-known set of app ingresses into Caddy's
