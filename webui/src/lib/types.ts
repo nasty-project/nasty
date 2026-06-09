@@ -327,6 +327,28 @@ export interface Filesystem {
 	used_bytes: number;
 	available_bytes: number;
 	options: FilesystemOptions;
+	last_mount_error?: MountFailure | null;
+}
+
+export type MountFailureReason =
+	| 'missing_device'
+	| 'needs_unlock'
+	| 'needs_check'
+	| 'busy'
+	| 'unknown';
+
+export interface MissingDevice {
+	path: string;
+	member_index?: number | null;
+	label?: string | null;
+}
+
+export interface MountFailure {
+	attempted_at: number;
+	reason: MountFailureReason;
+	message: string;
+	missing_devices: MissingDevice[];
+	raw: string;
 }
 
 export interface TpmBindStatus {

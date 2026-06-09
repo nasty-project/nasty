@@ -14,6 +14,7 @@ use crate::cmd;
 const NASTY_MOUNT_BASE: &str = "/fs";
 const FS_STATE_PATH: &str = "/var/lib/nasty/fs-state.json";
 const SCRUB_STATE_PATH: &str = "/var/lib/nasty/scrub-state.json";
+const MOUNT_STATE_PATH: &str = "/var/lib/nasty/mount-state.json";
 /// Trim the captured scrub output to this many trailing bytes before
 /// persisting. Long scrubs print per-shard counters every few seconds —
 /// keeping the full transcript would bloat the state file without
@@ -265,6 +266,11 @@ pub struct Filesystem {
     pub available_bytes: u64,
     /// Filesystem-level options read from sysfs or show-super.
     pub options: FilesystemOptions,
+    /// Details of the most recent failed mount attempt, surfaced while
+    /// the filesystem is not mounted. `None` when it's mounted or has
+    /// no recorded failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_mount_error: Option<MountFailure>,
 }
 
 /// Filesystem-level bcachefs options.
@@ -619,11 +625,72 @@ pub struct ReconcileStatus {
     pub enabled: bool,
 }
 
+/// Why a filesystem's most recent mount attempt failed, classified from
+/// the bcachefs mount stderr plus the set of expected-but-absent member
+/// devices. Drives the WebUI's mount-failure banner and its suggested
+/// next step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MountFailureReason {
+    /// One or more member devices are absent — the pool can't assemble.
+    /// A degraded mount may bring it up if enough replicas remain.
+    MissingDevice,
+    /// Encrypted and locked; needs an unlock before mounting.
+    NeedsUnlock,
+    /// bcachefs reported recovery/consistency errors — a check (fsck) is warranted.
+    NeedsCheck,
+    /// The mount point or a member device is busy / already in use.
+    Busy,
+    /// Couldn't be classified; the raw stderr carries the detail.
+    Unknown,
+}
+
+/// An expected member device that wasn't present at mount time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MissingDevice {
+    /// The device path NASty expected (from the persisted member list).
+    pub path: String,
+    /// bcachefs member index, when derivable from show-super.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_index: Option<u32>,
+    /// Hierarchical tiering label (e.g. "hdd.archive"), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Record of the most recent failed mount attempt for a filesystem.
+/// Persisted to `/var/lib/nasty/mount-state.json` so the WebUI can
+/// explain *why* a pool isn't mounted after a boot-time failure instead
+/// of just showing "Unmounted". Cleared on the next successful mount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MountFailure {
+    /// Unix seconds when the failed attempt happened.
+    pub attempted_at: i64,
+    /// Classified reason, driving the UI's suggested next step.
+    pub reason: MountFailureReason,
+    /// Short, operator-facing explanation.
+    pub message: String,
+    /// Expected member devices that were absent at attempt time.
+    #[serde(default)]
+    pub missing_devices: Vec<MissingDevice>,
+    /// Raw bcachefs stderr, kept verbatim for the details expander.
+    pub raw: String,
+}
+
+/// One member device parsed from `bcachefs show-super -f members_v2`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberInfo {
+    index: Option<u32>,
+    path: Option<String>,
+    label: Option<String>,
+}
+
 /// How long a cached `list()` result stays valid.
 const FS_LIST_CACHE_TTL: Duration = Duration::from_secs(3);
 
 type ListCache = Arc<Mutex<Option<(Instant, Vec<Filesystem>)>>>;
 type ScrubStateMap = Arc<Mutex<HashMap<String, ScrubStatus>>>;
+type MountStateMap = Arc<Mutex<HashMap<String, MountFailure>>>;
 
 #[derive(Clone)]
 pub struct FilesystemService {
@@ -635,6 +702,11 @@ pub struct FilesystemService {
     /// held only briefly for read/write — the actual `bcachefs scrub`
     /// child runs detached.
     scrub_state: ScrubStateMap,
+    /// Per-filesystem record of the most recent *failed* mount attempt,
+    /// loaded from `MOUNT_STATE_PATH` on construction. Written by
+    /// `mount_with_opts` on failure and cleared on success; read by
+    /// `list()` to surface `Filesystem.last_mount_error`.
+    mount_state: MountStateMap,
 }
 
 impl Default for FilesystemService {
@@ -659,9 +731,26 @@ impl FilesystemService {
                 HashMap::new()
             }
         };
+        // Same best-effort load for the last-mount-failure history.
+        let mount = match std::fs::read_to_string(MOUNT_STATE_PATH) {
+            Ok(s) => {
+                serde_json::from_str::<HashMap<String, MountFailure>>(&s).unwrap_or_else(|e| {
+                    warn!(
+                        "parse {MOUNT_STATE_PATH} failed: {e} — starting with empty mount history"
+                    );
+                    HashMap::new()
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => {
+                warn!("read {MOUNT_STATE_PATH} failed: {e} — starting with empty mount history");
+                HashMap::new()
+            }
+        };
         Self {
             list_cache: Arc::new(Mutex::new(None)),
             scrub_state: Arc::new(Mutex::new(scrub)),
+            mount_state: Arc::new(Mutex::new(mount)),
         }
     }
 
@@ -669,6 +758,25 @@ impl FilesystemService {
     /// Call this after any mutation (create, mount, unmount, destroy, etc.).
     pub async fn invalidate_list_cache(&self) {
         *self.list_cache.lock().await = None;
+    }
+
+    /// Record (and persist) the most recent failed mount for `name`.
+    async fn record_mount_failure(&self, name: &str, failure: MountFailure) {
+        self.mount_state
+            .lock()
+            .await
+            .insert(name.to_string(), failure);
+        persist_mount_state(&self.mount_state).await;
+        // Drop the cached list so the next fetch surfaces the failure
+        // immediately rather than after the 3s TTL.
+        self.invalidate_list_cache().await;
+    }
+
+    /// Clear any recorded mount failure for `name` (on a successful mount).
+    async fn clear_mount_failure(&self, name: &str) {
+        if self.mount_state.lock().await.remove(name).is_some() {
+            persist_mount_state(&self.mount_state).await;
+        }
     }
 
     /// Mount filesystems that were previously tracked as mounted.
@@ -866,6 +974,7 @@ impl FilesystemService {
                 used_bytes: used,
                 available_bytes: available,
                 options,
+                last_mount_error: None,
             });
         }
 
@@ -913,6 +1022,7 @@ impl FilesystemService {
                 used_bytes: 0,
                 available_bytes: 0,
                 options,
+                last_mount_error: None,
             });
         }
 
@@ -949,6 +1059,18 @@ impl FilesystemService {
                     // mount", not "locked".
                     let unlocked_in_keyring = is_bcachefs_key_loaded(&fs.uuid).await;
                     fs.options.locked = Some(!fs.mounted && !unlocked_in_keyring);
+                }
+            }
+        }
+
+        // Attach the most recent failed-mount record to any pool that
+        // isn't currently mounted, so the UI can explain *why* it's down
+        // rather than just showing "Unmounted" (#451).
+        {
+            let failures = self.mount_state.lock().await;
+            for fs in &mut filesystems {
+                if !fs.mounted {
+                    fs.last_mount_error = failures.get(&fs.name).cloned();
                 }
             }
         }
@@ -1315,6 +1437,7 @@ impl FilesystemService {
             used_bytes: used,
             available_bytes: available,
             options: read_fs_options_sysfs(&uuid).await,
+            last_mount_error: None,
         })
     }
 
@@ -1374,8 +1497,24 @@ impl FilesystemService {
 
     /// Mount an existing unmounted filesystem
     pub async fn mount(&self, name: &str) -> Result<Filesystem, FilesystemError> {
+        self.mount_maybe_degraded(name, false).await
+    }
+
+    /// Mount, optionally forcing the `degraded` option on to bring a pool
+    /// up without a missing member. When `force_degraded` is set the flag
+    /// is persisted via the normal mount-options save, so the pool keeps
+    /// mounting degraded across reboots until the operator restores the
+    /// device and turns it back off. See #451.
+    pub async fn mount_maybe_degraded(
+        &self,
+        name: &str,
+        force_degraded: bool,
+    ) -> Result<Filesystem, FilesystemError> {
         let state = load_fs_state().await;
-        let opts = get_fs_mount_options(&state, name);
+        let mut opts = get_fs_mount_options(&state, name);
+        if force_degraded {
+            opts.degraded = Some(true);
+        }
         self.mount_with_opts(name, &opts).await
     }
 
@@ -1458,12 +1597,20 @@ impl FilesystemService {
             .collect::<Vec<_>>()
             .join(":");
         let mount_opt_str = build_mount_opts(opts);
-        cmd::run_ok(
+        if let Err(e) = cmd::run_ok(
             "bcachefs",
             &["mount", "-o", &mount_opt_str, &device_arg, &mount_point],
         )
         .await
-        .map_err(FilesystemError::CommandFailed)?;
+        {
+            // Persist *why* it failed (named missing devices + classified
+            // reason) so the WebUI can explain an unmounted pool instead
+            // of just showing "Unmounted" — boot-time failures otherwise
+            // vanish into the log. See #451.
+            let failure = build_mount_failure(opts, &fs, e.clone()).await;
+            self.record_mount_failure(name, failure).await;
+            return Err(FilesystemError::CommandFailed(e));
+        }
 
         // Apply I/O scheduler to member block devices
         if let Some(ref sched) = opts.io_scheduler
@@ -1487,6 +1634,10 @@ impl FilesystemService {
             saved_opts.encrypted = Some(true);
         }
         save_fs_mounted_with_opts(name, saved_opts).await;
+
+        // Mounted cleanly — drop any stale failure record so the banner
+        // clears on the operator's next view.
+        self.clear_mount_failure(name).await;
 
         self.invalidate_list_cache().await;
         self.get(name).await
@@ -3481,6 +3632,229 @@ async fn persist_scrub_state(store: &ScrubStateMap) {
     }
 }
 
+async fn persist_mount_state(store: &MountStateMap) {
+    let snapshot = store.lock().await.clone();
+    let json = match serde_json::to_string_pretty(&snapshot) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("serialize mount state failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = tokio::fs::write(MOUNT_STATE_PATH, json).await {
+        warn!("write {MOUNT_STATE_PATH} failed: {e}");
+    }
+}
+
+/// Pull `key:`'s first value token out of a `show-super` device block.
+/// Mirrors the local extractor in `read_fs_devices` (kept separate so
+/// `parse_members` doesn't depend on that function's internals).
+fn extract_member_value(block: &[&str], key: &str) -> Option<String> {
+    for line in block {
+        let lower = line.to_lowercase();
+        if let Some(pos) = lower.find(key) {
+            let rest = &line[pos + key.len()..];
+            let rest = rest.trim_start_matches([':', ' ', '\t']);
+            if let Some(tok) = rest.split_whitespace().next() {
+                let tok = tok.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c == ';');
+                if !tok.is_empty() && tok != "none" {
+                    return Some(tok.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse `bcachefs show-super -f members_v2` into one [`MemberInfo`] per
+/// `Device N:` block. Tolerant of both the single-line and multi-line
+/// formats (the same shapes `read_fs_devices` handles).
+fn parse_members(show_super: &str) -> Vec<MemberInfo> {
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in show_super.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Device ")
+            && trimmed.chars().nth(7).is_some_and(|c| c.is_ascii_digit())
+            && !current.is_empty()
+        {
+            blocks.push(std::mem::take(&mut current));
+        }
+        current.push(line);
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let header = block.first()?.trim();
+            // "Device 3:" or "Device 3 (label ...):" → 3
+            let index = header
+                .strip_prefix("Device ")
+                .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|d| d.parse::<u32>().ok());
+            let path = block.iter().find_map(|l| {
+                l.split_whitespace()
+                    .find(|t| t.starts_with("/dev/"))
+                    .map(|t| t.trim_end_matches([',', ';']).to_string())
+            });
+            let label = extract_member_value(block, "label");
+            Some(MemberInfo { index, path, label })
+        })
+        .collect()
+}
+
+/// Of the `expected` member paths, return the ones not in `present`,
+/// enriched with member index/label from `members` when show-super
+/// knew about them. Pure so it's unit-testable without touching disk.
+fn build_missing(
+    expected: &[String],
+    present: &std::collections::HashSet<String>,
+    members: &[MemberInfo],
+) -> Vec<MissingDevice> {
+    expected
+        .iter()
+        .filter(|p| !present.contains(*p))
+        .map(|path| {
+            let m = members
+                .iter()
+                .find(|m| m.path.as_deref() == Some(path.as_str()));
+            MissingDevice {
+                path: path.clone(),
+                member_index: m.and_then(|m| m.index),
+                label: m.and_then(|m| m.label.clone()),
+            }
+        })
+        .collect()
+}
+
+fn describe_missing(d: &MissingDevice) -> String {
+    match (&d.label, d.member_index) {
+        (Some(l), Some(i)) => format!("{} (member {i}, {l})", d.path),
+        (Some(l), None) => format!("{} ({l})", d.path),
+        (None, Some(i)) => format!("{} (member {i})", d.path),
+        (None, None) => d.path.clone(),
+    }
+}
+
+fn join_human(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [a] => a.clone(),
+        [a, b] => format!("{a} and {b}"),
+        _ => {
+            let (last, rest) = items.split_last().unwrap();
+            format!("{}, and {}", rest.join(", "), last)
+        }
+    }
+}
+
+/// Classify a bcachefs mount stderr (plus the set of absent members)
+/// into an operator-facing reason + message. Pure; substring-heuristic
+/// over bcachefs's error text, always conservative (Unknown keeps the
+/// raw stderr for the details expander).
+fn classify_mount_failure(raw: &str, missing: &[MissingDevice]) -> (MountFailureReason, String) {
+    let lc = raw.to_lowercase();
+    let missing_hit = !missing.is_empty()
+        || lc.contains("insufficient devices")
+        || lc.contains("not enough devices")
+        || lc.contains("required member")
+        || lc.contains("no such device")
+        || lc.contains("unable to read device")
+        || lc.contains("missing device");
+    if missing_hit {
+        let msg = if missing.is_empty() {
+            "A required member device is missing, so the pool can't assemble. If enough \
+             replicas remain, mount degraded to bring it up without the missing device."
+                .to_string()
+        } else {
+            let names: Vec<String> = missing.iter().map(describe_missing).collect();
+            let (noun, verb, pronoun) = if missing.len() > 1 {
+                ("Member devices", "are", "them")
+            } else {
+                ("Member device", "is", "it")
+            };
+            format!(
+                "{noun} {} {verb} missing — the pool can't assemble. If enough replicas \
+                 remain, mount degraded to bring it up without {pronoun}.",
+                join_human(&names)
+            )
+        };
+        return (MountFailureReason::MissingDevice, msg);
+    }
+    if lc.contains("passphrase")
+        || lc.contains("encrypt")
+        || lc.contains("unlock")
+        || lc.contains("locked")
+    {
+        return (
+            MountFailureReason::NeedsUnlock,
+            "The filesystem is encrypted and locked — unlock it before mounting.".to_string(),
+        );
+    }
+    if lc.contains("fsck")
+        || lc.contains("recovery")
+        || lc.contains("checksum")
+        || lc.contains("btree")
+        || lc.contains("corrupt")
+        || lc.contains("journal")
+    {
+        return (
+            MountFailureReason::NeedsCheck,
+            "bcachefs reported consistency errors — run a check (fsck) before mounting."
+                .to_string(),
+        );
+    }
+    if lc.contains("already mounted") || lc.contains("busy") {
+        return (
+            MountFailureReason::Busy,
+            "The filesystem or its mount point is busy or already in use.".to_string(),
+        );
+    }
+    (
+        MountFailureReason::Unknown,
+        "The filesystem couldn't be mounted. See the details below for the bcachefs error."
+            .to_string(),
+    )
+}
+
+/// Assemble a [`MountFailure`] from a failed mount: figure out which
+/// expected members are absent (enriched via show-super on a present
+/// member), then classify. `opts.devices` is the authoritative expected
+/// set; fall back to the live device list if it hasn't been recorded.
+async fn build_mount_failure(opts: &FsMountOptions, fs: &Filesystem, raw: String) -> MountFailure {
+    let expected: Vec<String> = if !opts.devices.is_empty() {
+        opts.devices.clone()
+    } else {
+        fs.devices.iter().map(|d| d.path.clone()).collect()
+    };
+    let present: std::collections::HashSet<String> = expected
+        .iter()
+        .filter(|p| std::path::Path::new(p).exists())
+        .cloned()
+        .collect();
+    let members = match present.iter().next() {
+        Some(dev) => {
+            let out = cmd::run_ok("bcachefs", &["show-super", "-f", "members_v2", dev])
+                .await
+                .unwrap_or_default();
+            parse_members(&out)
+        }
+        None => Vec::new(),
+    };
+    let missing = build_missing(&expected, &present, &members);
+    let (reason, message) = classify_mount_failure(&raw, &missing);
+    MountFailure {
+        attempted_at: unix_now_secs(),
+        reason,
+        message,
+        missing_devices: missing,
+        raw,
+    }
+}
+
 fn unix_now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -4581,5 +4955,132 @@ mod tests {
         let mut s = ScrubScreen::default();
         s.feed("\x1b[32msda ok\x1b[0m\n");
         assert_eq!(s.render(), "sda ok");
+    }
+
+    // ── Mount-failure diagnostics (#451) ──────────────────────
+
+    fn md(path: &str, idx: Option<u32>, label: Option<&str>) -> MissingDevice {
+        MissingDevice {
+            path: path.into(),
+            member_index: idx,
+            label: label.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn classify_uses_missing_devices_even_when_stderr_is_opaque() {
+        let missing = vec![md("/dev/sdb", Some(1), Some("hdd.archive"))];
+        let (reason, msg) = classify_mount_failure("bcachefs: mount failed", &missing);
+        assert_eq!(reason, MountFailureReason::MissingDevice);
+        assert!(msg.contains("/dev/sdb"));
+        assert!(msg.contains("member 1"));
+        assert!(msg.contains("hdd.archive"));
+        assert!(msg.contains("degraded"));
+        assert!(msg.contains("is missing"), "singular phrasing: {msg}");
+    }
+
+    #[test]
+    fn classify_detects_missing_from_stderr_text_alone() {
+        let (reason, _) = classify_mount_failure("error: insufficient devices to mount", &[]);
+        assert_eq!(reason, MountFailureReason::MissingDevice);
+    }
+
+    #[test]
+    fn classify_plural_missing_uses_plural_phrasing() {
+        let missing = vec![md("/dev/sdb", None, None), md("/dev/sdc", None, None)];
+        let (_, msg) = classify_mount_failure("", &missing);
+        assert!(msg.contains("/dev/sdb and /dev/sdc"), "{msg}");
+        assert!(msg.contains("are missing"), "{msg}");
+    }
+
+    #[test]
+    fn classify_recognizes_lock_check_and_busy() {
+        assert_eq!(
+            classify_mount_failure("error reading passphrase", &[]).0,
+            MountFailureReason::NeedsUnlock
+        );
+        assert_eq!(
+            classify_mount_failure("filesystem needs recovery, run fsck", &[]).0,
+            MountFailureReason::NeedsCheck
+        );
+        assert_eq!(
+            classify_mount_failure("mount: /fs/tank: device is busy", &[]).0,
+            MountFailureReason::Busy
+        );
+    }
+
+    #[test]
+    fn classify_unknown_keeps_generic_message() {
+        let (reason, msg) = classify_mount_failure("some novel bcachefs error", &[]);
+        assert_eq!(reason, MountFailureReason::Unknown);
+        assert!(msg.to_lowercase().contains("details"));
+    }
+
+    #[test]
+    fn missing_device_classification_wins_over_other_keywords() {
+        // A missing-device failure whose stderr also mentions "journal"
+        // must still classify as MissingDevice (the actionable cause).
+        let missing = vec![md("/dev/sdb", None, None)];
+        let (reason, _) = classify_mount_failure("error: journal: insufficient devices", &missing);
+        assert_eq!(reason, MountFailureReason::MissingDevice);
+    }
+
+    #[test]
+    fn parse_members_multiline_format() {
+        let out = "\
+Device 0:\t/dev/sda
+\tLabel:\t\tssd.fast
+\tState:\t\trw
+Device 1:\t/dev/sdb
+\tLabel:\t\thdd.archive
+\tState:\t\trw
+";
+        let members = parse_members(out);
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].index, Some(0));
+        assert_eq!(members[0].path.as_deref(), Some("/dev/sda"));
+        assert_eq!(members[0].label.as_deref(), Some("ssd.fast"));
+        assert_eq!(members[1].index, Some(1));
+        assert_eq!(members[1].path.as_deref(), Some("/dev/sdb"));
+    }
+
+    #[test]
+    fn build_missing_enriches_absent_members_from_show_super() {
+        let expected = vec!["/dev/sda".to_string(), "/dev/sdb".to_string()];
+        let present: std::collections::HashSet<String> =
+            ["/dev/sda".to_string()].into_iter().collect();
+        let members = vec![
+            MemberInfo {
+                index: Some(0),
+                path: Some("/dev/sda".into()),
+                label: Some("ssd.fast".into()),
+            },
+            MemberInfo {
+                index: Some(1),
+                path: Some("/dev/sdb".into()),
+                label: Some("hdd.archive".into()),
+            },
+        ];
+        let missing = build_missing(&expected, &present, &members);
+        assert_eq!(missing, vec![md("/dev/sdb", Some(1), Some("hdd.archive"))]);
+    }
+
+    #[test]
+    fn build_missing_handles_no_show_super_info() {
+        let expected = vec!["/dev/sda".to_string(), "/dev/sdb".to_string()];
+        let present: std::collections::HashSet<String> =
+            ["/dev/sda".to_string()].into_iter().collect();
+        let missing = build_missing(&expected, &present, &[]);
+        assert_eq!(missing, vec![md("/dev/sdb", None, None)]);
+    }
+
+    #[test]
+    fn join_human_oxford_comma() {
+        assert_eq!(join_human(&["a".into()]), "a");
+        assert_eq!(join_human(&["a".into(), "b".into()]), "a and b");
+        assert_eq!(
+            join_human(&["a".into(), "b".into(), "c".into()]),
+            "a, b, and c"
+        );
     }
 }

@@ -650,6 +650,24 @@
 	}
 
 	let mountingFs = $state<string | null>(null);
+	// Which filesystem's raw mount-failure output (#451 banner) is expanded.
+	let rawErrShown = $state<string | null>(null);
+
+	// Bring a pool up degraded (without its missing member), from the
+	// mount-failure banner. Persists the degraded flag for subsequent boots.
+	async function mountDegraded(fs: Filesystem) {
+		if (!await confirm(
+			`Mount "${fs.name}" degraded?`,
+			`The pool will mount without its missing member device(s). This is safe only if enough replicas remain; writes made while degraded reduce redundancy. The pool will keep mounting degraded until you restore the device and turn it off in Options.`
+		)) return;
+		mountingFs = fs.name;
+		await withToast(
+			() => client.call('fs.mount', { name: fs.name, degraded: true }, 120000),
+			`Filesystem "${fs.name}" mounted (degraded)`
+		);
+		mountingFs = null;
+		await refresh();
+	}
 
 	async function toggleMount(fs: Filesystem) {
 		if (fs.mounted) {
@@ -1615,6 +1633,42 @@
 						<Button variant="destructive" size="xs" onclick={() => destroyFs(fs.name)}>Destroy</Button>
 					</div>
 				</div>
+
+				{#if !fs.mounted && fs.last_mount_error}
+					{@const e = fs.last_mount_error}
+					<div class="mt-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
+						<p class="font-medium text-destructive">Last mount failed</p>
+						<p class="mt-0.5 text-foreground">{e.message}</p>
+						{#if e.missing_devices.length}
+							<ul class="mt-1.5 list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
+								{#each e.missing_devices as d}
+									<li>
+										<span class="font-mono">{d.path}</span>{#if d.member_index != null} · member {d.member_index}{/if}{#if d.label} · <span class="font-mono">{d.label}</span>{/if}
+									</li>
+								{/each}
+							</ul>
+						{/if}
+						<div class="mt-2 flex flex-wrap items-center gap-2">
+							{#if e.reason === 'missing_device'}
+								<Button variant="default" size="xs" onclick={() => mountDegraded(fs)}
+									disabled={mountingFs === fs.name}>
+									{mountingFs === fs.name ? 'Mounting…' : 'Mount degraded'}
+								</Button>
+							{/if}
+							{#if e.reason === 'needs_unlock' && fs.options.encrypted && fs.options.locked}
+								<Button variant="default" size="xs" onclick={() => doUnlock(fs.name)}>Unlock</Button>
+							{/if}
+							<button type="button" class="text-xs text-muted-foreground underline underline-offset-2"
+								onclick={() => rawErrShown = rawErrShown === fs.name ? null : fs.name}>
+								{rawErrShown === fs.name ? 'Hide bcachefs output' : 'Show bcachefs output'}
+							</button>
+							<span class="ml-auto text-[0.65rem] text-muted-foreground">attempted {humanAgo(e.attempted_at)}</span>
+						</div>
+						{#if rawErrShown === fs.name}
+							<pre class="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-[0.7rem] font-mono">{e.raw}</pre>
+						{/if}
+					</div>
+				{/if}
 
 				{#if fs.total_bytes > 0}
 					{@const fsReplicas = fs.options.data_replicas ?? 1}

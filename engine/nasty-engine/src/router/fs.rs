@@ -61,17 +61,31 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
-        "fs.mount" => match require_str(req, "name") {
-            Ok(name) => match state.filesystems.mount(name).await {
-                Ok(v) => {
-                    // Cascade: restore block devices on this filesystem
-                    let _ = state.subvolumes.restore_block_devices().await;
-                    ok(req, v)
-                }
-                Err(e) => err(req, e),
-            },
-            Err(r) => r,
-        },
+        "fs.mount" => {
+            #[derive(Deserialize)]
+            struct MountParams {
+                name: String,
+                /// Force a degraded mount (bring the pool up without a
+                /// missing member). Surfaced by the #451 failure banner.
+                #[serde(default)]
+                degraded: bool,
+            }
+            match parse_params::<MountParams>(req) {
+                Ok(p) => match state
+                    .filesystems
+                    .mount_maybe_degraded(&p.name, p.degraded)
+                    .await
+                {
+                    Ok(v) => {
+                        // Cascade: restore block devices on this filesystem
+                        let _ = state.subvolumes.restore_block_devices().await;
+                        ok(req, v)
+                    }
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         "fs.unmount" => match require_str(req, "name") {
             Ok(name) => match state.filesystems.unmount(name).await {
                 Ok(()) => ok(req, "ok"),
