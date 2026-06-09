@@ -13,7 +13,7 @@ use nasty_apps::{
     App, AppConfig, AppIngress, AppStats, AppsStatus, CaddyRouteSummary, CheckDevicesRequest,
     CheckPortsRequest, CheckVolumesRequest, DeviceMissing, EnableAppsRequest,
     FixVolumePermsRequest, ImageInspectResult, InstallAppRequest, InstallComposeRequest,
-    PortConflict, PruneResult, SetIngressRequest, VolumeMismatch,
+    ManagedNetwork, NetworkSummary, PortConflict, PruneResult, SetIngressRequest, VolumeMismatch,
 };
 use nasty_backup::{BackupProfile, BackupSnapshot, BackupStatus};
 use nasty_sharing::iscsi::{
@@ -2616,6 +2616,27 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     result: Some(
                         serde_json::json!({"type": "string", "description": "Conflict reason, or empty when no conflict."}),
                     ),
+                },
+                Method {
+                    name: "apps.networks.list",
+                    desc: "List Docker networks NASty can manage — merges live Docker state with persisted managed-network specs and annotates each with exists/managed/attached_apps.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<NetworkSummary>>(generator)),
+                },
+                Method {
+                    name: "apps.networks.create",
+                    desc: "Create a NASty-managed Docker network (bridge/macvlan/ipvlan) on a validated host parent interface and persist the spec for boot reconcile.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::Schema(gen_schema::<ManagedNetwork>(generator)),
+                    result: None,
+                },
+                Method {
+                    name: "apps.networks.remove",
+                    desc: "Remove a NASty-managed Docker network. Refuses while any container is still attached.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Network name.")),
+                    result: None,
                 },
             ],
         ),

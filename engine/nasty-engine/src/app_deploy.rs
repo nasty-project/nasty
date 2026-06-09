@@ -67,12 +67,19 @@ struct DeployRequest {
     ingress_host_port: Option<u16>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct DeployMessage {
-    /// "log" for output lines, "error" for errors, "done" for completion
+    /// "log" for output lines, "error" for errors, "done" for completion,
+    /// "action" for a structured actionable hint the UI can render as a button.
     #[serde(rename = "type")]
     msg_type: String,
     data: String,
+    /// Action key for `type:"action"` messages (e.g. "create_macvlan").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+    /// Host bridge name the action applies to (for "create_macvlan").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bridge: Option<String>,
 }
 
 impl DeployMessage {
@@ -80,6 +87,7 @@ impl DeployMessage {
         serde_json::to_string(&Self {
             msg_type: "log".into(),
             data: s.to_string(),
+            ..Default::default()
         })
         .unwrap()
     }
@@ -88,6 +96,7 @@ impl DeployMessage {
         serde_json::to_string(&Self {
             msg_type: "error".into(),
             data: s.to_string(),
+            ..Default::default()
         })
         .unwrap()
     }
@@ -96,6 +105,21 @@ impl DeployMessage {
         serde_json::to_string(&Self {
             msg_type: "done".into(),
             data: s.to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// Actionable hint (#429/#435): the referenced external network is a
+    /// host bridge, so offer to create a macvlan network on it and retry.
+    fn action_create_macvlan(bridge: &str) -> String {
+        serde_json::to_string(&Self {
+            msg_type: "action".into(),
+            data: format!(
+                "Create a macvlan network on '{bridge}' to put this app on your LAN, then retry."
+            ),
+            action: Some("create_macvlan".into()),
+            bridge: Some(bridge.to_string()),
         })
         .unwrap()
     }
@@ -519,6 +543,15 @@ async fn deploy_compose(
                     DeployMessage::log(&format!("Hint: {hint}")).into(),
                 ))
                 .await;
+            // Structured signal so the UI can offer a one-click "create
+            // macvlan on <bridge> and retry" instead of just prose.
+            if let Some(bridge) = external_network_name(&e) {
+                let _ = socket
+                    .send(Message::Text(
+                        DeployMessage::action_create_macvlan(bridge).into(),
+                    ))
+                    .await;
+            }
         }
         let msg = match hint {
             Some(hint) => format!("deploy failed: {e}\n\nHint: {hint}"),

@@ -241,6 +241,7 @@ async fn main() -> anyhow::Result<()> {
             "network.reconcile_orphans",
             "subvolumes.reconcile_project_ids",
             "apps.reconcile_app_routes",
+            "apps.reconcile_networks",
             "backups.migrate_secrets",
             "nut.migrate_secrets",
             "oidc.migrate_secrets",
@@ -485,6 +486,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .await;
 
+    // Recreate NASty-managed Docker networks missing from Docker (e.g.
+    // after a fresh data-root); skips any whose parent interface vanished.
+    {
+        let ifaces = system_network_ifaces(&state).await;
+        state
+            .boot_status
+            .run_phase(
+                "apps.reconcile_networks",
+                secs(30),
+                state.apps.reconcile_networks(ifaces),
+            )
+            .await;
+    }
+
     // TLS automation reconcile — push the policy set (main domain +
     // every app subdomain) so Caddy issues certs after a fresh boot or
     // restart, the same way ingress routes get re-pushed above.
@@ -688,6 +703,27 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Host interface facts for the apps Docker-network validator: each live
+/// interface's name + kind, plus whether it's enslaved to a bridge (which
+/// makes it an invalid macvlan/ipvlan parent — the bridge should be used).
+pub(crate) async fn system_network_ifaces(state: &AppState) -> Vec<nasty_apps::IfaceInfo> {
+    let st = state.network.get(None).await;
+    let members: std::collections::HashSet<String> = st
+        .config
+        .bridges
+        .iter()
+        .flat_map(|b| b.members.iter().cloned())
+        .collect();
+    st.interfaces
+        .into_iter()
+        .map(|i| nasty_apps::IfaceInfo {
+            bridge_member: members.contains(&i.name),
+            name: i.name,
+            kind: i.kind,
+        })
+        .collect()
 }
 
 async fn run_bootstrap_system_flake_cli(args: &[String]) -> anyhow::Result<()> {

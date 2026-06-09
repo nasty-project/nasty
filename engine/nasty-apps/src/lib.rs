@@ -15,11 +15,12 @@ use std::path::Path;
 
 use bollard::Docker;
 use bollard::models::{
-    ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    ContainerCreateBody, EndpointIpamConfig, EndpointSettings, HostConfig, Ipam, IpamConfig,
+    NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, ListContainersOptions, LogsOptions,
-    RemoveContainerOptions, StatsOptions, StopContainerOptions,
+    CreateContainerOptions, CreateImageOptions, InspectNetworkOptions, ListContainersOptions,
+    ListNetworksOptions, LogsOptions, RemoveContainerOptions, StatsOptions, StopContainerOptions,
 };
 use futures_util::{StreamExt, TryStreamExt};
 use schemars::JsonSchema;
@@ -36,6 +37,8 @@ pub use caddy::{CaddyRouteSummary, HostCert};
 const STATE_PATH: &str = "/var/lib/nasty/apps-enabled";
 const COMPOSE_DIR: &str = "/var/lib/nasty/apps";
 const DOCKER_SERVICE: &str = "docker.service";
+/// Persisted definitions of NASty-managed Docker networks.
+const NETWORKS_PATH: &str = "/var/lib/nasty/apps-networks.json";
 
 /// Label applied to all NASty-managed containers.
 const LABEL_MANAGED: &str = "nasty.managed";
@@ -45,6 +48,14 @@ const LABEL_APP_NAME: &str = "nasty.app.name";
 const LABEL_APP_KIND: &str = "nasty.app.kind";
 /// Label set to "true" when the app was deployed with allow_unsafe.
 const LABEL_APP_UNSAFE: &str = "nasty.app.unsafe";
+/// Label marking a NASty-managed Docker network (value "true").
+const LABEL_NET_MANAGED: &str = "nasty.managed";
+/// Label storing a managed network's parent host interface.
+const LABEL_NET_PARENT: &str = "nasty.net.parent";
+/// Label on a container recording the managed network it's attached to.
+const LABEL_APP_NETWORK: &str = "nasty.app.network";
+/// Label on a container recording its static IP on the managed network.
+const LABEL_APP_NETWORK_IP: &str = "nasty.app.network_ip";
 
 // ── Errors ──────────────────────────────────────────────────────
 
@@ -68,6 +79,8 @@ pub enum AppsError {
     Io(#[from] std::io::Error),
     #[error("forbidden bind mount: {0}")]
     ForbiddenBind(String),
+    #[error("invalid network: {0}")]
+    InvalidNetwork(String),
 }
 
 impl AppsError {
@@ -82,8 +95,258 @@ impl AppsError {
             Self::CommandFailed(_) => -33007,
             Self::Io(_) => -33008,
             Self::ForbiddenBind(_) => -33009,
+            Self::InvalidNetwork(_) => -33010,
         }
     }
+}
+
+// ── Managed Docker networks ─────────────────────────────────────
+
+/// Lightweight host-interface fact the network validator needs. Built
+/// by the engine layer from `nasty-system`'s interface list so this
+/// crate stays free of a `nasty-system` dependency.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IfaceInfo {
+    pub name: String,
+    /// "physical" | "bond" | "vlan" | "bridge" | "virtual".
+    pub kind: String,
+    /// True when this NIC is enslaved to a bridge (so it's an invalid
+    /// macvlan/ipvlan parent — the bridge should be used instead).
+    pub bridge_member: bool,
+}
+
+/// A NASty-managed Docker network. Persisted to [`NETWORKS_PATH`] and
+/// materialized via bollard. `host_shim` is honored only for macvlan
+/// (see the engine's shim wiring) and defaults off.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ManagedNetwork {
+    pub name: String,
+    /// "bridge" | "macvlan" | "ipvlan".
+    pub driver: String,
+    /// Host interface/bridge for macvlan/ipvlan; absent for bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_range: Option<String>,
+    /// 802.1q tag; the effective docker parent becomes `parent.vlan`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlan: Option<u16>,
+    /// macvlan only: create a host-side shim so host↔container works.
+    #[serde(default)]
+    pub host_shim: bool,
+}
+
+/// On-disk shape for [`NETWORKS_PATH`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManagedNetworksFile {
+    #[serde(default)]
+    networks: Vec<ManagedNetwork>,
+}
+
+/// `apps.networks.list` row: the spec plus live-state annotations.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct NetworkSummary {
+    #[serde(flatten)]
+    pub spec: ManagedNetwork,
+    /// Present in Docker right now.
+    pub exists: bool,
+    /// Created/labeled by NASty (vs a pre-existing Docker network).
+    pub managed: bool,
+    /// Container names currently attached (drives remove-refusal + UI).
+    #[serde(default)]
+    pub attached_apps: Vec<String>,
+}
+
+fn invalid_net(msg: impl Into<String>) -> AppsError {
+    AppsError::InvalidNetwork(msg.into())
+}
+
+/// Parse `addr/prefix` into `(IpAddr, prefix_len)`.
+fn parse_cidr(s: &str) -> Option<(std::net::IpAddr, u8)> {
+    let (addr, prefix) = s.split_once('/')?;
+    let ip: std::net::IpAddr = addr.trim().parse().ok()?;
+    let p: u8 = prefix.trim().parse().ok()?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    (p <= max).then_some((ip, p))
+}
+
+/// Network address of `ip` masked to `prefix` bits, as a u128 (v4 in low bits).
+fn mask_ip(ip: std::net::IpAddr, prefix: u8) -> u128 {
+    let (bits, total) = match ip {
+        std::net::IpAddr::V4(v4) => (u32::from(v4) as u128, 32u8),
+        std::net::IpAddr::V6(v6) => (u128::from(v6), 128u8),
+    };
+    if prefix == 0 {
+        return 0;
+    }
+    let shift = total - prefix;
+    (bits >> shift) << shift
+}
+
+/// True iff `ip` falls within `cidr`. `None` on malformed input.
+fn cidr_contains_ip(cidr: &str, ip: &str) -> Option<bool> {
+    let (net, prefix) = parse_cidr(cidr)?;
+    let addr: std::net::IpAddr = ip.trim().parse().ok()?;
+    if net.is_ipv4() != addr.is_ipv4() {
+        return Some(false);
+    }
+    Some(mask_ip(net, prefix) == mask_ip(addr, prefix))
+}
+
+/// True iff `inner` CIDR is fully contained in `outer` CIDR. `None` on malformed input.
+fn cidr_contains_net(outer: &str, inner: &str) -> Option<bool> {
+    let (_, outer_prefix) = parse_cidr(outer)?;
+    let (inner_ip, inner_prefix) = parse_cidr(inner)?;
+    if inner_prefix < outer_prefix {
+        return Some(false);
+    }
+    cidr_contains_ip(outer, &inner_ip.to_string())
+}
+
+/// macvlan/ipvlan containers get their own LAN IP and have no presence
+/// at `127.0.0.1:<host_port>`, so published host ports (and the Caddy
+/// ingress that depends on them) are meaningless. Returns the rejection
+/// reason when the combination is incompatible.
+fn ingress_incompatible(driver: &str, has_host_ports: bool) -> Option<&'static str> {
+    if matches!(driver, "macvlan" | "ipvlan") && has_host_ports {
+        Some(
+            "macvlan/ipvlan apps get their own LAN IP and cannot also publish host ports; \
+             remove host-port mappings or choose a bridge network",
+        )
+    } else {
+        None
+    }
+}
+
+/// Validate a network spec against the set of host interfaces. Pure +
+/// dependency-free for unit testing.
+fn validate_network_spec(spec: &ManagedNetwork, ifaces: &[IfaceInfo]) -> Result<(), AppsError> {
+    if spec.name.is_empty()
+        || spec.name.len() > 64
+        || !spec
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(invalid_net(
+            "network name must be 1-64 chars of [A-Za-z0-9._-]",
+        ));
+    }
+    if !matches!(spec.driver.as_str(), "bridge" | "macvlan" | "ipvlan") {
+        return Err(invalid_net("driver must be bridge, macvlan, or ipvlan"));
+    }
+    // The host↔container macvlan shim mutates host networking and is
+    // deferred to a follow-up (it needs the confirm-or-rollback rail +
+    // real-hardware validation). Reserve the field but reject it for now
+    // so callers don't think it does something.
+    if spec.host_shim {
+        return Err(invalid_net(
+            "host↔container shim is not implemented yet — leave it disabled (tracked separately)",
+        ));
+    }
+    let needs_parent = matches!(spec.driver.as_str(), "macvlan" | "ipvlan");
+    match (&spec.parent, needs_parent) {
+        (Some(p), true) => {
+            if let Some(v) = spec.vlan
+                && !(1..=4094).contains(&v)
+            {
+                return Err(invalid_net("vlan tag must be 1-4094"));
+            }
+            match ifaces.iter().find(|i| &i.name == p) {
+                None => return Err(invalid_net(format!("parent interface '{p}' not found"))),
+                Some(i) if i.bridge_member => {
+                    return Err(invalid_net(format!(
+                        "'{p}' is enslaved to a bridge; use the bridge itself as the parent"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        (Some(_), false) => return Err(invalid_net("bridge driver does not take a parent")),
+        (None, true) => {
+            return Err(invalid_net(format!(
+                "{} requires a parent interface",
+                spec.driver
+            )));
+        }
+        (None, false) => {}
+    }
+    match &spec.subnet {
+        Some(subnet) => {
+            if parse_cidr(subnet).is_none() {
+                return Err(invalid_net(format!("invalid subnet CIDR '{subnet}'")));
+            }
+            if let Some(gw) = &spec.gateway
+                && cidr_contains_ip(subnet, gw) != Some(true)
+            {
+                return Err(invalid_net(format!(
+                    "gateway '{gw}' is not within subnet '{subnet}'"
+                )));
+            }
+            if let Some(range) = &spec.ip_range
+                && cidr_contains_net(subnet, range) != Some(true)
+            {
+                return Err(invalid_net(format!(
+                    "ip_range '{range}' is not within subnet '{subnet}'"
+                )));
+            }
+        }
+        None if spec.gateway.is_some() || spec.ip_range.is_some() => {
+            return Err(invalid_net("gateway/ip_range require a subnet"));
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// Boot-reconcile decision (pure, testable): which persisted networks
+/// are missing from Docker and recreatable, vs skipped because their
+/// parent interface is gone.
+#[derive(Debug, PartialEq, Default)]
+struct ReconcilePlan {
+    to_create: Vec<String>,
+    skipped_missing_parent: Vec<String>,
+}
+
+fn reconcile_plan(
+    persisted: &[ManagedNetwork],
+    docker_names: &[String],
+    iface_names: &[String],
+) -> ReconcilePlan {
+    let mut plan = ReconcilePlan::default();
+    for n in persisted {
+        if docker_names.iter().any(|d| d == &n.name) {
+            continue; // already present
+        }
+        match &n.parent {
+            Some(p) if !iface_names.iter().any(|i| i == p) => {
+                plan.skipped_missing_parent.push(n.name.clone());
+            }
+            _ => plan.to_create.push(n.name.clone()),
+        }
+    }
+    plan
+}
+
+fn load_networks() -> ManagedNetworksFile {
+    match std::fs::read_to_string(NETWORKS_PATH) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            warn!("failed to parse {NETWORKS_PATH}, ignoring: {e}");
+            ManagedNetworksFile::default()
+        }),
+        Err(_) => ManagedNetworksFile::default(),
+    }
+}
+
+async fn save_networks(f: &ManagedNetworksFile) -> Result<(), AppsError> {
+    let json = serde_json::to_string_pretty(f)
+        .map_err(|e| AppsError::CommandFailed(format!("serialize networks: {e}")))?;
+    tokio::fs::write(NETWORKS_PATH, json).await?;
+    Ok(())
 }
 
 /// Validate the `host_path` of every volume in a simple-app install/update.
@@ -1002,6 +1265,14 @@ pub struct App {
     /// why only the direct host-port link is offered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_disabled_reason: Option<String>,
+    /// Name of the NASty-managed Docker network this app is attached to,
+    /// if any. The WebUI shows a badge and (for macvlan/ipvlan) suppresses
+    /// the reverse-proxy "Open" link since the app is reached on its own IP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
+    /// The app's IP on that network, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1066,6 +1337,14 @@ pub struct AppConfig {
     /// Whether the app was deployed with allow_unsafe (read from container label).
     #[serde(default)]
     pub allow_unsafe: bool,
+    /// NASty-managed Docker network the app is attached to (from label).
+    /// Round-tripped through Edit/pull so a reinstall keeps the attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
+    /// The static IP requested at install (from label), if any. Distinct
+    /// from a live auto-assigned address — re-applied verbatim on reinstall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1159,6 +1438,16 @@ pub struct InstallAppRequest {
     /// hostname is taken.
     #[serde(default)]
     pub subdomain: Option<String>,
+    /// Attach the container to a NASty-managed Docker network instead of
+    /// (only) the default bridge. For a macvlan/ipvlan network the
+    /// container gets its own LAN IP and is *not* reachable at
+    /// `127.0.0.1:<host_port>`, so publishing host ports and reverse-proxy
+    /// ingress are rejected/skipped for it (see install's mutual-exclusion).
+    #[serde(default)]
+    pub network: Option<String>,
+    /// Optional static IPv4 within the chosen network's subnet.
+    #[serde(default)]
+    pub static_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1432,6 +1721,244 @@ impl AppsService {
         self.docker_conn()
     }
 
+    // ── Managed Docker networks ─────────────────────────────
+
+    /// List Docker networks (excluding the host/null built-ins),
+    /// annotated with managed/exists/attached_apps. Managed networks
+    /// show their authoritative persisted spec; others are derived from
+    /// live Docker state. Persisted networks absent from Docker are
+    /// appended with `exists=false` (boot reconcile will recreate them).
+    pub async fn network_list(&self) -> Result<Vec<NetworkSummary>, AppsError> {
+        self.require_ready().await?;
+        let docker = self.docker()?;
+        let nets = docker
+            .list_networks(None::<ListNetworksOptions>)
+            .await
+            .map_err(|e| AppsError::DockerFailed(format!("list networks: {e}")))?;
+        let persisted = load_networks().networks;
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for n in nets {
+            let name = match &n.name {
+                Some(s) if !s.is_empty() => s.clone(),
+                _ => continue,
+            };
+            let driver = n.driver.clone().unwrap_or_default();
+            if matches!(driver.as_str(), "host" | "null") {
+                continue;
+            }
+            let labels = n.labels.clone().unwrap_or_default();
+            let managed = labels.get(LABEL_NET_MANAGED).map(|v| v == "true") == Some(true);
+            let spec = match persisted.iter().find(|p| p.name == name) {
+                Some(p) => p.clone(),
+                None => {
+                    let (subnet, gateway, ip_range) = n
+                        .ipam
+                        .as_ref()
+                        .and_then(|i| i.config.as_ref())
+                        .and_then(|c| c.first())
+                        .map(|c| (c.subnet.clone(), c.gateway.clone(), c.ip_range.clone()))
+                        .unwrap_or((None, None, None));
+                    ManagedNetwork {
+                        name: name.clone(),
+                        driver,
+                        parent: n.options.as_ref().and_then(|o| o.get("parent")).cloned(),
+                        subnet,
+                        gateway,
+                        ip_range,
+                        vlan: None,
+                        host_shim: false,
+                    }
+                }
+            };
+            let attached_apps = if managed {
+                docker
+                    .inspect_network(&name, None::<InspectNetworkOptions>)
+                    .await
+                    .ok()
+                    .and_then(|ni| ni.containers)
+                    .map(|c| c.into_values().filter_map(|e| e.name).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            seen.insert(name);
+            out.push(NetworkSummary {
+                spec,
+                exists: true,
+                managed,
+                attached_apps,
+            });
+        }
+        for spec in persisted {
+            if !seen.contains(&spec.name) {
+                out.push(NetworkSummary {
+                    spec,
+                    exists: false,
+                    managed: true,
+                    attached_apps: Vec::new(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Create a NASty-managed Docker network and persist its spec.
+    pub async fn network_create(
+        &self,
+        spec: ManagedNetwork,
+        host_ifaces: &[IfaceInfo],
+    ) -> Result<(), AppsError> {
+        self.require_ready().await?;
+        validate_network_spec(&spec, host_ifaces)?;
+        let docker = self.docker()?;
+        if docker
+            .inspect_network(&spec.name, None::<InspectNetworkOptions>)
+            .await
+            .is_ok()
+        {
+            return Err(invalid_net(format!(
+                "a Docker network named '{}' already exists",
+                spec.name
+            )));
+        }
+
+        let mut options = std::collections::HashMap::new();
+        if let Some(p) = &spec.parent {
+            let parent = match spec.vlan {
+                Some(v) => format!("{p}.{v}"),
+                None => p.clone(),
+            };
+            options.insert("parent".to_string(), parent);
+        }
+        let ipam = spec.subnet.as_ref().map(|subnet| Ipam {
+            driver: Some("default".to_string()),
+            config: Some(vec![IpamConfig {
+                subnet: Some(subnet.clone()),
+                gateway: spec.gateway.clone(),
+                ip_range: spec.ip_range.clone(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let mut labels = std::collections::HashMap::new();
+        labels.insert(LABEL_NET_MANAGED.to_string(), "true".to_string());
+        if let Some(p) = &spec.parent {
+            labels.insert(LABEL_NET_PARENT.to_string(), p.clone());
+        }
+        let body = NetworkCreateRequest {
+            name: spec.name.clone(),
+            driver: Some(spec.driver.clone()),
+            options: (!options.is_empty()).then_some(options),
+            ipam,
+            labels: Some(labels),
+            ..Default::default()
+        };
+        docker
+            .create_network(body)
+            .await
+            .map_err(|e| AppsError::DockerFailed(format!("create network '{}': {e}", spec.name)))?;
+
+        let mut f = load_networks();
+        f.networks.retain(|n| n.name != spec.name);
+        f.networks.push(spec);
+        save_networks(&f).await
+    }
+
+    /// Remove a managed network. Refuses while containers are attached.
+    pub async fn network_remove(&self, name: &str) -> Result<(), AppsError> {
+        self.require_ready().await?;
+        let docker = self.docker()?;
+        if let Ok(ni) = docker
+            .inspect_network(name, None::<InspectNetworkOptions>)
+            .await
+        {
+            if ni.containers.map(|c| !c.is_empty()) == Some(true) {
+                return Err(invalid_net(format!(
+                    "network '{name}' is in use by attached containers"
+                )));
+            }
+            docker
+                .remove_network(name)
+                .await
+                .map_err(|e| AppsError::DockerFailed(format!("remove network '{name}': {e}")))?;
+        }
+        // Drop the persisted spec whether or not Docker still had it.
+        let mut f = load_networks();
+        let before = f.networks.len();
+        f.networks.retain(|n| n.name != name);
+        if f.networks.len() != before {
+            save_networks(&f).await?;
+        }
+        Ok(())
+    }
+
+    /// Resolve a network name to its spec — persisted first, else a
+    /// pre-existing (unmanaged) Docker network. Errors if neither.
+    async fn resolve_managed_network(&self, name: &str) -> Result<ManagedNetwork, AppsError> {
+        if let Some(spec) = load_networks()
+            .networks
+            .into_iter()
+            .find(|n| n.name == name)
+        {
+            return Ok(spec);
+        }
+        let ni = self
+            .docker()?
+            .inspect_network(name, None::<InspectNetworkOptions>)
+            .await
+            .map_err(|_| invalid_net(format!("network '{name}' does not exist")))?;
+        Ok(ManagedNetwork {
+            name: name.to_string(),
+            driver: ni.driver.unwrap_or_default(),
+            parent: ni.options.as_ref().and_then(|o| o.get("parent")).cloned(),
+            subnet: ni
+                .ipam
+                .as_ref()
+                .and_then(|i| i.config.as_ref())
+                .and_then(|c| c.first())
+                .and_then(|c| c.subnet.clone()),
+            gateway: None,
+            ip_range: None,
+            vlan: None,
+            host_shim: false,
+        })
+    }
+
+    /// Boot reconcile: recreate persisted managed networks missing from
+    /// Docker; skip (warn) any whose parent interface has vanished.
+    /// No-op when Docker is off or there's nothing persisted.
+    pub async fn reconcile_networks(&self, host_ifaces: Vec<IfaceInfo>) {
+        if !self.is_enabled() || !self.is_docker_ready().await {
+            return;
+        }
+        let persisted = load_networks().networks;
+        if persisted.is_empty() {
+            return;
+        }
+        let docker = match self.docker() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let docker_names: Vec<String> = docker
+            .list_networks(None::<ListNetworksOptions>)
+            .await
+            .map(|v| v.into_iter().filter_map(|n| n.name).collect())
+            .unwrap_or_default();
+        let iface_names: Vec<String> = host_ifaces.iter().map(|i| i.name.clone()).collect();
+        let plan = reconcile_plan(&persisted, &docker_names, &iface_names);
+        for name in &plan.skipped_missing_parent {
+            warn!("apps: managed network '{name}' parent interface is gone; not recreating");
+        }
+        for name in plan.to_create {
+            if let Some(spec) = persisted.iter().find(|n| n.name == name).cloned()
+                && let Err(e) = self.network_create(spec, &host_ifaces).await
+            {
+                warn!("apps: failed to reconcile network '{name}': {e}");
+            }
+        }
+    }
+
     // ── Enable/Disable ──────────────────────────────────────
 
     pub fn is_enabled(&self) -> bool {
@@ -1661,6 +2188,36 @@ impl AppsService {
             return Err(AppsError::AppAlreadyExists(req.name));
         }
 
+        // Resolve a requested managed network up front. A macvlan/ipvlan
+        // network gives the container its own LAN IP, which is incompatible
+        // with published host ports + reverse-proxy ingress (it has no
+        // presence at 127.0.0.1:<port>) — reject early and skip ingress.
+        let net_spec = match req.network.as_deref().filter(|s| !s.is_empty()) {
+            Some(name) => Some(self.resolve_managed_network(name).await?),
+            None => None,
+        };
+        let net_driver = net_spec
+            .as_ref()
+            .map(|s| s.driver.as_str())
+            .unwrap_or("bridge");
+        let lan_ip_network = matches!(net_driver, "macvlan" | "ipvlan");
+        if let Some(reason) = ingress_incompatible(net_driver, !req.ports.is_empty()) {
+            return Err(invalid_net(reason));
+        }
+        match (&req.static_ip, &net_spec) {
+            (Some(_), None) => return Err(invalid_net("static_ip requires a network")),
+            (Some(ip), Some(spec)) => {
+                if let Some(subnet) = &spec.subnet
+                    && cidr_contains_ip(subnet, ip) != Some(true)
+                {
+                    return Err(invalid_net(format!(
+                        "static_ip '{ip}' is not within network subnet '{subnet}'"
+                    )));
+                }
+            }
+            (None, _) => {}
+        }
+
         // Validate bind mounts before we pull anything. Engine state and the
         // host root are blocked unconditionally; the broader allowlist only
         // applies in safe mode.
@@ -1768,6 +2325,37 @@ impl AppsService {
         if req.allow_unsafe {
             labels.insert(LABEL_APP_UNSAFE.to_string(), "true".to_string());
         }
+        if let Some(spec) = &net_spec {
+            labels.insert(LABEL_APP_NETWORK.to_string(), spec.name.clone());
+            if let Some(ip) = req.static_ip.as_deref().filter(|s| !s.is_empty()) {
+                labels.insert(LABEL_APP_NETWORK_IP.to_string(), ip.to_string());
+            }
+        }
+
+        // Attach to the chosen managed network (with an optional static
+        // IP). Supplying endpoints_config at create time attaches the
+        // container to that network instead of the default bridge.
+        let networking_config = net_spec.as_ref().map(|spec| {
+            let ipam_config = req
+                .static_ip
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|ip| EndpointIpamConfig {
+                    ipv4_address: Some(ip.to_string()),
+                    ..Default::default()
+                });
+            let mut endpoints = HashMap::new();
+            endpoints.insert(
+                spec.name.clone(),
+                EndpointSettings {
+                    ipam_config,
+                    ..Default::default()
+                },
+            );
+            NetworkingConfig {
+                endpoints_config: Some(endpoints),
+            }
+        });
 
         let host_config = HostConfig {
             port_bindings: if port_bindings.is_empty() {
@@ -1795,6 +2383,7 @@ impl AppsService {
             },
             labels: Some(labels),
             host_config: Some(host_config),
+            networking_config,
             ..Default::default()
         };
 
@@ -1870,10 +2459,15 @@ impl AppsService {
         // — picking it would publish a dead /apps/<name>/ route. If
         // the app exposes only UDP, no ingress is created; the user
         // can still reach the container directly on the LAN.
-        if let Some(first_port) = req
-            .ports
-            .iter()
-            .find(|p| p.protocol.eq_ignore_ascii_case("tcp"))
+        // ...but never for a LAN-IP (macvlan/ipvlan) app: it has its own
+        // address and no presence at 127.0.0.1:<port> for Caddy to proxy.
+        if let Some(first_port) = (!lan_ip_network)
+            .then(|| {
+                req.ports
+                    .iter()
+                    .find(|p| p.protocol.eq_ignore_ascii_case("tcp"))
+            })
+            .flatten()
         {
             let host_port = if let Some(hp) = first_port.host_port {
                 hp
@@ -2212,6 +2806,8 @@ impl AppsService {
                         ports: Vec::new(),
                         unsafe_mode,
                         proxy_disabled_reason,
+                        network: None,
+                        network_ip: None,
                     });
                 }
             } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -2262,6 +2858,8 @@ impl AppsService {
                         ports: Vec::new(),
                         unsafe_mode,
                         proxy_disabled_reason,
+                        network: None,
+                        network_ip: None,
                     });
                 }
             }
@@ -2309,6 +2907,21 @@ impl AppsService {
                 .unwrap_or(false);
 
             let proxy_disabled_reason = load_proxy_disabled_reason(&app_name).await;
+            // Managed-network attachment: name from our label, IP from the
+            // live endpoint (real assigned address) falling back to the
+            // static-IP label.
+            let network = labels.and_then(|l| l.get(LABEL_APP_NETWORK)).cloned();
+            let network_ip = network
+                .as_ref()
+                .and_then(|net| {
+                    c.network_settings
+                        .as_ref()
+                        .and_then(|ns| ns.networks.as_ref())
+                        .and_then(|nets| nets.get(net))
+                        .and_then(|ep| ep.ip_address.clone())
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| labels.and_then(|l| l.get(LABEL_APP_NETWORK_IP)).cloned());
             apps.push(App {
                 name: app_name,
                 image: c.image.as_deref().unwrap_or("").to_string(),
@@ -2319,6 +2932,8 @@ impl AppsService {
                 ports: extract_ports(c),
                 unsafe_mode,
                 proxy_disabled_reason,
+                network,
+                network_ip,
             });
         }
 
@@ -2420,6 +3035,8 @@ impl AppsService {
                     ports: all_ports,
                     unsafe_mode,
                     proxy_disabled_reason,
+                    network: None,
+                    network_ip: None,
                 });
             }
         }
@@ -2588,6 +3205,18 @@ impl AppsService {
             .and_then(|l| l.get(LABEL_APP_UNSAFE))
             .map(|v| v == "true")
             .unwrap_or(false);
+        // Managed-network attachment + the *requested* static IP (label,
+        // not the live address) so a reinstall re-applies it verbatim.
+        let network = config
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(LABEL_APP_NETWORK))
+            .cloned();
+        let static_ip = config
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(LABEL_APP_NETWORK_IP))
+            .cloned();
 
         Ok(AppConfig {
             name: name.to_string(),
@@ -2598,6 +3227,8 @@ impl AppsService {
             cpu_limit,
             memory_limit,
             allow_unsafe,
+            network,
+            static_ip,
         })
     }
 
@@ -3844,6 +4475,10 @@ impl AppsService {
                 memory_limit: config.memory_limit,
                 allow_unsafe: config.allow_unsafe,
                 subdomain: existing_subdomain,
+                // Preserve the managed-network attachment + static IP across
+                // pull-and-reinstall (else apps.pull would detach the app).
+                network: config.network,
+                static_ip: config.static_ip,
             };
             return self.install(req).await;
         }
@@ -5459,5 +6094,186 @@ services:
         // 254-char total
         let too_long_total = format!("{}.example.com", "a".repeat(254 - ".example.com".len()));
         assert!(validate_subdomain(&too_long_total).is_err());
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+
+    fn ifaces() -> Vec<IfaceInfo> {
+        vec![
+            IfaceInfo {
+                name: "eth0".into(),
+                kind: "physical".into(),
+                bridge_member: true,
+            },
+            IfaceInfo {
+                name: "br0".into(),
+                kind: "bridge".into(),
+                bridge_member: false,
+            },
+            IfaceInfo {
+                name: "eth1".into(),
+                kind: "physical".into(),
+                bridge_member: false,
+            },
+        ]
+    }
+    fn net(name: &str, driver: &str) -> ManagedNetwork {
+        ManagedNetwork {
+            name: name.into(),
+            driver: driver.into(),
+            parent: None,
+            subnet: None,
+            gateway: None,
+            ip_range: None,
+            vlan: None,
+            host_shim: false,
+        }
+    }
+    fn macvlan_on(parent: &str) -> ManagedNetwork {
+        let mut n = net("x", "macvlan");
+        n.parent = Some(parent.into());
+        n
+    }
+
+    #[test]
+    fn bridge_driver_rejects_parent() {
+        let mut n = net("x", "bridge");
+        n.parent = Some("br0".into());
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+    #[test]
+    fn macvlan_requires_parent() {
+        assert!(validate_network_spec(&net("x", "macvlan"), &ifaces()).is_err());
+    }
+    #[test]
+    fn unknown_parent_rejected() {
+        assert!(validate_network_spec(&macvlan_on("eth9"), &ifaces()).is_err());
+    }
+    #[test]
+    fn bridge_member_parent_rejected() {
+        // eth0 is enslaved to a bridge — must use the bridge instead.
+        assert!(validate_network_spec(&macvlan_on("eth0"), &ifaces()).is_err());
+    }
+    #[test]
+    fn macvlan_on_bridge_ok() {
+        let mut n = macvlan_on("br0");
+        n.subnet = Some("192.168.1.0/24".into());
+        n.gateway = Some("192.168.1.1".into());
+        assert!(validate_network_spec(&n, &ifaces()).is_ok());
+    }
+    #[test]
+    fn macvlan_on_standalone_nic_ok() {
+        assert!(validate_network_spec(&macvlan_on("eth1"), &ifaces()).is_ok());
+    }
+    #[test]
+    fn gateway_outside_subnet_rejected() {
+        let mut n = macvlan_on("br0");
+        n.subnet = Some("192.168.1.0/24".into());
+        n.gateway = Some("10.0.0.1".into());
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+    #[test]
+    fn ip_range_outside_subnet_rejected() {
+        let mut n = macvlan_on("br0");
+        n.subnet = Some("192.168.1.0/24".into());
+        n.ip_range = Some("10.0.0.0/28".into());
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+    #[test]
+    fn vlan_range_enforced() {
+        let mut n = macvlan_on("br0");
+        n.vlan = Some(5000);
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+    #[test]
+    fn bad_subnet_rejected() {
+        let mut n = macvlan_on("br0");
+        n.subnet = Some("not-a-cidr".into());
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+    #[test]
+    fn host_shim_rejected_for_now() {
+        let mut n = macvlan_on("br0");
+        n.host_shim = true;
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+
+    #[test]
+    fn cidr_contains_ip_v4() {
+        assert_eq!(
+            cidr_contains_ip("192.168.1.0/24", "192.168.1.50"),
+            Some(true)
+        );
+        assert_eq!(
+            cidr_contains_ip("192.168.1.0/24", "192.168.2.50"),
+            Some(false)
+        );
+        assert_eq!(cidr_contains_ip("10.0.0.0/8", "10.255.1.2"), Some(true));
+        assert_eq!(cidr_contains_ip("192.168.1.0/24", "nope"), None);
+    }
+    #[test]
+    fn cidr_contains_net_v4() {
+        assert_eq!(
+            cidr_contains_net("192.168.1.0/24", "192.168.1.64/27"),
+            Some(true)
+        );
+        // less-specific inner can't be contained
+        assert_eq!(
+            cidr_contains_net("192.168.1.0/24", "192.168.0.0/23"),
+            Some(false)
+        );
+        assert_eq!(
+            cidr_contains_net("192.168.1.0/24", "10.0.0.0/28"),
+            Some(false)
+        );
+    }
+    #[test]
+    fn cidr_family_mismatch_is_false() {
+        assert_eq!(cidr_contains_ip("192.168.1.0/24", "fd00::1"), Some(false));
+        assert_eq!(cidr_contains_ip("fd00::/64", "fd00::1"), Some(true));
+    }
+
+    #[test]
+    fn ingress_incompatible_only_lan_ip_with_ports() {
+        assert!(ingress_incompatible("macvlan", true).is_some());
+        assert!(ingress_incompatible("ipvlan", true).is_some());
+        assert!(ingress_incompatible("macvlan", false).is_none());
+        assert!(ingress_incompatible("bridge", true).is_none());
+    }
+
+    #[test]
+    fn reconcile_recreates_missing_skips_vanished_parent() {
+        let persisted = vec![macvlan_named("present"), macvlan_named("missing"), {
+            let mut n = macvlan_named("orphan");
+            n.parent = Some("gone0".into());
+            n
+        }];
+        let docker_names = vec!["present".to_string()];
+        let iface_names = vec!["br0".to_string(), "eth1".to_string()];
+        let plan = reconcile_plan(&persisted, &docker_names, &iface_names);
+        assert_eq!(plan.to_create, vec!["missing".to_string()]);
+        assert_eq!(plan.skipped_missing_parent, vec!["orphan".to_string()]);
+    }
+    fn macvlan_named(name: &str) -> ManagedNetwork {
+        let mut n = net(name, "macvlan");
+        n.parent = Some("br0".into());
+        n
+    }
+
+    #[test]
+    fn serde_omits_unset_optionals_and_roundtrips() {
+        let n = net("x", "bridge");
+        let j = serde_json::to_string(&n).unwrap();
+        assert!(!j.contains("\"parent\""));
+        assert!(!j.contains("\"subnet\""));
+        assert_eq!(serde_json::from_str::<ManagedNetwork>(&j).unwrap(), n);
+        // Minimal/legacy JSON loads with defaults.
+        let min: ManagedNetwork =
+            serde_json::from_str(r#"{"name":"y","driver":"macvlan","parent":"br0"}"#).unwrap();
+        assert!(!min.host_shim);
+        assert!(min.subnet.is_none());
     }
 }
