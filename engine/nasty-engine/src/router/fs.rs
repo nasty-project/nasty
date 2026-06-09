@@ -278,6 +278,29 @@ pub(super) async fn try_route(
             },
             Err(r) => r,
         },
+        "fs.fsck.start" => {
+            #[derive(Deserialize)]
+            struct FsckParams {
+                name: String,
+                /// `false` (default) = read-only dry run; `true` = auto-repair.
+                #[serde(default)]
+                repair: bool,
+            }
+            match parse_params::<FsckParams>(req) {
+                Ok(p) => match state.filesystems.fsck_start(&p.name, p.repair).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "fs.fsck.status" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.fsck_status(name).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         "fs.reconcile.status" => match require_str(req, "name") {
             Ok(name) => match state.filesystems.reconcile_status(name).await {
                 Ok(v) => ok(req, v),

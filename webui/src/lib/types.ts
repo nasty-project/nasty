@@ -427,6 +427,21 @@ export interface ReconcileStatus {
 	enabled: boolean;
 }
 
+export type FsckOutcome = 'clean' | 'errors' | 'failed';
+
+export interface FsckStatus {
+	running: boolean;
+	/** Whether the in-flight (or most recent) run was a repair (`-y`) vs dry run (`-n`). */
+	repair: boolean;
+	started_at?: number | null;
+	progress_percent?: number | null;
+	last_run_at?: number | null;
+	last_duration_secs?: number | null;
+	last_repair?: boolean | null;
+	last_outcome?: FsckOutcome | null;
+	last_output?: string | null;
+}
+
 export interface BlockDevice {
 	path: string;
 	size_bytes: number;

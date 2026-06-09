@@ -17,7 +17,7 @@
 	import { confirmDangerous } from '$lib/confirm-dangerous.svelte';
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { summarizeDependents } from '$lib/fs-dependents';
-	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents, TpmBindStatus } from '$lib/types';
+	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, FsckStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents, TpmBindStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -236,6 +236,76 @@
 		return m ? `${h}h${m}m` : `${h}h`;
 	}
 
+	// ── fsck (#440) — offline check, only valid while unmounted ──
+	let fsckStatuses: Record<string, FsckStatus> = $state({});
+	let fsckPoll: ReturnType<typeof setInterval> | null = null;
+	// Which filesystem's fsck output `<pre>` is expanded.
+	let fsckOutputShown = $state<string | null>(null);
+
+	function updateFsckPolling() {
+		const anyRunning = Object.values(fsckStatuses).some((s) => s.running);
+		if (anyRunning && !fsckPoll) {
+			fsckPoll = setInterval(async () => {
+				const updates = await Promise.all(
+					filesystems
+						.filter((fs) => fsckStatuses[fs.name]?.running)
+						.map(async (fs) => {
+							try {
+								const s = await client.call<FsckStatus>('fs.fsck.status', { name: fs.name });
+								return [fs.name, s] as const;
+							} catch { return null; }
+						})
+				);
+				const next = { ...fsckStatuses };
+				for (const r of updates) if (r) next[r[0]] = r[1];
+				fsckStatuses = next;
+				updateFsckPolling();
+			}, 2000);
+		} else if (!anyRunning && fsckPoll) {
+			clearInterval(fsckPoll);
+			fsckPoll = null;
+		}
+	}
+
+	async function startFsckInline(fsName: string, repair: boolean) {
+		if (repair && !await confirm(
+			`Repair "${fsName}" with fsck?`,
+			`This runs "bcachefs fsck -y" and will modify the filesystem to correct errors it finds. Run a dry run first if you're unsure. Make sure you have backups of irreplaceable data.`
+		)) return;
+		const ok = await withToast(
+			() => client.call('fs.fsck.start', { name: fsName, repair }),
+			`fsck ${repair ? '(repair)' : '(dry run)'} started on "${fsName}"`
+		);
+		if (ok === undefined) return;
+		fsckOutputShown = fsName;
+		try {
+			const s = await client.call<FsckStatus>('fs.fsck.status', { name: fsName });
+			fsckStatuses = { ...fsckStatuses, [fsName]: s };
+		} catch { /* poll will catch up */ }
+		updateFsckPolling();
+	}
+
+	function fsckChip(s: FsckStatus | undefined): { label: string; cls: string } {
+		if (!s || (!s.running && !s.last_run_at)) {
+			return { label: 'not checked', cls: 'text-muted-foreground' };
+		}
+		if (s.running) {
+			const since = s.started_at ? humanAgo(s.started_at) : 'now';
+			const verb = s.repair ? 'repairing' : 'checking';
+			const label = s.progress_percent != null
+				? `${verb} ${s.progress_percent.toFixed(s.progress_percent >= 10 ? 0 : 1)}% (${since})`
+				: `${verb} (${since})`;
+			return { label, cls: 'text-blue-400' };
+		}
+		const ago = humanAgo(s.last_run_at!);
+		const dur = s.last_duration_secs ? ` in ${humanDuration(s.last_duration_secs)}` : '';
+		const kind = s.last_repair ? 'repair' : 'check';
+		const outcome = s.last_outcome ?? 'clean';
+		if (outcome === 'clean') return { label: `${kind} ${ago}: clean${dur}`, cls: 'text-green-500' };
+		if (outcome === 'errors') return { label: `${kind} ${ago}: errors${dur}`, cls: 'text-amber-500' };
+		return { label: `${kind} failed ${ago}`, cls: 'text-red-500' };
+	}
+
 	function startEvacuationPolling() {
 		if (evacuationPoll) return;
 		evacuationPoll = setInterval(async () => {
@@ -266,6 +336,7 @@
 		client.offEvent(handleEvent);
 		if (evacuationPoll) { clearInterval(evacuationPoll); evacuationPoll = null; }
 		if (scrubPoll) { clearInterval(scrubPoll); scrubPoll = null; }
+		if (fsckPoll) { clearInterval(fsckPoll); fsckPoll = null; }
 	});
 
 	async function refresh() {
@@ -308,6 +379,21 @@
 		for (const r of scrubResults) if (r) nextScrub[r[0]] = r[1];
 		scrubStatuses = nextScrub;
 		updateScrubPolling();
+
+		// fsck state is only meaningful for unmounted filesystems (an
+		// offline check can't run while mounted), so only fetch for those.
+		const fsckResults = await Promise.all(
+			filesystems.filter((fs) => !fs.mounted).map(async (fs) => {
+				try {
+					const s = await client.call<FsckStatus>('fs.fsck.status', { name: fs.name });
+					return [fs.name, s] as const;
+				} catch { return null; }
+			})
+		);
+		const nextFsck: Record<string, FsckStatus> = {};
+		for (const r of fsckResults) if (r) nextFsck[r[0]] = r[1];
+		fsckStatuses = nextFsck;
+		updateFsckPolling();
 		// Probe host-level TPM availability: re-use any existing
 		// status if we have one (same value across all FSes), or
 		// fire a one-off `fs.tpm.status` against a sentinel name
@@ -1658,6 +1744,12 @@
 							{#if e.reason === 'needs_unlock' && fs.options.encrypted && fs.options.locked}
 								<Button variant="default" size="xs" onclick={() => doUnlock(fs.name)}>Unlock</Button>
 							{/if}
+							{#if e.reason === 'needs_check'}
+								<Button variant="default" size="xs" onclick={() => startFsckInline(fs.name, false)}
+									disabled={fsckStatuses[fs.name]?.running}>
+									{fsckStatuses[fs.name]?.running ? 'Checking…' : 'Run check (fsck)'}
+								</Button>
+							{/if}
 							<button type="button" class="text-xs text-muted-foreground underline underline-offset-2"
 								onclick={() => rawErrShown = rawErrShown === fs.name ? null : fs.name}>
 								{rawErrShown === fs.name ? 'Hide bcachefs output' : 'Show bcachefs output'}
@@ -1666,6 +1758,48 @@
 						</div>
 						{#if rawErrShown === fs.name}
 							<pre class="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-[0.7rem] font-mono">{e.raw}</pre>
+						{/if}
+					</div>
+				{/if}
+
+				{#if !fs.mounted}
+					{@const fsck = fsckStatuses[fs.name]}
+					{@const locked = fs.options.encrypted && fs.options.locked}
+					<div class="mt-3 rounded-md border border-border p-3">
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="text-xs font-medium">Filesystem check (fsck)</span>
+							<span class="text-xs {fsckChip(fsck).cls}">· {fsckChip(fsck).label}</span>
+							{#if fsck?.running && fsck.progress_percent != null}
+								<div class="ml-1 h-1.5 w-24 overflow-hidden rounded-full bg-secondary">
+									<div class="h-full rounded-full bg-blue-400" style="width: {fsck.progress_percent}%"></div>
+								</div>
+							{/if}
+							<div class="ml-auto flex gap-2">
+								<Button variant="secondary" size="xs"
+									onclick={() => startFsckInline(fs.name, false)}
+									disabled={fsck?.running || locked}
+									title={locked ? 'Unlock the filesystem before checking it.' : 'Read-only check (bcachefs fsck -n) — reports problems without changing anything.'}>
+									{fsck?.running && !fsck.repair ? 'Checking…' : 'Dry run'}
+								</Button>
+								<Button variant="secondary" size="xs"
+									onclick={() => startFsckInline(fs.name, true)}
+									disabled={fsck?.running || locked}
+									title={locked ? 'Unlock the filesystem before checking it.' : 'Check and repair (bcachefs fsck -y) — modifies the filesystem to correct errors.'}>
+									{fsck?.running && fsck.repair ? 'Repairing…' : 'Run & repair'}
+								</Button>
+							</div>
+						</div>
+						{#if locked}
+							<p class="mt-1 text-[0.65rem] text-muted-foreground">Encrypted &amp; locked — unlock before running a check.</p>
+						{/if}
+						{#if fsck?.last_output}
+							<button type="button" class="mt-2 text-xs text-muted-foreground underline underline-offset-2"
+								onclick={() => fsckOutputShown = fsckOutputShown === fs.name ? null : fs.name}>
+								{fsckOutputShown === fs.name ? 'Hide output' : 'Show output'}
+							</button>
+							{#if fsckOutputShown === fs.name}
+								<pre class="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-[0.7rem] font-mono">{fsck.last_output}</pre>
+							{/if}
 						{/if}
 					</div>
 				{/if}
