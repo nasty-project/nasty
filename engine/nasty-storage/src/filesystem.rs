@@ -15,6 +15,7 @@ const NASTY_MOUNT_BASE: &str = "/fs";
 const FS_STATE_PATH: &str = "/var/lib/nasty/fs-state.json";
 const SCRUB_STATE_PATH: &str = "/var/lib/nasty/scrub-state.json";
 const MOUNT_STATE_PATH: &str = "/var/lib/nasty/mount-state.json";
+const FSCK_STATE_PATH: &str = "/var/lib/nasty/fsck-state.json";
 /// Trim the captured scrub output to this many trailing bytes before
 /// persisting. Long scrubs print per-shard counters every few seconds —
 /// keeping the full transcript would bloat the state file without
@@ -625,6 +626,56 @@ pub struct ReconcileStatus {
     pub enabled: bool,
 }
 
+/// Outcome of an offline `bcachefs fsck` run. Mirrors [`ScrubOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FsckOutcome {
+    /// Exited 0 with no error markers — the filesystem is consistent.
+    Clean,
+    /// Errors were reported (a dry run found problems, or a repair run
+    /// couldn't fix everything). The captured output carries detail.
+    Errors,
+    /// Spawn failure, abnormal exit, or the engine restarted mid-check.
+    Failed,
+}
+
+/// fsck operation status — live state plus the last-completed-run
+/// summary. Persisted to `/var/lib/nasty/fsck-state.json` so the
+/// operator's view survives engine restarts, exactly like scrub.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct FsckStatus {
+    /// Whether an fsck is currently in progress.
+    pub running: bool,
+    /// Whether the in-flight (or most recent) run was a repair (`-y`)
+    /// vs a read-only dry run (`-n`).
+    #[serde(default)]
+    pub repair: bool,
+    /// Unix seconds when the current run started. `Some` while running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    /// 0-100 progress of the in-flight run, when bcachefs emits a
+    /// parseable `XX%` token. Not persisted (a restart shouldn't surface
+    /// a stale percent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<f32>,
+    /// Unix seconds when the most recent completed run finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<i64>,
+    /// Duration of the most recent completed run, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_duration_secs: Option<u64>,
+    /// Whether the most recent completed run was a repair vs a dry run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_repair: Option<bool>,
+    /// Outcome of the most recent completed run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_outcome: Option<FsckOutcome>,
+    /// Captured stdout+stderr from the most recent completed run,
+    /// truncated to the last `SCRUB_OUTPUT_KEEP_BYTES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output: Option<String>,
+}
+
 /// Why a filesystem's most recent mount attempt failed, classified from
 /// the bcachefs mount stderr plus the set of expected-but-absent member
 /// devices. Drives the WebUI's mount-failure banner and its suggested
@@ -691,6 +742,7 @@ const FS_LIST_CACHE_TTL: Duration = Duration::from_secs(3);
 type ListCache = Arc<Mutex<Option<(Instant, Vec<Filesystem>)>>>;
 type ScrubStateMap = Arc<Mutex<HashMap<String, ScrubStatus>>>;
 type MountStateMap = Arc<Mutex<HashMap<String, MountFailure>>>;
+type FsckStateMap = Arc<Mutex<HashMap<String, FsckStatus>>>;
 
 #[derive(Clone)]
 pub struct FilesystemService {
@@ -707,6 +759,9 @@ pub struct FilesystemService {
     /// `mount_with_opts` on failure and cleared on success; read by
     /// `list()` to surface `Filesystem.last_mount_error`.
     mount_state: MountStateMap,
+    /// Per-filesystem fsck state, loaded from `FSCK_STATE_PATH`. Same
+    /// shape as `scrub_state`: live "running" + last-run summary.
+    fsck_state: FsckStateMap,
 }
 
 impl Default for FilesystemService {
@@ -747,10 +802,23 @@ impl FilesystemService {
                 HashMap::new()
             }
         };
+        // ...and for the fsck history.
+        let fsck = match std::fs::read_to_string(FSCK_STATE_PATH) {
+            Ok(s) => serde_json::from_str::<HashMap<String, FsckStatus>>(&s).unwrap_or_else(|e| {
+                warn!("parse {FSCK_STATE_PATH} failed: {e} — starting with empty fsck history");
+                HashMap::new()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => {
+                warn!("read {FSCK_STATE_PATH} failed: {e} — starting with empty fsck history");
+                HashMap::new()
+            }
+        };
         Self {
             list_cache: Arc::new(Mutex::new(None)),
             scrub_state: Arc::new(Mutex::new(scrub)),
             mount_state: Arc::new(Mutex::new(mount)),
+            fsck_state: Arc::new(Mutex::new(fsck)),
         }
     }
 
@@ -2754,6 +2822,148 @@ impl FilesystemService {
         Ok(status)
     }
 
+    /// Start an offline `bcachefs fsck` on a filesystem. `repair=false`
+    /// is a read-only dry run (`-n`); `repair=true` auto-repairs (`-y`).
+    /// Refuses while mounted — offline fsck needs exclusive access, and
+    /// the won't-mount case (#451) is already unmounted. Runs detached
+    /// and streams output, mirroring `scrub_start`.
+    pub async fn fsck_start(&self, name: &str, repair: bool) -> Result<(), FilesystemError> {
+        let fs = self.get(name).await?;
+        if fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "unmount the filesystem before running fsck (an offline check needs exclusive \
+                 access to the member devices)"
+                    .to_string(),
+            ));
+        }
+        let devices: Vec<String> = fs.devices.iter().map(|d| d.path.clone()).collect();
+        if devices.is_empty() {
+            return Err(FilesystemError::CommandFailed(
+                "no member devices found to check".to_string(),
+            ));
+        }
+        // Refuse a second concurrent run.
+        if self
+            .fsck_state
+            .lock()
+            .await
+            .get(name)
+            .is_some_and(|s| s.running)
+        {
+            return Err(FilesystemError::CommandFailed(
+                "an fsck is already running on this filesystem".to_string(),
+            ));
+        }
+
+        let fs_name = name.to_string();
+        let now = unix_now_secs();
+        {
+            let mut state = self.fsck_state.lock().await;
+            let entry = state.entry(fs_name.clone()).or_default();
+            entry.running = true;
+            entry.repair = repair;
+            entry.started_at = Some(now);
+            entry.progress_percent = None;
+        }
+        persist_fsck_state(&self.fsck_state).await;
+
+        let store = self.fsck_state.clone();
+        info!(
+            "Starting fsck ({}) on filesystem '{name}'",
+            if repair { "repair" } else { "dry run" }
+        );
+        tokio::spawn(async move {
+            let (outcome, captured) =
+                stream_fsck_and_collect(&devices, &fs_name, &store, repair).await;
+            let end = unix_now_secs();
+            let duration = (end - now).max(0) as u64;
+            match outcome {
+                FsckOutcome::Clean => info!("fsck on '{fs_name}' completed in {duration}s: clean"),
+                FsckOutcome::Errors => warn!(
+                    "fsck on '{fs_name}' completed in {duration}s: errors reported (see WebUI for full output)"
+                ),
+                FsckOutcome::Failed => warn!("fsck on '{fs_name}' failed after {duration}s"),
+            }
+            let truncated = truncate_tail(&captured, SCRUB_OUTPUT_KEEP_BYTES);
+            {
+                let mut state = store.lock().await;
+                let entry = state.entry(fs_name.clone()).or_default();
+                entry.running = false;
+                entry.started_at = None;
+                entry.progress_percent = None;
+                entry.last_run_at = Some(end);
+                entry.last_duration_secs = Some(duration);
+                entry.last_repair = Some(repair);
+                entry.last_outcome = Some(outcome);
+                entry.last_output = Some(truncated);
+            }
+            persist_fsck_state(&store).await;
+        });
+
+        Ok(())
+    }
+
+    /// Get fsck status for a filesystem, with a `pgrep` cross-check that
+    /// records an engine-restart-mid-fsck as `Failed` instead of leaving
+    /// it stuck "running" (mirrors `scrub_status`).
+    pub async fn fsck_status(&self, name: &str) -> Result<FsckStatus, FilesystemError> {
+        // Validate the FS exists; history is useful regardless of mount
+        // state, so don't require it mounted.
+        let _ = self.get(name).await?;
+
+        let mut status = self
+            .fsck_state
+            .lock()
+            .await
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+
+        if status.running {
+            // fsck runs against the member devices (the FS is unmounted),
+            // so the cross-check matches on the filesystem name in the
+            // command line isn't reliable; match the bcachefs fsck process
+            // against any of this FS's device paths instead.
+            let fs = self.get(name).await?;
+            let devices: Vec<String> = fs.devices.iter().map(|d| d.path.clone()).collect();
+            let alive = cmd::run_ok("pgrep", &["-fa", "bcachefs fsck"])
+                .await
+                .map(|out| {
+                    out.lines()
+                        .any(|l| devices.iter().any(|d| l.contains(d.as_str())))
+                })
+                .unwrap_or(false);
+            if !alive {
+                let end = unix_now_secs();
+                let duration = status
+                    .started_at
+                    .map(|s| (end - s).max(0) as u64)
+                    .unwrap_or(0);
+                let mut state = self.fsck_state.lock().await;
+                let entry = state
+                    .entry(name.to_string())
+                    .or_insert_with(|| status.clone());
+                entry.running = false;
+                entry.started_at = None;
+                entry.progress_percent = None;
+                entry.last_run_at = Some(end);
+                entry.last_duration_secs = Some(duration);
+                entry.last_repair = Some(status.repair);
+                entry.last_outcome = Some(FsckOutcome::Failed);
+                entry.last_output = Some(
+                    "engine restarted while fsck was running — the bcachefs child was lost; \
+                     start the check again."
+                        .into(),
+                );
+                status = entry.clone();
+                drop(state);
+                persist_fsck_state(&self.fsck_state).await;
+            }
+        }
+
+        Ok(status)
+    }
+
     /// Get reconcile (background work) status for a filesystem.
     /// `bcachefs reconcile status <mountpoint>`
     pub async fn reconcile_status(&self, name: &str) -> Result<ReconcileStatus, FilesystemError> {
@@ -3646,6 +3856,20 @@ async fn persist_mount_state(store: &MountStateMap) {
     }
 }
 
+async fn persist_fsck_state(store: &FsckStateMap) {
+    let snapshot = store.lock().await.clone();
+    let json = match serde_json::to_string_pretty(&snapshot) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("serialize fsck state failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = tokio::fs::write(FSCK_STATE_PATH, json).await {
+        warn!("write {FSCK_STATE_PATH} failed: {e}");
+    }
+}
+
 /// Pull `key:`'s first value token out of a `show-super` device block.
 /// Mirrors the local extractor in `read_fs_devices` (kept separate so
 /// `parse_members` doesn't depend on that function's internals).
@@ -4293,6 +4517,193 @@ async fn process_chunk(
     }
 
     // 2. Update the live progress percent (most recent token wins).
+    line_pending.push_str(&text);
+    while let Some(boundary) = line_pending.find(['\n', '\r']) {
+        let line: String = line_pending.drain(..=boundary).collect();
+        let line = line.trim_end_matches(['\n', '\r']);
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(pct) = parse_percent(&strip_ansi(line)) {
+            let mut state = store.lock().await;
+            if let Some(entry) = state.get_mut(fs_name) {
+                entry.progress_percent = Some(pct);
+            }
+        }
+    }
+}
+
+/// Classify an fsck run from its exit status and captured output.
+/// Pure + unit-tested. A non-zero exit (errors found, possibly
+/// corrected) or error markers in the output ⇒ `Errors`; the captured
+/// transcript carries whether they were corrected. Spawn/wait failures
+/// are mapped to `Failed` by the caller.
+fn classify_fsck(success: bool, output: &str) -> FsckOutcome {
+    if !success || combined_indicates_errors(output) {
+        FsckOutcome::Errors
+    } else {
+        FsckOutcome::Clean
+    }
+}
+
+/// Run an offline `bcachefs fsck` on `devices`, streaming output into a
+/// reconstructed terminal frame and surfacing live progress percent.
+/// Mirrors [`stream_scrub_and_collect`]; reuses the same `ScrubScreen`
+/// frame model and percent parser.
+async fn stream_fsck_and_collect(
+    devices: &[String],
+    fs_name: &str,
+    store: &FsckStateMap,
+    repair: bool,
+) -> (FsckOutcome, String) {
+    use tokio::io::AsyncReadExt;
+    use tokio::process::Command;
+
+    // `-n` = dry run (report only, change nothing); `-y` = assume yes
+    // (auto-repair). `-f` forces a full check even if the superblock
+    // looks clean — without it bcachefs may skip a clean-marked fs.
+    let mode = if repair { "-y" } else { "-n" };
+    let mut args: Vec<&str> = vec!["fsck", mode, "-f"];
+    args.extend(devices.iter().map(|d| d.as_str()));
+
+    let mut child = match Command::new("bcachefs")
+        .args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                FsckOutcome::Failed,
+                format!("failed to spawn bcachefs fsck: {e}"),
+            );
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let store_for_progress = store.clone();
+    let fs_name_for_progress = fs_name.to_string();
+    let capture = std::sync::Arc::new(std::sync::Mutex::new(ScrubScreen::default()));
+    let capture_for_task = capture.clone();
+
+    let drain = async move |handle: Option<tokio::process::ChildStdout>,
+                            err_handle: Option<tokio::process::ChildStderr>| {
+        let store = store_for_progress;
+        let fs_name = fs_name_for_progress;
+        let cap = capture_for_task;
+        let mut stdout_buf = [0u8; 1024];
+        let mut stderr_buf = [0u8; 1024];
+        let mut stdout_line = String::new();
+        let mut stderr_line = String::new();
+        let mut stdout_screen = String::new();
+        let mut stderr_screen = String::new();
+        let mut stdout = handle;
+        let mut stderr = err_handle;
+
+        loop {
+            tokio::select! {
+                read = async {
+                    match stdout.as_mut() {
+                        Some(s) => s.read(&mut stdout_buf).await,
+                        None => Ok(0),
+                    }
+                }, if stdout.is_some() => {
+                    match read {
+                        Ok(0) => { stdout = None; }
+                        Ok(n) => process_fsck_chunk(
+                            &stdout_buf[..n],
+                            &mut stdout_line,
+                            &mut stdout_screen,
+                            &cap,
+                            &store,
+                            &fs_name,
+                        ).await,
+                        Err(_) => { stdout = None; }
+                    }
+                }
+                read = async {
+                    match stderr.as_mut() {
+                        Some(s) => s.read(&mut stderr_buf).await,
+                        None => Ok(0),
+                    }
+                }, if stderr.is_some() => {
+                    match read {
+                        Ok(0) => { stderr = None; }
+                        Ok(n) => process_fsck_chunk(
+                            &stderr_buf[..n],
+                            &mut stderr_line,
+                            &mut stderr_screen,
+                            &cap,
+                            &store,
+                            &fs_name,
+                        ).await,
+                        Err(_) => { stderr = None; }
+                    }
+                }
+                else => break,
+            }
+        }
+        for (line_pending, screen_pending) in [
+            (&mut stdout_line, &mut stdout_screen),
+            (&mut stderr_line, &mut stderr_screen),
+        ] {
+            if !screen_pending.is_empty()
+                && let Ok(mut screen) = cap.lock()
+            {
+                screen.feed(screen_pending);
+            }
+            if !line_pending.is_empty()
+                && let Some(pct) = parse_percent(&strip_ansi(line_pending))
+            {
+                let mut state = store.lock().await;
+                if let Some(entry) = state.get_mut(&fs_name) {
+                    entry.progress_percent = Some(pct);
+                }
+            }
+        }
+    };
+
+    let drain_handle = tokio::spawn(drain(stdout, stderr));
+
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = drain_handle.await;
+            return (
+                FsckOutcome::Failed,
+                format!("bcachefs fsck child wait failed: {e}"),
+            );
+        }
+    };
+    let _ = drain_handle.await;
+
+    let captured = capture.lock().map(|g| g.render()).unwrap_or_default();
+    (classify_fsck(status.success(), &captured), captured)
+}
+
+/// fsck analogue of [`process_chunk`]: feed raw bytes to the frame model
+/// and update the live percent on the [`FsckStateMap`].
+async fn process_fsck_chunk(
+    chunk: &[u8],
+    line_pending: &mut String,
+    screen_pending: &mut String,
+    cap: &std::sync::Arc<std::sync::Mutex<ScrubScreen>>,
+    store: &FsckStateMap,
+    fs_name: &str,
+) {
+    let text = String::from_utf8_lossy(chunk);
+    {
+        let mut combined = std::mem::take(screen_pending);
+        combined.push_str(&text);
+        if let Ok(mut screen) = cap.lock() {
+            *screen_pending = screen.feed(&combined).to_string();
+        } else {
+            *screen_pending = combined;
+        }
+    }
     line_pending.push_str(&text);
     while let Some(boundary) = line_pending.find(['\n', '\r']) {
         let line: String = line_pending.drain(..=boundary).collect();
@@ -5082,5 +5493,27 @@ Device 1:\t/dev/sdb
             join_human(&["a".into(), "b".into(), "c".into()]),
             "a, b, and c"
         );
+    }
+
+    // ── fsck outcome classification (#440) ────────────────────
+
+    #[test]
+    fn fsck_clean_on_zero_exit_and_no_errors() {
+        let out = "checking allocations\nchecking extents\ndone\n";
+        assert_eq!(classify_fsck(true, out), FsckOutcome::Clean);
+    }
+
+    #[test]
+    fn fsck_nonzero_exit_is_errors() {
+        // bcachefs fsck exits non-zero when it found (and/or corrected)
+        // problems; the captured transcript carries the detail.
+        let out = "checking extents\n";
+        assert_eq!(classify_fsck(false, out), FsckOutcome::Errors);
+    }
+
+    #[test]
+    fn fsck_error_markers_flag_errors_even_on_zero_exit() {
+        let out = "checking extents\nerrors: 2\n";
+        assert_eq!(classify_fsck(true, out), FsckOutcome::Errors);
     }
 }

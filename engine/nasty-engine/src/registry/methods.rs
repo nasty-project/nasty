@@ -35,7 +35,7 @@ use nasty_sharing::smb::{
 use nasty_storage::filesystem::{
     BlockDevice, CreateFilesystemRequest, DestroyFilesystemRequest, DeviceActionRequest,
     DeviceAddRequest, DeviceSetLabelRequest, DeviceSetStateRequest, Filesystem, FsUsage,
-    ReconcileStatus, ScrubStatus, TpmBindStatus, UpdateFilesystemOptionsRequest,
+    FsckStatus, ReconcileStatus, ScrubStatus, TpmBindStatus, UpdateFilesystemOptionsRequest,
 };
 use nasty_storage::subvolume::{
     CloneSnapshotRequest, CloneSubvolumeRequest, CreateSnapshotRequest, CreateSubvolumeRequest,
@@ -541,6 +541,21 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Any,
                     params: MethodParams::AdHoc(ad_hoc_one("name", "Filesystem name.")),
                     result: Some(gen_schema::<ScrubStatus>(generator)),
+                },
+                Method {
+                    name: "fs.fsck.start",
+                    desc: "Start an offline bcachefs fsck on an unmounted filesystem \
+                           (dry run by default; set repair=true to auto-repair).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Filesystem name.")),
+                    result: None,
+                },
+                Method {
+                    name: "fs.fsck.status",
+                    desc: "Return current fsck status.",
+                    role: MethodRole::Any,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Filesystem name.")),
+                    result: Some(gen_schema::<FsckStatus>(generator)),
                 },
                 Method {
                     name: "fs.reconcile.status",
