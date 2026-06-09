@@ -726,6 +726,114 @@ pub(crate) async fn system_network_ifaces(state: &AppState) -> Vec<nasty_apps::I
         .collect()
 }
 
+/// Add a host-side macvlan shim for a macvlan Docker network (#448) so the
+/// host can reach containers on it. Threads a `MacvlanConfig` into the
+/// operator's `NetworkConfig` and applies it via the existing network rail
+/// (which rolls back risky changes; a non-mgmt-parent shim is classified
+/// safe so it applies without a confirm timer). Refuses when the parent
+/// already carries a host IP in the container subnet (route conflict).
+pub(crate) async fn add_macvlan_shim(
+    state: &AppState,
+    spec: &nasty_apps::ManagedNetwork,
+    mgmt: Option<&str>,
+) -> Result<(), String> {
+    use nasty_system::network::{IpConfig, IpMethod, MacvlanConfig, UpdateRequest};
+    let parent = spec
+        .parent
+        .as_deref()
+        .ok_or("macvlan network has no parent")?;
+    let subnet = spec
+        .subnet
+        .as_deref()
+        .ok_or("host shim requires the network to have a subnet")?;
+    let shim_ip = spec
+        .shim_ip
+        .as_deref()
+        .ok_or("host shim requires a shim_ip")?;
+    // The kernel parent matches Docker's (parent.<vlan> when tagged).
+    let eff_parent = match spec.vlan {
+        Some(v) => format!("{parent}.{v}"),
+        None => parent.to_string(),
+    };
+    let shim_name = format!("shim-{}", spec.name);
+    if shim_name.len() > 15 {
+        return Err(format!(
+            "network name too long for a shim interface ('{shim_name}' exceeds 15 chars)"
+        ));
+    }
+
+    let st = state.network.get(mgmt.map(|s| s.to_string())).await;
+    // Route-conflict guard: a host already on the container subnet via the
+    // parent would get a second on-link route through the shim.
+    if let Some(iface) = st.interfaces.iter().find(|i| i.name == eff_parent) {
+        for a in &iface.ipv4_addresses {
+            let ip = a.split('/').next().unwrap_or(a);
+            if nasty_apps::cidr_contains_ip(subnet, ip) == Some(true) {
+                return Err(format!(
+                    "parent '{eff_parent}' already has an address ({a}) in {subnet}; a host shim \
+                     would create a conflicting route — give the macvlan network a dedicated subnet"
+                ));
+            }
+        }
+    }
+
+    let route = spec.ip_range.clone().unwrap_or_else(|| subnet.to_string());
+    let mut config = st.config.clone();
+    config.macvlans.retain(|m| m.name != shim_name);
+    config.macvlans.push(MacvlanConfig {
+        name: shim_name.clone(),
+        parent: eff_parent,
+        mode: "bridge".to_string(),
+        ipv4: IpConfig {
+            method: IpMethod::Static,
+            addresses: vec![shim_ip.to_string()],
+            gateway: None,
+        },
+        mtu: None,
+        routes: vec![route],
+    });
+    let resp = state
+        .network
+        .update(
+            UpdateRequest {
+                config,
+                confirm_within_secs: Some(0),
+            },
+            mgmt.map(|s| s.to_string()),
+        )
+        .await?;
+    if !resp.apply_errors.is_empty() {
+        return Err(format!(
+            "network apply reported errors creating the shim: {:?}",
+            resp.apply_errors
+        ));
+    }
+    Ok(())
+}
+
+/// Remove the host macvlan shim for a Docker network (best-effort).
+pub(crate) async fn remove_macvlan_shim(state: &AppState, net_name: &str) -> Result<(), String> {
+    use nasty_system::network::UpdateRequest;
+    let shim_name = format!("shim-{net_name}");
+    let st = state.network.get(None).await;
+    if !st.config.macvlans.iter().any(|m| m.name == shim_name) {
+        return Ok(()); // nothing to remove
+    }
+    let mut config = st.config.clone();
+    config.macvlans.retain(|m| m.name != shim_name);
+    state
+        .network
+        .update(
+            UpdateRequest {
+                config,
+                confirm_within_secs: Some(0),
+            },
+            None,
+        )
+        .await
+        .map(|_| ())
+}
+
 async fn run_bootstrap_system_flake_cli(args: &[String]) -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(

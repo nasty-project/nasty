@@ -335,8 +335,13 @@
 	let ncGateway = $state('');
 	let ncIpRange = $state('');
 	let ncVlan = $state('');
+	let ncHostShim = $state(false);
+	let ncShimIp = $state('');
 	let ncError = $state('');
 	let ncSaving = $state(false);
+	/** True when the chosen parent is the management interface — a host
+	 * shim there risks lockout, so the engine refuses it and we disable it. */
+	let ncParentIsMgmt = $derived(!!netState && netState.mgmt_iface === ncParent);
 	/** Actionable hint surfaced by the deploy stream (#429): the compose
 	 * referenced a host bridge — offer to create a macvlan on it + retry. */
 	let deployAction = $state<{ action: string; bridge: string } | null>(null);
@@ -377,6 +382,8 @@
 		ncGateway = '';
 		ncIpRange = '';
 		ncVlan = '';
+		ncHostShim = false;
+		ncShimIp = '';
 		ncError = '';
 		try {
 			netState = await client.call<NetworkState>('system.network.get');
@@ -397,6 +404,8 @@
 			gateway: ncGateway.trim() || null,
 			ip_range: ncIpRange.trim() || null,
 			vlan: ncVlan.trim() ? parseInt(ncVlan) : null,
+			host_shim: ncDriver === 'macvlan' && ncHostShim && !ncParentIsMgmt,
+			shim_ip: ncDriver === 'macvlan' && ncHostShim ? ncShimIp.trim() || null : null,
 		};
 		try {
 			await client.call('apps.networks.create', spec);
@@ -2518,11 +2527,30 @@
 						<Input id="nc-range" bind:value={ncIpRange} placeholder="192.168.1.64/27" class="mt-1" />
 					</div>
 				</div>
+				{#if ncDriver === 'macvlan'}
+					<!-- Host↔container shim (#448): advanced, mutates host networking. -->
+					<div class="rounded-md border border-border p-2">
+						<label class="flex items-start gap-2 text-xs {ncParentIsMgmt ? 'opacity-50' : 'cursor-pointer'}">
+							<input type="checkbox" class="mt-0.5" bind:checked={ncHostShim} disabled={ncParentIsMgmt} />
+							<span>
+								<span class="font-medium">Host shim</span> — let this host reach containers on this network.
+								<span class="block text-[0.65rem] text-amber-300">Advanced: adds a macvlan interface + route on the host. May affect host networking.{#if ncParentIsMgmt} Disabled — parent is the management interface.{/if}</span>
+							</span>
+						</label>
+						{#if ncHostShim && !ncParentIsMgmt}
+							<div class="mt-2">
+								<Label for="nc-shim-ip">Host shim IP</Label>
+								<Input id="nc-shim-ip" bind:value={ncShimIp} placeholder="192.168.1.2/24" class="mt-1" />
+								<p class="mt-1 text-[0.65rem] text-muted-foreground">The host's own address on the container subnet (inside the subnet, outside the IP range/gateway).</p>
+							</div>
+						{/if}
+					</div>
+				{/if}
 				{#if ncError}<p class="text-xs text-red-500">{ncError}</p>{/if}
 			</div>
 			<div class="mt-4 flex justify-end gap-2">
 				<Button variant="secondary" size="sm" onclick={() => showNetCreate = false}>Cancel</Button>
-				<Button size="sm" onclick={createNetwork} disabled={ncSaving || !ncName.trim() || (ncDriver !== 'bridge' && !ncParent)}>
+				<Button size="sm" onclick={createNetwork} disabled={ncSaving || !ncName.trim() || (ncDriver !== 'bridge' && !ncParent) || (ncHostShim && !ncParentIsMgmt && !ncShimIp.trim())}>
 					{ncSaving ? 'Creating…' : 'Create'}
 				</Button>
 			</div>

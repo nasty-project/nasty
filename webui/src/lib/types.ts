@@ -1505,6 +1505,8 @@ export interface ManagedNetwork {
 	ip_range?: string | null;
 	vlan?: number | null;
 	host_shim?: boolean;
+	/** Host's address on the container subnet (CIDR) — required with host_shim. */
+	shim_ip?: string | null;
 }
 
 /** apps.networks.list row: spec + live-state annotations. */
