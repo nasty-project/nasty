@@ -5,7 +5,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
-	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, AppStats, MappedPort, PruneResult, SubPathRecipe } from '$lib/types';
+	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, AppStats, MappedPort, PruneResult, SubPathRecipe, NetworkSummary, ManagedNetwork, NetworkState } from '$lib/types';
 	import { formatBytes } from '$lib/format';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -32,6 +32,7 @@
 			deployDone = false;
 			deployError = '';
 			deployLog = [];
+			deployAction = null;
 
 			const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 			const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/apps/deploy`);
@@ -67,6 +68,11 @@
 						deploying = false;
 						resolve(true);
 						ws.close();
+					} else if (msg.type === 'action' && msg.action === 'create_macvlan' && msg.bridge) {
+						// Structured hint (#429): the referenced external network
+						// is a host bridge. Surface a "create macvlan + retry" button.
+						deployAction = { action: msg.action, bridge: msg.bridge };
+						deployLog = [...deployLog, msg.data];
 					}
 				} catch { /* ignore */ }
 			};
@@ -303,6 +309,113 @@
 	let newAllowUnsafe = $state(false);
 	/** Same flag, separate state for the compose dialog. */
 	let composeAllowUnsafe = $state(false);
+
+	// ── Docker networks (#435 / #438) ─────────────────────────
+	/** Managed-network attachment in the simple-app install/edit form. */
+	let newNetwork = $state('');
+	let newStaticIp = $state('');
+	/** All NASty-manageable Docker networks (apps.networks.list). */
+	let appNetworks = $state<NetworkSummary[]>([]);
+	/** Host interfaces/bridges for the create-network parent picker. */
+	let netState = $state<NetworkState | null>(null);
+	/** True when the chosen install network gives the app its own LAN IP
+	 * (macvlan/ipvlan) — published host ports + reverse-proxy ingress don't
+	 * apply, so the form hides those sections to match the engine. */
+	let installLanIp = $derived(
+		appNetworks.some(
+			(n) => n.name === newNetwork && (n.driver === 'macvlan' || n.driver === 'ipvlan'),
+		),
+	);
+	// Create-network dialog state.
+	let showNetCreate = $state(false);
+	let ncName = $state('');
+	let ncDriver = $state('macvlan');
+	let ncParent = $state('');
+	let ncSubnet = $state('');
+	let ncGateway = $state('');
+	let ncIpRange = $state('');
+	let ncVlan = $state('');
+	let ncError = $state('');
+	let ncSaving = $state(false);
+	/** Actionable hint surfaced by the deploy stream (#429): the compose
+	 * referenced a host bridge — offer to create a macvlan on it + retry. */
+	let deployAction = $state<{ action: string; bridge: string } | null>(null);
+
+	async function loadAppNetworks() {
+		try {
+			appNetworks = await client.call<NetworkSummary[]>('apps.networks.list');
+		} catch {
+			appNetworks = [];
+		}
+	}
+
+	/** Parent candidates for macvlan/ipvlan: bridges (preferred) + standalone
+	 * NICs, each labeled with its role. Bridge-member NICs are excluded — the
+	 * bridge itself is the correct parent (engine rejects otherwise). */
+	let parentChoices = $derived.by(() => {
+		const out: { name: string; label: string }[] = [];
+		if (!netState) return out;
+		const members = new Set(netState.config.bridges.flatMap((b) => b.members));
+		for (const b of netState.config.bridges) {
+			const role = b.members.length ? b.members.join(', ') : 'host-internal';
+			const mgmt = netState.mgmt_iface === b.name ? '; management' : '';
+			out.push({ name: b.name, label: `${b.name} — bridge (${role}${mgmt})` });
+		}
+		for (const i of netState.interfaces) {
+			if (members.has(i.name) || i.kind === 'bridge' || i.kind === 'virtual') continue;
+			const mgmt = netState.mgmt_iface === i.name ? ' — management' : '';
+			out.push({ name: i.name, label: `${i.name} — ${i.kind}${mgmt}` });
+		}
+		return out;
+	});
+
+	async function openNetCreate(prefillBridge?: string) {
+		ncName = prefillBridge ?? '';
+		ncDriver = 'macvlan';
+		ncParent = prefillBridge ?? '';
+		ncSubnet = '';
+		ncGateway = '';
+		ncIpRange = '';
+		ncVlan = '';
+		ncError = '';
+		try {
+			netState = await client.call<NetworkState>('system.network.get');
+		} catch {
+			netState = null;
+		}
+		showNetCreate = true;
+	}
+
+	async function createNetwork() {
+		ncSaving = true;
+		ncError = '';
+		const spec: ManagedNetwork = {
+			name: ncName.trim(),
+			driver: ncDriver,
+			parent: ncDriver === 'bridge' ? null : ncParent || null,
+			subnet: ncSubnet.trim() || null,
+			gateway: ncGateway.trim() || null,
+			ip_range: ncIpRange.trim() || null,
+			vlan: ncVlan.trim() ? parseInt(ncVlan) : null,
+		};
+		try {
+			await client.call('apps.networks.create', spec);
+			showNetCreate = false;
+			await loadAppNetworks();
+		} catch (e) {
+			ncError = e instanceof Error ? e.message : String(e);
+		} finally {
+			ncSaving = false;
+		}
+	}
+
+	async function removeNetwork(name: string) {
+		const r = await withToast(
+			() => client.call('apps.networks.remove', { name }),
+			'Network removed',
+		);
+		if (r !== undefined) await loadAppNetworks();
+	}
 	/** Has the operator clicked Install / Deploy on this form at least
 	 * once? Gates the amber required-field decoration so a fresh form
 	 * opens clean rather than lit up with "required" everywhere. Set
@@ -791,6 +904,7 @@
 			apps = await client.call<App[]>('apps.list');
 			if (status.enabled && status.running) {
 				await loadIngresses();
+				await loadAppNetworks();
 				if (!statsPoll) startStatsPolling();
 				// Also lift the idle list-poll here so Docker coming up
 				// after the page loaded (e.g. user enabled apps from this
@@ -899,7 +1013,9 @@
 			name: appName,
 			image: newImage,
 		};
-		if (newPorts.length > 0) {
+		// A LAN-IP (macvlan/ipvlan) app gets its own address — published host
+		// ports and reverse-proxy ingress don't apply (engine rejects them).
+		if (newPorts.length > 0 && !installLanIp) {
 			params.ports = newPorts.map(p => ({
 				name: p.name,
 				container_port: p.container_port,
@@ -930,7 +1046,10 @@
 		// operator typed a hostname that became taken between the live
 		// conflict check and Save, install fails with a clear error.
 		const subdomainTrimmed = newSubdomain.trim();
-		if (subdomainTrimmed) params.subdomain = subdomainTrimmed;
+		if (subdomainTrimmed && !installLanIp) params.subdomain = subdomainTrimmed;
+		// Managed-network attachment (+ optional static IP).
+		if (newNetwork) params.network = newNetwork;
+		if (newStaticIp.trim()) params.static_ip = newStaticIp.trim();
 
 		const ok = await streamDeploy({
 			kind: 'simple',
@@ -971,6 +1090,9 @@
 		newCpuLimit = config.cpu_limit ?? '';
 		newMemoryLimit = config.memory_limit ?? '';
 		newAllowUnsafe = config.allow_unsafe ?? false;
+		newNetwork = config.network ?? '';
+		newStaticIp = config.static_ip ?? '';
+		loadAppNetworks();
 		installMode = 'simple';
 		showInstall = true;
 	}
@@ -981,7 +1103,7 @@
 			name: editingApp,
 			image: newImage,
 		};
-		if (newPorts.length > 0) {
+		if (newPorts.length > 0 && !installLanIp) {
 			params.ports = newPorts.map(p => ({
 				name: p.name,
 				container_port: p.container_port,
@@ -1008,6 +1130,9 @@
 		if (newCpuLimit) params.cpu_limit = newCpuLimit;
 		if (newMemoryLimit) params.memory_limit = newMemoryLimit;
 		params.allow_unsafe = newAllowUnsafe;
+		// Round-trip the managed-network attachment so Edit doesn't detach it.
+		if (newNetwork) params.network = newNetwork;
+		if (newStaticIp.trim()) params.static_ip = newStaticIp.trim();
 
 		const result = await withToast(
 			() => client.call('apps.update', params, 300_000),
@@ -1036,6 +1161,8 @@
 		newAllowUnsafe = false;
 		newSubdomain = '';
 		newSubdomainConflict = '';
+		newNetwork = '';
+		newStaticIp = '';
 		installTried = false;
 		lastInspectedImage = '';
 		subpathRecipe = null;
@@ -1621,6 +1748,28 @@
 					{/if}
 				</div>
 
+				<!-- Network attachment (#435 / #438) -->
+				<div class="mb-4">
+					<div class="flex items-center justify-between mb-1">
+						<Label for="app-network">Network</Label>
+						<Button size="xs" variant="outline" onclick={() => openNetCreate()}>+ New network</Button>
+					</div>
+					<select id="app-network" bind:value={newNetwork} class="h-9 w-full rounded-md border border-input bg-background px-2 text-sm">
+						<option value="">Default bridge (reverse-proxy ingress)</option>
+						{#each appNetworks as n}
+							<option value={n.name}>{n.name} ({n.driver}{n.parent ? ` on ${n.parent}` : ''})</option>
+						{/each}
+					</select>
+					{#if installLanIp}
+						<p class="mt-1 text-xs text-amber-500">This app gets its own LAN IP — host ports and reverse-proxy ingress don't apply and are hidden below.</p>
+						<div class="mt-2">
+							<Label for="app-static-ip">Static IP (optional)</Label>
+							<Input id="app-static-ip" bind:value={newStaticIp} placeholder="e.g. 192.168.1.50" class="mt-1" />
+						</div>
+					{/if}
+				</div>
+
+				{#if !installLanIp}
 				<!-- Ports -->
 				<div class="mb-4">
 					<div class="flex items-center justify-between mb-1">
@@ -1664,6 +1813,7 @@
 					{/if}
 					<p class="mt-1 text-[0.6rem] text-muted-foreground">Exposed = port on the host (what clients connect to). Internal = port inside the container. Leave Exposed blank to use the same number as Internal. App is also accessible at /apps/{'{name}'}/ via reverse proxy.</p>
 				</div>
+				{/if}
 
 				<!-- Environment Variables -->
 				<div class="mb-4">
@@ -1741,6 +1891,7 @@
 					</div>
 				</div>
 
+				{#if !installLanIp}
 				<!-- Subdomain (optional) — opt into subdomain-mode ingress from
 				     day one. Empty = path-prefix mode + post-install probe (the
 				     historical default). Non-empty = host-match Caddy route +
@@ -1764,6 +1915,7 @@
 						</p>
 					{/if}
 				</div>
+				{/if}
 
 				<!-- Allow unsafe — opt out of strict bind-mount sandbox -->
 				<div class="mb-4 rounded-md border border-border p-3">
@@ -1985,6 +2137,48 @@
 		</div>
 	{/if}
 
+	<!-- Docker networks (#435 / #438) -->
+	{#if status?.running}
+		<div class="mt-6 flex items-center justify-between">
+			<h3 class="text-lg font-semibold">Networks</h3>
+			<Button size="xs" variant="outline" onclick={() => openNetCreate()}>+ Create network</Button>
+		</div>
+		{#if appNetworks.length === 0}
+			<p class="mt-1 text-xs text-muted-foreground">No managed networks. Create a macvlan/ipvlan network to give apps their own LAN IP, or a user bridge for inter-container DNS.</p>
+		{:else}
+			<table class="mt-2 w-full text-sm">
+				<thead>
+					<tr class="text-left text-xs uppercase text-muted-foreground">
+						<th class="p-2">Name</th>
+						<th class="p-2">Driver</th>
+						<th class="p-2">Parent</th>
+						<th class="p-2">Subnet</th>
+						<th class="p-2">Attached</th>
+						<th class="p-2"></th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each appNetworks as n}
+						<tr class="border-t border-border/40">
+							<td class="p-2 font-mono">{n.name}{#if !n.exists} <span class="text-amber-500" title="Persisted but missing from Docker — recreated on boot">(missing)</span>{/if}</td>
+							<td class="p-2">{n.driver}</td>
+							<td class="p-2 font-mono">{n.parent ?? '—'}{#if n.vlan}.{n.vlan}{/if}</td>
+							<td class="p-2 font-mono">{n.subnet ?? '—'}</td>
+							<td class="p-2">{n.attached_apps.length > 0 ? n.attached_apps.join(', ') : '—'}</td>
+							<td class="p-2 text-right">
+								{#if n.managed}
+									<Button size="xs" variant="ghost" disabled={n.attached_apps.length > 0} title={n.attached_apps.length > 0 ? 'Detach all apps first' : 'Remove network'} onclick={() => removeNetwork(n.name)}>Remove</Button>
+								{:else}
+									<span class="text-xs text-muted-foreground" title="Not created by NASty">external</span>
+								{/if}
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		{/if}
+	{/if}
+
 	<!-- Installed apps table -->
 	{#if apps.length > 0}
 		<h3 class="text-lg font-semibold mt-6 mb-3">Installed Apps</h3>
@@ -2112,6 +2306,14 @@
 									<a href="http://{window.location.hostname}:{pp.host_port}" target="_blank" class="inline-flex items-center whitespace-nowrap rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted" title="Direct port access (LAN)">
 										:{pp.host_port}
 									</a>
+								{/if}
+								{#if app.network}
+									<!-- App on a managed Docker network — show the network (and
+									     its own LAN IP for macvlan/ipvlan). No reverse-proxy
+									     "Open" link: it's reached directly on its IP. -->
+									<span class="inline-flex items-center whitespace-nowrap rounded-md border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-xs text-purple-300" title="Docker network: {app.network}">
+										{app.network}{app.network_ip ? ` @ ${app.network_ip}` : ''}
+									</span>
 								{/if}
 								{#if status?.running}
 									<!-- Stop also for "restarting" — that is the crash-loop state, and Start would be a no-op. -->
@@ -2256,6 +2458,74 @@
 				class="flex-1 p-4 overflow-auto text-xs font-mono whitespace-pre-wrap {deployError ? 'text-red-400' : 'text-green-400'}"
 				id="deploy-output"
 			>{deployLog.join('\n')}</pre>
+			{#if deployAction && deployAction.action === 'create_macvlan'}
+				<div class="flex items-center justify-between gap-2 border-t border-border px-4 py-2">
+					<span class="text-xs text-amber-300">'{deployAction.bridge}' is a host bridge — create a macvlan network on it to put this app on your LAN.</span>
+					<Button size="xs" onclick={() => { const b = deployAction!.bridge; closeDeployLog(); openNetCreate(b); }}>
+						Create macvlan on {deployAction.bridge}
+					</Button>
+				</div>
+			{/if}
+		</div>
+	</div>
+{/if}
+
+<!-- Create Docker network dialog (#435 / #438) -->
+{#if showNetCreate}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showNetCreate = false; }}>
+		<div class="w-[90vw] max-w-md rounded-lg border border-border bg-card p-5 shadow-2xl">
+			<h3 class="mb-3 text-lg font-semibold">Create Docker network</h3>
+			<div class="space-y-3">
+				<div>
+					<Label for="nc-name">Name</Label>
+					<Input id="nc-name" bind:value={ncName} placeholder="lan" class="mt-1" />
+				</div>
+				<div>
+					<Label for="nc-driver">Driver</Label>
+					<select id="nc-driver" bind:value={ncDriver} class="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm">
+						<option value="macvlan">macvlan — own LAN IP (separate MAC)</option>
+						<option value="ipvlan">ipvlan — own LAN IP (shared MAC; WiFi/MAC-limited)</option>
+						<option value="bridge">bridge — NAT'd, reached via ingress</option>
+					</select>
+				</div>
+				{#if ncDriver !== 'bridge'}
+					<div>
+						<Label for="nc-parent">Parent interface</Label>
+						<select id="nc-parent" bind:value={ncParent} class="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm">
+							<option value="" disabled>Select a bridge or NIC…</option>
+							{#each parentChoices as p}
+								<option value={p.name}>{p.label}</option>
+							{/each}
+						</select>
+						<p class="mt-1 text-[0.65rem] text-muted-foreground">Pick the bridge your VMs use to share the same LAN segment. Bridge-member NICs are excluded — use the bridge itself.</p>
+					</div>
+					<div>
+						<Label for="nc-vlan">VLAN tag (optional)</Label>
+						<Input id="nc-vlan" bind:value={ncVlan} placeholder="e.g. 10" class="mt-1" />
+					</div>
+				{/if}
+				<div>
+					<Label for="nc-subnet">Subnet (optional)</Label>
+					<Input id="nc-subnet" bind:value={ncSubnet} placeholder="192.168.1.0/24" class="mt-1" />
+				</div>
+				<div class="grid grid-cols-2 gap-2">
+					<div>
+						<Label for="nc-gw">Gateway (optional)</Label>
+						<Input id="nc-gw" bind:value={ncGateway} placeholder="192.168.1.1" class="mt-1" />
+					</div>
+					<div>
+						<Label for="nc-range">IP range (optional)</Label>
+						<Input id="nc-range" bind:value={ncIpRange} placeholder="192.168.1.64/27" class="mt-1" />
+					</div>
+				</div>
+				{#if ncError}<p class="text-xs text-red-500">{ncError}</p>{/if}
+			</div>
+			<div class="mt-4 flex justify-end gap-2">
+				<Button variant="secondary" size="sm" onclick={() => showNetCreate = false}>Cancel</Button>
+				<Button size="sm" onclick={createNetwork} disabled={ncSaving || !ncName.trim() || (ncDriver !== 'bridge' && !ncParent)}>
+					{ncSaving ? 'Creating…' : 'Create'}
+				</Button>
+			</div>
 		</div>
 	</div>
 {/if}

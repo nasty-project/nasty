@@ -326,6 +326,29 @@ pub(super) async fn try_route(
             },
             Err(r) => r,
         },
+
+        // ── Managed Docker networks ──────────────────────────
+        "apps.networks.list" => match state.apps.network_list().await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
+        "apps.networks.create" => match parse_params::<nasty_apps::ManagedNetwork>(req) {
+            Ok(spec) => {
+                let ifaces = crate::system_network_ifaces(state).await;
+                match state.apps.network_create(spec, &ifaces).await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                }
+            }
+            Err(e) => invalid(req, e),
+        },
+        "apps.networks.remove" => match require_str(req, "name") {
+            Ok(name) => match state.apps.network_remove(name).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         _ => return None,
     })
 }

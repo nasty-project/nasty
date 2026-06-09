@@ -1444,6 +1444,10 @@ export interface App {
 	 * apps list shows a "Direct port only" badge with this as a tooltip
 	 * and hides the "Open" link. */
 	proxy_disabled_reason?: string | null;
+	/** NASty-managed Docker network the app is attached to, if any. */
+	network?: string | null;
+	/** The app's IP on that network, when known (LAN-IP apps). */
+	network_ip?: string | null;
 }
 
 export interface AppContainer {
@@ -1485,6 +1489,29 @@ export interface AppConfig {
 	memory_limit: string | null;
 	/** True if app was originally deployed with allow_unsafe. */
 	allow_unsafe?: boolean;
+	/** Managed network the app is attached to (round-tripped on Edit). */
+	network?: string | null;
+	/** Static IP requested at install (round-tripped on Edit). */
+	static_ip?: string | null;
+}
+
+/** A NASty-managed Docker network spec (apps.networks.create payload). */
+export interface ManagedNetwork {
+	name: string;
+	driver: string; // "bridge" | "macvlan" | "ipvlan"
+	parent?: string | null;
+	subnet?: string | null;
+	gateway?: string | null;
+	ip_range?: string | null;
+	vlan?: number | null;
+	host_shim?: boolean;
+}
+
+/** apps.networks.list row: spec + live-state annotations. */
+export interface NetworkSummary extends ManagedNetwork {
+	exists: boolean;
+	managed: boolean;
+	attached_apps: string[];
 }
 
 export interface ImageInspectResult {
