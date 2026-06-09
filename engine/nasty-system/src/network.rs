@@ -174,6 +174,34 @@ fn inherit_ip() -> IpConfig {
     }
 }
 
+fn default_macvlan_mode() -> String {
+    "bridge".to_string()
+}
+
+/// A host-side macvlan sub-interface on `parent` — the "shim" that lets
+/// the NASty host reach macvlan Docker containers it would otherwise be
+/// isolated from (#448). Engine-managed: created when an operator enables
+/// the host shim on a macvlan Docker network, removed when the network is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MacvlanConfig {
+    /// Kernel interface name (e.g. `nasty-shim-lan`).
+    pub name: String,
+    /// Parent interface/bridge the macvlan attaches to.
+    pub parent: String,
+    /// NM macvlan mode; only "bridge" is created today.
+    #[serde(default = "default_macvlan_mode")]
+    pub mode: String,
+    /// The host's static address on the container subnet.
+    #[serde(default)]
+    pub ipv4: IpConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+    /// Container subnet(s)/ip-range the host should reach via this shim
+    /// (on-link routes). CIDR strings.
+    #[serde(default)]
+    pub routes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct NetworkConfig {
     #[serde(default)]
@@ -186,6 +214,10 @@ pub struct NetworkConfig {
     pub vlans: Vec<VlanConfig>,
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
+    /// Engine-managed macvlan host shims (#448). Not surfaced in the
+    /// network editor UI — added/removed by the apps macvlan-network flow.
+    #[serde(default)]
+    pub macvlans: Vec<MacvlanConfig>,
 }
 
 /// Live interface state — read-only, populated at query time.
@@ -421,6 +453,21 @@ impl NetworkService {
             }
             validate_ip_config(&bridge.ipv4, "IPv4")?;
             validate_ip_config(&bridge.ipv6, "IPv6")?;
+        }
+        for mv in &config.macvlans {
+            if mv.name.is_empty() || mv.parent.is_empty() {
+                return Err("macvlan name and parent are required".to_string());
+            }
+            // Lockout guard (defense in depth; the apps RPC arm enforces
+            // this too with the peer-resolved mgmt iface): never put a
+            // host macvlan shim on the management interface.
+            if mgmt_iface.as_deref() == Some(mv.parent.as_str()) {
+                return Err(format!(
+                    "refusing macvlan shim on management interface '{}'",
+                    mv.parent
+                ));
+            }
+            validate_ip_config(&mv.ipv4, "IPv4")?;
         }
 
         // Resolve `IpMethod::Inherit` against the prior config and live
@@ -837,6 +884,15 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
     let json =
         serde_json::to_string_pretty(config).map_err(|e| format!("serialization error: {e}"))?;
 
+    // Layered validation is authoritative: a structurally-broken
+    // config (cycle, dangling reference, double enslavement, macvlan with
+    // an undeclared parent, ...) is rejected *before* we touch disk, so a
+    // rejected update can't poison networking.json — the next apply/boot
+    // must never read a config the validator would refuse.
+    let layered_cfg = layered::to_layered(config);
+    layered::validate(&layered_cfg)
+        .map_err(|e| format!("network config rejected by validator: {e}"))?;
+
     // Snapshot the existing config to history before overwriting, so a bad
     // apply can be rolled back. Best-effort: a missing/unreadable prior file
     // is fine (first-run case).
@@ -850,12 +906,6 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to write {JSON_PATH}: {e}"))?;
 
-    // Layered validation is authoritative: a structurally-broken
-    // config (cycle, dangling reference, double enslavement, ...) is
-    // rejected here before NM ever sees it.
-    let layered_cfg = layered::to_layered(config);
-    layered::validate(&layered_cfg)
-        .map_err(|e| format!("network config rejected by validator: {e}"))?;
     match serde_json::to_string_pretty(&layered_cfg) {
         Ok(layered_json) => {
             if let Err(e) = atomic_write(JSON_PATH_V2, layered_json.as_bytes()).await {

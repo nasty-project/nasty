@@ -70,6 +70,7 @@ pub enum NmConnectionType {
     Bond,
     Bridge,
     Vlan,
+    Macvlan,
 }
 
 impl NmConnectionType {
@@ -80,6 +81,7 @@ impl NmConnectionType {
             NmConnectionType::Bond => "bond",
             NmConnectionType::Bridge => "bridge",
             NmConnectionType::Vlan => "vlan",
+            NmConnectionType::Macvlan => "macvlan",
         }
     }
 }
@@ -103,6 +105,12 @@ pub struct NmIpSettings {
     /// presence of a colon.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dns: Vec<String>,
+    /// On-link static routes (bare destination CIDRs) for this family.
+    /// Emitted as `routeN=<dst>` (keyfile) / `route-data` (DBus) with no
+    /// next-hop, i.e. scope-link via this connection's device — used by
+    /// the macvlan host shim to reach container subnets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -153,6 +161,11 @@ pub enum NmTypeSpecific {
     Vlan {
         parent: String,
         id: u16,
+    },
+    Macvlan {
+        parent: String,
+        /// NM macvlan mode; we only emit "bridge" (host↔child shim).
+        mode: String,
     },
 }
 
@@ -229,6 +242,18 @@ pub fn to_nm_profiles_with_macs(layered: &LayeredConfig, ctx: &MacContext) -> Ve
         }
     }
 
+    // On-link static routes grouped by device, split into v4/v6 by the
+    // destination's form, so each goes in the right [ipv4]/[ipv6] section.
+    let mut routes_by_dev: HashMap<&str, (Vec<String>, Vec<String>)> = HashMap::new();
+    for r in &layered.routes {
+        let entry = routes_by_dev.entry(r.dev.as_str()).or_default();
+        if r.dst.contains(':') {
+            entry.1.push(r.dst.clone());
+        } else {
+            entry.0.push(r.dst.clone());
+        }
+    }
+
     // Split user-configured DNS into v4/v6 buckets so we put each
     // entry in the right [ipv4]/[ipv6] section. NM accepts only
     // family-matching addresses in each section.
@@ -246,6 +271,11 @@ pub fn to_nm_profiles_with_macs(layered: &LayeredConfig, ctx: &MacContext) -> Ve
             if conn.controller.is_none() {
                 conn.ipv4.dns.clone_from(&dns_v4);
                 conn.ipv6.dns.clone_from(&dns_v6);
+            }
+            // Attach any on-link routes targeted at this device (macvlan shim).
+            if let Some((v4, v6)) = routes_by_dev.get(link.name.as_str()) {
+                conn.ipv4.routes.clone_from(v4);
+                conn.ipv6.routes.clone_from(v6);
             }
             // Bond/bridge masters: inherit the primary member's MAC
             // *if the user opted in* (default for new bridges/bonds;
@@ -373,6 +403,13 @@ fn profile_for_link(
                 id: *id,
             },
         ),
+        LinkKind::Macvlan { parent, mode } => (
+            NmConnectionType::Macvlan,
+            NmTypeSpecific::Macvlan {
+                parent: parent.clone(),
+                mode: mode.clone(),
+            },
+        ),
     };
 
     NmConnection {
@@ -398,6 +435,7 @@ fn address_to_nm_settings(addr: &Address) -> NmIpSettings {
         addresses: addr.cidr.clone(),
         gateway: addr.gateway.clone(),
         dns: Vec::new(),
+        routes: Vec::new(),
     }
 }
 
@@ -503,6 +541,12 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
             out.push_str(&format!("parent={parent}\n"));
             out.push_str(&format!("id={id}\n\n"));
         }
+        NmTypeSpecific::Macvlan { parent, mode } => {
+            out.push_str("[macvlan]\n");
+            out.push_str(&format!("parent={parent}\n"));
+            // NM stores macvlan mode as the numeric NMSettingMacvlanMode.
+            out.push_str(&format!("mode={}\n\n", macvlan_mode_num(mode)));
+        }
     }
 
     // [ethernet] carries MTU and cloned-mac for ethernet-like types
@@ -567,6 +611,24 @@ fn serialize_ip_section(out: &mut String, ip: &NmIpSettings) {
             out.push(';');
         }
         out.push('\n');
+    }
+    // On-link static routes: `routeN=<dst>` with no next-hop ⇒ scope-link
+    // route via this connection's device (the macvlan shim).
+    for (i, dst) in ip.routes.iter().enumerate() {
+        out.push_str(&format!("route{}={dst}\n", i + 1));
+    }
+}
+
+/// NM `NMSettingMacvlanMode` numeric value. We only create "bridge"
+/// shims, but map the rest for completeness/forward-compat.
+fn macvlan_mode_num(mode: &str) -> u32 {
+    match mode {
+        "vepa" => 1,
+        "bridge" => 2,
+        "private" => 3,
+        "passthru" => 4,
+        "source" => 5,
+        _ => 2,
     }
 }
 
@@ -656,6 +718,12 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
             vlan.insert("parent".into(), into_value(parent.clone()));
             vlan.insert("id".into(), into_value(u32::from(*id)));
             out.insert("vlan".into(), vlan);
+        }
+        NmTypeSpecific::Macvlan { parent, mode } => {
+            let mut mv = HashMap::new();
+            mv.insert("parent".into(), into_value(parent.clone()));
+            mv.insert("mode".into(), into_value(macvlan_mode_num(mode)));
+            out.insert("macvlan".into(), mv);
         }
     }
 
@@ -765,6 +833,21 @@ fn ip_section_dict(ip: &NmIpSettings, family: Family) -> HashMap<String, OwnedVa
                     s.insert("dns".into(), into_value(packed));
                 }
             }
+        }
+    }
+    // route-data (aa{sv}): on-link routes — dest + prefix, no next-hop.
+    if !ip.routes.is_empty() {
+        let mut rd: Vec<HashMap<String, OwnedValue>> = Vec::new();
+        for cidr in &ip.routes {
+            if let Some((dest, prefix)) = parse_cidr(cidr, family) {
+                let mut e = HashMap::new();
+                e.insert("dest".into(), into_value(dest));
+                e.insert("prefix".into(), into_value(prefix));
+                rd.push(e);
+            }
+        }
+        if !rd.is_empty() {
+            s.insert("route-data".into(), into_value(rd));
         }
     }
     s
@@ -975,6 +1058,63 @@ mod tests {
             NmTypeSpecific::Bond { mode } => assert_eq!(mode, "802.3ad"),
             other => panic!("expected Bond type_specific, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn macvlan_shim_serializes_with_parent_mode_and_route() {
+        let layered = LayeredConfig {
+            links: vec![
+                link_phys("eth1"),
+                Link {
+                    name: "shim-lan".into(),
+                    enabled: true,
+                    mtu: None,
+                    mac: None,
+                    kind: LinkKind::Macvlan {
+                        parent: "eth1".into(),
+                        mode: "bridge".into(),
+                    },
+                },
+            ],
+            addresses: vec![Address {
+                link: "shim-lan".into(),
+                family: Family::V4,
+                method: IpMethod::Static,
+                cidr: vec!["192.168.1.2/24".into()],
+                gateway: None,
+            }],
+            routes: vec![crate::network::layered::Route {
+                table: 254,
+                dst: "192.168.1.0/24".into(),
+                via: None,
+                dev: "shim-lan".into(),
+                metric: None,
+            }],
+            ..Default::default()
+        };
+        let profiles = to_nm_profiles(&layered);
+        let shim = find(&profiles, "shim-lan");
+        assert_eq!(shim.conn_type, NmConnectionType::Macvlan);
+        match &shim.type_specific {
+            NmTypeSpecific::Macvlan { parent, mode } => {
+                assert_eq!(parent, "eth1");
+                assert_eq!(mode, "bridge");
+            }
+            other => panic!("expected Macvlan, got {other:?}"),
+        }
+        assert_eq!(shim.ipv4.routes, vec!["192.168.1.0/24".to_string()]);
+
+        let keyfile = serialize_keyfile(shim);
+        assert!(keyfile.contains("[macvlan]"), "{keyfile}");
+        assert!(keyfile.contains("parent=eth1"));
+        assert!(keyfile.contains("mode=2")); // NMSettingMacvlanMode bridge
+        assert!(keyfile.contains("route1=192.168.1.0/24"));
+        // On-link: no next-hop appended to the route.
+        assert!(!keyfile.contains("route1=192.168.1.0/24,"));
+
+        let dict = to_settings_dict(shim);
+        assert!(dict.contains_key("macvlan"));
+        assert!(dict["ipv4"].contains_key("route-data"));
     }
 
     #[test]

@@ -335,16 +335,50 @@ pub(super) async fn try_route(
         "apps.networks.create" => match parse_params::<nasty_apps::ManagedNetwork>(req) {
             Ok(spec) => {
                 let ifaces = crate::system_network_ifaces(state).await;
-                match state.apps.network_create(spec, &ifaces).await {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
+                // Resolve the management interface from the caller's peer so we
+                // can refuse a host shim on it (lockout guard, #448).
+                let mgmt = match session.client_ip.as_deref() {
+                    Some(peer) => nasty_system::network::mgmt_iface_for_peer(peer).await,
+                    None => None,
+                };
+                if spec.host_shim && spec.parent.as_deref() == mgmt.as_deref() {
+                    err(
+                        req,
+                        "refusing a host shim on the management interface (would risk lockout)"
+                            .to_string(),
+                    )
+                } else {
+                    match state.apps.network_create(spec.clone(), &ifaces).await {
+                        Ok(()) => {
+                            if spec.host_shim {
+                                // Apply the host-side shim; on failure undo the
+                                // Docker network so we don't leave a half-state.
+                                match crate::add_macvlan_shim(state, &spec, mgmt.as_deref()).await {
+                                    Ok(()) => ok(req, "ok"),
+                                    Err(e) => {
+                                        let _ = state.apps.network_remove(&spec.name).await;
+                                        err(req, format!("host shim failed: {e}"))
+                                    }
+                                }
+                            } else {
+                                ok(req, "ok")
+                            }
+                        }
+                        Err(e) => err(req, e),
+                    }
                 }
             }
             Err(e) => invalid(req, e),
         },
         "apps.networks.remove" => match require_str(req, "name") {
             Ok(name) => match state.apps.network_remove(name).await {
-                Ok(()) => ok(req, "ok"),
+                Ok(()) => {
+                    // Tear down the host shim too (best-effort).
+                    if let Err(e) = crate::remove_macvlan_shim(state, name).await {
+                        tracing::warn!("apps: failed to remove macvlan shim for '{name}': {e}");
+                    }
+                    ok(req, "ok")
+                }
                 Err(e) => err(req, e),
             },
             Err(r) => r,

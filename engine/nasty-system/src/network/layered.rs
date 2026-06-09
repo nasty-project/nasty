@@ -15,8 +15,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    BondConfig, BondMode, BridgeConfig, InterfaceConfig, IpConfig, IpMethod, NetworkConfig,
-    VlanConfig,
+    BondConfig, BondMode, BridgeConfig, InterfaceConfig, IpConfig, IpMethod, MacvlanConfig,
+    NetworkConfig, VlanConfig,
 };
 
 // ── Types ──────────────────────────────────────────────────────
@@ -94,6 +94,12 @@ pub enum LinkKind {
         parent: String,
         id: u16,
     },
+    /// A macvlan sub-interface on `parent` (host↔container shim). Only
+    /// `mode = "bridge"` is created today.
+    Macvlan {
+        parent: String,
+        mode: String,
+    },
 }
 
 /// L3 address binding. Multiple `Address` rows can target the same link
@@ -163,6 +169,7 @@ pub struct Rule {
 pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
     let mut links = Vec::new();
     let mut addresses = Vec::new();
+    let mut routes = Vec::new();
 
     for iface in &legacy.interfaces {
         links.push(Link {
@@ -217,6 +224,30 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
         });
         push_addresses(&mut addresses, &name, &vlan.ipv4, &vlan.ipv6);
     }
+    for mv in &legacy.macvlans {
+        links.push(Link {
+            name: mv.name.clone(),
+            enabled: true,
+            mtu: mv.mtu,
+            mac: None,
+            kind: LinkKind::Macvlan {
+                parent: mv.parent.clone(),
+                mode: mv.mode.clone(),
+            },
+        });
+        // The shim's host address on the container subnet (IPv4 only for v1).
+        push_addresses(&mut addresses, &mv.name, &mv.ipv4, &IpConfig::default());
+        // On-link routes so the host reaches the container subnet via the shim.
+        for dst in &mv.routes {
+            routes.push(Route {
+                table: 254,
+                dst: dst.clone(),
+                via: None,
+                dev: mv.name.clone(),
+                metric: None,
+            });
+        }
+    }
 
     // Synthesize Physical links for any bond/bridge member that isn't
     // declared in the top-level interfaces list (#348).
@@ -263,7 +294,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
     LayeredConfig {
         links,
         addresses,
-        routes: Vec::new(),
+        routes,
         rules: Vec::new(),
         dns: legacy.dns.clone(),
     }
@@ -308,6 +339,15 @@ pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
     let mut bonds = Vec::new();
     let mut bridges = Vec::new();
     let mut vlans = Vec::new();
+    let mut macvlans = Vec::new();
+    // Reconstruct per-macvlan routes from the (dev-keyed) layered routes.
+    let mut routes_by_dev: HashMap<&str, Vec<String>> = HashMap::new();
+    for r in &layered.routes {
+        routes_by_dev
+            .entry(r.dev.as_str())
+            .or_default()
+            .push(r.dst.clone());
+    }
 
     for link in &layered.links {
         let (ipv4, ipv6) = addrs_by_link
@@ -358,6 +398,17 @@ pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
                 ipv6,
                 mtu: link.mtu,
             }),
+            LinkKind::Macvlan { parent, mode } => macvlans.push(MacvlanConfig {
+                name: link.name.clone(),
+                parent: parent.clone(),
+                mode: mode.clone(),
+                ipv4,
+                mtu: link.mtu,
+                routes: routes_by_dev
+                    .get(link.name.as_str())
+                    .cloned()
+                    .unwrap_or_default(),
+            }),
         }
     }
 
@@ -367,6 +418,7 @@ pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
         bonds,
         vlans,
         bridges,
+        macvlans,
     }
 }
 
@@ -424,6 +476,18 @@ pub fn validate(layered: &LayeredConfig) -> Result<(), String> {
                 if !names.contains(parent.as_str()) {
                     return Err(format!(
                         "vlan '{}' references missing parent '{parent}'",
+                        link.name
+                    ));
+                }
+            }
+            LinkKind::Macvlan { parent, .. } => {
+                if parent == &link.name {
+                    return Err(format!("macvlan '{}' is its own parent", link.name));
+                }
+                if !names.contains(parent.as_str()) {
+                    return Err(format!(
+                        "macvlan '{}' references missing parent '{parent}' \
+                         (declare the parent interface/bridge first)",
                         link.name
                     ));
                 }
@@ -502,6 +566,7 @@ fn deps(link: &Link) -> Vec<&str> {
             members.iter().map(String::as_str).collect()
         }
         LinkKind::Vlan { parent, .. } => vec![parent.as_str()],
+        LinkKind::Macvlan { parent, .. } => vec![parent.as_str()],
         LinkKind::Physical => Vec::new(),
     }
 }
@@ -627,6 +692,7 @@ mod tests {
             bonds: vec![legacy_bond("bond0", &["eth0", "eth1"])],
             vlans: vec![vlan],
             bridges: vec![br],
+            macvlans: vec![],
         });
     }
 
@@ -904,6 +970,106 @@ mod tests {
         };
         let err = validate(&cfg).unwrap_err();
         assert!(err.contains("own parent"));
+    }
+
+    fn link_macvlan(name: &str, parent: &str) -> Link {
+        Link {
+            name: name.into(),
+            enabled: true,
+            mtu: None,
+            mac: None,
+            kind: LinkKind::Macvlan {
+                parent: parent.into(),
+                mode: "bridge".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn validate_passes_macvlan_with_existing_parent() {
+        let cfg = LayeredConfig {
+            links: vec![link_phys("eth1"), link_macvlan("shim-lan", "eth1")],
+            addresses: vec![Address {
+                link: "shim-lan".into(),
+                family: Family::V4,
+                method: IpMethod::Static,
+                cidr: vec!["192.168.1.2/24".into()],
+                gateway: None,
+            }],
+            ..Default::default()
+        };
+        validate(&cfg).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_macvlan_with_missing_parent() {
+        let cfg = LayeredConfig {
+            links: vec![link_macvlan("shim-lan", "ghost")],
+            ..Default::default()
+        };
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.contains("missing parent"));
+        assert!(err.contains("ghost"));
+    }
+
+    #[test]
+    fn validate_rejects_macvlan_as_own_parent() {
+        let cfg = LayeredConfig {
+            links: vec![link_macvlan("shim", "shim")],
+            ..Default::default()
+        };
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.contains("own parent"));
+    }
+
+    #[test]
+    fn to_layered_emits_macvlan_link_address_and_route() {
+        let cfg = NetworkConfig {
+            interfaces: vec![legacy_iface("eth1")],
+            macvlans: vec![MacvlanConfig {
+                name: "shim-lan".into(),
+                parent: "eth1".into(),
+                mode: "bridge".into(),
+                ipv4: IpConfig {
+                    method: IpMethod::Static,
+                    addresses: vec!["192.168.1.2/24".into()],
+                    ..Default::default()
+                },
+                mtu: None,
+                routes: vec!["192.168.1.0/24".into()],
+            }],
+            ..Default::default()
+        };
+        let layered = to_layered(&cfg);
+
+        let shim = layered
+            .links
+            .iter()
+            .find(|l| l.name == "shim-lan")
+            .expect("shim link present");
+        match &shim.kind {
+            LinkKind::Macvlan { parent, mode } => {
+                assert_eq!(parent, "eth1");
+                assert_eq!(mode, "bridge");
+            }
+            other => panic!("expected Macvlan, got {other:?}"),
+        }
+        assert!(
+            layered
+                .addresses
+                .iter()
+                .any(|a| a.link == "shim-lan" && a.cidr == vec!["192.168.1.2/24".to_string()]),
+            "shim address present"
+        );
+        assert!(
+            layered
+                .routes
+                .iter()
+                .any(|r| r.dev == "shim-lan" && r.dst == "192.168.1.0/24" && r.via.is_none()),
+            "on-link shim route present"
+        );
+
+        validate(&layered).unwrap();
     }
 
     #[test]

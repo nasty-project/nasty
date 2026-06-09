@@ -138,6 +138,10 @@ pub struct ManagedNetwork {
     /// macvlan only: create a host-side shim so host↔container works.
     #[serde(default)]
     pub host_shim: bool,
+    /// The host's address on the container subnet (CIDR) for the shim.
+    /// Required when `host_shim` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shim_ip: Option<String>,
 }
 
 /// On-disk shape for [`NETWORKS_PATH`].
@@ -188,7 +192,7 @@ fn mask_ip(ip: std::net::IpAddr, prefix: u8) -> u128 {
 }
 
 /// True iff `ip` falls within `cidr`. `None` on malformed input.
-fn cidr_contains_ip(cidr: &str, ip: &str) -> Option<bool> {
+pub fn cidr_contains_ip(cidr: &str, ip: &str) -> Option<bool> {
     let (net, prefix) = parse_cidr(cidr)?;
     let addr: std::net::IpAddr = ip.trim().parse().ok()?;
     if net.is_ipv4() != addr.is_ipv4() {
@@ -239,14 +243,38 @@ fn validate_network_spec(spec: &ManagedNetwork, ifaces: &[IfaceInfo]) -> Result<
     if !matches!(spec.driver.as_str(), "bridge" | "macvlan" | "ipvlan") {
         return Err(invalid_net("driver must be bridge, macvlan, or ipvlan"));
     }
-    // The host↔container macvlan shim mutates host networking and is
-    // deferred to a follow-up (it needs the confirm-or-rollback rail +
-    // real-hardware validation). Reserve the field but reject it for now
-    // so callers don't think it does something.
+    // Host↔container shim (#448): only valid on macvlan, needs a subnet to
+    // route and a host address (shim_ip) inside it, distinct from the
+    // gateway. The mgmt-interface refusal lives in the engine RPC arm,
+    // which knows the management iface.
     if spec.host_shim {
-        return Err(invalid_net(
-            "host↔container shim is not implemented yet — leave it disabled (tracked separately)",
-        ));
+        if spec.driver != "macvlan" {
+            return Err(invalid_net(
+                "host shim is only supported on macvlan networks",
+            ));
+        }
+        let subnet = spec
+            .subnet
+            .as_deref()
+            .ok_or_else(|| invalid_net("host shim requires the network to have a subnet"))?;
+        let shim_ip = spec
+            .shim_ip
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                invalid_net("host shim requires a shim_ip (the host's address on the subnet)")
+            })?;
+        // shim_ip is stored as a static host address (CIDR, e.g. 192.168.1.2/24);
+        // the containment and gateway checks compare the bare address.
+        let shim_addr = shim_ip.split('/').next().unwrap_or(shim_ip);
+        if cidr_contains_ip(subnet, shim_addr) != Some(true) {
+            return Err(invalid_net(format!(
+                "shim_ip '{shim_ip}' is not within subnet '{subnet}'"
+            )));
+        }
+        if spec.gateway.as_deref() == Some(shim_addr) {
+            return Err(invalid_net("shim_ip must differ from the gateway"));
+        }
     }
     let needs_parent = matches!(spec.driver.as_str(), "macvlan" | "ipvlan");
     match (&spec.parent, needs_parent) {
@@ -1768,6 +1796,7 @@ impl AppsService {
                         ip_range,
                         vlan: None,
                         host_shim: false,
+                        shim_ip: None,
                     }
                 }
             };
@@ -1922,6 +1951,7 @@ impl AppsService {
             ip_range: None,
             vlan: None,
             host_shim: false,
+            shim_ip: None,
         })
     }
 
@@ -6130,6 +6160,7 @@ mod network_tests {
             ip_range: None,
             vlan: None,
             host_shim: false,
+            shim_ip: None,
         }
     }
     fn macvlan_on(parent: &str) -> ManagedNetwork {
@@ -6194,10 +6225,47 @@ mod network_tests {
         n.subnet = Some("not-a-cidr".into());
         assert!(validate_network_spec(&n, &ifaces()).is_err());
     }
-    #[test]
-    fn host_shim_rejected_for_now() {
-        let mut n = macvlan_on("br0");
+    fn macvlan_shim(parent: &str) -> ManagedNetwork {
+        let mut n = macvlan_on(parent);
+        n.subnet = Some("192.168.1.0/24".into());
         n.host_shim = true;
+        n.shim_ip = Some("192.168.1.2/24".into());
+        n
+    }
+
+    #[test]
+    fn host_shim_accepted_with_valid_shim_ip() {
+        assert!(validate_network_spec(&macvlan_shim("br0"), &ifaces()).is_ok());
+    }
+
+    #[test]
+    fn host_shim_rejected_without_shim_ip() {
+        let mut n = macvlan_shim("br0");
+        n.shim_ip = None;
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+
+    #[test]
+    fn host_shim_rejected_shim_ip_outside_subnet() {
+        let mut n = macvlan_shim("br0");
+        n.shim_ip = Some("10.9.9.9/24".into());
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+
+    #[test]
+    fn host_shim_rejected_without_subnet() {
+        let mut n = macvlan_shim("br0");
+        n.subnet = None;
+        assert!(validate_network_spec(&n, &ifaces()).is_err());
+    }
+
+    #[test]
+    fn host_shim_rejected_on_bridge_driver() {
+        // bridge driver can't carry a host shim (and forbids a parent anyway).
+        let mut n = net("x", "bridge");
+        n.host_shim = true;
+        n.subnet = Some("192.168.1.0/24".into());
+        n.shim_ip = Some("192.168.1.2/24".into());
         assert!(validate_network_spec(&n, &ifaces()).is_err());
     }
 
