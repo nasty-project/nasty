@@ -884,6 +884,15 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
     let json =
         serde_json::to_string_pretty(config).map_err(|e| format!("serialization error: {e}"))?;
 
+    // Layered validation is authoritative: a structurally-broken
+    // config (cycle, dangling reference, double enslavement, macvlan with
+    // an undeclared parent, ...) is rejected *before* we touch disk, so a
+    // rejected update can't poison networking.json — the next apply/boot
+    // must never read a config the validator would refuse.
+    let layered_cfg = layered::to_layered(config);
+    layered::validate(&layered_cfg)
+        .map_err(|e| format!("network config rejected by validator: {e}"))?;
+
     // Snapshot the existing config to history before overwriting, so a bad
     // apply can be rolled back. Best-effort: a missing/unreadable prior file
     // is fine (first-run case).
@@ -897,12 +906,6 @@ async fn persist_config(config: &NetworkConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to write {JSON_PATH}: {e}"))?;
 
-    // Layered validation is authoritative: a structurally-broken
-    // config (cycle, dangling reference, double enslavement, ...) is
-    // rejected here before NM ever sees it.
-    let layered_cfg = layered::to_layered(config);
-    layered::validate(&layered_cfg)
-        .map_err(|e| format!("network config rejected by validator: {e}"))?;
     match serde_json::to_string_pretty(&layered_cfg) {
         Ok(layered_json) => {
             if let Err(e) = atomic_write(JSON_PATH_V2, layered_json.as_bytes()).await {
