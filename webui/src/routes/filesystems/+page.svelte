@@ -88,9 +88,15 @@
 	let editOptionsFs: string | null = $state(null);
 	let editCompression = $state('');
 	let editBgCompression = $state('');
+	// bcachefs tiering targets (#434) — each points at a device label.
+	let editForegroundTarget = $state('');
+	let editBackgroundTarget = $state('');
+	let editMetadataTarget = $state('');
+	let editPromoteTarget = $state('');
 	let addDeviceFs: string | null = $state(null);
 	let addDevicePath = $state('');
 	let addDeviceLabel = $state('');
+	let addDeviceDurability = $state('1');
 	let showAddPartitions = $state(false);
 	let editErasureCode = $state(false);
 	let editDataChecksum = $state('');
@@ -792,6 +798,7 @@
 				device: {
 					path: addDevicePath,
 					label: addDeviceLabel || undefined,
+					durability: addDeviceDurability !== '' ? parseInt(addDeviceDurability) : undefined,
 				},
 			}),
 			`Device ${addDevicePath} added to "${fsName}"`
@@ -800,6 +807,7 @@
 			addDeviceFs = null;
 			addDevicePath = '';
 			addDeviceLabel = '';
+			addDeviceDurability = '1';
 			await refresh();
 		}
 	}
@@ -859,6 +867,10 @@
 		editOptionsFs = fs.name;
 		editCompression = fs.options.compression ?? '';
 		editBgCompression = fs.options.background_compression ?? '';
+		editForegroundTarget = fs.options.foreground_target ?? '';
+		editBackgroundTarget = fs.options.background_target ?? '';
+		editMetadataTarget = fs.options.metadata_target ?? '';
+		editPromoteTarget = fs.options.promote_target ?? '';
 	editErasureCode = fs.options.erasure_code ?? false;
 		editDataChecksum = fs.options.data_checksum ?? 'none';
 		editMetadataChecksum = fs.options.metadata_checksum ?? 'none';
@@ -930,6 +942,10 @@
 				name: fsName,
 				compression: editCompression || 'none',
 				background_compression: editBgCompression || 'none',
+				foreground_target: editForegroundTarget || 'none',
+				background_target: editBackgroundTarget || 'none',
+				metadata_target: editMetadataTarget || 'none',
+				promote_target: editPromoteTarget || 'none',
 				erasure_code: editErasureCode,
 				data_checksum: editDataChecksum || 'none',
 				metadata_checksum: editMetadataChecksum || 'none',
@@ -997,6 +1013,12 @@
 
 	function availableDevices(): BlockDevice[] {
 		return devices.filter(d => !d.in_use && (showPartitions || d.dev_type !== 'part'));
+	}
+
+	/** Distinct device labels in a filesystem — the candidate tiering
+	 * targets for foreground/background/metadata/promote (#434). */
+	function deviceLabels(fs: Filesystem): string[] {
+		return [...new Set(fs.devices.map((d) => d.label).filter((l): l is string => !!l))].sort();
 	}
 
 	function availableDevicesForAdd(): BlockDevice[] {
@@ -1938,6 +1960,46 @@
 								<span class="text-xs">Erasure coding</span>
 							</label>
 						</fieldset>
+						<!-- Data Targets (#434): route each data class to a device-label tier -->
+						<fieldset class="rounded-md border border-border p-3 sm:col-span-2">
+							<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Data Targets</legend>
+							{#if deviceLabels(fs).length === 0}
+								<p class="text-xs text-muted-foreground">No device labels set. Label devices (e.g. <span class="font-mono">ssd.fast</span>, <span class="font-mono">hdd.bulk</span>) in the device table above, then point targets at them here.</p>
+							{:else}
+								{@const labels = deviceLabels(fs)}
+								<div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+									<div>
+										<label for="edit-fg-target-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Foreground</label>
+										<select id="edit-fg-target-{fs.name}" bind:value={editForegroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+											<option value="">none</option>
+											{#each labels as l}<option value={l}>{l}</option>{/each}
+										</select>
+									</div>
+									<div>
+										<label for="edit-bg-target-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Background</label>
+										<select id="edit-bg-target-{fs.name}" bind:value={editBackgroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+											<option value="">none</option>
+											{#each labels as l}<option value={l}>{l}</option>{/each}
+										</select>
+									</div>
+									<div>
+										<label for="edit-meta-target-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Metadata</label>
+										<select id="edit-meta-target-{fs.name}" bind:value={editMetadataTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+											<option value="">none</option>
+											{#each labels as l}<option value={l}>{l}</option>{/each}
+										</select>
+									</div>
+									<div>
+										<label for="edit-promote-target-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Promote</label>
+										<select id="edit-promote-target-{fs.name}" bind:value={editPromoteTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+											<option value="">none</option>
+											{#each labels as l}<option value={l}>{l}</option>{/each}
+										</select>
+									</div>
+								</div>
+								<p class="mt-1.5 text-[0.6rem] text-muted-foreground">Foreground/metadata = where new writes land; background = where the rebalance thread migrates; promote = read cache tier.</p>
+							{/if}
+						</fieldset>
 					</div>
 
 					<!-- Advanced options — bcachefs tuning knobs most users won't touch -->
@@ -2298,9 +2360,21 @@
 										{/each}
 									{/if}
 									{#if addDevicePath}
-										<div class="mt-2">
-											<Label for="add-dev-label">Label (optional)</Label>
-											<Input id="add-dev-label" bind:value={addDeviceLabel} placeholder="e.g. ssd.fast" class="mt-1" />
+										<div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+											<div>
+												<Label for="add-dev-label">Label (optional)</Label>
+												<Input id="add-dev-label" bind:value={addDeviceLabel} placeholder="e.g. ssd.fast" class="mt-1" />
+												<p class="mt-1 text-[0.65rem] text-muted-foreground">Tiering group — point Data Targets at it in Options.</p>
+											</div>
+											<div>
+												<Label for="add-dev-durability">Durability</Label>
+												<select id="add-dev-durability" bind:value={addDeviceDurability} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm">
+													<option value="1">Normal (1) — counts as one replica</option>
+													<option value="0">Cache (0) — no replica, evictable</option>
+													<option value="2">Hardware RAID (2) — counts as two</option>
+												</select>
+												<p class="mt-1 text-[0.65rem] text-muted-foreground">How many replicas a copy here counts for.</p>
+											</div>
 										</div>
 									{/if}
 									<div class="mt-2 flex items-center gap-2">
