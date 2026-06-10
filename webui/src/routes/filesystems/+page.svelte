@@ -17,7 +17,7 @@
 	import { confirmDangerous } from '$lib/confirm-dangerous.svelte';
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { summarizeDependents } from '$lib/fs-dependents';
-	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, FsckStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents, TpmBindStatus } from '$lib/types';
+	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, FsckStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents, TpmBindStatus, DiskHealth } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
@@ -27,6 +27,9 @@
 
 	let filesystems: Filesystem[] = $state([]);
 	let devices: BlockDevice[] = $state([]);
+	/** SMART health per disk (system.disks), joined by path to give an
+	 * add-device candidate its health summary before it joins an fs. */
+	let diskHealth: DiskHealth[] = $state([]);
 	let tpmStatus: Record<string, TpmBindStatus> = $state({});
 	/** Per-FS scrub state populated by `refresh()` alongside fs.list, and
 	 * re-polled while any scrub is running. Drives the inline chip +
@@ -351,6 +354,9 @@
 			filesystems = await client.call<Filesystem[]>('fs.list');
 			devices = await client.call<BlockDevice[]>('device.list');
 		});
+		// SMART health for the add-device candidate summaries (best-effort;
+		// virtual disks / no-SMART setups just render "no SMART").
+		diskHealth = await client.call<DiskHealth[]>('system.disks').catch(() => []);
 		// Refresh TPM bind state for encrypted filesystems in parallel.
 		// Non-encrypted FSes are skipped — the engine would return
 		// `tpm_available` correctly but `bound: false` is uninteresting.
@@ -995,6 +1001,13 @@
 
 	function availableDevicesForAdd(): BlockDevice[] {
 		return devices.filter(d => !d.in_use && (showAddPartitions || d.dev_type !== 'part'));
+	}
+
+	/** SMART health for a candidate disk, matched by path (whole-disk
+	 * only; partitions inherit nothing). `undefined` when smartctl has
+	 * no data — virtual disks, USB bridges, or SMART service disabled. */
+	function smartFor(path: string): DiskHealth | undefined {
+		return diskHealth.find(d => d.device === path);
 	}
 
 	function devDisplayState(dev: FilesystemDevice): string | null {
@@ -2248,9 +2261,29 @@
 										<p class="text-sm text-muted-foreground">No available devices. Wipe or prepare them in <Button size="xs" onclick={() => goto('/disks')}>Disks</Button></p>
 									{:else}
 										{#each availableDevicesForAdd() as dev}
-											<label class="flex cursor-pointer items-center gap-2 py-1 text-sm">
-												<input type="radio" name="add-device" value={dev.path} bind:group={addDevicePath} class="h-4 w-4" />
-												{dev.path} ({formatBytes(dev.size_bytes)}) {dev.dev_type === 'part' ? '[part]' : ''} {dev.fs_type ? `[${dev.fs_type}]` : ''}
+											{@const smart = smartFor(dev.path)}
+											<label class="flex cursor-pointer items-start gap-2 rounded-md border border-border/50 p-2 text-sm hover:bg-secondary/40 {addDevicePath === dev.path ? 'border-primary bg-primary/5' : ''}">
+												<input type="radio" name="add-device" value={dev.path} bind:group={addDevicePath} class="mt-0.5 h-4 w-4 shrink-0" />
+												<span class="min-w-0 flex-1">
+													<span class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+														<span class="font-mono">{dev.path}</span>
+														<span class="text-muted-foreground">{formatBytes(dev.size_bytes)}</span>
+														<span class="rounded bg-secondary px-1 py-0.5 text-[10px] uppercase text-muted-foreground">{dev.device_class}</span>
+														{#if dev.dev_type === 'part'}<span class="rounded bg-secondary px-1 py-0.5 text-[10px] text-muted-foreground">part</span>{/if}
+														{#if dev.fs_type}<span class="rounded bg-amber-950 px-1 py-0.5 text-[10px] text-amber-400" title="Already has a filesystem — adding will wipe it">{dev.fs_type}</span>{/if}
+													</span>
+													<span class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.7rem] text-muted-foreground">
+														{#if dev.model}<span class="font-mono">{dev.model}</span>{/if}
+														{#if dev.serial}<span class="font-mono">SN {dev.serial}</span>{/if}
+														{#if smart}
+															<span class="font-medium {smart.health_passed ? 'text-green-500' : 'text-red-500'}" title="SMART overall health">SMART {smart.health_passed ? 'OK' : smart.smart_status}</span>
+															{#if smart.power_on_hours != null}<span title="Power-on hours">· {smart.power_on_hours.toLocaleString()}h</span>{/if}
+															{#if smart.temperature_c != null}<span title="Temperature">· {smart.temperature_c}°C</span>{/if}
+														{:else}
+															<span class="italic" title="No SMART data — virtual disk, USB bridge, or SMART service off">no SMART</span>
+														{/if}
+													</span>
+												</span>
 											</label>
 										{/each}
 									{/if}
