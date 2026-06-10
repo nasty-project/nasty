@@ -53,6 +53,9 @@ export interface SystemInfo {
 	bcachefs_version: string;
 	bcachefs_commit: string | null;
 	bcachefs_pinned_ref: string | null;
+	/** bcachefs-tools ref this NASty build ships with; the top-bar chip
+	 * offers to switch the operator's pin to this when they differ. */
+	bcachefs_recommended_ref: string | null;
 	bcachefs_is_custom: boolean;
 	timezone: string;
 	ntp_synced: boolean;

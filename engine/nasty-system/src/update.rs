@@ -2004,7 +2004,7 @@ pub async fn bootstrap_system_flake_from_template(
 /// Returns `Err` if the embedded flake.nix doesn't parse or doesn't
 /// declare a `bcachefs-tools.url` — both of which should be caught
 /// by tests in this same module before any binary ships.
-fn embedded_default_bcachefs_tools_ref() -> Result<String, UpdateError> {
+pub(crate) fn embedded_default_bcachefs_tools_ref() -> Result<String, UpdateError> {
     let urls = parse_flake_input_urls(EMBEDDED_NASTY_FLAKE)?;
     let input = urls.get("bcachefs-tools").ok_or_else(|| {
         UpdateError::CommandFailed(
