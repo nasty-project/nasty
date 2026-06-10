@@ -347,6 +347,17 @@ pub struct FilesystemDevice {
     pub has_data: Option<String>,
     /// Whether TRIM/discard is enabled on this device.
     pub discard: Option<bool>,
+    /// Cumulative read IO errors (since filesystem creation), from
+    /// `/sys/fs/bcachefs/<uuid>/dev-N/io_errors`. Only populated while
+    /// the filesystem is mounted (sysfs is absent otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_errors: Option<u64>,
+    /// Cumulative write IO errors (since filesystem creation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_errors: Option<u64>,
+    /// Cumulative checksum errors (since filesystem creation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum_errors: Option<u64>,
 }
 
 /// Specifies a device and its per-device options for filesystem creation.
@@ -1070,6 +1081,9 @@ impl FilesystemService {
                     data_allowed: None,
                     has_data: None,
                     discard: None,
+                    read_errors: None,
+                    write_errors: None,
+                    checksum_errors: None,
                 })
                 .collect();
 
@@ -1433,6 +1447,9 @@ impl FilesystemService {
                 data_allowed: None,
                 has_data: None,
                 discard: None,
+                read_errors: None,
+                write_errors: None,
+                checksum_errors: None,
             })
             .collect();
         if let Some(ref sched) = req.io_scheduler
@@ -1463,6 +1480,9 @@ impl FilesystemService {
                 data_allowed: None,
                 has_data: None,
                 discard: None,
+                read_errors: None,
+                write_errors: None,
+                checksum_errors: None,
             })
             .collect();
 
@@ -3295,7 +3315,7 @@ pub async fn create_partition_on_free_space(disk_path: &str) -> Result<String, F
 
 /// Read per-device info (labels, durability) for a mounted bcachefs filesystem.
 /// Uses `bcachefs show-super` on the first device to extract member info.
-async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<FilesystemDevice> {
+async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemDevice> {
     let first_dev = match device_paths.first() {
         Some(d) => d.as_str(),
         None => return Vec::new(),
@@ -3304,6 +3324,9 @@ async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<Filesystem
     let member_info = cmd::run_ok("bcachefs", &["show-super", "-f", "members_v2", first_dev])
         .await
         .unwrap_or_default();
+
+    // Per-device IO error counters live in sysfs (mounted pools only).
+    let io_errors = read_device_io_errors(uuid).await;
 
     // show-super -f members_v2 output comes in two formats:
     //
@@ -3382,6 +3405,11 @@ async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<Filesystem
             (None, None, None, None, None, None)
         };
 
+        let (read_errors, write_errors, checksum_errors) = io_errors
+            .get(dev_path)
+            .copied()
+            .unwrap_or((None, None, None));
+
         devices.push(FilesystemDevice {
             path: dev_path.clone(),
             label,
@@ -3390,10 +3418,81 @@ async fn read_fs_devices(_uuid: &str, device_paths: &[String]) -> Vec<Filesystem
             data_allowed,
             has_data,
             discard,
+            read_errors,
+            write_errors,
+            checksum_errors,
         });
     }
 
     devices
+}
+
+/// Parse `/sys/fs/bcachefs/<uuid>/dev-N/io_errors`, returning the
+/// cumulative `(read, write, checksum)` counts from the "since
+/// filesystem creation" block. A later "since … ago" block reports
+/// counts since the last reset and is ignored. Pure; unit-tested.
+fn parse_io_errors(s: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let (mut read, mut write, mut checksum) = (None, None, None);
+    for line in s.lines() {
+        let l = line.trim();
+        // Once we've started filling the first block, a second
+        // "IO errors since …" header marks the reset block — stop.
+        if l.starts_with("IO errors since")
+            && (read.is_some() || write.is_some() || checksum.is_some())
+        {
+            break;
+        }
+        let val = |key: &str| -> Option<u64> {
+            l.strip_prefix(key)
+                .map(|r| r.trim_start_matches([':', ' ', '\t']))
+                .and_then(|r| r.split_whitespace().next())
+                .and_then(|t| t.parse().ok())
+        };
+        // "checksum:0" has no space; "read:    0" does — `val` handles both.
+        if read.is_none() && l.starts_with("read") {
+            read = val("read");
+        } else if write.is_none() && l.starts_with("write") {
+            write = val("write");
+        } else if checksum.is_none() && l.starts_with("checksum") {
+            checksum = val("checksum");
+        }
+    }
+    (read, write, checksum)
+}
+
+/// Map each member device path → its cumulative `(read, write, checksum)`
+/// IO error counts, by scanning `/sys/fs/bcachefs/<uuid>/dev-*/`. Empty
+/// when the filesystem isn't mounted (the sysfs tree is absent).
+async fn read_device_io_errors(
+    uuid: &str,
+) -> HashMap<String, (Option<u64>, Option<u64>, Option<u64>)> {
+    let base = format!("/sys/fs/bcachefs/{uuid}");
+    let mut out = HashMap::new();
+    let mut rd = match tokio::fs::read_dir(&base).await {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("dev-") {
+            continue;
+        }
+        let dir = format!("{base}/{name}");
+        // dev-N/block is a symlink whose basename is the kernel device name.
+        let dev_name = match tokio::fs::read_link(format!("{dir}/block")).await {
+            Ok(target) => target.file_name().map(|s| s.to_string_lossy().into_owned()),
+            Err(_) => None,
+        };
+        let Some(dev_name) = dev_name else { continue };
+        match tokio::fs::read_to_string(format!("{dir}/io_errors")).await {
+            Ok(s) => {
+                out.insert(format!("/dev/{dev_name}"), parse_io_errors(&s));
+            }
+            Err(_) => continue,
+        }
+    }
+    out
 }
 
 /// Read filesystem options from sysfs for a mounted bcachefs filesystem.
@@ -5515,5 +5614,36 @@ Device 1:\t/dev/sdb
     fn fsck_error_markers_flag_errors_even_on_zero_exit() {
         let out = "checking extents\nerrors: 2\n";
         assert_eq!(classify_fsck(true, out), FsckOutcome::Errors);
+    }
+
+    // ── Per-device IO error counters (#457) ───────────────────
+
+    #[test]
+    fn parse_io_errors_reads_creation_block_only() {
+        // The sysfs file has two blocks; only the cumulative
+        // "since filesystem creation" one should be parsed. Note the
+        // "checksum:0" form has no space after the colon.
+        let s = "\
+IO errors since filesystem creation
+  read:    3
+  write:   1
+  checksum:2
+IO errors since 8 y ago
+  read:    99
+  write:   99
+  checksum:99
+";
+        assert_eq!(parse_io_errors(s), (Some(3), Some(1), Some(2)));
+    }
+
+    #[test]
+    fn parse_io_errors_clean_device_is_all_zero() {
+        let s = "IO errors since filesystem creation\n  read:    0\n  write:   0\n  checksum:0\n";
+        assert_eq!(parse_io_errors(s), (Some(0), Some(0), Some(0)));
+    }
+
+    #[test]
+    fn parse_io_errors_empty_input_is_none() {
+        assert_eq!(parse_io_errors(""), (None, None, None));
     }
 }

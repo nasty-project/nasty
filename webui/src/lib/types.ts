@@ -313,6 +313,12 @@ export interface FilesystemDevice {
 	has_data: string | null;
 	/** Whether TRIM/discard is enabled */
 	discard: boolean | null;
+	/** Cumulative read IO errors since fs creation (mounted pools only). */
+	read_errors?: number | null;
+	/** Cumulative write IO errors since fs creation. */
+	write_errors?: number | null;
+	/** Cumulative checksum errors since fs creation. */
+	checksum_errors?: number | null;
 }
 
 export type DeviceState = 'rw' | 'ro' | 'failed' | 'spare';
