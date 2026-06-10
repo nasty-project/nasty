@@ -31,6 +31,10 @@ struct CachedInfo {
     bcachefs_version: String,
     bcachefs_commit: Option<String>,
     bcachefs_pinned_ref: Option<String>,
+    /// The bcachefs-tools ref this NASty build ships with (baked from
+    /// nasty's flake.nix at compile time). The top-bar chip offers to
+    /// switch the operator's pin to this when they differ.
+    bcachefs_recommended_ref: Option<String>,
     debug_symbols: bool,
     /// Whether the RUNNING module is custom (version differs from default).
     bcachefs_is_custom_running: bool,
@@ -64,6 +68,12 @@ pub struct SystemInfo {
     pub bcachefs_commit: Option<String>,
     /// The ref currently pinned in `/etc/nixos/flake.lock` for `bcachefs-tools`.
     pub bcachefs_pinned_ref: Option<String>,
+    /// The bcachefs-tools ref this NASty build was shipped/tested with
+    /// (parsed from nasty's flake.nix baked into the engine at build
+    /// time). When this differs from `bcachefs_pinned_ref`, the WebUI's
+    /// top-bar chip offers a one-click switch of the operator's pin to
+    /// this ref. `None` if the embedded flake can't be parsed.
+    pub bcachefs_recommended_ref: Option<String>,
     /// True when the running bcachefs kernel module version doesn't
     /// match the wrapper's currently-pinned `bcachefs-tools` ref —
     /// i.e. an upgrade or pin change has activated a new generation
@@ -172,10 +182,15 @@ impl SystemService {
             }
             _ => false,
         };
+        // The bcachefs ref this engine build ships with — parsed from
+        // nasty's flake.nix baked in at compile time. Drives the chip's
+        // "sync to bundled bcachefs" offer when it differs from the pin.
+        let bcachefs_recommended_ref = crate::update::embedded_default_bcachefs_tools_ref().ok();
         let info = CachedInfo {
             bcachefs_version,
             bcachefs_commit,
             bcachefs_pinned_ref: pinned_ref,
+            bcachefs_recommended_ref,
             debug_symbols,
             bcachefs_is_custom_running,
             bcachefs_debug_checks: debug_checks,
@@ -198,6 +213,7 @@ impl SystemService {
             bcachefs_version: cached.bcachefs_version,
             bcachefs_commit: cached.bcachefs_commit,
             bcachefs_pinned_ref: cached.bcachefs_pinned_ref,
+            bcachefs_recommended_ref: cached.bcachefs_recommended_ref,
             bcachefs_is_custom: cached.bcachefs_is_custom_running,
             timezone,
             ntp_synced,

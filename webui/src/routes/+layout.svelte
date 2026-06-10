@@ -294,7 +294,7 @@
 	}
 
 	// Version info (loaded once after connect)
-	let sysInfo: { hostname: string; version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_is_custom: boolean; bcachefs_debug_checks: boolean; kvm_available: boolean; is_virtual: boolean } | null = $state(null);
+	let sysInfo: { hostname: string; version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_recommended_ref: string | null; bcachefs_is_custom: boolean; bcachefs_debug_checks: boolean; kvm_available: boolean; is_virtual: boolean } | null = $state(null);
 	let clock24h = $state(true);
 
 	// Network rollback countdown — ticks once per second while a rollback is
@@ -1066,11 +1066,18 @@
 						</button>
 					{/if}
 					{#if sysInfo?.bcachefs_is_custom || sysInfo?.bcachefs_debug_checks}
+						{@const bcachefsSyncAvail = !!sysInfo.bcachefs_recommended_ref && sysInfo.bcachefs_recommended_ref !== sysInfo.bcachefs_pinned_ref}
 						<a
 							href="/update#bcachefs"
 							class="flex items-center gap-2 rounded-md border-2 border-blue-500/70 px-3 py-1.5 text-sm text-blue-400 no-underline transition-all hover:bg-blue-500/10 hover:border-blue-400 hover:shadow-[0_0_16px_rgba(96,165,250,0.5)]"
+							title={bcachefsSyncAvail
+								? `NASty ships bcachefs ${sysInfo.bcachefs_recommended_ref} (you're pinned at ${sysInfo.bcachefs_pinned_ref ?? '—'}) — click to switch`
+								: 'bcachefs status'}
 						>
 							<span>bcachefs</span>
+							{#if bcachefsSyncAvail}
+								<span class="font-mono text-xs">→ {sysInfo.bcachefs_recommended_ref}</span>
+							{/if}
 							<span class="flex items-center gap-1.5">
 								<span title="Reboot pending to load the new bcachefs kernel module"><Settings size={14} class={sysInfo.bcachefs_is_custom ? 'text-amber-400' : 'text-muted-foreground/30'} /></span>
 								<span title="Debug checks"><Bug size={14} class={sysInfo.bcachefs_debug_checks ? 'text-blue-400' : 'text-muted-foreground/30'} /></span>

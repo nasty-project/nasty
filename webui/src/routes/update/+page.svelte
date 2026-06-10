@@ -77,6 +77,10 @@
 	let startingDevUpgrade = $state(false);
 	let taggedReleaseBanner: TaggedReleaseBannerState = $state({ kind: 'loading' });
 	let versionRows: VersionRow[] = $state([]);
+	/** bcachefs-tools ref this NASty build ships with (system.info). When
+	 * it differs from the pinned bcachefs row, we offer a one-click sync. */
+	let recommendedBcachefs = $state<string | null>(null);
+	let syncingBcachefs = $state(false);
 	let status: UpdateStatus | null = $state(null);
 	let loading = $state(true);
 	let startingSwitch = $state(false);
@@ -286,14 +290,16 @@
 
 	async function loadVersionPage() {
 		await withToast(async () => {
-			const [nextInfo, nextVersion, nextBuildDir] = await Promise.all([
+			const [nextInfo, nextVersion, nextBuildDir, sys] = await Promise.all([
 				client.call<VersionInfo>('system.version.get'),
 				client.call<UpdateInfo>('system.update.version'),
-				client.call<UpdateBuildDirConfig>('system.update.build_dir.get')
+				client.call<UpdateBuildDirConfig>('system.update.build_dir.get'),
+				client.call<{ bcachefs_recommended_ref: string | null }>('system.info').catch(() => null)
 			]);
 			info = nextVersion;
 			buildDir = nextBuildDir;
 			buildDirDraft = nextBuildDir.path ?? '';
+			recommendedBcachefs = sys?.bcachefs_recommended_ref ?? null;
 			syncVersionRows(nextInfo);
 			if (readVersionPageAction() === 'version-switch') {
 				taggedReleaseBanner = { kind: 'switching' };
@@ -383,6 +389,33 @@
 			void loadTaggedReleaseBanner();
 		}
 		startingSwitch = false;
+	}
+
+	// Offer a one-click bcachefs sync when the operator's pinned ref
+	// differs from the ref this NASty build ships with (#457-adjacent).
+	const bcachefsRow = $derived(versionRows.find((r) => r.name === 'bcachefs-tools'));
+	const bcachefsSyncAvailable = $derived(
+		!!recommendedBcachefs &&
+			!!bcachefsRow &&
+			trackingRef(bcachefsRow.initialUrl) !== recommendedBcachefs
+	);
+
+	async function syncBcachefsToBundled() {
+		const row = versionRows.find((r) => r.name === 'bcachefs-tools');
+		if (!recommendedBcachefs || !row) return;
+		if (
+			!(await confirm(
+				`Switch bcachefs to ${recommendedBcachefs}?`,
+				`This re-pins bcachefs-tools to ${recommendedBcachefs} — the version bundled with this NASty release — and rebuilds immediately. You may need to reboot afterward to load the new kernel module.`,
+				{ confirmLabel: 'Switch', cancelLabel: 'Cancel' }
+			))
+		)
+			return;
+		syncingBcachefs = true;
+		row.url = `github:koverstreet/bcachefs-tools/${recommendedBcachefs}`;
+		row.update = true;
+		await doVersionSwitch();
+		syncingBcachefs = false;
 	}
 
 	async function upgradeTaggedRelease() {
@@ -727,6 +760,12 @@
 										{#if checkInfo?.update_available}
 											<Button size="sm" onclick={upgradeDevBuild} disabled={startingDevUpgrade || status?.state === 'running'}>
 												{startingDevUpgrade ? 'Starting...' : 'Upgrade'}
+											</Button>
+										{/if}
+										{#if bcachefsSyncAvailable}
+											<Button size="sm" variant="secondary" onclick={syncBcachefsToBundled} disabled={syncingBcachefs || status?.state === 'running'}
+												title="Your bcachefs pin differs from the version bundled with this NASty release. Re-pin to it and rebuild.">
+												{syncingBcachefs ? 'Switching...' : `Sync bcachefs → ${recommendedBcachefs}`}
 											</Button>
 										{/if}
 									{:else if taggedReleaseBanner.kind === 'ready' && (!taggedReleaseBanner.current_is_latest_standard_url || info?.last_attempt === 'failed')}
