@@ -322,6 +322,13 @@
 
 	onMount(async () => {
 		client.onEvent(handleEvent);
+		try {
+			const saved = localStorage.getItem('fsDeviceCols');
+			if (saved) {
+				const parsed = JSON.parse(saved);
+				if (Array.isArray(parsed)) visibleDeviceCols = parsed.filter((c) => typeof c === 'string');
+			}
+		} catch { /* ignore malformed pref */ }
 		await refresh();
 		loading = false;
 		if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('create')) {
@@ -1010,6 +1017,47 @@
 			case 'evacuating': return 'bg-yellow-950 text-yellow-400 animate-pulse';
 			default: return 'bg-secondary text-muted-foreground';
 		}
+	}
+
+	// ── Filesystem device table: user-selectable columns (#457) ──
+	// Device / Label / State / Actions are always shown; these are
+	// optional and persisted per-browser. Size/Type/Model/Serial join
+	// the BlockDevice list (device.list); Clean + error counts come from
+	// the per-device bcachefs IO error counters.
+	const DEVICE_COLUMNS = [
+		{ id: 'size', label: 'Size' },
+		{ id: 'type', label: 'Type' },
+		{ id: 'model', label: 'Model' },
+		{ id: 'serial', label: 'Serial' },
+		{ id: 'clean', label: 'Clean' },
+		{ id: 'read_err', label: 'Read err' },
+		{ id: 'write_err', label: 'Write err' },
+		{ id: 'csum_err', label: 'Cksum err' },
+		{ id: 'data_allowed', label: 'Data allowed' },
+		{ id: 'has_data', label: 'Has data' }
+	] as const;
+	const DEFAULT_DEVICE_COLS = ['size', 'type', 'clean', 'has_data'];
+	let visibleDeviceCols = $state<string[]>([...DEFAULT_DEVICE_COLS]);
+
+	function colOn(id: string): boolean {
+		return visibleDeviceCols.includes(id);
+	}
+	function toggleCol(id: string) {
+		visibleDeviceCols = colOn(id)
+			? visibleDeviceCols.filter((c) => c !== id)
+			: [...visibleDeviceCols, id];
+		try { localStorage.setItem('fsDeviceCols', JSON.stringify(visibleDeviceCols)); } catch { /* ignore */ }
+	}
+
+	/** The BlockDevice (device.list) backing a filesystem member, by path. */
+	function deviceBlock(path: string): BlockDevice | undefined {
+		return devices.find((d) => d.path === path);
+	}
+	/** Total IO errors across read/write/checksum, or null if unknown (unmounted). */
+	function devErrorTotal(dev: FilesystemDevice): number | null {
+		if (dev.read_errors == null && dev.write_errors == null && dev.checksum_errors == null)
+			return null;
+		return (dev.read_errors ?? 0) + (dev.write_errors ?? 0) + (dev.checksum_errors ?? 0);
 	}
 
 	function classColor(cls: string): string {
@@ -2045,14 +2093,35 @@
 							</div>
 						</div>
 
+						<div class="mb-1 flex justify-end">
+							<details class="relative text-xs">
+								<summary class="cursor-pointer list-none rounded border border-border px-2 py-0.5 text-muted-foreground hover:bg-secondary">Columns ▾</summary>
+								<div class="absolute right-0 z-10 mt-1 w-40 rounded-md border border-border bg-popover p-2 shadow-md">
+									{#each DEVICE_COLUMNS as col}
+										<label class="flex cursor-pointer items-center gap-2 py-0.5">
+											<input type="checkbox" checked={colOn(col.id)} onchange={() => toggleCol(col.id)} class="h-3.5 w-3.5" />
+											<span>{col.label}</span>
+										</label>
+									{/each}
+								</div>
+							</details>
+						</div>
 						<table class="w-full text-sm">
 							<thead>
 								<tr>
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Device</th>
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Label</th>
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">State</th>
-									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Data Allowed</th>
-									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Has Data</th>
+									{#if colOn('size')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Size</th>{/if}
+									{#if colOn('type')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Type</th>{/if}
+									{#if colOn('model')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Model</th>{/if}
+									{#if colOn('serial')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Serial</th>{/if}
+									{#if colOn('clean')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Clean</th>{/if}
+									{#if colOn('read_err')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Read err</th>{/if}
+									{#if colOn('write_err')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Write err</th>{/if}
+									{#if colOn('csum_err')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Cksum err</th>{/if}
+									{#if colOn('data_allowed')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Data Allowed</th>{/if}
+									{#if colOn('has_data')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Has Data</th>{/if}
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 								</tr>
 							</thead>
@@ -2098,8 +2167,49 @@
 												<span class="text-muted-foreground">—</span>
 											{/if}
 										</td>
-										<td class="p-2 font-mono text-xs text-muted-foreground">{dev.data_allowed ?? '—'}</td>
-										<td class="p-2 font-mono text-xs text-muted-foreground">{dev.has_data ?? '—'}</td>
+										{#if colOn('size')}
+											{@const blk = deviceBlock(dev.path)}
+											<td class="p-2 font-mono text-xs text-muted-foreground">{blk ? formatBytes(blk.size_bytes) : '—'}</td>
+										{/if}
+										{#if colOn('type')}
+											{@const blk = deviceBlock(dev.path)}
+											<td class="p-2 text-xs text-muted-foreground uppercase">{blk?.device_class ?? '—'}</td>
+										{/if}
+										{#if colOn('model')}
+											{@const blk = deviceBlock(dev.path)}
+											<td class="p-2 text-xs text-muted-foreground">{blk?.model ?? '—'}</td>
+										{/if}
+										{#if colOn('serial')}
+											{@const blk = deviceBlock(dev.path)}
+											<td class="p-2 font-mono text-xs text-muted-foreground">{blk?.serial ?? '—'}</td>
+										{/if}
+										{#if colOn('clean')}
+											{@const errTotal = devErrorTotal(dev)}
+											<td class="p-2 text-xs">
+												{#if errTotal === null}
+													<span class="text-muted-foreground">—</span>
+												{:else if errTotal === 0}
+													<span class="text-green-500" title="No read/write/checksum errors since creation">✓</span>
+												{:else}
+													<span class="text-red-500" title="read {dev.read_errors ?? 0}, write {dev.write_errors ?? 0}, checksum {dev.checksum_errors ?? 0}">{errTotal} ✗</span>
+												{/if}
+											</td>
+										{/if}
+										{#if colOn('read_err')}
+											<td class="p-2 font-mono text-xs {dev.read_errors ? 'text-red-500' : 'text-muted-foreground'}">{dev.read_errors ?? '—'}</td>
+										{/if}
+										{#if colOn('write_err')}
+											<td class="p-2 font-mono text-xs {dev.write_errors ? 'text-red-500' : 'text-muted-foreground'}">{dev.write_errors ?? '—'}</td>
+										{/if}
+										{#if colOn('csum_err')}
+											<td class="p-2 font-mono text-xs {dev.checksum_errors ? 'text-red-500' : 'text-muted-foreground'}">{dev.checksum_errors ?? '—'}</td>
+										{/if}
+										{#if colOn('data_allowed')}
+											<td class="p-2 font-mono text-xs text-muted-foreground">{dev.data_allowed ?? '—'}</td>
+										{/if}
+										{#if colOn('has_data')}
+											<td class="p-2 font-mono text-xs text-muted-foreground">{dev.has_data ?? '—'}</td>
+										{/if}
 										<td class="p-2 w-px whitespace-nowrap">
 											<div class="flex gap-1.5 items-center">
 											{#if fs.mounted}
