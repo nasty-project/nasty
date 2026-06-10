@@ -22,6 +22,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
+	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 
 	type Tab = 'version' | 'generations' | 'firmware';
 	type VersionRow = {
@@ -343,6 +344,14 @@
 				} else {
 					writeVersionPageAction(null);
 					void loadTaggedReleaseBanner();
+					// The switch finished. A bcachefs-tools-only switch
+					// rebuilds + activates without restarting the engine, so
+					// the WS never drops and the layout's reconnect-driven
+					// sysInfo refresh never fires — the top-bar bcachefs chip
+					// would stay stale until a manual reload. Nudge it, and
+					// reload our rows so the pinned ref / sync button update.
+					sysInfoRefresh.trigger();
+					void loadVersionPage();
 				}
 			}
 			if (status?.state === 'running') startPolling();
