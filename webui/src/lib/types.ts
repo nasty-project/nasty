@@ -322,6 +322,10 @@ export interface FilesystemDevice {
 	write_errors?: number | null;
 	/** Cumulative checksum errors since fs creation. */
 	checksum_errors?: number | null;
+	/** bcachefs member slot (the `Device N` index) — stable across reboots. */
+	member_index?: number | null;
+	/** Stable per-device bcachefs UUID (mounted pools only). */
+	uuid?: string | null;
 }
 
 export type DeviceState = 'rw' | 'ro' | 'failed' | 'spare';

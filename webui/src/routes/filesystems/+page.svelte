@@ -1038,6 +1038,8 @@
 	// the BlockDevice list (device.list); Clean + error counts come from
 	// the per-device bcachefs IO error counters.
 	const DEVICE_COLUMNS = [
+		{ id: 'slot', label: 'Slot' },
+		{ id: 'uuid', label: 'UUID' },
 		{ id: 'size', label: 'Size' },
 		{ id: 'type', label: 'Type' },
 		{ id: 'model', label: 'Model' },
@@ -1049,7 +1051,7 @@
 		{ id: 'data_allowed', label: 'Data allowed' },
 		{ id: 'has_data', label: 'Has data' }
 	] as const;
-	const DEFAULT_DEVICE_COLS = ['size', 'type', 'clean', 'has_data'];
+	const DEFAULT_DEVICE_COLS = ['slot', 'size', 'type', 'clean', 'has_data'];
 	let visibleDeviceCols = $state<string[]>([...DEFAULT_DEVICE_COLS]);
 
 	function colOn(id: string): boolean {
@@ -2125,6 +2127,8 @@
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Device</th>
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Label</th>
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground">State</th>
+									{#if colOn('slot')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Slot</th>{/if}
+									{#if colOn('uuid')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">UUID</th>{/if}
 									{#if colOn('size')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Size</th>{/if}
 									{#if colOn('type')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Type</th>{/if}
 									{#if colOn('model')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Model</th>{/if}
@@ -2180,6 +2184,12 @@
 												<span class="text-muted-foreground">—</span>
 											{/if}
 										</td>
+										{#if colOn('slot')}
+											<td class="p-2 font-mono text-xs text-muted-foreground">{dev.member_index ?? '—'}</td>
+										{/if}
+										{#if colOn('uuid')}
+											<td class="p-2 font-mono text-xs text-muted-foreground" title={dev.uuid ?? ''}>{dev.uuid ? dev.uuid.slice(0, 8) : '—'}</td>
+										{/if}
 										{#if colOn('size')}
 											{@const blk = deviceBlock(dev.path)}
 											<td class="p-2 font-mono text-xs text-muted-foreground">{blk ? formatBytes(blk.size_bytes) : '—'}</td>

@@ -358,6 +358,18 @@ pub struct FilesystemDevice {
     /// Cumulative checksum errors (since filesystem creation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum_errors: Option<u64>,
+    /// bcachefs member index (the `Device N` slot). Stable across
+    /// reboots and independent of the kernel device name, so it
+    /// disambiguates "is this the same member?" when a disk is removed
+    /// and re-added — possibly in a different physical slot. From
+    /// show-super, so available mounted or not. See #452.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_index: Option<u32>,
+    /// Stable per-device bcachefs UUID (distinct from the filesystem
+    /// UUID). From `/sys/fs/bcachefs/<fs>/dev-N/uuid`, so populated only
+    /// while mounted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
 }
 
 /// Specifies a device and its per-device options for filesystem creation.
@@ -1084,6 +1096,8 @@ impl FilesystemService {
                     read_errors: None,
                     write_errors: None,
                     checksum_errors: None,
+                    member_index: None,
+                    uuid: None,
                 })
                 .collect();
 
@@ -1450,6 +1464,8 @@ impl FilesystemService {
                 read_errors: None,
                 write_errors: None,
                 checksum_errors: None,
+                member_index: None,
+                uuid: None,
             })
             .collect();
         if let Some(ref sched) = req.io_scheduler
@@ -1483,6 +1499,8 @@ impl FilesystemService {
                 read_errors: None,
                 write_errors: None,
                 checksum_errors: None,
+                member_index: None,
+                uuid: None,
             })
             .collect();
 
@@ -3326,7 +3344,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         .unwrap_or_default();
 
     // Per-device IO error counters live in sysfs (mounted pools only).
-    let io_errors = read_device_io_errors(uuid).await;
+    let sysfs = read_device_sysfs(uuid).await;
 
     // show-super -f members_v2 output comes in two formats:
     //
@@ -3405,10 +3423,18 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             (None, None, None, None, None, None)
         };
 
-        let (read_errors, write_errors, checksum_errors) = io_errors
-            .get(dev_path)
-            .copied()
+        // Member slot from the show-super block header ("Device N:") —
+        // works mounted or not; fall back to the sysfs dev-N index.
+        let member_index = block
+            .and_then(|b| b.first())
+            .and_then(|hdr| parse_device_index(hdr))
+            .or_else(|| sysfs.get(dev_path).and_then(|s| s.member_index));
+
+        let sy = sysfs.get(dev_path);
+        let (read_errors, write_errors, checksum_errors) = sy
+            .map(|s| (s.read_errors, s.write_errors, s.checksum_errors))
             .unwrap_or((None, None, None));
+        let uuid = sy.and_then(|s| s.uuid.clone());
 
         devices.push(FilesystemDevice {
             path: dev_path.clone(),
@@ -3421,6 +3447,8 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             read_errors,
             write_errors,
             checksum_errors,
+            member_index,
+            uuid,
         });
     }
 
@@ -3463,9 +3491,32 @@ fn parse_io_errors(s: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
 /// Map each member device path → its cumulative `(read, write, checksum)`
 /// IO error counts, by scanning `/sys/fs/bcachefs/<uuid>/dev-*/`. Empty
 /// when the filesystem isn't mounted (the sysfs tree is absent).
-async fn read_device_io_errors(
-    uuid: &str,
-) -> HashMap<String, (Option<u64>, Option<u64>, Option<u64>)> {
+/// Parse the bcachefs member index out of a show-super device block
+/// header like `Device 0:   /dev/sda` → `Some(0)`. Tolerates the
+/// `Device 0 (label ...):` single-line variant too.
+fn parse_device_index(header: &str) -> Option<u32> {
+    header
+        .trim()
+        .strip_prefix("Device ")
+        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+        .filter(|d| !d.is_empty())
+        .and_then(|d| d.parse::<u32>().ok())
+}
+
+/// Per-device facts read from `/sys/fs/bcachefs/<fs-uuid>/dev-N/`
+/// (mounted pools only). Keyed by `/dev/<name>` in the returned map.
+#[derive(Default, Clone)]
+struct DeviceSysfs {
+    read_errors: Option<u64>,
+    write_errors: Option<u64>,
+    checksum_errors: Option<u64>,
+    /// Stable per-device bcachefs UUID (`dev-N/uuid`).
+    uuid: Option<String>,
+    /// Member slot — the `N` in `dev-N`.
+    member_index: Option<u32>,
+}
+
+async fn read_device_sysfs(uuid: &str) -> HashMap<String, DeviceSysfs> {
     let base = format!("/sys/fs/bcachefs/{uuid}");
     let mut out = HashMap::new();
     let mut rd = match tokio::fs::read_dir(&base).await {
@@ -3475,9 +3526,10 @@ async fn read_device_io_errors(
     while let Ok(Some(entry)) = rd.next_entry().await {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("dev-") {
+        let Some(idx) = name.strip_prefix("dev-") else {
             continue;
-        }
+        };
+        let member_index = idx.parse::<u32>().ok();
         let dir = format!("{base}/{name}");
         // dev-N/block is a symlink whose basename is the kernel device name.
         let dev_name = match tokio::fs::read_link(format!("{dir}/block")).await {
@@ -3485,12 +3537,26 @@ async fn read_device_io_errors(
             Err(_) => None,
         };
         let Some(dev_name) = dev_name else { continue };
-        match tokio::fs::read_to_string(format!("{dir}/io_errors")).await {
-            Ok(s) => {
-                out.insert(format!("/dev/{dev_name}"), parse_io_errors(&s));
-            }
-            Err(_) => continue,
-        }
+        let (read_errors, write_errors, checksum_errors) =
+            match tokio::fs::read_to_string(format!("{dir}/io_errors")).await {
+                Ok(s) => parse_io_errors(&s),
+                Err(_) => (None, None, None),
+            };
+        let dev_uuid = tokio::fs::read_to_string(format!("{dir}/uuid"))
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        out.insert(
+            format!("/dev/{dev_name}"),
+            DeviceSysfs {
+                read_errors,
+                write_errors,
+                checksum_errors,
+                uuid: dev_uuid,
+                member_index,
+            },
+        );
     }
     out
 }
@@ -5645,5 +5711,17 @@ IO errors since 8 y ago
     #[test]
     fn parse_io_errors_empty_input_is_none() {
         assert_eq!(parse_io_errors(""), (None, None, None));
+    }
+
+    #[test]
+    fn parse_device_index_handles_both_formats() {
+        assert_eq!(parse_device_index("Device 0:    /dev/sda"), Some(0));
+        assert_eq!(parse_device_index("\tDevice 7:\t/dev/sdh"), Some(7));
+        assert_eq!(
+            parse_device_index("Device 2 (label ssd.fast):  /dev/sdc"),
+            Some(2)
+        );
+        assert_eq!(parse_device_index("Label:  ssd.fast"), None);
+        assert_eq!(parse_device_index("Device index: 0"), None); // not a member header
     }
 }
