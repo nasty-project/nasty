@@ -991,8 +991,13 @@
 	}
 
 	function devDisplayState(dev: FilesystemDevice): string | null {
-		if (dev.state === 'evacuating' && (!dev.has_data || dev.has_data === '(none)' || dev.has_data === '–'))
-			return 'evacuated';
+		// Show the device's actual bcachefs state (rw/ro/failed/spare/
+		// evacuating). We used to synthesize an "evacuated" badge when
+		// `has_data` parsed empty, but that lied: a still-evacuating disk
+		// flipped to "evacuated" the moment the (fragile) has_data parse
+		// came back empty, and could land on the wrong row. There's no
+		// real "evacuated" device state — once a device is drained the
+		// operator removes it and it disappears from the list. (#456)
 		return dev.state;
 	}
 
@@ -1003,7 +1008,6 @@
 			case 'failed': return 'bg-red-950 text-red-400';
 			case 'spare': return 'bg-amber-950 text-amber-400';
 			case 'evacuating': return 'bg-yellow-950 text-yellow-400 animate-pulse';
-			case 'evacuated': return 'bg-teal-950 text-teal-400';
 			default: return 'bg-secondary text-muted-foreground';
 		}
 	}
@@ -1635,7 +1639,7 @@
 		<p class="mt-1 text-sm text-muted-foreground">Use the <strong>Create Filesystem</strong> button above to get started.</p>
 	</div>
 {:else}
-	{#each filesystems as fs}
+	{#each filesystems as fs (fs.name)}
 		<Card class="mb-4">
 			<CardContent class="pt-4">
 				<div class="flex flex-wrap items-center justify-between gap-4">
@@ -2053,7 +2057,7 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each fs.devices as dev}
+								{#each fs.devices as dev (dev.path)}
 									<tr class="border-b border-border">
 										<td class="p-2 font-mono text-xs">
 											{dev.path}
@@ -2101,8 +2105,6 @@
 											{#if fs.mounted}
 												{@const ds = devDisplayState(dev)}
 												{#if ds === 'evacuating'}
-													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
-												{:else if ds === 'evacuated'}
 													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 												{:else}
 													{#if ds === 'rw'}
