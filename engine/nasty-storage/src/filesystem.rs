@@ -3643,13 +3643,19 @@ async fn read_device_sysfs(uuid: &str) -> Vec<DeviceSysfs> {
         // or dead disk) still has its dev-N dir but the block symlink no
         // longer resolves — we keep it with `path: None` so the UI can show
         // it and offer a force-remove (#466).
-        let path = tokio::fs::read_link(format!("{dir}/block"))
-            .await
-            .ok()
-            .and_then(|t| {
-                t.file_name()
-                    .map(|s| format!("/dev/{}", s.to_string_lossy()))
-            });
+        let path = match tokio::fs::read_link(format!("{dir}/block")).await {
+            Ok(t) => t
+                .file_name()
+                .map(|s| format!("/dev/{}", s.to_string_lossy())),
+            Err(_) => None,
+        };
+        // A pulled disk can leave the symlink *dangling* (it reads OK but
+        // its target /dev node is gone) — treat that as missing too, so a
+        // pulled drive is flagged even when the kernel didn't drop the link.
+        let path = match path {
+            Some(p) if tokio::fs::metadata(&p).await.is_ok() => Some(p),
+            _ => None,
+        };
         let (read_errors, write_errors, checksum_errors) =
             match tokio::fs::read_to_string(format!("{dir}/io_errors")).await {
                 Ok(s) => parse_io_errors(&s),
