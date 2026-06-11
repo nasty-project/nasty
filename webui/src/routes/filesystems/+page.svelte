@@ -1043,6 +1043,31 @@
 		return devices.filter(d => !d.in_use && (showAddPartitions || d.dev_type !== 'part'));
 	}
 
+	/** Classify an Add Device candidate against the target pool (#472).
+	 * A bcachefs disk whose superblock UUID matches this filesystem is
+	 * either an offline member (re-attach it — wiping would destroy a
+	 * disk that could just be brought back online) or a former, removed
+	 * member (its data was evacuated; wipe is the correct path). Other
+	 * bcachefs disks belong to a foreign pool. */
+	function addCandidateKind(dev: BlockDevice, fs: Filesystem): 'plain' | 'offline_member' | 'former_member' | 'foreign' {
+		if (dev.fs_type !== 'bcachefs') return 'plain';
+		if (dev.fs_uuid && dev.fs_uuid === fs.uuid) {
+			return fs.devices.some(d => d.missing) ? 'offline_member' : 'former_member';
+		}
+		return 'foreign';
+	}
+
+	/** Device path to hand fs.device.online to re-attach this missing
+	 * member (#472): its own path when that disk is currently detected
+	 * (e.g. it was offlined in place), else any available disk whose
+	 * superblock UUID matches this pool — the member may have reappeared
+	 * under a new kernel name. Null when no matching disk is present. */
+	function reattachPath(fs: Filesystem, dev: FilesystemDevice): string | null {
+		if (deviceBlock(dev.path)) return dev.path;
+		const cand = devices.find(d => !d.in_use && d.fs_uuid && d.fs_uuid === fs.uuid);
+		return cand?.path ?? null;
+	}
+
 	/** SMART health for a candidate disk, matched by path (whole-disk
 	 * only; partitions inherit nothing). `undefined` when smartctl has
 	 * no data — virtual disks, USB bridges, or SMART service disabled. */
@@ -2321,6 +2346,12 @@
 										<td class="p-2 w-px whitespace-nowrap">
 											<div class="flex gap-1.5 items-center">
 											{#if fs.mounted && dev.missing}
+												{@const reattach = reattachPath(fs, dev)}
+												{#if reattach}
+													<Button size="xs" onclick={() => onlineDevice(fs.name, reattach)} title="Re-attach {reattach} to this pool with its data intact">Bring online</Button>
+												{:else}
+													<span class="text-xs italic text-muted-foreground" title="The disk for this member slot is not currently detected. Reconnect it — it may reappear under a different name, in which case Bring online and Add Device will offer to re-attach it.">disk not detected</span>
+												{/if}
 												<Button variant="destructive" size="xs" onclick={() => removeMissingDevice(fs.name, dev)}>Remove (force)</Button>
 											{:else if fs.mounted}
 												{@const ds = devDisplayState(dev)}
@@ -2359,15 +2390,23 @@
 									{:else}
 										{#each availableDevicesForAdd() as dev}
 											{@const smart = smartFor(dev.path)}
-											<label class="flex cursor-pointer items-start gap-2 rounded-md border border-border/50 p-2 text-sm hover:bg-secondary/40 {addDevicePath === dev.path ? 'border-primary bg-primary/5' : ''}">
-												<input type="radio" name="add-device" value={dev.path} bind:group={addDevicePath} class="mt-0.5 h-4 w-4 shrink-0" />
+											{@const kind = addCandidateKind(dev, fs)}
+											{@const selectable = kind === 'plain' || kind === 'foreign'}
+											<label class="flex items-start gap-2 rounded-md border border-border/50 p-2 text-sm {selectable ? 'cursor-pointer hover:bg-secondary/40' : ''} {addDevicePath === dev.path ? 'border-primary bg-primary/5' : ''}">
+												<input type="radio" name="add-device" value={dev.path} bind:group={addDevicePath} disabled={!selectable} class="mt-0.5 h-4 w-4 shrink-0" />
 												<span class="min-w-0 flex-1">
 													<span class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
 														<span class="font-mono">{dev.path}</span>
 														<span class="text-muted-foreground">{formatBytes(dev.size_bytes)}</span>
 														<span class="rounded bg-secondary px-1 py-0.5 text-[10px] uppercase text-muted-foreground">{dev.device_class}</span>
 														{#if dev.dev_type === 'part'}<span class="rounded bg-secondary px-1 py-0.5 text-[10px] text-muted-foreground">part</span>{/if}
-														{#if dev.fs_type}<span class="rounded bg-amber-950 px-1 py-0.5 text-[10px] text-amber-400" title="Already has a filesystem — adding will wipe it">{dev.fs_type}</span>{/if}
+														{#if kind === 'offline_member'}
+															<span class="rounded bg-sky-950 px-1.5 py-0.5 text-[10px] text-sky-400" title="This disk's superblock belongs to this filesystem and a member slot is offline — bring it back online with its data intact. Do not wipe it.">offline member of this pool</span>
+														{:else if kind === 'former_member'}
+															<span class="rounded bg-amber-950 px-1.5 py-0.5 text-[10px] text-amber-400" title="This disk used to belong to this filesystem but its member slot was removed (data evacuated). Wipe it in Disks before re-adding it as a new device.">former member of this pool · wipe to re-add</span>
+														{:else if dev.fs_type}
+															<span class="rounded bg-amber-950 px-1 py-0.5 text-[10px] text-amber-400" title="Already has a filesystem — wipe it in Disks first">{dev.fs_type}</span>
+														{/if}
 													</span>
 													<span class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.7rem] text-muted-foreground">
 														{#if dev.model}<span class="font-mono">{dev.model}</span>{/if}
@@ -2381,6 +2420,9 @@
 														{/if}
 													</span>
 												</span>
+												{#if kind === 'offline_member'}
+													<Button size="xs" class="shrink-0" onclick={() => onlineDevice(fs.name, dev.path)}>Bring online</Button>
+												{/if}
 											</label>
 										{/each}
 									{/if}
