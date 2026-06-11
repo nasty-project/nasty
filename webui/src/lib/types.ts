@@ -326,6 +326,10 @@ export interface FilesystemDevice {
 	member_index?: number | null;
 	/** Stable per-device bcachefs UUID (mounted pools only). */
 	uuid?: string | null;
+	/** True for a missing/dead member: the superblock still lists it but
+	 * the block device is gone. `path` is a synthetic placeholder; remove
+	 * it by member_index with force. */
+	missing?: boolean | null;
 }
 
 export type DeviceState = 'rw' | 'ro' | 'failed' | 'spare';

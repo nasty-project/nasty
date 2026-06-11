@@ -821,6 +821,24 @@
 		await refresh();
 	}
 
+	/** Force-remove a missing/dead member by its slot index (#466/#473).
+	 * The disk is gone so nothing can be migrated off — relies on the
+	 * replicas surviving on the remaining devices. */
+	async function removeMissingDevice(fsName: string, dev: FilesystemDevice) {
+		const idx = dev.member_index;
+		if (idx == null) return;
+		if (!await confirm(
+			`Force-remove dead member (slot ${idx})?`,
+			`Removes the missing device from "${fsName}". Its data can't be migrated (the disk is gone), so this relies on the replicas still present on the remaining devices. Don't do this if the pool is already at minimum redundancy.`,
+			{ confirmLabel: 'Force remove', cancelLabel: 'Cancel' }
+		)) return;
+		await withToast(
+			() => client.call('fs.device.remove', { filesystem: fsName, device: String(idx), force: true }, 120000),
+			`Removed dead member (slot ${idx}) from "${fsName}"`
+		);
+		await refresh();
+	}
+
 	async function evacuateDevice(fsName: string, devicePath: string) {
 		if (!await confirm(`Evacuate all data from ${devicePath}?`)) return;
 		await withToast(
@@ -2217,7 +2235,7 @@
 											{/if}
 										</td>
 										<td class="p-2 text-xs">
-										{#if fs.mounted && editingLabel === `${fs.name}|${dev.path}`}
+										{#if fs.mounted && !dev.missing && editingLabel === `${fs.name}|${dev.path}`}
 											<!-- svelte-ignore a11y_autofocus -->
 											<input
 												class="w-28 rounded border border-input bg-background px-1.5 py-0.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring"
@@ -2229,7 +2247,7 @@
 										{:else}
 											<button
 												class="group inline-flex items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-secondary {dev.label ? '' : 'text-muted-foreground'} {fs.mounted ? 'cursor-text' : 'cursor-default'}"
-												onclick={() => { if (fs.mounted) startEditLabel(fs.name, dev); }}
+												onclick={() => { if (fs.mounted && !dev.missing) startEditLabel(fs.name, dev); }}
 												title={fs.mounted ? 'Click to edit label' : ''}
 											>
 												<span>{dev.label ?? '—'}</span>
@@ -2240,7 +2258,9 @@
 										{/if}
 									</td>
 										<td class="p-2">
-											{#if dev.state !== null}
+											{#if dev.missing}
+												<span class="rounded bg-red-950 px-2 py-0.5 text-xs font-semibold text-red-400" title="Member device is gone — force-remove it from the pool">missing</span>
+											{:else if dev.state !== null}
 												{@const ds = devDisplayState(dev)}
 												<span class="rounded px-2 py-0.5 text-xs font-semibold {stateColor(ds)}">
 													{ds}
@@ -2300,7 +2320,9 @@
 										{/if}
 										<td class="p-2 w-px whitespace-nowrap">
 											<div class="flex gap-1.5 items-center">
-											{#if fs.mounted}
+											{#if fs.mounted && dev.missing}
+												<Button variant="destructive" size="xs" onclick={() => removeMissingDevice(fs.name, dev)}>Remove (force)</Button>
+											{:else if fs.mounted}
 												{@const ds = devDisplayState(dev)}
 												{#if ds === 'evacuating'}
 													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
