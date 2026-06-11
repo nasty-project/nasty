@@ -65,6 +65,8 @@
 	let reconcileLoading = $state(false);
 	let reconcileEnabled = $state(true);
 	let reconcileToggling = $state(false);
+	let reconcileAutoRefresh = $state(false);
+	let reconcileIntervalId: ReturnType<typeof setInterval> | null = null;
 
 	onMount(async () => {
 		try {
@@ -106,6 +108,7 @@
 		stopAutoRefresh();
 		stopTopAutoRefresh();
 		stopTimestatsAutoRefresh();
+		stopReconcileAutoRefresh();
 		stopScrubPolling();
 	});
 
@@ -238,6 +241,21 @@
 		}
 	}
 
+	function startReconcileAutoRefresh() {
+		stopReconcileAutoRefresh();
+		refreshReconcile();
+		reconcileIntervalId = setInterval(refreshReconcile, 3000);
+	}
+
+	function stopReconcileAutoRefresh() {
+		if (reconcileIntervalId !== null) { clearInterval(reconcileIntervalId); reconcileIntervalId = null; }
+	}
+
+	function toggleReconcileAutoRefresh() {
+		reconcileAutoRefresh = !reconcileAutoRefresh;
+		if (reconcileAutoRefresh) startReconcileAutoRefresh(); else stopReconcileAutoRefresh();
+	}
+
 	async function toggleReconcile() {
 		if (!selectedFs) return;
 		reconcileToggling = true;
@@ -295,6 +313,13 @@
 		stopAutoRefresh();
 		stopTopAutoRefresh();
 		stopTimestatsAutoRefresh();
+		stopReconcileAutoRefresh();
+		// Reset the toggles too — a stopped interval with the button
+		// still lit would claim a live view that isn't running.
+		autoRefresh = false;
+		topAutoRefresh = false;
+		timestatsAutoRefresh = false;
+		reconcileAutoRefresh = false;
 
 		if (_fs) {
 			if (_tab === 'usage') refreshUsage();
@@ -466,6 +491,14 @@
 				>
 					<RefreshCw size={12} class={reconcileLoading ? 'animate-spin' : ''} />
 					Refresh
+				</button>
+				<button
+					onclick={toggleReconcileAutoRefresh}
+					disabled={!selectedFs}
+					class="rounded px-3 py-1 text-xs disabled:opacity-50
+						{reconcileAutoRefresh ? 'bg-primary text-primary-foreground' : 'bg-secondary hover:bg-secondary/80'}"
+				>
+					{reconcileAutoRefresh ? 'Live (3s)' : 'Live'}
 				</button>
 			</div>
 
