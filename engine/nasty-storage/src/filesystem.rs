@@ -2121,7 +2121,7 @@ impl FilesystemService {
             "lsblk",
             &[
                 "-Jbno",
-                "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,ROTA,MODEL,SERIAL,VENDOR,TRAN",
+                "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,ROTA,MODEL,SERIAL,VENDOR,TRAN,UUID",
             ],
         )
         .await
@@ -2213,6 +2213,7 @@ impl FilesystemService {
                     let serial = pick("serial");
                     let vendor = pick("vendor");
                     let transport = pick("tran");
+                    let fs_uuid = pick("uuid");
 
                     // Transport needs to be resolved before classify so the
                     // SAS path can use it.
@@ -2228,6 +2229,7 @@ impl FilesystemService {
                             dev_type: dev_type.to_string(),
                             mount_point: mountpoint,
                             fs_type: fstype,
+                            fs_uuid,
                             in_use: in_fs || actually_mounted,
                             rotational,
                             device_class,
@@ -2314,6 +2316,7 @@ impl FilesystemService {
                             dev_type: "free".to_string(),
                             mount_point: None,
                             fs_type: None,
+                            fs_uuid: None,
                             in_use: false,
                             rotational,
                             device_class,
@@ -2376,12 +2379,30 @@ impl FilesystemService {
             return Err(FilesystemError::DeviceInUse(req.device.path.clone()));
         }
         // Reject if the device has a filesystem signature (including stale bcachefs superblocks
-        // left over after removal). The user must explicitly wipe it via Disks → Wipe first.
+        // left over after removal). The user must explicitly wipe it via Disks → Wipe first —
+        // unless the superblock belongs to *this* filesystem and a member slot is offline, in
+        // which case the right move is a re-attach, not a wipe (#472).
         if is_device_bcachefs(&req.device.path).await {
-            return Err(FilesystemError::CommandFailed(format!(
-                "{} has an existing bcachefs superblock. Go to Disks → Wipe to erase it before adding it to a filesystem.",
-                req.device.path
-            )));
+            let same_fs = get_fs_uuid(&req.device.path).await.as_deref() == Some(fs.uuid.as_str());
+            let has_missing_member = fs.devices.iter().any(|d| d.missing == Some(true));
+            return Err(FilesystemError::CommandFailed(
+                if same_fs && has_missing_member {
+                    format!(
+                        "{} is an offline member of this filesystem. Use \"Bring online\" to re-attach it with its data intact instead of adding it as a new device.",
+                        req.device.path
+                    )
+                } else if same_fs {
+                    format!(
+                        "{} is a former member of this filesystem. Go to Disks → Wipe to erase its old superblock before re-adding it as a new device.",
+                        req.device.path
+                    )
+                } else {
+                    format!(
+                        "{} has an existing bcachefs superblock. Go to Disks → Wipe to erase it before adding it to a filesystem.",
+                        req.device.path
+                    )
+                },
+            ));
         }
 
         let mut args: Vec<String> = vec!["device".into(), "add".into()];
@@ -3256,6 +3277,12 @@ pub struct BlockDevice {
     pub mount_point: Option<String>,
     /// Filesystem type detected on the device (e.g. `bcachefs`, `ext4`).
     pub fs_type: Option<String>,
+    /// Filesystem UUID from lsblk — for bcachefs members this is the
+    /// *external* (whole-filesystem) UUID, so a candidate disk can be
+    /// matched against an existing pool's `Filesystem.uuid` to tell an
+    /// offline/former member apart from a foreign disk (#472).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_uuid: Option<String>,
     /// Whether the device is currently in use (mounted, in a filesystem, or has partitions in use).
     pub in_use: bool,
     /// Whether the underlying disk spins (false for NVMe/SSD, true for HDD).
@@ -3436,6 +3463,9 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
     };
 
     let mut devices: Vec<FilesystemDevice> = Vec::new();
+    // Phantom slots already represented by a bound /proc/mounts row,
+    // skipped by the missing-member loop below.
+    let mut bound_slots: std::collections::HashSet<Option<u32>> = std::collections::HashSet::new();
 
     for dev_path in device_paths {
         // Mounted pool: sysfs is the authoritative, correctly-mapped
@@ -3488,6 +3518,41 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             .and_then(|b| b.first())
             .and_then(|hdr| parse_device_index(hdr));
 
+        // On a mounted pool every *attached* member is in sysfs_by_path,
+        // so reaching here with a non-empty sysfs tree means this
+        // /proc/mounts path dropped out after mount. Its slot lives on as
+        // a phantom dev-N — bind the two into one row carrying the real
+        // path (so the re-attach affordance has a device to act on) and
+        // the phantom's live sysfs fields, flagged missing, instead of a
+        // stale-`rw` superblock row plus a separate "(missing dev-N)"
+        // placeholder for the same member (#472).
+        if !sysfs_members.is_empty() {
+            let phantom = member_index.and_then(|idx| {
+                sysfs_members
+                    .iter()
+                    .find(|m| m.path.is_none() && m.member_index == Some(idx))
+            });
+            if let Some(m) = phantom {
+                bound_slots.insert(m.member_index);
+                devices.push(FilesystemDevice {
+                    path: dev_path.clone(),
+                    label: m.label.clone(),
+                    durability: m.durability,
+                    state: m.state.clone(),
+                    data_allowed: m.data_allowed.clone(),
+                    has_data: m.has_data.clone(),
+                    discard: m.discard,
+                    read_errors: m.read_errors,
+                    write_errors: m.write_errors,
+                    checksum_errors: m.checksum_errors,
+                    member_index: m.member_index,
+                    uuid: m.uuid.clone(),
+                    missing: Some(true),
+                });
+                continue;
+            }
+        }
+
         devices.push(FilesystemDevice {
             path: dev_path.clone(),
             label,
@@ -3501,7 +3566,13 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             checksum_errors: None,
             member_index,
             uuid: None,
-            missing: None,
+            // No phantom slot matched, but on a mounted pool this device
+            // is still detached — don't pretend it's a healthy member.
+            missing: if sysfs_members.is_empty() {
+                None
+            } else {
+                Some(true)
+            },
         });
     }
 
@@ -3511,7 +3582,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
     // (which comes from /proc/mounts = present devices), so add them here
     // so the operator can see the dead member and force-remove it.
     for m in &sysfs_members {
-        if m.path.is_some() {
+        if m.path.is_some() || bound_slots.contains(&m.member_index) {
             continue;
         }
         let slot = m

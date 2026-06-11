@@ -326,9 +326,12 @@ export interface FilesystemDevice {
 	member_index?: number | null;
 	/** Stable per-device bcachefs UUID (mounted pools only). */
 	uuid?: string | null;
-	/** True for a missing/dead member: the superblock still lists it but
-	 * the block device is gone. `path` is a synthetic placeholder; remove
-	 * it by member_index with force. */
+	/** True for a missing member: the superblock still lists it but the
+	 * device is detached (pulled, dead, or offlined). `path` is the real
+	 * /dev node when the dropped device is still named in /proc/mounts,
+	 * else a synthetic `(missing dev-N)` placeholder. Re-attach via
+	 * fs.device.online if the disk is back (#472), or remove it by
+	 * member_index with force. */
 	missing?: boolean | null;
 }
 
@@ -465,6 +468,10 @@ export interface BlockDevice {
 	dev_type: string;
 	mount_point: string | null;
 	fs_type: string | null;
+	/** Filesystem UUID from lsblk — for bcachefs members this is the
+	 * *external* (whole-pool) UUID, matchable against `Filesystem.uuid`
+	 * to tell an offline/former member from a foreign disk (#472). */
+	fs_uuid?: string;
 	in_use: boolean;
 	rotational: boolean;
 	/** "nvme" | "ssd" | "hdd" */
