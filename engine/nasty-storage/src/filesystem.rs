@@ -3402,14 +3402,39 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
     let mut devices: Vec<FilesystemDevice> = Vec::new();
 
     for dev_path in device_paths {
-        let dev_short = dev_path.trim_start_matches("/dev/");
+        // Mounted pool: sysfs is the authoritative, correctly-mapped
+        // source. It's keyed by the kernel's live `block` symlink, so it
+        // stays correct after a remove/re-add reshuffle, and it doesn't
+        // need the passphrase on encrypted pools. show-super, by contrast,
+        // reports the device PATHS stored in the superblock — which go
+        // stale on reshuffle and made labels/slots land on the wrong row
+        // (#455). So prefer sysfs; only fall back to show-super when the
+        // filesystem isn't mounted (no sysfs tree).
+        if let Some(sy) = sysfs.get(dev_path) {
+            devices.push(FilesystemDevice {
+                path: dev_path.clone(),
+                label: sy.label.clone(),
+                durability: sy.durability,
+                state: sy.state.clone(),
+                data_allowed: sy.data_allowed.clone(),
+                has_data: sy.has_data.clone(),
+                discard: sy.discard,
+                read_errors: sy.read_errors,
+                write_errors: sy.write_errors,
+                checksum_errors: sy.checksum_errors,
+                member_index: sy.member_index,
+                uuid: sy.uuid.clone(),
+            });
+            continue;
+        }
 
-        // Find the block that mentions this device path
+        // Unmounted: fall back to show-super's per-device blocks, matched
+        // by device path (best-effort; sysfs is absent here).
+        let dev_short = dev_path.trim_start_matches("/dev/");
         let block = blocks.iter().find(|b| {
             b.iter()
                 .any(|l| l.contains(dev_path.as_str()) || l.contains(dev_short))
         });
-
         let (label, durability, state, data_allowed, has_data, discard) = if let Some(block) = block
         {
             let label = extract_value(block, "label");
@@ -3422,19 +3447,9 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         } else {
             (None, None, None, None, None, None)
         };
-
-        // Member slot from the show-super block header ("Device N:") —
-        // works mounted or not; fall back to the sysfs dev-N index.
         let member_index = block
             .and_then(|b| b.first())
-            .and_then(|hdr| parse_device_index(hdr))
-            .or_else(|| sysfs.get(dev_path).and_then(|s| s.member_index));
-
-        let sy = sysfs.get(dev_path);
-        let (read_errors, write_errors, checksum_errors) = sy
-            .map(|s| (s.read_errors, s.write_errors, s.checksum_errors))
-            .unwrap_or((None, None, None));
-        let uuid = sy.and_then(|s| s.uuid.clone());
+            .and_then(|hdr| parse_device_index(hdr));
 
         devices.push(FilesystemDevice {
             path: dev_path.clone(),
@@ -3444,11 +3459,11 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             data_allowed,
             has_data,
             discard,
-            read_errors,
-            write_errors,
-            checksum_errors,
+            read_errors: None,
+            write_errors: None,
+            checksum_errors: None,
             member_index,
-            uuid,
+            uuid: None,
         });
     }
 
@@ -3514,6 +3529,22 @@ struct DeviceSysfs {
     uuid: Option<String>,
     /// Member slot — the `N` in `dev-N`.
     member_index: Option<u32>,
+    label: Option<String>,
+    state: Option<String>,
+    durability: Option<u32>,
+    data_allowed: Option<String>,
+    has_data: Option<String>,
+    discard: Option<bool>,
+}
+
+/// Read one sysfs attribute file, trimmed; `None` if absent/empty or the
+/// bcachefs "unset" sentinel `(none)`.
+async fn read_sysfs_attr(dir: &str, attr: &str) -> Option<String> {
+    tokio::fs::read_to_string(format!("{dir}/{attr}"))
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "(none)" && s != "none")
 }
 
 async fn read_device_sysfs(uuid: &str) -> HashMap<String, DeviceSysfs> {
@@ -3532,6 +3563,9 @@ async fn read_device_sysfs(uuid: &str) -> HashMap<String, DeviceSysfs> {
         let member_index = idx.parse::<u32>().ok();
         let dir = format!("{base}/{name}");
         // dev-N/block is a symlink whose basename is the kernel device name.
+        // This is the kernel's *live* mapping, so it stays correct across a
+        // remove/re-add reshuffle — unlike the device paths recorded in the
+        // superblock that `show-super` reports.
         let dev_name = match tokio::fs::read_link(format!("{dir}/block")).await {
             Ok(target) => target.file_name().map(|s| s.to_string_lossy().into_owned()),
             Err(_) => None,
@@ -3542,19 +3576,28 @@ async fn read_device_sysfs(uuid: &str) -> HashMap<String, DeviceSysfs> {
                 Ok(s) => parse_io_errors(&s),
                 Err(_) => (None, None, None),
             };
-        let dev_uuid = tokio::fs::read_to_string(format!("{dir}/uuid"))
+        // `state` is the bracketed-enum form: `[rw] ro evacuating spare`.
+        let state = read_sysfs_attr(&dir, "state")
             .await
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .map(|s| parse_bcachefs_opt(&s));
         out.insert(
             format!("/dev/{dev_name}"),
             DeviceSysfs {
                 read_errors,
                 write_errors,
                 checksum_errors,
-                uuid: dev_uuid,
+                uuid: read_sysfs_attr(&dir, "uuid").await,
                 member_index,
+                label: read_sysfs_attr(&dir, "label").await,
+                state,
+                durability: read_sysfs_attr(&dir, "durability")
+                    .await
+                    .and_then(|s| s.parse().ok()),
+                data_allowed: read_sysfs_attr(&dir, "data_allowed").await,
+                has_data: read_sysfs_attr(&dir, "has_data").await,
+                discard: read_sysfs_attr(&dir, "discard")
+                    .await
+                    .map(|s| s == "1" || s == "true"),
             },
         );
     }

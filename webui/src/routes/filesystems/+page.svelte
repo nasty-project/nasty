@@ -23,7 +23,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
-	import { RefreshCw } from '@lucide/svelte';
+	import { RefreshCw, Pencil } from '@lucide/svelte';
 
 	let filesystems: Filesystem[] = $state([]);
 	let devices: BlockDevice[] = $state([]);
@@ -2228,11 +2228,14 @@
 											/>
 										{:else}
 											<button
-												class="rounded px-1 py-0.5 text-left hover:bg-secondary {dev.label ? '' : 'text-muted-foreground'} {fs.mounted ? 'cursor-text' : 'cursor-default'}"
+												class="group inline-flex items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-secondary {dev.label ? '' : 'text-muted-foreground'} {fs.mounted ? 'cursor-text' : 'cursor-default'}"
 												onclick={() => { if (fs.mounted) startEditLabel(fs.name, dev); }}
 												title={fs.mounted ? 'Click to edit label' : ''}
 											>
-												{dev.label ?? '—'}
+												<span>{dev.label ?? '—'}</span>
+												{#if fs.mounted}
+													<Pencil size={11} class="shrink-0 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
+												{/if}
 											</button>
 										{/if}
 									</td>
