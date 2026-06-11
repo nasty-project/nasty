@@ -370,6 +370,12 @@ pub struct FilesystemDevice {
     /// while mounted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
+    /// True when this is a *missing* member: the bcachefs superblock still
+    /// lists it (phantom `dev-N` in sysfs) but its block device is gone
+    /// (pulled/dead). `path` then carries a synthetic placeholder, not a
+    /// real `/dev` node — remove it by `member_index` with force. See #466.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<bool>,
 }
 
 /// Specifies a device and its per-device options for filesystem creation.
@@ -520,8 +526,16 @@ pub struct DeviceAddRequest {
 pub struct DeviceActionRequest {
     /// Name of the filesystem containing the device.
     pub filesystem: String,
-    /// Absolute path of the block device (e.g. `/dev/sdb`).
+    /// The device to act on: an absolute block-device path (e.g. `/dev/sdb`)
+    /// or, for a missing/dead member with no current path, its numeric
+    /// bcachefs member index.
     pub device: String,
+    /// Force removal even when data/metadata can't be migrated off first —
+    /// required for a *missing* member (the disk is gone, nothing to
+    /// evacuate; safe while enough replicas remain on surviving devices).
+    /// Ignored by non-remove actions.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Set a label on a device in a filesystem.
@@ -1098,6 +1112,7 @@ impl FilesystemService {
                     checksum_errors: None,
                     member_index: None,
                     uuid: None,
+                    missing: None,
                 })
                 .collect();
 
@@ -1466,6 +1481,7 @@ impl FilesystemService {
                 checksum_errors: None,
                 member_index: None,
                 uuid: None,
+                missing: None,
             })
             .collect();
         if let Some(ref sched) = req.io_scheduler
@@ -1501,6 +1517,7 @@ impl FilesystemService {
                 checksum_errors: None,
                 member_index: None,
                 uuid: None,
+                missing: None,
             })
             .collect();
 
@@ -2406,10 +2423,24 @@ impl FilesystemService {
         let mount_point = fs.mount_point.as_ref().unwrap();
 
         info!(
-            "Removing device {} from filesystem '{}'",
-            req.device, req.filesystem
+            "Removing device {} from filesystem '{}'{}",
+            req.device,
+            req.filesystem,
+            if req.force { " (forced)" } else { "" }
         );
-        cmd::run_ok("bcachefs", &["device", "remove", &req.device, mount_point])
+        // `req.device` is a path for present devices, or a numeric member
+        // index for a missing/dead member (no /dev node). `bcachefs device
+        // remove` accepts both, with the mount point as the trailing PATH
+        // arg. For a missing member nothing can be migrated off, so force
+        // both data and metadata — safe while enough replicas survive.
+        let mut args = vec!["device", "remove"];
+        if req.force {
+            args.push("--force");
+            args.push("--force-metadata");
+        }
+        args.push(&req.device);
+        args.push(mount_point);
+        cmd::run_ok("bcachefs", &args)
             .await
             .map_err(FilesystemError::CommandFailed)?;
 
@@ -3343,8 +3374,13 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         .await
         .unwrap_or_default();
 
-    // Per-device IO error counters live in sysfs (mounted pools only).
-    let sysfs = read_device_sysfs(uuid).await;
+    // The authoritative member set for a mounted pool (incl. missing
+    // members — phantom dev-N with no block device). Empty when unmounted.
+    let sysfs_members = read_device_sysfs(uuid).await;
+    let sysfs_by_path: HashMap<&str, &DeviceSysfs> = sysfs_members
+        .iter()
+        .filter_map(|m| m.path.as_deref().map(|p| (p, m)))
+        .collect();
 
     // show-super -f members_v2 output comes in two formats:
     //
@@ -3410,7 +3446,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         // stale on reshuffle and made labels/slots land on the wrong row
         // (#455). So prefer sysfs; only fall back to show-super when the
         // filesystem isn't mounted (no sysfs tree).
-        if let Some(sy) = sysfs.get(dev_path) {
+        if let Some(sy) = sysfs_by_path.get(dev_path.as_str()) {
             devices.push(FilesystemDevice {
                 path: dev_path.clone(),
                 label: sy.label.clone(),
@@ -3424,6 +3460,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
                 checksum_errors: sy.checksum_errors,
                 member_index: sy.member_index,
                 uuid: sy.uuid.clone(),
+                missing: None,
             });
             continue;
         }
@@ -3464,6 +3501,38 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             checksum_errors: None,
             member_index,
             uuid: None,
+            missing: None,
+        });
+    }
+
+    // Missing members (#466): superblock still lists them but their block
+    // device is gone (pulled/dead) — surfaced as phantom dev-N in sysfs
+    // with no resolvable `block` symlink. They're not in `device_paths`
+    // (which comes from /proc/mounts = present devices), so add them here
+    // so the operator can see the dead member and force-remove it.
+    for m in &sysfs_members {
+        if m.path.is_some() {
+            continue;
+        }
+        let slot = m
+            .member_index
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        devices.push(FilesystemDevice {
+            // Synthetic, stable per-slot key (the row has no real /dev node).
+            path: format!("(missing dev-{slot})"),
+            label: m.label.clone(),
+            durability: m.durability,
+            state: m.state.clone(),
+            data_allowed: m.data_allowed.clone(),
+            has_data: m.has_data.clone(),
+            discard: m.discard,
+            read_errors: m.read_errors,
+            write_errors: m.write_errors,
+            checksum_errors: m.checksum_errors,
+            member_index: m.member_index,
+            uuid: m.uuid.clone(),
+            missing: Some(true),
         });
     }
 
@@ -3518,10 +3587,15 @@ fn parse_device_index(header: &str) -> Option<u32> {
         .and_then(|d| d.parse::<u32>().ok())
 }
 
-/// Per-device facts read from `/sys/fs/bcachefs/<fs-uuid>/dev-N/`
-/// (mounted pools only). Keyed by `/dev/<name>` in the returned map.
+/// One member of a mounted bcachefs filesystem, read from
+/// `/sys/fs/bcachefs/<fs-uuid>/dev-N/`. Includes *missing* members
+/// (phantom `dev-N` whose `block` symlink no longer resolves), which is
+/// how a pulled/dead disk is surfaced — `path` is `None` for those.
 #[derive(Default, Clone)]
 struct DeviceSysfs {
+    /// `/dev/<name>` from the live `block` symlink; `None` for a missing
+    /// (pulled/dead) member whose block device is gone.
+    path: Option<String>,
     read_errors: Option<u64>,
     write_errors: Option<u64>,
     checksum_errors: Option<u64>,
@@ -3547,9 +3621,9 @@ async fn read_sysfs_attr(dir: &str, attr: &str) -> Option<String> {
         .filter(|s| !s.is_empty() && s != "(none)" && s != "none")
 }
 
-async fn read_device_sysfs(uuid: &str) -> HashMap<String, DeviceSysfs> {
+async fn read_device_sysfs(uuid: &str) -> Vec<DeviceSysfs> {
     let base = format!("/sys/fs/bcachefs/{uuid}");
-    let mut out = HashMap::new();
+    let mut out = Vec::new();
     let mut rd = match tokio::fs::read_dir(&base).await {
         Ok(r) => r,
         Err(_) => return out,
@@ -3565,12 +3639,23 @@ async fn read_device_sysfs(uuid: &str) -> HashMap<String, DeviceSysfs> {
         // dev-N/block is a symlink whose basename is the kernel device name.
         // This is the kernel's *live* mapping, so it stays correct across a
         // remove/re-add reshuffle — unlike the device paths recorded in the
-        // superblock that `show-super` reports.
-        let dev_name = match tokio::fs::read_link(format!("{dir}/block")).await {
-            Ok(target) => target.file_name().map(|s| s.to_string_lossy().into_owned()),
+        // superblock that `show-super` reports. A *missing* member (pulled
+        // or dead disk) still has its dev-N dir but the block symlink no
+        // longer resolves — we keep it with `path: None` so the UI can show
+        // it and offer a force-remove (#466).
+        let path = match tokio::fs::read_link(format!("{dir}/block")).await {
+            Ok(t) => t
+                .file_name()
+                .map(|s| format!("/dev/{}", s.to_string_lossy())),
             Err(_) => None,
         };
-        let Some(dev_name) = dev_name else { continue };
+        // A pulled disk can leave the symlink *dangling* (it reads OK but
+        // its target /dev node is gone) — treat that as missing too, so a
+        // pulled drive is flagged even when the kernel didn't drop the link.
+        let path = match path {
+            Some(p) if tokio::fs::metadata(&p).await.is_ok() => Some(p),
+            _ => None,
+        };
         let (read_errors, write_errors, checksum_errors) =
             match tokio::fs::read_to_string(format!("{dir}/io_errors")).await {
                 Ok(s) => parse_io_errors(&s),
@@ -3580,26 +3665,24 @@ async fn read_device_sysfs(uuid: &str) -> HashMap<String, DeviceSysfs> {
         let state = read_sysfs_attr(&dir, "state")
             .await
             .map(|s| parse_bcachefs_opt(&s));
-        out.insert(
-            format!("/dev/{dev_name}"),
-            DeviceSysfs {
-                read_errors,
-                write_errors,
-                checksum_errors,
-                uuid: read_sysfs_attr(&dir, "uuid").await,
-                member_index,
-                label: read_sysfs_attr(&dir, "label").await,
-                state,
-                durability: read_sysfs_attr(&dir, "durability")
-                    .await
-                    .and_then(|s| s.parse().ok()),
-                data_allowed: read_sysfs_attr(&dir, "data_allowed").await,
-                has_data: read_sysfs_attr(&dir, "has_data").await,
-                discard: read_sysfs_attr(&dir, "discard")
-                    .await
-                    .map(|s| s == "1" || s == "true"),
-            },
-        );
+        out.push(DeviceSysfs {
+            path,
+            read_errors,
+            write_errors,
+            checksum_errors,
+            uuid: read_sysfs_attr(&dir, "uuid").await,
+            member_index,
+            label: read_sysfs_attr(&dir, "label").await,
+            state,
+            durability: read_sysfs_attr(&dir, "durability")
+                .await
+                .and_then(|s| s.parse().ok()),
+            data_allowed: read_sysfs_attr(&dir, "data_allowed").await,
+            has_data: read_sysfs_attr(&dir, "has_data").await,
+            discard: read_sysfs_attr(&dir, "discard")
+                .await
+                .map(|s| s == "1" || s == "true"),
+        });
     }
     out
 }
