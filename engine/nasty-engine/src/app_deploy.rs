@@ -1128,10 +1128,14 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
                 }
 
                 if !allow_unsafe {
-                    let allowed = in_app_dir || source.starts_with("/fs/") || source == "/fs";
+                    // `/appdata` is the stable symlink onto the appdata
+                    // subvolume (#436) — sandbox territory by definition.
+                    let in_appdata = source == "/appdata" || source.starts_with("/appdata/");
+                    let allowed =
+                        in_app_dir || source.starts_with("/fs/") || source == "/fs" || in_appdata;
                     if !allowed {
                         return Err(format!(
-                            "{} bind-mounts '{}' — only paths under '{}/' or '/fs/' are allowed. Set allow_unsafe to override.",
+                            "{} bind-mounts '{}' — only paths under '{}/', '/appdata/' or '/fs/' are allowed. Set allow_unsafe to override.",
                             scope("volumes"),
                             source,
                             allowed_app_dir
@@ -1182,10 +1186,12 @@ fn validate_compose(yaml: &str, app_name: &str, allow_unsafe: bool) -> Result<()
             }
 
             if !allow_unsafe {
-                let allowed = in_app_dir || device.starts_with("/fs/") || device == "/fs";
+                let in_appdata = device == "/appdata" || device.starts_with("/appdata/");
+                let allowed =
+                    in_app_dir || device.starts_with("/fs/") || device == "/fs" || in_appdata;
                 if !allowed {
                     return Err(format!(
-                        "volumes.{vol_name} bind-mounts '{device}' — only paths under '{allowed_app_dir}/' or '/fs/' are allowed. Set allow_unsafe to override."
+                        "volumes.{vol_name} bind-mounts '{device}' — only paths under '{allowed_app_dir}/', '/appdata/' or '/fs/' are allowed. Set allow_unsafe to override."
                     ));
                 }
             }
@@ -1447,6 +1453,24 @@ mod tests {
         // test in nasty-apps where it'd need a real mount fixture.
         ok_strict(
             "services:\n  ok:\n    image: alpine\n    volumes:\n      - \"/var/lib/nasty/apps/myapp/data:/data\"\n      - \"named-vol:/x\"\n",
+        );
+    }
+
+    #[test]
+    fn strict_allows_appdata_bind() {
+        // The stable /appdata symlink (#436) is sandbox territory, and
+        // — unlike /fs/<X>/ paths — has no mounted-filesystem segment
+        // to verify (the symlink target carries that).
+        ok_strict(
+            "services:\n  ok:\n    image: alpine\n    volumes:\n      - \"/appdata/jellyfin/config:/config\"\n",
+        );
+    }
+
+    #[test]
+    fn strict_rejects_appdata_prefix_lookalike() {
+        err_strict(
+            "services:\n  bad:\n    image: alpine\n    volumes:\n      - \"/appdata-evil/x:/x\"\n",
+            "/appdata-evil/x",
         );
     }
 

@@ -37,6 +37,12 @@ pub use caddy::{CaddyRouteSummary, HostCert};
 const STATE_PATH: &str = "/var/lib/nasty/apps-enabled";
 const COMPOSE_DIR: &str = "/var/lib/nasty/apps";
 const DOCKER_SERVICE: &str = "docker.service";
+/// Stable, relocation-proof home for container persistent data (#436).
+/// A symlink whose target is the real appdata subvolume on some
+/// bcachefs filesystem — compose files reference `/appdata/<app>/…`,
+/// so relocating the subvolume to another filesystem only flips the
+/// symlink and never touches bind references.
+pub const APPDATA_LINK: &str = "/appdata";
 /// Persisted definitions of NASty-managed Docker networks.
 const NETWORKS_PATH: &str = "/var/lib/nasty/apps-networks.json";
 
@@ -418,10 +424,13 @@ pub fn validate_simple_volumes(
         }
 
         if !allow_unsafe {
-            let allowed = in_app_dir || src == "/fs" || src.starts_with("/fs/");
+            // `/appdata` is the stable symlink onto the appdata
+            // subvolume (#436) — inside the sandbox by definition.
+            let in_appdata = src == APPDATA_LINK || src.starts_with(&format!("{APPDATA_LINK}/"));
+            let allowed = in_app_dir || src == "/fs" || src.starts_with("/fs/") || in_appdata;
             if !allowed {
                 return Err(AppsError::ForbiddenBind(format!(
-                    "'{src}' is outside '{app_data_dir}/' and '/fs/'. Set allow_unsafe to override."
+                    "'{src}' is outside '{app_data_dir}/', '/appdata/' and '/fs/'. Set allow_unsafe to override."
                 )));
             }
         }
@@ -1277,6 +1286,14 @@ pub struct AppsStatus {
     pub docker_version: Option<String>,
     /// Docker disk usage: images + containers + volumes in bytes.
     pub disk_usage_bytes: Option<u64>,
+    /// Real path behind the stable `/appdata` symlink (#436), e.g.
+    /// `/fs/tank/appdata`. None until the appdata subvolume has been
+    /// set up (next boot for installs that predate the feature).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appdata_path: Option<String>,
+    /// Whether `/appdata` currently resolves to an existing directory.
+    #[serde(default)]
+    pub appdata_ok: bool,
 }
 
 /// Result of apps.prune — how much space was reclaimed.
@@ -1298,6 +1315,11 @@ pub struct AppsConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_path: Option<String>,
+    /// Real path of the appdata subvolume that [`APPDATA_LINK`] points
+    /// at (e.g. `/fs/tank/appdata`). None on installs that predate the
+    /// feature — healed to the apps storage filesystem on next boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appdata_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1767,6 +1789,31 @@ pub struct AppsService {
     prev_stats: tokio::sync::Mutex<
         std::collections::HashMap<String, bollard::models::ContainerStatsResponse>,
     >,
+    /// Live/last state of the appdata relocation job (#436). Arc so the
+    /// spawned move task can update it without holding `self`.
+    appdata_relocate: std::sync::Arc<tokio::sync::Mutex<Option<AppdataRelocateStatus>>>,
+}
+
+/// Progress/outcome of an `apps.appdata.relocate` run. One at a time;
+/// in-memory only (a relocation doesn't survive an engine restart —
+/// the symlink/config flip is the last step, so a crash mid-copy
+/// leaves the old location fully intact).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AppdataRelocateStatus {
+    pub running: bool,
+    /// `stopping_apps` → `copying` → `switching` → `restarting` →
+    /// `done` | `failed`.
+    pub phase: String,
+    /// Target filesystem name (the `<X>` of `/fs/<X>/appdata`).
+    pub target_fs: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// On success: the previous appdata path, left in place as a safety
+    /// copy for the operator to delete after verifying the move.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    /// Apps that bind `/appdata` and were stopped for the move.
+    pub affected_apps: Vec<String>,
 }
 
 impl Default for AppsService {
@@ -1788,6 +1835,7 @@ impl AppsService {
         Self {
             docker: std::sync::Mutex::new(docker),
             prev_stats: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            appdata_relocate: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -2106,6 +2154,7 @@ impl AppsService {
         let config = AppsConfig {
             enabled: true,
             storage_path: None,
+            appdata_path: None,
         };
         Self::save_config(&config).await?;
 
@@ -2162,6 +2211,20 @@ impl AppsService {
                 error!("create_dir_all({COMPOSE_DIR}) failed: {e} — compose deploys will fail");
             }
 
+            // Stable appdata location (#436) on the same filesystem as
+            // the apps storage. Non-fatal: appdata only matters to apps
+            // that bind it, and the boot path retries.
+            let appdata_path = match storage_path.as_deref().and_then(fs_root_segment) {
+                Some(fs_name) => match setup_appdata_storage(fs_name).await {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        error!("appdata setup failed: {e} — /appdata binds won't resolve");
+                        None
+                    }
+                },
+                None => None,
+            };
+
             // Persist storage path in config. A failure here means the
             // chosen storage path won't survive an engine restart, which
             // breaks app data persistence — log loudly.
@@ -2169,6 +2232,7 @@ impl AppsService {
                 let config = AppsConfig {
                     enabled: true,
                     storage_path: Some(path.clone()),
+                    appdata_path,
                 };
                 if let Err(e) = AppsService::save_config(&config).await {
                     error!(
@@ -2228,6 +2292,10 @@ impl AppsService {
             .as_ref()
             .map(|p| Path::new(p).is_dir())
             .unwrap_or(false);
+        let appdata_path = config.appdata_path.clone();
+        // is_dir() follows the symlink — false when /appdata dangles
+        // (target filesystem unmounted) or was never set up.
+        let appdata_ok = Path::new(APPDATA_LINK).is_dir();
 
         if !enabled {
             return AppsStatus {
@@ -2239,6 +2307,8 @@ impl AppsService {
                 storage_ok,
                 docker_version: None,
                 disk_usage_bytes: None,
+                appdata_path,
+                appdata_ok,
             };
         }
 
@@ -2253,6 +2323,8 @@ impl AppsService {
                 storage_ok,
                 docker_version: None,
                 disk_usage_bytes: None,
+                appdata_path,
+                appdata_ok,
             };
         }
 
@@ -2273,7 +2345,113 @@ impl AppsService {
             storage_ok,
             docker_version,
             disk_usage_bytes,
+            appdata_path,
+            appdata_ok,
         }
+    }
+
+    // ── Appdata relocation (#436) ───────────────────────────
+
+    pub async fn appdata_relocate_status(&self) -> Option<AppdataRelocateStatus> {
+        self.appdata_relocate.lock().await.clone()
+    }
+
+    /// Move the appdata subvolume to another filesystem and flip the
+    /// stable `/appdata` symlink. Returns immediately; poll
+    /// `apps.appdata.status`. Apps that bind `/appdata` are stopped for
+    /// the copy and restarted afterwards; the old copy is left in place
+    /// for the operator to delete once they've verified the move.
+    pub async fn appdata_relocate(&self, target_fs: &str) -> Result<(), AppsError> {
+        self.require_ready().await?;
+        if target_fs.is_empty() || target_fs.contains('/') || target_fs.contains("..") {
+            return Err(AppsError::CommandFailed(format!(
+                "invalid filesystem name '{target_fs}'"
+            )));
+        }
+        let config = Self::load_config();
+        let Some(current) = config.appdata_path.clone() else {
+            return Err(AppsError::CommandFailed(
+                "appdata is not set up yet — restart the engine or re-enable apps".into(),
+            ));
+        };
+        let target_path = format!("/fs/{target_fs}/appdata");
+        if target_path == current {
+            return Err(AppsError::CommandFailed(format!(
+                "appdata already lives on '{target_fs}'"
+            )));
+        }
+        if !fs_root_is_mounted(&target_path) {
+            return Err(AppsError::CommandFailed(format!(
+                "filesystem '{target_fs}' is not mounted at /fs/{target_fs}"
+            )));
+        }
+        // Never merge into pre-existing data — that's how copies get
+        // silently interleaved and restores become guesswork.
+        if Path::new(&target_path).exists() {
+            return Err(AppsError::CommandFailed(format!(
+                "{target_path} already exists — remove or rename it first"
+            )));
+        }
+
+        let affected = self.appdata_apps().await?;
+        {
+            let mut status = self.appdata_relocate.lock().await;
+            if status.as_ref().is_some_and(|s| s.running) {
+                return Err(AppsError::CommandFailed(
+                    "an appdata relocation is already running".into(),
+                ));
+            }
+            *status = Some(AppdataRelocateStatus {
+                running: true,
+                phase: "stopping_apps".into(),
+                target_fs: target_fs.to_string(),
+                error: None,
+                old_path: None,
+                affected_apps: affected.iter().map(|a| a.0.clone()).collect(),
+            });
+        }
+
+        info!(
+            "Relocating appdata {current} -> {target_path} ({} affected apps)",
+            affected.len()
+        );
+        let status_arc = self.appdata_relocate.clone();
+        tokio::spawn(run_appdata_relocation(
+            status_arc,
+            current,
+            target_path,
+            affected,
+        ));
+        Ok(())
+    }
+
+    /// Apps whose bind mounts reference the stable `/appdata` path —
+    /// the set that must be stopped while appdata moves. Returns
+    /// `(name, kind, was_running)`.
+    async fn appdata_apps(&self) -> Result<Vec<(String, String, bool)>, AppsError> {
+        let mut out = Vec::new();
+        for app in self.list().await? {
+            let uses = if app.kind == "compose" {
+                tokio::fs::read_to_string(format!("{COMPOSE_DIR}/{}/docker-compose.yml", app.name))
+                    .await
+                    .map(|y| y.contains(APPDATA_LINK))
+                    .unwrap_or(false)
+            } else {
+                self.get_config(&app.name)
+                    .await
+                    .map(|c| {
+                        c.volumes.iter().any(|v| {
+                            v.host_path == APPDATA_LINK
+                                || v.host_path.starts_with(&format!("{APPDATA_LINK}/"))
+                        })
+                    })
+                    .unwrap_or(false)
+            };
+            if uses {
+                out.push((app.name.clone(), app.kind.clone(), app.status == "running"));
+            }
+        }
+        Ok(out)
     }
 
     // ── Simple app management ───────────────────────────────
@@ -4237,6 +4415,36 @@ impl AppsService {
         if !self.is_enabled() {
             return;
         }
+        // Heal the stable /appdata symlink (#436). Pre-feature installs
+        // have no appdata_path yet — set it up on the apps storage
+        // filesystem. Never blocks the apps boot: appdata only matters
+        // to apps that bind it, and a dangling symlink fails their
+        // start with a clear Docker error, not a crash loop.
+        {
+            let config = Self::load_config();
+            let fs_name = config
+                .appdata_path
+                .as_deref()
+                .or(config.storage_path.as_deref())
+                .and_then(fs_root_segment)
+                .map(str::to_string);
+            if let Some(fs_name) = fs_name {
+                match setup_appdata_storage(&fs_name).await {
+                    Ok(path) => {
+                        if config.appdata_path.as_deref() != Some(path.as_str()) {
+                            let mut cfg = config;
+                            cfg.appdata_path = Some(path);
+                            if let Err(e) = Self::save_config(&cfg).await {
+                                warn!("persist appdata_path failed: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("appdata setup failed: {e} — /appdata binds will not resolve")
+                    }
+                }
+            }
+        }
         // #424: never start Docker against a dangling data-root symlink.
         // v0.0.10 points /var/lib/docker at the apps bcachefs FS; if that
         // FS isn't mounted/unlocked yet at boot, dockerd crash-loops on
@@ -5092,6 +5300,213 @@ async fn setup_apps_storage(filesystem: Option<&str>) -> Option<String> {
 }
 
 /// Configure Docker's data-root to store images/layers on bcachefs instead of root partition.
+/// Create (if needed) the appdata subvolume on `fs_name` and point the
+/// stable [`APPDATA_LINK`] symlink at it (#436). A dedicated subvolume
+/// — sibling of the `apps` one that holds the Docker data-root — so
+/// snapshots and backup profiles capture the user's container data
+/// without dragging Docker's internal state along. Returns the real
+/// path.
+async fn setup_appdata_storage(fs_name: &str) -> Result<String, AppsError> {
+    let appdata_path = format!("/fs/{fs_name}/appdata");
+    if !Path::new(&appdata_path).exists() {
+        run_cmd("bcachefs", &["subvolume", "create", &appdata_path])
+            .await
+            .map_err(|e| AppsError::CommandFailed(format!("create appdata subvolume: {e}")))?;
+        info!("Created appdata subvolume at {appdata_path}");
+        // Permissive like every new subvolume/share root (#482):
+        // containers run as arbitrary uids that must be able to write
+        // their own data; access control lives in the protocol layer.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                tokio::fs::set_permissions(&appdata_path, std::fs::Permissions::from_mode(0o777))
+                    .await
+            {
+                warn!("chmod 0777 {appdata_path} failed: {e}");
+            }
+        }
+    }
+    ensure_appdata_symlink(&appdata_path, Path::new(APPDATA_LINK)).await?;
+    Ok(appdata_path)
+}
+
+/// Point `link` at `target`, replacing an existing symlink. Refuses to
+/// touch a real (non-symlink) file or directory at the link path —
+/// that could be user data we must not delete.
+async fn ensure_appdata_symlink(target: &str, link: &Path) -> Result<(), AppsError> {
+    if let Ok(t) = tokio::fs::read_link(link).await {
+        if t.to_string_lossy() == target {
+            return Ok(());
+        }
+        tokio::fs::remove_file(link).await.map_err(|e| {
+            AppsError::CommandFailed(format!("remove old {} symlink: {e}", link.display()))
+        })?;
+    } else if tokio::fs::symlink_metadata(link).await.is_ok() {
+        return Err(AppsError::CommandFailed(format!(
+            "{} exists and is not a symlink — move it aside first",
+            link.display()
+        )));
+    }
+    tokio::fs::symlink(target, link).await.map_err(|e| {
+        AppsError::CommandFailed(format!("symlink {target} -> {}: {e}", link.display()))
+    })?;
+    info!("Symlinked {} -> {target}", link.display());
+    Ok(())
+}
+
+/// The detached appdata move (#436). Self-contained (shells out to
+/// docker/cp instead of borrowing the service) because `AppsService`
+/// isn't `Clone`. Order matters for crash safety: the symlink/config
+/// flip happens only after a complete copy, so dying mid-copy leaves
+/// the old location fully intact and the partial copy gets dropped.
+async fn run_appdata_relocation(
+    status: std::sync::Arc<tokio::sync::Mutex<Option<AppdataRelocateStatus>>>,
+    current: String,
+    target_path: String,
+    affected: Vec<(String, String, bool)>,
+) {
+    async fn set_phase(
+        status: &std::sync::Arc<tokio::sync::Mutex<Option<AppdataRelocateStatus>>>,
+        phase: &str,
+    ) {
+        if let Some(s) = status.lock().await.as_mut() {
+            s.phase = phase.to_string();
+        }
+    }
+
+    // Best-effort restart of whatever we stopped, then record failure.
+    async fn fail(
+        status: &std::sync::Arc<tokio::sync::Mutex<Option<AppdataRelocateStatus>>>,
+        stopped: &[(String, String)],
+        error: String,
+    ) {
+        error!("appdata relocation failed: {error}");
+        for (name, kind) in stopped {
+            if let Err(e) = appdata_start_app(name, kind).await {
+                warn!("restart of '{name}' after failed relocation also failed: {e}");
+            }
+        }
+        if let Some(s) = status.lock().await.as_mut() {
+            s.running = false;
+            s.phase = "failed".to_string();
+            s.error = Some(error);
+        }
+    }
+
+    let mut stopped: Vec<(String, String)> = Vec::new();
+    for (name, kind, was_running) in &affected {
+        if !*was_running {
+            continue;
+        }
+        if let Err(e) = appdata_stop_app(name, kind).await {
+            fail(&status, &stopped, format!("stopping '{name}': {e}")).await;
+            return;
+        }
+        stopped.push((name.clone(), kind.clone()));
+    }
+
+    set_phase(&status, "copying").await;
+    if let Err(e) = run_cmd("bcachefs", &["subvolume", "create", &target_path]).await {
+        fail(&status, &stopped, format!("create target subvolume: {e}")).await;
+        return;
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ =
+            tokio::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o777)).await;
+    }
+    // `cp -a` preserves ownership/modes/xattrs — container uids must
+    // survive the move or every app hits permission errors on restart.
+    if let Err(e) = run_cmd("cp", &["-a", &format!("{current}/."), &target_path]).await {
+        // Drop the partial copy so a retry doesn't hit the no-merge guard.
+        let _ = run_cmd("bcachefs", &["subvolume", "delete", &target_path]).await;
+        fail(&status, &stopped, format!("copy failed: {e}")).await;
+        return;
+    }
+
+    set_phase(&status, "switching").await;
+    if let Err(e) = ensure_appdata_symlink(&target_path, Path::new(APPDATA_LINK)).await {
+        fail(&status, &stopped, format!("flip /appdata symlink: {e}")).await;
+        return;
+    }
+    let mut cfg = AppsService::load_config();
+    cfg.appdata_path = Some(target_path.clone());
+    if let Err(e) = AppsService::save_config(&cfg).await {
+        // The symlink already points at the new location; a stale
+        // config would flip it back on next boot. Loud failure.
+        fail(
+            &status,
+            &stopped,
+            format!(
+                "persist new appdata path: {e} — /appdata points at {target_path} but the \
+                 config still says {current}; a reboot will flip it back"
+            ),
+        )
+        .await;
+        return;
+    }
+
+    set_phase(&status, "restarting").await;
+    let mut restart_errors = Vec::new();
+    for (name, kind) in &stopped {
+        if let Err(e) = appdata_start_app(name, kind).await {
+            warn!("restart of '{name}' after relocation failed: {e}");
+            restart_errors.push(format!("'{name}': {e}"));
+        }
+    }
+
+    info!("appdata relocated to {target_path}; old copy left at {current}");
+    if let Some(s) = status.lock().await.as_mut() {
+        s.running = false;
+        s.phase = "done".to_string();
+        s.old_path = Some(current);
+        if !restart_errors.is_empty() {
+            s.error = Some(format!(
+                "moved, but some apps failed to restart: {}",
+                restart_errors.join("; ")
+            ));
+        }
+    }
+}
+
+async fn appdata_stop_app(name: &str, kind: &str) -> Result<(), AppsError> {
+    if kind == "compose" {
+        run_cmd(
+            "docker",
+            &[
+                "compose",
+                "-f",
+                &format!("{COMPOSE_DIR}/{name}/docker-compose.yml"),
+                "--project-name",
+                name,
+                "stop",
+            ],
+        )
+        .await
+    } else {
+        run_cmd("docker", &["stop", &container_name(name)]).await
+    }
+}
+
+async fn appdata_start_app(name: &str, kind: &str) -> Result<(), AppsError> {
+    if kind == "compose" {
+        run_cmd(
+            "docker",
+            &[
+                "compose",
+                "-f",
+                &format!("{COMPOSE_DIR}/{name}/docker-compose.yml"),
+                "--project-name",
+                name,
+                "start",
+            ],
+        )
+        .await
+    } else {
+        run_cmd("docker", &["start", &container_name(name)]).await
+    }
+}
+
 /// Ensure Docker stores data on bcachefs by symlinking /var/lib/docker.
 /// Must be called before Docker starts — Docker reads data-root at startup.
 async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), AppsError> {
@@ -5573,6 +5988,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn appdata_symlink_creates_flips_and_is_idempotent() {
+        let base = unique_tmp("appdata-link");
+        std::fs::create_dir_all(&base).unwrap();
+        let t1 = base.join("a");
+        let t2 = base.join("b");
+        std::fs::create_dir_all(&t1).unwrap();
+        std::fs::create_dir_all(&t2).unwrap();
+        let link = base.join("appdata");
+        super::ensure_appdata_symlink(t1.to_str().unwrap(), &link)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), t1);
+        // Idempotent on the same target…
+        super::ensure_appdata_symlink(t1.to_str().unwrap(), &link)
+            .await
+            .unwrap();
+        // …and flips to a new one (the relocation switch).
+        super::ensure_appdata_symlink(t2.to_str().unwrap(), &link)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), t2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn appdata_symlink_refuses_to_replace_real_dir() {
+        // A real directory at the link path could be user data —
+        // never delete it.
+        let base = unique_tmp("appdata-realdir");
+        let link = base.join("appdata");
+        std::fs::create_dir_all(&link).unwrap();
+        let target = base.join("t");
+        std::fs::create_dir_all(&target).unwrap();
+        super::ensure_appdata_symlink(target.to_str().unwrap(), &link)
+            .await
+            .unwrap_err();
+        assert!(link.is_dir(), "real dir must survive");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn empty_host_path_is_fine() {
         // Auto-generated path under storage base; install creates it.
@@ -5588,6 +6044,30 @@ mod tests {
             false,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn strict_allows_appdata() {
+        // The stable /appdata symlink (#436) is sandbox territory.
+        validate_simple_volumes(
+            "myapp",
+            "/var/lib/nasty/apps-data",
+            &[vol("/appdata/myapp/config")],
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn strict_rejects_appdata_prefix_lookalike() {
+        // "/appdata-evil" must not ride on the "/appdata" allowance.
+        validate_simple_volumes(
+            "myapp",
+            "/var/lib/nasty/apps-data",
+            &[vol("/appdata-evil/x")],
+            false,
+        )
+        .unwrap_err();
     }
 
     #[test]

@@ -1482,6 +1482,10 @@ export interface AppsStatus {
 	storage_ok: boolean;
 	docker_version?: string;
 	disk_usage_bytes?: number;
+	/** Real path behind the stable /appdata symlink (#436). */
+	appdata_path?: string;
+	/** Whether /appdata currently resolves to an existing directory. */
+	appdata_ok?: boolean;
 }
 
 export interface PruneResult {
