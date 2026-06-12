@@ -16,6 +16,12 @@
 	let tlsChallengeType = $state<'tls-alpn' | 'http' | 'dns'>('tls-alpn');
 	let tlsDnsProvider = $state('');
 	let tlsDnsCredentials = $state('');
+	/** Credentials exist server-side (sealed or legacy) — the engine
+	 * never returns them, so this drives the "stored" marker and the
+	 * keep-on-blank-save behavior. */
+	let dnsCredsStored = $state(false);
+	/** Operator explicitly asked to clear the stored credentials. */
+	let dnsCredsClear = $state(false);
 	let tlsDnsResolver = $state('');
 	let tlsDnsPropagationWait = $state(0);
 	let showAdvancedDns = $state(false);
@@ -47,7 +53,13 @@
 		tlsAcmeEnabled = settings?.tls_acme_enabled ?? false;
 		tlsChallengeType = settings?.tls_challenge_type ?? 'tls-alpn';
 		tlsDnsProvider = settings?.tls_dns_provider ?? '';
-		tlsDnsCredentials = settings?.tls_dns_credentials ?? '';
+		// Credentials are encrypted at rest and not returned once sealed —
+		// the textarea starts blank and a marker shows whether something
+		// is stored. Saving with the field blank keeps the stored value
+		// (the engine receives the "<unchanged>" sentinel).
+		tlsDnsCredentials = '';
+		dnsCredsStored = !!(settings?.tls_dns_credentials || settings?.tls_dns_credentials_encrypted);
+		dnsCredsClear = false;
 		tlsDnsResolver = settings?.tls_dns_resolver ?? '';
 		tlsDnsPropagationWait = settings?.tls_dns_propagation_wait ?? 0;
 		// Expand the advanced section if the operator has previously
@@ -153,7 +165,11 @@
 				tls_acme_enabled: tlsAcmeEnabled,
 				tls_challenge_type: tlsChallengeType,
 				tls_dns_provider: tlsDnsProvider || null,
-				tls_dns_credentials: tlsDnsCredentials || null,
+				tls_dns_credentials: tlsDnsCredentials
+					? tlsDnsCredentials
+					: dnsCredsStored && !dnsCredsClear
+						? '<unchanged>'
+						: null,
 				tls_dns_resolver: tlsDnsResolver || '',
 				tls_dns_propagation_wait: tlsDnsPropagationWait || 0,
 				tls_acme_staging: tlsAcmeStaging,
@@ -164,6 +180,9 @@
 			settings = result;
 			tlsChanged = false;
 			editing = false;
+			tlsDnsCredentials = '';
+			dnsCredsStored = !!(result.tls_dns_credentials || result.tls_dns_credentials_encrypted);
+			dnsCredsClear = false;
 			if (tlsAcmeEnabled) startAcmePolling();
 		}
 		savingTls = false;
@@ -299,19 +318,29 @@
 				</div>
 
 				<div class="mb-4">
-					<label for="tls-dns-creds" class="mb-1 block text-xs text-muted-foreground">API Credentials</label>
+					<div class="mb-1 flex items-center justify-between">
+						<label for="tls-dns-creds" class="block text-xs text-muted-foreground">API Credentials</label>
+						{#if dnsCredsStored && !dnsCredsClear}
+							<span class="flex items-center gap-2 text-xs">
+								<span class="text-green-600" title="Credentials are stored encrypted at rest and never sent back to the browser.">stored (encrypted)</span>
+								<button type="button" class="text-muted-foreground underline hover:text-destructive" onclick={() => { dnsCredsClear = true; tlsChanged = true; }}>clear</button>
+							</span>
+						{:else if dnsCredsClear}
+							<span class="text-xs text-destructive">will be cleared on save <button type="button" class="text-muted-foreground underline" onclick={() => { dnsCredsClear = false; }}>undo</button></span>
+						{/if}
+					</div>
 					<textarea
 						id="tls-dns-creds"
 						bind:value={tlsDnsCredentials}
 						oninput={() => tlsChanged = true}
 						rows={4}
 						class="w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-						placeholder={"CF_API_TOKEN=xxxxx"}
+						placeholder={dnsCredsStored && !dnsCredsClear ? 'stored — leave blank to keep, paste to replace' : 'CF_API_TOKEN=xxxxx'}
 					></textarea>
 					<span class="mt-1 block text-xs text-muted-foreground">
 						One KEY=VALUE per line. Written to a Caddy <code>EnvironmentFile</code> and referenced from the
 						generated <code>tls</code> block via <code>{'{env.KEY}'}</code> placeholders. No inbound ports needed —
-						verification happens via DNS records.
+						verification happens via DNS records. Stored encrypted at rest (systemd-creds).
 					</span>
 				</div>
 
