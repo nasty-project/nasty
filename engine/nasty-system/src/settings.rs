@@ -227,8 +227,15 @@ pub struct Settings {
     /// DNS provider API credentials as KEY=VALUE lines.
     /// Written to a Caddy `EnvironmentFile` and referenced from the
     /// generated `tls` block via `{env.KEY}` placeholders.
+    /// Encrypted into `tls_dns_credentials_encrypted` at rest when the
+    /// secrets backend is healthy, in which case this field is blanked.
     #[serde(default)]
     pub tls_dns_credentials: Option<String>,
+    /// DNS provider credentials encrypted at rest via systemd-creds.
+    /// Populated by the engine when the secrets backend is available;
+    /// preferred over the legacy plaintext field when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_dns_credentials_encrypted: Option<EncryptedBlob>,
     /// Use Let's Encrypt staging environment (for testing, avoids rate limits).
     #[serde(default)]
     pub tls_acme_staging: bool,
@@ -334,6 +341,16 @@ pub const OIDC_SECRET_PLACEHOLDER: &str = "<unchanged>";
 /// suffices.
 const OIDC_CLIENT_SECRET_NAME: &str = "nasty.oidc.client_secret";
 
+/// Sentinel the WebUI sends in `tls_dns_credentials` to mean "keep the
+/// stored DNS credentials". Needed because the stored value is blanked
+/// once sealed — without the sentinel, a TLS form save would silently
+/// clear the provider token (#442 follow-up).
+pub const DNS_CREDS_PLACEHOLDER: &str = "<unchanged>";
+
+/// `systemd-creds` AEAD name binding the encrypted DNS-01 provider
+/// credentials to this host + field.
+const DNS_CREDS_SECRET_NAME: &str = "nasty.tls.dns_credentials";
+
 /// Replace the client_secret on a copy of OidcSettings with `<set>` / `<unset>`,
 /// suitable for returning to API callers without leaking the real value.
 /// A secret counts as set whether it's still legacy plaintext or has been
@@ -377,6 +394,47 @@ pub async fn resolve_oidc_client_secret(oidc: &OidcSettings) -> Option<String> {
         };
     }
     oidc.client_secret.clone().filter(|s| !s.is_empty())
+}
+
+/// Encrypt the plaintext `tls_dns_credentials` into
+/// `tls_dns_credentials_encrypted` and blank the plaintext. Idempotent
+/// (already-encrypted or empty → no-op). systemd-creds failure is
+/// non-fatal: warn and keep plaintext.
+async fn encrypt_dns_credentials_in_place(settings: &mut Settings) {
+    if settings.tls_dns_credentials_encrypted.is_none()
+        && let Some(plain) = settings
+            .tls_dns_credentials
+            .as_deref()
+            .filter(|s| !s.is_empty())
+    {
+        match secrets::encrypt(DNS_CREDS_SECRET_NAME, plain).await {
+            Ok(blob) => {
+                settings.tls_dns_credentials_encrypted = Some(blob);
+                settings.tls_dns_credentials = None;
+            }
+            Err(e) => warn!("Failed to encrypt DNS credentials — keeping plaintext: {e}"),
+        }
+    }
+}
+
+/// Resolve the DNS-01 provider credentials for use (the Caddy
+/// EnvironmentFile render), preferring the encrypted blob over the
+/// legacy plaintext. Returns `None` when no credentials are configured
+/// or decryption fails (logged).
+pub async fn resolve_dns_credentials(settings: &Settings) -> Option<String> {
+    if let Some(blob) = &settings.tls_dns_credentials_encrypted {
+        return match secrets::decrypt(DNS_CREDS_SECRET_NAME, blob).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                warn!("Failed to decrypt DNS credentials: {e}");
+                None
+            }
+        };
+    }
+    settings
+        .tls_dns_credentials
+        .clone()
+        .filter(|s| !s.is_empty())
 }
 
 fn default_oidc_scopes() -> Vec<String> {
@@ -425,6 +483,7 @@ impl Default for Settings {
             tls_challenge_type: default_challenge_type(),
             tls_dns_provider: None,
             tls_dns_credentials: None,
+            tls_dns_credentials_encrypted: None,
             tls_acme_staging: false,
             tls_dns_resolver: None,
             tls_dns_propagation_wait: None,
@@ -524,20 +583,39 @@ impl SettingsService {
     /// is unavailable (boot does not fail in that case).
     pub async fn migrate_secrets(&self) {
         let mut settings = self.state.write().await;
-        if settings.oidc.client_secret_encrypted.is_some()
-            || settings
+        let oidc_pending = settings.oidc.client_secret_encrypted.is_none()
+            && settings
                 .oidc
                 .client_secret
                 .as_deref()
-                .is_none_or(|s| s.is_empty())
-        {
+                .is_some_and(|s| !s.is_empty());
+        let dns_pending = settings.tls_dns_credentials_encrypted.is_none()
+            && settings
+                .tls_dns_credentials
+                .as_deref()
+                .is_some_and(|s| !s.is_empty());
+        if !oidc_pending && !dns_pending {
             return;
         }
-        encrypt_oidc_secret_in_place(&mut settings.oidc).await;
-        if settings.oidc.client_secret_encrypted.is_some() {
+        if oidc_pending {
+            encrypt_oidc_secret_in_place(&mut settings.oidc).await;
+        }
+        if dns_pending {
+            encrypt_dns_credentials_in_place(&mut settings).await;
+        }
+        let oidc_done = oidc_pending && settings.oidc.client_secret_encrypted.is_some();
+        let dns_done = dns_pending && settings.tls_dns_credentials_encrypted.is_some();
+        if oidc_done || dns_done {
             match save(&settings).await {
-                Ok(()) => info!("Migrated OIDC client_secret to systemd-creds"),
-                Err(e) => warn!("Failed to persist migrated OIDC secret: {e}"),
+                Ok(()) => {
+                    if oidc_done {
+                        info!("Migrated OIDC client_secret to systemd-creds");
+                    }
+                    if dns_done {
+                        info!("Migrated DNS credentials to systemd-creds");
+                    }
+                }
+                Err(e) => warn!("Failed to persist migrated settings secrets: {e}"),
             }
         }
     }
@@ -605,14 +683,21 @@ impl SettingsService {
             }
         }
         if let Some(creds) = update.tls_dns_credentials {
-            let creds = if creds.trim().is_empty() {
-                None
+            let creds = creds.trim().to_string();
+            if creds == DNS_CREDS_PLACEHOLDER {
+                // WebUI round-trip — keep the stored credentials in
+                // whichever form they're held (sealed or legacy).
             } else {
-                Some(creds.trim().to_string())
-            };
-            if settings.tls_dns_credentials != creds {
-                settings.tls_dns_credentials = creds;
-                tls_changed = true;
+                let creds = if creds.is_empty() { None } else { Some(creds) };
+                if settings.tls_dns_credentials != creds
+                    || settings.tls_dns_credentials_encrypted.is_some()
+                {
+                    settings.tls_dns_credentials = creds;
+                    // New plaintext (or an explicit clear) supersedes any
+                    // sealed blob; it gets re-sealed before save below.
+                    settings.tls_dns_credentials_encrypted = None;
+                    tls_changed = true;
+                }
             }
         }
         if let Some(staging) = update.tls_acme_staging
@@ -645,6 +730,9 @@ impl SettingsService {
         if let Some(telemetry) = update.telemetry_enabled {
             settings.telemetry_enabled = telemetry;
         }
+        // Seal DNS credentials at rest before persisting (no-op when
+        // empty, already encrypted, or the backend is unavailable).
+        encrypt_dns_credentials_in_place(&mut settings).await;
         save(&settings).await.map_err(|e| e.to_string())?;
         if tls_changed {
             // Always re-apply on a TLS change — even when ACME is now
@@ -797,20 +885,14 @@ pub type AppSubdomains = Vec<String>;
 /// module (e.g. `CLOUDFLARE_DNS_API_TOKEN`) must be present in this file
 /// for Caddy to resolve them at request time. We trust the operator to
 /// write KEY=VAL lines matching what the chosen provider expects.
-fn caddy_acme_env(settings: &Settings) -> String {
-    if !settings.tls_acme_enabled
-        || settings.tls_challenge_type != "dns"
-        || settings.tls_dns_credentials.is_none()
-    {
+fn caddy_acme_env(settings: &Settings, creds: Option<&str>) -> String {
+    if !settings.tls_acme_enabled || settings.tls_challenge_type != "dns" {
         return String::new();
     }
-    settings
-        .tls_dns_credentials
-        .clone()
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-        + "\n"
+    match creds.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => c.to_string() + "\n",
+        None => String::new(),
+    }
 }
 
 /// Apply current TLS settings to Caddy via the admin API: write the
@@ -857,7 +939,10 @@ pub async fn apply_caddy_tls_with_apps(
         warn!("create_dir_all({}) failed: {e}", parent.display());
     }
 
-    let env_content = caddy_acme_env(settings);
+    // Unseal the DNS provider credentials only here, at the point the
+    // consumer (Caddy's EnvironmentFile) needs the plaintext.
+    let dns_creds = resolve_dns_credentials(settings).await;
+    let env_content = caddy_acme_env(settings, dns_creds.as_deref());
     tokio::fs::write(CADDY_ACME_ENV_PATH, &env_content)
         .await
         .map_err(|e| format!("write {CADDY_ACME_ENV_PATH}: {e}"))?;
@@ -1527,7 +1612,7 @@ async fn read_cert_info(cert_path: &str) -> CertInfo {
 mod tests {
     use super::{
         EncryptedBlob, OidcSettings, Settings, build_policy_set, caddy_acme_env,
-        redact_oidc_secret, to_nix_string,
+        redact_oidc_secret, resolve_dns_credentials, to_nix_string,
     };
 
     fn fake_blob() -> EncryptedBlob {
@@ -1653,17 +1738,15 @@ mod tests {
     #[test]
     fn acme_env_empty_unless_dns_challenge_with_creds() {
         // Three negative cases that should all yield "".
-        assert_eq!(caddy_acme_env(&Settings::default()), "");
-        let mut s = acme_enabled_settings("tls-alpn");
-        s.tls_dns_credentials = Some("CF_API_TOKEN=ignored\n".into());
+        assert_eq!(caddy_acme_env(&Settings::default(), None), "");
+        let s = acme_enabled_settings("tls-alpn");
         assert_eq!(
-            caddy_acme_env(&s),
+            caddy_acme_env(&s, Some("CF_API_TOKEN=ignored\n")),
             "",
             "tls-alpn challenge must not leak DNS creds to env file"
         );
-        let mut s = acme_enabled_settings("dns");
-        s.tls_dns_credentials = None;
-        assert_eq!(caddy_acme_env(&s), "");
+        let s = acme_enabled_settings("dns");
+        assert_eq!(caddy_acme_env(&s, None), "");
     }
 
     #[test]
@@ -1671,9 +1754,29 @@ mod tests {
         // The user's KEY=VAL textarea is the source of truth — the
         // engine writes it verbatim (after a trim) so Caddy's
         // EnvironmentFile parser sees it as-is.
-        let mut s = acme_enabled_settings("dns");
-        s.tls_dns_credentials = Some("CF_API_TOKEN=abc123\nFOO=bar\n".into());
-        assert_eq!(caddy_acme_env(&s), "CF_API_TOKEN=abc123\nFOO=bar\n");
+        let s = acme_enabled_settings("dns");
+        assert_eq!(
+            caddy_acme_env(&s, Some("CF_API_TOKEN=abc123\nFOO=bar\n")),
+            "CF_API_TOKEN=abc123\nFOO=bar\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_dns_creds_falls_back_to_legacy_plaintext() {
+        // Pre-migration state (or a box whose secrets backend is
+        // unavailable): the plaintext field is still authoritative.
+        let mut s = Settings {
+            tls_dns_credentials: Some("CF_API_TOKEN=abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_dns_credentials(&s).await.as_deref(),
+            Some("CF_API_TOKEN=abc")
+        );
+        s.tls_dns_credentials = Some(String::new());
+        assert_eq!(resolve_dns_credentials(&s).await, None);
+        s.tls_dns_credentials = None;
+        assert_eq!(resolve_dns_credentials(&s).await, None);
     }
 
     #[test]
