@@ -907,6 +907,26 @@ impl SubvolumeService {
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
+        // New subvolumes must be writable through the sharing layer:
+        // Samba forces writes through a fixed identity (`nobody` on
+        // guest shares, the first valid user otherwise) and NFS through
+        // squashed uids — access control lives in the protocol layer,
+        // not POSIX bits, the same philosophy as the share-root chmod
+        // in nasty-sharing::smb. Without this, a subvolume created
+        // after the share stays root:0755 and every write into it is
+        // denied until the operator chmods it by hand (#482).
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                tokio::fs::set_permissions(&subvol_path, std::fs::Permissions::from_mode(0o777))
+                    .await
+            {
+                warn!(
+                    "chmod 0777 {subvol_path} failed: {e} — SMB/NFS writes into the new subvolume may be denied"
+                );
+            }
+        }
+
         // Set compression if specified
         if let Some(ref comp) = req.compression {
             info!("Setting compression={} on subvolume '{}'", comp, req.name);
