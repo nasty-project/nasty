@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::cmd;
 
@@ -2290,6 +2290,13 @@ impl FilesystemService {
                     Some(format!("/dev/{base}"))
                 }
             })
+            // A disk that is itself a filesystem member (whole-disk
+            // bcachefs) can't host a new partition, and probing it with
+            // sgdisk only produces GPT lectures — the member superblock
+            // sits where a partition table would be. Partition nodes on
+            // such a disk are stale kernel state from a pre-wipe table
+            // (#488).
+            .filter(|parent| !used_devices.contains(parent))
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
@@ -2335,7 +2342,11 @@ impl FilesystemService {
                         });
                     }
                 }
-                Err(e) => warn!("Failed to get free space for {disk_path}: {e}"),
+                // Routine for foreign or half-wiped partition tables —
+                // the disk simply gets no free-space entry. sgdisk's
+                // multi-line GPT lecture at warn level flooded the
+                // journal on every device.list refresh (#488).
+                Err(e) => debug!("Failed to get free space for {disk_path}: {e}"),
             }
         }
 
@@ -2359,6 +2370,23 @@ impl FilesystemService {
         cmd::run_ok("wipefs", &["-a", path])
             .await
             .map_err(FilesystemError::CommandFailed)?;
+        if dev.dev_type == "disk" {
+            // wipefs erases the signatures libblkid probes for (primary
+            // GPT, protective MBR, filesystem superblocks) but NOT the
+            // backup GPT at the end of the disk. Leaving it behind makes
+            // every GPT-aware tool from then on lecture about "invalid
+            // main header, valid backup — you should repair the disk!"
+            // (#488). Zap both tables explicitly; best-effort because
+            // sgdisk exits non-zero while cleaning up exactly the
+            // half-wiped state we're fixing.
+            if let Err(e) = cmd::run_ok("sgdisk", &["--zap-all", path]).await {
+                debug!("sgdisk --zap-all {path}: {e} (expected on a half-wiped GPT)");
+            }
+            // Drop stale kernel partition nodes from the pre-wipe table
+            // so the device list (and the free-space scan) stop seeing
+            // partitions that no longer exist on disk.
+            let _ = cmd::run_ok("partprobe", &[path]).await;
+        }
         self.invalidate_list_cache().await;
         Ok(())
     }
