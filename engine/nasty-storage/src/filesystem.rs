@@ -799,6 +799,13 @@ pub struct FilesystemService {
     /// Per-filesystem fsck state, loaded from `FSCK_STATE_PATH`. Same
     /// shape as `scrub_state`: live "running" + last-run summary.
     fsck_state: FsckStateMap,
+    /// Device paths with a `bcachefs device evacuate` currently running
+    /// (spawned detached — it can take hours). Guards against a second
+    /// evacuation of the same device being spawned in the window before
+    /// bcachefs persists the `evacuating` state (#479). Not persisted:
+    /// an engine restart orphans the child anyway, and the state-based
+    /// check in `device_evacuate` covers re-submission after that.
+    evacuating: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Default for FilesystemService {
@@ -856,6 +863,7 @@ impl FilesystemService {
             scrub_state: Arc::new(Mutex::new(scrub)),
             mount_state: Arc::new(Mutex::new(mount)),
             fsck_state: Arc::new(Mutex::new(fsck)),
+            evacuating: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -2480,8 +2488,30 @@ impl FilesystemService {
             ));
         }
 
+        // Refuse a second evacuation of the same device: either the
+        // spawned `bcachefs device evacuate` is still running (tracked
+        // in-process — bcachefs takes a moment to persist `evacuating`,
+        // and hammering the button in that window must not spawn
+        // parallel migrations, #479), or the device state already says
+        // so.
+        {
+            let mut inflight = self.evacuating.lock().await;
+            let state_says_evacuating = fs
+                .devices
+                .iter()
+                .any(|d| d.path == req.device && d.state.as_deref() == Some("evacuating"));
+            if state_says_evacuating || inflight.contains(&req.device) {
+                return Err(FilesystemError::CommandFailed(format!(
+                    "evacuation of {} is already in progress",
+                    req.device
+                )));
+            }
+            inflight.insert(req.device.clone());
+        }
+
         let device = req.device.clone();
         let fs_name = req.filesystem.clone();
+        let evacuating = self.evacuating.clone();
         info!(
             "Starting evacuation of device {} in filesystem '{}'",
             device, fs_name
@@ -2494,6 +2524,7 @@ impl FilesystemService {
                 Ok(_) => info!("Evacuation of {} in '{}' completed", device, fs_name),
                 Err(e) => warn!("Evacuation of {} in '{}' failed: {}", device, fs_name, e),
             }
+            evacuating.lock().await.remove(&device);
         });
 
         self.invalidate_list_cache().await;

@@ -360,6 +360,15 @@
 			filesystems = await client.call<Filesystem[]>('fs.list');
 			devices = await client.call<BlockDevice[]>('device.list');
 		});
+		// Drop pending-evacuation markers once the live state confirms
+		// them (or the device vanished, or the marker went stale — an
+		// evacuation that finished instantly never shows `evacuating`).
+		for (const [p, t] of Object.entries(pendingEvacuation)) {
+			const dev = filesystems.flatMap(f => f.devices).find(d => d.path === p);
+			if (!dev || dev.state === 'evacuating' || Date.now() - t > 30_000) {
+				delete pendingEvacuation[p];
+			}
+		}
 		// SMART health for the add-device candidate summaries (best-effort;
 		// virtual disks / no-SMART setups just render "no SMART").
 		diskHealth = await client.call<DiskHealth[]>('system.disks').catch(() => []);
@@ -790,35 +799,61 @@
 		await refresh();
 	}
 
+	// ── Per-device action busy state (#479) ──
+	// While a device action RPC is in flight, every button on that
+	// row disables — a slow operation must not be hammerable, and the
+	// ghosted row is itself the "something is happening" signal.
+	let busyDevices = $state<Record<string, boolean>>({});
+	/** Devices we just told the engine to evacuate, displayed as
+	 * `evacuating` until a refresh observes the real state flip.
+	 * bcachefs takes a moment to persist the state, and in that gap
+	 * the row would otherwise re-offer Evacuate (#479). Value is the
+	 * time the marker was set, so a stuck marker (instant-finish
+	 * evacuation that never shows `evacuating`) expires. */
+	let pendingEvacuation = $state<Record<string, number>>({});
+
+	async function runDeviceAction(devicePath: string, fn: () => Promise<unknown>) {
+		busyDevices[devicePath] = true;
+		try {
+			await fn();
+		} finally {
+			delete busyDevices[devicePath];
+		}
+	}
+
 	async function addDevice(fsName: string) {
 		if (!addDevicePath) return;
-		const ok = await withToast(
-			() => client.call('fs.device.add', {
-				filesystem: fsName,
-				device: {
-					path: addDevicePath,
-					label: addDeviceLabel || undefined,
-					durability: addDeviceDurability !== '' ? parseInt(addDeviceDurability) : undefined,
-				},
-			}),
-			`Device ${addDevicePath} added to "${fsName}"`
-		);
-		if (ok !== undefined) {
-			addDeviceFs = null;
-			addDevicePath = '';
-			addDeviceLabel = '';
-			addDeviceDurability = '1';
-			await refresh();
-		}
+		await runDeviceAction(addDevicePath, async () => {
+			const ok = await withToast(
+				() => client.call('fs.device.add', {
+					filesystem: fsName,
+					device: {
+						path: addDevicePath,
+						label: addDeviceLabel || undefined,
+						durability: addDeviceDurability !== '' ? parseInt(addDeviceDurability) : undefined,
+					},
+				}),
+				`Device ${addDevicePath} added to "${fsName}"`
+			);
+			if (ok !== undefined) {
+				addDeviceFs = null;
+				addDevicePath = '';
+				addDeviceLabel = '';
+				addDeviceDurability = '1';
+				await refresh();
+			}
+		});
 	}
 
 	async function removeDevice(fsName: string, devicePath: string) {
 		if (!await confirm(`Remove ${devicePath}?`, `Data will be evacuated from filesystem "${fsName}" first.`)) return;
-		await withToast(
-			() => client.call('fs.device.remove', { filesystem: fsName, device: devicePath }),
-			`Device ${devicePath} removed from "${fsName}"`
-		);
-		await refresh();
+		await runDeviceAction(devicePath, async () => {
+			await withToast(
+				() => client.call('fs.device.remove', { filesystem: fsName, device: devicePath }),
+				`Device ${devicePath} removed from "${fsName}"`
+			);
+			await refresh();
+		});
 	}
 
 	/** Force-remove a missing/dead member by its slot index (#466/#473).
@@ -832,49 +867,64 @@
 			`Removes the missing device from "${fsName}". Its data can't be migrated (the disk is gone), so this relies on the replicas still present on the remaining devices. Don't do this if the pool is already at minimum redundancy.`,
 			{ confirmLabel: 'Force remove', cancelLabel: 'Cancel' }
 		)) return;
-		await withToast(
-			() => client.call('fs.device.remove', { filesystem: fsName, device: String(idx), force: true }, 120000),
-			`Removed dead member (slot ${idx}) from "${fsName}"`
-		);
-		await refresh();
+		await runDeviceAction(dev.path, async () => {
+			await withToast(
+				() => client.call('fs.device.remove', { filesystem: fsName, device: String(idx), force: true }, 120000),
+				`Removed dead member (slot ${idx}) from "${fsName}"`
+			);
+			await refresh();
+		});
 	}
 
 	async function evacuateDevice(fsName: string, devicePath: string) {
 		if (!await confirm(`Evacuate all data from ${devicePath}?`)) return;
-		await withToast(
-			() => client.call('fs.device.evacuate', { filesystem: fsName, device: devicePath }),
-			`Evacuating ${devicePath} — this may take several minutes`
-		);
-		await refresh();
-		startEvacuationPolling();
+		await runDeviceAction(devicePath, async () => {
+			let started = false;
+			await withToast(
+				async () => {
+					await client.call('fs.device.evacuate', { filesystem: fsName, device: devicePath });
+					started = true;
+				},
+				`Evacuating ${devicePath} — this may take several minutes`
+			);
+			if (started) pendingEvacuation[devicePath] = Date.now();
+			await refresh();
+			startEvacuationPolling();
+		});
 	}
 
 	async function setDeviceState(fsName: string, devicePath: string, state: DeviceState) {
 		if (state === 'ro') {
 			if (!await confirm(`Set ${devicePath} read-only?`, `The device will stop accepting writes. Use Set RW to revert.`)) return;
 		}
-		await withToast(
-			() => client.call('fs.device.set_state', { filesystem: fsName, device: devicePath, state }),
-			`Device ${devicePath} set to ${state}`
-		);
-		await refresh();
+		await runDeviceAction(devicePath, async () => {
+			await withToast(
+				() => client.call('fs.device.set_state', { filesystem: fsName, device: devicePath, state }),
+				`Device ${devicePath} set to ${state}`
+			);
+			await refresh();
+		});
 	}
 
 	async function onlineDevice(fsName: string, devicePath: string) {
-		await withToast(
-			() => client.call('fs.device.online', { filesystem: fsName, device: devicePath }),
-			`Device ${devicePath} online`
-		);
-		await refresh();
+		await runDeviceAction(devicePath, async () => {
+			await withToast(
+				() => client.call('fs.device.online', { filesystem: fsName, device: devicePath }),
+				`Device ${devicePath} online`
+			);
+			await refresh();
+		});
 	}
 
 	async function offlineDevice(fsName: string, devicePath: string) {
 		if (!await confirm(`Take ${devicePath} offline?`)) return;
-		await withToast(
-			() => client.call('fs.device.offline', { filesystem: fsName, device: devicePath }),
-			`Device ${devicePath} offline`
-		);
-		await refresh();
+		await runDeviceAction(devicePath, async () => {
+			await withToast(
+				() => client.call('fs.device.offline', { filesystem: fsName, device: devicePath }),
+				`Device ${devicePath} offline`
+			);
+			await refresh();
+		});
 	}
 
 	function openEditOptions(fs: Filesystem) {
@@ -1083,6 +1133,12 @@
 		// came back empty, and could land on the wrong row. There's no
 		// real "evacuated" device state — once a device is drained the
 		// operator removes it and it disappears from the list. (#456)
+		//
+		// One exception: a just-started evacuation may not be visible in
+		// dev.state yet (bcachefs persists it asynchronously). Show it
+		// optimistically until refresh() confirms or expires the marker,
+		// so the row doesn't re-offer Evacuate in the gap. (#479)
+		if (pendingEvacuation[dev.path] && dev.state !== 'evacuating') return 'evacuating';
 		return dev.state;
 	}
 
@@ -2347,25 +2403,27 @@
 											<div class="flex gap-1.5 items-center">
 											{#if fs.mounted && dev.missing}
 												{@const reattach = reattachPath(fs, dev)}
+												{@const busy = !!busyDevices[dev.path] || (reattach != null && !!busyDevices[reattach])}
 												{#if reattach}
-													<Button size="xs" onclick={() => onlineDevice(fs.name, reattach)} title="Re-attach {reattach} to this pool with its data intact">Bring online</Button>
+													<Button size="xs" disabled={busy} onclick={() => onlineDevice(fs.name, reattach)} title="Re-attach {reattach} to this pool with its data intact">Bring online</Button>
 												{:else}
 													<span class="text-xs italic text-muted-foreground" title="The disk for this member slot is not currently detected. Reconnect it — it may reappear under a different name, in which case Bring online and Add Device will offer to re-attach it.">disk not detected</span>
 												{/if}
-												<Button variant="destructive" size="xs" onclick={() => removeMissingDevice(fs.name, dev)}>Remove (force)</Button>
+												<Button variant="destructive" size="xs" disabled={busy} onclick={() => removeMissingDevice(fs.name, dev)}>Remove (force)</Button>
 											{:else if fs.mounted}
 												{@const ds = devDisplayState(dev)}
+												{@const busy = !!busyDevices[dev.path]}
 												{#if ds === 'evacuating'}
-													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
+													<Button variant="destructive" size="xs" disabled={busy} onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 												{:else}
 													{#if ds === 'rw'}
-														<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'ro')}>Set RO</Button>
-														<Button variant="secondary" size="xs" onclick={() => offlineDevice(fs.name, dev.path)}>Offline</Button>
+														<Button variant="secondary" size="xs" disabled={busy} onclick={() => setDeviceState(fs.name, dev.path, 'ro')}>Set RO</Button>
+														<Button variant="secondary" size="xs" disabled={busy} onclick={() => offlineDevice(fs.name, dev.path)}>Offline</Button>
 													{:else if ds === 'ro'}
-														<Button variant="secondary" size="xs" onclick={() => setDeviceState(fs.name, dev.path, 'rw')}>Set RW</Button>
+														<Button variant="secondary" size="xs" disabled={busy} onclick={() => setDeviceState(fs.name, dev.path, 'rw')}>Set RW</Button>
 													{/if}
-													<Button variant="secondary" size="xs" onclick={() => evacuateDevice(fs.name, dev.path)}>Evacuate</Button>
-													<Button variant="destructive" size="xs" onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
+													<Button variant="secondary" size="xs" disabled={busy} onclick={() => evacuateDevice(fs.name, dev.path)}>Evacuate</Button>
+													<Button variant="destructive" size="xs" disabled={busy} onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 												{/if}
 											{/if}
 											</div>
@@ -2421,7 +2479,7 @@
 													</span>
 												</span>
 												{#if kind === 'offline_member'}
-													<Button size="xs" class="shrink-0" onclick={() => onlineDevice(fs.name, dev.path)}>Bring online</Button>
+													<Button size="xs" class="shrink-0" disabled={!!busyDevices[dev.path]} onclick={() => onlineDevice(fs.name, dev.path)}>Bring online</Button>
 												{/if}
 											</label>
 										{/each}
@@ -2445,7 +2503,7 @@
 										</div>
 									{/if}
 									<div class="mt-2 flex items-center gap-2">
-										<Button size="xs" onclick={() => addDevice(fs.name)} disabled={!addDevicePath}>Add</Button>
+										<Button size="xs" onclick={() => addDevice(fs.name)} disabled={!addDevicePath || !!busyDevices[addDevicePath]}>Add</Button>
 										<Button variant="secondary" size="xs" onclick={() => { addDeviceFs = null; addDevicePath = ''; addDeviceLabel = ''; }}>Cancel</Button>
 										{#if availableDevicesForAdd().length > 0}
 											<span class="ml-auto text-xs text-muted-foreground">Need to wipe a disk first?</span>
