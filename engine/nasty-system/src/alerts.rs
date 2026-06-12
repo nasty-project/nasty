@@ -542,7 +542,7 @@ fn evaluate_rules(
                                 severity: rule.severity.clone(),
                                 metric: rule.metric.clone(),
                                 message: format!(
-                                    "Filesystem \"{}\" reconcile is stalled — background work not progressing",
+                                    "Filesystem \"{}\" reconcile looks stalled — pending background work hasn't progressed in over 30 minutes",
                                     fs.fs_name
                                 ),
                                 current_value: 1.0,
@@ -735,6 +735,60 @@ pub struct BcachefsDeviceHealth {
     pub state: String,
     /// Whether the device has IO errors reported in sysfs
     pub has_errors: bool,
+}
+
+/// One parsed `bcachefs reconcile status` snapshot, for stall tracking
+/// (#487). A single snapshot can't distinguish "stalled" from
+/// bcachefs's normal pacing — the rebalance thread sits in `waiting`
+/// with pending work between throttled bursts *by design* — so the
+/// caller compares fingerprints across samples and only declares a
+/// stall when the counters haven't moved for a full window.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReconcileSample {
+    /// Fingerprint of the pending-work counters (the raw `pending:` /
+    /// `scan pending` lines). `None` when no work is pending — nothing
+    /// to stall on.
+    pub pending: Option<String>,
+    /// The thread reported an actively-progressing state.
+    pub active: bool,
+}
+
+/// Parse the raw `bcachefs reconcile status` text into a
+/// [`ReconcileSample`]. Pure; unit-tested.
+pub fn parse_reconcile_sample(raw: &str) -> ReconcileSample {
+    let lower = raw.to_lowercase();
+    let scan_pending_line = lower.lines().find(|l| l.contains("scan pending"));
+    let scan_pending = scan_pending_line
+        .and_then(|l| l.split_whitespace().last())
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(0)
+        > 0;
+    let pending_line = lower
+        .lines()
+        .find(|l| l.trim().starts_with("pending:"))
+        .map(str::trim);
+    let work_pending = pending_line
+        .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
+        .unwrap_or(false);
+    let pending = (scan_pending || work_pending).then(|| {
+        let mut fp = String::new();
+        if let Some(l) = scan_pending_line {
+            fp.push_str(l.trim());
+            fp.push('\n');
+        }
+        if let Some(l) = pending_line {
+            fp.push_str(l);
+        }
+        fp
+    });
+    // Anything bcachefs reports as in-flight counts as progressing —
+    // the exact wording has shifted across versions, so accept all of
+    // them rather than gating on one (`running` alone flagged actively
+    // working pools as stalled, #487).
+    let active = ["running", "working", "scanning"]
+        .iter()
+        .any(|s| lower.contains(s));
+    ReconcileSample { pending, active }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1026,6 +1080,49 @@ mod tests {
     use super::*;
     use crate::SystemStats;
     use nasty_common::metrics_types::{CpuStats, MemoryStats};
+
+    // ── reconcile stall sampling (#487) ────────────────────────
+
+    #[test]
+    fn reconcile_sample_no_pending_work() {
+        let s = parse_reconcile_sample("pending: 0\nscan pending 0\nwaiting\n");
+        assert_eq!(s.pending, None);
+    }
+
+    #[test]
+    fn reconcile_sample_waiting_with_pending_is_not_active() {
+        // The over-eager case from #487: pending work + `waiting` is
+        // bcachefs's normal pacing, not (yet) a stall. The sample must
+        // carry a fingerprint so the caller can watch for progress.
+        let s = parse_reconcile_sample("pending: 12 GiB\nscan pending 0\nwaiting\n");
+        assert!(s.pending.is_some());
+        assert!(!s.active);
+    }
+
+    #[test]
+    fn reconcile_sample_working_counts_as_active() {
+        // `working`/`scanning` never matched the old `running`-only
+        // check, flagging actively-progressing pools as stalled.
+        for state in ["working", "scanning", "running"] {
+            let s = parse_reconcile_sample(&format!("pending: 12 GiB\n{state}\n"));
+            assert!(s.active, "{state} must count as active");
+        }
+    }
+
+    #[test]
+    fn reconcile_sample_fingerprint_tracks_counter_changes() {
+        let a = parse_reconcile_sample("pending: 12 GiB\nwaiting\n");
+        let b = parse_reconcile_sample("pending: 11 GiB\nwaiting\n");
+        let a2 = parse_reconcile_sample("pending: 12 GiB\nwaiting\n");
+        assert_ne!(a.pending, b.pending, "progress must change the fingerprint");
+        assert_eq!(a.pending, a2.pending, "same counters, same fingerprint");
+    }
+
+    #[test]
+    fn reconcile_sample_scan_pending_counts_as_pending() {
+        let s = parse_reconcile_sample("pending: 0\nscan pending 3\nwaiting\n");
+        assert!(s.pending.is_some());
+    }
 
     fn rule(metric: AlertMetric, condition: AlertCondition, threshold: f64) -> AlertRule {
         AlertRule {

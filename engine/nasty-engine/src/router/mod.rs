@@ -1105,23 +1105,15 @@ pub(crate) async fn evaluate_active_alerts(
             };
 
             let reconcile_stalled = match reconcile_result {
-                Ok(s) => {
-                    let raw = s.raw.to_lowercase();
-                    let scan_pending = raw
-                        .lines()
-                        .find(|l| l.contains("scan pending"))
-                        .and_then(|l| l.split_whitespace().last())
-                        .and_then(|n| n.parse::<u64>().ok())
-                        .unwrap_or(0)
-                        > 0;
-                    let work_pending = raw
-                        .lines()
-                        .find(|l| l.trim().starts_with("pending:"))
-                        .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
-                        .unwrap_or(false);
-                    (scan_pending || work_pending) && !raw.contains("running")
+                // An operator-disabled reconcile is expected to sit on
+                // pending work indefinitely — never a stall (#487).
+                Ok(s) if s.enabled => {
+                    reconcile_stall_check(&fs.name, &alerts::parse_reconcile_sample(&s.raw))
                 }
-                Err(_) => false,
+                Ok(_) | Err(_) => {
+                    clear_reconcile_tracker(&fs.name);
+                    false
+                }
             };
 
             alerts::BcachefsHealth {
@@ -1219,6 +1211,47 @@ pub(crate) async fn evaluate_active_alerts(
     }
 
     active
+}
+
+/// How long reconcile must sit on *unchanged* pending counters, in a
+/// non-active state, before it counts as stalled (#487). Generous on
+/// purpose: bcachefs paces background work in throttled bursts with
+/// long `waiting` gaps, and a heavily-loaded pool can legitimately go
+/// many minutes without the counters moving.
+const RECONCILE_STALL_WINDOW: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Per-filesystem fingerprint of the last reconcile pending counters +
+/// when that fingerprint was first seen. Process-lifetime state for
+/// the stall detector; an engine restart just restarts the window.
+static RECONCILE_STALL_TRACKER: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Stall decision for one reconcile sample (#487): pending work exists,
+/// the thread isn't actively progressing, and the pending counters
+/// haven't changed for [`RECONCILE_STALL_WINDOW`]. Anything else —
+/// no pending work, an active state, or counters that moved — resets
+/// the window.
+fn reconcile_stall_check(fs_name: &str, sample: &nasty_system::alerts::ReconcileSample) -> bool {
+    let mut tracker = RECONCILE_STALL_TRACKER.lock().unwrap();
+    let Some(fingerprint) = sample.pending.as_ref().filter(|_| !sample.active) else {
+        tracker.remove(fs_name);
+        return false;
+    };
+    match tracker.get(fs_name) {
+        Some((prev, since)) if prev == fingerprint => since.elapsed() >= RECONCILE_STALL_WINDOW,
+        _ => {
+            tracker.insert(
+                fs_name.to_string(),
+                (fingerprint.clone(), std::time::Instant::now()),
+            );
+            false
+        }
+    }
+}
+
+fn clear_reconcile_tracker(fs_name: &str) {
+    RECONCILE_STALL_TRACKER.lock().unwrap().remove(fs_name);
 }
 
 /// Read bcachefs error counters from sysfs. Returns total read+write error count.
