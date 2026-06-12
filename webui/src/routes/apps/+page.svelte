@@ -826,7 +826,7 @@
 	}
 
 	onMount(async () => {
-		await Promise.all([refresh(), loadFilesystems()]);
+		await Promise.all([refresh(), loadFilesystems(), refreshAppdataStatus()]);
 		loading = false;
 		if (status?.enabled && !status?.running) startStartupPolling();
 		if (status?.enabled && status?.running) {
@@ -840,8 +840,60 @@
 		stopStartupPolling();
 		stopStatsPolling();
 		stopListPolling();
+		stopAppdataPolling();
 		document.removeEventListener('visibilitychange', onVisibilityChange);
 	});
+
+	// ── Appdata location (#436) ──
+	type AppdataRelocateStatus = {
+		running: boolean;
+		phase: string;
+		target_fs: string;
+		error?: string;
+		old_path?: string;
+		affected_apps: string[];
+	};
+	let appdataRelocate = $state<AppdataRelocateStatus | null>(null);
+	let appdataTargetFs = $state('');
+	let appdataPoll: ReturnType<typeof setInterval> | null = null;
+
+	async function refreshAppdataStatus() {
+		try {
+			appdataRelocate = await client.call<AppdataRelocateStatus | null>('apps.appdata.status');
+			if (appdataRelocate?.running) startAppdataPolling();
+		} catch { /* apps disabled — card stays passive */ }
+	}
+
+	function startAppdataPolling() {
+		if (appdataPoll) return;
+		appdataPoll = setInterval(async () => {
+			await refreshAppdataStatus();
+			if (!appdataRelocate?.running && appdataPoll) {
+				clearInterval(appdataPoll);
+				appdataPoll = null;
+				// Pick up restarted apps + the new appdata path.
+				void refresh();
+			}
+		}, 2000);
+	}
+
+	function stopAppdataPolling() {
+		if (appdataPoll) { clearInterval(appdataPoll); appdataPoll = null; }
+	}
+
+	async function relocateAppdata() {
+		if (!appdataTargetFs) return;
+		if (!await confirm(
+			`Move appdata to "${appdataTargetFs}"?`,
+			`Apps that bind /appdata will be stopped while the data is copied, then restarted. Compose references keep working — /appdata simply points at the new filesystem. The old copy stays in place until you delete it.`
+		)) return;
+		await withToast(
+			() => client.call('apps.appdata.relocate', { filesystem: appdataTargetFs }),
+			`Relocating appdata to "${appdataTargetFs}"`
+		);
+		appdataTargetFs = '';
+		await refreshAppdataStatus();
+	}
 
 	function startStartupPolling() {
 		stopStartupPolling();
@@ -1647,6 +1699,47 @@
 								<Button size="sm" onclick={() => goto('/services')}>Services</Button>
 							</div>
 						</div>
+					</CardContent>
+				</Card>
+				<Card>
+					<CardContent class="py-4">
+						<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Appdata</h4>
+						<div class="text-sm space-y-1">
+							<div class="flex justify-between"><span class="text-muted-foreground">Stable path</span> <code class="text-xs">/appdata</code></div>
+							<div class="flex justify-between"><span class="text-muted-foreground">Lives on</span> <code class="text-xs">{status.appdata_path ?? 'not set up yet'}</code></div>
+							{#if status.appdata_path && !status.appdata_ok}
+								<p class="text-xs text-destructive">/appdata does not resolve — is that filesystem mounted?</p>
+							{/if}
+						</div>
+						{#if appdataRelocate?.running}
+							<div class="mt-2 rounded-md bg-secondary/50 px-2 py-1.5 text-xs">
+								<span class="mr-1 inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-500"></span>
+								Relocating to <code>{appdataRelocate.target_fs}</code> — {appdataRelocate.phase.replace('_', ' ')}
+								{#if appdataRelocate.affected_apps.length}
+									<div class="mt-0.5 text-muted-foreground">apps paused: {appdataRelocate.affected_apps.join(', ')}</div>
+								{/if}
+							</div>
+						{:else}
+							{#if appdataRelocate?.phase === 'failed'}
+								<p class="mt-2 text-xs text-destructive">Relocation failed: {appdataRelocate.error}</p>
+							{:else if appdataRelocate?.phase === 'done'}
+								<p class="mt-2 text-xs text-green-600">Moved. Old copy left at <code>{appdataRelocate.old_path}</code> — delete it once you've verified the apps.{#if appdataRelocate.error} {appdataRelocate.error}{/if}</p>
+							{/if}
+							{#if status.appdata_path}
+								{@const currentFs = status.appdata_path.match(/^\/fs\/([^/]+)\//)?.[1]}
+								{@const targets = filesystems.filter(f => f.name !== currentFs)}
+								{#if targets.length > 0}
+									<div class="mt-2 flex items-center gap-2">
+										<select bind:value={appdataTargetFs} class="h-8 flex-1 rounded-md border border-input bg-transparent px-2 text-xs">
+											<option value="">Move to filesystem…</option>
+											{#each targets as f}<option value={f.name}>{f.name}</option>{/each}
+										</select>
+										<Button size="sm" variant="outline" disabled={!appdataTargetFs} onclick={relocateAppdata}>Relocate</Button>
+									</div>
+								{/if}
+							{/if}
+							<p class="mt-2 text-[0.65rem] text-muted-foreground">Bind app data as <code>/appdata/&lt;app&gt;/…</code> — references survive relocation. Snapshot or back it up from Subvolumes.</p>
+						{/if}
 					</CardContent>
 				</Card>
 			</div>

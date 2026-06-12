@@ -10,11 +10,11 @@ use crate::auth::{ApiToken, ApiTokenInfo, Role, Session, UserInfo};
 use crate::fs_dependents::FsDependents;
 use crate::subvolume_dependents::SubvolumeDependents;
 use nasty_apps::{
-    App, AppConfig, AppIngress, AppStats, AppsStatus, CaddyRouteSummary, CheckComposeRequest,
-    CheckComposeResult, CheckDevicesRequest, CheckPortsRequest, CheckVolumesRequest, DeviceMissing,
-    EnableAppsRequest, FixVolumePermsRequest, ImageInspectResult, InstallAppRequest,
-    InstallComposeRequest, ManagedNetwork, NetworkSummary, PortConflict, PruneResult,
-    SetIngressRequest, VolumeMismatch,
+    App, AppConfig, AppIngress, AppStats, AppdataRelocateStatus, AppsStatus, CaddyRouteSummary,
+    CheckComposeRequest, CheckComposeResult, CheckDevicesRequest, CheckPortsRequest,
+    CheckVolumesRequest, DeviceMissing, EnableAppsRequest, FixVolumePermsRequest,
+    ImageInspectResult, InstallAppRequest, InstallComposeRequest, ManagedNetwork, NetworkSummary,
+    PortConflict, PruneResult, SetIngressRequest, VolumeMismatch,
 };
 use nasty_backup::{BackupProfile, BackupSnapshot, BackupStatus};
 use nasty_sharing::iscsi::{
@@ -2470,6 +2470,23 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Any,
                     params: MethodParams::Schema(gen_schema::<CheckComposeRequest>(generator)),
                     result: Some(gen_schema::<CheckComposeResult>(generator)),
+                },
+                Method {
+                    name: "apps.appdata.status",
+                    desc: "Progress/outcome of the current or most recent appdata relocation, or null if none has run since engine start.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Option<AppdataRelocateStatus>>(generator)),
+                },
+                Method {
+                    name: "apps.appdata.relocate",
+                    desc: "Move the appdata subvolume to another filesystem and flip the stable /appdata symlink: stops apps that bind /appdata, copies with ownership preserved, switches, restarts them. The old copy is left in place for the operator to delete after verifying.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::AdHoc(ad_hoc_one(
+                        "filesystem",
+                        "Target filesystem name (the <X> of /fs/<X>).",
+                    )),
+                    result: None,
                 },
                 Method {
                     name: "apps.enable",

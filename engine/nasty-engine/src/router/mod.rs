@@ -122,6 +122,9 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "apps.compose.install"
                 | "apps.compose.update"
                 | "apps.compose.remove"
+                // Appdata relocation (#436) — same altitude as the
+                // rest of app lifecycle management.
+                | "apps.appdata.relocate"
                 | "apps.ingress.set"
                 | "apps.ingress.remove"
                 // Backup lifecycle is operator territory in a NAS
