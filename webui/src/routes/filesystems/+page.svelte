@@ -58,6 +58,7 @@
 	let wizardProfile: TieringProfileId = $state('single');
 	let replicas = $state(1);
 	let compression = $state('');
+	let compressionLevel = $state('');
 	let showPartitions = $state(false);
 	let erasureCode = $state(false);
 	let versionUpgrade = $state('');
@@ -87,7 +88,9 @@
 	let expandedFs: string | null = $state(null);
 	let editOptionsFs: string | null = $state(null);
 	let editCompression = $state('');
+	let editCompressionLevel = $state('');
 	let editBgCompression = $state('');
+	let editBgCompressionLevel = $state('');
 	// bcachefs tiering targets (#434) — each points at a device label.
 	let editForegroundTarget = $state('');
 	let editBackgroundTarget = $state('');
@@ -594,7 +597,10 @@
 		const args = ['bcachefs', 'format'];
 
 		if (replicas > 1) args.push(`--replicas=${replicas}`);
-		if (compression) args.push(`--compression=${compression}`);
+		{
+			const comp = combineCompression(compression, compressionLevel);
+			if (comp) args.push(`--compression=${comp}`);
+		}
 		if (profile.foreground_target) args.push(`--foreground_target=${profile.foreground_target}`);
 		if (profile.metadata_target) args.push(`--metadata_target=${profile.metadata_target}`);
 		if (profile.background_target) args.push(`--background_target=${profile.background_target}`);
@@ -670,7 +676,7 @@
 					label: profile.device_labels[path] || undefined,
 				})),
 				replicas,
-				compression: compression || undefined,
+				compression: combineCompression(compression, compressionLevel) || undefined,
 				foreground_target: profile.foreground_target || undefined,
 				metadata_target: profile.metadata_target || undefined,
 				background_target: profile.background_target || undefined,
@@ -727,6 +733,7 @@
 		wizardProfile = 'single';
 		replicas = 1;
 		compression = '';
+		compressionLevel = '';
 		// Auto-show partitions if no full disks are available
 		const hasFullDisks = devices.some(d => !d.in_use && d.dev_type !== 'part');
 		showPartitions = !hasFullDisks;
@@ -933,8 +940,8 @@
 			return;
 		}
 		editOptionsFs = fs.name;
-		editCompression = fs.options.compression ?? '';
-		editBgCompression = fs.options.background_compression ?? '';
+		({ algo: editCompression, level: editCompressionLevel } = splitCompression(fs.options.compression));
+		({ algo: editBgCompression, level: editBgCompressionLevel } = splitCompression(fs.options.background_compression));
 		editForegroundTarget = fs.options.foreground_target ?? '';
 		editBackgroundTarget = fs.options.background_target ?? '';
 		editMetadataTarget = fs.options.metadata_target ?? '';
@@ -1008,8 +1015,8 @@
 		await withToast(
 			() => client.call('fs.options.update', {
 				name: fsName,
-				compression: editCompression || 'none',
-				background_compression: editBgCompression || 'none',
+				compression: combineCompression(editCompression, editCompressionLevel) || 'none',
+				background_compression: combineCompression(editBgCompression, editBgCompressionLevel) || 'none',
 				foreground_target: editForegroundTarget || 'none',
 				background_target: editBackgroundTarget || 'none',
 				metadata_target: editMetadataTarget || 'none',
@@ -1081,6 +1088,25 @@
 
 	function availableDevices(): BlockDevice[] {
 		return devices.filter(d => !d.in_use && (showPartitions || d.dev_type !== 'part'));
+	}
+
+	// ── Compression algorithm:level helpers (#491) ──
+	// bcachefs accepts `<algo>:<level>` — a quick level on ingress
+	// (foreground) and a deeper level for background recompression.
+	// Only zstd and gzip have a level knob; lz4 doesn't.
+	function compressionMaxLevel(algo: string): number | null {
+		return algo === 'zstd' ? 22 : algo === 'gzip' ? 9 : null;
+	}
+	/** Split a stored spec ("zstd:15") into its algorithm and level. */
+	function splitCompression(spec: string | null | undefined): { algo: string; level: string } {
+		if (!spec || spec === 'none') return { algo: '', level: '' };
+		const [algo, level] = spec.split(':');
+		return { algo, level: level ?? '' };
+	}
+	/** Combine an algorithm + level back into a spec the engine accepts. */
+	function combineCompression(algo: string, level: string): string {
+		if (!algo) return '';
+		return level && compressionMaxLevel(algo) !== null ? `${algo}:${level}` : algo;
 	}
 
 	/** Distinct device labels in a filesystem — the candidate tiering
@@ -1561,13 +1587,23 @@
 					</div>
 					<div>
 						<Label for="compression">Compression</Label>
-						<select id="compression" bind:value={compression}
-							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
-							<option value="">None</option>
-							<option value="lz4">LZ4</option>
-							<option value="zstd">Zstd</option>
-							<option value="gzip">Gzip</option>
-						</select>
+						<div class="mt-1 flex gap-2">
+							<select id="compression" bind:value={compression}
+								onchange={() => compressionLevel = ''}
+								class="h-9 flex-1 rounded-md border border-input bg-transparent px-3 text-sm">
+								<option value="">None</option>
+								<option value="lz4">LZ4</option>
+								<option value="zstd">Zstd</option>
+								<option value="gzip">Gzip</option>
+							</select>
+							{#if compressionMaxLevel(compression) !== null}
+								<input type="number" bind:value={compressionLevel}
+									min="1" max={compressionMaxLevel(compression)}
+									placeholder="level"
+									title="Optional {compression} level (1–{compressionMaxLevel(compression)}). Leave blank for the default."
+									class="h-9 w-24 rounded-md border border-input bg-transparent px-3 text-sm" />
+							{/if}
+						</div>
 					</div>
 				</div>
 
@@ -2029,21 +2065,31 @@
 							<div class="grid grid-cols-2 gap-3">
 								<div>
 									<label for="edit-compression-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Foreground</label>
-									<select id="edit-compression-{fs.name}" bind:value={editCompression} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-										<option value="">None</option>
-										<option value="lz4">LZ4</option>
-										<option value="zstd">Zstd</option>
-										<option value="gzip">Gzip</option>
-									</select>
+									<div class="flex gap-2">
+										<select id="edit-compression-{fs.name}" bind:value={editCompression} onchange={() => editCompressionLevel = ''} class="h-8 flex-1 rounded-md border border-input bg-transparent px-2 text-sm">
+											<option value="">None</option>
+											<option value="lz4">LZ4</option>
+											<option value="zstd">Zstd</option>
+											<option value="gzip">Gzip</option>
+										</select>
+										{#if compressionMaxLevel(editCompression) !== null}
+											<input type="number" bind:value={editCompressionLevel} min="1" max={compressionMaxLevel(editCompression)} placeholder="lvl" title="Optional {editCompression} level (1–{compressionMaxLevel(editCompression)}). Blank = default." class="h-8 w-16 rounded-md border border-input bg-transparent px-2 text-sm" />
+										{/if}
+									</div>
 								</div>
 								<div>
 									<label for="edit-bg-compression-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Background</label>
-									<select id="edit-bg-compression-{fs.name}" bind:value={editBgCompression} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-										<option value="">None</option>
-										<option value="lz4">LZ4</option>
-										<option value="zstd">Zstd</option>
-										<option value="gzip">Gzip</option>
-									</select>
+									<div class="flex gap-2">
+										<select id="edit-bg-compression-{fs.name}" bind:value={editBgCompression} onchange={() => editBgCompressionLevel = ''} class="h-8 flex-1 rounded-md border border-input bg-transparent px-2 text-sm">
+											<option value="">None</option>
+											<option value="lz4">LZ4</option>
+											<option value="zstd">Zstd</option>
+											<option value="gzip">Gzip</option>
+										</select>
+										{#if compressionMaxLevel(editBgCompression) !== null}
+											<input type="number" bind:value={editBgCompressionLevel} min="1" max={compressionMaxLevel(editBgCompression)} placeholder="lvl" title="Optional {editBgCompression} level (1–{compressionMaxLevel(editBgCompression)}). Blank = default." class="h-8 w-16 rounded-md border border-input bg-transparent px-2 text-sm" />
+										{/if}
+									</div>
 								</div>
 							</div>
 						</fieldset>

@@ -1215,6 +1215,14 @@ impl FilesystemService {
             return Err(FilesystemError::NoDevices);
         }
 
+        // Reject a malformed compression spec before formatting — the
+        // string is interpolated straight into `bcachefs format
+        // --compression=…`, and a bad level there fails the format with
+        // an opaque error after we've already started touching disk.
+        if let Some(ref comp) = req.compression {
+            validate_compression(comp).map_err(FilesystemError::InvalidInput)?;
+        }
+
         // Upfront validation of `bind_to_tpm`. Fails the request before
         // touching disk when prerequisites aren't met, so the operator
         // doesn't end up with a half-baked FS (formatted but never
@@ -1945,6 +1953,16 @@ impl FilesystemService {
                 "filesystem must be mounted to update options".to_string(),
             ));
         }
+        // Validate compression specs up front so a typo in the level
+        // can't leave foreground set and background rejected halfway
+        // through the sysfs writes below.
+        for spec in [&req.compression, &req.background_compression]
+            .into_iter()
+            .flatten()
+        {
+            validate_compression(spec).map_err(FilesystemError::InvalidInput)?;
+        }
+
         let uuid = &fs.uuid;
         let base = format!("/sys/fs/bcachefs/{uuid}/options");
 
@@ -3295,6 +3313,46 @@ fn extract_first_bytes(line: &str) -> Option<u64> {
     let after_colon = line.split_once(':')?.1.trim();
     let token = after_colon.split_whitespace().next()?;
     parse_human_bytes(token)
+}
+
+/// Validate a bcachefs compression spec before it's interpolated into
+/// `bcachefs format --compression=…` or written to the sysfs
+/// `compression` / `background_compression` option (#491).
+///
+/// Accepts `none`, or `lz4` / `zstd` / `gzip` optionally followed by
+/// `:<level>`. Levels are bounded to the algorithm's real range so a
+/// typo gets a clear message instead of an opaque format/sysfs error:
+/// zstd 1–22, gzip 1–9. lz4 has no tunable level in bcachefs, so a
+/// level on lz4 (or none) is rejected. Pure; unit-tested.
+fn validate_compression(spec: &str) -> Result<(), String> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec == "none" {
+        return Ok(());
+    }
+    let (algo, level) = match spec.split_once(':') {
+        Some((a, l)) => (a, Some(l)),
+        None => (spec, None),
+    };
+    let max_level = match algo {
+        "lz4" => None, // valid algorithm, but no level knob
+        "zstd" => Some(22u32),
+        "gzip" => Some(9u32),
+        other => return Err(format!("unknown compression algorithm '{other}'")),
+    };
+    if let Some(level) = level {
+        let Some(max) = max_level else {
+            return Err(format!("{algo} does not take a compression level"));
+        };
+        let n: u32 = level
+            .parse()
+            .map_err(|_| format!("compression level '{level}' is not a number"))?;
+        if n < 1 || n > max {
+            return Err(format!(
+                "{algo} compression level must be between 1 and {max} (got {n})"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse human-readable byte strings like "109.8M", "2.3G", "512K", "1024".
@@ -5414,6 +5472,42 @@ mod tests {
         // `bcachefs show-super` prints "Superblock size: 7.85k/1.00M" — the
         // slash form isn't a unit and shouldn't parse.
         assert_eq!(parse_human_bytes("7.85k/1.00M"), None);
+    }
+
+    // ── validate_compression (#491) ────────────────────────────────
+
+    #[test]
+    fn validate_compression_accepts_bare_algorithms_and_none() {
+        for s in ["none", "", "lz4", "zstd", "gzip", "  zstd  "] {
+            assert!(validate_compression(s).is_ok(), "should accept {s:?}");
+        }
+    }
+
+    #[test]
+    fn validate_compression_accepts_levels_in_range() {
+        for s in ["zstd:1", "zstd:15", "zstd:22", "gzip:1", "gzip:9"] {
+            assert!(validate_compression(s).is_ok(), "should accept {s:?}");
+        }
+    }
+
+    #[test]
+    fn validate_compression_rejects_out_of_range_levels() {
+        assert!(validate_compression("zstd:0").is_err());
+        assert!(validate_compression("zstd:23").is_err());
+        assert!(validate_compression("gzip:10").is_err());
+    }
+
+    #[test]
+    fn validate_compression_rejects_level_on_lz4() {
+        // bcachefs lz4 has no tunable level.
+        assert!(validate_compression("lz4:5").is_err());
+    }
+
+    #[test]
+    fn validate_compression_rejects_unknown_algo_and_garbage() {
+        assert!(validate_compression("snappy").is_err());
+        assert!(validate_compression("zstd:high").is_err());
+        assert!(validate_compression("zstd:").is_err());
     }
 
     // ── parse_device_table_line ────────────────────────────────────
