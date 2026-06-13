@@ -368,6 +368,18 @@ impl ProtocolService {
             started.push(*svc);
         }
 
+        // Enabling SMB just started samba-wsdd (Windows WS-Discovery) and
+        // smbd, but avahi-daemon has been running since boot announcing
+        // its pre-SMB state, and a cold wsdd can miss its first multicast
+        // Hello before IGMP membership settles. Rebind both onto the
+        // current network so the box is discoverable from Windows
+        // Explorer immediately, instead of only after a reboot (#291).
+        // Same remedy the network-apply path uses; restarts only the
+        // daemons already active.
+        if proto == Protocol::Smb {
+            crate::network::rebind_discovery_daemons().await;
+        }
+
         let running = is_protocol_running(proto).await;
         Ok(ProtocolStatus {
             name: proto.name().to_string(),

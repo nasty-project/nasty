@@ -1714,7 +1714,16 @@ async fn apply_config(
     Ok(outcome)
 }
 
-async fn rebind_discovery_daemons() {
+/// Restart the LAN-discovery daemons (`samba-wsdd`, `avahi-daemon`) that
+/// are currently active, so they re-announce on the box's present
+/// interface/IP set. Called after a network apply (the daemons strand on
+/// the pre-change interface set, #270) and after the SMB protocol is
+/// enabled (a freshly-started `samba-wsdd` can lose its startup
+/// WS-Discovery Hello before multicast membership settles, leaving the
+/// box invisible to Windows Explorer until a reboot, #291). Best-effort;
+/// only touches daemons already running so it never starts one a
+/// protocol toggle left off.
+pub(crate) async fn rebind_discovery_daemons() {
     for unit in ["samba-wsdd.service", "avahi-daemon.service"] {
         let is_active = tokio::process::Command::new("systemctl")
             .args(["is-active", "--quiet", unit])

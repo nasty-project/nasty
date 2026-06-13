@@ -629,6 +629,14 @@ impl SettingsService {
         if let Some(name) = update.hostname {
             apply_hostname(&name).await?;
             settings.hostname = Some(name);
+            // avahi-daemon and samba-wsdd announce the *old* hostname
+            // until restarted — they don't pick up the live kernel
+            // hostname change, so the box vanishes from file-manager
+            // network views (announced under a name that no longer
+            // resolves) until a reboot. Rebind them onto the new name
+            // now. Same remedy the network-apply and SMB-enable paths
+            // use; restarts only daemons already active (#291).
+            crate::network::rebind_discovery_daemons().await;
         }
         if let Some(h24) = update.clock_24h {
             settings.clock_24h = h24;
