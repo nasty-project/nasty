@@ -1972,17 +1972,51 @@ pub async fn bootstrap_system_flake_from_template_path(
     bootstrap_system_flake_from_template(&template, dest_dir, nasty_version, local_system).await
 }
 
+/// Render a fresh-install wrapper flake from `template`, then inject the
+/// canonical bcachefs-tools ref read from nasty's own `flake.nix`
+/// (`embedded_default_bcachefs_tools_ref`) so the install inherits
+/// exactly the version the running system ships — single source of
+/// truth, no second pin to keep in sync.
+///
+/// The template carries a hardcoded bcachefs-tools ref too, but only as
+/// a self-consistent fallback for the (test-caught, should-never-happen)
+/// case where the embedded flake.nix can't be parsed; on the happy path
+/// this rewrite overrides it. The rewrite lives here, not in the
+/// renderer, to preserve the v0.0.8 invariant that the template grows no
+/// new `@PLACEHOLDER@` — same rewrite-after-render pattern the migration
+/// and tagged-release paths use. Pure (sync) so the inheritance is
+/// directly unit-testable without disk I/O.
+fn render_bootstrap_wrapper(
+    template: &str,
+    nasty_version: &str,
+    local_system: &str,
+) -> Result<String, UpdateError> {
+    let rendered = render_system_flake_template(template, nasty_version, local_system)?;
+    match embedded_default_bcachefs_tools_ref() {
+        Ok(bcachefs_ref) => rewrite_flake_input_urls(
+            &rendered,
+            &HashMap::from([(
+                String::from("bcachefs-tools"),
+                format!("github:koverstreet/bcachefs-tools/{bcachefs_ref}"),
+            )]),
+        ),
+        Err(e) => {
+            warn!(
+                "could not resolve canonical bcachefs-tools ref from embedded flake.nix \
+                 ({e}); bootstrapping wrapper with the template's hardcoded fallback"
+            );
+            Ok(rendered)
+        }
+    }
+}
+
 pub async fn bootstrap_system_flake_from_template(
     template: &str,
     dest_dir: &str,
     nasty_version: &str,
     local_system: &str,
 ) -> Result<BootstrapSystemFlakeResult, UpdateError> {
-    // Template carries a hardcoded bcachefs-tools URL default; no
-    // per-render substitution needed here. Caller can mutate the
-    // bcachefs ref later via `rewrite_flake_input_urls` if they
-    // need a non-default pin (the tagged-release path does this).
-    let rendered = render_system_flake_template(template, nasty_version, local_system)?;
+    let rendered = render_bootstrap_wrapper(template, nasty_version, local_system)?;
     tokio::fs::create_dir_all(dest_dir)
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("mkdir {dest_dir}: {e}")))?;
@@ -3407,6 +3441,41 @@ outputs = { nixpkgs, nasty, ... }: {
         let rendered2 = super::render_system_flake_template(&template, "0.0.3", "x86_64-linux")
             .expect("rendered");
         assert_eq!(rendered, rendered2);
+    }
+
+    #[test]
+    fn bootstrap_wrapper_inherits_canonical_bcachefs_ref() {
+        // A fresh install must pin the bcachefs-tools the running system
+        // ships, inherited from nasty's flake.nix — not whatever stale
+        // ref the template happens to hardcode. Give the template a
+        // deliberately-wrong ref and assert render_bootstrap_wrapper
+        // overrides it to the canonical embedded one. Guards against the
+        // v0.0.11 ISO regression where the wrapper pinned v1.38.3 while
+        // the box ran v1.38.5. (Comparing against the function, not a
+        // literal, keeps this correct across future bumps.)
+        let template = r#"{
+  inputs = {
+    nixpkgs.follows = "nasty/nixpkgs";
+    nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v9.9.9-stale";
+  };
+  wrapperFlakeVersion = "@WRAPPER_FLAKE_VERSION@";
+  outputs = { self, nixpkgs, nasty, ... }: {
+    nixosConfigurations.nasty = nixpkgs.lib.nixosSystem { system = "@LOCAL_SYSTEM@"; };
+  };
+}"#;
+        let canonical =
+            super::embedded_default_bcachefs_tools_ref().expect("embedded flake.nix parses");
+        let rendered =
+            super::render_bootstrap_wrapper(template, "0.0.3", "x86_64-linux").expect("rendered");
+        assert!(
+            rendered.contains(&format!("github:koverstreet/bcachefs-tools/{canonical}")),
+            "wrapper should inherit the canonical bcachefs ref {canonical}; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("v9.9.9-stale"),
+            "the template's stale ref must be overridden"
+        );
     }
 
     #[test]

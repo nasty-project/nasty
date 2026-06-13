@@ -59,7 +59,15 @@
     # aged out of the fleet (likely never matters again after a
     # tagged release everyone has updated past), this shim can be
     # removed safely.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    # FALLBACK ONLY — the engine normally overrides this. At render time
+    # `bootstrap_system_flake_from_template` rewrites this line to the
+    # canonical bcachefs-tools ref read from nasty's own flake.nix
+    # (`embedded_default_bcachefs_tools_ref`), so a fresh install always
+    # inherits exactly the version the running system ships — one source
+    # of truth, no second pin to bump. This hardcoded value is used only
+    # if that embedded flake.nix can't be parsed; keep it sane (matching
+    # the repo-root flake.nix) so even that fallback is correct.
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.5";
 
     # NOTE: lanzaboote is intentionally NOT declared as a top-level
     # input here. Secure Boot is per-box opt-in: when the operator
