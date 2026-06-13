@@ -16,7 +16,7 @@ schemars.workspace = true
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cron = "0.16"
-rustic_core = "0.11"
+rustic_core = "0.12"
 rustic_backend = "0.6"
 jiff = "0.2"
 url = "2"
