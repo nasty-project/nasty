@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.0.11 — 2026-06-13
+
+> **This is the storage-operations release.** The bcachefs device lifecycle is now fully drivable from the WebUI — scrub with live progress, offline fsck, mount-failure diagnostics that name the missing disk by slot, slot-true device identity, and evacuate / remove / re-attach flows that tell an offline member apart from a dead one. Compression gains per-algorithm levels, wipe leaves a clean disk, and reconcile stops crying wolf. The Docker side grows real network management (containers on your LAN), live compose validation in the editor, and a first-class relocatable `/appdata` home for container data. Plus the encryption-at-rest sweep is finished — every stored operator secret is now sealed via systemd-creds — and the dependency tree is brought current.
+
+### Headline changes
+
+- **The bcachefs device-management arc (#419, #422, #423, #432, #434, #440, #450–#482).** Driven by extended pull-the-disk testing. Scrub gains persistent per-filesystem state, a status chip + Start button, and a streamed live progress bar reconstructed from bcachefs's terminal output (#419, #422, #423, #432). Offline fsck runs from the UI as dry-run or repair with a captured transcript (#440). A pool that fails to mount now explains *why* — naming missing members by slot and label — and offers a confirm-gated degraded mount (#453). The per-device table grows user-selectable columns (size, read/write/checksum errors, clean, type, model, serial), sourced from sysfs so rows stay correct after a remove/re-add reshuffle (#459, #471), and Add Device shows candidate disk info + SMART before you commit (#463). Members whose disk vanished are surfaced as *missing* with force-remove by slot (#476), and a disk whose superblock belongs to the pool is offered **Bring online / re-attach** instead of being pushed toward a destructive wipe (#477). Devices take a durability on add, and tiering targets (foreground/background/promote/metadata) are editable per-filesystem (#469). Action buttons disable while an operation runs, and the engine refuses to spawn a second evacuation of a device already draining (#481).
+
+- **Docker networking, for real (#430, #447, #449).** A Networks tab manages NASty-owned Docker networks — internal bridges plus **macvlan/ipvlan networks that put a container directly on your LAN** with its own IP, on the same parent interface your VMs use. The kernel quirk that normally makes macvlan painful (host and container can't reach each other) is auto-wired via a managed shim (#449). Deploy errors now hint when a compose `external:` network is actually a host bridge (#430).
+
+- **Live compose validation in the editor (#480).** The compose editor validates as you type: an in-process YAML pass catches syntax/indentation errors with the exact line, then the engine runs the same `docker compose config` check deploy uses — so the editor can't approve something deploy would reject. Diagnostics underline their lines; a quiet ✓ marks a valid file.
+
+- **A first-class, relocatable appdata location (#485).** Container persistent data gets a dedicated `appdata` subvolume reached through a stable `/appdata` symlink — bind `/appdata/<app>/…` in compose and the reference survives moving the data to another filesystem. Added an SSD later? One click relocates: affected apps stop, data copies with ownership intact, the symlink flips, apps restart; the old copy stays until you delete it. Separate from Docker's internal state, so snapshots and backup profiles capture exactly your app data — no `allow_unsafe` needed.
+
+- **Encryption-at-rest, finished (#443, #444, #445, #446, #486).** The systemd-creds sealing introduced for backups in v0.0.10 now covers every remaining stored secret: NUT remote password (#443), OIDC client secret (#444), iSCSI CHAP passwords (#445), notification channel credentials — SMTP / Telegram / webhook / ntfy (#446), and the DNS-01 provider API token (#486). TPM2+host sealing where available, host-key fallback, idempotent boot-time migration of existing plaintext, and RPC redaction so secrets no longer cross the wire even to the ReadOnly role.
+
+### Storage & bcachefs
+
+- Scrub: persistent state + last-outcome chip, Start button, streamed live progress percent, terminal-frame reconstruction (#419, #422, #423, #432).
+- Offline fsck (dry-run + repair) with captured transcript (#440); the reconcile tab gains the same Live auto-refresh toggle as the other diagnostics tabs (#478).
+- Mount failures are classified and explained — missing devices named by slot/label, needs-unlock, needs-fsck — with a confirm-gated degraded mount (#453).
+- Per-device member slot + stable UUID (#465); selectable device-table columns (#459); device labels editable inline (#471); Add Device shows candidate info + SMART (#463).
+- Missing members surfaced with force-remove by index, dangling block symlinks detected (#476); offline members re-attach with data intact instead of wipe+add, candidates labeled "offline / former member of this pool" via superblock UUID match (#477).
+- Device action buttons disable while busy; optimistic `evacuating` display; engine rejects a duplicate evacuation of the same device (#481).
+- **Compression levels** for zstd (1–22) and gzip (1–9), settable on create and per-filesystem edit (foreground + background), with engine-side validation (#492).
+- New subvolumes are created permissive (0777) so SMB guests / forced users and NFS squashed uids can write without a manual chmod (#483).
+- **Wipe** now zaps the backup GPT table too (`sgdisk --zap-all` + partprobe), so a wiped disk no longer triggers "invalid main header, valid backup" lectures from every GPT tool; the free-space scan skips whole-disk members and logs odd tables quietly (#490).
+- **Reconcile stall** detection is now progress-based — it watches the pending counters across samples and only alerts after 30 minutes of no movement, instead of mistaking bcachefs's normal throttled pacing for a stall (#489).
+- bcachefs-tools default bumped to v1.38.5; one-click "sync to bundled version" chip in the top bar, refreshed immediately after a switch (#460, #462, #464, #470).
+
+### Apps & Docker
+
+- Docker network management UI + per-app attachment, including LAN IPs via macvlan/ipvlan with the host-reach shim (#447, #449).
+- Live YAML + compose-schema validation in the editor, same validator as deploy (#480).
+- Relocatable `/appdata` with sandbox-blessed binds and snapshot-clean separation from the Docker data-root (#485).
+- Boot hardening: dockerd never starts against a dangling data-root symlink (unmounted/locked apps filesystem) — guarded in the engine and backstopped by a systemd condition; fresh-box first start fixed (#426).
+- Compose deploy hints when an `external:` network names a host bridge (#430).
+
+### Security & hardening
+
+- systemd-creds encryption-at-rest for NUT, OIDC, iSCSI CHAP, notification channels, and DNS-01 credentials, each with boot-time migration and RPC redaction (#443–#446, #486).
+- New subvolumes are permissive by default so the protocol layer — not POSIX bits — governs share access, matching the existing share-root behaviour (#483).
+
+### System & UI
+
+- Engine reports its build commit via `/health` and `--version` (#427).
+- smartd reports raw disk temperatures instead of normalized values (#428).
+- Secure-boot readiness no longer blocks on a wrapper flake without the lanzaboote input (#433).
+- Bridge multicast-snooping disabled via NetworkManager so Avahi / WS-Discovery stay reachable (#425).
+- Sidebar search understands a broader keyword set (#421); refreshed docs screenshots (#431).
+
+### Dependencies
+
+- **rustic chain brought current**: `rustic_backend` 0.6.2 and `rustic_core` 0.12, unblocked by suppressing RUSTSEC-2025-0052 (`async-std` discontinued — an unmaintained advisory, not a vulnerability; the FTP backend that pulls it is never used). Tracked for eventual un-suppression in #386 (#493, #496).
+- `bcrypt` 0.17→0.19; `nasty-system` moved onto the workspace `rand` 0.10, dropping a duplicate (#495).
+- In-range refresh: `chrono` 0.4.45, SvelteKit 2.65, Svelte 5.56.3, Tailwind 4.3.1, CodeMirror / Lucide; `npmDepsHash` regenerated (#494).
+- Caddy rebuilt against 2.11.4 (weekly nixpkgs bump), DNS-01 plugin set unchanged (#441, #484).
+
 ## v0.0.10 — 2026-06-05
 
 > **This is the Backups + REST API release.** Backups now run on a built-in cron scheduler, with credentials sealed at rest, a job-handle pattern keeping long-running ops alive past the WS timeout, and a HTTPS+auth-enforcing receiver. The engine's JSON-RPC dispatcher now also speaks REST at `/api/v1/{...}` with OpenAPI 3.1 and a built-in Swagger UI. Disk health gets first-class NVMe, SAS, ATA and PCIe-link panels; alerts fire on critical SMART attributes before the drive's own self-assessment flips. Plus a security pass — input validators, configfs secret redaction, systemd restart hardening, scanner-flagged response headers, two new destructive-confirm dialogs.
