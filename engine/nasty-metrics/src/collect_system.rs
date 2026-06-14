@@ -859,6 +859,7 @@ async fn build_disk_health(
             } else {
                 "FAILED".to_string()
             },
+            rotational: s.rotational,
             attributes: s.attributes,
             nvme: s.nvme,
             scsi: s.scsi,
@@ -904,6 +905,7 @@ fn build_disk_health_unreachable_for_endpoint(
         // rules can skip. See SMART_STATUS_UNAVAILABLE.
         health_passed: false,
         smart_status: SMART_STATUS_UNAVAILABLE.to_string(),
+        rotational: None,
         attributes: Vec::new(),
         nvme: None,
         scsi: None,
@@ -929,6 +931,7 @@ struct SmartReport {
     temperature_c: Option<i32>,
     power_on_hours: Option<u64>,
     health_passed: bool,
+    rotational: Option<bool>,
     attributes: Vec<SmartAttribute>,
     nvme: Option<NvmeHealth>,
     scsi: Option<ScsiHealth>,
@@ -1062,6 +1065,9 @@ async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartRe
         temperature_c: json.temperature.and_then(|t| t.current),
         power_on_hours: json.power_on_time.and_then(|p| p.hours),
         health_passed,
+        // HDD reports its RPM; SSD reports 0 / "Solid State Device";
+        // NVMe dumps omit the field entirely (None).
+        rotational: json.rotation_rate.map(|r| r > 0),
         attributes,
         nvme,
         scsi,

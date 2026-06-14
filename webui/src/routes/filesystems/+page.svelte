@@ -1249,8 +1249,20 @@
 </div>
 
 {#if pageTab === 'diagnostics'}
-	{#await import('$lib/components/BcachefsDiagnostics.svelte') then module}
+	{#await import('$lib/components/BcachefsDiagnostics.svelte')}
+		<p class="p-6 text-sm text-muted-foreground">Loading diagnostics…</p>
+	{:then module}
 		<module.default />
+	{:catch}
+		<!-- A failed dynamic import is almost always a stale app shell
+		     after an in-place upgrade: the cached page references asset
+		     filenames that no longer exist, so the chunk 404s. Without
+		     this catch the panel silently rendered blank (#503). -->
+		<div class="rounded-lg border border-border bg-card p-6 text-sm">
+			<p class="font-medium">Couldn't load the diagnostics panel.</p>
+			<p class="mt-1 text-muted-foreground">NASty was likely updated in the background — reload to pick up the new version.</p>
+			<Button size="sm" class="mt-3" onclick={() => location.reload()}>Reload</Button>
+		</div>
 	{/await}
 {:else}
 

@@ -1052,19 +1052,11 @@ pub(crate) async fn evaluate_active_alerts(
             // construction in that case, but the filter still costs
             // a closure allocation per attribute and per drive, so
             // the early-out matters when N drives × ~30 attributes.
-            let critical_attrs_with_value = if d.smart_status == "UNAVAILABLE" {
-                Vec::new()
-            } else {
-                d.attributes
-                    .iter()
-                    .filter_map(|a| {
-                        alerts::CRITICAL_ATA_ATTRIBUTES
-                            .iter()
-                            .any(|(id, _)| *id == a.id)
-                            .then_some((a.id, a.raw_value))
-                    })
-                    .collect()
-            };
+            // Gate the critical-attribute set to spinning disks — the
+            // table is HDD failure data and false-fires on SSDs (#503).
+            // See alerts::collect_critical_ata_attrs.
+            let critical_attrs_with_value =
+                alerts::collect_critical_ata_attrs(&d.smart_status, d.rotational, &d.attributes);
             alerts::DiskHealthSummary {
                 device: d.device,
                 transport: d.transport,

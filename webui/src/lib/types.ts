@@ -707,6 +707,9 @@ export interface DiskHealth {
 	power_on_hours: number | null;
 	health_passed: boolean;
 	smart_status: string;
+	/** true = spinning HDD, false = SSD, null/undefined = unknown (NVMe
+	 * dumps carry no rotation rate). */
+	rotational?: boolean | null;
 	attributes: SmartAttribute[];
 	nvme?: NvmeHealth;
 	scsi?: ScsiHealth;
