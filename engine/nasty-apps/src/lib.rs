@@ -5554,18 +5554,14 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
     // Stop Docker if running (we need to move/replace its data dir)
     let _ = run_cmd("systemctl", &["stop", DOCKER_SERVICE]).await;
 
-    // Remove existing /var/lib/docker (empty default dir or old data)
-    if docker_lib.exists() {
-        if docker_lib.is_symlink() {
-            tokio::fs::remove_file(docker_lib)
-                .await
-                .map_err(|e| AppsError::CommandFailed(format!("remove old symlink: {e}")))?;
-        } else {
-            tokio::fs::remove_dir_all(docker_lib)
-                .await
-                .map_err(|e| AppsError::CommandFailed(format!("remove /var/lib/docker: {e}")))?;
-        }
-    }
+    // Clear whatever currently occupies /var/lib/docker — the default
+    // empty dir, stale data, or a *dangling* symlink (the state left
+    // when the operator deletes the apps subvolume out from under the
+    // data-root, #502). Critically uses lstat semantics so the dangling
+    // symlink is detected: plain `exists()` follows the link, reports a
+    // dangling symlink as absent, and the `symlink()` below then fails
+    // with EEXIST.
+    clear_path_for_symlink(docker_lib).await?;
 
     // Create symlink
     tokio::fs::symlink(&docker_data, docker_lib)
@@ -5576,6 +5572,29 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
 
     info!("Symlinked /var/lib/docker -> {docker_data}");
     Ok(())
+}
+
+/// Remove whatever currently lives at `path` so a fresh symlink can be
+/// created there — a regular directory (`remove_dir_all`), a file, or a
+/// symlink (`remove_file`, whether it resolves or *dangles*). No-op when
+/// nothing is there. Uses `symlink_metadata` (lstat), which does not
+/// follow the link, so a dangling symlink — which `Path::exists()`
+/// reports as absent because it follows to the missing target — is
+/// correctly detected and removed (#502).
+async fn clear_path_for_symlink(path: &Path) -> Result<(), AppsError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) if meta.file_type().is_symlink() => tokio::fs::remove_file(path)
+            .await
+            .map_err(|e| AppsError::CommandFailed(format!("remove symlink {path:?}: {e}"))),
+        Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(path)
+            .await
+            .map_err(|e| AppsError::CommandFailed(format!("remove dir {path:?}: {e}"))),
+        Ok(_) => tokio::fs::remove_file(path)
+            .await
+            .map_err(|e| AppsError::CommandFailed(format!("remove {path:?}: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AppsError::CommandFailed(format!("stat {path:?}: {e}"))),
+    }
 }
 
 /// Whether Docker's data-root is safe to start dockerd against.
@@ -5942,6 +5961,63 @@ mod tests {
         // Fresh box: no /var/lib/docker yet — dockerd creates it.
         let missing = unique_tmp("absent").join("docker");
         assert!(docker_data_root_status(&missing).is_ok());
+    }
+
+    // ── clear_path_for_symlink (#502) ──────────────────────────────
+
+    #[tokio::test]
+    async fn clear_path_removes_dangling_symlink() {
+        // The #502 case: apps subvolume deleted out from under the
+        // data-root leaves /var/lib/docker as a symlink to a now-missing
+        // target. Path::exists() reports it absent (follows the link),
+        // but it must still be removed so the re-create symlink doesn't
+        // hit EEXIST.
+        let base = unique_tmp("dangling");
+        std::fs::create_dir_all(&base).unwrap();
+        let link = base.join("docker");
+        std::os::unix::fs::symlink(base.join("gone-target"), &link).unwrap();
+        assert!(
+            !link.exists(),
+            "precondition: dangling symlink reads as absent"
+        );
+        assert!(
+            link.symlink_metadata().is_ok(),
+            "but the link itself is present"
+        );
+        super::clear_path_for_symlink(&link).await.unwrap();
+        assert!(
+            link.symlink_metadata().is_err(),
+            "dangling symlink should be gone"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn clear_path_removes_dir_symlink_and_noops_absent() {
+        let base = unique_tmp("clear-variants");
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Real directory with content → removed.
+        let dir = base.join("realdir");
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        super::clear_path_for_symlink(&dir).await.unwrap();
+        assert!(!dir.exists());
+
+        // Live symlink → removed (target left intact).
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = base.join("live-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        super::clear_path_for_symlink(&link).await.unwrap();
+        assert!(link.symlink_metadata().is_err(), "symlink removed");
+        assert!(target.exists(), "target preserved");
+
+        // Absent path → no-op Ok.
+        super::clear_path_for_symlink(&base.join("nope"))
+            .await
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
