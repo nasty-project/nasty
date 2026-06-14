@@ -135,6 +135,13 @@ pub struct DiskHealth {
     pub health_passed: bool,
     /// Human-readable SMART health status (`PASSED` or `FAILED`).
     pub smart_status: String,
+    /// Whether the drive spins: `Some(true)` for an HDD, `Some(false)`
+    /// for an SSD (smartctl reports rotation rate 0 / "Solid State
+    /// Device"), `None` when unknown (NVMe dumps carry no rotation_rate,
+    /// and SMART-unavailable drives have nothing to read). Used to scope
+    /// the HDD-failure SMART-attribute alert to spinning disks (#503).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotational: Option<bool>,
     /// ATA SMART attribute table (empty for NVMe and SAS drives).
     pub attributes: Vec<SmartAttribute>,
     /// NVMe SMART health information log (`Some` only on NVMe drives).

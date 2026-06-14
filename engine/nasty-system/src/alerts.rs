@@ -663,6 +663,39 @@ pub const CRITICAL_ATA_ATTRIBUTES: &[(u32, &str)] = &[
     (201, "Soft Read Error Rate"),
 ];
 
+/// Pick the critical SMART attributes (with raw values) the
+/// `SmartAttribute` alert should evaluate for one drive. The router
+/// calls this when building each [`DiskHealthSummary`].
+///
+/// Returns empty for two kinds of drive:
+/// - **UNAVAILABLE SMART** — `attributes` is empty by construction
+///   anyway, but the early-out skips the per-attribute scan.
+/// - **non-rotational** (SSD / NVMe) — [`CRITICAL_ATA_ATTRIBUTES`] is
+///   Backblaze *HDD* failure data, and the same attribute IDs carry
+///   benign or vendor-specific values on solid-state drives. e.g. id
+///   201 ("Soft Read Error Rate" on a disk) is a cumulative counter
+///   reading in the trillions on Intel/other SATA SSDs, which
+///   false-fired the "drive needs attention" alert (#503). Only
+///   spinning disks (rotation_rate > 0) contribute. Pure; unit-tested.
+pub fn collect_critical_ata_attrs(
+    smart_status: &str,
+    rotational: Option<bool>,
+    attributes: &[nasty_common::metrics_types::SmartAttribute],
+) -> Vec<(u32, i64)> {
+    if smart_status == "UNAVAILABLE" || rotational != Some(true) {
+        return Vec::new();
+    }
+    attributes
+        .iter()
+        .filter_map(|a| {
+            CRITICAL_ATA_ATTRIBUTES
+                .iter()
+                .any(|(id, _)| *id == a.id)
+                .then_some((a.id, a.raw_value))
+        })
+        .collect()
+}
+
 /// Minimal disk info for alert evaluation
 #[derive(Debug)]
 pub struct DiskHealthSummary {
@@ -1430,6 +1463,39 @@ mod tests {
             alerts.is_empty(),
             "UNAVAILABLE smart_status must not trigger SmartHealth alerts"
         );
+    }
+
+    #[test]
+    fn collect_critical_attrs_skips_ssd_and_nvme() {
+        use nasty_common::metrics_types::SmartAttribute;
+        let attr = |id: u32, raw: i64| SmartAttribute {
+            id,
+            name: String::new(),
+            value: 100,
+            worst: 100,
+            threshold: 0,
+            raw_value: raw,
+            failing: false,
+        };
+        // The #503 case: a SATA SSD (rotation_rate 0) with id 201
+        // ("Soft Read Error Rate" on a disk) reading 1.4 trillion as a
+        // benign vendor counter must NOT contribute.
+        let ssd_attrs = vec![attr(201, 1_400_188_371_581), attr(5, 0)];
+        assert!(
+            collect_critical_ata_attrs("PASSED", Some(false), &ssd_attrs).is_empty(),
+            "SSD (rotational=false) must not yield critical attrs"
+        );
+        // NVMe / unknown rotation → None → skipped.
+        assert!(collect_critical_ata_attrs("PASSED", None, &ssd_attrs).is_empty());
+        // A spinning disk with a real reallocated-sector count DOES.
+        let hdd_attrs = vec![attr(5, 3), attr(9, 58314)];
+        assert_eq!(
+            collect_critical_ata_attrs("PASSED", Some(true), &hdd_attrs),
+            vec![(5, 3)],
+            "HDD critical attr id 5 should fire; non-critical id 9 should not"
+        );
+        // UNAVAILABLE SMART yields nothing even on a spinning disk.
+        assert!(collect_critical_ata_attrs("UNAVAILABLE", Some(true), &hdd_attrs).is_empty());
     }
 
     #[test]
