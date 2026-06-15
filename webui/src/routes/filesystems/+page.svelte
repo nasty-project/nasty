@@ -1115,6 +1115,26 @@
 		return [...new Set(fs.devices.map((d) => d.label).filter((l): l is string => !!l))].sort();
 	}
 
+	/** Targetable labels for the data-target dropdowns (#507). bcachefs
+	 * labels are hierarchical: a device labeled `hdd.spinner1` belongs to
+	 * group `hdd`, and a data target can point at the whole group or the
+	 * leaf. We surface every prefix of every device label so the operator
+	 * can target a tier (`hdd`, `ssd`) — covering "all the spinners" in
+	 * one pick — not just one device at a time. `group` = the label has
+	 * descendants; `count` = devices it covers. */
+	function targetOptions(fs: Filesystem): { value: string; group: boolean; count: number }[] {
+		const labels = fs.devices.map((d) => d.label).filter((l): l is string => !!l);
+		const prefixes = new Set<string>();
+		for (const label of labels) {
+			const parts = label.split('.');
+			for (let i = 1; i <= parts.length; i++) prefixes.add(parts.slice(0, i).join('.'));
+		}
+		return [...prefixes].sort().map((value) => {
+			const members = labels.filter((l) => l === value || l.startsWith(value + '.'));
+			return { value, group: members.some((l) => l !== value), count: members.length };
+		});
+	}
+
 	function availableDevicesForAdd(): BlockDevice[] {
 		return devices.filter(d => !d.in_use && (showAddPartitions || d.dev_type !== 'part'));
 	}
@@ -2120,41 +2140,41 @@
 						<!-- Data Targets (#434): route each data class to a device-label tier -->
 						<fieldset class="rounded-md border border-border p-3 sm:col-span-2">
 							<legend class="px-1.5 text-[0.65rem] uppercase tracking-wide text-muted-foreground">Data Targets</legend>
-							{#if deviceLabels(fs).length === 0}
+							{#if targetOptions(fs).length === 0}
 								<p class="text-xs text-muted-foreground">No device labels set. Label devices (e.g. <span class="font-mono">ssd.fast</span>, <span class="font-mono">hdd.bulk</span>) in the device table above, then point targets at them here.</p>
 							{:else}
-								{@const labels = deviceLabels(fs)}
+								{@const targets = targetOptions(fs)}
+								{#snippet targetOpts()}
+									<option value="">none</option>
+									{#each targets as t}<option value={t.value}>{t.value}{t.group ? ` — group (${t.count})` : ''}</option>{/each}
+								{/snippet}
 								<div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
 									<div>
 										<label for="edit-fg-target-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Foreground</label>
 										<select id="edit-fg-target-{fs.name}" bind:value={editForegroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-											<option value="">none</option>
-											{#each labels as l}<option value={l}>{l}</option>{/each}
+											{@render targetOpts()}
 										</select>
 									</div>
 									<div>
 										<label for="edit-bg-target-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Background</label>
 										<select id="edit-bg-target-{fs.name}" bind:value={editBackgroundTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-											<option value="">none</option>
-											{#each labels as l}<option value={l}>{l}</option>{/each}
+											{@render targetOpts()}
 										</select>
 									</div>
 									<div>
 										<label for="edit-meta-target-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Metadata</label>
 										<select id="edit-meta-target-{fs.name}" bind:value={editMetadataTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-											<option value="">none</option>
-											{#each labels as l}<option value={l}>{l}</option>{/each}
+											{@render targetOpts()}
 										</select>
 									</div>
 									<div>
 										<label for="edit-promote-target-{fs.name}" class="mb-1 block text-xs text-muted-foreground">Promote</label>
 										<select id="edit-promote-target-{fs.name}" bind:value={editPromoteTarget} class="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm">
-											<option value="">none</option>
-											{#each labels as l}<option value={l}>{l}</option>{/each}
+											{@render targetOpts()}
 										</select>
 									</div>
 								</div>
-								<p class="mt-1.5 text-[0.6rem] text-muted-foreground">Foreground/metadata = where new writes land; background = where the rebalance thread migrates; promote = read cache tier.</p>
+								<p class="mt-1.5 text-[0.6rem] text-muted-foreground">Foreground/metadata = where new writes land; background = where the rebalance thread migrates; promote = read cache tier. A <strong>group</strong> (e.g. <span class="font-mono">hdd</span>) targets every device under it.</p>
 							{/if}
 						</fieldset>
 					</div>
