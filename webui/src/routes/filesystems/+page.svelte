@@ -1209,6 +1209,7 @@
 		{ id: 'uuid', label: 'UUID' },
 		{ id: 'size', label: 'Size' },
 		{ id: 'type', label: 'Type' },
+		{ id: 'rotational', label: 'Rotational' },
 		{ id: 'model', label: 'Model' },
 		{ id: 'serial', label: 'Serial' },
 		{ id: 'clean', label: 'Clean' },
@@ -2370,6 +2371,7 @@
 									{#if colOn('uuid')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">UUID</th>{/if}
 									{#if colOn('size')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Size</th>{/if}
 									{#if colOn('type')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Type</th>{/if}
+									{#if colOn('rotational')}<th class="p-2 text-left text-xs uppercase text-muted-foreground" title="bcachefs's own per-device Rotational flag — what it uses for SSD optimizations. Can disagree with the hardware Type if mis-latched (bcachefs-tools #594).">Rotational</th>{/if}
 									{#if colOn('model')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Model</th>{/if}
 									{#if colOn('serial')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Serial</th>{/if}
 									{#if colOn('clean')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Clean</th>{/if}
@@ -2441,6 +2443,19 @@
 										{#if colOn('type')}
 											{@const blk = deviceBlock(dev.path)}
 											<td class="p-2 text-xs text-muted-foreground uppercase">{blk?.device_class ?? '—'}</td>
+										{/if}
+										{#if colOn('rotational')}
+											{@const blk = deviceBlock(dev.path)}
+											{@const mismatch = dev.rotational === true && blk != null && !blk.rotational}
+											<td class="p-2 text-xs">
+												{#if dev.rotational == null}
+													<span class="text-muted-foreground">—</span>
+												{:else if mismatch}
+													<span class="text-amber-500" title="bcachefs has this device marked rotational, but the hardware is solid-state — likely a mis-latched superblock flag (bcachefs-tools #594).">yes ⚠</span>
+												{:else}
+													<span class="text-muted-foreground">{dev.rotational ? 'yes' : 'no'}</span>
+												{/if}
+											</td>
 										{/if}
 										{#if colOn('model')}
 											{@const blk = deviceBlock(dev.path)}

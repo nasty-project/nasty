@@ -347,6 +347,17 @@ pub struct FilesystemDevice {
     pub has_data: Option<String>,
     /// Whether TRIM/discard is enabled on this device.
     pub discard: Option<bool>,
+    /// bcachefs's own per-member `Rotational` flag from the superblock
+    /// (`show-super -f members_v2`). This is what bcachefs uses for its
+    /// SSD-vs-HDD optimization decisions — NOT the live hardware type
+    /// (that's `BlockDevice.rotational`, derived from sysfs/lsblk). The
+    /// two can disagree: bcachefs latches this on first mount and can
+    /// get it wrong (an SSD stuck at `Rotational: 1`), so surfacing it
+    /// lets the operator spot the mis-latch (#501, upstream
+    /// koverstreet/bcachefs-tools#594). Sourced from show-super (not
+    /// sysfs) keyed by member index so it means the same persisted thing
+    /// whether or not the pool is mounted.
+    pub rotational: Option<bool>,
     /// Cumulative read IO errors (since filesystem creation), from
     /// `/sys/fs/bcachefs/<uuid>/dev-N/io_errors`. Only populated while
     /// the filesystem is mounted (sysfs is absent otherwise).
@@ -1115,6 +1126,7 @@ impl FilesystemService {
                     data_allowed: None,
                     has_data: None,
                     discard: None,
+                    rotational: None,
                     read_errors: None,
                     write_errors: None,
                     checksum_errors: None,
@@ -1492,6 +1504,7 @@ impl FilesystemService {
                 data_allowed: None,
                 has_data: None,
                 discard: None,
+                rotational: None,
                 read_errors: None,
                 write_errors: None,
                 checksum_errors: None,
@@ -1528,6 +1541,7 @@ impl FilesystemService {
                 data_allowed: None,
                 has_data: None,
                 discard: None,
+                rotational: None,
                 read_errors: None,
                 write_errors: None,
                 checksum_errors: None,
@@ -3579,6 +3593,23 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         None
     };
 
+    // bcachefs's own `Rotational` flag per member slot, from the
+    // superblock (#501). Keyed by member index, not device path, so it
+    // stays correct across a remove/re-add reshuffle and means the same
+    // persisted thing whether or not the pool is mounted — and so the
+    // value is consistent with the sysfs-vs-show-super divergence the
+    // latch bug (#594) can cause: we always report the persisted
+    // superblock value here.
+    let rotational_by_slot: std::collections::HashMap<u32, bool> = blocks
+        .iter()
+        .filter_map(|b| {
+            let idx = b.first().and_then(|h| parse_device_index(h))?;
+            let rot = extract_value(b, "rotational")?;
+            Some((idx, rot == "1" || rot == "true"))
+        })
+        .collect();
+    let rotational_of = |slot: Option<u32>| slot.and_then(|i| rotational_by_slot.get(&i).copied());
+
     let mut devices: Vec<FilesystemDevice> = Vec::new();
     // Phantom slots already represented by a bound /proc/mounts row,
     // skipped by the missing-member loop below.
@@ -3602,6 +3633,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
                 data_allowed: sy.data_allowed.clone(),
                 has_data: sy.has_data.clone(),
                 discard: sy.discard,
+                rotational: rotational_of(sy.member_index),
                 read_errors: sy.read_errors,
                 write_errors: sy.write_errors,
                 checksum_errors: sy.checksum_errors,
@@ -3659,6 +3691,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
                     data_allowed: m.data_allowed.clone(),
                     has_data: m.has_data.clone(),
                     discard: m.discard,
+                    rotational: rotational_of(m.member_index),
                     read_errors: m.read_errors,
                     write_errors: m.write_errors,
                     checksum_errors: m.checksum_errors,
@@ -3678,6 +3711,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             data_allowed,
             has_data,
             discard,
+            rotational: rotational_of(member_index),
             read_errors: None,
             write_errors: None,
             checksum_errors: None,
@@ -3715,6 +3749,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             data_allowed: m.data_allowed.clone(),
             has_data: m.has_data.clone(),
             discard: m.discard,
+            rotational: rotational_of(m.member_index),
             read_errors: m.read_errors,
             write_errors: m.write_errors,
             checksum_errors: m.checksum_errors,
