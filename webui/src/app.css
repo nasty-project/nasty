@@ -130,6 +130,19 @@
   body {
     @apply bg-background text-foreground;
   }
+  /* Native <select> popup legibility. `color-scheme` (set on :root /
+   * .dark above) is the first line of defence, but some Chromium-on-
+   * Linux + GTK theme combinations still render the dropdown's option
+   * rows with no background, leaving the labels invisible — only the
+   * highlighted row shows (#377, recurred in #507). Pin explicit colors
+   * on the options themselves so the popup is legible regardless of
+   * whether the browser honours color-scheme. Scoped to option/optgroup
+   * so the *closed* control keeps its Tailwind `bg-transparent`. */
+  option,
+  optgroup {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
 }
 
 @keyframes indeterminate {
