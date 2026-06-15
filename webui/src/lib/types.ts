@@ -316,6 +316,10 @@ export interface FilesystemDevice {
 	has_data: string | null;
 	/** Whether TRIM/discard is enabled */
 	discard: boolean | null;
+	/** bcachefs's own per-device Rotational flag from the superblock —
+	 * what it uses for SSD optimizations. Distinct from the hardware
+	 * type; can disagree if mis-latched (bcachefs-tools #594). */
+	rotational?: boolean | null;
 	/** Cumulative read IO errors since fs creation (mounted pools only). */
 	read_errors?: number | null;
 	/** Cumulative write IO errors since fs creation. */
