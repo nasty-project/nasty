@@ -54,6 +54,10 @@ in
     smb.enable = true;
     iscsi.enable = true;
     nvmeof.enable = true;
+    # Build the NUT units so enabling the UPS protocol works (engine-
+    # managed, only run when toggled on). Valid on cloud for remote-mode
+    # monitoring of a network UPS. See #512.
+    nut.enable = true;
   };
 
   # No mDNS/Avahi on cloud — no local network discovery needed
