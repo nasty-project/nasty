@@ -121,12 +121,21 @@
   # Useful tools
   environment.systemPackages = with pkgs; [ vim file binutils git fwupd rsync iotop-c btop ];
 
-  # Allow SSH for management
+  # Allow SSH for management.
+  #
+  # PasswordAuthentication is owned entirely by the engine-managed
+  # override file (Include below), seeded to `yes` by tmpfiles and
+  # flipped via `system.ssh.set_password_auth`. It is deliberately NOT
+  # set in `settings` here: sshd_config uses the *first* value seen for
+  # each keyword, and `settings` lands before `extraConfig` in the
+  # generated config — so a `PasswordAuthentication no` here would win
+  # and the Include's value would never take effect. That's exactly the
+  # bug where the WebUI reported password auth enabled (reading the
+  # override) while sshd actually had it disabled (#516).
   services.openssh = {
     enable = true;
     settings = {
       PermitRootLogin = "yes";
-      PasswordAuthentication = false; # engine overrides at runtime via Include sshd_override.conf
     };
     extraConfig = ''
       Include /var/lib/nasty/sshd_override.conf
