@@ -98,6 +98,13 @@
     smb.enable = true;
     iscsi.enable = true;
     nvmeof.enable = true;
+    # Build the NUT systemd units (driver/server/monitor) into the
+    # appliance so the engine can start them when the operator enables
+    # the UPS protocol. They carry `wantedBy = []`, so they only run
+    # when toggled on — same engine-managed pattern as smb/iscsi above.
+    # Without this the units don't exist and enabling NUT fails with
+    # "Unit nut-driver.service not found" (#512).
+    nut.enable = true;
     tailscale.enable = true;
   };
 
