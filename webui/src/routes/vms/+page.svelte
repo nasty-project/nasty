@@ -29,6 +29,11 @@
 	let wizardStep: -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6 = $state(0); // 0=hidden, -1=prerequisites
 	let loading = $state(true);
 	let editTab: 'general' | 'system' | 'storage' | 'network' | 'passthrough' = $state('general');
+	/** Pending (not-yet-picked) CD-ROM rows per VM in the edit panel.
+	 * "Add ISO" adds a local empty row instead of persisting an empty
+	 * cdrom path — the engine rejects a blank path ("CD-ROM ISO does not
+	 * exist", #514). The row is persisted only once a real ISO is picked. */
+	let pendingCdromRows = $state<Record<string, number>>({});
 
 	const WIZARD_STEPS: [string, string][] = [
 		['1', 'General'],
@@ -1640,13 +1645,17 @@
 											<span class="text-xs text-muted-foreground">CD-ROM ISOs</span>
 											{#if !vm.running}
 												{@const currentCdroms = vm.cdroms ?? (vm.boot_iso ? [vm.boot_iso] : [])}
-												{#each currentCdroms as iso, i (i)}
+												{@const rows = [...currentCdroms, ...Array(pendingCdromRows[vm.id] ?? 0).fill('')]}
+												{#each rows as iso, i (i)}
 													<div class="mt-0.5 flex items-center gap-1">
 														<select value={iso}
 															class="h-8 flex-1 rounded-md border border-input bg-transparent px-2 text-xs"
 															onchange={(e) => {
-																const next = [...currentCdroms];
+																const next = [...rows];
 																next[i] = (e.target as HTMLSelectElement).value;
+																// The pick is now persisted into cdroms; clear the
+																// local empty rows so we don't double-render them.
+																pendingCdromRows[vm.id] = 0;
 																updateVmField(vm.id, 'cdroms', next.filter(Boolean));
 															}}>
 															<option value="">None</option>
@@ -1655,11 +1664,18 @@
 															{/each}
 														</select>
 														<Button size="xs" variant="outline"
-															onclick={() => updateVmField(vm.id, 'cdroms', currentCdroms.filter((_, idx) => idx !== i))}>×</Button>
+															onclick={() => {
+																if (i < currentCdroms.length) {
+																	updateVmField(vm.id, 'cdroms', currentCdroms.filter((_, idx) => idx !== i));
+																} else {
+																	// A still-empty pending row — drop it locally, no save.
+																	pendingCdromRows[vm.id] = Math.max(0, (pendingCdromRows[vm.id] ?? 0) - 1);
+																}
+															}}>×</Button>
 													</div>
 												{/each}
 												<Button size="xs" variant="outline" class="mt-1"
-													onclick={() => updateVmField(vm.id, 'cdroms', [...currentCdroms, ''])}>+ Add ISO</Button>
+													onclick={() => pendingCdromRows[vm.id] = (pendingCdromRows[vm.id] ?? 0) + 1}>+ Add ISO</Button>
 											{:else}
 												{@const cdroms = vm.cdroms ?? (vm.boot_iso ? [vm.boot_iso] : [])}
 												{#if cdroms.length === 0}

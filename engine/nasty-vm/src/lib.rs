@@ -555,7 +555,13 @@ impl VmService {
             (Some(list), _) => list,
             (None, Some(iso)) if !iso.is_empty() => vec![iso],
             _ => Vec::new(),
-        };
+        }
+        // Drop blank entries — a placeholder "add a CD-ROM" row in the
+        // UI can arrive as an empty path and would otherwise fail the
+        // existence check below ("CD-ROM ISO  does not exist", #514).
+        .into_iter()
+        .filter(|iso| !iso.trim().is_empty())
+        .collect();
         for iso in &cdroms {
             if !Path::new(iso).exists() {
                 return Err(VmError::InvalidDiskPath(format!(
@@ -676,6 +682,11 @@ impl VmService {
                 _ => None,
             };
             if let Some(list) = new_cdroms {
+                // Drop blank entries (e.g. an unfilled "add ISO" row), #514.
+                let list: Vec<String> = list
+                    .into_iter()
+                    .filter(|iso| !iso.trim().is_empty())
+                    .collect();
                 for iso in &list {
                     if !Path::new(iso).exists() {
                         return Err(VmError::InvalidDiskPath(format!(
