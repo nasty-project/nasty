@@ -1658,6 +1658,27 @@ async fn files_mkdir_handler(
     match tokio::fs::create_dir(&full).await {
         Ok(()) => {
             info!("Created directory {}", full.display());
+
+            // Make the new directory writable through the sharing layer.
+            // The engine runs as root, so create_dir leaves it root:0755 —
+            // but Samba forces writes through a fixed identity (`nobody` on
+            // guest shares, the first valid user otherwise) and NFS through
+            // squashed uids, so a root:0755 directory rejects every write
+            // until it's chmod'd by hand (#519). Access control lives in the
+            // protocol layer, not POSIX bits — the same reasoning as the
+            // subvolume-create chmod (#482) and the SMB share-root chmod.
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) =
+                    tokio::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o777)).await
+                {
+                    tracing::warn!(
+                        "chmod 0777 {} failed: {e} — SMB/NFS writes into the new folder may be denied",
+                        full.display()
+                    );
+                }
+            }
+
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Err(e) => (
