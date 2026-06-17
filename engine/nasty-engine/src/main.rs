@@ -1669,11 +1669,8 @@ async fn files_mkdir_handler(
             // subvolume-create chmod (#482) and the SMB share-root chmod.
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = tokio::fs::set_permissions(
-                    &full,
-                    std::fs::Permissions::from_mode(0o777),
-                )
-                .await
+                if let Err(e) =
+                    tokio::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o777)).await
                 {
                     tracing::warn!(
                         "chmod 0777 {} failed: {e} — SMB/NFS writes into the new folder may be denied",
