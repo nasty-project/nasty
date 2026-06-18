@@ -348,9 +348,11 @@
 					// rebuilds + activates without restarting the engine, so
 					// the WS never drops and the layout's reconnect-driven
 					// sysInfo refresh never fires — the top-bar bcachefs chip
-					// would stay stale until a manual reload. Nudge it, and
-					// reload our rows so the pinned ref / sync button update.
-					sysInfoRefresh.trigger();
+					// would stay stale until a manual reload. Nudge it (with a
+					// few spaced retries, since a single fetch can race the
+					// just-settling rebuild), and reload our rows so the
+					// pinned ref / sync button update.
+					sysInfoRefresh.triggerReconcile();
 					void loadVersionPage();
 				}
 			}

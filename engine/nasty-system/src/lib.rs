@@ -25,19 +25,23 @@ use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Cached values that only change on bcachefs switch or reboot.
+/// Cached values from probing the RUNNING bcachefs kernel module.
+///
+/// These only change on reboot, and the probes are subprocess calls,
+/// so they're cached and cleared via `invalidate_bcachefs_cache()`
+/// after a rebuild/reboot.
+///
+/// The pin-derived fields (pinned ref + commit, recommended ref) are
+/// deliberately NOT cached here — they're read fresh in `info()` on
+/// every call. They're cheap (one `flake.lock` read + a string parse
+/// of the compile-time-embedded flake.nix), and reading them fresh
+/// means the top-bar chip reflects a re-pin the instant the rebuild
+/// rewrites `/etc/nixos/flake.lock`, with no cache-invalidation timing
+/// to race.
 #[derive(Clone)]
 struct CachedInfo {
     bcachefs_version: String,
-    bcachefs_commit: Option<String>,
-    bcachefs_pinned_ref: Option<String>,
-    /// The bcachefs-tools ref this NASty build ships with (baked from
-    /// nasty's flake.nix at compile time). The top-bar chip offers to
-    /// switch the operator's pin to this when they differ.
-    bcachefs_recommended_ref: Option<String>,
     debug_symbols: bool,
-    /// Whether the RUNNING module is custom (version differs from default).
-    bcachefs_is_custom_running: bool,
     /// Whether the RUNNING module has debug checks.
     bcachefs_debug_checks: bool,
 }
@@ -150,14 +154,37 @@ impl SystemService {
                 return c.clone();
             }
         }
-        // Compute — run subprocess calls in parallel.
-        let (bcachefs_version, bcachefs_commit, (pinned_ref, _), debug_symbols, debug_checks) = tokio::join!(
+        // Probe the RUNNING module — these subprocess calls are the
+        // expensive part, and the values only change on reboot.
+        let (bcachefs_version, debug_symbols, debug_checks) = tokio::join!(
             bcachefs_version(),
-            read_bcachefs_commit(),
-            crate::update::read_flake_lock_bcachefs_pub(),
             bcachefs_has_debug_symbols(),
             bcachefs_has_debug_checks(),
         );
+        let info = CachedInfo {
+            bcachefs_version,
+            debug_symbols,
+            bcachefs_debug_checks: debug_checks,
+        };
+        *self.cached.write().await = Some(info.clone());
+        info
+    }
+
+    pub async fn info(&self) -> SystemInfo {
+        let cached = self.get_cached_bcachefs().await;
+        // Pin-derived fields are read FRESH on every call (not cached):
+        // the pinned ref + commit from flake.lock, and the recommended
+        // ref baked into the engine at compile time. Cheap, and it means
+        // the top-bar chip reflects a re-pin the moment the rebuild
+        // rewrites flake.lock — no waiting on cache invalidation.
+        let ((pinned_ref, pinned_rev), (timezone, ntp_synced)) = tokio::join!(
+            crate::update::read_flake_lock_bcachefs_pub(),
+            timedatectl_info(),
+        );
+        // The bcachefs ref this engine build ships with — parsed from
+        // nasty's flake.nix baked in at compile time. Drives the chip's
+        // "sync to bundled bcachefs" offer when it differs from the pin.
+        let bcachefs_recommended_ref = crate::update::embedded_default_bcachefs_tools_ref().ok();
         // "Pending reboot": the loaded kernel module's bcachefs version
         // doesn't match the wrapper's currently-pinned bcachefs-tools
         // ref. Happens after the operator changes the pin (or runs a
@@ -175,33 +202,13 @@ impl SystemService {
         //
         // Strip leading 'v' on the pinned ref so `v1.38.3` compares
         // equal to bcachefs's `1.38.3` runtime output.
-        let bcachefs_is_custom_running = match (&pinned_ref, bcachefs_version.as_str()) {
+        let bcachefs_is_custom = match (&pinned_ref, cached.bcachefs_version.as_str()) {
             (Some(pin), running) if running != "unknown" => {
                 let pin_bare = pin.strip_prefix('v').unwrap_or(pin);
                 pin_bare != running
             }
             _ => false,
         };
-        // The bcachefs ref this engine build ships with — parsed from
-        // nasty's flake.nix baked in at compile time. Drives the chip's
-        // "sync to bundled bcachefs" offer when it differs from the pin.
-        let bcachefs_recommended_ref = crate::update::embedded_default_bcachefs_tools_ref().ok();
-        let info = CachedInfo {
-            bcachefs_version,
-            bcachefs_commit,
-            bcachefs_pinned_ref: pinned_ref,
-            bcachefs_recommended_ref,
-            debug_symbols,
-            bcachefs_is_custom_running,
-            bcachefs_debug_checks: debug_checks,
-        };
-        *self.cached.write().await = Some(info.clone());
-        info
-    }
-
-    pub async fn info(&self) -> SystemInfo {
-        let cached = self.get_cached_bcachefs().await;
-        let (timezone, ntp_synced) = timedatectl_info().await;
 
         SystemInfo {
             hostname: hostname(),
@@ -211,10 +218,10 @@ impl SystemService {
             uptime_seconds: uptime_seconds(),
             kernel: kernel_version(),
             bcachefs_version: cached.bcachefs_version,
-            bcachefs_commit: cached.bcachefs_commit,
-            bcachefs_pinned_ref: cached.bcachefs_pinned_ref,
-            bcachefs_recommended_ref: cached.bcachefs_recommended_ref,
-            bcachefs_is_custom: cached.bcachefs_is_custom_running,
+            bcachefs_commit: pinned_rev,
+            bcachefs_pinned_ref: pinned_ref,
+            bcachefs_recommended_ref,
+            bcachefs_is_custom,
             timezone,
             ntp_synced,
             bcachefs_debug_symbols: cached.debug_symbols,
@@ -476,14 +483,4 @@ async fn read_proc_stats(pid: u32) -> (u64, f64, u64) {
     };
 
     (memory_bytes, cpu_seconds, uptime_secs)
-}
-
-/// Read the pinned bcachefs-tools commit SHA from flake.lock (12-char short form).
-async fn read_bcachefs_commit() -> Option<String> {
-    let content = tokio::fs::read_to_string("/etc/nixos/flake.lock")
-        .await
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let rev = v["nodes"]["bcachefs-tools"]["locked"]["rev"].as_str()?;
-    Some(rev[..rev.len().min(12)].to_string())
 }
