@@ -295,6 +295,13 @@
 
 	// Version info (loaded once after connect)
 	let sysInfo: { hostname: string; version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_recommended_ref: string | null; bcachefs_is_custom: boolean; bcachefs_debug_checks: boolean; kvm_available: boolean; is_virtual: boolean } | null = $state(null);
+	// bcachefs "update available": the pin differs from the version this
+	// NASty build ships, so a one-click sync is offered. Distinct from
+	// "reboot pending" (bcachefs_is_custom), which the restart banner owns.
+	const bcachefsUpdateAvail = $derived.by(() => {
+		const rec = sysInfo?.bcachefs_recommended_ref;
+		return !!rec && rec !== sysInfo?.bcachefs_pinned_ref;
+	});
 	let clock24h = $state(true);
 
 	// Network rollback countdown — ticks once per second while a rollback is
@@ -1065,22 +1072,36 @@
 							Kernel/driver update — click to restart
 						</button>
 					{/if}
-					{#if sysInfo?.bcachefs_is_custom || sysInfo?.bcachefs_debug_checks}
-						{@const bcachefsSyncAvail = !!sysInfo.bcachefs_recommended_ref && sysInfo.bcachefs_recommended_ref !== sysInfo.bcachefs_pinned_ref}
+					<!-- bcachefs chip. Two distinct states, two distinct owners:
+					     - "update available" (pinned ref differs from the version
+					       this NASty build ships) → THIS chip, blue + arrow,
+					       click to switch the pin.
+					     - "reboot pending" (running module differs from the pin)
+					       → the amber "Kernel/driver update — click to restart"
+					       banner ABOVE, which already fires whenever the
+					       kernel-modules closure changes. We don't duplicate that
+					       action here; the gear icon is just a passive glance cue.
+					     The chip otherwise renders as a quiet status pill (debug
+					     build flags). Note the render condition includes the sync
+					     case directly — previously the offer was hidden unless a
+					     debug flag or pending reboot happened to be set too. -->
+					{#if sysInfo && (bcachefsUpdateAvail || sysInfo.bcachefs_is_custom || sysInfo.bcachefs_debug_checks)}
 						<a
 							href="/update#bcachefs"
-							class="flex items-center gap-2 rounded-md border-2 border-blue-500/70 px-3 py-1.5 text-sm text-blue-400 no-underline transition-all hover:bg-blue-500/10 hover:border-blue-400 hover:shadow-[0_0_16px_rgba(96,165,250,0.5)]"
-							title={bcachefsSyncAvail
-								? `NASty ships bcachefs ${sysInfo.bcachefs_recommended_ref} (you're pinned at ${sysInfo.bcachefs_pinned_ref ?? '—'}) — click to switch`
-								: 'bcachefs status'}
+							class={bcachefsUpdateAvail
+								? 'flex items-center gap-2 rounded-md border-2 border-blue-500/70 px-3 py-1.5 text-sm text-blue-400 no-underline transition-all hover:bg-blue-500/10 hover:border-blue-400 hover:shadow-[0_0_16px_rgba(96,165,250,0.5)]'
+								: 'flex items-center gap-2 rounded-md border-2 border-white/15 px-3 py-1.5 text-sm text-muted-foreground/80 no-underline transition-all hover:bg-white/5 hover:border-white/30'}
+							title={bcachefsUpdateAvail
+								? `bcachefs update available — NASty ships ${sysInfo.bcachefs_recommended_ref} (you're pinned at ${sysInfo.bcachefs_pinned_ref ?? '—'}). Click to switch.`
+								: 'bcachefs status — click for details'}
 						>
 							<span>bcachefs</span>
-							{#if bcachefsSyncAvail}
+							{#if bcachefsUpdateAvail}
 								<span class="font-mono text-xs">→ {sysInfo.bcachefs_recommended_ref}</span>
 							{/if}
 							<span class="flex items-center gap-1.5">
-								<span title="Reboot pending to load the new bcachefs kernel module"><Settings size={14} class={sysInfo.bcachefs_is_custom ? 'text-amber-400' : 'text-muted-foreground/30'} /></span>
-								<span title="Debug checks"><Bug size={14} class={sysInfo.bcachefs_debug_checks ? 'text-blue-400' : 'text-muted-foreground/30'} /></span>
+								<span title="Reboot pending — running module differs from the pinned version"><Settings size={14} class={sysInfo.bcachefs_is_custom ? 'text-amber-400' : 'text-muted-foreground/30'} /></span>
+								<span title="Debug checks enabled in the running module"><Bug size={14} class={sysInfo.bcachefs_debug_checks ? 'text-blue-400' : 'text-muted-foreground/30'} /></span>
 							</span>
 						</a>
 					{/if}
