@@ -67,7 +67,7 @@
     # of truth, no second pin to bump. This hardcoded value is used only
     # if that embedded flake.nix can't be parsed; keep it sane (matching
     # the repo-root flake.nix) so even that fallback is correct.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.5";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.6";
 
     # NOTE: lanzaboote is intentionally NOT declared as a top-level
     # input here. Secure Boot is per-box opt-in: when the operator

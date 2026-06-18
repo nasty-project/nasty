@@ -5,10 +5,10 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
     # ── bcachefs override (optional) ──────────────────────────────
-    # Pinned to v1.38.5 release tag.
+    # Pinned to v1.38.6 release tag.
     # To revert to pure nixpkgs: comment out these two lines.
     # No other changes needed — bcachefs.nix defaults to pkgs.bcachefs-tools.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.5";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.6";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
     # ── lanzaboote (Secure Boot for NixOS) ─────────────────────────
