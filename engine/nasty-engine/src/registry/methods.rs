@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::{Method, MethodParams, MethodRole, ad_hoc_one, ad_hoc_two, gen_schema};
 use crate::auth::{ApiToken, ApiTokenInfo, Role, Session, UserInfo};
 use crate::fs_dependents::FsDependents;
+use crate::guestshare::{CreateGuestShareRequest, CreateGuestShareResult, GuestShare};
 use crate::subvolume_dependents::SubvolumeDependents;
 use nasty_apps::{
     App, AppConfig, AppIngress, AppStats, AppdataRelocateStatus, AppsStatus, CaddyRouteSummary,
@@ -1012,6 +1013,39 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Admin,
                     params: MethodParams::Schema(gen_schema::<RemoveHostRequest>(generator)),
                     result: Some(gen_schema::<NvmeofSubsystem>(generator)),
+                },
+            ],
+        ),
+        (
+            "Guest Shares",
+            vec![
+                Method {
+                    name: "guestshare.list",
+                    desc: "List all guest file shares (including revoked ones). Never returns plaintext tokens.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<GuestShare>>(generator)),
+                },
+                Method {
+                    name: "guestshare.get",
+                    desc: "Fetch a single guest share by id.",
+                    role: MethodRole::Any,
+                    params: MethodParams::AdHoc(ad_hoc_one("id", "Share id (UUID).")),
+                    result: Some(gen_schema::<GuestShare>(generator)),
+                },
+                Method {
+                    name: "guestshare.create",
+                    desc: "Create a guest share for one or more paths under /fs. Returns the plaintext URL token exactly once — only its hash is stored.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::Schema(gen_schema::<CreateGuestShareRequest>(generator)),
+                    result: Some(gen_schema::<CreateGuestShareResult>(generator)),
+                },
+                Method {
+                    name: "guestshare.revoke",
+                    desc: "Revoke a guest share. The record is kept (marked revoked) so history survives.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::AdHoc(ad_hoc_one("id", "Share id (UUID) to revoke.")),
+                    result: Some(gen_schema::<GuestShare>(generator)),
                 },
             ],
         ),

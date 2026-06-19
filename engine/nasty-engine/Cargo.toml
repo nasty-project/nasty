@@ -54,3 +54,7 @@ webauthn-rs = "0.5"
 # wait-with-timeout tests. The `tokio = { features = ["full"] }`
 # workspace dep doesn't include test-util.
 tokio = { workspace = true, features = ["test-util"] }
+# Temp dirs for guestshare's path-canonicalization + state-store tests
+# (same version nasty-common's tests already use). Test-only; not in the
+# binary closure, so no Nix derivation impact.
+tempfile = "3"

@@ -2913,6 +2913,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2 0.11.0",
  "subtle",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

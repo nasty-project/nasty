@@ -22,6 +22,7 @@ mod auth_webauthn;
 mod boot_status;
 mod fs_dependents;
 mod fs_lock;
+mod guestshare;
 mod ingress_conflict;
 mod log_stream;
 mod registry;
@@ -75,6 +76,7 @@ pub struct AppState {
     pub subvolumes: Arc<nasty_storage::SubvolumeService>,
     pub snapshots: nasty_snapshot::SnapshotService,
     pub nfs: nasty_sharing::NfsService,
+    pub guest_shares: guestshare::GuestShareService,
     pub smb: nasty_sharing::SmbService,
     pub iscsi: nasty_sharing::IscsiService,
     pub nvmeof: Arc<nasty_sharing::NvmeofService>,
@@ -213,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
         snapshots: nasty_snapshot::SnapshotService::new(subvolumes.clone()),
         subvolumes,
         nfs: nasty_sharing::NfsService::new(),
+        guest_shares: guestshare::GuestShareService::new(),
         smb: nasty_sharing::SmbService::new(),
         iscsi: nasty_sharing::IscsiService::new(),
         nvmeof,

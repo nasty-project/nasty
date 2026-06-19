@@ -1269,7 +1269,7 @@ pub async fn read_audit_log(limit: usize) -> Vec<serde_json::Value> {
     entries
 }
 
-fn hash_password(password: &str) -> Result<String, AuthError> {
+pub(crate) fn hash_password(password: &str) -> Result<String, AuthError> {
     // Generate 16 random bytes for salt, encode as base64ct for SaltString
     let mut salt_bytes = [0u8; 16];
     rand::fill(&mut salt_bytes);
@@ -1282,7 +1282,7 @@ fn hash_password(password: &str) -> Result<String, AuthError> {
     Ok(hash.to_string())
 }
 
-fn verify_password(password: &str, hash: &str) -> Result<(), AuthError> {
+pub(crate) fn verify_password(password: &str, hash: &str) -> Result<(), AuthError> {
     let parsed = PasswordHash::new(hash).map_err(|e| AuthError::HashError(e.to_string()))?;
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
@@ -1360,7 +1360,7 @@ pub fn parse_role_str(s: &str) -> Option<Role> {
     }
 }
 
-fn generate_token() -> String {
+pub(crate) fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     rand::fill(&mut bytes);
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)

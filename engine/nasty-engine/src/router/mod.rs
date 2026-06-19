@@ -8,6 +8,7 @@ mod auth;
 mod backup;
 mod bcachefs;
 mod fs;
+mod guestshare;
 mod notifications;
 mod service;
 mod share;
@@ -66,6 +67,13 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "share.nfs.create"
                 | "share.nfs.update"
                 | "share.nfs.delete"
+                // Guest file sharing (#474). Reads (`guestshare.list`/
+                // `.get`) are already covered by `is_read_only`; only the
+                // mutations need listing here. v1 is operator/admin-only
+                // because the engine reads shared files as root — see the
+                // #475 note in the issue.
+                | "guestshare.create"
+                | "guestshare.revoke"
                 | "share.smb.create"
                 | "share.smb.update"
                 | "share.smb.delete"
@@ -454,6 +462,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "subvolume" => subvolume::try_route(req, state, session).await,
         "snapshot" => snapshot::try_route(req, state, session).await,
         "share" => share::try_route(req, state, session).await,
+        "guestshare" => guestshare::try_route(req, state, session).await,
         "smb" => smb::try_route(req, state, session).await,
         "service" => service::try_route(req, state, session).await,
         "system" => {
