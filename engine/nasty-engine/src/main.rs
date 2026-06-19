@@ -660,6 +660,17 @@ async fn main() -> anyhow::Result<()> {
             get(webauthn_available_handler),
         )
         .route("/api/boot_status", get(boot_status_handler))
+        // Public guest-share access (#474) — unauthenticated by design; the
+        // URL token + optional unlock grant are the only credentials.
+        .route("/api/public/share/{token}", get(public_share_meta_handler))
+        .route(
+            "/api/public/share/{token}/unlock",
+            post(public_share_unlock_handler),
+        )
+        .route(
+            "/api/public/share/{token}/download",
+            get(public_share_download_handler),
+        )
         .route("/api/auth/oidc/start", get(oidc_start_handler))
         .route("/api/auth/oidc/callback", get(oidc_callback_handler))
         .route(
@@ -2520,6 +2531,216 @@ async fn logout_handler(
         Json(serde_json::json!({"ok": true})),
     )
         .into_response()
+}
+
+// ── Public guest-share access surface (#474) ────────────────────────────
+// Unauthenticated handlers backing `/api/public/share/*`. Auth is by the
+// URL token (the link is the credential) plus, for protected shares, a
+// short-lived unlock grant cookie. Every "unavailable" reason collapses to
+// one generic response so a token-guesser gets no oracle.
+
+const SHARE_GRANT_COOKIE: &str = "nasty_share_grant";
+
+fn build_share_grant_cookie(token: &str) -> String {
+    // Scoped to the public share path and short-lived to match the grant
+    // TTL. SameSite=Strict is fine while shares are served same-origin
+    // (path-based); the future share.* subdomain work revisits this.
+    format!(
+        "{SHARE_GRANT_COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/api/public/share; Max-Age=3600"
+    )
+}
+
+fn share_grant_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())?;
+    let prefix = format!("{SHARE_GRANT_COOKIE}=");
+    raw.split(';')
+        .map(|p| p.trim())
+        .find_map(|p| p.strip_prefix(&prefix))
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
+fn now_unix_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn share_client_ip(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// One generic "not available" for unknown / expired / revoked / exhausted /
+/// unresolvable — no oracle for token or path guessing.
+fn share_not_available() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "This share is not available"})),
+    )
+        .into_response()
+}
+
+/// `GET /api/public/share/{token}` → guest landing metadata. Counts a view.
+async fn public_share_meta_handler(
+    axum::extract::Path(token): axum::extract::Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let now = now_unix_i64();
+    let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
+        return share_not_available();
+    };
+    state.guest_shares.record_view(&share.id).await;
+    Json(guestshare::GuestShareService::meta(&share)).into_response()
+}
+
+#[derive(Deserialize)]
+struct ShareUnlockRequest {
+    password: String,
+}
+
+/// `POST /api/public/share/{token}/unlock` → verify the password once and
+/// hand back a short-lived grant cookie. Rate-limited per (IP, token).
+async fn public_share_unlock_handler(
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ShareUnlockRequest>,
+) -> impl IntoResponse {
+    let now = now_unix_i64();
+    let client_ip = share_client_ip(&headers);
+
+    if state.guest_shares.unlock_locked(&client_ip, &token, now) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many attempts; try again later"})),
+        )
+            .into_response();
+    }
+
+    let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
+        return share_not_available();
+    };
+
+    if guestshare::GuestShareService::verify_share_password(&share, &body.password) {
+        state.guest_shares.clear_unlock_failures(&client_ip, &token);
+        let grant = state.guest_shares.mint_grant(&share.id, now);
+        crate::auth::audit(
+            "guest_share_unlock",
+            "guest",
+            &client_ip,
+            &format!("share_id={}", share.id),
+        );
+        let mut resp_headers = axum::http::HeaderMap::new();
+        resp_headers.insert(
+            axum::http::header::SET_COOKIE,
+            build_share_grant_cookie(&grant).parse().unwrap(),
+        );
+        return (
+            StatusCode::OK,
+            resp_headers,
+            Json(serde_json::json!({"ok": true})),
+        )
+            .into_response();
+    }
+
+    state
+        .guest_shares
+        .record_unlock_failure(&client_ip, &token, now);
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({"error": "Incorrect password"})),
+    )
+        .into_response()
+}
+
+/// `GET /api/public/share/{token}/download?path=…` → stream one file as an
+/// attachment. Enforces token validity → password grant (if protected) →
+/// path stays in a share root → `max_downloads` cap, then counts + audits.
+async fn public_share_download_handler(
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let now = now_unix_i64();
+    let client_ip = share_client_ip(&headers);
+
+    let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
+        return share_not_available();
+    };
+
+    if guestshare::GuestShareService::needs_password(&share) {
+        let granted = share_grant_from_cookie(&headers)
+            .map(|g| state.guest_shares.check_grant(&g, &share.id, now))
+            .unwrap_or(false);
+        if !granted {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Password required"})),
+            )
+                .into_response();
+        }
+    }
+
+    let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let Some(target) = guestshare::GuestShareService::resolve_download(&share, rel) else {
+        return share_not_available();
+    };
+
+    // Count + enforce the cap before opening the stream. A failure here means
+    // the share went inactive (e.g. hit its cap) between lookup and now.
+    if state
+        .guest_shares
+        .register_download(&share.id, now)
+        .await
+        .is_err()
+    {
+        return share_not_available();
+    }
+
+    let file = match tokio::fs::File::open(&target).await {
+        Ok(f) => f,
+        Err(_) => return share_not_available(),
+    };
+    let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+
+    crate::auth::audit(
+        "guest_share_download",
+        "guest",
+        &client_ip,
+        &format!("share_id={} name={name} bytes={size}", share.id),
+    );
+
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+    let mut resp_headers = axum::http::HeaderMap::new();
+    resp_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
+    resp_headers.insert(
+        axum::http::header::CONTENT_LENGTH,
+        size.to_string().parse().unwrap(),
+    );
+    // Always an attachment — never inline. Shared HTML must not render on the
+    // app origin (stored-XSS), so we never hand the browser a renderable type.
+    resp_headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{name}\"").parse().unwrap(),
+    );
+    (StatusCode::OK, resp_headers, body).into_response()
 }
 
 /// 8h, matches SESSION_TTL_SECS in auth.rs (kept in sync by hand).
