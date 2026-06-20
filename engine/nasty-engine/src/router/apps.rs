@@ -240,6 +240,19 @@ pub(super) async fn try_route(
                 Err(e) => err(req, e),
             }
         }
+        "apps.compose.set_startup" => {
+            match parse_params::<nasty_apps::SetComposeStartupRequest>(req) {
+                Ok(p) => match state
+                    .apps
+                    .compose_set_startup(&p.name, p.managed, p.order, p.delay_secs)
+                    .await
+                {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         "apps.ingress.list" => match state.apps.ingress_list().await {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),

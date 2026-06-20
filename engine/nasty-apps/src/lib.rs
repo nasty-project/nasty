@@ -1221,6 +1221,183 @@ async fn load_ingress_subdomain(app_name: &str) -> Option<String> {
         .map(String::from)
 }
 
+// ── Compose stack startup ordering (#437) ──────────────────────────────
+// Opt-in: enrolled stacks are brought up by the engine in a defined order
+// with a settle delay after each, and get `restart: "no"` (via a generated
+// compose override) so Docker doesn't race the engine at boot.
+
+/// Filename of the engine-generated compose override (sits next to the
+/// user's `docker-compose.yml`, layered on with a second `-f`).
+const STARTUP_OVERRIDE_FILE: &str = "nasty-startup-override.yml";
+/// Upper bound on a per-stack settle delay. Guards against a pathological
+/// value (the ordered startup runs in a background task, but a sane cap
+/// keeps the sequence from stalling indefinitely).
+const MAX_STARTUP_DELAY_SECS: u32 = 300;
+
+/// Per-stack startup configuration, persisted in the app's sidecar manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct StartupConfig {
+    /// NASty owns this stack's boot startup (order + delay + restart:no).
+    managed: bool,
+    /// Position in the ordered boot sequence (ascending; ties broken by name).
+    order: u32,
+    /// Seconds to wait after this stack is up before starting the next.
+    delay_secs: u32,
+}
+
+/// Persist the startup config into the per-app manifest JSON. Read-modify-
+/// write, splicing only our keys — mirrors `save_ingress_subdomain` so other
+/// fields (ingress_subdomain, proxy_disabled_reason) survive untouched.
+async fn save_startup_config(app_name: &str, cfg: StartupConfig) -> Result<(), AppsError> {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let mut manifest: serde_json::Value = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(s) => serde_json::from_str(&s)
+            .map_err(|e| AppsError::CommandFailed(format!("manifest parse: {e}")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(AppsError::CommandFailed(format!("manifest read: {e}"))),
+    };
+    let map = match manifest.as_object_mut() {
+        Some(m) => m,
+        None => return Err(AppsError::CommandFailed("manifest not an object".into())),
+    };
+    map.insert(
+        "startup_managed".to_string(),
+        serde_json::Value::Bool(cfg.managed),
+    );
+    map.insert(
+        "startup_order".to_string(),
+        serde_json::Value::from(cfg.order),
+    );
+    map.insert(
+        "startup_delay_secs".to_string(),
+        serde_json::Value::from(cfg.delay_secs.min(MAX_STARTUP_DELAY_SECS)),
+    );
+    tokio::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .await
+    .map_err(|e| AppsError::CommandFailed(format!("manifest write: {e}")))?;
+    Ok(())
+}
+
+/// Read the startup config from an app's manifest. Best-effort: a missing /
+/// unparseable manifest or absent fields yield the default (unmanaged).
+async fn load_startup_config(app_name: &str) -> StartupConfig {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let Ok(content) = tokio::fs::read_to_string(&manifest_path).await else {
+        return StartupConfig::default();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return StartupConfig::default();
+    };
+    StartupConfig {
+        managed: parsed
+            .get("startup_managed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        order: parsed
+            .get("startup_order")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        delay_secs: (parsed
+            .get("startup_delay_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32)
+            .min(MAX_STARTUP_DELAY_SECS),
+    }
+}
+
+fn startup_override_path(app_name: &str) -> String {
+    format!("{COMPOSE_DIR}/{app_name}/{STARTUP_OVERRIDE_FILE}")
+}
+
+/// Render a compose override that pins every service to `restart: "no"`, so
+/// Docker won't auto-start the stack at boot (the engine drives it instead).
+fn render_startup_override(services: &[String]) -> String {
+    let mut yml =
+        String::from("# Managed by NASty — startup ordering (#437). Do not edit.\nservices:\n");
+    for svc in services {
+        // Service names from `compose config --services` are already valid
+        // compose identifiers; quote defensively.
+        yml.push_str(&format!("  \"{svc}\":\n    restart: \"no\"\n"));
+    }
+    yml
+}
+
+/// Service names declared in a stack's compose file, via
+/// `docker compose config --services` (avoids parsing YAML ourselves).
+async fn compose_service_names(compose_path: &str) -> Result<Vec<String>, AppsError> {
+    let output = Command::new("docker")
+        .args(["compose", "-f", compose_path, "config", "--services"])
+        .output()
+        .await
+        .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+    if !output.status.success() {
+        return Err(AppsError::DockerFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// Write the startup override for a managed stack (restart: "no" per service).
+async fn write_startup_override(app_name: &str) -> Result<(), AppsError> {
+    let compose_path = format!("{COMPOSE_DIR}/{app_name}/docker-compose.yml");
+    let services = compose_service_names(&compose_path).await?;
+    let yml = render_startup_override(&services);
+    tokio::fs::write(startup_override_path(app_name), yml)
+        .await
+        .map_err(|e| AppsError::CommandFailed(format!("override write: {e}")))?;
+    Ok(())
+}
+
+/// Remove a stack's startup override (idempotent) so a later `compose up`
+/// restores the YAML's own restart policy.
+async fn remove_startup_override(app_name: &str) {
+    if let Err(e) = tokio::fs::remove_file(startup_override_path(app_name)).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!("remove startup override for '{app_name}' failed: {e}");
+    }
+}
+
+/// The `-f` args for a `docker compose` invocation: always the user's
+/// compose file, plus the startup override when it exists (managed stacks).
+/// Single source of truth so install/update/restore/set_startup agree.
+fn compose_file_args(app_name: &str) -> Vec<String> {
+    let yml = format!("{COMPOSE_DIR}/{app_name}/docker-compose.yml");
+    let mut args = vec!["-f".to_string(), yml];
+    let override_path = startup_override_path(app_name);
+    if Path::new(&override_path).exists() {
+        args.push("-f".to_string());
+        args.push(override_path);
+    }
+    args
+}
+
+/// `docker compose up -d --no-build` for one stack, with the right `-f` set
+/// (override included for managed stacks). Best-effort: `try_run` logs
+/// failures to the journal so a stack that won't come up is debuggable.
+async fn compose_up_stack(app_name: &str) {
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_file_args(app_name));
+    args.extend([
+        "--project-name".to_string(),
+        app_name.to_string(),
+        "up".to_string(),
+        "-d".to_string(),
+        "--no-build".to_string(),
+    ]);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    nasty_common::cmd::try_run("docker", &arg_refs).await;
+}
+
 /// Validate a subdomain hostname before we hand it to Caddy. RFC 1123-ish:
 /// labels are 1–63 chars of `[A-Za-z0-9-]`, no leading/trailing hyphen,
 /// dots between labels, total length ≤ 253. Reject anything else upfront
@@ -1590,6 +1767,24 @@ pub struct InstallComposeRequest {
     pub name: String,
     /// Contents of docker-compose.yml.
     pub compose_file: String,
+}
+
+/// Set NASty-managed startup ordering for a compose stack (#437).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetComposeStartupRequest {
+    /// Compose stack name.
+    pub name: String,
+    /// When true, NASty owns this stack's boot startup: it forces
+    /// `restart: "no"` (so Docker won't auto-start it) and brings it up in
+    /// the configured order with the settle delay. When false, the stack
+    /// reverts to its compose file's own restart policy.
+    pub managed: bool,
+    /// Position in the ordered boot sequence (ascending; ties by name).
+    #[serde(default)]
+    pub order: u32,
+    /// Seconds to wait after this stack is up before starting the next.
+    #[serde(default)]
+    pub delay_secs: u32,
 }
 
 // ── Ingress types ──────────────────────────────────────────────
@@ -3795,24 +3990,24 @@ impl AppsService {
         // are untouched.
         self.precreate_compose_binds(&req.compose_file).await;
 
-        // Bring up with new config — pull only, no building from source
+        // Bring up with new config — pull only, no building from source.
+        // `compose_file_args` layers on the startup override when this stack
+        // is NASty-managed, so `restart: "no"` is preserved across updates.
+        let mut up_args = vec!["compose".to_string()];
+        up_args.extend(compose_file_args(&req.name));
+        up_args.extend([
+            "--project-name".to_string(),
+            req.name.clone(),
+            "up".to_string(),
+            "-d".to_string(),
+            "--no-build".to_string(),
+            "--pull".to_string(),
+            "missing".to_string(),
+            "--remove-orphans".to_string(),
+        ]);
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(300),
-            Command::new("docker")
-                .args([
-                    "compose",
-                    "-f",
-                    &format!("{}/docker-compose.yml", project_dir),
-                    "--project-name",
-                    &req.name,
-                    "up",
-                    "-d",
-                    "--no-build",
-                    "--pull",
-                    "missing",
-                    "--remove-orphans",
-                ])
-                .output(),
+            Command::new("docker").args(&up_args).output(),
         )
         .await;
 
@@ -3833,6 +4028,72 @@ impl AppsService {
 
         info!("Updated compose app '{}'", req.name);
         self.get(&req.name).await
+    }
+
+    /// Set (or clear) NASty-managed startup ordering for a compose stack.
+    /// Persists `startup_*` to the sidecar manifest; when the managed flag
+    /// flips, (re)generates or removes the `restart: "no"` override and
+    /// re-runs `compose up` so the running containers' restart policy
+    /// converges. Order/delay-only changes are pure metadata (no Docker
+    /// action). Enroll requires an authenticated, existing stack.
+    pub async fn compose_set_startup(
+        &self,
+        name: &str,
+        managed: bool,
+        order: u32,
+        delay_secs: u32,
+    ) -> Result<(), AppsError> {
+        self.require_ready().await?;
+        let project_dir = format!("{}/{}", COMPOSE_DIR, name);
+        if !Path::new(&project_dir).join("docker-compose.yml").exists() {
+            return Err(AppsError::AppNotFound(name.to_string()));
+        }
+
+        let was_managed = load_startup_config(name).await.managed;
+        save_startup_config(
+            name,
+            StartupConfig {
+                managed,
+                order,
+                delay_secs: delay_secs.min(MAX_STARTUP_DELAY_SECS),
+            },
+        )
+        .await?;
+
+        // Only a change in the managed flag needs to touch Docker — that's
+        // what flips the override (and therefore the containers' restart
+        // policy). Reordering / re-timing is metadata the boot path reads.
+        if managed != was_managed {
+            if managed {
+                write_startup_override(name).await?;
+            } else {
+                remove_startup_override(name).await;
+            }
+            let mut up_args = vec!["compose".to_string()];
+            up_args.extend(compose_file_args(name));
+            up_args.extend([
+                "--project-name".to_string(),
+                name.to_string(),
+                "up".to_string(),
+                "-d".to_string(),
+                "--no-build".to_string(),
+            ]);
+            let output = Command::new("docker")
+                .args(&up_args)
+                .output()
+                .await
+                .map_err(|e| AppsError::CommandFailed(e.to_string()))?;
+            if !output.status.success() {
+                return Err(AppsError::DockerFailed(
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                ));
+            }
+        }
+
+        info!(
+            "Compose stack '{name}' startup: managed={managed} order={order} delay={delay_secs}s"
+        );
+        Ok(())
     }
 
     pub async fn compose_remove(&self, name: &str) -> Result<(), AppsError> {
@@ -4475,7 +4736,12 @@ impl AppsService {
             return;
         }
 
-        // Bring up compose apps (their containers may not have restart:always)
+        // Bring up compose apps. NASty-managed stacks (#437) start in a
+        // defined order with a settle delay after each; the rest keep
+        // Docker's own restart-policy behavior and are nudged up here as a
+        // safety net (their containers may not have restart:always, and
+        // Docker has usually already started them by now anyway).
+        let mut managed: Vec<(String, StartupConfig)> = Vec::new();
         if let Ok(mut entries) = tokio::fs::read_dir(COMPOSE_DIR).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let compose_file = entry.path().join("docker-compose.yml");
@@ -4483,27 +4749,39 @@ impl AppsService {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
-                let path = compose_file.to_string_lossy().to_string();
+                let cfg = load_startup_config(&name).await;
+                if cfg.managed {
+                    managed.push((name, cfg));
+                    continue;
+                }
                 info!("Restoring compose app '{name}'");
-                // `try_run` logs failures so a compose app that won't
-                // come back up after reboot is debuggable from the
-                // journal — the previous `let _ =` form left this case
-                // completely silent.
-                nasty_common::cmd::try_run(
-                    "docker",
-                    &[
-                        "compose",
-                        "-f",
-                        &path,
-                        "--project-name",
-                        &name,
-                        "up",
-                        "-d",
-                        "--no-build",
-                    ],
-                )
-                .await;
+                compose_up_stack(&name).await;
             }
+        }
+
+        if !managed.is_empty() {
+            // Ascending order; ties broken by name for determinism.
+            managed.sort_by(|a, b| a.1.order.cmp(&b.1.order).then_with(|| a.0.cmp(&b.0)));
+            // Run the ordered sequence OFF the boot path: the `apps.restore`
+            // phase has a 300s budget (engine main), and deliberate settle
+            // delays must never risk timing it out. Ordering is preserved
+            // within the task; a stack that fails to come up is logged and
+            // the sequence continues (stack 1 broken must not block 2..n).
+            tokio::spawn(async move {
+                for (name, cfg) in managed {
+                    info!("Starting managed stack '{name}' (order {})", cfg.order);
+                    compose_up_stack(&name).await;
+                    if cfg.delay_secs > 0 {
+                        info!(
+                            "Settling {}s after '{name}' before the next stack",
+                            cfg.delay_secs
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(cfg.delay_secs as u64))
+                            .await;
+                    }
+                }
+                info!("Managed compose startup sequence complete");
+            });
         }
     }
 
@@ -5940,8 +6218,67 @@ async fn fetch_manifest_json(
 
 #[cfg(test)]
 mod tests {
-    use super::{AppVolume, docker_data_root_status, validate_simple_volumes};
+    use super::{
+        AppVolume, StartupConfig, compose_file_args, docker_data_root_status,
+        render_startup_override, validate_simple_volumes,
+    };
     use std::path::PathBuf;
+
+    #[test]
+    fn startup_override_pins_each_service_to_no() {
+        let out = render_startup_override(&["web".to_string(), "db".to_string()]);
+        assert!(out.contains("services:\n"));
+        assert!(out.contains("  \"web\":\n    restart: \"no\"\n"));
+        assert!(out.contains("  \"db\":\n    restart: \"no\"\n"));
+        // Empty stack → just the header, no service entries.
+        let empty = render_startup_override(&[]);
+        assert!(empty.contains("services:\n"));
+        assert!(!empty.contains("restart:"));
+    }
+
+    #[test]
+    fn compose_file_args_omits_override_when_absent() {
+        // A name whose override file won't exist in the test environment
+        // yields just the compose file (`-f <yml>`), no override.
+        let args = compose_file_args("definitely-not-a-real-stack-xyz");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-f");
+        assert!(args[1].ends_with("/definitely-not-a-real-stack-xyz/docker-compose.yml"));
+    }
+
+    #[test]
+    fn managed_startup_sorts_by_order_then_name() {
+        let mut stacks: Vec<(String, StartupConfig)> = vec![
+            (
+                "zeta".into(),
+                StartupConfig {
+                    managed: true,
+                    order: 2,
+                    delay_secs: 0,
+                },
+            ),
+            (
+                "alpha".into(),
+                StartupConfig {
+                    managed: true,
+                    order: 1,
+                    delay_secs: 0,
+                },
+            ),
+            (
+                "beta".into(),
+                StartupConfig {
+                    managed: true,
+                    order: 1,
+                    delay_secs: 0,
+                },
+            ),
+        ];
+        stacks.sort_by(|a, b| a.1.order.cmp(&b.1.order).then_with(|| a.0.cmp(&b.0)));
+        let names: Vec<&str> = stacks.iter().map(|(n, _)| n.as_str()).collect();
+        // order 1 (alpha, beta by name) before order 2 (zeta).
+        assert_eq!(names, ["alpha", "beta", "zeta"]);
+    }
 
     /// A process-unique scratch path under the temp dir. The crate has
     /// no tempfile dev-dep; this keeps tests self-contained.
