@@ -57,7 +57,7 @@ webauthn-rs = "0.5"
 # RAM. `deflate` is pure Rust (flate2 → miniz_oxide); we intentionally do
 # NOT enable the optional bzip2/zstd/xz backends, which pull -sys crates the
 # Nix derivation would need to learn about.
-async_zip = { version = "0.0.17", default-features = false, features = ["tokio", "deflate"] }
+async_zip = { version = "0.0.18", default-features = false, features = ["tokio", "deflate"] }
 
 [dev-dependencies]
 # `test-util` enables tokio::time::pause/start_paused for fs_lock's

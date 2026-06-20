@@ -15,7 +15,7 @@ thiserror.workspace = true
 schemars.workspace = true
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-cron = "0.16"
+cron = "0.17"
 rustic_core = "0.12"
 rustic_backend = "0.6"
 jiff = "0.2"
