@@ -15,7 +15,7 @@ use nasty_apps::{
     CheckComposeRequest, CheckComposeResult, CheckDevicesRequest, CheckPortsRequest,
     CheckVolumesRequest, DeviceMissing, EnableAppsRequest, FixVolumePermsRequest,
     ImageInspectResult, InstallAppRequest, InstallComposeRequest, ManagedNetwork, NetworkSummary,
-    PortConflict, PruneResult, SetIngressRequest, VolumeMismatch,
+    PortConflict, PruneResult, SetComposeStartupRequest, SetIngressRequest, VolumeMismatch,
 };
 use nasty_backup::{BackupProfile, BackupSnapshot, BackupStatus};
 use nasty_sharing::iscsi::{
@@ -2664,6 +2664,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     desc: "Tear down a compose app via `docker compose down -v --remove-orphans`, delete its project directory, and remove its Caddy ingress.",
                     role: MethodRole::Operator,
                     params: MethodParams::AdHoc(ad_hoc_one("name", "Compose app name.")),
+                    result: None,
+                },
+                Method {
+                    name: "apps.compose.set_startup",
+                    desc: "Set NASty-managed startup ordering for a compose stack (#437): when managed, the engine forces `restart: \"no\"` and brings the stack up at boot in the configured order with a settle delay; when unmanaged, the stack reverts to its compose file's own restart policy.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::Schema(gen_schema::<SetComposeStartupRequest>(generator)),
                     result: None,
                 },
                 Method {

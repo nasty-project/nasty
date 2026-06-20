@@ -131,6 +131,7 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "apps.compose.install"
                 | "apps.compose.update"
                 | "apps.compose.remove"
+                | "apps.compose.set_startup"
                 // Appdata relocation (#436) — same altitude as the
                 // rest of app lifecycle management.
                 | "apps.appdata.relocate"
