@@ -398,7 +398,15 @@
 	let reconnectingTimer: ReturnType<typeof setTimeout> | null = null;
 	const RECONNECT_OVERLAY_DELAY_MS = 800;
 
+	// Public guest-share pages (/share/[token]) are the one route group that
+	// renders without a session: a recipient who was handed a link has no
+	// NASty account. We skip the auth probe + WebSocket entirely and render
+	// the page bare (no sidebar, no login gate) — it talks to the engine
+	// only through the unauthenticated /api/public/share/* endpoints.
+	const isPublicShare = $derived($page.url.pathname.startsWith('/share/'));
+
 	onMount(() => {
+		if (isPublicShare) return;
 		tryConnect();
 		const onReconnect = async () => {
 			dbg(`reconnect cb fired — clearing powering=${powering}, reconnecting=${reconnecting}, timer=${reconnectingTimer ? 'armed' : 'none'}`);
@@ -769,7 +777,13 @@
 <ConfirmDangerousDialog />
 <UnlockFsDialog />
 
-{#if bootStatus && bootStatus.overall === 'booting'}
+{#if isPublicShare}
+	<!--
+		Guest share landing — no sidebar, no login, no engine WebSocket.
+		The page owns its own chrome and uses only public endpoints.
+	-->
+	{@render children()}
+{:else if bootStatus && bootStatus.overall === 'booting'}
 	<!--
 		Engine is mid-startup. Show the per-phase checklist so the
 		operator sees motion and can spot whether a specific phase
