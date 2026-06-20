@@ -1382,9 +1382,10 @@ fn compose_file_args(app_name: &str) -> Vec<String> {
 }
 
 /// `docker compose up -d --no-build` for one stack, with the right `-f` set
-/// (override included for managed stacks). Best-effort: `try_run` logs
-/// failures to the journal so a stack that won't come up is debuggable.
-async fn compose_up_stack(app_name: &str) {
+/// (override included for managed stacks). Returns whether it succeeded;
+/// `cmd::run` logs the underlying failure (program/args/stderr) so a stack
+/// that won't come up is debuggable from the journal.
+async fn compose_up_stack(app_name: &str) -> bool {
     let mut args = vec!["compose".to_string()];
     args.extend(compose_file_args(app_name));
     args.extend([
@@ -1395,7 +1396,7 @@ async fn compose_up_stack(app_name: &str) {
         "--no-build".to_string(),
     ]);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    nasty_common::cmd::try_run("docker", &arg_refs).await;
+    matches!(nasty_common::cmd::run("docker", &arg_refs).await, Ok(o) if o.status.success())
 }
 
 /// Validate a subdomain hostname before we hand it to Caddy. RFC 1123-ish:
@@ -4799,7 +4800,7 @@ impl AppsService {
                     continue;
                 }
                 info!("Restoring compose app '{name}'");
-                compose_up_stack(&name).await;
+                let _ = compose_up_stack(&name).await;
             }
         }
 
@@ -4814,7 +4815,16 @@ impl AppsService {
             tokio::spawn(async move {
                 for (name, cfg) in managed {
                     info!("Starting managed stack '{name}' (order {})", cfg.order);
-                    compose_up_stack(&name).await;
+                    if !compose_up_stack(&name).await {
+                        // The underlying error is logged by `cmd::run`; this
+                        // is the ordered-startup-context line so the operator
+                        // sees which managed stack failed and that the
+                        // sequence carried on.
+                        warn!(
+                            "Managed stack '{name}' (order {}) failed to start; continuing with the rest",
+                            cfg.order
+                        );
+                    }
                     if cfg.delay_secs > 0 {
                         info!(
                             "Settling {}s after '{name}' before the next stack",

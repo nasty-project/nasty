@@ -130,7 +130,11 @@ in {
 
       logLevel = mkOption {
         type = types.str;
-        default = "nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,nasty_apps=info,tower_http=info";
+        # `nasty::cmd` carries every subprocess failure (run/try_run/run_ok
+        # log non-zero exits + spawn errors there). Without it in the
+        # allowlist those warnings are dropped — e.g. a compose stack that
+        # fails to come up at boot logged nothing engine-side (#437 testing).
+        default = "nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,nasty_apps=info,nasty::cmd=info,tower_http=info";
         description = "RUST_LOG filter for engine";
       };
     };
