@@ -41,11 +41,35 @@ pub(super) async fn try_route(
         },
         "guestshare.revoke" => match require_str(req, "id") {
             Ok(id) => match state.guest_shares.revoke(id).await {
-                Ok(v) => ok(req, v),
+                Ok(v) => {
+                    audit_share(session, "guest_share_revoked", id);
+                    ok(req, v)
+                }
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "guestshare.remove" => match require_str(req, "id") {
+            Ok(id) => match state.guest_shares.remove(id).await {
+                Ok(()) => {
+                    audit_share(session, "guest_share_removed", id);
+                    ok(req, "ok")
+                }
                 Err(e) => err(req, e),
             },
             Err(r) => r,
         },
         _ => return None,
     })
+}
+
+/// Append an audit entry for an operator action on a guest share, attributed
+/// to the session user + their client IP.
+fn audit_share(session: &Session, event: &str, share_id: &str) {
+    crate::auth::audit(
+        event,
+        &session.username,
+        session.client_ip.as_deref().unwrap_or("unknown"),
+        &format!("share_id={share_id}"),
+    );
 }

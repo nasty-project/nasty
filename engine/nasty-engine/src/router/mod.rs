@@ -74,6 +74,7 @@ fn is_operator_allowed(method: &str) -> bool {
                 // #475 note in the issue.
                 | "guestshare.create"
                 | "guestshare.revoke"
+                | "guestshare.remove"
                 | "share.smb.create"
                 | "share.smb.update"
                 | "share.smb.delete"
