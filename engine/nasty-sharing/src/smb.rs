@@ -11,6 +11,9 @@ use uuid::Uuid;
 const NASTY_SMB_CONF_PATH: &str = "/etc/samba/smb.nasty.conf";
 const NASTY_SMB_SHARE_DIR: &str = "/etc/samba/nasty.d";
 const STATE_DIR: &str = "/var/lib/nasty/shares/smb";
+/// Engine-written Avahi service file advertising `_adisk._tcp` so Time
+/// Machine shares appear in the macOS picker. Avahi auto-reloads this dir.
+const NASTY_TIMEMACHINE_AVAHI_PATH: &str = "/etc/avahi/services/nasty-timemachine.service";
 
 #[derive(Debug, Error)]
 pub enum SmbError {
@@ -24,6 +27,8 @@ pub enum SmbError {
     PathNotInFilesystem(String),
     #[error("invalid share name: {0}")]
     InvalidName(String),
+    #[error("a Time Machine share must be authenticated and writable (not guest, not read-only)")]
+    TimeMachineRequiresAuth,
     #[error("samba reload failed: {0}")]
     ReloadFailed(String),
     #[error("io error: {0}")]
@@ -50,6 +55,16 @@ pub struct SmbShare {
     pub valid_users: Vec<String>,
     /// Additional raw Samba parameters written to the share section.
     pub extra_params: HashMap<String, String>,
+    /// Whether this share is a macOS Time Machine destination. When true the
+    /// share section gets the `vfs_fruit` Time Machine options. Requires an
+    /// authenticated, writable share (not guest, not read-only).
+    #[serde(default)]
+    pub time_machine: bool,
+    /// Optional Time Machine size cap in GiB, written as
+    /// `fruit:time machine max size` so macOS self-limits and thins old
+    /// backups. `None` = no advertised cap (pair with a subvolume quota).
+    #[serde(default)]
+    pub time_machine_max_size_gib: Option<u32>,
     /// Whether the share is active in `smb.nasty.conf`.
     pub enabled: bool,
 }
@@ -78,6 +93,11 @@ pub struct CreateSmbShareRequest {
     pub valid_users: Option<Vec<String>>,
     /// Additional raw Samba parameters for this share section.
     pub extra_params: Option<HashMap<String, String>>,
+    /// Make this a macOS Time Machine destination (default: false). Requires
+    /// an authenticated, writable share.
+    pub time_machine: Option<bool>,
+    /// Optional Time Machine size cap in GiB.
+    pub time_machine_max_size_gib: Option<u32>,
     /// Whether to enable the share immediately (default: true).
     pub enabled: Option<bool>,
 }
@@ -100,6 +120,10 @@ pub struct UpdateSmbShareRequest {
     pub valid_users: Option<Vec<String>>,
     /// Replacement extra Samba parameters (optional).
     pub extra_params: Option<HashMap<String, String>>,
+    /// Toggle Time Machine destination (optional).
+    pub time_machine: Option<bool>,
+    /// Update the Time Machine size cap in GiB (optional). Send 0 to clear.
+    pub time_machine_max_size_gib: Option<u32>,
     /// Enable or disable the share (optional).
     pub enabled: Option<bool>,
 }
@@ -170,13 +194,17 @@ impl SmbService {
             guest_ok: req.guest_ok.unwrap_or(false),
             valid_users: req.valid_users.unwrap_or_default(),
             extra_params: req.extra_params.unwrap_or_default(),
+            time_machine: req.time_machine.unwrap_or(false),
+            time_machine_max_size_gib: req.time_machine_max_size_gib.filter(|&n| n > 0),
             enabled: req.enabled.unwrap_or(true),
         };
+        validate_time_machine(&share)?;
 
         state_dir().save(&share.id, &share).await?;
         write_share_conf(&share).await?;
         rebuild_include_list().await?;
         reload_samba().await?;
+        sync_timemachine_avahi().await;
         wait_for_share_ready(&share.name).await;
 
         info!("Created SMB share '{}' at {}", share.name, share.path);
@@ -222,14 +250,23 @@ impl SmbService {
         if let Some(extra_params) = req.extra_params {
             share.extra_params = extra_params;
         }
+        if let Some(time_machine) = req.time_machine {
+            share.time_machine = time_machine;
+        }
+        if let Some(n) = req.time_machine_max_size_gib {
+            // 0 clears the cap.
+            share.time_machine_max_size_gib = if n > 0 { Some(n) } else { None };
+        }
         if let Some(enabled) = req.enabled {
             share.enabled = enabled;
         }
+        validate_time_machine(&share)?;
 
         state_dir().save(&share.id, &share).await?;
         write_share_conf(&share).await?;
         rebuild_include_list().await?;
         reload_samba().await?;
+        sync_timemachine_avahi().await;
 
         info!("Updated SMB share '{}'", share.name);
         Ok(share)
@@ -245,6 +282,7 @@ impl SmbService {
         remove_share_conf(&req.id).await;
         rebuild_include_list().await?;
         reload_samba().await?;
+        sync_timemachine_avahi().await;
 
         info!("Deleted SMB share '{}'", req.id);
         Ok(())
@@ -362,7 +400,33 @@ fn render_share_conf(share: &SmbShare) -> String {
         ));
     }
 
+    // Time Machine block last so it can't be silently overridden by an
+    // extra_params entry. The recommended vfs_fruit options for a macOS
+    // Time Machine destination over SMB (streams_xattr is backed by bcachefs
+    // xattrs).
+    if share.time_machine {
+        conf.push_str("    vfs objects = catia fruit streams_xattr\n");
+        conf.push_str("    fruit:time machine = yes\n");
+        conf.push_str("    fruit:metadata = stream\n");
+        conf.push_str("    fruit:posix_rename = yes\n");
+        conf.push_str("    fruit:veto_appledouble = no\n");
+        conf.push_str("    fruit:wipe_intentionally_left_blank_rfork = yes\n");
+        conf.push_str("    fruit:delete_empty_adfiles = yes\n");
+        if let Some(gib) = share.time_machine_max_size_gib {
+            conf.push_str(&format!("    fruit:time machine max size = {gib}G\n"));
+        }
+    }
+
     conf
+}
+
+/// A Time Machine share must be authenticated and writable — guest access or
+/// read-only would make it unusable as a backup target.
+fn validate_time_machine(share: &SmbShare) -> Result<(), SmbError> {
+    if share.time_machine && (share.guest_ok || share.read_only) {
+        return Err(SmbError::TimeMachineRequiresAuth);
+    }
+    Ok(())
 }
 
 /// Write a single share config file: /etc/samba/nasty.d/{id}.conf
@@ -429,6 +493,92 @@ async fn rebuild_include_list() -> Result<(), SmbError> {
 /// Path to the per-share SMB config file.
 fn share_conf_path(id: &str) -> String {
     format!("{NASTY_SMB_SHARE_DIR}/{id}.conf")
+}
+
+/// Build the `_adisk._tcp` Avahi service-group XML for the given Time Machine
+/// share names, or `None` when there are none (caller removes the file).
+///
+/// Each share becomes a `dkN=adVN=<name>,adVF=0x82` TXT record — that's how
+/// macOS Time Machine discovers selectable destinations; `adVF=0x82` flags
+/// the disk as Time Machine capable. The companion `sys=…adVF=0x100` record
+/// advertises the host's overall Time Machine support.
+fn build_timemachine_avahi_xml(tm_share_names: &[String]) -> Option<String> {
+    if tm_share_names.is_empty() {
+        return None;
+    }
+    let mut dk = String::new();
+    for (i, name) in tm_share_names.iter().enumerate() {
+        // Share names are already validated to a safe character set, but
+        // escape XML metacharacters defensively.
+        let safe = xml_escape(name);
+        dk.push_str(&format!(
+            "    <txt-record>dk{i}=adVN={safe},adVF=0x82</txt-record>\n"
+        ));
+    }
+    Some(format!(
+        "<?xml version=\"1.0\" standalone='no'?>\n\
+         <!DOCTYPE service-group SYSTEM \"avahi-service.dtd\">\n\
+         <!-- Managed by NASty — do not edit manually -->\n\
+         <service-group>\n\
+         \x20 <name replace-wildcards=\"yes\">%h</name>\n\
+         \x20 <service>\n\
+         \x20\x20\x20 <type>_adisk._tcp</type>\n\
+         \x20\x20\x20 <port>9</port>\n\
+         \x20\x20\x20 <txt-record>sys=waMa=0,adVF=0x100</txt-record>\n\
+         {dk}\
+         \x20 </service>\n\
+         </service-group>\n"
+    ))
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Recompute the `_adisk` advertisement from current state: write the Avahi
+/// service file listing every enabled Time Machine share, or remove it when
+/// there are none. Best-effort — discovery is a convenience, not correctness,
+/// so failures are logged, not propagated.
+async fn sync_timemachine_avahi() {
+    let shares: Vec<SmbShare> = state_dir().load_all().await;
+    let names: Vec<String> = shares
+        .into_iter()
+        .filter(|s| s.enabled && s.time_machine)
+        .map(|s| s.name)
+        .collect();
+
+    match build_timemachine_avahi_xml(&names) {
+        Some(xml) => {
+            if let Some(parent) = Path::new(NASTY_TIMEMACHINE_AVAHI_PATH).parent()
+                && let Err(e) = tokio::fs::create_dir_all(parent).await
+            {
+                tracing::warn!("Time Machine: could not ensure {}: {e}", parent.display());
+                return;
+            }
+            if let Err(e) = tokio::fs::write(NASTY_TIMEMACHINE_AVAHI_PATH, &xml).await {
+                tracing::warn!("Time Machine: could not write Avahi service file: {e}");
+                return;
+            }
+        }
+        None => {
+            if let Err(e) = tokio::fs::remove_file(NASTY_TIMEMACHINE_AVAHI_PATH).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("Time Machine: could not remove Avahi service file: {e}");
+            }
+        }
+    }
+
+    // Avahi auto-reloads /etc/avahi/services via inotify; nudge it as a
+    // best-effort fallback (no-op if avahi isn't running).
+    let _ = tokio::process::Command::new("systemctl")
+        .args(["reload", "avahi-daemon"])
+        .output()
+        .await;
 }
 
 /// Wait for an SMB share to be visible after smbcontrol reload.
@@ -828,6 +978,8 @@ mod tests {
             guest_ok: false,
             valid_users: vec![],
             extra_params: HashMap::new(),
+            time_machine: false,
+            time_machine_max_size_gib: None,
             enabled: true,
         }
     }
@@ -965,5 +1117,76 @@ mod tests {
         assert!(alpha_pos < middle_pos && middle_pos < zeta_pos);
         // Injection chars in the value got stripped.
         assert!(out.contains("    middle = vinjectedx\n"));
+    }
+
+    // ── Time Machine ───────────────────────────────────────────────────
+
+    #[test]
+    fn render_share_conf_time_machine_emits_fruit_block() {
+        let mut share = minimal_share();
+        share.valid_users = vec!["alice".to_string()];
+        share.time_machine = true;
+        let out = render_share_conf(&share);
+        assert!(out.contains("    vfs objects = catia fruit streams_xattr\n"));
+        assert!(out.contains("    fruit:time machine = yes\n"));
+        assert!(out.contains("    fruit:metadata = stream\n"));
+        // No cap unless one is set.
+        assert!(!out.contains("fruit:time machine max size"));
+    }
+
+    #[test]
+    fn render_share_conf_time_machine_max_size() {
+        let mut share = minimal_share();
+        share.valid_users = vec!["alice".to_string()];
+        share.time_machine = true;
+        share.time_machine_max_size_gib = Some(500);
+        let out = render_share_conf(&share);
+        assert!(out.contains("    fruit:time machine max size = 500G\n"));
+    }
+
+    #[test]
+    fn render_share_conf_without_time_machine_emits_no_fruit() {
+        let out = render_share_conf(&minimal_share());
+        assert!(!out.contains("fruit:"));
+        assert!(!out.contains("vfs objects"));
+    }
+
+    #[test]
+    fn validate_time_machine_rejects_guest_and_readonly() {
+        let mut share = minimal_share();
+        share.time_machine = true;
+        share.valid_users = vec!["alice".to_string()];
+        assert!(validate_time_machine(&share).is_ok());
+
+        let mut guest = share.clone();
+        guest.guest_ok = true;
+        assert!(matches!(
+            validate_time_machine(&guest),
+            Err(SmbError::TimeMachineRequiresAuth)
+        ));
+
+        let mut ro = share.clone();
+        ro.read_only = true;
+        assert!(matches!(
+            validate_time_machine(&ro),
+            Err(SmbError::TimeMachineRequiresAuth)
+        ));
+
+        // Non-TM shares are unaffected by guest/read-only.
+        let mut plain = minimal_share();
+        plain.guest_ok = true;
+        assert!(validate_time_machine(&plain).is_ok());
+    }
+
+    #[test]
+    fn timemachine_avahi_xml_lists_one_dk_per_share_or_none() {
+        // No shares → no file.
+        assert!(build_timemachine_avahi_xml(&[]).is_none());
+
+        let xml = build_timemachine_avahi_xml(&["TimeMachine".into(), "Backups".into()]).unwrap();
+        assert!(xml.contains("<type>_adisk._tcp</type>"));
+        assert!(xml.contains("sys=waMa=0,adVF=0x100"));
+        assert!(xml.contains("dk0=adVN=TimeMachine,adVF=0x82"));
+        assert!(xml.contains("dk1=adVN=Backups,adVF=0x82"));
     }
 }

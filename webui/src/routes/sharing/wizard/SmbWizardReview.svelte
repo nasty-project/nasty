@@ -5,12 +5,18 @@
 		guestOk: boolean;
 		readOnly: boolean;
 		validUsers: string[];
+		timeMachine?: boolean;
+		maxSizeGib?: number | null;
 	}
-	let { name, fallbackName, guestOk, readOnly, validUsers }: Props = $props();
+	let { name, fallbackName, guestOk, readOnly, validUsers, timeMachine = false, maxSizeGib = null }: Props = $props();
 </script>
 
 <span class="text-muted-foreground">Share Name</span>
 <span>{name || fallbackName}</span>
+{#if timeMachine}
+	<span class="text-muted-foreground">Time Machine</span>
+	<span>Enabled{maxSizeGib ? ` — max ${maxSizeGib} GiB` : ''}</span>
+{/if}
 {#if guestOk}
 	<span class="text-muted-foreground">Guests</span>
 	<span>Allowed</span>

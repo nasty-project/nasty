@@ -65,6 +65,8 @@
 	let shareSmbGuestOk = $state(false);
 	let shareSmbReadOnly = $state(false);
 	let shareSmbValidUsers: string[] = $state([]);
+	let shareSmbTimeMachine = $state(false);
+	let shareSmbTmMaxSize: number | null = $state(null);
 	// SMB inline user/group creation moved into <SmbWizardForm>.
 	// iSCSI access
 	let shareIscsiName = $state('');
@@ -135,6 +137,7 @@
 		shareSubvolume = '';
 		shareNfsHost = ''; shareNfsOptions = 'rw,sync,no_subtree_check';
 		shareSmbName = ''; shareSmbGuestOk = false; shareSmbReadOnly = false; shareSmbValidUsers = [];
+		shareSmbTimeMachine = false; shareSmbTmMaxSize = null;
 		shareIscsiName = ''; shareNvmeofName = '';
 		shareNvmeofAddr = '0.0.0.0'; shareNvmeofPort = '4420';
 		showInlineCreate = false;
@@ -178,6 +181,8 @@
 				guest_ok: shareSmbGuestOk,
 				read_only: shareSmbReadOnly,
 				valid_users: shareSmbValidUsers,
+				time_machine: shareSmbTimeMachine,
+				time_machine_max_size_gib: shareSmbTmMaxSize ?? undefined,
 			}),
 			'SMB share created',
 		),
@@ -437,6 +442,8 @@
 					bind:guestOk={shareSmbGuestOk}
 					bind:readOnly={shareSmbReadOnly}
 					bind:validUsers={shareSmbValidUsers}
+					bind:timeMachine={shareSmbTimeMachine}
+					bind:maxSizeGib={shareSmbTmMaxSize}
 				/>
 			{:else if shareProtocol === 'iscsi'}
 				<IscsiWizardForm bind:name={shareIscsiName} />
@@ -469,6 +476,8 @@
 						guestOk={shareSmbGuestOk}
 						readOnly={shareSmbReadOnly}
 						validUsers={shareSmbValidUsers}
+						timeMachine={shareSmbTimeMachine}
+						maxSizeGib={shareSmbTmMaxSize}
 					/>
 				{:else if shareProtocol === 'iscsi'}
 					<IscsiWizardReview name={shareIscsiName} fallbackName={sv?.name ?? ''} />
