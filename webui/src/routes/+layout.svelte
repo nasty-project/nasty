@@ -1187,6 +1187,12 @@
 									bcachefs Matrix
 									<ExternalLink size={12} class="ml-auto text-muted-foreground" />
 								</a>
+								<a href="https://www.reddit.com/r/bcachefs/" target="_blank" rel="noopener noreferrer"
+									class="flex items-center gap-2 rounded px-3 py-2 text-sm text-popover-foreground no-underline hover:bg-accent transition-colors">
+									<MessageCircle size={15} />
+									r/bcachefs
+									<ExternalLink size={12} class="ml-auto text-muted-foreground" />
+								</a>
 							</div>
 						{/if}
 					</div>
