@@ -1444,6 +1444,10 @@ in {
       "d /etc/target 0750 root root -"
       "f /etc/samba/smb.nasty.conf 0644 root root -"
       "d /etc/samba/nasty.d 0755 root root -"
+      # Real, engine-writable dir for the dynamic Time Machine `_adisk`
+      # Avahi service file (otherwise only populated by static
+      # extraServiceFiles). See nasty-sharing smb.rs::sync_timemachine_avahi.
+      "d /etc/avahi/services 0755 root root -"
       "d /var/lib/nasty/nut 0750 root root -"
       "d /var/state/ups 0750 root root -"
     ];

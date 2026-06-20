@@ -88,14 +88,38 @@
 				<Label for="smb-comment">Comment</Label>
 				<Input id="smb-comment" bind:value={smb.newComment} placeholder="Optional description" class="mt-1" />
 			</div>
-			<div class="mb-4 flex gap-6">
+			<div class="mb-4">
 				<label class="flex cursor-pointer items-center gap-2">
-					<input type="checkbox" bind:checked={smb.newReadOnly} class="h-4 w-4" /> Read-only
+					<input
+						type="checkbox"
+						bind:checked={smb.newTimeMachine}
+						onchange={() => { if (smb.newTimeMachine) { smb.newGuestOk = false; smb.newReadOnly = false; } }}
+						class="h-4 w-4" />
+					Time Machine — macOS backup destination
 				</label>
-				<label class="flex cursor-pointer items-center gap-2">
-					<input type="checkbox" bind:checked={smb.newGuestOk} class="h-4 w-4" /> Allow guests
-				</label>
+				{#if smb.newTimeMachine}
+					<div class="mt-2 ml-6 flex items-center gap-2 text-sm">
+						<span class="text-muted-foreground">Max size (GiB)</span>
+						<input
+							type="number"
+							min="1"
+							placeholder="unlimited"
+							value={smb.newTmMaxSize ?? ''}
+							oninput={(e) => { const v = (e.target as HTMLInputElement).value; smb.newTmMaxSize = v === '' ? null : Number(v); }}
+							class="h-8 w-32 rounded-md border border-input bg-transparent px-2 text-sm" />
+					</div>
+				{/if}
 			</div>
+			{#if !smb.newTimeMachine}
+				<div class="mb-4 flex gap-6">
+					<label class="flex cursor-pointer items-center gap-2">
+						<input type="checkbox" bind:checked={smb.newReadOnly} class="h-4 w-4" /> Read-only
+					</label>
+					<label class="flex cursor-pointer items-center gap-2">
+						<input type="checkbox" bind:checked={smb.newGuestOk} class="h-4 w-4" /> Allow guests
+					</label>
+				</div>
+			{/if}
 			<Button onclick={smbCreateGuarded}>Create</Button>
 		</CardContent>
 	</Card>
@@ -124,6 +148,9 @@
 				>
 					<td class="p-3">
 						<strong>{share.name}</strong>
+						{#if share.time_machine}
+							<Badge variant="secondary" class="ml-2 bg-blue-950 text-blue-300">Time Machine</Badge>
+						{/if}
 						{#if share.comment}<br /><span class="text-xs text-muted-foreground">{share.comment}</span>{/if}
 					</td>
 					<td class="p-3 font-mono text-sm">{share.path}</td>

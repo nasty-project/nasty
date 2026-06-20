@@ -14,12 +14,16 @@
 		guestOk: boolean;
 		readOnly: boolean;
 		validUsers: string[];
+		timeMachine: boolean;
+		maxSizeGib: number | null;
 	}
 	let {
 		name = $bindable(),
 		guestOk = $bindable(),
 		readOnly = $bindable(),
 		validUsers = $bindable(),
+		timeMachine = $bindable(),
+		maxSizeGib = $bindable(),
 	}: Props = $props();
 
 	const client = getClient();
@@ -78,16 +82,50 @@
 	<Label>Share Name</Label>
 	<Input bind:value={name} placeholder="documents" class="mt-1" />
 </div>
-<div class="mb-4 flex gap-4">
+<div class="mb-4">
 	<label class="flex items-center gap-2 text-sm cursor-pointer">
-		<input type="checkbox" bind:checked={guestOk} class="rounded border-input" />
-		Allow guests
+		<input
+			type="checkbox"
+			bind:checked={timeMachine}
+			onchange={() => { if (timeMachine) { guestOk = false; readOnly = false; } }}
+			class="rounded border-input" />
+		Time Machine — macOS backup destination
 	</label>
-	<label class="flex items-center gap-2 text-sm cursor-pointer">
-		<input type="checkbox" bind:checked={readOnly} class="rounded border-input" />
-		Read-only
-	</label>
+	{#if timeMachine}
+		<div class="mt-2 ml-6 space-y-2">
+			<div class="flex items-center gap-2 text-sm">
+				<Label class="font-normal">Max size (GiB)</Label>
+				<input
+					type="number"
+					min="1"
+					placeholder="unlimited"
+					value={maxSizeGib ?? ''}
+					oninput={(e) => {
+						const v = (e.target as HTMLInputElement).value;
+						maxSizeGib = v === '' ? null : Number(v);
+					}}
+					class="h-8 w-32 rounded-md border border-input bg-transparent px-2 text-sm" />
+			</div>
+			<p class="text-xs text-muted-foreground">
+				macOS thins old backups to stay under this. Pair it with a subvolume quota
+				as a hard cap. Time Machine shares are authenticated and writable — add the
+				one user who will back up below.
+			</p>
+		</div>
+	{/if}
 </div>
+{#if !timeMachine}
+	<div class="mb-4 flex gap-4">
+		<label class="flex items-center gap-2 text-sm cursor-pointer">
+			<input type="checkbox" bind:checked={guestOk} class="rounded border-input" />
+			Allow guests
+		</label>
+		<label class="flex items-center gap-2 text-sm cursor-pointer">
+			<input type="checkbox" bind:checked={readOnly} class="rounded border-input" />
+			Read-only
+		</label>
+	</div>
+{/if}
 {#if !guestOk}
 	<div class="mb-4">
 		<Label>Allowed Users & Groups</Label>

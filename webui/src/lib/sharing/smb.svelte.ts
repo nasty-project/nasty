@@ -29,6 +29,8 @@ export const smb = $state({
 	newComment: '',
 	newReadOnly: false,
 	newGuestOk: false,
+	newTimeMachine: false,
+	newTmMaxSize: null as number | null,
 	expanded: {} as Record<string, boolean>,
 	addUserShare: null as string | null,
 	addUserName: '',
@@ -93,6 +95,8 @@ export async function smbCreate() {
 			comment: smb.newComment || undefined,
 			read_only: smb.newReadOnly,
 			guest_ok: smb.newGuestOk,
+			time_machine: smb.newTimeMachine,
+			time_machine_max_size_gib: smb.newTmMaxSize ?? undefined,
 		}),
 		'SMB share created'
 	);
@@ -101,6 +105,8 @@ export async function smbCreate() {
 		smb.newSubvolume = '';
 		smb.newName = '';
 		smb.newComment = '';
+		smb.newTimeMachine = false;
+		smb.newTmMaxSize = null;
 		await smbRefresh();
 	}
 }

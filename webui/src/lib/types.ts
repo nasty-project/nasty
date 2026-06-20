@@ -561,6 +561,8 @@ export interface SmbShare {
 	guest_ok: boolean;
 	valid_users: string[];
 	extra_params: Record<string, string>;
+	time_machine: boolean;
+	time_machine_max_size_gib: number | null;
 	enabled: boolean;
 }
 
