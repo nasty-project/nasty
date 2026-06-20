@@ -27,14 +27,18 @@ rand.workspace = true
 base64.workspace = true
 thiserror.workspace = true
 portable-pty.workspace = true
-futures-util.workspace = true
+# `io` adds futures-style AsyncRead/Write helpers (futures_util::io::copy),
+# used to bridge a tokio file into async_zip's futures-io entry writer.
+futures-util = { workspace = true, features = ["io"] }
 schemars.workspace = true
 reqwest.workspace = true
 sha2 = "0.11"
 subtle = "2"
 bollard = "0.21"
 serde_yaml_ng = "0.10"
-tokio-util = { workspace = true, features = ["io"] }
+# `compat` exposes `.compat()` to adapt a tokio AsyncRead to futures-io for
+# async_zip's entry writer (see guestshare.rs).
+tokio-util = { workspace = true, features = ["io", "compat"] }
 openidconnect = { version = "4", default-features = false, features = ["accept-rfc3339-timestamps", "accept-string-booleans"] }
 http = "1"
 # Vendored Swagger UI assets, embedded into the binary at compile time
@@ -48,6 +52,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # that's reserved for issue #17 (volume unlock via hmac-secret),
 # which is a separate user flow with different storage shape.
 webauthn-rs = "0.5"
+# Streaming ZIP for guest folder shares (#474). Async-native so a folder is
+# zipped straight into the HTTP response without buffering the archive in
+# RAM. `deflate` is pure Rust (flate2 → miniz_oxide); we intentionally do
+# NOT enable the optional bzip2/zstd/xz backends, which pull -sys crates the
+# Nix derivation would need to learn about.
+async_zip = { version = "0.0.17", default-features = false, features = ["tokio", "deflate"] }
 
 [dev-dependencies]
 # `test-util` enables tokio::time::pause/start_paused for fs_lock's
