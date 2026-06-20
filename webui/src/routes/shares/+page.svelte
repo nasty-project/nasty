@@ -6,6 +6,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import { Link2, Lock, Ban, Trash2 } from '@lucide/svelte';
+	import SortTh from '$lib/components/SortTh.svelte';
 
 	// Mirrors the engine's GuestShare (engine/nasty-engine/src/guestshare.rs).
 	// Note: only `token_hash` is stored, never the plaintext token — so a
@@ -56,6 +57,42 @@
 	function isExhausted(s: GuestShare): boolean {
 		return s.max_downloads != null && s.downloads >= s.max_downloads;
 	}
+
+	function statusLabel(s: GuestShare): string {
+		if (s.hidden) return 'Removed';
+		if (s.revoked) return 'Revoked';
+		if (isExpired(s)) return 'Expired';
+		if (isExhausted(s)) return 'Exhausted';
+		return 'Active';
+	}
+
+	// ── Column sorting ──────────────────────────────────────────────────
+	type ShareSortKey = 'shared' | 'created_by' | 'created' | 'expires' | 'downloads' | 'views' | 'status';
+	let shareSortKey = $state<ShareSortKey>('created');
+	let shareSortDir = $state<'asc' | 'desc'>('desc');
+	function toggleShareSort(key: ShareSortKey) {
+		if (shareSortKey === key) shareSortDir = shareSortDir === 'asc' ? 'desc' : 'asc';
+		else { shareSortKey = key; shareSortDir = key === 'created' ? 'desc' : 'asc'; }
+	}
+	const sortedShares = $derived.by(() => {
+		if (!visibleShares) return [];
+		const sign = shareSortDir === 'asc' ? 1 : -1;
+		const sharedName = (s: GuestShare) => s.paths.map(basename).join(', ');
+		return [...visibleShares].sort((a, b) => {
+			let cmp = 0;
+			switch (shareSortKey) {
+				case 'shared': cmp = sharedName(a).localeCompare(sharedName(b), undefined, { numeric: true }); break;
+				case 'created_by': cmp = a.created_by.localeCompare(b.created_by); break;
+				case 'created': cmp = a.created_at - b.created_at; break;
+				case 'expires': cmp = (a.expires_at ?? Infinity) - (b.expires_at ?? Infinity); break;
+				case 'downloads': cmp = a.downloads - b.downloads; break;
+				case 'views': cmp = a.views - b.views; break;
+				case 'status': cmp = statusLabel(a).localeCompare(statusLabel(b)); break;
+			}
+			if (cmp === 0) cmp = b.created_at - a.created_at;
+			return sign * cmp;
+		});
+	});
 
 	async function load() {
 		shares = (await getClient().call<GuestShare[]>('guestshare.list')) ?? [];
@@ -109,18 +146,18 @@
 		<table class="w-full text-sm">
 			<thead>
 				<tr>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Shared</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Created by</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Created</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Expires</th>
-					<th class="border-b-2 border-border p-3 text-right text-xs uppercase text-muted-foreground">Downloads</th>
-					<th class="border-b-2 border-border p-3 text-right text-xs uppercase text-muted-foreground">Views</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
+					<SortTh label="Shared" active={shareSortKey === 'shared'} dir={shareSortDir} onclick={() => toggleShareSort('shared')} />
+					<SortTh label="Created by" active={shareSortKey === 'created_by'} dir={shareSortDir} onclick={() => toggleShareSort('created_by')} />
+					<SortTh label="Created" active={shareSortKey === 'created'} dir={shareSortDir} onclick={() => toggleShareSort('created')} />
+					<SortTh label="Expires" active={shareSortKey === 'expires'} dir={shareSortDir} onclick={() => toggleShareSort('expires')} />
+					<SortTh label="Downloads" align="right" active={shareSortKey === 'downloads'} dir={shareSortDir} onclick={() => toggleShareSort('downloads')} />
+					<SortTh label="Views" align="right" active={shareSortKey === 'views'} dir={shareSortDir} onclick={() => toggleShareSort('views')} />
+					<SortTh label="Status" active={shareSortKey === 'status'} dir={shareSortDir} onclick={() => toggleShareSort('status')} />
 					<th class="border-b-2 border-border p-3 text-right text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 				</tr>
 			</thead>
 			<tbody>
-				{#each visibleShares ?? [] as s (s.id)}
+				{#each sortedShares as s (s.id)}
 					<tr class="border-b border-border {s.hidden ? 'opacity-50' : ''}">
 						<td class="p-3">
 							<div class="flex items-center gap-2">

@@ -4,6 +4,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import type { Settings } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
+	import SortTh from '$lib/components/SortTh.svelte';
 
 	const client = getClient();
 
@@ -87,6 +88,31 @@
 
 	let hostStatuses: HostTlsStatus[] = $state([]);
 	let hostStatusPollHandle: number | null = $state(null);
+
+	// ── Column sorting ──────────────────────────────────────────────────
+	type HostSortKey = 'host' | 'state' | 'expires';
+	let hostSortKey = $state<HostSortKey>('host');
+	let hostSortDir = $state<'asc' | 'desc'>('asc');
+	function toggleHostSort(key: HostSortKey) {
+		if (hostSortKey === key) hostSortDir = hostSortDir === 'asc' ? 'desc' : 'asc';
+		else { hostSortKey = key; hostSortDir = 'asc'; }
+	}
+	const sortedHostStatuses = $derived.by(() => {
+		const sign = hostSortDir === 'asc' ? 1 : -1;
+		return [...hostStatuses].sort((a, b) => {
+			let cmp = 0;
+			if (hostSortKey === 'host') cmp = a.host.localeCompare(b.host, undefined, { numeric: true });
+			else if (hostSortKey === 'state') cmp = a.state.localeCompare(b.state);
+			else {
+				// Sort by days-to-expiry; unknown expiry sorts last.
+				const av = a.expires_in_days ?? Infinity;
+				const bv = b.expires_in_days ?? Infinity;
+				cmp = av - bv;
+			}
+			if (cmp === 0) cmp = a.host.localeCompare(b.host, undefined, { numeric: true });
+			return sign * cmp;
+		});
+	});
 	// Page-scoped handles for the post-save / Retry ACME-status pollers so
 	// onDestroy can cancel them on SPA navigation — otherwise the 2-second
 	// interval (plus its 5-min setTimeout backstop) keeps hammering
@@ -505,15 +531,15 @@
 		{:else}
 			<table class="w-full text-sm">
 				<thead>
-					<tr class="text-left text-xs uppercase text-muted-foreground">
-						<th class="pb-2 font-medium">Host</th>
-						<th class="pb-2 font-medium">State</th>
-						<th class="pb-2 font-medium">Issuer / Expires</th>
-						<th class="pb-2 font-medium">Detail</th>
+					<tr>
+						<SortTh label="Host" active={hostSortKey === 'host'} dir={hostSortDir} onclick={() => toggleHostSort('host')} thClass="pb-2 font-medium" />
+						<SortTh label="State" active={hostSortKey === 'state'} dir={hostSortDir} onclick={() => toggleHostSort('state')} thClass="pb-2 font-medium" />
+						<SortTh label="Issuer / Expires" active={hostSortKey === 'expires'} dir={hostSortDir} onclick={() => toggleHostSort('expires')} thClass="pb-2 font-medium" />
+						<th class="pb-2 font-medium text-left text-xs uppercase text-muted-foreground">Detail</th>
 					</tr>
 				</thead>
 				<tbody>
-					{#each hostStatuses as h}
+					{#each sortedHostStatuses as h}
 						{@const badge = badgeForState(h.state)}
 						<tr class="border-t border-border">
 							<td class="py-2 pr-3 font-mono text-xs">{h.host}</td>

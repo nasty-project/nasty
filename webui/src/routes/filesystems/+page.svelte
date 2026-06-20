@@ -19,6 +19,7 @@
 	import { summarizeDependents } from '$lib/fs-dependents';
 	import type { Filesystem, FilesystemDevice, BlockDevice, DeviceState, ScrubStatus, FsckStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents, TpmBindStatus, DiskHealth } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
+	import SortTh from '$lib/components/SortTh.svelte';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -1243,6 +1244,54 @@
 		return (dev.read_errors ?? 0) + (dev.write_errors ?? 0) + (dev.checksum_errors ?? 0);
 	}
 
+	// ── Device-table column sorting (#531) ──────────────────────────────
+	// One shared sort key applies to every filesystem's device table.
+	type DevSortKey =
+		| 'path' | 'label' | 'state' | 'slot' | 'uuid' | 'size' | 'type'
+		| 'rotational' | 'model' | 'serial' | 'clean'
+		| 'read_err' | 'write_err' | 'csum_err' | 'data_allowed' | 'has_data';
+	let devSortKey = $state<DevSortKey>('slot');
+	let devSortDir = $state<'asc' | 'desc'>('asc');
+	function toggleDevSort(key: DevSortKey) {
+		if (devSortKey === key) devSortDir = devSortDir === 'asc' ? 'desc' : 'asc';
+		else { devSortKey = key; devSortDir = 'asc'; }
+	}
+	/** Comparable value for a device under the given sort key (number or string). */
+	function devSortVal(dev: FilesystemDevice, key: DevSortKey): string | number {
+		switch (key) {
+			case 'path': return dev.path ?? '';
+			case 'label': return dev.label ?? '';
+			case 'state': return dev.missing ? 'missing' : (devDisplayState(dev) ?? '');
+			case 'slot': return dev.member_index ?? -1;
+			case 'uuid': return dev.uuid ?? '';
+			case 'size': return deviceBlock(dev.path)?.size_bytes ?? -1;
+			case 'type': return deviceBlock(dev.path)?.device_class ?? '';
+			case 'rotational': return dev.rotational == null ? -1 : (dev.rotational ? 1 : 0);
+			case 'model': return deviceBlock(dev.path)?.model ?? '';
+			case 'serial': return deviceBlock(dev.path)?.serial ?? '';
+			case 'clean': return devErrorTotal(dev) ?? -1;
+			case 'read_err': return dev.read_errors ?? -1;
+			case 'write_err': return dev.write_errors ?? -1;
+			case 'csum_err': return dev.checksum_errors ?? -1;
+			case 'data_allowed': return dev.data_allowed ?? '';
+			case 'has_data': return dev.has_data ?? '';
+		}
+	}
+	/** A sorted copy of a filesystem's devices under the current key/dir. */
+	function sortedDevices(devs: FilesystemDevice[]): FilesystemDevice[] {
+		const sign = devSortDir === 'asc' ? 1 : -1;
+		return [...devs].sort((a, b) => {
+			const av = devSortVal(a, devSortKey);
+			const bv = devSortVal(b, devSortKey);
+			let cmp =
+				typeof av === 'number' && typeof bv === 'number'
+					? av - bv
+					: String(av).localeCompare(String(bv), undefined, { numeric: true });
+			if (cmp === 0) cmp = (a.path ?? '').localeCompare(b.path ?? '', undefined, { numeric: true });
+			return sign * cmp;
+		});
+	}
+
 	function classColor(cls: string): string {
 		switch (cls) {
 			case 'nvme': return 'bg-violet-950 text-violet-300';
@@ -2364,27 +2413,27 @@
 						<table class="w-full text-sm">
 							<thead>
 								<tr>
-									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Device</th>
-									<th class="p-2 text-left text-xs uppercase text-muted-foreground">Label</th>
-									<th class="p-2 text-left text-xs uppercase text-muted-foreground">State</th>
-									{#if colOn('slot')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Slot</th>{/if}
-									{#if colOn('uuid')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">UUID</th>{/if}
-									{#if colOn('size')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Size</th>{/if}
-									{#if colOn('type')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Type</th>{/if}
-									{#if colOn('rotational')}<th class="p-2 text-left text-xs uppercase text-muted-foreground" title="bcachefs's own per-device Rotational flag — what it uses for SSD optimizations. Can disagree with the hardware Type if mis-latched (bcachefs-tools #594).">Rotational</th>{/if}
-									{#if colOn('model')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Model</th>{/if}
-									{#if colOn('serial')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Serial</th>{/if}
-									{#if colOn('clean')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Clean</th>{/if}
-									{#if colOn('read_err')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Read err</th>{/if}
-									{#if colOn('write_err')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Write err</th>{/if}
-									{#if colOn('csum_err')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Cksum err</th>{/if}
-									{#if colOn('data_allowed')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Data Allowed</th>{/if}
-									{#if colOn('has_data')}<th class="p-2 text-left text-xs uppercase text-muted-foreground">Has Data</th>{/if}
+									<SortTh label="Device" active={devSortKey === 'path'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('path')} />
+									<SortTh label="Label" active={devSortKey === 'label'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('label')} />
+									<SortTh label="State" active={devSortKey === 'state'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('state')} />
+									{#if colOn('slot')}<SortTh label="Slot" active={devSortKey === 'slot'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('slot')} />{/if}
+									{#if colOn('uuid')}<SortTh label="UUID" active={devSortKey === 'uuid'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('uuid')} />{/if}
+									{#if colOn('size')}<SortTh label="Size" active={devSortKey === 'size'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('size')} />{/if}
+									{#if colOn('type')}<SortTh label="Type" active={devSortKey === 'type'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('type')} />{/if}
+									{#if colOn('rotational')}<SortTh label="Rotational" active={devSortKey === 'rotational'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('rotational')} />{/if}
+									{#if colOn('model')}<SortTh label="Model" active={devSortKey === 'model'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('model')} />{/if}
+									{#if colOn('serial')}<SortTh label="Serial" active={devSortKey === 'serial'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('serial')} />{/if}
+									{#if colOn('clean')}<SortTh label="Clean" active={devSortKey === 'clean'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('clean')} />{/if}
+									{#if colOn('read_err')}<SortTh label="Read err" active={devSortKey === 'read_err'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('read_err')} />{/if}
+									{#if colOn('write_err')}<SortTh label="Write err" active={devSortKey === 'write_err'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('write_err')} />{/if}
+									{#if colOn('csum_err')}<SortTh label="Cksum err" active={devSortKey === 'csum_err'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('csum_err')} />{/if}
+									{#if colOn('data_allowed')}<SortTh label="Data Allowed" active={devSortKey === 'data_allowed'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('data_allowed')} />{/if}
+									{#if colOn('has_data')}<SortTh label="Has Data" active={devSortKey === 'has_data'} dir={devSortDir} thClass="p-2" onclick={() => toggleDevSort('has_data')} />{/if}
 									<th class="p-2 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 								</tr>
 							</thead>
 							<tbody>
-								{#each fs.devices as dev (dev.path)}
+								{#each sortedDevices(fs.devices) as dev (dev.path)}
 									<tr class="border-b border-border">
 										<td class="p-2 font-mono text-xs">
 											{dev.path}

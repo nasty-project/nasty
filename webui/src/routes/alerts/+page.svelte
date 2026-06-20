@@ -11,6 +11,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
+	import SortTh from '$lib/components/SortTh.svelte';
 
 	let rules: AlertRule[] = $state([]);
 	let activeAlerts: ActiveAlert[] = $state([]);
@@ -53,6 +54,30 @@
 		below: 'Below',
 		equals: 'Equals',
 	};
+
+	// ── Column sorting ──────────────────────────────────────────────────
+	type RuleSortKey = 'name' | 'metric' | 'severity' | 'status';
+	let ruleSortKey = $state<RuleSortKey>('name');
+	let ruleSortDir = $state<'asc' | 'desc'>('asc');
+	function toggleRuleSort(key: RuleSortKey) {
+		if (ruleSortKey === key) ruleSortDir = ruleSortDir === 'asc' ? 'desc' : 'asc';
+		else { ruleSortKey = key; ruleSortDir = 'asc'; }
+	}
+	const sortedRules = $derived.by(() => {
+		const sign = ruleSortDir === 'asc' ? 1 : -1;
+		// critical sorts above warning when descending.
+		const sevRank = (s: AlertSeverity) => (s === 'critical' ? 2 : 1);
+		return [...rules].sort((a, b) => {
+			let cmp = 0;
+			if (ruleSortKey === 'name') cmp = a.name.localeCompare(b.name, undefined, { numeric: true });
+			else if (ruleSortKey === 'metric')
+				cmp = (metricLabels[a.metric] ?? a.metric).localeCompare(metricLabels[b.metric] ?? b.metric);
+			else if (ruleSortKey === 'severity') cmp = sevRank(a.severity) - sevRank(b.severity);
+			else cmp = Number(a.enabled) - Number(b.enabled);
+			if (cmp === 0) cmp = a.name.localeCompare(b.name, undefined, { numeric: true });
+			return sign * cmp;
+		});
+	});
 
 	function handleEvent(_: string, params: unknown) {
 		const p = params as { collection?: string };
@@ -203,16 +228,16 @@
 	<table class="w-full text-sm">
 		<thead>
 			<tr>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Name</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Metric</th>
+				<SortTh label="Name" active={ruleSortKey === 'name'} dir={ruleSortDir} onclick={() => toggleRuleSort('name')} />
+				<SortTh label="Metric" active={ruleSortKey === 'metric'} dir={ruleSortDir} onclick={() => toggleRuleSort('metric')} />
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Condition</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Severity</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Status</th>
+				<SortTh label="Severity" active={ruleSortKey === 'severity'} dir={ruleSortDir} onclick={() => toggleRuleSort('severity')} />
+				<SortTh label="Status" active={ruleSortKey === 'status'} dir={ruleSortDir} onclick={() => toggleRuleSort('status')} />
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Actions</th>
 			</tr>
 		</thead>
 		<tbody>
-			{#each rules as rule}
+			{#each sortedRules as rule}
 				<tr class="border-b border-border {!rule.enabled ? 'opacity-50' : ''}">
 					<td class="p-3"><strong>{rule.name}</strong></td>
 					<td class="p-3">{metricLabels[rule.metric] ?? rule.metric}</td>

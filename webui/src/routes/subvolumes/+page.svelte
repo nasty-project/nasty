@@ -776,6 +776,27 @@
 		return sv.subvolume_type === 'block' ? (sv.volsize_bytes ?? 0) : (sv.used_bytes ?? 0);
 	}
 
+	// ── Snapshots-table column sorting (separate from the subvolumes table
+	// above). Applied to each filesystem group's items. ─────────────────
+	type SnapSortKey = 'name' | 'parent' | 'read_only';
+	let snapSortKey = $state<SnapSortKey>('name');
+	let snapSortDir = $state<'asc' | 'desc'>('asc');
+	function toggleSnapSort(key: SnapSortKey) {
+		if (snapSortKey === key) snapSortDir = snapSortDir === 'asc' ? 'desc' : 'asc';
+		else { snapSortKey = key; snapSortDir = 'asc'; }
+	}
+	function sortedSnaps<T extends { name: string; subvolume: string; read_only?: boolean }>(items: T[]): T[] {
+		const sign = snapSortDir === 'asc' ? 1 : -1;
+		return [...items].sort((a, b) => {
+			let cmp = 0;
+			if (snapSortKey === 'name') cmp = a.name.localeCompare(b.name, undefined, { numeric: true });
+			else if (snapSortKey === 'parent') cmp = a.subvolume.localeCompare(b.subvolume, undefined, { numeric: true });
+			else cmp = Number(a.read_only ?? false) - Number(b.read_only ?? false);
+			if (cmp === 0) cmp = a.name.localeCompare(b.name, undefined, { numeric: true });
+			return sign * cmp;
+		});
+	}
+
 	const filtered = $derived.by(() => {
 		let items = subvolumes;
 		if (selectedFs) items = items.filter(sv => sv.filesystem === selectedFs);
@@ -1527,15 +1548,15 @@
 		<table class="w-full text-sm">
 			<thead>
 				<tr>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Snapshot Name</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Parent Subvolume</th>
-					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Read-only</th>
+					<SortTh label="Snapshot Name" active={snapSortKey === 'name'} dir={snapSortDir} onclick={() => toggleSnapSort('name')} />
+					<SortTh label="Parent Subvolume" active={snapSortKey === 'parent'} dir={snapSortDir} onclick={() => toggleSnapSort('parent')} />
+					<SortTh label="Read-only" active={snapSortKey === 'read_only'} dir={snapSortDir} onclick={() => toggleSnapSort('read_only')} />
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Type</th>
 					<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 				</tr>
 			</thead>
 			<tbody>
-				{#each group.items as snap (`${snap.filesystem}|${snap.subvolume}|${snap.name}`)}
+				{#each sortedSnaps(group.items) as snap (`${snap.filesystem}|${snap.subvolume}|${snap.name}`)}
 					<tr class="border-b border-border">
 						<td class="p-3">
 							<span class="font-mono text-sm">{snap.name}</span>

@@ -21,12 +21,35 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import SortTh from '$lib/components/SortTh.svelte';
 	import { Trash2, Plus } from '@lucide/svelte';
 	import { startRegistration } from '@simplewebauthn/browser';
 
 	let activeTab: 'users' | 'tokens' | 'sso' = $state('users');
 
 	let users: UserInfo[] = $state([]);
+
+	// ── Column sorting (main users table) ───────────────────────────────
+	type UserSortKey = 'username' | 'role';
+	let userSortKey = $state<UserSortKey>('username');
+	let userSortDir = $state<'asc' | 'desc'>('asc');
+	function toggleUserSort(key: UserSortKey) {
+		if (userSortKey === key) userSortDir = userSortDir === 'asc' ? 'desc' : 'asc';
+		else { userSortKey = key; userSortDir = 'asc'; }
+	}
+	const sortedUsers = $derived.by(() => {
+		const sign = userSortDir === 'asc' ? 1 : -1;
+		// admin > operator > read-only when descending.
+		const roleRank = (r: string) => (r === 'admin' ? 3 : r === 'operator' ? 2 : 1);
+		return [...users].sort((a, b) => {
+			let cmp =
+				userSortKey === 'role'
+					? roleRank(a.role) - roleRank(b.role)
+					: a.username.localeCompare(b.username, undefined, { numeric: true });
+			if (cmp === 0) cmp = a.username.localeCompare(b.username, undefined, { numeric: true });
+			return sign * cmp;
+		});
+	});
 	let apiTokens: ApiTokenInfo[] = $state([]);
 	let filesystems: Filesystem[] = $state([]);
 	let loading = $state(true);
@@ -592,13 +615,13 @@
 	<table class="mb-10 w-full text-sm">
 		<thead>
 			<tr>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Username</th>
-				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">Role</th>
+				<SortTh label="Username" active={userSortKey === 'username'} dir={userSortDir} onclick={() => toggleUserSort('username')} />
+				<SortTh label="Role" active={userSortKey === 'role'} dir={userSortDir} onclick={() => toggleUserSort('role')} />
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 			</tr>
 		</thead>
 		<tbody>
-			{#each users as user}
+			{#each sortedUsers as user}
 				<tr class="border-b border-border">
 					<td class="p-3"><strong>{user.username}</strong></td>
 					<td class="p-3">
