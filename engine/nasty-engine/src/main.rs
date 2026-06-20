@@ -671,6 +671,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/share/{token}/download",
             get(public_share_download_handler),
         )
+        .route(
+            "/api/public/share/{token}/zip",
+            get(public_share_zip_handler),
+        )
         .route("/api/auth/oidc/start", get(oidc_start_handler))
         .route("/api/auth/oidc/callback", get(oidc_callback_handler))
         .route(
@@ -2739,6 +2743,68 @@ async fn public_share_download_handler(
     resp_headers.insert(
         axum::http::header::CONTENT_DISPOSITION,
         format!("attachment; filename=\"{name}\"").parse().unwrap(),
+    );
+    (StatusCode::OK, resp_headers, body).into_response()
+}
+
+/// `GET /api/public/share/{token}/zip` → stream a ZIP of the whole share
+/// (folders walked recursively, symlinks skipped). Same gates as download;
+/// counts as a single download against `max_downloads`.
+async fn public_share_zip_handler(
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let now = now_unix_i64();
+    let client_ip = share_client_ip(&headers);
+
+    let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
+        return share_not_available();
+    };
+
+    if guestshare::GuestShareService::needs_password(&share) {
+        let granted = share_grant_from_cookie(&headers)
+            .map(|g| state.guest_shares.check_grant(&g, &share.id, now))
+            .unwrap_or(false);
+        if !granted {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Password required"})),
+            )
+                .into_response();
+        }
+    }
+
+    if state
+        .guest_shares
+        .register_download(&share.id, now)
+        .await
+        .is_err()
+    {
+        return share_not_available();
+    }
+
+    let filename = guestshare::GuestShareService::zip_filename(&share);
+    crate::auth::audit(
+        "guest_share_zip",
+        "guest",
+        &client_ip,
+        &format!("share_id={} name={filename}", share.id),
+    );
+
+    let reader = state.guest_shares.zip_stream(&share);
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(reader));
+    let mut resp_headers = axum::http::HeaderMap::new();
+    resp_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/zip".parse().unwrap(),
+    );
+    // Streamed: length is unknown up front, so no Content-Length (chunked).
+    resp_headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{filename}\"")
+            .parse()
+            .unwrap(),
     );
     (StatusCode::OK, resp_headers, body).into_response()
 }

@@ -107,6 +107,11 @@
 		return `/api/public/share/${token}/download`;
 	}
 
+	// Folder shares download as a streamed ZIP of the whole folder.
+	function zipUrl(): string {
+		return `/api/public/share/${token}/zip`;
+	}
+
 	onMount(loadMeta);
 </script>
 
@@ -170,7 +175,12 @@
 								{/if}
 							</div>
 							{#if entry.is_dir}
-								<span class="shrink-0 text-xs text-muted-foreground">Folder download coming soon</span>
+								<a
+									href={zipUrl()}
+									download={`${entry.name}.zip`}
+									class="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent">
+									<Download size={14} /> Download as ZIP
+								</a>
 							{:else}
 								<a
 									href={downloadUrl()}

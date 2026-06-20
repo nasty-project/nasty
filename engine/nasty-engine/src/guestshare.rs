@@ -213,6 +213,56 @@ fn resolve_within(share: &GuestShare, rel: &str) -> Option<PathBuf> {
     None
 }
 
+/// Write a ZIP of every `root` into `writer`, entries named relative to each
+/// root's parent (so a share of `/fs/tank/photos` yields `photos/img.jpg`).
+/// Iterative DFS — no async recursion — and symlinks are skipped so the
+/// archive stays within the roots.
+async fn write_share_zip(
+    writer: tokio::io::DuplexStream,
+    roots: Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use async_zip::{Compression, ZipEntryBuilder};
+
+    let mut zip = async_zip::tokio::write::ZipFileWriter::with_tokio(writer);
+
+    for root in &roots {
+        // Entry names are relative to the root's parent so the root's own
+        // basename appears as the top-level archive folder.
+        let base = root.parent().unwrap_or(root.as_path());
+        let mut stack = vec![root.clone()];
+        while let Some(path) = stack.pop() {
+            let meta = match tokio::fs::symlink_metadata(&path).await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            // Never follow symlinks — that's the escape guard.
+            if meta.is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                let mut rd = tokio::fs::read_dir(&path).await?;
+                while let Some(entry) = rd.next_entry().await? {
+                    stack.push(entry.path());
+                }
+            } else if meta.is_file() {
+                let rel = path.strip_prefix(base).unwrap_or(&path);
+                let name = rel.to_string_lossy().replace('\\', "/");
+                let builder = ZipEntryBuilder::new(name.into(), Compression::Deflate);
+                let mut entry = zip.write_entry_stream(builder).await?;
+                // async_zip's entry writer is futures-io; bridge the tokio
+                // file into it with `.compat()` + futures copy.
+                use tokio_util::compat::TokioAsyncReadCompatExt;
+                let mut f = tokio::fs::File::open(&path).await?.compat();
+                futures_util::io::copy(&mut f, &mut entry).await?;
+                entry.close().await?;
+            }
+        }
+    }
+
+    zip.close().await?;
+    Ok(())
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -427,6 +477,40 @@ impl GuestShareService {
         s.downloads = s.downloads.saturating_add(1);
         self.state_dir().save(id, &s).await?;
         Ok(())
+    }
+
+    /// Stream a ZIP of all the share's roots into a pipe, returning the read
+    /// end for the HTTP body. The archive is built lazily as the client
+    /// reads, so a multi-gigabyte folder is never buffered in memory.
+    ///
+    /// Symlinks are skipped (never followed), so the archive cannot escape a
+    /// share root — the ZIP-time analog of the download path guard.
+    pub fn zip_stream(&self, share: &GuestShare) -> tokio::io::DuplexStream {
+        let (reader, writer) = tokio::io::duplex(64 * 1024);
+        let roots: Vec<PathBuf> = share.paths.iter().map(PathBuf::from).collect();
+        tokio::spawn(async move {
+            if let Err(e) = write_share_zip(writer, roots).await {
+                // The client gets a truncated archive; nothing else we can do
+                // once the response body has started streaming.
+                tracing::warn!("guest share zip stream aborted: {e}");
+            }
+        });
+        reader
+    }
+
+    /// A filename for the downloaded archive, derived from the first shared
+    /// root's basename (e.g. "photos.zip"). Quotes are stripped so it's safe
+    /// in a `Content-Disposition` header.
+    pub fn zip_filename(share: &GuestShare) -> String {
+        let base = share
+            .paths
+            .first()
+            .map(Path::new)
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("share")
+            .replace(['"', '\\'], "");
+        format!("{base}.zip")
     }
 
     // ── Password-unlock grants (ephemeral, in-memory) ───────────────────
@@ -870,6 +954,55 @@ mod tests {
             .unwrap();
         assert!(!pdf.is_dir);
         assert_eq!(pdf.size, 8);
+    }
+
+    #[tokio::test]
+    async fn zip_stream_includes_files_and_skips_symlink_escape() {
+        use tokio::io::AsyncReadExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let folder = root.join("photos");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        std::fs::write(folder.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(folder.join("sub/b.txt"), b"bravo").unwrap();
+
+        // A secret outside the share, reachable only via a symlink planted
+        // inside it. The walk must NOT follow the symlink.
+        let secret = root.join("secret.txt");
+        std::fs::write(&secret, b"TOPSECRET").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, folder.join("leak.txt")).unwrap();
+
+        let svc = GuestShareService::with_dirs(root.join("state"), root.clone());
+        let share = GuestShare {
+            paths: vec![folder.to_string_lossy().into_owned()],
+            ..bare("z")
+        };
+
+        let mut reader = svc.zip_stream(&share);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+
+        // Filenames live verbatim in the (uncompressed) local file headers,
+        // so we can assert on the raw archive bytes without a zip reader.
+        assert!(!bytes.is_empty());
+        assert_eq!(&bytes[..2], b"PK", "should be a zip archive");
+        let blob = String::from_utf8_lossy(&bytes);
+        assert!(
+            blob.contains("photos/a.txt"),
+            "expected top-level file entry"
+        );
+        assert!(
+            blob.contains("photos/sub/b.txt"),
+            "expected nested file entry"
+        );
+        // The symlink itself is skipped and its target's content never appears.
+        assert!(!blob.contains("leak.txt"), "symlink entry must be skipped");
+        assert!(
+            !blob.contains("TOPSECRET"),
+            "symlink target must never be archived"
+        );
     }
 
     /// A throwaway share with everything empty/default but a distinct id.
