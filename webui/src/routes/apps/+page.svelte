@@ -5,7 +5,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
-	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, AppStats, MappedPort, PruneResult, SubPathRecipe, NetworkSummary, ManagedNetwork, NetworkState } from '$lib/types';
+	import type { AppsStatus, App, AppIngress, AppConfig, ImageInspectResult, AppContainer, AppStats, MappedPort, PruneResult, SubPathRecipe, NetworkSummary, ManagedNetwork, NetworkState, ComposeStartupEntry } from '$lib/types';
 	import { formatBytes } from '$lib/format';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -134,6 +134,8 @@
 
 	let status: AppsStatus | null = $state(null);
 	let apps: App[] = $state([]);
+	// Compose stack startup config (#437), for the Startup-order card.
+	let composeStartup: ComposeStartupEntry[] = $state([]);
 	// Map of app-name → locked-FS-name. Populated from
 	// `fs.locked_dependents` so each app row can show a "🔒 on tank"
 	// badge that opens the global unlock dialog. Stays empty when
@@ -995,6 +997,9 @@
 			if (status.enabled && status.running) {
 				await loadIngresses();
 				await loadAppNetworks();
+				try {
+					composeStartup = await client.call<ComposeStartupEntry[]>('apps.compose.startup.list');
+				} catch { composeStartup = []; }
 				if (!statsPoll) startStatsPolling();
 				// Also lift the idle list-poll here so Docker coming up
 				// after the page loaded (e.g. user enabled apps from this
@@ -1010,6 +1015,28 @@
 			}
 		} catch { /* ignore */ }
 		await loadLockedFsByApp();
+	}
+
+	// ── Compose startup ordering (#437) ──────────────────────────────
+	let startupBusy = $state<string | null>(null);
+	const composeStacks = $derived(apps.filter((a) => a.kind === 'compose'));
+	/** Startup config for a stack, defaulting to unmanaged when absent. */
+	function startupOf(name: string): ComposeStartupEntry {
+		return composeStartup.find((e) => e.name === name) ?? { name, managed: false, order: 0, delay_secs: 0 };
+	}
+	async function setComposeStartup(name: string, managed: boolean, order: number, delay_secs: number) {
+		startupBusy = name;
+		await withToast(
+			() => client.call('apps.compose.set_startup', {
+				name,
+				managed,
+				order: Math.max(0, Math.floor(order) || 0),
+				delay_secs: Math.max(0, Math.floor(delay_secs) || 0),
+			}),
+			managed ? 'Startup updated' : 'Removed from managed startup'
+		);
+		startupBusy = null;
+		await refresh();
 	}
 
 	/** Build the {appName: lockedFsName} map for the per-row badge.
@@ -2323,6 +2350,58 @@
 				</tbody>
 			</table>
 		{/if}
+	{/if}
+
+	<!-- Startup order (#437): NASty-managed boot ordering for compose stacks -->
+	{#if composeStacks.length > 0}
+		<h3 class="text-lg font-semibold mt-6 mb-1">Compose Startup Order</h3>
+		<p class="mb-3 max-w-3xl text-xs text-muted-foreground">
+			Let NASty bring compose stacks up at boot in a set order, waiting a few seconds after each
+			to let things settle (e.g. a stack that creates shared Docker networks before the stacks
+			that use them). Managed stacks are pinned to <code>restart: "no"</code> so Docker won't
+			race the engine — your compose files are left untouched.
+		</p>
+		<table class="w-full max-w-3xl text-sm">
+			<thead>
+				<tr>
+					<th class="border-b-2 border-border p-2 text-left text-xs uppercase text-muted-foreground">Managed</th>
+					<th class="border-b-2 border-border p-2 text-left text-xs uppercase text-muted-foreground">Stack</th>
+					<th class="border-b-2 border-border p-2 text-right text-xs uppercase text-muted-foreground">Order</th>
+					<th class="border-b-2 border-border p-2 text-right text-xs uppercase text-muted-foreground">Delay (s)</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each composeStacks.map((a) => startupOf(a.name)).sort((x, y) => x.managed === y.managed ? (x.order - y.order || x.name.localeCompare(y.name)) : (x.managed ? -1 : 1)) as e (e.name)}
+					<tr class="border-b border-border {e.managed ? '' : 'opacity-60'}">
+						<td class="p-2">
+							<input
+								type="checkbox"
+								class="h-4 w-4"
+								checked={e.managed}
+								disabled={startupBusy === e.name}
+								onchange={(ev) => setComposeStartup(e.name, (ev.target as HTMLInputElement).checked, e.order, e.delay_secs)} />
+						</td>
+						<td class="p-2 font-medium">{e.name}</td>
+						<td class="p-2 text-right">
+							<input
+								type="number" min="0"
+								class="h-8 w-20 rounded-md border border-input bg-transparent px-2 text-right text-sm disabled:opacity-50"
+								value={e.order}
+								disabled={!e.managed || startupBusy === e.name}
+								onchange={(ev) => setComposeStartup(e.name, true, Number((ev.target as HTMLInputElement).value), e.delay_secs)} />
+						</td>
+						<td class="p-2 text-right">
+							<input
+								type="number" min="0" max="300"
+								class="h-8 w-20 rounded-md border border-input bg-transparent px-2 text-right text-sm disabled:opacity-50"
+								value={e.delay_secs}
+								disabled={!e.managed || startupBusy === e.name}
+								onchange={(ev) => setComposeStartup(e.name, true, e.order, Number((ev.target as HTMLInputElement).value))} />
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
 	{/if}
 
 	<!-- Installed apps table -->

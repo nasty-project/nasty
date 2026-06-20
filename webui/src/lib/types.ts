@@ -1507,6 +1507,14 @@ export interface PruneResult {
 	space_reclaimed_bytes: number;
 }
 
+/** A compose stack's NASty-managed startup config (#437). */
+export interface ComposeStartupEntry {
+	name: string;
+	managed: boolean;
+	order: number;
+	delay_secs: number;
+}
+
 export interface App {
 	name: string;
 	image: string;

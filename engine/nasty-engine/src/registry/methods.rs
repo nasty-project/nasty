@@ -13,9 +13,10 @@ use crate::subvolume_dependents::SubvolumeDependents;
 use nasty_apps::{
     App, AppConfig, AppIngress, AppStats, AppdataRelocateStatus, AppsStatus, CaddyRouteSummary,
     CheckComposeRequest, CheckComposeResult, CheckDevicesRequest, CheckPortsRequest,
-    CheckVolumesRequest, DeviceMissing, EnableAppsRequest, FixVolumePermsRequest,
-    ImageInspectResult, InstallAppRequest, InstallComposeRequest, ManagedNetwork, NetworkSummary,
-    PortConflict, PruneResult, SetComposeStartupRequest, SetIngressRequest, VolumeMismatch,
+    CheckVolumesRequest, ComposeStartupEntry, DeviceMissing, EnableAppsRequest,
+    FixVolumePermsRequest, ImageInspectResult, InstallAppRequest, InstallComposeRequest,
+    ManagedNetwork, NetworkSummary, PortConflict, PruneResult, SetComposeStartupRequest,
+    SetIngressRequest, VolumeMismatch,
 };
 use nasty_backup::{BackupProfile, BackupSnapshot, BackupStatus};
 use nasty_sharing::iscsi::{
@@ -2672,6 +2673,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Operator,
                     params: MethodParams::Schema(gen_schema::<SetComposeStartupRequest>(generator)),
                     result: None,
+                },
+                Method {
+                    name: "apps.compose.startup.list",
+                    desc: "List every compose stack's startup config (managed flag, order, delay), sorted by order then name — powers the WebUI's Startup-order view.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<ComposeStartupEntry>>(generator)),
                 },
                 Method {
                     name: "apps.ingress.list",

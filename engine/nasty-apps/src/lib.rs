@@ -1787,6 +1787,15 @@ pub struct SetComposeStartupRequest {
     pub delay_secs: u32,
 }
 
+/// Startup config of one compose stack, for the WebUI's Startup-order view.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ComposeStartupEntry {
+    pub name: String,
+    pub managed: bool,
+    pub order: u32,
+    pub delay_secs: u32,
+}
+
 // ── Ingress types ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -4094,6 +4103,29 @@ impl AppsService {
             "Compose stack '{name}' startup: managed={managed} order={order} delay={delay_secs}s"
         );
         Ok(())
+    }
+
+    /// Startup config of every compose stack, sorted by (order, name), for
+    /// the WebUI's Startup-order view. Read-only; best-effort.
+    pub async fn compose_list_startup(&self) -> Vec<ComposeStartupEntry> {
+        let mut out = Vec::new();
+        if let Ok(mut entries) = tokio::fs::read_dir(COMPOSE_DIR).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if !entry.path().join("docker-compose.yml").exists() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let cfg = load_startup_config(&name).await;
+                out.push(ComposeStartupEntry {
+                    name,
+                    managed: cfg.managed,
+                    order: cfg.order,
+                    delay_secs: cfg.delay_secs,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.name.cmp(&b.name)));
+        out
     }
 
     pub async fn compose_remove(&self, name: &str) -> Result<(), AppsError> {

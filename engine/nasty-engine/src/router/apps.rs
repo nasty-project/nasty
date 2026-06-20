@@ -253,6 +253,7 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
+        "apps.compose.startup.list" => ok(req, state.apps.compose_list_startup().await),
         "apps.ingress.list" => match state.apps.ingress_list().await {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
