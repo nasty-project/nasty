@@ -1047,6 +1047,16 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     params: MethodParams::AdHoc(ad_hoc_one("id", "Share id (UUID) to revoke.")),
                     result: Some(gen_schema::<GuestShare>(generator)),
                 },
+                Method {
+                    name: "guestshare.remove",
+                    desc: "Remove a *revoked* guest share from the management list. The record is kept on disk (hidden) for audit/history; revoke the share first.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::AdHoc(ad_hoc_one(
+                        "id",
+                        "Share id (UUID) to remove. Must already be revoked.",
+                    )),
+                    result: None,
+                },
             ],
         ),
         // ── Authentication adjuncts ────────────────────────────────────

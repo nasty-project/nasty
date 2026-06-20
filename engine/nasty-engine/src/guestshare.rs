@@ -49,6 +49,8 @@ const UNLOCK_WINDOW_SECS: i64 = 15 * 60;
 pub enum GuestShareError {
     #[error("share not found: {0}")]
     NotFound(String),
+    #[error("share must be revoked before it can be removed: {0}")]
+    NotRevoked(String),
     #[error("no paths supplied")]
     NoPaths,
     #[error("path does not exist: {0}")]
@@ -94,6 +96,12 @@ pub struct GuestShare {
     /// Whether the share has been revoked. Revoked records are kept (not
     /// deleted) so history/audit survive.
     pub revoked: bool,
+    /// Soft "removed" — hidden from the default management list while the
+    /// record is kept on disk for audit/history. Only a *revoked* share can
+    /// be hidden (the UI revokes first). `#[serde(default)]` so shares
+    /// written before this field load as not-hidden.
+    #[serde(default)]
+    pub hidden: bool,
     /// Optional free-text note for the management UI.
     pub note: Option<String>,
 }
@@ -397,6 +405,7 @@ impl GuestShareService {
             downloads: 0,
             views: 0,
             revoked: false,
+            hidden: false,
             note: req.note,
         };
 
@@ -413,6 +422,22 @@ impl GuestShareService {
             self.state_dir().save(&share.id, &share).await?;
         }
         Ok(share)
+    }
+
+    /// Soft-remove a share: hide it from the default management list while
+    /// keeping the record on disk for audit/history. Only a *revoked* share
+    /// can be removed — the UI revokes first, so a live link is never
+    /// silently dropped. Idempotent.
+    pub async fn remove(&self, id: &str) -> Result<(), GuestShareError> {
+        let mut share = self.get(id).await?;
+        if !share.revoked {
+            return Err(GuestShareError::NotRevoked(id.to_string()));
+        }
+        if !share.hidden {
+            share.hidden = true;
+            self.state_dir().save(&share.id, &share).await?;
+        }
+        Ok(())
     }
 
     // ── Public access surface ───────────────────────────────────────────
@@ -685,6 +710,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remove_requires_revoke_then_hides_but_keeps_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, fs_root) = service(tmp.path());
+        let shared = fs_root.join("doc");
+        std::fs::create_dir_all(&shared).unwrap();
+        let res = svc
+            .create(
+                CreateGuestShareRequest {
+                    paths: vec![shared.to_string_lossy().into_owned()],
+                    expires_at: None,
+                    password: None,
+                    max_downloads: None,
+                    note: None,
+                },
+                "admin",
+            )
+            .await
+            .unwrap();
+        let id = res.share.id;
+
+        // An active share cannot be removed — must be revoked first.
+        assert!(matches!(
+            svc.remove(&id).await,
+            Err(GuestShareError::NotRevoked(_))
+        ));
+
+        svc.revoke(&id).await.unwrap();
+        svc.remove(&id).await.unwrap();
+
+        // The record is kept on disk and still returned by list() (the WebUI
+        // hides it behind a "Show removed" toggle), but marked hidden.
+        let rec = svc.get(&id).await.unwrap();
+        assert!(rec.hidden);
+        assert!(rec.revoked);
+        assert!(
+            svc.list()
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.id == id && s.hidden)
+        );
+        // remove is idempotent.
+        svc.remove(&id).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn create_hashes_password_and_rejects_no_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let (svc, fs_root) = service(tmp.path());
@@ -745,6 +816,7 @@ mod tests {
             downloads: 0,
             views: 0,
             revoked: false,
+            hidden: false,
             note: None,
         };
         mutate(&mut s);
@@ -867,6 +939,7 @@ mod tests {
             downloads: 0,
             views: 0,
             revoked: false,
+            hidden: false,
             note: None,
         };
         assert!(GuestShareService::needs_password(&protected));
@@ -1019,6 +1092,7 @@ mod tests {
             downloads: 0,
             views: 0,
             revoked: false,
+            hidden: false,
             note: None,
         }
     }
