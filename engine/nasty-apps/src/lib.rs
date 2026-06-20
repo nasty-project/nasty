@@ -4160,6 +4160,18 @@ impl AppsService {
             return Err(AppsError::AppNotFound(name.to_string()));
         }
 
+        // Drop the per-app sidecar manifest (`<name>.json`). It holds
+        // ingress_subdomain + startup config (#437) and lives BESIDE the
+        // project dir, so the `remove_dir_all` above doesn't catch it.
+        // Without this, a stack later recreated with the same name silently
+        // inherits stale startup enrollment / ingress settings. Best-effort.
+        let sidecar = format!("{}/{}.json", COMPOSE_DIR, name);
+        if let Err(e) = tokio::fs::remove_file(&sidecar).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("compose_remove: could not remove sidecar {sidecar}: {e}");
+        }
+
         if let Err(e) = self.ingress_remove(name).await {
             warn!("ingress_remove({name}) failed during compose app removal: {e}");
         }
