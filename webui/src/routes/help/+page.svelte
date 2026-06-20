@@ -53,6 +53,16 @@
 					summary: 'NVMe over Fabrics — high-performance block storage over the network.',
 					detail: 'Like iSCSI but faster — uses the NVMe protocol natively over the network. Requires NVMe-oF support on both ends. Best for: high-performance workloads, low-latency requirements, modern infrastructure.',
 				},
+				{
+					term: 'Time Machine',
+					summary: 'Turn an SMB share into a macOS Time Machine backup destination.',
+					detail: 'Tick "Time Machine" when creating an SMB share to make it a backup target for macOS. NASty applies the Samba vfs_fruit options Time Machine needs and advertises the share over mDNS (_adisk) so it auto-appears in System Settings → Time Machine → Add Backup Disk — no manual mounting. A Time Machine share must be authenticated and writable (not guest, not read-only), so add the one user who will back up. Optionally cap its size, and point it at a quota\'d subvolume as a hard backstop. The share is pinned so Time Machine — not Docker/Samba — thins old backups.',
+				},
+				{
+					term: 'Guest Share',
+					summary: 'A public link to a file or folder for someone who has no NASty account.',
+					detail: 'Create one from the Files page (the Share action) to hand a file or whole folder to an outside recipient. The link itself is the credential — only its hash is stored, so it\'s shown once at creation and can\'t be retrieved afterwards. Optional controls: an expiry, a password, and a download limit. Folders download as a streamed ZIP. Recipients land on a no-login page; downloads are always served as attachments (never rendered inline) so shared content can\'t run on the app origin, and any unavailable link (expired, revoked, over its limit) returns the same generic message. Manage and revoke links under Sharing → Guest Shares.',
+				},
 			],
 		},
 		{
@@ -167,6 +177,11 @@
 					term: 'Docker Compose',
 					summary: 'A tool for defining multi-container applications.',
 					detail: 'Some apps need multiple containers working together (e.g., a web app + database). Docker Compose defines these in a single YAML file, managing networking and dependencies between containers automatically.',
+				},
+				{
+					term: 'Managed Startup (Startup Order)',
+					summary: 'Have NASty bring compose stacks up at boot in a set order, with a delay after each.',
+					detail: 'By default Docker starts compose stacks in arbitrary order at boot, per each stack\'s own restart policy. Enroll a stack into managed startup (Apps → Compose Startup Order) and the NASty engine owns its boot startup instead: managed stacks come up in the order you choose, with a configurable settle delay after each — handy when a "network" stack must create shared Docker networks before the stacks that depend on them. Managed stacks are pinned to restart: "no" through a generated compose override (your own compose file is left untouched) so Docker doesn\'t race the engine; unenroll a stack and it reverts to its own restart policy. If a stack fails to start, it\'s logged and the sequence continues with the rest.',
 				},
 				{
 					term: 'allow_unsafe',
@@ -332,6 +347,14 @@
 				{
 					term: 'I want to stream media (Plex, Jellyfin)',
 					summary: 'Use NFS or SMB — either works, NFS has less overhead.',
+				},
+				{
+					term: 'I want to back up my Mac with Time Machine',
+					summary: 'Create an SMB share with Time Machine enabled.',
+				},
+				{
+					term: 'I want to give a file to someone without a NASty account',
+					summary: 'Create a Guest Share link from the Files page.',
 				},
 				{
 					term: 'I\'m not sure',
