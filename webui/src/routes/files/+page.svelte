@@ -3,9 +3,11 @@
 	import { goto } from '$app/navigation';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput } from '@lucide/svelte';
+	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput, Share2, Check } from '@lucide/svelte';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import PathPicker from '$lib/components/PathPicker.svelte';
+	import { getClient } from '$lib/client';
+	import { withToast, error as toastError } from '$lib/toast.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 
 	interface FileEntry {
@@ -128,6 +130,68 @@
 
 	// Delete confirmation
 	let deleteTarget: FileEntry | null = $state(null);
+
+	// Guest share creation (#474). `shareTarget` opens the dialog; once the
+	// link is minted `shareUrl` holds the one-time URL (the engine never
+	// returns it again).
+	let shareTarget: FileEntry | null = $state(null);
+	let shareExpiry = $state('7'); // days; '0' = never
+	let sharePassword = $state('');
+	let shareMaxDownloads = $state('');
+	let shareNote = $state('');
+	let shareBusy = $state(false);
+	let shareUrl: string | null = $state(null);
+	let shareCopied = $state(false);
+
+	function openShare(entry: FileEntry) {
+		shareTarget = entry;
+		shareExpiry = '7';
+		sharePassword = '';
+		shareMaxDownloads = '';
+		shareNote = '';
+		shareUrl = null;
+		shareCopied = false;
+	}
+
+	async function createShare() {
+		if (!shareTarget) return;
+		const rel = currentPath ? `${currentPath}/${shareTarget.name}` : shareTarget.name;
+		// The engine takes absolute paths under /fs; the browser works in
+		// /fs-relative paths, so re-add the prefix here.
+		const abs = `/fs/${rel}`;
+		const days = parseInt(shareExpiry, 10);
+		const expires_at = days > 0 ? Math.floor(Date.now() / 1000) + days * 86400 : null;
+		const maxDl = shareMaxDownloads.trim() ? parseInt(shareMaxDownloads, 10) : null;
+		if (maxDl != null && (!Number.isFinite(maxDl) || maxDl < 1)) {
+			toastError('Download limit must be a positive number');
+			return;
+		}
+		shareBusy = true;
+		const res = await withToast(
+			() =>
+				getClient().call<{ share: unknown; token: string }>('guestshare.create', {
+					paths: [abs],
+					expires_at,
+					password: sharePassword ? sharePassword : null,
+					max_downloads: maxDl,
+					note: shareNote.trim() ? shareNote.trim() : null
+				}),
+			'Share link created'
+		);
+		shareBusy = false;
+		if (res) shareUrl = `${location.origin}/share/${res.token}`;
+	}
+
+	async function copyShareUrl() {
+		if (!shareUrl) return;
+		try {
+			await navigator.clipboard.writeText(shareUrl);
+			shareCopied = true;
+			setTimeout(() => (shareCopied = false), 2000);
+		} catch {
+			toastError('Could not copy to clipboard');
+		}
+	}
 
 	// Rename inline
 	let renameTarget: FileEntry | null = $state(null);
@@ -646,6 +710,12 @@
 								{/if}
 								<button
 									class="text-muted-foreground/40 hover:text-foreground transition-colors"
+									onclick={() => openShare(entry)}
+									title="Create guest share link">
+									<Share2 size={14} />
+								</button>
+								<button
+									class="text-muted-foreground/40 hover:text-foreground transition-colors"
 									onclick={() => startRename(entry)}
 									title="Rename">
 									<Pencil size={14} />
@@ -720,6 +790,89 @@
 					<Button variant="destructive" onclick={confirmDelete}>Delete</Button>
 					<Button variant="secondary" onclick={() => deleteTarget = null}>Cancel</Button>
 				</div>
+			</CardContent>
+		</Card>
+	</div>
+{/if}
+
+<!-- Guest share creation -->
+{#if shareTarget}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<Card class="w-full max-w-md">
+			<CardContent class="pt-6">
+				{#if shareUrl}
+					<h3 class="mb-2 text-lg font-semibold">Share link ready</h3>
+					<p class="mb-3 text-sm text-muted-foreground">
+						Copy it now — for security it can't be shown again. Manage or revoke it later under
+						<a href="/shares" class="underline">Guest Shares</a>.
+					</p>
+					<div class="mb-4 flex items-center gap-2">
+						<input
+							class="h-9 w-full rounded-md border border-input bg-transparent px-3 font-mono text-xs"
+							readonly
+							value={shareUrl} />
+						<Button variant="secondary" size="sm" onclick={copyShareUrl}>
+							{#if shareCopied}<Check size={14} class="mr-1" /> Copied{:else}<Copy size={14} class="mr-1" /> Copy{/if}
+						</Button>
+					</div>
+					<div class="flex justify-end">
+						<Button onclick={() => (shareTarget = null)}>Done</Button>
+					</div>
+				{:else}
+					<h3 class="mb-1 text-lg font-semibold">Share {shareTarget.is_dir ? 'folder' : 'file'}</h3>
+					<p class="mb-4 text-sm text-muted-foreground">
+						Create a public link to <span class="font-mono font-medium text-foreground">{shareTarget.name}</span>.
+					</p>
+
+					<div class="mb-4">
+						<label for="share-expiry" class="text-sm font-medium">Expires</label>
+						<select
+							id="share-expiry"
+							bind:value={shareExpiry}
+							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+							<option value="1">In 1 day</option>
+							<option value="7">In 7 days</option>
+							<option value="30">In 30 days</option>
+							<option value="0">Never</option>
+						</select>
+					</div>
+
+					<div class="mb-4">
+						<label for="share-password" class="text-sm font-medium">Password <span class="text-muted-foreground">(optional)</span></label>
+						<input
+							id="share-password"
+							type="password"
+							autocomplete="new-password"
+							bind:value={sharePassword}
+							placeholder="No password"
+							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" />
+					</div>
+
+					<div class="mb-4">
+						<label for="share-maxdl" class="text-sm font-medium">Download limit <span class="text-muted-foreground">(optional)</span></label>
+						<input
+							id="share-maxdl"
+							type="number"
+							min="1"
+							bind:value={shareMaxDownloads}
+							placeholder="Unlimited"
+							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" />
+					</div>
+
+					<div class="mb-4">
+						<label for="share-note" class="text-sm font-medium">Note <span class="text-muted-foreground">(optional)</span></label>
+						<input
+							id="share-note"
+							bind:value={shareNote}
+							placeholder="For your reference"
+							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" />
+					</div>
+
+					<div class="flex justify-end gap-2">
+						<Button variant="secondary" onclick={() => (shareTarget = null)} disabled={shareBusy}>Cancel</Button>
+						<Button onclick={createShare} disabled={shareBusy}>{shareBusy ? 'Creating…' : 'Create link'}</Button>
+					</div>
+				{/if}
 			</CardContent>
 		</Card>
 	</div>
