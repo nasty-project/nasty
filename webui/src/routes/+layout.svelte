@@ -24,7 +24,6 @@
 		Database,
 		Layers,
 		Share2,
-		Link2,
 		HardDrive,
 		Archive,
 		Bell,
@@ -659,7 +658,6 @@
 				{ href: '/subvolumes', label: 'Subvolumes', icon: Layers },
 				{ href: '/disks',      label: 'Disks',       icon: HardDrive },
 				{ href: '/files',      label: 'Files',       icon: FolderOpen },
-				{ href: '/shares',     label: 'Guest Shares', icon: Link2 },
 			]},
 			{ href: '/sharing', label: 'Sharing', icon: Share2 },
 			{ label: 'Protection', icon: Shield, children: [

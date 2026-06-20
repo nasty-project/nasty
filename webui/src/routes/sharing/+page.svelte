@@ -13,6 +13,7 @@
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { AlertTriangle } from '@lucide/svelte';
 	import NfsPanel from './NfsPanel.svelte';
+	import GuestSharesPanel from './GuestSharesPanel.svelte';
 	import SmbPanel from './SmbPanel.svelte';
 	import IscsiPanel from './IscsiPanel.svelte';
 	import NvmeofPanel from './NvmeofPanel.svelte';
@@ -46,11 +47,15 @@
 		nvmeLoadProtocol,
 	} from '$lib/sharing/nvmeof.svelte';
 
-	type Tab = 'nfs' | 'smb' | 'iscsi' | 'nvmeof';
+	// Guest shares are public web links (managed in their own panel), a peer
+	// of the network protocols but with no create-wizard / protocol service.
+	type Tab = 'nfs' | 'smb' | 'iscsi' | 'nvmeof' | 'guest';
+	// The protocols that DO use the cross-protocol create wizard.
+	type ShareProto = Exclude<Tab, 'guest'>;
 
 	// ── Share creation wizard ────────────────────────────
 	let shareWizardStep: 0 | 1 | 2 | 3 | 4 = $state(0);
-	let shareProtocol = $state<Tab>('smb');
+	let shareProtocol = $state<ShareProto>('smb');
 	let shareSubvolume = $state('');
 	// NFS access
 	let shareNfsHost = $state('');
@@ -124,7 +129,9 @@
 
 	function openShareWizard() {
 		shareWizardStep = 1;
-		shareProtocol = activeTab;
+		// The wizard is protocol-only (its button is hidden on the guest tab);
+		// guard keeps the types honest and is a no-op on 'guest'.
+		if (activeTab !== 'guest') shareProtocol = activeTab;
 		shareSubvolume = '';
 		shareNfsHost = ''; shareNfsOptions = 'rw,sync,no_subtree_check';
 		shareSmbName = ''; shareSmbGuestOk = false; shareSmbReadOnly = false; shareSmbValidUsers = [];
@@ -205,10 +212,11 @@
 
 	// ── Tab state ────────────────────────────────────────
 	const TABS: { key: Tab; label: string; hash: string }[] = [
-		{ key: 'smb',    label: 'SMB',     hash: '#smb' },
-		{ key: 'nfs',    label: 'NFS',     hash: '#nfs' },
-		{ key: 'iscsi',  label: 'iSCSI',   hash: '#iscsi' },
-		{ key: 'nvmeof', label: 'NVMe-oF', hash: '#nvmeof' },
+		{ key: 'smb',    label: 'SMB',          hash: '#smb' },
+		{ key: 'nfs',    label: 'NFS',          hash: '#nfs' },
+		{ key: 'iscsi',  label: 'iSCSI',        hash: '#iscsi' },
+		{ key: 'nvmeof', label: 'NVMe-oF',      hash: '#nvmeof' },
+		{ key: 'guest',  label: 'Guest Shares', hash: '#guest' },
 	];
 
 	function tabFromHash(): Tab {
@@ -222,8 +230,11 @@
 
 	function switchTab(tab: Tab) {
 		activeTab = tab;
-		// Sync wizard protocol with active tab
-		if (shareWizardStep > 0) {
+		if (tab === 'guest') {
+			// Guest shares have no create-wizard; cancel any in-progress one.
+			shareWizardStep = 0;
+		} else if (shareWizardStep > 0) {
+			// Sync wizard protocol with active tab.
 			shareProtocol = tab;
 		}
 		window.location.hash = tab;
@@ -482,8 +493,8 @@
 <!-- Tab bar with inline status -->
 <div class="mb-6 flex items-center border-b border-border">
 	{#each TABS as tab}
-		{@const proto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsi.protocol, nvmeof: nvme.protocol })[tab.key]}
-		{@const count = ({ nfs: nfs.shares.length, smb: smb.shares.length, iscsi: iscsi.targets.length, nvmeof: nvme.subsystems.length })[tab.key]}
+		{@const proto = ({ nfs: nfs.protocol, smb: smb.protocol, iscsi: iscsi.protocol, nvmeof: nvme.protocol, guest: undefined })[tab.key]}
+		{@const count = ({ nfs: nfs.shares.length, smb: smb.shares.length, iscsi: iscsi.targets.length, nvmeof: nvme.subsystems.length, guest: 0 })[tab.key]}
 		<button
 			onclick={() => switchTab(tab.key)}
 			class="flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors {activeTab === tab.key
@@ -501,12 +512,15 @@
 	{/each}
 </div>
 
-<!-- Create Share button + wizard -->
-<div class="mb-4">
-	<Button size="sm" onclick={() => shareWizardStep === 0 ? openShareWizard() : (shareWizardStep = 0)}>
-		{shareWizardStep !== 0 ? 'Cancel' : 'Create Share'}
-	</Button>
-</div>
+<!-- Create Share button + wizard (protocol shares only; guest shares are
+     created from the Files page, so no wizard here). -->
+{#if activeTab !== 'guest'}
+	<div class="mb-4">
+		<Button size="sm" onclick={() => shareWizardStep === 0 ? openShareWizard() : (shareWizardStep = 0)}>
+			{shareWizardStep !== 0 ? 'Cancel' : 'Create Share'}
+		</Button>
+	</div>
+{/if}
 
 <!-- ════════════════════════════════════════════════════ NFS ════════════════════════════════════════════════════ -->
 {#if activeTab === 'nfs'}
@@ -526,5 +540,10 @@
 <!-- ════════════════════════════════════════════════════ NVMe-oF ════════════════════════════════════════════════════ -->
 {:else if activeTab === 'nvmeof'}
 	<NvmeofPanel />
+
+
+<!-- ════════════════════════════════════════════════════ Guest Shares ════════════════════════════════════════════════════ -->
+{:else if activeTab === 'guest'}
+	<GuestSharesPanel />
 
 {/if}

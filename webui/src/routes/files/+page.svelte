@@ -804,7 +804,7 @@
 					<h3 class="mb-2 text-lg font-semibold">Share link ready</h3>
 					<p class="mb-3 text-sm text-muted-foreground">
 						Copy it now — for security it can't be shown again. Manage or revoke it later under
-						<a href="/shares" class="underline">Guest Shares</a>.
+						<a href="/sharing#guest" class="underline">Guest Shares</a>.
 					</p>
 					<div class="mb-4 flex items-center gap-2">
 						<input
