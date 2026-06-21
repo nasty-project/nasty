@@ -85,7 +85,12 @@
     engine = {
       package = nasty-engine;
       port = 2137;
-      logLevel = "nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,nasty_apps=info,tower_http=info";
+      # NOTE: the appliance sets logLevel explicitly here, which OVERRIDES the
+      # `mkOption` default in modules/nasty.nix — so any allowlist change must
+      # be made in BOTH places (a default-only change is dead code on a real
+      # box). `nasty::cmd` carries every subprocess failure (run/try_run/
+      # run_ok); without it those warnings are dropped from the journal (#543).
+      logLevel = "nasty_engine=info,nasty_storage=info,nasty_sharing=info,nasty_snapshot=info,nasty_system=info,nasty_apps=info,nasty::cmd=info,tower_http=info";
     };
 
     webui = {
