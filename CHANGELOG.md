@@ -92,6 +92,9 @@
   (`docker compose`, `smbcontrol`, `exportfs`, …) is logged under the `nasty::cmd`
   target with its command + stderr, instead of failing silently — and a managed
   compose stack that fails to start at boot now says so explicitly (#543, #546).
+- **`nasty-top` bumped to v0.0.8** — the live IO / tuning-advisor CLI now shows
+  `background_compression` in the header when it differs from the foreground
+  algorithm (nasty-top #19, #21).
 - UPS support can be enabled: the NUT systemd units are built on the appliance
   (#513).
 - SSH password-authentication changes made in the WebUI are honoured by the engine
