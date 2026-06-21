@@ -1,5 +1,118 @@
 # Changelog
 
+## v0.0.12 — 2026-06-21
+
+> **This is the sharing & visibility release.** NASty learns to hand files out
+> and to show what it's doing. **Guest file sharing** turns any file or folder
+> into a public link — with expiry, password, download caps and folder-as-ZIP —
+> for people who have no NASty account. SMB shares become **macOS Time Machine**
+> destinations that auto-appear in the Time Machine picker. Compose stacks gain
+> **engine-owned startup ordering with inter-stack delays**, and a new
+> **always-on system-status band** in the sidebar surfaces exotic array
+> operations (device evacuation, scrub, reconcile) as they happen. Round it out
+> with sortable columns across the data tables, bcachefs 1.38.6, journal
+> visibility for every engine subprocess, and a sweep of fixes.
+
+### Headline changes
+
+- **Guest File Sharing (#474; #525, #526, #527, #529, #530, #532, #536).** Share
+  a file or folder under `/fs` with a public link for someone who has no NASty
+  account. Create it from the Files page with an optional **expiry**, **password**
+  and **download limit**; folders download as a **streamed ZIP** (built on the
+  fly, never buffered in RAM). The link *is* the credential — only its SHA-256 is
+  stored, so it's shown once at creation and can't be retrieved later. Recipients
+  land on a clean no-login page; downloads are always served as attachments
+  (shared content can't render on the app origin) and every unavailable reason —
+  expired, revoked, over-limit — returns the same generic message, so a token
+  guesser gets no oracle. Manage and revoke links under **Sharing → Guest Shares**.
+
+- **macOS Time Machine destinations (#537).** A single toggle turns an SMB share
+  into a Time Machine target: NASty applies the Samba `vfs_fruit` options Time
+  Machine needs and advertises the share over mDNS (`_adisk`), so it **auto-appears
+  in System Settings → Time Machine → Add Backup Disk** with no manual mounting.
+  Optional size cap; pair it with a subvolume quota as a hard backstop.
+
+- **Compose stack startup ordering + inter-stack delays (#437; #539, #541).** Let
+  NASty own boot startup for the compose stacks you opt in: they come up in the
+  order you choose, with a configurable settle delay after each — for the common
+  case where a "network" stack must create shared Docker networks before the
+  stacks that depend on them. Managed stacks are pinned to `restart: "no"` via a
+  generated compose override (your compose file is left untouched) so Docker
+  doesn't race the engine; a stack that fails to start is logged and the sequence
+  continues. Drive it from **Apps → Compose Startup Order**.
+
+- **Persistent system-status band in the sidebar (#528; #545).** An always-visible
+  band under the logo — green **Healthy**, amber for **activity** (a device
+  evacuating, scrub or reconcile running), red for **critical** — so there's no
+  mistaking that an array operation is in flight while you navigate. Click to
+  expand the running operations and alert counts.
+
+### Sharing & files
+
+- Guest shares: public metadata / password-unlock (verify-once → short-lived
+  grant cookie, rate-limited) / single-file download / folder ZIP, plus a
+  management page with status, download/view counts, and revoke; removed shares
+  are kept for audit and hidden behind a "Show removed" toggle (#532). The whole
+  surface lives as a tab on the **Sharing** page alongside SMB/NFS/iSCSI/NVMe-oF
+  (#536).
+- Time Machine SMB shares are validated as authenticated + writable, with the
+  `_adisk` advertisement managed dynamically as shares are enrolled/removed (#537).
+- Folders created in the Files browser are now writable through the sharing layer
+  — they get share-friendly permissions on create, so SMB forced-users and NFS
+  squashed uids can write into a freshly-made folder (#519, #520).
+
+### Apps & Docker
+
+- Compose startup ordering + settle delays, with the `restart: "no"` override and
+  an ordered, failure-tolerant boot sequence run off the boot-phase budget
+  (#539, #541).
+- Removing a compose stack now also clears its metadata sidecar, so a stack later
+  recreated with the same name can't inherit stale startup/ingress settings (#542).
+- Apps boot hardening: a dangling `/var/lib/docker` data-root symlink is cleared
+  before re-linking, avoiding a dockerd crash-loop when the apps filesystem wasn't
+  mounted (#504).
+
+### Storage & bcachefs
+
+- **bcachefs-tools bumped to v1.38.6** (#522).
+- The bcachefs update/sync **status chip stays accurate** after a sync — the
+  engine reads the pin-derived fields fresh and the WebUI reconciles after a
+  switch — and the chip now cleanly separates "update available" from "reboot
+  pending" (#523, #524).
+- Filesystems: bcachefs **label groups are offered as data targets**
+  (foreground / background / promote), and an optional **Rotational** column
+  surfaces the per-device bcachefs superblock flag (#510, #511).
+
+### System & UI
+
+- **Sortable columns** across the main data tables — Filesystems (and the
+  per-pool device table), Alerts, Guest Shares, TLS, Users, and Snapshots (#531,
+  #535).
+- **Subprocess failures now reach the journal.** Every failing engine shell-out
+  (`docker compose`, `smbcontrol`, `exportfs`, …) is logged under the `nasty::cmd`
+  target with its command + stderr, instead of failing silently — and a managed
+  compose stack that fails to start at boot now says so explicitly (#543, #546).
+- UPS support can be enabled: the NUT systemd units are built on the appliance
+  (#513).
+- SSH password-authentication changes made in the WebUI are honoured by the engine
+  (#517).
+- VM **Add ISO** no longer persists an empty CD-ROM path when editing (#515).
+- Native `<select>` dropdown text stays legible across themes (#508).
+- **Help & Glossary** gains Guest Shares, Time Machine and managed-startup entries,
+  plus an r/bcachefs community link (#533, #544).
+
+### Alerts
+
+- The HDD-failure SMART alert is scoped to spinning disks (no false alarms on
+  SSDs) and tolerates blank diagnostics (#505).
+
+### Dependencies
+
+- Rust + WebUI dependency refresh: `cargo update` sweep, `async_zip` 0.0.18,
+  `cron` 0.17; `@lucide/svelte` 1.21, SvelteKit 2.66, `vitest` 4.1.9;
+  `npmDepsHash` regenerated (#538).
+- Weekly nixpkgs bump — Linux 6.18.34 → 6.18.35 (#509).
+
 ## v0.0.11 — 2026-06-13
 
 > **This is the storage-operations release.** The bcachefs device lifecycle is now fully drivable from the WebUI — scrub with live progress, offline fsck, mount-failure diagnostics that name the missing disk by slot, slot-true device identity, and evacuate / remove / re-attach flows that tell an offline member apart from a dead one. Compression gains per-algorithm levels, wipe leaves a clean disk, and reconcile stops crying wolf. The Docker side grows real network management (containers on your LAN), live compose validation in the editor, and a first-class relocatable `/appdata` home for container data. Plus the encryption-at-rest sweep is finished — every stored operator secret is now sealed via systemd-creds — and the dependency tree is brought current.
