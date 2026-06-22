@@ -507,6 +507,11 @@
 						under KVM/Proxmox — graceful shutdown, time sync and guest IP reporting are
 						already on. No action needed.
 					</div>
+					<p class="mt-2 text-xs text-muted-foreground">
+						Not seeing the guest IP on your hypervisor? Enable the guest-agent option in
+						its VM settings (Proxmox: <span class="font-mono">Options → QEMU Guest Agent</span>)
+						and power-cycle the VM — the host only opens the agent channel once that's on.
+					</p>
 				{:else}
 					<p class="mb-3 text-xs text-muted-foreground">
 						{#if hv === 'vmware'}
