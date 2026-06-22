@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod firewall;
 pub mod firmware;
+pub mod guest_tools;
 pub mod hardware;
 pub mod network;
 pub mod notifications;

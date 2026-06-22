@@ -48,6 +48,7 @@ use nasty_storage::subvolume::{
 use nasty_system::alerts::{ActiveAlert, AlertRule, AlertRuleUpdate};
 use nasty_system::firewall::FirewallStatus;
 use nasty_system::firmware::{FirmwareConstraints, FirmwareDevice, FirmwareUpdateResult};
+use nasty_system::guest_tools::{GuestToolsStatus, GuestToolsUpdate};
 use nasty_system::hardware::{HardwareSummary, IommuGroup};
 use nasty_system::network::nm::dbus::{NmApplyOutcome, NmDiff};
 use nasty_system::network::{ConfirmRequest, NetworkConfig, NetworkPendingTxn};
@@ -1486,6 +1487,26 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Admin,
                     params: MethodParams::Schema(gen_schema::<PassthroughUpdate>(generator)),
                     result: Some(gen_schema::<PassthroughConfig>(generator)),
+                },
+            ],
+        ),
+        // ── System: VM guest tools ───────────────────────────────────────
+        (
+            "System Guest Tools",
+            vec![
+                Method {
+                    name: "system.guest_tools.status",
+                    desc: "Return VM guest-tools state: opt-in flag, detected hypervisor, and the live rebuild state.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<GuestToolsStatus>(generator)),
+                },
+                Method {
+                    name: "system.guest_tools.set",
+                    desc: "Enable/disable the per-box VM guest integrations (VMware open-vm-tools / Hyper-V), regenerate the Nix overlay, and trigger nixos-rebuild switch to apply without a reboot.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<GuestToolsUpdate>(generator)),
+                    result: Some(gen_schema::<GuestToolsStatus>(generator)),
                 },
             ],
         ),

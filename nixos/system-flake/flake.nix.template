@@ -123,6 +123,16 @@
             ./networking.nix
           ]
           ++ nixpkgs.lib.optional (builtins.pathExists ./passthrough.nix) ./passthrough.nix
+          # VM guest-tools overlay — written by the engine when the
+          # operator enables the heavy hypervisor integrations (VMware
+          # open-vm-tools / Hyper-V) from the System page. Enables stock
+          # nixpkgs modules only (no extra flake input, unlike Secure
+          # Boot), so it's a plain optional import. Absent on fresh
+          # installs and on boxes that never opt in; `pathExists` keeps
+          # the import optional so eval doesn't fail. The QEMU guest
+          # agent is unconditional (appliance-base.nix) and not gated
+          # here (#534).
+          ++ nixpkgs.lib.optional (builtins.pathExists ./guest-tools.nix) ./guest-tools.nix
           # Secure Boot enrollment overlay — written by the engine
           # when the operator clicks "Begin enrollment" in the
           # Hardware page's experimental SB wizard. Sets

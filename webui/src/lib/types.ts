@@ -275,6 +275,20 @@ export interface PassthroughConfig {
 	ids: PassthroughDeviceId[];
 }
 
+/** VM guest-tools state from `system.guest_tools.status`. The QEMU
+ * guest agent is always-on (free, reuses bundled qemu) and not
+ * represented here; `enabled` governs the heavier VMware/Hyper-V
+ * integrations toggled via `system.guest_tools.set`. */
+export interface GuestToolsStatus {
+	enabled: boolean;
+	/** `systemd-detect-virt` token: vmware | microsoft | kvm | qemu | none | … */
+	hypervisor: string;
+	is_vm: boolean;
+	/** idle | running | failed */
+	rebuild_state: string;
+	log_tail: string | null;
+}
+
 /** Aggregated view of everything that depends on a filesystem,
  * returned by `fs.dependents`. Powers the impact-preview dialog
  * before destructive operations like Lock — the WebUI lists these

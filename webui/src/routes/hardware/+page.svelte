@@ -1,11 +1,12 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import type {
+		GuestToolsStatus,
 		HardwareSummary,
 		IommuGroup,
 		PassthroughConfig,
@@ -65,7 +66,52 @@
 	let pending = $state(new Set<string>());
 	let saving = $state(false);
 
+	// VM guest-tools opt-in (VMware open-vm-tools / Hyper-V). The QEMU
+	// guest agent is always-on, so this card only appears as actionable
+	// when a non-KVM hypervisor is detected (or the operator wants it
+	// anyway). `guestBusy` covers the set RPC; the rebuild itself is
+	// tracked via `guestTools.rebuild_state`, polled while running.
+	let guestTools: GuestToolsStatus | null = $state(null);
+	let guestBusy = $state(false);
+	let guestPoll: ReturnType<typeof setInterval> | null = null;
+
 	const client = getClient();
+
+	function stopGuestPoll() {
+		if (guestPoll !== null) {
+			clearInterval(guestPoll);
+			guestPoll = null;
+		}
+	}
+
+	// Poll guest-tools status every 3s while a rebuild is in flight, so
+	// the card reflects progress and stops once it lands (or fails).
+	function startGuestPoll() {
+		stopGuestPoll();
+		guestPoll = setInterval(async () => {
+			try {
+				guestTools = await client.call<GuestToolsStatus>('system.guest_tools.status');
+			} catch {
+				/* transient — keep the last snapshot */
+			}
+			if (guestTools?.rebuild_state !== 'running') stopGuestPoll();
+		}, 3000);
+	}
+
+	async function setGuestTools(enabled: boolean) {
+		guestBusy = true;
+		const result = await withToast(
+			() => client.call<GuestToolsStatus>('system.guest_tools.set', { enabled }),
+			enabled
+				? 'Guest tools enabling — building system…'
+				: 'Guest tools disabling — building system…',
+		);
+		if (result) {
+			guestTools = result;
+			startGuestPoll();
+		}
+		guestBusy = false;
+	}
 
 	async function load() {
 		try {
@@ -105,6 +151,15 @@
 			sbReadinessLoading = false;
 		} else {
 			sbReadiness = null;
+		}
+		// Guest-tools status — separately guarded so an older engine
+		// without the RPC just hides the card rather than failing the
+		// whole page load.
+		try {
+			guestTools = await client.call<GuestToolsStatus>('system.guest_tools.status');
+			if (guestTools.rebuild_state === 'running') startGuestPoll();
+		} catch {
+			guestTools = null;
 		}
 		loading = false;
 	}
@@ -214,6 +269,7 @@
 	});
 
 	onMount(load);
+	onDestroy(stopGuestPoll);
 </script>
 
 <div class="mb-4 flex items-center justify-between">
@@ -420,6 +476,96 @@
 			</CardContent>
 		</Card>
 	</div>
+
+	<!-- ── VM guest tools (only when running under a hypervisor, or already opted in) ─── -->
+	{#if guestTools && (guestTools.is_vm || guestTools.enabled)}
+		{@const hv = guestTools.hypervisor}
+		{@const hvLabel =
+			hv === 'vmware'
+				? 'VMware / ESXi'
+				: hv === 'microsoft'
+					? 'Hyper-V'
+					: hv === 'kvm' || hv === 'qemu'
+						? 'KVM / QEMU'
+						: hv}
+		{@const building = guestTools.rebuild_state === 'running'}
+		{@const failed = guestTools.rebuild_state === 'failed'}
+		<Card class="mb-6">
+			<CardContent class="pt-4 pb-3">
+				<div class="mb-2 flex items-baseline justify-between">
+					<h3 class="text-sm font-semibold">VM guest tools</h3>
+					<span class="text-xs text-muted-foreground">
+						Detected hypervisor: <span class="font-mono">{hvLabel}</span>
+					</span>
+				</div>
+
+				{#if hv === 'kvm' || hv === 'qemu'}
+					<!-- KVM/QEMU is covered by the always-on QEMU guest agent;
+						 nothing to enable here. -->
+					<div class="text-sm">
+						<span class="text-emerald-400">Active</span> · QEMU guest agent runs automatically
+						under KVM/Proxmox — graceful shutdown, time sync and guest IP reporting are
+						already on. No action needed.
+					</div>
+				{:else}
+					<p class="mb-3 text-xs text-muted-foreground">
+						{#if hv === 'vmware'}
+							Enables <code class="font-mono">open-vm-tools</code> so vCenter/ESXi can
+							gracefully shut the guest down (clean stop + unmount), sync time, and report
+							the guest IP. Downloaded on enable and applied with a system rebuild — no reboot.
+						{:else if hv === 'microsoft'}
+							Enables Hyper-V integration services (graceful shutdown, time sync, heartbeat).
+							Applied with a system rebuild.
+						{:else}
+							Enables the VMware and Hyper-V integrations. They self-gate on the running
+							hypervisor, so only the matching one activates. Applied with a system rebuild.
+						{/if}
+					</p>
+
+					<div class="flex items-center gap-3">
+						{#if guestTools.enabled}
+							<Button
+								variant="outline"
+								size="sm"
+								disabled={guestBusy || building}
+								onclick={() => setGuestTools(false)}
+							>
+								Disable
+							</Button>
+							{#if building}
+								<span class="flex items-center gap-2 text-xs text-amber-400">
+									<RefreshCw class="h-3 w-3 animate-spin" /> Rebuilding…
+								</span>
+							{:else if failed}
+								<span class="text-xs text-rose-400">Last rebuild failed — see log below.</span>
+							{:else}
+								<Badge variant="outline" class="text-emerald-400">Enabled</Badge>
+							{/if}
+						{:else}
+							<Button
+								size="sm"
+								disabled={guestBusy || building}
+								onclick={() => setGuestTools(true)}
+							>
+								{building ? 'Building…' : 'Enable'}
+							</Button>
+							{#if building}
+								<span class="flex items-center gap-2 text-xs text-amber-400">
+									<RefreshCw class="h-3 w-3 animate-spin" /> Rebuilding…
+								</span>
+							{:else if failed}
+								<span class="text-xs text-rose-400">Last rebuild failed — see log below.</span>
+							{/if}
+						{/if}
+					</div>
+
+					{#if (building || failed) && guestTools.log_tail}
+						<pre class="mt-3 max-h-48 overflow-auto rounded border border-border bg-muted/30 p-2 text-[11px] leading-snug text-muted-foreground whitespace-pre-wrap">{guestTools.log_tail}</pre>
+					{/if}
+				{/if}
+			</CardContent>
+		</Card>
+	{/if}
 
 	<!-- ── Secure Boot readiness checklist (only when SB is currently off + capable) ─── -->
 	{#if sbReadiness}
