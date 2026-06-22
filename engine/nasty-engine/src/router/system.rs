@@ -103,6 +103,16 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
+        "system.guest_tools.status" => ok(req, nasty_system::guest_tools::status().await),
+        "system.guest_tools.set" => {
+            match parse_params::<nasty_system::guest_tools::GuestToolsUpdate>(req) {
+                Ok(u) => match nasty_system::guest_tools::set_and_apply(u).await {
+                    Ok(s) => ok(req, s),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         "system.stats" => match fetch_metrics_json::<nasty_system::SystemStats>(
             &state.metrics_client,
             "/api/stats",

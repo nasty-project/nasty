@@ -176,5 +176,22 @@
   services.smartd.defaults.monitored = "-a -r 194 -r 190";
   systemd.services.smartd.unitConfig.ConditionVirtualization = "no";
 
+  # VM guest tools — QEMU/KVM half (always-on, effectively free).
+  #
+  # `qemu-ga` gives the hypervisor graceful guest shutdown (clean stop +
+  # bcachefs unmount), time sync, and guest IP reporting under KVM /
+  # Proxmox. `services.qemuGuest` defaults to pulling a separate
+  # `qemu-host-cpu-only` (~72 MiB closure) just for that one binary — but
+  # full `pkgs.qemu` is ALREADY in the appliance for the VM feature
+  # (nasty.nix systemPackages) and ships `bin/qemu-ga`, so pointing the
+  # package at it makes this ~zero marginal closure. The unit self-gates
+  # on `ConditionVirtualization`, so it's inert on bare metal and other
+  # hypervisors. The heavier VMware (open-vm-tools, ~500 MiB) and Hyper-V
+  # integrations are per-box opt-in via `system.guest_tools.set` (#534).
+  services.qemuGuest = {
+    enable = true;
+    package = pkgs.qemu;
+  };
+
   system.stateVersion = "24.11";
 }
