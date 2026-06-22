@@ -7,8 +7,14 @@ on:
   pull_request:
     paths:
       - '.github/workflows/integration.yml'
-      - 'nixos/tests/**'
-      - 'nixos/modules/**'
+      # Any nixos/ change can alter the system the smoke test builds.
+      # Previously this only watched nixos/tests/** and nixos/modules/**,
+      # which silently skipped the appliance build on changes to
+      # nixos/appliance-base.nix and nixos/system-flake/** (e.g. #534's
+      # qemu-guest-agent + guest-tools overlay) — exactly the files the
+      # test validates. Watch all of nixos/ so build-affecting config
+      # can't merge unvalidated.
+      - 'nixos/**'
       - 'flake.nix'
       - 'flake.lock'
 
