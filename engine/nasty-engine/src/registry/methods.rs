@@ -66,7 +66,7 @@ use nasty_system::update::{
     Generation, ReleaseChannel, UpdateBuildDirConfig, UpdateInfo, UpdateStatus, VersionInfo,
     VersionSwitchRequest, VersionTaggedReleaseStatus,
 };
-use nasty_system::{DiskHealth, SystemHealth, SystemInfo, SystemStats, SystemStatus};
+use nasty_system::{DiskHealth, Operation, SystemHealth, SystemInfo, SystemStats, SystemStatus};
 use nasty_vm::{
     CloneVmRequest, CreateVmRequest, SnapshotVmRequest, UpdateVmRequest, VmCapabilities, VmConfig,
     VmDiskSubvolume, VmStatus,
@@ -221,6 +221,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Any,
                     params: MethodParams::None,
                     result: Some(gen_schema::<SystemStatus>(generator)),
+                },
+                Method {
+                    name: "system.operations.list",
+                    desc: "List controllable data operations across mounted filesystems for the Operations panel (#553): running scrubs/evacuations (cancellable) and the pausable background jobs reconcile and copygc, each with the action the UI can take.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<Operation>>(generator)),
                 },
                 Method {
                     name: "system.stats",
@@ -560,6 +567,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Any,
                     params: MethodParams::AdHoc(ad_hoc_one("name", "Filesystem name.")),
                     result: Some(gen_schema::<ScrubStatus>(generator)),
+                },
+                Method {
+                    name: "fs.scrub.cancel",
+                    desc: "Cancel a running scrub by terminating its bcachefs process (#553).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Filesystem name.")),
+                    result: None,
                 },
                 Method {
                     name: "fs.fsck.start",
@@ -2002,6 +2016,27 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     desc: "Turn off bcachefs background reconcile work on a mounted filesystem by writing `0` to its sysfs `reconcile_enabled` knob.",
                     role: MethodRole::Admin,
                     params: MethodParams::AdHoc(ad_hoc_one("name", "Filesystem name.")),
+                    result: None,
+                },
+                Method {
+                    name: "fs.copygc.enable",
+                    desc: "Resume bcachefs copy garbage collection on a mounted filesystem by writing `1` to its sysfs `copygc_enabled` knob (#553).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Filesystem name.")),
+                    result: None,
+                },
+                Method {
+                    name: "fs.copygc.disable",
+                    desc: "Pause bcachefs copy garbage collection on a mounted filesystem by writing `0` to its sysfs `copygc_enabled` knob — the same lever nasty-top's advisor pulls on write-stalls (#553).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Filesystem name.")),
+                    result: None,
+                },
+                Method {
+                    name: "fs.device.evacuate.cancel",
+                    desc: "Cancel a running device evacuation: terminate the bcachefs process and return the device to read-write. Migrated data stays migrated (#553).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<DeviceActionRequest>(generator)),
                     result: None,
                 },
             ],

@@ -34,6 +34,7 @@ pub(super) async fn try_route(
             *state.status_cache.lock().await = Some((std::time::Instant::now(), status.clone()));
             ok(req, status)
         }
+        "system.operations.list" => ok(req, build_operations(state).await),
         "system.hardware.iommu" => ok(req, nasty_system::hardware::iommu_groups().await),
         "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
         "system.secure_boot.readiness" => ok(req, nasty_system::secure_boot::readiness().await),
@@ -825,4 +826,99 @@ async fn build_system_status(state: &AppState) -> nasty_system::SystemStatus {
         top_warning,
         operations,
     )
+}
+
+/// Gather the controllable data operations across all mounted filesystems
+/// for the Operations panel (#553): running scrubs and evacuations (Cancel),
+/// plus the pausable background jobs reconcile and copygc (Pause/Resume),
+/// shown even when idle so they can be toggled.
+async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
+    let mut ops: Vec<nasty_system::Operation> = Vec::new();
+    let Ok(filesystems) = state.filesystems.list().await else {
+        return ops;
+    };
+    for fs in &filesystems {
+        if !fs.mounted {
+            continue;
+        }
+        // Running evacuations (bcachefs marks the member "evacuating").
+        for dev in &fs.devices {
+            if dev.state.as_deref() == Some("evacuating") {
+                let short = dev.path.rsplit('/').next().unwrap_or(&dev.path);
+                ops.push(nasty_system::Operation {
+                    kind: "evacuate".into(),
+                    fs: fs.name.clone(),
+                    target: Some(dev.path.clone()),
+                    state: "running".into(),
+                    progress_percent: None,
+                    detail: format!("Evacuating {short} from {}", fs.name),
+                    control: "cancel".into(),
+                });
+            }
+        }
+        // Running scrub.
+        if let Ok(scrub) = state.filesystems.scrub_status(&fs.name).await
+            && scrub.running
+        {
+            let detail = match scrub.progress_percent {
+                Some(p) => format!("Scrub {} — {p:.0}%", fs.name),
+                None => format!("Scrub {}", fs.name),
+            };
+            ops.push(nasty_system::Operation {
+                kind: "scrub".into(),
+                fs: fs.name.clone(),
+                target: None,
+                state: "running".into(),
+                progress_percent: scrub.progress_percent,
+                detail,
+                control: "cancel".into(),
+            });
+        }
+        // Reconcile — pausable background rebalance.
+        if let Ok(rec) = state.filesystems.reconcile_status(&fs.name).await {
+            let active = nasty_system::alerts::parse_reconcile_sample(&rec.raw).active;
+            let (st, ctrl, detail) = if !rec.enabled {
+                (
+                    "paused",
+                    "resume",
+                    format!("Reconcile paused on {}", fs.name),
+                )
+            } else if active {
+                (
+                    "active",
+                    "pause",
+                    format!("Reconcile running on {}", fs.name),
+                )
+            } else {
+                ("idle", "pause", format!("Reconcile enabled on {}", fs.name))
+            };
+            ops.push(nasty_system::Operation {
+                kind: "reconcile".into(),
+                fs: fs.name.clone(),
+                target: None,
+                state: st.into(),
+                progress_percent: None,
+                detail,
+                control: ctrl.into(),
+            });
+        }
+        // Copygc — pausable; skipped when the kernel doesn't expose it.
+        if let Ok(Some(enabled)) = state.filesystems.copygc_status(&fs.name).await {
+            let (st, ctrl, detail) = if enabled {
+                ("idle", "pause", format!("Copygc enabled on {}", fs.name))
+            } else {
+                ("paused", "resume", format!("Copygc paused on {}", fs.name))
+            };
+            ops.push(nasty_system::Operation {
+                kind: "copygc".into(),
+                fs: fs.name.clone(),
+                target: None,
+                state: st.into(),
+                progress_percent: None,
+                detail,
+                control: ctrl.into(),
+            });
+        }
+    }
+    ops
 }

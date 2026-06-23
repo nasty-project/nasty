@@ -224,11 +224,14 @@
 		const cls =
 			outcome === 'ok' ? 'text-green-500' :
 			outcome === 'errors' ? 'text-amber-500' :
+			outcome === 'cancelled' ? 'text-muted-foreground' :
 			'text-red-500';
 		const label = outcome === 'ok'
 			? `scrubbed ${ago}, ok`
 			: outcome === 'errors'
 			? `scrubbed ${ago}, errors`
+			: outcome === 'cancelled'
+			? `scrub cancelled ${ago}`
 			: `scrub failed ${ago}`;
 		return { label, cls, title: `${dur ? `Took ${dur}. ` : ''}Click Diagnostics for full output.` };
 	}

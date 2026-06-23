@@ -23,6 +23,7 @@
 		LayoutDashboard,
 		Database,
 		Layers,
+		Activity,
 		Share2,
 		HardDrive,
 		Archive,
@@ -690,6 +691,7 @@
 				{ href: '/filesystems', label: 'Filesystems', icon: Database },
 				{ href: '/subvolumes', label: 'Subvolumes', icon: Layers },
 				{ href: '/disks',      label: 'Disks',       icon: HardDrive },
+				{ href: '/operations', label: 'Operations',  icon: Activity },
 				{ href: '/files',      label: 'Files',       icon: FolderOpen },
 			]},
 			{ href: '/sharing', label: 'Sharing', icon: Share2 },
@@ -965,7 +967,7 @@
 						{#if statusExpanded && statusHasDetail}
 							<div class="mt-1 space-y-1 px-2 pb-1 text-[0.7rem] text-muted-foreground">
 								{#each systemStatus.operations as op}
-									<a href="/filesystems" class="block truncate hover:text-foreground">• {op.detail}</a>
+									<a href="/operations" class="block truncate hover:text-foreground">• {op.detail}</a>
 								{/each}
 								{#if systemStatus.critical_count + systemStatus.warning_count > 0}
 									<a href="/alerts" class="block hover:text-foreground">

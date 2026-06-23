@@ -329,6 +329,40 @@ pub(super) async fn try_route(
             },
             Err(r) => r,
         },
+        "fs.copygc.enable" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.set_copygc_enabled(name, true).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.copygc.disable" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.set_copygc_enabled(name, false).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.scrub.cancel" => match require_str(req, "name") {
+            Ok(name) => match state.filesystems.scrub_cancel(name).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
+        "fs.device.evacuate.cancel" => {
+            match parse_params::<nasty_storage::filesystem::DeviceActionRequest>(req) {
+                Ok(p) => match state
+                    .filesystems
+                    .device_evacuate_cancel(&p.filesystem, &p.device)
+                    .await
+                {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         _ => return None,
     })
 }

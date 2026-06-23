@@ -623,6 +623,9 @@ pub enum ScrubOutcome {
     Errors,
     /// Non-zero exit, spawn failure, or the engine restarted mid-scrub.
     Failed,
+    /// The operator cancelled the scrub (process terminated via
+    /// `scrub_cancel`); not an error condition (#553).
+    Cancelled,
 }
 
 /// Scrub operation status — both live state ("am I running, since when")
@@ -817,6 +820,11 @@ pub struct FilesystemService {
     /// an engine restart orphans the child anyway, and the state-based
     /// check in `device_evacuate` covers re-submission after that.
     evacuating: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Filesystem names whose running scrub has a pending cancel request.
+    /// Set by `scrub_cancel` before it signals the process; the scrub's
+    /// completion path consumes it to record a `Cancelled` outcome rather
+    /// than a misleading `Failed` (#553).
+    scrub_cancels: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Default for FilesystemService {
@@ -875,6 +883,7 @@ impl FilesystemService {
             mount_state: Arc::new(Mutex::new(mount)),
             fsck_state: Arc::new(Mutex::new(fsck)),
             evacuating: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            scrub_cancels: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -2657,6 +2666,34 @@ impl FilesystemService {
         Ok(())
     }
 
+    /// Cancel a running device evacuation: terminate the
+    /// `bcachefs device evacuate <device>` process and return the device
+    /// to `rw` so it rejoins normal operation. Data already migrated off
+    /// stays migrated; the device simply keeps what's left. Both steps
+    /// are best-effort (`pkill` exits 1 when the child already finished).
+    /// (#553)
+    pub async fn device_evacuate_cancel(
+        &self,
+        name: &str,
+        device: &str,
+    ) -> Result<(), FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.devices.iter().any(|d| d.path == device) {
+            return Err(FilesystemError::CommandFailed(format!(
+                "{device} is not a member of filesystem '{name}'"
+            )));
+        }
+        let pattern = format!("bcachefs device evacuate {device}");
+        info!("Cancelling evacuation of {device} on '{name}' via pkill -TERM -f '{pattern}'");
+        nasty_common::cmd::try_run("pkill", &["-TERM", "-f", &pattern]).await;
+        self.evacuating.lock().await.remove(device);
+        // Return the device to read-write so it's usable again; the
+        // partial drain is harmless (replicas were preserved throughout).
+        nasty_common::cmd::try_run("bcachefs", &["device", "set-state", "rw", device]).await;
+        self.invalidate_list_cache().await;
+        Ok(())
+    }
+
     /// Change the persistent state of a device (rw, ro, failed, spare).
     /// bcachefs device set-state <new_state> <device> [path]
     pub async fn device_set_state(
@@ -2938,6 +2975,7 @@ impl FilesystemService {
         persist_scrub_state(&self.scrub_state).await;
 
         let store = self.scrub_state.clone();
+        let cancels = self.scrub_cancels.clone();
         info!("Starting scrub on filesystem '{}'", name);
         tokio::spawn(async move {
             let mount = mount_point;
@@ -2947,6 +2985,17 @@ impl FilesystemService {
             // binary doesn't print percent at all — the chip just
             // shows "scrubbing (Nh ago)" via the elapsed timestamp.
             let (outcome, captured) = stream_scrub_and_collect(&mount, &fs_name, &store).await;
+            // Honor a cancel request: a terminated scrub exits non-zero
+            // (Failed), but if the operator asked for it, record it as
+            // Cancelled rather than a misleading failure (#553).
+            let outcome = {
+                let mut c = cancels.lock().await;
+                if c.remove(&fs_name) {
+                    ScrubOutcome::Cancelled
+                } else {
+                    outcome
+                }
+            };
             let end = unix_now_secs();
             let duration = (end - now).max(0) as u64;
 
@@ -2958,6 +3007,9 @@ impl FilesystemService {
                 ScrubOutcome::Failed => {
                     warn!("Scrub on '{fs_name}' failed after {duration}s: {captured}",)
                 }
+                ScrubOutcome::Cancelled => {
+                    info!("Scrub on '{fs_name}' cancelled after {duration}s")
+                }
             }
 
             let truncated = truncate_tail(&captured, SCRUB_OUTPUT_KEEP_BYTES);
@@ -2965,6 +3017,7 @@ impl FilesystemService {
                 ScrubOutcome::Ok => "Last scrub: ok".to_string(),
                 ScrubOutcome::Errors => "Last scrub: errors detected".to_string(),
                 ScrubOutcome::Failed => "Last scrub: failed".to_string(),
+                ScrubOutcome::Cancelled => "Last scrub: cancelled".to_string(),
             };
             {
                 let mut state = store.lock().await;
@@ -2990,6 +3043,42 @@ impl FilesystemService {
             persist_scrub_state(&store).await;
         });
 
+        Ok(())
+    }
+
+    /// Cancel a running scrub by terminating its `bcachefs scrub <mount>`
+    /// process. Pattern-based (`pkill -f`) rather than a stored PID, for
+    /// the same reason `scrub_status` uses a `pgrep` cross-check: an
+    /// engine restart orphans the child, and a pattern still finds it.
+    /// Flags the cancel first so the completion path records a
+    /// `Cancelled` outcome instead of `Failed` (#553).
+    pub async fn scrub_cancel(&self, name: &str) -> Result<(), FilesystemError> {
+        let fs = self.get(name).await?;
+        let mount = fs.mount_point.clone().ok_or_else(|| {
+            FilesystemError::CommandFailed("filesystem is not mounted".to_string())
+        })?;
+
+        // Refuse if nothing is running, so the UI button can't fire a
+        // stray pkill against an unrelated future scrub.
+        let running = self
+            .scrub_state
+            .lock()
+            .await
+            .get(name)
+            .map(|s| s.running)
+            .unwrap_or(false);
+        if !running {
+            return Err(FilesystemError::CommandFailed(
+                "no scrub is running on this filesystem".to_string(),
+            ));
+        }
+
+        self.scrub_cancels.lock().await.insert(name.to_string());
+        let pattern = format!("bcachefs scrub {mount}");
+        info!("Cancelling scrub on '{name}' via pkill -TERM -f '{pattern}'");
+        // pkill exits 1 when nothing matched — fine; the child may have
+        // just finished. The completion path still clears `running`.
+        nasty_common::cmd::try_run("pkill", &["-TERM", "-f", &pattern]).await;
         Ok(())
     }
 
@@ -3255,6 +3344,45 @@ impl FilesystemService {
         let path = format!("/sys/fs/bcachefs/{}/options/reconcile_enabled", fs.uuid);
         let val = if enabled { "1" } else { "0" };
         info!("Setting reconcile_enabled={val} on filesystem '{name}'");
+        tokio::fs::write(&path, val)
+            .await
+            .map_err(|e| FilesystemError::CommandFailed(format!("failed to write {path}: {e}")))
+    }
+
+    /// Whether copygc (copy garbage collection) is enabled for a mounted
+    /// filesystem. `None` when the kernel doesn't expose the option, so
+    /// callers can hide the control rather than guess (forward-compat —
+    /// e.g. `rebalance_enabled` was dropped upstream in favour of
+    /// `reconcile_enabled`). (#553)
+    pub async fn copygc_status(&self, name: &str) -> Result<Option<bool>, FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Ok(None);
+        }
+        let path = format!("/sys/fs/bcachefs/{}/options/copygc_enabled", fs.uuid);
+        Ok(match tokio::fs::read_to_string(&path).await {
+            Ok(s) => Some(s.trim() != "0"),
+            Err(_) => None,
+        })
+    }
+
+    /// Enable or disable copygc on a mounted filesystem via sysfs.
+    /// Pausing copygc (`enabled=false`) is the same lever nasty-top's
+    /// advisor pulls on write-stalls. (#553)
+    pub async fn set_copygc_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(), FilesystemError> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(FilesystemError::CommandFailed(
+                "filesystem must be mounted to toggle copygc".to_string(),
+            ));
+        }
+        let path = format!("/sys/fs/bcachefs/{}/options/copygc_enabled", fs.uuid);
+        let val = if enabled { "1" } else { "0" };
+        info!("Setting copygc_enabled={val} on filesystem '{name}'");
         tokio::fs::write(&path, val)
             .await
             .map_err(|e| FilesystemError::CommandFailed(format!("failed to write {path}: {e}")))
