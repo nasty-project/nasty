@@ -4,6 +4,7 @@
 //! to provide storage filesystem lifecycle operations.
 
 pub mod cmd;
+pub mod disk_type;
 pub mod filesystem;
 pub mod subvolume;
 

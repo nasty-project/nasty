@@ -88,6 +88,25 @@
 		if (ok !== undefined) await loadBlockDevices();
 	}
 
+	// Manual disk-type override (#552): for VMs where lsblk's rotational
+	// bit is wrong. `device_class` of 'auto' clears the override.
+	async function setDiskType(dev: BlockDevice, deviceClass: string) {
+		const ok = await withToast(
+			() => client.call('device.set_type', { path: dev.path, device_class: deviceClass }),
+			deviceClass === 'auto'
+				? `${dev.path} type reset to auto-detect`
+				: `${dev.path} type set to ${deviceClass.toUpperCase()}`
+		);
+		if (ok !== undefined) await loadBlockDevices();
+	}
+
+	// Human note about how durable an override on this disk is.
+	function idKindNote(kind: string | undefined): string {
+		if (kind === 'hardware') return 'Anchored to a stable hardware ID — survives reboots and disk re-slotting.';
+		if (kind === 'slot') return 'Anchored to the disk\'s bus slot (no hardware ID on this disk) — survives reboots, but re-applies if you move the disk to another controller/slot in the VM.';
+		return 'No stable ID on this disk — the override is tied to the /dev name and may not survive a reboot.';
+	}
+
 	function formatHours(hours: number): string {
 		const days = Math.floor(hours / 24);
 		const years = Math.floor(days / 365);
@@ -277,9 +296,29 @@
 						<td class="p-3 font-mono text-sm {dev.dev_type === 'part' ? 'pl-8' : ''}">{dev.path}</td>
 						<td class="p-3">{formatBytes(dev.size_bytes)}</td>
 						<td class="p-3">
-							<span class="rounded px-1.5 py-0.5 text-xs font-semibold {deviceClassBadge(dev.device_class)}">
-								{dev.device_class.toUpperCase()}
-							</span>
+							<div class="flex items-center gap-2">
+								<span class="rounded px-1.5 py-0.5 text-xs font-semibold {deviceClassBadge(dev.device_class)}">
+									{dev.device_class.toUpperCase()}
+								</span>
+								{#if dev.dev_type === 'disk'}
+									<select
+										class="rounded border border-border bg-background px-1 py-0.5 text-xs text-foreground"
+										value={dev.type_source === 'manual' ? dev.device_class : 'auto'}
+										title="Override the detected disk type (for VMs where it's wrong)"
+										onchange={(e) => setDiskType(dev, e.currentTarget.value)}
+									>
+										<option value="auto">Auto</option>
+										<option value="ssd">SSD</option>
+										<option value="hdd">HDD</option>
+										<option value="nvme">NVMe</option>
+									</select>
+									{#if dev.type_source === 'manual'}
+										<span class="text-xs text-amber-400" title={idKindNote(dev.id_kind)}>
+											manual{dev.id_kind === 'volatile' ? ' ⚠' : ''}
+										</span>
+									{/if}
+								{/if}
+							</div>
 						</td>
 						<td class="p-3 font-mono text-xs text-muted-foreground">{dev.fs_type ?? '—'}</td>
 						<td class="p-3">
