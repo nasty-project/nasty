@@ -158,6 +158,13 @@ pub(super) async fn try_route(
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
         },
+        "device.set_type" => match parse_params::<nasty_storage::disk_type::DiskTypeUpdate>(req) {
+            Ok(u) => match nasty_storage::disk_type::set(u).await {
+                Ok(key) => ok(req, serde_json::json!({ "stable_id": key })),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
         "device.wipe" => match parse_params::<serde_json::Value>(req) {
             Ok(p) => {
                 let path = p

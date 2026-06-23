@@ -35,6 +35,7 @@ use nasty_sharing::smb::{
     CreateSmbShareRequest, CreateSmbUserRequest, DeleteSmbShareRequest, SmbGroup, SmbShare,
     SmbUser, UpdateSmbShareRequest,
 };
+use nasty_storage::disk_type::DiskTypeUpdate;
 use nasty_storage::filesystem::{
     BlockDevice, CreateFilesystemRequest, DestroyFilesystemRequest, DeviceActionRequest,
     DeviceAddRequest, DeviceSetLabelRequest, DeviceSetStateRequest, Filesystem, FsUsage,
@@ -474,6 +475,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                         "path",
                         "Block device path (e.g. /dev/sdb).",
                     )),
+                    result: None,
+                },
+                Method {
+                    name: "device.set_type",
+                    desc: "Manually override a disk's type (ssd/hdd/nvme), or 'auto' to clear. For VMs where lsblk's rotational bit is wrong. Anchored to a stable by-id/by-path key so it survives reboots and /dev re-lettering.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<DiskTypeUpdate>(generator)),
                     result: None,
                 },
             ],

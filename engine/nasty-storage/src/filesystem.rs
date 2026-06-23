@@ -2210,11 +2210,14 @@ impl FilesystemService {
                     })
                     .collect();
 
+            #[allow(clippy::too_many_arguments)]
             fn collect_devices(
                 devs: &[serde_json::Value],
                 fs_devices: &std::collections::HashSet<String>,
                 mounted_devices: &std::collections::HashSet<String>,
                 out: &mut Vec<BlockDevice>,
+                resolver: &crate::disk_type::IdentityResolver,
+                overrides: &std::collections::HashMap<String, String>,
             ) {
                 for dev in devs {
                     let name = dev.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -2257,12 +2260,32 @@ impl FilesystemService {
 
                     // Transport needs to be resolved before classify so the
                     // SAS path can use it.
-                    let (rotational, device_class) = classify(name, rota, transport.as_deref());
+                    let (mut rotational, mut device_class) =
+                        classify(name, rota, transport.as_deref());
 
                     if dev_type == "disk" || dev_type == "part" {
                         let path = format!("/dev/{name}");
                         let in_fs = fs_devices.contains(&path);
                         let actually_mounted = mounted_devices.contains(&path);
+
+                        // Manual disk-type override (#552) applies to whole
+                        // disks only — partitions inherit nothing here.
+                        let (mut stable_id, mut id_kind) = (None, None);
+                        let mut type_source = "detected".to_string();
+                        if dev_type == "disk" {
+                            let (key, kind) = resolver.resolve(name);
+                            if let Some(class) = overrides.get(&key)
+                                && let Some((c, rota_override)) =
+                                    crate::disk_type::class_to_fields(class)
+                            {
+                                device_class = c;
+                                rotational = rota_override;
+                                type_source = "manual".to_string();
+                            }
+                            stable_id = Some(key);
+                            id_kind = Some(kind.to_string());
+                        }
+
                         out.push(BlockDevice {
                             path,
                             size_bytes: size,
@@ -2277,15 +2300,36 @@ impl FilesystemService {
                             serial,
                             vendor,
                             transport,
+                            stable_id,
+                            id_kind,
+                            type_source,
                         });
                     }
 
                     if let Some(children) = dev.get("children").and_then(|v| v.as_array()) {
-                        collect_devices(children, fs_devices, mounted_devices, out);
+                        collect_devices(
+                            children,
+                            fs_devices,
+                            mounted_devices,
+                            out,
+                            resolver,
+                            overrides,
+                        );
                     }
                 }
             }
-            collect_devices(blockdevices, &used_devices, &mounted_devices, &mut devices);
+            // Identity (by-id/by-path) + persisted type overrides are read
+            // once per listing, then applied per whole-disk inside the walk.
+            let resolver = crate::disk_type::IdentityResolver::new().await;
+            let overrides = crate::disk_type::load().await;
+            collect_devices(
+                blockdevices,
+                &used_devices,
+                &mounted_devices,
+                &mut devices,
+                &resolver,
+                &overrides,
+            );
         }
 
         // Mark parent disks as in_use if any of their partitions are in_use.
@@ -2345,7 +2389,15 @@ impl FilesystemService {
                     info!("Free space on {disk_path}: {free_bytes} bytes");
                     if free_bytes >= MIN_FREE_BYTES {
                         let disk = devices.iter().find(|d| &d.path == disk_path);
-                        let (rotational, device_class, model, serial, vendor, transport) = disk
+                        let (
+                            rotational,
+                            device_class,
+                            model,
+                            serial,
+                            vendor,
+                            transport,
+                            type_source,
+                        ) = disk
                             .map(|d| {
                                 (
                                     d.rotational,
@@ -2354,9 +2406,18 @@ impl FilesystemService {
                                     d.serial.clone(),
                                     d.vendor.clone(),
                                     d.transport.clone(),
+                                    d.type_source.clone(),
                                 )
                             })
-                            .unwrap_or((false, "ssd".to_string(), None, None, None, None));
+                            .unwrap_or((
+                                false,
+                                "ssd".to_string(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                "detected".to_string(),
+                            ));
                         devices.push(BlockDevice {
                             path: format!("{disk_path}:free"),
                             size_bytes: free_bytes,
@@ -2371,6 +2432,11 @@ impl FilesystemService {
                             serial,
                             vendor,
                             transport,
+                            // Free-space pseudo-entries carry no identity of
+                            // their own; they mirror the parent disk's class.
+                            stable_id: None,
+                            id_kind: None,
+                            type_source,
                         });
                     }
                 }
@@ -3433,6 +3499,24 @@ pub struct BlockDevice {
     /// Transport bus from lsblk (e.g. "sata", "nvme", "usb").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+    /// Stable identity key this disk's type override is anchored to —
+    /// a unique by-id link, a by-path link, or (last resort) the /dev
+    /// name. None for partitions and synthetic "free" entries. (#552)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_id: Option<String>,
+    /// How durable `stable_id` is: `hardware` (by-id, survives re-slot),
+    /// `slot` (by-path, reboot-stable but tied to the VM disk slot), or
+    /// `volatile` (/dev name only — won't survive re-lettering).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_kind: Option<String>,
+    /// `detected` when `device_class` came from lsblk/sysfs, `manual`
+    /// when an operator override is in effect (#552).
+    #[serde(default = "default_type_source")]
+    pub type_source: String,
+}
+
+fn default_type_source() -> String {
+    "detected".to_string()
 }
 
 /// Get the largest contiguous free space on a partitioned disk using sgdisk.

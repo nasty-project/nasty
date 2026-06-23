@@ -520,6 +520,14 @@ export interface BlockDevice {
 	vendor?: string;
 	/** Transport bus from lsblk (e.g. "sata", "nvme", "usb"). */
 	transport?: string;
+	/** Stable identity a manual type override is anchored to (by-id /
+	 * by-path / dev name). Absent on partitions and "free" entries (#552). */
+	stable_id?: string;
+	/** Durability of `stable_id`: "hardware" (by-id) | "slot" (by-path) |
+	 * "volatile" (/dev name). */
+	id_kind?: string;
+	/** "detected" (from lsblk/sysfs) | "manual" (operator override). */
+	type_source: string;
 }
 
 export type TieringProfileId = 'single' | 'write_cache' | 'full_tiering' | 'none' | 'manual';
