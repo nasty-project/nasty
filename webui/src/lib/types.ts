@@ -84,6 +84,18 @@ export interface SystemStatus {
 	warning_count: number;
 }
 
+/** A controllable data operation for the Operations panel (#553), from
+ * `system.operations.list`. Carries the action the UI can take. */
+export interface Operation {
+	kind: string; // "scrub" | "evacuate" | "reconcile" | "copygc"
+	fs: string;
+	target?: string | null;
+	state: string; // "running" | "active" | "idle" | "paused"
+	progress_percent?: number | null;
+	detail: string;
+	control: string; // "cancel" | "pause" | "resume" | "none"
+}
+
 /** One IOMMU group with its constituent PCI devices, returned by
  * `system.hardware.iommu`. The id is the kernel's group number;
  * devices are sorted by BDF. Empty list = IOMMU is off in BIOS. */
@@ -454,7 +466,7 @@ export interface FsDeviceUsage {
 	total_bytes: number;
 }
 
-export type ScrubOutcome = 'ok' | 'errors' | 'failed';
+export type ScrubOutcome = 'ok' | 'errors' | 'failed' | 'cancelled';
 
 export interface ScrubStatus {
 	running: boolean;

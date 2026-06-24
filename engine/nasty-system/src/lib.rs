@@ -149,6 +149,33 @@ pub struct ActiveOperation {
     pub detail: String,
 }
 
+/// A controllable data operation for the Operations panel (#553). Unlike
+/// [`ActiveOperation`] (band-only, active jobs), this carries the action the
+/// UI can take, and includes pausable background jobs even when idle so they
+/// can be resumed.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Operation {
+    /// "scrub" | "evacuate" | "reconcile" | "copygc".
+    pub kind: String,
+    /// Filesystem the operation belongs to.
+    pub fs: String,
+    /// Device path for an evacuation; `None` otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// "running" (scrub/evacuate in flight) | "active" (background job
+    /// working) | "idle" (enabled, not currently working) | "paused"
+    /// (disabled).
+    pub state: String,
+    /// Progress 0–100 when known (scrub); `None` otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<f32>,
+    /// Short operator-facing line, e.g. "Evacuating sdc" or "Scrub 42%".
+    pub detail: String,
+    /// Action the UI offers: "cancel" (scrub/evacuate) | "pause" |
+    /// "resume" (reconcile/copygc) | "none".
+    pub control: String,
+}
+
 /// Aggregated system status for the sidebar band (#528): one colored level
 /// plus a headline and the in-progress operations and alert counts behind it.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
