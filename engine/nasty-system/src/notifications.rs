@@ -626,9 +626,8 @@ async fn send_smtp(
     body: &str,
 ) -> Result<(), String> {
     use lettre::{
-        AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
+        AsyncTransport,
         message::{Mailbox, header::ContentType},
-        transport::smtp::authentication::Credentials,
     };
 
     let from_mbox: Mailbox = from
@@ -644,19 +643,7 @@ async fn send_smtp(
         .body(body.to_string())
         .map_err(|e| format!("build email: {e}"))?;
 
-    let creds = Credentials::new(username.to_string(), password.to_string());
-
-    // Port 465 = implicit TLS (relay), port 587/25 = STARTTLS.
-    // The tls flag is kept for backward compat but port takes precedence.
-    let transport = if port == 465 {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-    } else {
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
-    }
-    .map_err(|e| format!("smtp transport: {e}"))?
-    .port(port)
-    .credentials(creds)
-    .build();
+    let transport = build_smtp_transport(host, port, username, password)?;
 
     transport
         .send(email)
@@ -664,6 +651,58 @@ async fn send_smtp(
         .map_err(|e| format!("smtp send: {e}"))?;
 
     Ok(())
+}
+
+/// Build the SMTP transport for the operator's configured relay.
+///
+/// NASty is **not** an MTA: this only ever connects to the single
+/// `host:port` the operator points it at — no MX lookup, no direct
+/// delivery. Auth and TLS are chosen by what that relay actually needs,
+/// which is the fix for #559 (a no-auth port-25 relay was rejected
+/// because we always forced both):
+///
+/// - **port 465** → implicit TLS (SMTPS).
+/// - **username set** → STARTTLS *required* + credentials, so the password
+///   is never sent in the clear (typical 587 submission).
+/// - **username blank** → no auth at all, with *opportunistic* STARTTLS:
+///   encrypt when the relay offers it (e.g. a LAN smarthost on port 25
+///   that supports STARTTLS), fall back to plaintext only if it doesn't.
+///   Nothing secret is sent on this path, so there's nothing to leak.
+fn build_smtp_transport(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>, String> {
+    use lettre::{
+        AsyncSmtpTransport, Tokio1Executor,
+        transport::smtp::authentication::Credentials,
+        transport::smtp::client::{Tls, TlsParameters},
+    };
+
+    let mut builder = if port == 465 {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+            .map_err(|e| format!("smtp transport: {e}"))?
+    } else if !username.is_empty() {
+        // Authenticated submission: demand STARTTLS so credentials are
+        // never exposed.
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+            .map_err(|e| format!("smtp transport: {e}"))?
+    } else {
+        // Unauthenticated relay (the #559 case): opportunistic TLS so a
+        // STARTTLS-capable relay still encrypts, but a plaintext-only one
+        // works instead of erroring.
+        let tls =
+            TlsParameters::new(host.to_string()).map_err(|e| format!("smtp tls params: {e}"))?;
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host).tls(Tls::Opportunistic(tls))
+    }
+    .port(port);
+
+    if !username.is_empty() {
+        builder = builder.credentials(Credentials::new(username.to_string(), password.to_string()));
+    }
+
+    Ok(builder.build())
 }
 
 // ── Telegram ───────────────────────────────────────────────────
@@ -1111,5 +1150,31 @@ mod tests {
         assert_eq!(parsed["data"]["severity"], "critical");
         assert!(parsed["nasty_version"].is_string());
         assert!(parsed["nasty_hostname"].is_string());
+    }
+
+    // `build()` constructs the transport without connecting, so these
+    // exercise every auth/TLS branch of build_smtp_transport (#559).
+    #[test]
+    fn smtp_transport_no_auth_port_25_builds() {
+        // The reported case: blank username + port 25. Must construct with
+        // no auth forced (was the bug — credentials + STARTTLS always set).
+        assert!(build_smtp_transport("relay.lan", 25, "", "").is_ok());
+    }
+
+    #[test]
+    fn smtp_transport_authenticated_submission_builds() {
+        assert!(build_smtp_transport("smtp.example.com", 587, "user", "pass").is_ok());
+        assert!(build_smtp_transport("smtp.example.com", 465, "user", "pass").is_ok());
+    }
+
+    #[test]
+    fn smtp_transport_no_auth_other_ports_build() {
+        // Opportunistic-TLS unauthenticated path on the common ports.
+        for port in [25, 587, 2525] {
+            assert!(
+                build_smtp_transport("relay.lan", port, "", "").is_ok(),
+                "port {port} no-auth transport should build"
+            );
+        }
     }
 }
