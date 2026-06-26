@@ -841,29 +841,49 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
         if !fs.mounted {
             continue;
         }
+        // Live byte counters from bcachefs's data-move framework (#540) —
+        // the reliable signal for "is this actually moving data, and how
+        // much" across all four operation kinds, read once per fs.
+        let ctxts = state.filesystems.moving_ctxts(&fs.name).await;
+        let moved = |kind: &str| {
+            ctxts
+                .iter()
+                .find(|c| c.kind == kind)
+                .map(|c| (c.bytes_seen, c.bytes_moved))
+        };
+
         // Running evacuations (bcachefs marks the member "evacuating").
         for dev in &fs.devices {
             if dev.state.as_deref() == Some("evacuating") {
                 let short = dev.path.rsplit('/').next().unwrap_or(&dev.path);
+                let mut detail = format!("Evacuating {short} from {}", fs.name);
+                if let Some((_, m)) = moved("evacuate").filter(|&(_, m)| m > 0) {
+                    detail += &format!(" — {} drained", human_bytes(m));
+                }
                 ops.push(nasty_system::Operation {
                     kind: "evacuate".into(),
                     fs: fs.name.clone(),
                     target: Some(dev.path.clone()),
                     state: "running".into(),
                     progress_percent: None,
-                    detail: format!("Evacuating {short} from {}", fs.name),
+                    detail,
                     control: "cancel".into(),
                 });
             }
         }
-        // Running scrub.
+        // Running scrub. Percent stays from the CLI (bcachefs computes it
+        // with the replication denominator); moving_ctxts adds a reliable
+        // live "scanned" figure on top.
         if let Ok(scrub) = state.filesystems.scrub_status(&fs.name).await
             && scrub.running
         {
-            let detail = match scrub.progress_percent {
+            let mut detail = match scrub.progress_percent {
                 Some(p) => format!("Scrub {} — {p:.0}%", fs.name),
                 None => format!("Scrub {}", fs.name),
             };
+            if let Some((seen, _)) = moved("scrub").filter(|&(s, _)| s > 0) {
+                detail += &format!(" ({} scanned)", human_bytes(seen));
+            }
             ops.push(nasty_system::Operation {
                 kind: "scrub".into(),
                 fs: fs.name.clone(),
@@ -874,10 +894,12 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
                 control: "cancel".into(),
             });
         }
-        // Reconcile — pausable background rebalance.
+        // Reconcile — pausable background rebalance. moving_ctxts confirms
+        // whether it's actually moving data right now.
         if let Ok(rec) = state.filesystems.reconcile_status(&fs.name).await {
-            let active = nasty_system::alerts::parse_reconcile_sample(&rec.raw).active;
-            let (st, ctrl, detail) = if !rec.enabled {
+            let bytes = moved("reconcile").map(|(_, m)| m).unwrap_or(0);
+            let active = bytes > 0 || nasty_system::alerts::parse_reconcile_sample(&rec.raw).active;
+            let (st, ctrl, mut detail) = if !rec.enabled {
                 (
                     "paused",
                     "resume",
@@ -892,6 +914,9 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
             } else {
                 ("idle", "pause", format!("Reconcile enabled on {}", fs.name))
             };
+            if bytes > 0 {
+                detail += &format!(" — {} moved", human_bytes(bytes));
+            }
             ops.push(nasty_system::Operation {
                 kind: "reconcile".into(),
                 fs: fs.name.clone(),
@@ -903,12 +928,19 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
             });
         }
         // Copygc — pausable; skipped when the kernel doesn't expose it.
+        // moving_ctxts gives us real active-vs-idle detection here.
         if let Ok(Some(enabled)) = state.filesystems.copygc_status(&fs.name).await {
-            let (st, ctrl, detail) = if enabled {
-                ("idle", "pause", format!("Copygc enabled on {}", fs.name))
-            } else {
+            let bytes = moved("copygc").map(|(_, m)| m).unwrap_or(0);
+            let (st, ctrl, mut detail) = if !enabled {
                 ("paused", "resume", format!("Copygc paused on {}", fs.name))
+            } else if bytes > 0 {
+                ("active", "pause", format!("Copygc running on {}", fs.name))
+            } else {
+                ("idle", "pause", format!("Copygc enabled on {}", fs.name))
             };
+            if bytes > 0 {
+                detail += &format!(" — {} moved", human_bytes(bytes));
+            }
             ops.push(nasty_system::Operation {
                 kind: "copygc".into(),
                 fs: fs.name.clone(),
@@ -921,4 +953,20 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
         }
     }
     ops
+}
+
+/// Compact binary byte formatter for operation detail strings.
+fn human_bytes(b: u64) -> String {
+    const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = b as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
 }
