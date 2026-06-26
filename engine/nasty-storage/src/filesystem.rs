@@ -3388,6 +3388,21 @@ impl FilesystemService {
             .map_err(|e| FilesystemError::CommandFailed(format!("failed to write {path}: {e}")))
     }
 
+    /// Active data-move operations from `internal/moving_ctxts` — live
+    /// progress for scrub / reconcile / copygc / evacuate (#540). Empty on
+    /// an unmounted fs or when the debug file is absent/unreadable.
+    pub async fn moving_ctxts(&self, name: &str) -> Vec<MoveCtx> {
+        let Ok(fs) = self.get(name).await else {
+            return Vec::new();
+        };
+        if !fs.mounted {
+            return Vec::new();
+        }
+        let path = format!("/sys/fs/bcachefs/{}/internal/moving_ctxts", fs.uuid);
+        let raw = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+        parse_moving_ctxts(&raw)
+    }
+
     /// Raw output of `bcachefs fs usage <mount>` — space breakdown by data type and device.
     pub async fn bcachefs_usage(&self, name: &str) -> Result<String, FilesystemError> {
         let fs = self.get(name).await?;
@@ -3561,6 +3576,68 @@ fn validate_compression(spec: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// One active data-move operation parsed from a bcachefs filesystem's
+/// `internal/moving_ctxts` (#540). bcachefs runs scrub, reconcile,
+/// copygc, and device evacuation on a shared data-move framework; each
+/// registers a context here with live byte counters. This is the closest
+/// thing bcachefs exposes to a `/proc/mdstat` for those operations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MoveCtx {
+    /// Normalized kind: `scrub` | `reconcile` | `copygc` | `evacuate` | `other`.
+    pub kind: String,
+    /// Bytes the operation has scanned/considered so far.
+    pub bytes_seen: u64,
+    /// Bytes it has actually relocated so far.
+    pub bytes_moved: u64,
+}
+
+/// Parse `internal/moving_ctxts`. Each context is a non-indented header
+/// (`scrub: ...`, `reconcile_work: ...`) followed by indented counter
+/// lines (`bytes seen:`, `bytes moved:`). This is a debug interface with
+/// no stability guarantee, so parse defensively: unrecognized headers
+/// become `other`, missing counters stay 0, and unknown lines are ignored.
+pub fn parse_moving_ctxts(raw: &str) -> Vec<MoveCtx> {
+    let mut out = Vec::new();
+    let mut cur: Option<MoveCtx> = None;
+    for line in raw.lines() {
+        let is_header =
+            !line.is_empty() && !line.starts_with(char::is_whitespace) && line.contains(':');
+        if is_header {
+            if let Some(c) = cur.take() {
+                out.push(c);
+            }
+            let label = line.split(':').next().unwrap_or("").trim().to_lowercase();
+            let kind = if label.contains("scrub") {
+                "scrub"
+            } else if label.contains("reconcile") || label.contains("rebalance") {
+                "reconcile"
+            } else if label.contains("copygc") || label.contains("copy_gc") {
+                "copygc"
+            } else if label.contains("evac") || label.contains("migrate") {
+                "evacuate"
+            } else {
+                "other"
+            };
+            cur = Some(MoveCtx {
+                kind: kind.to_string(),
+                bytes_seen: 0,
+                bytes_moved: 0,
+            });
+        } else if let Some(c) = cur.as_mut() {
+            let t = line.trim();
+            if let Some(v) = t.strip_prefix("bytes seen:") {
+                c.bytes_seen = parse_human_bytes(v.trim()).unwrap_or(0);
+            } else if let Some(v) = t.strip_prefix("bytes moved:") {
+                c.bytes_moved = parse_human_bytes(v.trim()).unwrap_or(0);
+            }
+        }
+    }
+    if let Some(c) = cur.take() {
+        out.push(c);
+    }
+    out
 }
 
 /// Parse human-readable byte strings like "109.8M", "2.3G", "512K", "1024".
@@ -5719,6 +5796,71 @@ mod tests {
         // `bcachefs show-super` prints "Superblock size: 7.85k/1.00M" — the
         // slash form isn't a unit and shouldn't parse.
         assert_eq!(parse_human_bytes("7.85k/1.00M"), None);
+    }
+
+    // ── parse_moving_ctxts (#540) ──────────────────────────────────
+    // Samples are verbatim from a real bcachefs 6.18.35 pool.
+
+    #[test]
+    fn moving_ctxts_parses_active_scrub() {
+        // Trimmed from a mid-pass scrub captured on .38.
+        let raw = "\
+scrub: data type==(unknown data_type 254) pos=extents:5764607:9038848:U32_MAX
+  keys moved:                  5886
+  keys raced:                  0
+  bytes seen:                  1.44G
+  bytes moved:                 1.43G
+  bytes raced:                 0
+  reads: ios 64/64 sectors 32768/131072
+";
+        let ctxs = parse_moving_ctxts(raw);
+        assert_eq!(ctxs.len(), 1);
+        assert_eq!(ctxs[0].kind, "scrub");
+        assert_eq!(ctxs[0].bytes_seen, (1.44 * 1024.0 * 1024.0 * 1024.0) as u64);
+        assert_eq!(
+            ctxs[0].bytes_moved,
+            (1.43 * 1024.0 * 1024.0 * 1024.0) as u64
+        );
+    }
+
+    #[test]
+    fn moving_ctxts_parses_idle_reconcile_baseline() {
+        let raw = "\
+reconcile_work: data type==user pos=extents:POS_MIN
+  keys moved:                  0
+  bytes seen:                  0
+  bytes moved:                 0
+";
+        let ctxs = parse_moving_ctxts(raw);
+        assert_eq!(ctxs.len(), 1);
+        assert_eq!(ctxs[0].kind, "reconcile");
+        assert_eq!(ctxs[0].bytes_seen, 0);
+        assert_eq!(ctxs[0].bytes_moved, 0);
+    }
+
+    #[test]
+    fn moving_ctxts_handles_multiple_and_unknown_kinds() {
+        let raw = "\
+scrub: ...
+  bytes seen:                  512M
+copygc: ...
+  bytes moved:                 8.0M
+weird_future_op: ...
+  bytes moved:                 1.0M
+";
+        let ctxs = parse_moving_ctxts(raw);
+        assert_eq!(ctxs.len(), 3);
+        assert_eq!(ctxs[0].kind, "scrub");
+        assert_eq!(ctxs[0].bytes_seen, 512 * 1024 * 1024);
+        assert_eq!(ctxs[1].kind, "copygc");
+        assert_eq!(ctxs[1].bytes_moved, 8 * 1024 * 1024);
+        // Unrecognized header → "other", still parsed (forward-compat).
+        assert_eq!(ctxs[2].kind, "other");
+    }
+
+    #[test]
+    fn moving_ctxts_empty_when_idle() {
+        assert!(parse_moving_ctxts("").is_empty());
     }
 
     // ── validate_compression (#491) ────────────────────────────────
