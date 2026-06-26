@@ -1215,6 +1215,20 @@ impl FilesystemService {
             }
         }
 
+        // Deterministic order so the WebUI doesn't shuffle rows on every
+        // poll: the mounted set comes from HashMap iteration (unordered)
+        // and the unmounted set is appended after, so without this the
+        // pool list — and each pool's device table — "bounces" between
+        // refreshes (#554). Sort pools by name, members by slot then path.
+        filesystems.sort_by(|a, b| a.name.cmp(&b.name));
+        for fs in &mut filesystems {
+            fs.devices.sort_by(|a, b| {
+                a.member_index
+                    .cmp(&b.member_index)
+                    .then(a.path.cmp(&b.path))
+            });
+        }
+
         Ok(filesystems)
     }
 
