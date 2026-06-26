@@ -8,7 +8,7 @@
 		formatBytes,
 		formatPercent
 	} from '$lib/format';
-	import { withToast } from '$lib/toast.svelte';
+	import { withToast, success as toastSuccess } from '$lib/toast.svelte';
 
 	let pageTab = $state<'manage' | 'diagnostics'>(
 		typeof window !== 'undefined' && window.location.hash === '#diagnostics' ? 'diagnostics' : 'manage'
@@ -859,11 +859,30 @@
 	async function removeDevice(fsName: string, devicePath: string) {
 		if (!await confirm(`Remove ${devicePath}?`, `Data will be evacuated from filesystem "${fsName}" first.`)) return;
 		await runDeviceAction(devicePath, async () => {
-			await withToast(
-				() => client.call('fs.device.remove', { filesystem: fsName, device: devicePath }),
-				`Device ${devicePath} removed from "${fsName}"`
-			);
-			await refresh();
+			try {
+				await client.call('fs.device.remove', { filesystem: fsName, device: devicePath }, 120000);
+				toastSuccess(`Device ${devicePath} removed from "${fsName}"`);
+				await refresh();
+			} catch (e) {
+				// The safe remove was refused — typically the device still
+				// holds data/metadata bcachefs won't migrate on its own (e.g.
+				// removal would drop below the configured replicas). Rather
+				// than dead-end the user in the terminal with `--force` (#554),
+				// surface the real reason and offer a deliberately-gated force
+				// remove that the engine already supports.
+				const reason = String((e as Error)?.message ?? e).replace(/^Error:\s*/, '');
+				const forced = await confirmDangerous(
+					`Force-remove ${devicePath}?`,
+					`bcachefs refused to remove ${devicePath} safely:\n\n${reason}\n\nForce-remove pulls the device out anyway, skipping the migrate-off and redundancy checks. If the pool no longer has enough replicas on the remaining devices, this loses data. Type the device path below to confirm you understand.`,
+					devicePath
+				);
+				if (!forced) return;
+				const ok = await withToast(
+					() => client.call('fs.device.remove', { filesystem: fsName, device: devicePath, force: true }, 120000),
+					`Force-removed ${devicePath} from "${fsName}"`
+				);
+				if (ok !== undefined) await refresh();
+			}
 		});
 	}
 
