@@ -84,6 +84,7 @@
 		expires?: string;
 		expires_in_days?: number;
 		message?: string;
+		app?: string;
 	};
 
 	let hostStatuses: HostTlsStatus[] = $state([]);
@@ -533,6 +534,7 @@
 				<thead>
 					<tr>
 						<SortTh label="Host" active={hostSortKey === 'host'} dir={hostSortDir} onclick={() => toggleHostSort('host')} thClass="pb-2 font-medium" />
+						<th class="pb-2 font-medium text-left text-xs uppercase text-muted-foreground">App</th>
 						<SortTh label="State" active={hostSortKey === 'state'} dir={hostSortDir} onclick={() => toggleHostSort('state')} thClass="pb-2 font-medium" />
 						<SortTh label="Issuer / Expires" active={hostSortKey === 'expires'} dir={hostSortDir} onclick={() => toggleHostSort('expires')} thClass="pb-2 font-medium" />
 						<th class="pb-2 font-medium text-left text-xs uppercase text-muted-foreground">Detail</th>
@@ -543,6 +545,13 @@
 						{@const badge = badgeForState(h.state)}
 						<tr class="border-t border-border">
 							<td class="py-2 pr-3 font-mono text-xs">{h.host}</td>
+							<td class="py-2 pr-3 text-xs">
+								{#if h.app}
+									<a href="/apps" class="text-primary hover:underline">{h.app}</a>
+								{:else}
+									<span class="text-muted-foreground">—</span>
+								{/if}
+							</td>
 							<td class="py-2 pr-3">
 								<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[0.65rem] {badge.cls}">{badge.label}</span>
 							</td>

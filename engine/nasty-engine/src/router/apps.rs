@@ -51,11 +51,27 @@ pub(super) async fn try_route(
             },
             Err(r) => r,
         },
-        "apps.install" => match parse_params(req) {
-            Ok(p) => match state.apps.install(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
+        "apps.install" => match parse_params::<nasty_apps::InstallAppRequest>(req) {
+            Ok(p) => {
+                // Refresh Caddy TLS automation when the install opts into
+                // a subdomain ingress — install() wires the route but the
+                // TLS layer is reached from here (see the matching note in
+                // app_deploy.rs::deploy_simple).
+                let chose_subdomain = p
+                    .subdomain
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|s| !s.is_empty());
+                match state.apps.install(p).await {
+                    Ok(v) => {
+                        if chose_subdomain {
+                            tokio::spawn(nasty_system::settings::reapply_tls_from_disk());
+                        }
+                        ok(req, v)
+                    }
+                    Err(e) => err(req, e),
+                }
+            }
             Err(e) => invalid(req, e),
         },
         "apps.update" => match parse_params(req) {

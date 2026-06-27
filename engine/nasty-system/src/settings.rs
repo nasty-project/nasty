@@ -139,6 +139,24 @@ pub async fn read_caddy_local_ca_root() -> Option<String> {
 /// any read or parse failure is logged at debug and skipped — a
 /// malformed app.json shouldn't block the main-domain cert refresh.
 async fn load_app_subdomains() -> Vec<String> {
+    load_app_ingress_hosts()
+        .await
+        .into_iter()
+        .map(|(host, _app)| host)
+        .collect()
+}
+
+/// Like [`load_app_subdomains`] but keeps the owning app name alongside
+/// each ingress hostname. The TLS-status path uses this so the WebUI can
+/// label a stuck cert with the deployment it belongs to, and so an
+/// ingress host shows up on the TLS page even when it hasn't yet been
+/// written into Caddy's `certificates.automate` set (Caddy still harvests
+/// the host from the route matcher and attempts issuance — we want that
+/// attempt, and any failure, to be visible regardless).
+///
+/// The app name is the manifest's `name` field, falling back to the
+/// file stem. Best-effort, same as [`load_app_subdomains`].
+async fn load_app_ingress_hosts() -> Vec<(String, String)> {
     let dir = "/var/lib/nasty/apps";
     let mut out = Vec::new();
     let mut entries = match tokio::fs::read_dir(dir).await {
@@ -158,11 +176,27 @@ async fn load_app_subdomains() -> Vec<String> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(host) = v.get("ingress_subdomain").and_then(|s| s.as_str())
-            && !host.trim().is_empty()
-        {
-            out.push(host.trim().to_string());
-        }
+        let Some(host) = v
+            .get("ingress_subdomain")
+            .and_then(|s| s.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let name = v
+            .get("name")
+            .and_then(|s| s.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        out.push((host.to_string(), name));
     }
     out
 }
@@ -1386,6 +1420,12 @@ pub struct HostTlsStatus {
     /// line, verbatim. `pending` ⇒ None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Name of the app whose ingress owns this hostname, when the host
+    /// is an app subdomain (vs. the WebUI's own TLS domain or an
+    /// internal-CA IP). Lets the TLS page label the row so an operator
+    /// can tell at a glance which deployment a stuck cert belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 /// Build a [`HostTlsStatus`] for one managed hostname.
@@ -1412,6 +1452,7 @@ pub async fn host_tls_status(host: &str) -> HostTlsStatus {
             expires: info.expires,
             expires_in_days: info.expires_in_days,
             message: Some(info.path),
+            app: None,
         };
     }
 
@@ -1441,6 +1482,7 @@ pub async fn host_tls_status(host: &str) -> HostTlsStatus {
             expires: None,
             expires_in_days: None,
             message: None,
+            app: None,
         };
     };
 
@@ -1461,40 +1503,78 @@ pub async fn host_tls_status(host: &str) -> HostTlsStatus {
         expires: None,
         expires_in_days: None,
         message: Some(extract_log_message(line)),
+        app: None,
     }
 }
 
-/// Return the list of all managed hostnames Caddy is currently
-/// tracking, with each one's current TLS status. Reads
-/// `apps.tls.certificates.automate` from Caddy's admin API (the
-/// authoritative "what hosts should Caddy be obtaining certs for"
-/// list — set by our `set_tls_automation` flow) and resolves status
-/// per host.
-///
-/// Skips `nasty.local` (the internal-CA fallback) — that one is
-/// always active and not interesting on the /tls page.
-pub async fn list_host_tls_statuses() -> Vec<HostTlsStatus> {
+/// Fetch the `certificates.automate` list from Caddy's admin API — the
+/// authoritative "what hosts should Caddy be obtaining certs for" set,
+/// written by our `set_tls_automation` flow. Empty on any error (admin
+/// API down, parse failure); callers still surface app ingress hosts.
+async fn fetch_caddy_automate_hosts() -> Vec<String> {
     let url = "http://127.0.0.1:2019/config/apps/tls/certificates/automate";
-    let client = reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
-        .build();
-    let Ok(client) = client else {
+        .build()
+    else {
         return Vec::new();
     };
-    let resp = match client.get(url).send().await {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
+    let Ok(resp) = client.get(url).send().await else {
+        return Vec::new();
     };
-    let hosts: Vec<String> = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+    resp.json().await.unwrap_or_default()
+}
+
+/// Merge Caddy's formally-automated host list with app ingress hosts
+/// into an ordered, de-duplicated `(host, app_name)` list.
+///
+/// Automate hosts come first (preserving Caddy's order); each app
+/// ingress host not already present is appended. `nasty.local` (the
+/// internal-CA fallback — always active, uninteresting on the /tls
+/// page) is dropped. Every host carries its owning app name when known,
+/// so an ingress cert can be labelled with its deployment.
+///
+/// The union is the point: an app ingress host that never made it into
+/// `certificates.automate` (registration race, or a config pushed
+/// before the app was deployed) is still being harvested by Caddy from
+/// its route matcher and attempted — so it belongs on the TLS page with
+/// its issuance status, not hidden because one list happened to lack it.
+fn merge_host_lists(
+    automate: Vec<String>,
+    app_hosts: Vec<(String, String)>,
+) -> Vec<(String, Option<String>)> {
+    let app_map: std::collections::HashMap<String, String> = app_hosts.iter().cloned().collect();
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for host in hosts {
+    for host in automate
+        .into_iter()
+        .chain(app_hosts.into_iter().map(|(host, _)| host))
+    {
         if host == "nasty.local" {
             continue;
         }
-        out.push(host_tls_status(&host).await);
+        if seen.insert(host.clone()) {
+            let app = app_map.get(&host).cloned();
+            out.push((host, app));
+        }
+    }
+    out
+}
+
+/// Return the list of all managed hostnames Caddy is currently
+/// tracking, with each one's current TLS status. Unions Caddy's
+/// `certificates.automate` set with the box's app ingress hosts (see
+/// [`merge_host_lists`]) and resolves status per host, so every
+/// hostname Caddy is serving or attempting — including app ingresses
+/// not yet in the automate set — appears on the /tls page.
+pub async fn list_host_tls_statuses() -> Vec<HostTlsStatus> {
+    let automate = fetch_caddy_automate_hosts().await;
+    let app_hosts = load_app_ingress_hosts().await;
+    let mut out = Vec::new();
+    for (host, app) in merge_host_lists(automate, app_hosts) {
+        let mut status = host_tls_status(&host).await;
+        status.app = app;
+        out.push(status);
     }
     out
 }
@@ -1619,12 +1699,54 @@ async fn read_cert_info(cert_path: &str) -> CertInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        EncryptedBlob, OidcSettings, Settings, build_policy_set, caddy_acme_env,
+        EncryptedBlob, OidcSettings, Settings, build_policy_set, caddy_acme_env, merge_host_lists,
         redact_oidc_secret, resolve_dns_credentials, to_nix_string,
     };
 
     fn fake_blob() -> EncryptedBlob {
         serde_json::from_str("\"c2VhbGVkLWJsb2I=\"").unwrap()
+    }
+
+    #[test]
+    fn merge_host_lists_unions_automate_with_app_ingress() {
+        // The WebUI domain is in Caddy's automate set; the app ingress
+        // host (z.0f.ee) is NOT yet — but must still surface, labelled
+        // with its app. nasty.local is dropped.
+        let out = merge_host_lists(
+            vec!["nasty.0f.ee".into(), "nasty.local".into()],
+            vec![("z.0f.ee".into(), "zod-mp".into())],
+        );
+        assert_eq!(
+            out,
+            vec![
+                ("nasty.0f.ee".to_string(), None),
+                ("z.0f.ee".to_string(), Some("zod-mp".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_host_lists_dedupes_and_attaches_app_when_already_automated() {
+        // Once registration has happened the host is in BOTH lists; it
+        // should appear once, still carrying its app name.
+        let out = merge_host_lists(
+            vec!["z.0f.ee".into()],
+            vec![("z.0f.ee".into(), "zod-mp".into())],
+        );
+        assert_eq!(
+            out,
+            vec![("z.0f.ee".to_string(), Some("zod-mp".to_string()))]
+        );
+    }
+
+    #[test]
+    fn merge_host_lists_preserves_automate_order_first() {
+        let out = merge_host_lists(
+            vec!["a.example".into(), "b.example".into()],
+            vec![("c.example".into(), "app-c".into())],
+        );
+        let hosts: Vec<_> = out.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(hosts, vec!["a.example", "b.example", "c.example"]);
     }
 
     #[test]
