@@ -309,8 +309,25 @@ async fn deploy_simple(
             .await;
     }
 
+    // Did this deploy opt into a subdomain ingress? install() wires the
+    // Caddy route internally, but the TLS-automation layer lives in
+    // nasty-system (which nasty-apps can't call without a dep cycle), so
+    // the refresh has to be kicked from here — mirroring the
+    // apps.ingress.set arm. Without it a deploy-time subdomain wouldn't
+    // land in Caddy's certificates.automate until the next engine
+    // restart, leaving the host on Caddy's default automation policy
+    // (no configured DNS-01 provider ⇒ no cert at all on a DNS-challenge
+    // box).
+    let chose_subdomain = params
+        .subdomain
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
     match state.apps.install(params).await {
         Ok(app) => {
+            if chose_subdomain {
+                tokio::spawn(nasty_system::settings::reapply_tls_from_disk());
+            }
             let _ = socket
                 .send(Message::Text(
                     DeployMessage::log(&format!("Container '{}' started", app.name)).into(),
