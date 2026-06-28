@@ -222,7 +222,17 @@
 				const host = parts.length >= 2 ? parts[0] : '';
 				const container = parts.length >= 2 ? parts[1] : parts[0];
 				const proto = parts.length >= 3 ? parts[2]?.toUpperCase() : 'TCP';
-				ports.push({ name: `port-${ports.length}`, container_port: parseInt(container) || 80, host_port: host, protocol: proto || 'TCP' });
+				// Handle port ranges (e.g. `2301-2305:2301-2305`). `parseInt`
+				// alone stops at the dash and silently truncates a range to its
+				// first port — instead split start/end and emit a range row
+				// (container_port + container_port_end), which expands back on
+				// deploy. host_port stays blank for a 1:1 publish; a remapped
+				// range keeps the host start so the offset is preserved.
+				const [cStart, cEnd] = container.split('-');
+				const containerPort = parseInt(cStart) || 80;
+				const containerPortEnd = cEnd ? parseInt(cEnd) || undefined : undefined;
+				const hostPort = host && host !== container ? host.split('-')[0] : '';
+				ports.push({ name: `port-${ports.length}`, container_port: containerPort, container_port_end: containerPortEnd, host_port: hostPort, protocol: proto || 'TCP' });
 			} else if ((t === '-e' || t === '--env') && i + 1 < tokens.length) {
 				const val = tokens[++i];
 				const eq = val.indexOf('=');
