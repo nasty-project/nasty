@@ -1157,6 +1157,61 @@ async fn load_proxy_disabled_reason(app_name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Merge the base app-manifest fields into whatever the manifest already
+/// holds, preserving every other engine-managed key (`ingress_subdomain`,
+/// `startup_*`, …). `proxy_disabled_reason` is the one exception: it's
+/// re-derived by the post-install proxy-compat probe, so it's reset here
+/// (exactly as the previous full-overwrite did implicitly) to avoid a
+/// now-fixed app keeping a stale "direct-port only" hint.
+///
+/// Pure so the splice is unit-testable; the IO wrapper is
+/// [`save_app_manifest_base`].
+fn splice_manifest_base(
+    manifest: serde_json::Value,
+    name: &str,
+    image: &str,
+    allow_unsafe: bool,
+) -> serde_json::Value {
+    let mut map = match manifest {
+        serde_json::Value::Object(m) => m,
+        // Missing/corrupt manifest — start a fresh object rather than
+        // propagate garbage.
+        _ => serde_json::Map::new(),
+    };
+    map.insert("name".into(), name.into());
+    map.insert("image".into(), image.into());
+    map.insert("kind".into(), "simple".into());
+    map.insert("allow_unsafe".into(), allow_unsafe.into());
+    map.remove("proxy_disabled_reason");
+    serde_json::Value::Object(map)
+}
+
+/// Persist the base app-manifest fields for a simple app, preserving the
+/// other engine-managed keys. Read-modify-write (mirrors
+/// [`save_startup_config`]) so a reinstall via `apps.update` / pull no
+/// longer clobbers `ingress_subdomain` or `startup_*`. Best-effort: the
+/// manifest only exists so the app is listable while Docker is down, so a
+/// write failure is logged, not fatal to the install.
+async fn save_app_manifest_base(name: &str, image: &str, allow_unsafe: bool) {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, name);
+    let existing = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    let manifest = splice_manifest_base(existing, name, image, allow_unsafe);
+    if let Err(e) = tokio::fs::create_dir_all(COMPOSE_DIR).await {
+        warn!("create_dir_all({COMPOSE_DIR}) failed: {e}");
+    }
+    if let Err(e) = tokio::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .await
+    {
+        warn!("Failed to save app manifest: {e}");
+    }
+}
+
 /// Persist (or clear) the per-app `ingress_subdomain` in the manifest.
 /// Pass `Some(host)` to record subdomain mode, `None` to drop the field
 /// entirely (used by `ingress_remove` so the next tenant of the same
@@ -2961,25 +3016,11 @@ impl AppsService {
 
         info!("Installed app '{}' (image: {})", req.name, req.image);
 
-        // Save manifest so the app is visible even when Docker is not running
-        let manifest = serde_json::json!({
-            "name": req.name,
-            "image": req.image,
-            "kind": "simple",
-            "allow_unsafe": req.allow_unsafe,
-        });
-        let manifest_path = format!("{}/{}.json", COMPOSE_DIR, req.name);
-        if let Err(e) = tokio::fs::create_dir_all(COMPOSE_DIR).await {
-            warn!("create_dir_all({COMPOSE_DIR}) failed: {e}");
-        }
-        if let Err(e) = tokio::fs::write(
-            &manifest_path,
-            serde_json::to_string_pretty(&manifest).unwrap(),
-        )
-        .await
-        {
-            warn!("Failed to save app manifest: {e}");
-        }
+        // Save manifest so the app is visible even when Docker is not
+        // running. Read-modify-write (not a full overwrite) so a reinstall
+        // via apps.update / pull preserves engine-managed keys —
+        // ingress_subdomain, startup_* — instead of dropping them.
+        save_app_manifest_base(&req.name, &req.image, req.allow_unsafe).await;
 
         // Auto-create ingress for the first TCP port. UDP can't serve
         // HTTP (Caddy's `reverse_proxy`, like every other HTTP proxy,
@@ -7368,6 +7409,56 @@ services:
         // 254-char total
         let too_long_total = format!("{}.example.com", "a".repeat(254 - ".example.com".len()));
         assert!(validate_subdomain(&too_long_total).is_err());
+    }
+
+    // ── splice_manifest_base ──
+
+    use super::splice_manifest_base;
+
+    #[test]
+    fn splice_manifest_preserves_engine_keys() {
+        // A reinstall must keep the subdomain + startup config that other
+        // code paths own — the old full-overwrite dropped them.
+        let existing = serde_json::json!({
+            "name": "z",
+            "image": "old:tag",
+            "kind": "simple",
+            "allow_unsafe": false,
+            "ingress_subdomain": "z.0f.ee",
+            "startup_managed": true,
+            "startup_order": 3,
+            "startup_delay_secs": 5
+        });
+        let out = splice_manifest_base(existing, "z", "new:tag", true);
+        assert_eq!(out["image"], "new:tag");
+        assert_eq!(out["allow_unsafe"], true);
+        assert_eq!(out["ingress_subdomain"], "z.0f.ee");
+        assert_eq!(out["startup_managed"], true);
+        assert_eq!(out["startup_order"], 3);
+        assert_eq!(out["startup_delay_secs"], 5);
+    }
+
+    #[test]
+    fn splice_manifest_resets_proxy_disabled_reason() {
+        // The post-install probe re-derives this; a now-fixed app must not
+        // keep a stale "direct-port only" hint across a reinstall.
+        let existing = serde_json::json!({
+            "proxy_disabled_reason": "emits absolute asset paths"
+        });
+        let out = splice_manifest_base(existing, "haze", "img:tag", false);
+        assert!(out.get("proxy_disabled_reason").is_none());
+    }
+
+    #[test]
+    fn splice_manifest_handles_missing_or_corrupt() {
+        // Empty (fresh install) and non-object (corrupt) both yield a clean
+        // object with just the base fields.
+        let fresh = splice_manifest_base(serde_json::json!({}), "a", "i", false);
+        assert_eq!(fresh["name"], "a");
+        assert_eq!(fresh["kind"], "simple");
+        let corrupt = splice_manifest_base(serde_json::json!("not an object"), "a", "i", true);
+        assert_eq!(corrupt["image"], "i");
+        assert_eq!(corrupt["allow_unsafe"], true);
     }
 
     // ── resolve_ingress_subdomain ──
