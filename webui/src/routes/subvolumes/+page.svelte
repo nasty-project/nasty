@@ -14,7 +14,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import SortTh from '$lib/components/SortTh.svelte';
-	import { Camera, Copy, Trash2, Pencil, Check, X, AlertTriangle, RotateCcw } from '@lucide/svelte';
+	import { Camera, Copy, Trash2, Pencil, Check, X, AlertTriangle, RotateCcw, History } from '@lucide/svelte';
 
 	let pageTab = $state<'subvolumes' | 'snapshots'>(
 		typeof window !== 'undefined' && window.location.hash === '#snapshots' ? 'snapshots' : 'subvolumes'
@@ -663,6 +663,28 @@
 			}),
 			`Snapshot "${snap}" deleted`
 		);
+		await refresh();
+		if (detailSv) {
+			const updated = subvolumes.find(s => s.filesystem === detailSv!.filesystem && s.name === detailSv!.name);
+			if (updated) detailSv = updated;
+		}
+	}
+
+	async function rollbackSnapshot(sv: Subvolume, snap: string) {
+		if (!await confirm(
+			`Roll back "${sv.name}" to snapshot "${snap}"?`,
+			`This replaces the whole subvolume with the snapshot — all changes since "${snap}" was taken are discarded. Apps, VMs and shares using it are paused and resumed automatically. A read-only safety snapshot (pre-rollback-…) is created first so you can undo. This can't be interrupted.`
+		)) return;
+		await withToast(
+			// Long timeout — quiescing a VM can take up to ~60s.
+			() => client.call('snapshot.rollback', {
+				filesystem: sv.filesystem,
+				subvolume: sv.name,
+				snapshot: snap,
+			}, 300_000),
+			`"${sv.name}" rolled back — a safety snapshot was created so you can undo`
+		);
+		await loadSnapshots();
 		await refresh();
 		if (detailSv) {
 			const updated = subvolumes.find(s => s.filesystem === detailSv!.filesystem && s.name === detailSv!.name);
@@ -1384,7 +1406,8 @@
 															<Button variant="secondary" size="xs" onclick={() => { showClone = { filesystem: detailSv!.filesystem, name: detailSv!.name, snapshot: snap.name }; cloneName = ''; }}>
 															<Copy class="mr-1 h-3 w-3" />Clone
 														</Button>
-														<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(detailSv!, snap.name)}>
+														<Button variant="destructive" size="xs" onclick={() => rollbackSnapshot(detailSv!, snap.name)} title="Roll the whole subvolume back to this snapshot (pauses apps/VMs/shares; creates a safety snapshot first)"><History class="mr-1 h-3 w-3" />Roll back</Button>
+															<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(detailSv!, snap.name)}>
 															<Trash2 class="h-3 w-3" />
 														</Button>
 													</div>

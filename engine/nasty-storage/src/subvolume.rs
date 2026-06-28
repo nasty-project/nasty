@@ -458,6 +458,25 @@ pub struct CloneSnapshotRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RollbackSnapshotRequest {
+    /// Name of the filesystem containing the snapshot.
+    pub filesystem: String,
+    /// Name of the parent subvolume to roll back.
+    pub subvolume: String,
+    /// Name of the snapshot to roll the subvolume back to.
+    pub snapshot: String,
+}
+
+/// Outcome of a rollback: the recreated subvolume plus the name of the
+/// read-only safety snapshot taken of the pre-rollback state (the undo
+/// point — roll back to it to get the prior state back).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RollbackResult {
+    pub subvolume: Subvolume,
+    pub safety_snapshot: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CloneSubvolumeRequest {
     /// Name of the filesystem containing the source subvolume.
     pub filesystem: String,
@@ -1581,44 +1600,120 @@ impl SubvolumeService {
             "Cloning snapshot '{}/{}@{}' to new subvolume '{}'",
             req.filesystem, req.subvolume, req.snapshot, req.new_name
         );
-        // bcachefs subvolume snapshot without -r creates a writable subvolume from snapshot
-        cmd::run_ok(
-            "bcachefs",
-            &["subvolume", "snapshot", &snap_path, &new_subvol_path],
-        )
-        .await
-        .map_err(SubvolumeError::CommandFailed)?;
-
-        // Read metadata from the snapshot itself — it inherits xattrs from the source.
-        // This works even when the parent subvolume has been deleted (DR scenario).
-        let snap_meta = read_meta_xattrs(Path::new(&snap_path));
-
-        // The new subvolume already has the correct xattrs (copied by bcachefs snapshot).
-        // Only update owner if an owner filter is set.
-        if let Some(owner) = owner_filter {
-            let _ = xattr::set(&new_subvol_path, XATTR_NASTY_OWNER, owner.as_bytes());
-        }
-
-        // For block subvolumes, attach a loop device to the restored clone's sparse image
-        if snap_meta.subvolume_type == SubvolumeType::Block {
-            let img_path = format!("{new_subvol_path}/{BLOCK_FILE_NAME}");
-            if Path::new(&img_path).exists() {
-                info!(
-                    "Attaching loop device for restored block subvolume '{}'",
-                    req.new_name
-                );
-                let mut args = vec!["--find", "--show"];
-                if snap_meta.direct_io {
-                    args.push("--direct-io=on");
-                }
-                args.push(&img_path);
-                cmd::run_ok("losetup", &args)
-                    .await
-                    .map_err(SubvolumeError::CommandFailed)?;
-            }
-        }
+        materialize_subvol_from_snapshot(&snap_path, &new_subvol_path, owner_filter).await?;
 
         self.get(&req.filesystem, &req.new_name, None).await
+    }
+
+    /// Roll a filesystem subvolume back to a snapshot's state. Assumes the
+    /// engine layer has already quiesced everything using the subvolume.
+    ///
+    /// Takes a read-only safety snapshot of the current state first (the
+    /// undo point — it survives the delete), then deletes the live
+    /// subvolume and recreates it writable from the target snapshot at the
+    /// same path, re-applying the project quota. Name/path/owner/quota are
+    /// preserved, so path-based consumers keep working.
+    ///
+    /// v1 scope: filesystem subvolumes with no nested children; block
+    /// subvolumes (loop/iSCSI/NVMe-oF/VM-disk) are refused.
+    pub async fn rollback(
+        &self,
+        req: RollbackSnapshotRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<RollbackResult, SubvolumeError> {
+        let subvol = self
+            .get(&req.filesystem, &req.subvolume, owner_filter)
+            .await?;
+
+        if subvol.subvolume_type == SubvolumeType::Block {
+            return Err(SubvolumeError::CommandFailed(
+                "rollback is not yet supported for block subvolumes (iSCSI / NVMe-oF / VM disks)"
+                    .into(),
+            ));
+        }
+
+        let mount_point = self.fs_mount_point(&req.filesystem).await?;
+        let subvol_path = subvol_path(&mount_point, &req.subvolume);
+        let snap_path = snap_path(&mount_point, &req.subvolume, &req.snapshot);
+
+        if !Path::new(&snap_path).exists() {
+            return Err(SubvolumeError::NotFound(format!(
+                "snapshot {}@{}",
+                req.subvolume, req.snapshot
+            )));
+        }
+        let children = find_child_subvolumes(&mount_point, &req.subvolume).await;
+        if !children.is_empty() {
+            return Err(SubvolumeError::CommandFailed(format!(
+                "rollback refused: '{}' has nested subvolumes ({}). Roll those back individually.",
+                req.subvolume,
+                children.join(", ")
+            )));
+        }
+
+        // 1. Safety snapshot of the current state — the undo point. It's an
+        //    independent subvolume, so it survives the delete below.
+        let safety_name = format!(
+            "pre-rollback-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+        self.create_snapshot(
+            CreateSnapshotRequest {
+                filesystem: req.filesystem.clone(),
+                subvolume: req.subvolume.clone(),
+                name: safety_name.clone(),
+                read_only: Some(true),
+            },
+            owner_filter,
+        )
+        .await?;
+
+        // 2. Delete the live subvolume.
+        info!(
+            "Rollback: deleting live subvolume '{}/{}' before recreating from @{}",
+            req.filesystem, req.subvolume, req.snapshot
+        );
+        cmd::run_ok("bcachefs", &["subvolume", "delete", &subvol_path])
+            .await
+            .map_err(|e| {
+                SubvolumeError::CommandFailed(format!(
+                    "rollback: deleting live subvolume failed ({e}). Your data is intact in \
+                     safety snapshot '{}@{safety_name}'.",
+                    req.subvolume
+                ))
+            })?;
+
+        // 3. Recreate writable from the target snapshot at the same path.
+        materialize_subvol_from_snapshot(&snap_path, &subvol_path, owner_filter)
+            .await
+            .map_err(|e| {
+                SubvolumeError::CommandFailed(format!(
+                    "rollback: recreating from snapshot failed ({e}). Recover from safety \
+                     snapshot '{}@{safety_name}' or the target '@{}'.",
+                    req.subvolume, req.snapshot
+                ))
+            })?;
+
+        // 4. Re-apply the project quota — project id is deterministic from
+        //    (fs, name), so the recreated subvolume reuses it; re-stamp the
+        //    original limit (0 = tracked-unlimited).
+        let projid = project_id_for(&req.filesystem, &req.subvolume);
+        set_project_quota(
+            &mount_point,
+            &subvol_path,
+            projid,
+            subvol.quota_bytes.unwrap_or(0),
+        )
+        .await;
+
+        let recreated = self.get(&req.filesystem, &req.subvolume, None).await?;
+        Ok(RollbackResult {
+            subvolume: recreated,
+            safety_snapshot: safety_name,
+        })
     }
 
     /// Clone a subvolume into a new writable subvolume (COW).
@@ -2086,6 +2181,43 @@ async fn find_child_subvolumes(mount_point: &str, parent_name: &str) -> Vec<Stri
     // Sort so deeper paths come later — reverse for depth-first deletion
     children.sort();
     children
+}
+
+/// Recreate a writable subvolume at `dest_path` from a snapshot at
+/// `snap_path` (`bcachefs subvolume snapshot` without `-r`), re-stamping
+/// the owner xattr when a scope filter is active and re-attaching a loop
+/// device for block subvolumes. bcachefs copies the source's other xattrs
+/// into the new subvolume automatically. Shared by `clone_snapshot` and
+/// `rollback`.
+async fn materialize_subvol_from_snapshot(
+    snap_path: &str,
+    dest_path: &str,
+    owner_filter: Option<&str>,
+) -> Result<(), SubvolumeError> {
+    cmd::run_ok("bcachefs", &["subvolume", "snapshot", snap_path, dest_path])
+        .await
+        .map_err(SubvolumeError::CommandFailed)?;
+
+    let snap_meta = read_meta_xattrs(Path::new(snap_path));
+    if let Some(owner) = owner_filter {
+        let _ = xattr::set(dest_path, XATTR_NASTY_OWNER, owner.as_bytes());
+    }
+
+    if snap_meta.subvolume_type == SubvolumeType::Block {
+        let img_path = format!("{dest_path}/{BLOCK_FILE_NAME}");
+        if Path::new(&img_path).exists() {
+            info!("Attaching loop device for block subvolume at '{dest_path}'");
+            let mut args = vec!["--find", "--show"];
+            if snap_meta.direct_io {
+                args.push("--direct-io=on");
+            }
+            args.push(&img_path);
+            cmd::run_ok("losetup", &args)
+                .await
+                .map_err(SubvolumeError::CommandFailed)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -44,7 +44,8 @@ use nasty_storage::filesystem::{
 use nasty_storage::subvolume::{
     CloneSnapshotRequest, CloneSubvolumeRequest, CreateSnapshotRequest, CreateSubvolumeRequest,
     DeleteSnapshotRequest, DeleteSubvolumeRequest, FindByPropertyRequest, RemovePropertiesRequest,
-    ResizeSubvolumeRequest, SetPropertiesRequest, Snapshot, Subvolume, UpdateSubvolumeRequest,
+    ResizeSubvolumeRequest, RollbackResult, RollbackSnapshotRequest, SetPropertiesRequest,
+    Snapshot, Subvolume, UpdateSubvolumeRequest,
 };
 use nasty_system::alerts::{ActiveAlert, AlertRule, AlertRuleUpdate};
 use nasty_system::firewall::FirewallStatus;
@@ -814,6 +815,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Operator,
                     params: MethodParams::Schema(gen_schema::<CloneSnapshotRequest>(generator)),
                     result: Some(gen_schema::<Subvolume>(generator)),
+                },
+                Method {
+                    name: "snapshot.rollback",
+                    desc: "Roll a subvolume back to a snapshot: quiesce its apps/VMs/shares, take a safety snapshot of the current state, swap the subvolume to the snapshot, and resume. Destructive; filesystem subvolumes only.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::Schema(gen_schema::<RollbackSnapshotRequest>(generator)),
+                    result: Some(gen_schema::<RollbackResult>(generator)),
                 },
             ],
         ),

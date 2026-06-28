@@ -59,6 +59,34 @@ pub(super) async fn try_route(
             },
             Err(e) => invalid(req, e),
         },
+        // Whole-subvolume rollback: quiesce dependents (apps/VMs/shares),
+        // swap the subvolume to the snapshot, resume. Destructive — takes a
+        // safety snapshot first. Orchestrated in the engine layer.
+        "snapshot.rollback" => {
+            match parse_params::<nasty_storage::subvolume::RollbackSnapshotRequest>(req) {
+                Ok(p) => {
+                    if session
+                        .filesystem
+                        .as_deref()
+                        .is_some_and(|f| f != p.filesystem)
+                    {
+                        err(req, "access denied")
+                    } else {
+                        match crate::subvol_rollback::rollback_with_dependents(
+                            state,
+                            p,
+                            session.owner.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(v) => ok(req, v),
+                            Err(e) => err(req, e),
+                        }
+                    }
+                }
+                Err(e) => invalid(req, e),
+            }
+        }
         _ => return None,
     })
 }
