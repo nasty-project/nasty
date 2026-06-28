@@ -695,6 +695,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/files/mkdir", post(files_mkdir_handler))
         .route("/api/files/rename", post(files_rename_handler))
         .route("/api/files/copy", post(files_copy_handler))
+        .route("/api/files/restore", post(files_restore_handler))
         .route(
             "/api/files/content",
             get(files_content_handler)
@@ -1713,6 +1714,16 @@ async fn files_mkdir_handler(
 }
 
 #[derive(serde::Deserialize)]
+struct RestoreRequest {
+    /// Snapshot paths (relative to /fs) to restore, e.g.
+    /// `tank/photos@daily/holiday/img.jpg`. The live destination is
+    /// derived server-side by stripping `@<snap>` from the snapshot
+    /// component, so a restore can only ever overwrite the snapshot's own
+    /// live subvolume — never an arbitrary path.
+    items: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
 struct RenameRequest {
     /// Existing path under /fs. Resolved to a canonical path; the
     /// rename is rejected if it falls outside FILES_ROOT or targets a
@@ -2059,6 +2070,260 @@ async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Res
         }
     }
     Ok(())
+}
+
+// ── Restore-from-snapshot endpoint ─────────────────────────────
+
+/// Given a snapshot path relative to `/fs` (e.g. `tank/photos@daily/x/y`),
+/// derive the *live* destination by stripping `@<snap>` from the snapshot
+/// component (index 1: `<subvol>@<snap>`). Returns the live relative path
+/// (`tank/photos/x/y`).
+///
+/// Errors when the path isn't inside a snapshot (component 1 has no `@`),
+/// is too short, or contains traversal/empty components. `@` is forbidden
+/// in subvolume and snapshot names (`validate_subvolume_name`), so the
+/// snapshot component is unambiguous even when a deeper *file* is named
+/// `a@b`. This is the safety pivot: a restore can only target the
+/// snapshot's own live subvolume, never an operator-supplied path.
+fn derive_restore_dest(rel: &str) -> Result<String, String> {
+    let rel = rel.trim_start_matches('/');
+    let comps: Vec<&str> = rel.split('/').collect();
+    if comps.len() < 2 {
+        return Err("not a snapshot path (expected <filesystem>/<subvol>@<snap>/…)".into());
+    }
+    for c in &comps {
+        if c.is_empty() || *c == "." || *c == ".." {
+            return Err("invalid path component".into());
+        }
+    }
+    let Some((subvol, _snap)) = comps[1].split_once('@') else {
+        return Err("source is not inside a snapshot".into());
+    };
+    if subvol.is_empty() {
+        return Err("invalid snapshot path".into());
+    }
+    let mut out = comps;
+    out[1] = subvol;
+    Ok(out.join("/"))
+}
+
+/// Remove whatever currently exists at `p` (file, symlink, or directory)
+/// so a restore can overwrite it. No-op when `p` doesn't exist.
+async fn remove_existing(p: &std::path::Path) -> Result<(), String> {
+    match tokio::fs::symlink_metadata(p).await {
+        Ok(m) if m.is_dir() => tokio::fs::remove_dir_all(p)
+            .await
+            .map_err(|e| format!("rm -r {}: {e}", p.display())),
+        Ok(_) => tokio::fs::remove_file(p)
+            .await
+            .map_err(|e| format!("rm {}: {e}", p.display())),
+        Err(_) => Ok(()),
+    }
+}
+
+/// Like [`copy_dir_recursive`] but with overwrite-merge semantics for
+/// restore: an existing destination directory is merged into (not
+/// rejected), files are overwritten, symlinks replaced. Files that exist
+/// in the live tree but not the snapshot are left untouched (additive —
+/// no `--delete`).
+async fn restore_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    let mut stack: Vec<(std::path::PathBuf, std::path::PathBuf)> =
+        vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((src_dir, dst_dir)) = stack.pop() {
+        match tokio::fs::symlink_metadata(&dst_dir).await {
+            Ok(m) if m.is_dir() => {} // merge into the existing directory
+            Ok(_) => {
+                // A non-directory is in the way — replace it with a dir.
+                remove_existing(&dst_dir).await?;
+                tokio::fs::create_dir(&dst_dir)
+                    .await
+                    .map_err(|e| format!("mkdir {}: {e}", dst_dir.display()))?;
+            }
+            Err(_) => tokio::fs::create_dir_all(&dst_dir)
+                .await
+                .map_err(|e| format!("mkdir {}: {e}", dst_dir.display()))?,
+        }
+        let mut entries = tokio::fs::read_dir(&src_dir)
+            .await
+            .map_err(|e| format!("read_dir {}: {e}", src_dir.display()))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("next_entry {}: {e}", src_dir.display()))?
+        {
+            let entry_src = entry.path();
+            let entry_dst = dst_dir.join(entry.file_name());
+            let meta = entry
+                .metadata()
+                .await
+                .map_err(|e| format!("metadata {}: {e}", entry_src.display()))?;
+            if meta.is_dir() {
+                stack.push((entry_src, entry_dst));
+            } else {
+                restore_leaf(&entry_src, &entry_dst, &meta).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Restore a single file or symlink onto `dst`, overwriting any existing
+/// entry there (including a directory or symlink in the way).
+async fn restore_leaf(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    meta: &std::fs::Metadata,
+) -> Result<(), String> {
+    if meta.file_type().is_symlink() {
+        remove_existing(dst).await?;
+        let target = tokio::fs::read_link(src)
+            .await
+            .map_err(|e| format!("read_link {}: {e}", src.display()))?;
+        tokio::fs::symlink(&target, dst)
+            .await
+            .map_err(|e| format!("symlink {}: {e}", dst.display()))
+    } else {
+        // `tokio::fs::copy` overwrites a regular file, but not a dir/symlink
+        // sitting at the destination — clear those first.
+        if let Ok(m) = tokio::fs::symlink_metadata(dst).await
+            && (m.is_dir() || m.file_type().is_symlink())
+        {
+            remove_existing(dst).await?;
+        }
+        tokio::fs::copy(src, dst)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))
+    }
+}
+
+/// Restore files/folders from a read-only snapshot back over their live
+/// subvolume. POST /api/files/restore with `{ items: [<snapshot path>…] }`.
+///
+/// The destination is derived (see [`derive_restore_dest`]) — callers
+/// never supply it — so a restore can only ever overwrite the snapshot's
+/// own live subvolume. Overwrites existing files (the whole point); files
+/// created after the snapshot are left in place. The live destination's
+/// parent must already exist (restore a parent folder first if a whole
+/// directory tree was deleted).
+async fn files_restore_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RestoreRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = validate_bearer(&headers, &state.auth).await {
+        return e.into_response();
+    }
+    if req.items.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no items to restore"})),
+        )
+            .into_response();
+    }
+
+    let mut restored = 0u32;
+    for item in &req.items {
+        // Source: the snapshot path. safe_path canonicalises + jails to /fs.
+        let src = match safe_path(item) {
+            Ok(p) => p,
+            Err(status) => {
+                return (
+                    status,
+                    Json(serde_json::json!({"error": format!("invalid source path: {item}")})),
+                )
+                    .into_response();
+            }
+        };
+        if is_inside_block_subvolume(&src) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "cannot restore block subvolume contents — manage via the Subvolumes page"})),
+            )
+                .into_response();
+        }
+        let src_rel = src.strip_prefix(FILES_ROOT).unwrap_or(&src);
+        let live_rel = match derive_restore_dest(&src_rel.to_string_lossy()) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        };
+
+        let dest = std::path::Path::new(FILES_ROOT).join(&live_rel);
+        let (Some(dest_parent), Some(leaf)) = (dest.parent(), dest.file_name()) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid destination"})),
+            )
+                .into_response();
+        };
+        // The live parent must exist; canonicalising it also blocks symlink
+        // escapes. If it's gone, the live subvolume/folder was deleted.
+        let parent_rel = dest_parent.strip_prefix(FILES_ROOT).unwrap_or(dest_parent);
+        let parent_canon = match safe_path(&parent_rel.to_string_lossy()) {
+            Ok(p) => p,
+            Err(_) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({"error": format!(
+                        "the live location for '{live_rel}' no longer exists — clone the snapshot instead"
+                    )})),
+                )
+                    .into_response();
+            }
+        };
+        if is_inside_block_subvolume(&parent_canon) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "cannot restore into block subvolume contents"})),
+            )
+                .into_response();
+        }
+        let final_dest = parent_canon.join(leaf);
+        if !final_dest.starts_with(FILES_ROOT) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid destination path"})),
+            )
+                .into_response();
+        }
+
+        let src_meta = match tokio::fs::symlink_metadata(&src).await {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("stat source: {e}")})),
+                )
+                    .into_response();
+            }
+        };
+        let result = if src_meta.is_dir() {
+            restore_dir_recursive(&src, &final_dest).await
+        } else {
+            restore_leaf(&src, &final_dest, &src_meta).await
+        };
+        if let Err(e) = result {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+        info!("Restored {} -> {}", src.display(), final_dest.display());
+        restored += 1;
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "restored": restored})),
+    )
+        .into_response()
 }
 
 // ── File content/download endpoint ─────────────────────────────
@@ -3441,4 +3706,99 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
             ),
         }
     });
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::derive_restore_dest;
+
+    #[test]
+    fn derives_live_path_from_snapshot() {
+        // <fs>/<subvol>@<snap>/rel → <fs>/<subvol>/rel
+        assert_eq!(
+            derive_restore_dest("tank/photos@daily/holiday/img.jpg").unwrap(),
+            "tank/photos/holiday/img.jpg"
+        );
+        // The snapshot root restores the whole subvolume root.
+        assert_eq!(
+            derive_restore_dest("tank/photos@daily").unwrap(),
+            "tank/photos"
+        );
+        // A leading slash is tolerated.
+        assert_eq!(
+            derive_restore_dest("/tank/photos@daily/a").unwrap(),
+            "tank/photos/a"
+        );
+    }
+
+    #[test]
+    fn only_strips_the_snapshot_component() {
+        // A deeper file literally named `a@b` must NOT be touched — only
+        // component 1 (the snapshot dir) is rewritten.
+        assert_eq!(
+            derive_restore_dest("tank/photos@daily/a@b.txt").unwrap(),
+            "tank/photos/a@b.txt"
+        );
+    }
+
+    #[test]
+    fn rejects_non_snapshot_and_traversal() {
+        // Component 1 has no '@' — not a snapshot path.
+        assert!(derive_restore_dest("tank/photos/img.jpg").is_err());
+        // Too short (no subvolume component).
+        assert!(derive_restore_dest("tank").is_err());
+        // Traversal anywhere is rejected.
+        assert!(derive_restore_dest("tank/photos@daily/../etc").is_err());
+        // Empty snapshot subvolume name.
+        assert!(derive_restore_dest("tank/@daily/x").is_err());
+    }
+
+    // End-to-end round-trip of the actual byte-moving logic (the heart of
+    // the feature): build a fake snapshot tree + a diverged live tree, run
+    // the real restore copy, and assert the live tree matches the snapshot
+    // while files created after the snapshot survive (additive semantics).
+    #[tokio::test]
+    async fn restore_round_trip_overwrites_and_is_additive() {
+        use super::{restore_dir_recursive, restore_leaf};
+        let tmp = tempfile::tempdir().unwrap();
+        let snap = tmp.path().join("photos@daily");
+        let live = tmp.path().join("photos");
+        tokio::fs::create_dir_all(snap.join("trip")).await.unwrap();
+        tokio::fs::create_dir_all(live.join("trip")).await.unwrap();
+
+        // Snapshot (the "good" past state).
+        tokio::fs::write(snap.join("a.txt"), b"v1").await.unwrap();
+        tokio::fs::write(snap.join("trip/b.txt"), b"keep")
+            .await
+            .unwrap();
+        // Live (diverged): a.txt modified, b.txt deleted, plus a new file.
+        tokio::fs::write(live.join("a.txt"), b"v2-modified")
+            .await
+            .unwrap();
+        tokio::fs::write(live.join("trip/after.txt"), b"new")
+            .await
+            .unwrap();
+
+        // Restore the whole snapshot tree over the live subvolume.
+        restore_dir_recursive(&snap, &live).await.unwrap();
+
+        // Modified file rolled back, deleted file restored…
+        assert_eq!(tokio::fs::read(live.join("a.txt")).await.unwrap(), b"v1");
+        assert_eq!(
+            tokio::fs::read(live.join("trip/b.txt")).await.unwrap(),
+            b"keep"
+        );
+        // …and the file created after the snapshot is left in place (additive).
+        assert!(live.join("trip/after.txt").exists());
+
+        // A single-file restore of a now-deleted file also reappears.
+        tokio::fs::remove_file(live.join("a.txt")).await.unwrap();
+        let meta = tokio::fs::symlink_metadata(snap.join("a.txt"))
+            .await
+            .unwrap();
+        restore_leaf(&snap.join("a.txt"), &live.join("a.txt"), &meta)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(live.join("a.txt")).await.unwrap(), b"v1");
+    }
 }

@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput, Share2, Check } from '@lucide/svelte';
+	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput, Share2, Check, RotateCcw } from '@lucide/svelte';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import PathPicker from '$lib/components/PathPicker.svelte';
 	import { getClient } from '$lib/client';
@@ -336,7 +336,48 @@
 		}
 	}
 
-	onMount(() => browse(''));
+	// Optional `?path=` deep-link (used by the Subvolumes page's
+	// "Restore files…" to drop the operator straight into a snapshot).
+	onMount(() => {
+		const initial = new URLSearchParams(window.location.search).get('path');
+		browse(initial ? initial.replace(/^\/fs\/?/, '') : '');
+	});
+
+	// True when the current path is inside a read-only snapshot, i.e. the
+	// component after the filesystem (`<fs>/<subvol>@<snap>/…`) contains '@'.
+	// In this mode the action bar offers Restore (copy back to the live
+	// subvolume) and hides Move/Delete, which can't work on a RO snapshot.
+	const inSnapshot = $derived.by(() => {
+		const parts = currentPath.split('/').filter(Boolean);
+		return parts.length >= 2 && parts[1].includes('@');
+	});
+
+	let restoreConfirm = $state(false);
+	async function runRestore() {
+		restoreConfirm = false;
+		const targets = selectedEntries();
+		if (targets.length === 0) return;
+		const items = targets.map((e) => (currentPath ? `${currentPath}/${e.name}` : e.name));
+		bulkActionRunning = true;
+		bulkActionStatus = `restoring ${items.length} item${items.length === 1 ? '' : 's'}…`;
+		try {
+			const res = await fetch('/api/files/restore', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ items }),
+			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				alert(`Restore failed: ${data.error || res.statusText}`);
+			}
+		} catch (e) {
+			alert(`Restore failed: ${e instanceof Error ? e.message : String(e)}`);
+		}
+		bulkActionRunning = false;
+		bulkActionStatus = '';
+		clearSelection();
+		await browse(currentPath);
+	}
 
 	async function browse(path: string) {
 		loading = true;
@@ -573,19 +614,39 @@
 </div>
 
 <!-- Bulk action bar (visible only when at least one row is selected) -->
+{#if inSnapshot}
+	<div class="mb-3 flex items-start gap-2 rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-300">
+		<RotateCcw size={16} class="mt-0.5 shrink-0" />
+		<span>
+			You're viewing a <span class="font-medium">read-only snapshot</span>. Select files or folders and click
+			<span class="font-medium">Restore</span> to copy them back over the live subvolume — this overwrites the
+			current version. Files created after the snapshot are left in place.
+		</span>
+	</div>
+{/if}
+
 {#if selected.size > 0 && !isRoot}
 	<div class="mb-3 flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
 		<span class="text-sm font-medium">{selected.size} selected</span>
 		<div class="ml-auto flex items-center gap-2">
-			<Button size="sm" variant="outline" onclick={() => openPicker(selectedEntries(), 'copy')} disabled={bulkActionRunning}>
-				<Copy size={14} class="mr-1" /> Copy
-			</Button>
-			<Button size="sm" variant="outline" onclick={() => openPicker(selectedEntries(), 'move')} disabled={bulkActionRunning}>
-				<FolderInput size={14} class="mr-1" /> Move
-			</Button>
-			<Button size="sm" variant="destructive" onclick={() => bulkDeleteConfirm = true} disabled={bulkActionRunning}>
-				<Trash2 size={14} class="mr-1" /> Delete
-			</Button>
+			{#if inSnapshot}
+				<Button size="sm" onclick={() => restoreConfirm = true} disabled={bulkActionRunning}>
+					<RotateCcw size={14} class="mr-1" /> Restore
+				</Button>
+				<Button size="sm" variant="outline" onclick={() => openPicker(selectedEntries(), 'copy')} disabled={bulkActionRunning}>
+					<Copy size={14} class="mr-1" /> Copy
+				</Button>
+			{:else}
+				<Button size="sm" variant="outline" onclick={() => openPicker(selectedEntries(), 'copy')} disabled={bulkActionRunning}>
+					<Copy size={14} class="mr-1" /> Copy
+				</Button>
+				<Button size="sm" variant="outline" onclick={() => openPicker(selectedEntries(), 'move')} disabled={bulkActionRunning}>
+					<FolderInput size={14} class="mr-1" /> Move
+				</Button>
+				<Button size="sm" variant="destructive" onclick={() => bulkDeleteConfirm = true} disabled={bulkActionRunning}>
+					<Trash2 size={14} class="mr-1" /> Delete
+				</Button>
+			{/if}
 			<Button size="sm" variant="ghost" onclick={clearSelection} disabled={bulkActionRunning}>
 				Clear
 			</Button>
@@ -951,6 +1012,25 @@
 {/if}
 
 <!-- Bulk delete confirm modal -->
+{#if restoreConfirm}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+		<Card class="w-full max-w-md">
+			<CardContent class="pt-6">
+				<h3 class="mb-2 text-lg font-semibold">Restore {selected.size} item{selected.size === 1 ? '' : 's'} from snapshot?</h3>
+				<p class="mb-4 text-sm text-muted-foreground">
+					This copies the selected item{selected.size === 1 ? '' : 's'} from the snapshot back over the live
+					subvolume, <span class="font-medium text-foreground">overwriting the current version</span>. Files
+					created after the snapshot are left in place. This can't be undone — take a snapshot first if you want a way back.
+				</p>
+				<div class="flex gap-2">
+					<Button onclick={runRestore}>Restore {selected.size}</Button>
+					<Button variant="secondary" onclick={() => restoreConfirm = false}>Cancel</Button>
+				</div>
+			</CardContent>
+		</Card>
+	</div>
+{/if}
+
 {#if bulkDeleteConfirm}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
 		<Card class="w-full max-w-sm">

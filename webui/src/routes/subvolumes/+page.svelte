@@ -14,7 +14,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import SortTh from '$lib/components/SortTh.svelte';
-	import { Camera, Copy, Trash2, Pencil, Check, X, AlertTriangle } from '@lucide/svelte';
+	import { Camera, Copy, Trash2, Pencil, Check, X, AlertTriangle, RotateCcw } from '@lucide/svelte';
 
 	let pageTab = $state<'subvolumes' | 'snapshots'>(
 		typeof window !== 'undefined' && window.location.hash === '#snapshots' ? 'snapshots' : 'subvolumes'
@@ -1380,7 +1380,8 @@
 														<span class="ml-2 text-xs text-muted-foreground">{snap.read_only ? 'read-only' : 'writable'}</span>
 													</div>
 													<div class="flex gap-1">
-														<Button variant="secondary" size="xs" onclick={() => { showClone = { filesystem: detailSv!.filesystem, name: detailSv!.name, snapshot: snap.name }; cloneName = ''; }}>
+														<Button variant="secondary" size="xs" onclick={() => goto(`/files?path=${encodeURIComponent(`${detailSv!.filesystem}/${detailSv!.name}@${snap.name}`)}`)} title="Browse this snapshot and restore files back over the live subvolume"><RotateCcw class="mr-1 h-3 w-3" />Restore files…</Button>
+															<Button variant="secondary" size="xs" onclick={() => { showClone = { filesystem: detailSv!.filesystem, name: detailSv!.name, snapshot: snap.name }; cloneName = ''; }}>
 															<Copy class="mr-1 h-3 w-3" />Clone
 														</Button>
 														<Button variant="destructive" size="xs" onclick={() => deleteSnapshot(detailSv!, snap.name)}>
