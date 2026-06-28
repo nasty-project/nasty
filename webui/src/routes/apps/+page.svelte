@@ -2385,7 +2385,9 @@
 		</div>
 	{/if}
 
-	<!-- Docker networks (#435 / #438) -->
+	<!-- Networks — defined as a snippet here, rendered below the apps table
+	     (see {@render networksSection()}) so the apps stay the primary section. -->
+	{#snippet networksSection()}
 	{#if status?.running}
 		<div class="mt-6 flex items-center justify-between">
 			<h3 class="text-lg font-semibold">Networks</h3>
@@ -2426,6 +2428,7 @@
 			</table>
 		{/if}
 	{/if}
+	{/snippet}
 
 	<!-- Startup order (#437): NASty-managed boot ordering for compose stacks -->
 	{#if composeStacks.length > 0}
@@ -2682,6 +2685,9 @@
 			</tbody>
 		</table>
 	{/if}
+
+	<!-- Networks render below the apps table — apps are the primary actors. -->
+	{@render networksSection()}
 {/if}
 
 <!-- Subdomain ingress dialog (per-app "···" → "Subdomain…") -->
