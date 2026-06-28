@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
-	import type { FirewallStatus, NetworkState } from '$lib/types';
+	import type { FirewallStatus, NetworkState, PublishedAppPort } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 
 	const client = getClient();
@@ -12,6 +12,33 @@
 	let fwEditService: string | null = $state(null);
 	let fwEditSources = $state('');
 	let fwEditIfaces: string[] = $state([]);
+
+	/** A published app port, or a collapsed contiguous 1:1 range of them. */
+	type AppPortRow = PublishedAppPort & { host_port_end?: number };
+
+	/** Collapse contiguous 1:1 (host == container) published ports of the same
+	 * app + transport into a single range row, so a game server publishing
+	 * 2300-2399 shows as one line instead of 100. Non-contiguous or
+	 * remapped (host != container) ports stay individual. */
+	const collapsedAppPorts = $derived.by<AppPortRow[]>(() => {
+		const ports = [...(firewallStatus?.published_app_ports ?? [])].sort(
+			(a, b) => a.app.localeCompare(b.app) || a.transport.localeCompare(b.transport) || a.host_port - b.host_port
+		);
+		const out: AppPortRow[] = [];
+		for (const p of ports) {
+			const last = out[out.length - 1];
+			const lastEnd = last ? (last.host_port_end ?? last.host_port) : -1;
+			const oneToOne = p.host_port === p.container_port;
+			const lastOneToOne = last ? (last.host_port_end ?? last.host_port) === last.container_port : false;
+			if (last && oneToOne && lastOneToOne && last.app === p.app && last.transport === p.transport && lastEnd + 1 === p.host_port) {
+				last.host_port_end = p.host_port;
+				last.container_port = p.container_port;
+			} else {
+				out.push({ ...p });
+			}
+		}
+		return out;
+	});
 
 	onMount(async () => {
 		await Promise.all([loadFirewall(), loadNetwork()]);
@@ -146,12 +173,14 @@
 					that's reachable on this box in one place.
 				</p>
 				<div class="mt-3 space-y-1">
-					{#each firewallStatus.published_app_ports as p}
+					{#each collapsedAppPorts as p}
 						<div class="flex items-center gap-3 rounded px-3 py-2 text-sm">
 							<span class="h-2 w-2 rounded-full shrink-0 bg-sky-400"></span>
-							<span class="font-mono text-xs w-28">{p.host_port}/{p.transport}</span>
+							<span class="font-mono text-xs w-28">
+								{#if p.host_port_end}{p.host_port}–{p.host_port_end}{:else}{p.host_port}{/if}/{p.transport}
+							</span>
 							<a href="/apps" class="font-medium text-primary hover:underline">{p.app}</a>
-							{#if p.container_port !== p.host_port}
+							{#if !p.host_port_end && p.container_port !== p.host_port}
 								<span class="text-xs text-muted-foreground">→ container {p.container_port}</span>
 							{/if}
 							<span class="ml-auto text-xs text-sky-400">Open (Docker)</span>

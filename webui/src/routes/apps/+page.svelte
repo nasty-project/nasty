@@ -285,7 +285,58 @@
 	// Install form
 	let newName = $state('');
 	let newImage = $state('');
-	let newPorts = $state<{ name: string; container_port: number; host_port: string; protocol: string }[]>([]);
+	let newPorts = $state<{ name: string; container_port: number; container_port_end?: number; host_port: string; protocol: string }[]>([]);
+
+	/** Collapse a flat list of single-port rows into range rows: a maximal
+	 * run of consecutive container ports with the same protocol and no
+	 * explicit host port (publish 1:1) becomes one row spanning
+	 * `container_port`..`container_port_end`. Used on image inspect so an
+	 * image that EXPOSEs e.g. 2300-2399 shows as a single row, not 100. */
+	function collapsePortRows(
+		rows: { name: string; container_port: number; host_port: string; protocol: string }[]
+	): { name: string; container_port: number; container_port_end?: number; host_port: string; protocol: string }[] {
+		const sorted = [...rows].sort((a, b) => a.container_port - b.container_port);
+		const out: { name: string; container_port: number; container_port_end?: number; host_port: string; protocol: string }[] = [];
+		for (const r of sorted) {
+			const last = out[out.length - 1];
+			const lastEnd = last ? (last.container_port_end ?? last.container_port) : -1;
+			if (last && last.protocol === r.protocol && !last.host_port && !r.host_port && lastEnd + 1 === r.container_port) {
+				last.container_port_end = r.container_port;
+			} else {
+				out.push({ ...r });
+			}
+		}
+		for (const r of out) {
+			if (r.container_port_end != null && r.container_port_end > r.container_port) {
+				r.name = `ports-${r.container_port}-${r.container_port_end}`;
+			}
+		}
+		return out;
+	}
+
+	/** Inverse of {@link collapsePortRows}: expand range rows back into the
+	 * individual `{container_port, host_port}` entries the deploy API
+	 * expects. A range with a host port offsets each host port from the
+	 * start; a blank host port stays blank (engine publishes 1:1). */
+	function expandPortRows(
+		rows: { name: string; container_port: number; container_port_end?: number; host_port: string; protocol: string }[]
+	): { name: string; container_port: number; host_port: number | undefined; protocol: string }[] {
+		const out: { name: string; container_port: number; host_port: number | undefined; protocol: string }[] = [];
+		for (const p of rows) {
+			const isRange = p.container_port_end != null && p.container_port_end > p.container_port;
+			const end = isRange ? (p.container_port_end as number) : p.container_port;
+			const hostStart = p.host_port ? parseInt(p.host_port) : null;
+			for (let c = p.container_port; c <= end; c++) {
+				out.push({
+					name: isRange ? `${p.name}-${c}` : p.name,
+					container_port: c,
+					host_port: hostStart !== null ? hostStart + (c - p.container_port) : undefined,
+					protocol: p.protocol,
+				});
+			}
+		}
+		return out;
+	}
 	/** `is_image_default` = the row's value came from the image's own
 	 * `Config.Env` (not set by the user). Greyed out in Edit, shown with
 	 * an "Override" button that flips `overriding` to true and makes the
@@ -589,12 +640,15 @@
 		try {
 			const result = await client.call<ImageInspectResult>('apps.inspect_image', { image });
 			if (result.ports.length > 0) {
-				newPorts = result.ports.map(p => ({
+				// Collapse contiguous exposed ports (e.g. a game server's
+				// EXPOSE 2300-2399) into a single range row instead of one
+				// row per port.
+				newPorts = collapsePortRows(result.ports.map(p => ({
 					name: p.name,
 					container_port: p.container_port,
 					host_port: '',
 					protocol: p.protocol,
-				}));
+				})));
 			} else {
 				// Image declares no EXPOSE — let the user know they need to
 				// set the internal port manually below.
@@ -1133,12 +1187,8 @@
 		// A LAN-IP (macvlan/ipvlan) app gets its own address — published host
 		// ports and reverse-proxy ingress don't apply (engine rejects them).
 		if (newPorts.length > 0 && !installLanIp) {
-			params.ports = newPorts.map(p => ({
-				name: p.name,
-				container_port: p.container_port,
-				host_port: p.host_port ? parseInt(p.host_port) : undefined,
-				protocol: p.protocol,
-			}));
+			// Expand any range rows into individual port mappings for the API.
+			params.ports = expandPortRows(newPorts);
 		}
 		if (newEnvs.length > 0) {
 			// Same image-default filter as updateApp — symmetric so an
@@ -1221,12 +1271,8 @@
 			image: newImage,
 		};
 		if (newPorts.length > 0 && !installLanIp) {
-			params.ports = newPorts.map(p => ({
-				name: p.name,
-				container_port: p.container_port,
-				host_port: p.host_port ? parseInt(p.host_port) : undefined,
-				protocol: p.protocol,
-			}));
+			// Expand any range rows into individual port mappings for the API.
+			params.ports = expandPortRows(newPorts);
 		}
 		if (newEnvs.length > 0) {
 			// Drop image-default rows unless the user explicitly clicked
@@ -1942,20 +1988,24 @@
 						     The listing and the dropdown elsewhere on this page
 						     also read host:container, so all three surfaces line
 						     up. See issue #271. -->
-						<div class="grid grid-cols-[1fr_90px_80px_60px_auto] gap-2 mb-1">
+						<div class="grid grid-cols-[1fr_80px_128px_56px_auto] gap-2 mb-1">
 							<span class="text-[0.65rem] text-muted-foreground">Name</span>
 							<span class="text-[0.65rem] text-muted-foreground">Exposed</span>
-							<span class="text-[0.65rem] text-muted-foreground">Internal</span>
+							<span class="text-[0.65rem] text-muted-foreground">Internal (+ range)</span>
 							<span class="text-[0.65rem] text-muted-foreground"></span>
 							<span></span>
 						</div>
 					{/if}
 					{#each newPorts as port, i}
 						{@const hasConflict = portConflicts.some(c => c.port === (parseInt(port.host_port) || port.container_port))}
-						<div class="grid grid-cols-[1fr_90px_80px_60px_auto] gap-2 mt-1 items-center">
+						<div class="grid grid-cols-[1fr_80px_128px_56px_auto] gap-2 mt-1 items-center">
 							<Input bind:value={port.name} placeholder="e.g. http" class="h-8 text-xs" />
 							<Input bind:value={port.host_port} placeholder={String(port.container_port)} class="h-8 text-xs {hasConflict ? 'border-amber-500 ring-1 ring-amber-500/50' : ''}" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
-							<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
+							<div class="flex items-center gap-1">
+								<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
+								<span class="text-muted-foreground text-xs">–</span>
+								<Input type="number" bind:value={port.container_port_end} placeholder="end" class="h-8 text-xs" />
+							</div>
 							<select bind:value={port.protocol} class="h-8 rounded-md border border-input bg-transparent px-1 text-xs">
 								<option>TCP</option>
 								<option>UDP</option>
@@ -1971,7 +2021,7 @@
 							{/each}
 						</div>
 					{/if}
-					<p class="mt-1 text-[0.6rem] text-muted-foreground">Exposed = port on the host (what clients connect to). Internal = port inside the container. Leave Exposed blank to use the same number as Internal. App is also accessible at /apps/{'{name}'}/ via reverse proxy.</p>
+					<p class="mt-1 text-[0.6rem] text-muted-foreground">Exposed = port on the host (what clients connect to). Internal = port inside the container. Leave Exposed blank to use the same number as Internal. Set the second Internal box to publish a contiguous range (e.g. 2300–2399) as one row. App is also accessible at /apps/{'{name}'}/ via reverse proxy.</p>
 				</div>
 				{/if}
 
