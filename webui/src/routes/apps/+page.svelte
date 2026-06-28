@@ -1259,6 +1259,9 @@
 		newAllowUnsafe = config.allow_unsafe ?? false;
 		newNetwork = config.network ?? '';
 		newStaticIp = config.static_ip ?? '';
+		// Pre-fill the existing subdomain so it's visible and round-trips on
+		// Save — otherwise an empty field would drop the ingress.
+		newSubdomain = config.subdomain ?? '';
 		loadAppNetworks();
 		installMode = 'simple';
 		showInstall = true;
@@ -1296,6 +1299,10 @@
 		// Round-trip the managed-network attachment so Edit doesn't detach it.
 		if (newNetwork) params.network = newNetwork;
 		if (newStaticIp.trim()) params.static_ip = newStaticIp.trim();
+		// Round-trip (or change) the subdomain ingress. A blank field is left
+		// to the engine, which preserves the existing subdomain rather than
+		// dropping it; clear a subdomain via the dedicated Subdomain dialog.
+		if (newSubdomain.trim() && !installLanIp) params.subdomain = newSubdomain.trim();
 
 		const result = await withToast(
 			() => client.call('apps.update', params, 300_000),
@@ -1869,7 +1876,7 @@
 	{/if}
 
 	{#if showInstall || showCompose}
-		<Card class="mb-6 {(showCompose || editingCompose) ? 'max-w-6xl' : 'max-w-2xl'}">
+		<Card class="mb-6 {(showCompose || editingCompose) ? 'max-w-6xl' : 'max-w-4xl'}">
 			<CardContent class="pt-6">
 				<h3 class="mb-4 text-lg font-semibold">{editingApp ? `Edit ${editingApp}` : editingCompose ? `Edit ${editingCompose}` : 'Install App'}</h3>
 
@@ -1988,7 +1995,7 @@
 						     The listing and the dropdown elsewhere on this page
 						     also read host:container, so all three surfaces line
 						     up. See issue #271. -->
-						<div class="grid grid-cols-[1fr_80px_128px_56px_auto] gap-2 mb-1">
+						<div class="grid grid-cols-[1fr_90px_176px_64px_auto] gap-2 mb-1">
 							<span class="text-[0.65rem] text-muted-foreground">Name</span>
 							<span class="text-[0.65rem] text-muted-foreground">Exposed</span>
 							<span class="text-[0.65rem] text-muted-foreground">Internal (+ range)</span>
@@ -1998,13 +2005,13 @@
 					{/if}
 					{#each newPorts as port, i}
 						{@const hasConflict = portConflicts.some(c => c.port === (parseInt(port.host_port) || port.container_port))}
-						<div class="grid grid-cols-[1fr_80px_128px_56px_auto] gap-2 mt-1 items-center">
+						<div class="grid grid-cols-[1fr_90px_176px_64px_auto] gap-2 mt-1 items-center">
 							<Input bind:value={port.name} placeholder="e.g. http" class="h-8 text-xs" />
 							<Input bind:value={port.host_port} placeholder={String(port.container_port)} class="h-8 text-xs {hasConflict ? 'border-amber-500 ring-1 ring-amber-500/50' : ''}" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
 							<div class="flex items-center gap-1">
-								<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
+								<Input type="number" bind:value={port.container_port} placeholder="Port" class="h-8 min-w-0 w-full text-xs" oninput={() => checkPortConflicts(editingApp ?? undefined)} />
 								<span class="text-muted-foreground text-xs">–</span>
-								<Input type="number" bind:value={port.container_port_end} placeholder="end" class="h-8 text-xs" />
+								<Input type="number" bind:value={port.container_port_end} placeholder="end" class="h-8 min-w-0 w-full text-xs" />
 							</div>
 							<select bind:value={port.protocol} class="h-8 rounded-md border border-input bg-transparent px-1 text-xs">
 								<option>TCP</option>

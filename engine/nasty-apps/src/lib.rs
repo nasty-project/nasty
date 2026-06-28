@@ -1221,6 +1221,19 @@ async fn load_ingress_subdomain(app_name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Decide which subdomain a (re)install should apply. An explicit, non-empty
+/// `requested` value wins; otherwise fall back to `existing` (what the
+/// manifest already had) so an update that omits the field preserves the
+/// ingress instead of dropping it. A fresh install has no existing manifest
+/// ⇒ `None` ⇒ path-prefix mode. To *clear* a subdomain, use the dedicated
+/// ingress-remove path, not an empty Edit field.
+fn resolve_ingress_subdomain(requested: Option<&str>, existing: Option<String>) -> Option<String> {
+    match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(s.to_string()),
+        None => existing,
+    }
+}
+
 // ── Compose stack startup ordering (#437) ──────────────────────────────
 // Opt-in: enrolled stacks are brought up by the engine in a defined order
 // with a settle delay after each, and get `restart: "no"` (via a generated
@@ -1611,6 +1624,11 @@ pub struct AppConfig {
     /// from a live auto-assigned address — re-applied verbatim on reinstall.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_ip: Option<String>,
+    /// The app's subdomain-ingress hostname, if any (from the manifest).
+    /// Round-tripped through Edit so changing other fields and saving
+    /// preserves the ingress instead of silently dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdomain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -2666,6 +2684,13 @@ impl AppsService {
 
         let cname = container_name(&req.name);
 
+        // Capture any existing subdomain ingress BEFORE the manifest is
+        // rewritten below — a reinstall (apps.update) that doesn't carry a
+        // subdomain in the request should preserve the one already in place
+        // rather than silently dropping the ingress. The manifest write
+        // later in this fn clobbers `ingress_subdomain`, so read it now.
+        let prior_subdomain = load_ingress_subdomain(&req.name).await;
+
         // Check if already exists
         if self.container_exists(&cname).await {
             return Err(AppsError::AppAlreadyExists(req.name));
@@ -2965,12 +2990,8 @@ impl AppsService {
             // (None / empty) keeps path-prefix mode as the historical
             // default. Conflict detection runs upstream in
             // deploy_simple — see app_deploy.rs.
-            let install_subdomain = req
-                .subdomain
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
+            let install_subdomain =
+                resolve_ingress_subdomain(req.subdomain.as_deref(), prior_subdomain);
             let chose_subdomain = install_subdomain.is_some();
             if let Err(e) = self
                 .ingress_set(SetIngressRequest {
@@ -3712,6 +3733,7 @@ impl AppsService {
             allow_unsafe,
             network,
             static_ip,
+            subdomain: load_ingress_subdomain(name).await,
         })
     }
 
@@ -7314,6 +7336,41 @@ services:
         // 254-char total
         let too_long_total = format!("{}.example.com", "a".repeat(254 - ".example.com".len()));
         assert!(validate_subdomain(&too_long_total).is_err());
+    }
+
+    // ── resolve_ingress_subdomain ──
+
+    use super::resolve_ingress_subdomain;
+
+    #[test]
+    fn resolve_subdomain_explicit_request_wins() {
+        // Operator typed a subdomain → use it, regardless of what existed.
+        assert_eq!(
+            resolve_ingress_subdomain(Some("z.0f.ee"), Some("old.example.com".into())),
+            Some("z.0f.ee".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_subdomain_absent_request_preserves_existing() {
+        // The Edit→Save bug: form sends no subdomain, but one is already
+        // assigned — preserve it instead of dropping the ingress.
+        assert_eq!(
+            resolve_ingress_subdomain(None, Some("z.0f.ee".into())),
+            Some("z.0f.ee".to_string())
+        );
+        // Empty/whitespace request is treated as "not provided".
+        assert_eq!(
+            resolve_ingress_subdomain(Some("   "), Some("z.0f.ee".into())),
+            Some("z.0f.ee".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_subdomain_fresh_install_is_path_prefix() {
+        // No request, no existing manifest → path-prefix mode (None).
+        assert_eq!(resolve_ingress_subdomain(None, None), None);
+        assert_eq!(resolve_ingress_subdomain(Some(""), None), None);
     }
 }
 

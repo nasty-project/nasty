@@ -1642,6 +1642,9 @@ export interface AppConfig {
 	network?: string | null;
 	/** Static IP requested at install (round-tripped on Edit). */
 	static_ip?: string | null;
+	/** Subdomain-ingress hostname, if any (round-tripped on Edit so saving
+	 * other fields doesn't drop the ingress). */
+	subdomain?: string | null;
 }
 
 /** A NASty-managed Docker network spec (apps.networks.create payload). */
