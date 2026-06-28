@@ -1061,7 +1061,10 @@ echo "==> Update complete!"
         let token = read_github_token().await;
         let nasty_input = read_nasty_input_source().await;
 
-        // TODO: Remove token env var once the repo access model is finalized.
+        // `token` is always None today (the source repo is public), so this
+        // stays empty and no `access-tokens` line is injected into the
+        // rebuild's NIX_CONFIG. Kept so a future private-source build only
+        // has to flip read_github_token, not re-thread the env plumbing.
         let token_env = token
             .as_ref()
             .map(|t| format!("access-tokens = github.com={t}"))
@@ -2798,7 +2801,13 @@ async fn is_reboot_required() -> bool {
     false
 }
 
-/// TODO: Remove once repo is public.
+/// Source-repo auth token for self-update fetches and git operations.
+///
+/// Returns `None`: the Nasty source repo is public, so update checks
+/// (latest-tag lookup, flake.lock fetch) and the nixos-rebuild git ops all
+/// run unauthenticated. Kept as the single chokepoint so re-introducing
+/// source auth (a private mirror / enterprise build) is a one-function
+/// change rather than threading a new lookup through every call site.
 async fn read_github_token() -> Option<String> {
     None
 }
