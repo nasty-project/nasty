@@ -3752,4 +3752,53 @@ mod restore_tests {
         // Empty snapshot subvolume name.
         assert!(derive_restore_dest("tank/@daily/x").is_err());
     }
+
+    // End-to-end round-trip of the actual byte-moving logic (the heart of
+    // the feature): build a fake snapshot tree + a diverged live tree, run
+    // the real restore copy, and assert the live tree matches the snapshot
+    // while files created after the snapshot survive (additive semantics).
+    #[tokio::test]
+    async fn restore_round_trip_overwrites_and_is_additive() {
+        use super::{restore_dir_recursive, restore_leaf};
+        let tmp = tempfile::tempdir().unwrap();
+        let snap = tmp.path().join("photos@daily");
+        let live = tmp.path().join("photos");
+        tokio::fs::create_dir_all(snap.join("trip")).await.unwrap();
+        tokio::fs::create_dir_all(live.join("trip")).await.unwrap();
+
+        // Snapshot (the "good" past state).
+        tokio::fs::write(snap.join("a.txt"), b"v1").await.unwrap();
+        tokio::fs::write(snap.join("trip/b.txt"), b"keep")
+            .await
+            .unwrap();
+        // Live (diverged): a.txt modified, b.txt deleted, plus a new file.
+        tokio::fs::write(live.join("a.txt"), b"v2-modified")
+            .await
+            .unwrap();
+        tokio::fs::write(live.join("trip/after.txt"), b"new")
+            .await
+            .unwrap();
+
+        // Restore the whole snapshot tree over the live subvolume.
+        restore_dir_recursive(&snap, &live).await.unwrap();
+
+        // Modified file rolled back, deleted file restored…
+        assert_eq!(tokio::fs::read(live.join("a.txt")).await.unwrap(), b"v1");
+        assert_eq!(
+            tokio::fs::read(live.join("trip/b.txt")).await.unwrap(),
+            b"keep"
+        );
+        // …and the file created after the snapshot is left in place (additive).
+        assert!(live.join("trip/after.txt").exists());
+
+        // A single-file restore of a now-deleted file also reappears.
+        tokio::fs::remove_file(live.join("a.txt")).await.unwrap();
+        let meta = tokio::fs::symlink_metadata(snap.join("a.txt"))
+            .await
+            .unwrap();
+        restore_leaf(&snap.join("a.txt"), &live.join("a.txt"), &meta)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(live.join("a.txt")).await.unwrap(), b"v1");
+    }
 }
