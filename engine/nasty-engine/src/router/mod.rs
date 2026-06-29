@@ -64,6 +64,7 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "snapshot.create"
                 | "snapshot.delete"
                 | "snapshot.clone"
+                | "snapshot.rollback"
                 | "share.nfs.create"
                 | "share.nfs.update"
                 | "share.nfs.delete"

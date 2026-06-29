@@ -28,6 +28,7 @@ mod log_stream;
 mod registry;
 mod rest_gateway;
 mod router;
+mod subvol_rollback;
 mod subvolume_dependents;
 mod swagger_ui;
 mod telemetry;

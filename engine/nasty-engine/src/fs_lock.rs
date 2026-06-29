@@ -125,7 +125,11 @@ async fn is_vm_running(state: &AppState, name: &str) -> bool {
 /// when the predicate first becomes true, false on timeout. Pulled
 /// out so the timeout/poll math is unit-testable without spinning up
 /// real services.
-async fn wait_until_stopped<F, Fut>(predicate: F, timeout: Duration, interval: Duration) -> bool
+pub(crate) async fn wait_until_stopped<F, Fut>(
+    predicate: F,
+    timeout: Duration,
+    interval: Duration,
+) -> bool
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = bool>,
