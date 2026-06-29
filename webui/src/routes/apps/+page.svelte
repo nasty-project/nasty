@@ -1621,6 +1621,14 @@
 	 * `null` = closed; otherwise carries the app name being edited
 	 * (host_port is read from the current ingress at submit time). */
 	let subdomainDialog = $state<{ appName: string; value: string; host_port: number } | null>(null);
+	/** Published TCP ports of the app whose ingress dialog is open — the
+	 * choices for which port the reverse proxy forwards to. */
+	let dialogTcpPorts = $derived(
+		subdomainDialog
+			? (apps.find(a => a.name === subdomainDialog!.appName)?.ports ?? [])
+				.filter(p => p.protocol?.toLowerCase() === 'tcp')
+			: []
+	);
 	/** Live conflict-check feedback for the subdomain input. Empty
 	 * string when the value is fine, non-empty when the engine detected
 	 * a conflict (another app already using it, or the WebUI hostname).
@@ -2714,6 +2722,19 @@
 				     side too — this is just fast feedback so the operator
 				     doesn't get a surprise toast after clicking. -->
 				<p class="mt-1 text-xs text-amber-500">⚠ {subdomainConflict}</p>
+			{/if}
+			{#if dialogTcpPorts.length > 1}
+				<!-- Multi-port app (e.g. a game server with match ports + an
+				     HTTP port): let the operator pick which published port the
+				     proxy forwards to, and persist it so a redeploy/restart
+				     doesn't re-derive the lowest port. -->
+				<Label class="mt-3 block text-xs">Upstream port</Label>
+				<select bind:value={subdomainDialog.host_port} class="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm">
+					{#each dialogTcpPorts as p}
+						<option value={p.host_port}>{p.host_port}{p.host_port !== p.container_port ? ` → container ${p.container_port}` : ''}</option>
+					{/each}
+				</select>
+				<p class="mt-1 text-xs text-muted-foreground">Which published port the proxy forwards to (HTTP). Pick the app's web port — not a game/data port.</p>
 			{/if}
 			<div class="mt-4 flex justify-end gap-2">
 				<Button variant="outline" size="sm" onclick={() => { subdomainDialog = null; }}>Cancel</Button>
