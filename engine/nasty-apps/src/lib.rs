@@ -1276,6 +1276,69 @@ async fn load_ingress_subdomain(app_name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Persist (or clear) the operator-chosen ingress upstream port in the
+/// manifest. Mirrors `save_ingress_subdomain` — read-modify-write so the
+/// reconcile path rebuilds the same upstream rather than re-deriving the
+/// lowest TCP port (which is wrong for multi-port apps: a game server
+/// exposing 2300-2399 + 8080 would otherwise have its ingress proxy 2300
+/// instead of the 8080 HTTP port).
+async fn save_ingress_host_port(app_name: &str, host_port: Option<u16>) -> Result<(), AppsError> {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let mut manifest: serde_json::Value = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(s) => serde_json::from_str(&s)
+            .map_err(|e| AppsError::CommandFailed(format!("manifest parse: {e}")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(AppsError::CommandFailed(format!("manifest read: {e}"))),
+    };
+    let map = match manifest.as_object_mut() {
+        Some(m) => m,
+        None => return Err(AppsError::CommandFailed("manifest not an object".into())),
+    };
+    match host_port {
+        Some(p) => {
+            map.insert("ingress_host_port".to_string(), serde_json::Value::from(p));
+        }
+        None => {
+            map.remove("ingress_host_port");
+        }
+    }
+    tokio::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .await
+    .map_err(|e| AppsError::CommandFailed(format!("manifest write: {e}")))?;
+    Ok(())
+}
+
+/// Read the persisted ingress upstream port, if the operator pinned one.
+async fn load_ingress_host_port(app_name: &str) -> Option<u16> {
+    let manifest_path = format!("{}/{}.json", COMPOSE_DIR, app_name);
+    let content = tokio::fs::read_to_string(&manifest_path).await.ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    parsed
+        .get("ingress_host_port")?
+        .as_u64()
+        .and_then(|n| u16::try_from(n).ok())
+}
+
+/// Decide which published port the reverse-proxy ingress should forward
+/// to. A `pinned` port (operator's choice) wins as long as it's still
+/// published; otherwise fall back to the first/lowest TCP port. Pure so
+/// the "pin survives, but a stale pin degrades gracefully" logic is
+/// unit-testable without a manifest.
+fn resolve_ingress_port(pinned: Option<u16>, ports: &[MappedPort]) -> Option<u16> {
+    if let Some(p) = pinned
+        && ports.iter().any(|x| x.host_port == p)
+    {
+        return Some(p);
+    }
+    ports
+        .iter()
+        .find(|p| p.protocol.eq_ignore_ascii_case("tcp"))
+        .map(|p| p.host_port)
+}
+
 /// Decide which subdomain a (re)install should apply. An explicit, non-empty
 /// `requested` value wins; otherwise fall back to `existing` (what the
 /// manifest already had) so an update that omits the field preserves the
@@ -2745,6 +2808,10 @@ impl AppsService {
         // rather than silently dropping the ingress. The manifest write
         // later in this fn clobbers `ingress_subdomain`, so read it now.
         let prior_subdomain = load_ingress_subdomain(&req.name).await;
+        // Same for the pinned ingress upstream port — a redeploy (Pull /
+        // Edit) should keep proxying to the port the operator chose, not
+        // re-derive the lowest TCP port.
+        let prior_ingress_port = load_ingress_host_port(&req.name).await;
 
         // Check if already exists
         if self.container_exists(&cname).await {
@@ -3038,7 +3105,13 @@ impl AppsService {
             })
             .flatten()
         {
-            let host_port = if let Some(hp) = first_port.host_port {
+            // A pinned upstream port (from a prior ingress_set) wins, so a
+            // redeploy keeps proxying to the operator's chosen port instead
+            // of the lowest TCP port. Otherwise fall back to the first TCP
+            // port's published host port.
+            let host_port = if let Some(p) = prior_ingress_port {
+                p
+            } else if let Some(hp) = first_port.host_port {
                 hp
             } else {
                 // Look up the actual assigned port from Docker
@@ -4414,12 +4487,12 @@ impl AppsService {
                     );
                     continue;
                 }
-                let Some(port) = app
-                    .ports
-                    .iter()
-                    .find(|p| p.protocol.eq_ignore_ascii_case("tcp"))
-                    .map(|p| p.host_port)
-                else {
+                // Prefer the operator-pinned upstream port (if still
+                // published); otherwise fall back to the lowest TCP port.
+                // Pinning is what stops a multi-port app's ingress from
+                // re-deriving to the wrong port on every restart.
+                let pinned = load_ingress_host_port(&app.name).await;
+                let Some(port) = resolve_ingress_port(pinned, &app.ports) else {
                     continue;
                 };
                 routes.push(AppRoute {
@@ -4461,6 +4534,16 @@ impl AppsService {
             warn!(
                 "Could not persist ingress_subdomain for '{}': {e} — \
                  the route is set in Caddy but may revert on engine restart",
+                req.name
+            );
+        }
+        // Persist the chosen upstream port too, so the reconcile path and
+        // future redeploys proxy to the same port instead of re-deriving
+        // the lowest TCP port (wrong for multi-port apps).
+        if let Err(e) = save_ingress_host_port(&req.name, Some(req.host_port)).await {
+            warn!(
+                "Could not persist ingress_host_port for '{}': {e} — \
+                 the route is set in Caddy but the port may revert on engine restart",
                 req.name
             );
         }
@@ -4519,6 +4602,9 @@ impl AppsService {
         // inheriting whatever the previous tenant had.
         if let Err(e) = save_ingress_subdomain(name, None).await {
             warn!("ingress_remove: could not clear ingress_subdomain for '{name}': {e}");
+        }
+        if let Err(e) = save_ingress_host_port(name, None).await {
+            warn!("ingress_remove: could not clear ingress_host_port for '{name}': {e}");
         }
         info!("Ingress removed for '{name}'");
         Ok(())
@@ -7494,6 +7580,43 @@ services:
         // No request, no existing manifest → path-prefix mode (None).
         assert_eq!(resolve_ingress_subdomain(None, None), None);
         assert_eq!(resolve_ingress_subdomain(Some(""), None), None);
+    }
+
+    // ── resolve_ingress_port ──
+
+    use super::{MappedPort, resolve_ingress_port};
+
+    fn port(host: u16, proto: &str) -> MappedPort {
+        MappedPort {
+            host_port: host,
+            container_port: host,
+            protocol: proto.to_string(),
+        }
+    }
+
+    #[test]
+    fn ingress_port_pinned_choice_wins() {
+        // The z-app bug: published 2300-2305 + 8080, pinned to 8080.
+        let ports = vec![port(2300, "tcp"), port(2301, "tcp"), port(8080, "tcp")];
+        assert_eq!(resolve_ingress_port(Some(8080), &ports), Some(8080));
+    }
+
+    #[test]
+    fn ingress_port_unpinned_falls_back_to_first_tcp() {
+        // No pin → lowest TCP (the historical default).
+        let ports = vec![port(2300, "tcp"), port(8080, "tcp")];
+        assert_eq!(resolve_ingress_port(None, &ports), Some(2300));
+        // A UDP-first list still skips to the first TCP port.
+        let mixed = vec![port(2300, "udp"), port(8080, "tcp")];
+        assert_eq!(resolve_ingress_port(None, &mixed), Some(8080));
+    }
+
+    #[test]
+    fn ingress_port_stale_pin_degrades_to_first_tcp() {
+        // Pinned port no longer published (operator changed ports) → don't
+        // dial a dead port; fall back to the first TCP port.
+        let ports = vec![port(2300, "tcp"), port(8080, "tcp")];
+        assert_eq!(resolve_ingress_port(Some(9999), &ports), Some(2300));
     }
 }
 
