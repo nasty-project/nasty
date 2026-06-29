@@ -524,11 +524,10 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
             // managers. Snooping buys nothing without a querier, so turn it
             // off on every bridge we manage.
             out.push_str("multicast-snooping=false\n");
-            // Bridge-master MTU lives here, not in [ethernet] (NM ≥1.20).
-            if let Some(mtu) = p.mtu {
-                out.push_str(&format!("mtu={mtu}\n"));
-            }
-            // Bridge MAC also lives here (`bridge.mac-address`), not
+            // Bridge MTU is NOT a [bridge] property (NM rejects `bridge.mtu`
+            // as unknown — #580); it's emitted in [ethernet] below like
+            // every other link type.
+            // Bridge MAC DOES live here (`bridge.mac-address`), not
             // in [802-3-ethernet]. Without it NM creates the bridge
             // with a kernel-random MAC and DHCP hands out a new lease.
             if let Some(mac) = &p.mac {
@@ -549,22 +548,29 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
         }
     }
 
-    // [ethernet] carries MTU and cloned-mac for ethernet-like types
-    // (ethernet, bond, vlan). Bridge has its own [bridge] section
-    // for MTU and is handled above. NM treats [ethernet] as the
-    // ethernet-layer settings even on bond/vlan connections.
+    // [ethernet] carries MTU for ethernet-like types AND bridges, and
+    // cloned-mac for the non-bridge ones. A bridge master's MTU has no
+    // `bridge.mtu` (NM rejects it — #580), so it lives here. A bridge's
+    // MAC is set via [bridge] mac-address, so no cloned-mac here for it.
+    let is_bridge = matches!(p.conn_type, NmConnectionType::Bridge);
+    let eth_cloned_mac = if is_bridge { None } else { p.mac.as_ref() };
     let needs_eth_section = matches!(
         p.conn_type,
-        NmConnectionType::Ethernet | NmConnectionType::Bond | NmConnectionType::Vlan
+        NmConnectionType::Ethernet
+            | NmConnectionType::Bond
+            | NmConnectionType::Vlan
+            | NmConnectionType::Bridge
     );
     if needs_eth_section
-        && (p.mtu.is_some() || p.mac.is_some() || matches!(p.conn_type, NmConnectionType::Ethernet))
+        && (p.mtu.is_some()
+            || eth_cloned_mac.is_some()
+            || matches!(p.conn_type, NmConnectionType::Ethernet))
     {
         out.push_str("[ethernet]\n");
         if let Some(mtu) = p.mtu {
             out.push_str(&format!("mtu={mtu}\n"));
         }
-        if let Some(mac) = &p.mac {
+        if let Some(mac) = eth_cloned_mac {
             out.push_str(&format!("cloned-mac-address={mac}\n"));
         }
         out.push('\n');
@@ -694,14 +700,16 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
             // LAN the bridge stops forwarding multicast after ~5 min,
             // which kills mDNS/WSD discovery while leaving SMB working.
             bridge.insert("multicast-snooping".into(), into_value(false));
-            // Bridge-master MTU lives in [bridge] (NM ≥1.20). Reported
-            // in #96: bond/bridge MTU was being silently dropped because
-            // we only emitted MTU under [802-3-ethernet] for Ethernet
-            // type. The other types each have their own correct home.
-            if let Some(mtu) = p.mtu {
-                bridge.insert("mtu".into(), into_value(u32::from(mtu)));
-            }
-            // Bridge MAC: same reasoning. NM's `bridge.mac-address`
+            // NOTE: a bridge master's MTU is NOT a `bridge` property — NM
+            // rejects `bridge.mtu` as an unknown property (verified on NM
+            // 1.56; the `bridge` setting has no `mtu`). It's emitted under
+            // [802-3-ethernet] below, like every other link type. This
+            // reverts the #96 change that moved it into `bridge.mtu` and
+            // broke bridge creation on any box with a non-default bridge
+            // MTU — e.g. a bridge over a 9000-MTU bond (#580), where the
+            // failed br0 then cascades to "can't find controller br0" for
+            // the bond.
+            // Bridge MAC: NM's `bridge.mac-address`
             // pins the bridge interface's MAC at activation time;
             // without it the kernel generates a random MAC and
             // DHCP hands out a new lease (issue from the bridge
@@ -727,30 +735,33 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
         }
     }
 
-    // [802-3-ethernet] carries MTU and cloned-mac for ethernet-like
-    // types. NM accepts this section on Ethernet, Bond, and VLAN
-    // connections (a bond is "bond-over-ethernet"; a vlan over an
-    // ethernet/bond parent inherits the ethernet layer). Bridge MTU
-    // is handled above in the [bridge] section since its NM-canonical
-    // location is different.
+    // [802-3-ethernet] carries MTU for ethernet-like types AND bridges,
+    // and cloned-mac for the non-bridge ones. NM accepts this section on
+    // Ethernet, Bond, VLAN, and Bridge connections — and a bridge master's
+    // MTU has nowhere else to go (no `bridge.mtu`), so it lives here (#580).
+    // A bridge's MAC is set via `bridge.mac-address` (above), so we don't
+    // emit cloned-mac here for bridges.
     let needs_eth_section = matches!(
         p.conn_type,
-        NmConnectionType::Ethernet | NmConnectionType::Bond | NmConnectionType::Vlan
+        NmConnectionType::Ethernet
+            | NmConnectionType::Bond
+            | NmConnectionType::Vlan
+            | NmConnectionType::Bridge
     );
     if needs_eth_section {
         let mut eth = HashMap::new();
         if let Some(mtu) = p.mtu {
             eth.insert("mtu".into(), into_value(u32::from(mtu)));
         }
-        if let Some(mac) = &p.mac
+        if !matches!(p.conn_type, NmConnectionType::Bridge)
+            && let Some(mac) = &p.mac
             && let Some(bytes) = mac_to_bytes(mac)
         {
             eth.insert("cloned-mac-address".into(), into_value(bytes));
         }
         // Always emit the section for ethernet so a profile with
         // neither MTU nor cloned-mac still has the type's primary
-        // setting block. Bond/VLAN: only emit when populated, since
-        // an empty block adds no value but does add wire bytes.
+        // setting block. Bond/VLAN/Bridge: only emit when populated.
         if matches!(p.conn_type, NmConnectionType::Ethernet) || !eth.is_empty() {
             out.insert("802-3-ethernet".into(), eth);
         }
@@ -1418,9 +1429,12 @@ mod tests {
     }
 
     #[test]
-    fn keyfile_emits_bridge_mtu_under_bridge_section() {
-        // Bridges have their own [bridge] section that takes mtu —
-        // not [ethernet]. Different from bonds/vlans.
+    fn keyfile_emits_bridge_mtu_under_ethernet_not_bridge() {
+        // #580: a bridge master's MTU must go under [ethernet], NOT
+        // [bridge] — NM has no `bridge.mtu` property and rejects it as
+        // "unknown property" (verified on NM 1.56), which fails bridge
+        // creation and cascades to its bond member. The [bridge] block
+        // must NOT carry an mtu= line.
         let mut br0 = link_bridge("br0", &["eth0"]);
         br0.mtu = Some(9000);
         let layered = LayeredConfig {
@@ -1432,17 +1446,29 @@ mod tests {
             .find(|p| p.id == "nasty-br0")
             .unwrap();
         let keyfile = serialize_keyfile(&br_profile);
-        // mtu appears once, in the bridge section. Easiest assertion:
-        // the [bridge] block contains an mtu= line.
+
+        // The [ethernet] block carries the MTU.
+        let eth_idx = keyfile
+            .find("[ethernet]")
+            .expect("bridge with MTU should emit an [ethernet] section");
+        let after_eth = &keyfile[eth_idx..];
+        let eth_end = after_eth[1..].find('[').map_or(after_eth.len(), |i| i + 1);
+        assert!(
+            after_eth[..eth_end].contains("mtu=9000"),
+            "[ethernet] block missing mtu: {:?}",
+            &after_eth[..eth_end]
+        );
+
+        // The [bridge] block must NOT carry an mtu= line.
         let bridge_idx = keyfile.find("[bridge]").expect("bridge section missing");
         let after_bridge = &keyfile[bridge_idx..];
-        let next_section = after_bridge[1..]
+        let br_end = after_bridge[1..]
             .find('[')
             .map_or(after_bridge.len(), |i| i + 1);
-        let bridge_block = &after_bridge[..next_section];
         assert!(
-            bridge_block.contains("mtu=9000"),
-            "bridge block missing mtu: {bridge_block:?}"
+            !after_bridge[..br_end].contains("mtu="),
+            "[bridge] block must not contain mtu= (NM rejects bridge.mtu): {:?}",
+            &after_bridge[..br_end]
         );
     }
 
@@ -1750,9 +1776,10 @@ mod tests {
     }
 
     #[test]
-    fn dict_bridge_includes_mtu_in_bridge_section() {
-        // Bridge MTU goes in [bridge] (NM ≥1.20), not [802-3-ethernet]
-        // — distinct from bond/vlan.
+    fn dict_bridge_mtu_in_ethernet_not_bridge_section() {
+        // #580: bridge MTU goes in [802-3-ethernet], NOT [bridge] — NM has
+        // no `bridge.mtu` and rejects it as an unknown property (NM 1.56),
+        // failing the connection. Same home as bond/vlan.
         let mut br0 = link_bridge("br0", &["eth0"]);
         br0.mtu = Some(9000);
         let layered = LayeredConfig {
@@ -1764,14 +1791,15 @@ mod tests {
             .find(|p| p.id == "nasty-br0")
             .unwrap();
         let dict = to_settings_dict(&br_profile);
-        let bridge = dict.get("bridge").expect("bridge section");
-        let mtu: u32 = bridge["mtu"].try_clone().unwrap().try_into().unwrap();
+        let eth = dict
+            .get("802-3-ethernet")
+            .expect("bridge with MTU should emit 802-3-ethernet");
+        let mtu: u32 = eth["mtu"].try_clone().unwrap().try_into().unwrap();
         assert_eq!(mtu, 9000);
-        // And NOT in 802-3-ethernet — bridges don't use it.
+        // The bridge setting must NOT carry mtu (NM would reject it).
         assert!(
-            dict.get("802-3-ethernet")
-                .is_none_or(|eth| !eth.contains_key("mtu")),
-            "bridge MTU must not also leak into 802-3-ethernet"
+            dict.get("bridge").is_none_or(|b| !b.contains_key("mtu")),
+            "bridge.mtu must not be emitted — NM rejects it as unknown"
         );
     }
 
