@@ -25,6 +25,8 @@
 	// badge so the user sees why their stopped VM can't start.
 	let lockedFsByVm = $state(new Map<string, string>());
 	let blockSubvolumes: Subvolume[] = $state([]);
+	let resizingDisk: string | null = $state(null); // `${vmId}:${index}` of the disk row being resized
+	let diskResizeValue = $state('');
 	let networkState: NetworkState | null = $state(null);
 	let wizardStep: -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6 = $state(0); // 0=hidden, -1=prerequisites
 	let loading = $state(true);
@@ -797,6 +799,49 @@
 			() => client.call('vm.update', { id: vm.id, disks }),
 			'Disk detached'
 		);
+		await refresh();
+	}
+	// VM NIC editing (stopped VMs only — vm.update rejects hardware changes while
+	// running). Each edit rewrites the whole networks list, like disk attach/detach.
+	async function updateNic(vm: VmStatus, index: number, patch: Record<string, unknown>) {
+		const networks = vm.networks.map((n, i) => (i === index ? { ...n, ...patch } : { ...n }));
+		const nic = networks[index] as { mode: string; bridge?: string };
+		if (nic.mode === 'user') {
+			nic.bridge = undefined;
+		} else if (nic.mode === 'bridge' && !nic.bridge && networkState && networkState.config.bridges.length > 0) {
+			nic.bridge = networkState.config.bridges[0].name;
+		}
+		await withToast(() => client.call('vm.update', { id: vm.id, networks }), 'Network updated');
+		await refresh();
+	}
+	async function addNic(vm: VmStatus) {
+		const hasBridge = networkState && networkState.config.bridges.length > 0;
+		const nic = hasBridge
+			? { mode: 'bridge', bridge: networkState!.config.bridges[0].name }
+			: { mode: 'user' };
+		const networks = [...vm.networks, nic];
+		await withToast(() => client.call('vm.update', { id: vm.id, networks }), 'NIC added');
+		await refresh();
+	}
+	async function removeNic(vm: VmStatus, index: number) {
+		const networks = vm.networks.filter((_, i) => i !== index);
+		await withToast(() => client.call('vm.update', { id: vm.id, networks }), 'NIC removed');
+		await refresh();
+	}
+	// Resizing a VM disk = resizing its backing block subvolume. Gated to stopped
+	// VMs so we never grow a loop device QEMU has open (the guest wouldn't see the
+	// change anyway without a rescan).
+	async function resizeDisk(sv: Subvolume) {
+		const gib = parseFloat(diskResizeValue);
+		if (!sv || !Number.isFinite(gib) || gib <= 0) return;
+		const bytes = Math.round(gib * 1073741824);
+		await withToast(
+			() => client.call('subvolume.resize', { filesystem: sv.filesystem, name: sv.name, volsize_bytes: bytes }),
+			`Disk resized to ${gib} GiB`
+		);
+		resizingDisk = null;
+		diskResizeValue = '';
+		await loadSubvolumes();
 		await refresh();
 	}
 
@@ -1689,7 +1734,6 @@
 										</div>
 									</div>
 								</div>
-								<h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Disks</h4>
 
 								<!-- Disks -->
 								<div>
@@ -1705,6 +1749,9 @@
 													{#if sv}
 														<span class="text-xs">{sv.filesystem}/{sv.name}</span>
 														<span class="text-xs text-muted-foreground">{disk.path}</span>
+														{#if sv.volsize_bytes}
+															<span class="text-xs text-muted-foreground">{(sv.volsize_bytes / 1073741824).toFixed(0)} GiB</span>
+														{/if}
 													{:else}
 														<span class="text-xs text-muted-foreground">{disk.path}</span>
 													{/if}
@@ -1719,9 +1766,28 @@
 														<Badge variant="secondary" class="text-[0.6rem]">discard={disk.discard}</Badge>
 													{/if}
 													{#if !vm.running}
-														<Button variant="ghost" size="xs" class="ml-auto text-destructive hover:text-destructive" onclick={() => detachDisk(vm, i)}>
-															Detach
-														</Button>
+														<div class="ml-auto flex items-center gap-1">
+															{#if sv && resizingDisk === `${vm.id}:${i}`}
+																<Input
+																	type="number"
+																	bind:value={diskResizeValue}
+																	class="h-7 w-24 text-xs"
+																	placeholder="GiB"
+																	min="1"
+																	onkeydown={(e) => { if (e.key === 'Enter') resizeDisk(sv); if (e.key === 'Escape') { resizingDisk = null; diskResizeValue = ''; } }} />
+																<Button variant="outline" size="xs" onclick={() => resizeDisk(sv)}>Save</Button>
+																<Button variant="ghost" size="xs" onclick={() => { resizingDisk = null; diskResizeValue = ''; }}>Cancel</Button>
+															{:else}
+																{#if sv}
+																	<Button variant="ghost" size="xs" onclick={() => { resizingDisk = `${vm.id}:${i}`; diskResizeValue = sv.volsize_bytes ? (sv.volsize_bytes / 1073741824).toFixed(0) : ''; }}>
+																		Resize
+																	</Button>
+																{/if}
+																<Button variant="ghost" size="xs" class="text-destructive hover:text-destructive" onclick={() => detachDisk(vm, i)}>
+																	Detach
+																</Button>
+															{/if}
+														</div>
 													{/if}
 												</div>
 											{/each}
@@ -1765,16 +1831,50 @@
 											{#each vm.networks as net, i}
 												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
 													<span class="font-mono text-xs font-semibold">NIC {i}</span>
-													<Badge variant="secondary" class="text-[0.6rem]">{net.mode}</Badge>
-													{#if net.bridge}
-														<span class="text-xs text-muted-foreground">bridge: {net.bridge}</span>
+													{#if vm.running}
+														<Badge variant="secondary" class="text-[0.6rem]">{net.mode}</Badge>
+														{#if net.bridge}
+															<span class="text-xs text-muted-foreground">bridge: {net.bridge}</span>
+														{/if}
+													{:else}
+														<select
+															class="h-7 rounded-md border border-input bg-transparent px-2 text-xs"
+															value={net.mode}
+															onchange={(e) => updateNic(vm, i, { mode: (e.currentTarget as HTMLSelectElement).value })}
+														>
+															<option value="user">user (NAT)</option>
+															<option value="bridge">bridge</option>
+														</select>
+														{#if net.mode === 'bridge'}
+															{#if networkState && networkState.config.bridges.length > 0}
+																<select
+																	class="h-7 rounded-md border border-input bg-transparent px-2 text-xs"
+																	value={net.bridge ?? networkState.config.bridges[0].name}
+																	onchange={(e) => updateNic(vm, i, { bridge: (e.currentTarget as HTMLSelectElement).value })}
+																>
+																	{#each networkState.config.bridges as br}
+																		<option value={br.name}>{br.name}</option>
+																	{/each}
+																</select>
+															{:else}
+																<span class="text-xs text-destructive">no bridges — create one under Network settings</span>
+															{/if}
+														{/if}
 													{/if}
 													{#if net.mac}
 														<span class="font-mono text-xs text-muted-foreground">{net.mac}</span>
 													{/if}
+													{#if !vm.running}
+														<Button variant="ghost" size="xs" class="ml-auto text-destructive hover:text-destructive" onclick={() => removeNic(vm, i)}>
+															Remove
+														</Button>
+													{/if}
 												</div>
 											{/each}
 										</div>
+									{/if}
+									{#if !vm.running}
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => addNic(vm)}>+ Add NIC</Button>
 									{/if}
 								</div>
 
