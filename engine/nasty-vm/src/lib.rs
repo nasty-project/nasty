@@ -34,6 +34,8 @@ pub enum VmError {
     InvalidDiskPath(String),
     #[error("invalid USB device: {0}")]
     InvalidUsbDevice(String),
+    #[error("invalid network configuration: {0}")]
+    InvalidNetwork(String),
     #[error("QEMU command failed: {0}")]
     QemuFailed(String),
     #[error("QMP error: {0}")]
@@ -52,6 +54,7 @@ impl VmError {
             Self::KvmNotAvailable => -32005,
             Self::InvalidDiskPath(_) => -32009,
             Self::InvalidUsbDevice(_) => -32010,
+            Self::InvalidNetwork(_) => -32011,
             Self::QemuFailed(_) => -32006,
             Self::Qmp(_) => -32007,
             Self::Io(_) => -32008,
@@ -781,6 +784,12 @@ impl VmService {
             validate_vm_path(iso)?;
         }
 
+        // Validate bridge-mode NICs up front: QEMU's bridge helper fails (and the
+        // VM never launches) if the target bridge doesn't exist. Catching it here
+        // gives the operator a clear reason instead of a daemon that silently
+        // never came up.
+        validate_bridge_networks(&config.networks)?;
+
         // Ensure runtime directory exists with restrictive permissions (owner-only)
         tokio::fs::create_dir_all(QMP_DIR).await?;
         #[cfg(unix)]
@@ -815,30 +824,50 @@ impl VmService {
             args.join(" ")
         );
 
+        // QEMU runs as a daemon via -daemonize: the process we spawn forks the
+        // long-lived guest and then exits. Crucially it exits *non-zero* if the
+        // guest fails to initialize (bad bridge helper, unusable disk, invalid
+        // device), so waiting on it turns a previously-silent failure into a
+        // real error the operator sees — instead of "Started VM" for a guest
+        // that never launched.
         let qemu_bin = format!("qemu-system-{}", std::env::consts::ARCH);
-        let child = Command::new(&qemu_bin)
+        let output = Command::new(&qemu_bin)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .spawn()
+            .output()
+            .await
             .map_err(|e| VmError::QemuFailed(format!("{qemu_bin}: {e}")))?;
 
-        let pid = child.id();
-        info!("VM '{}' started (pid={:?})", config.name, pid);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let reason = stderr
+                .lines()
+                .map(str::trim)
+                .rfind(|l| !l.is_empty())
+                .unwrap_or("QEMU exited with a failure status")
+                .to_string();
+            return Err(VmError::QemuFailed(format!(
+                "VM '{}' failed to start: {reason}",
+                config.name
+            )));
+        }
 
-        // Detach — QEMU runs as a daemon via -daemonize
-        // Give it a moment to initialize
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // Negotiate QMP handshake
+        // The daemonizing parent only exits 0 once the guest is up and the QMP
+        // monitor socket is listening, so the handshake should now succeed. If
+        // it doesn't, the VM is not actually usable — surface that rather than
+        // reporting a healthy start.
         let qmp_path = qmp_socket_path(id);
         if let Err(e) = qmp::negotiate(&qmp_path).await {
-            warn!(
-                "QMP handshake failed for '{}': {e} (VM may still be starting)",
+            return Err(VmError::Qmp(format!(
+                "VM '{}' launched but its monitor is unreachable: {e}",
                 config.name
-            );
+            )));
         }
+
+        let pid = self.get_pid(id).await;
+        info!("VM '{}' started (pid={:?})", config.name, pid);
 
         Ok(VmStatus {
             config,
@@ -926,6 +955,24 @@ impl VmService {
 }
 
 // ── QEMU command builder ────────────────────────────────────────
+
+/// Reject bridge-mode NICs that point at a bridge which doesn't exist on the
+/// host. QEMU's bridge helper would otherwise fail and the daemonized guest
+/// would never come up — historically with no error surfaced to the operator.
+fn validate_bridge_networks(networks: &[VmNetwork]) -> Result<(), VmError> {
+    for net in networks {
+        if net.mode == "bridge" {
+            let br = net.bridge.as_deref().unwrap_or("br0");
+            if !Path::new(&format!("/sys/class/net/{br}")).exists() {
+                return Err(VmError::InvalidNetwork(format!(
+                    "bridge '{br}' does not exist — create it under Network \
+                     settings (or pick another) before starting this VM"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn build_qemu_args(config: &VmConfig) -> Vec<String> {
     let mut args = Vec::new();
@@ -1222,6 +1269,29 @@ async fn list_pci_devices() -> Vec<PciDevice> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_validation_rejects_missing_bridge() {
+        // A name no real host interface will ever have.
+        let nets = vec![VmNetwork {
+            mode: "bridge".to_string(),
+            bridge: Some("nasty-nonexistent-br-zzzzz".to_string()),
+            mac: None,
+        }];
+        let err = validate_bridge_networks(&nets).unwrap_err();
+        assert!(matches!(err, VmError::InvalidNetwork(_)));
+        assert!(err.to_string().contains("nasty-nonexistent-br-zzzzz"));
+    }
+
+    #[test]
+    fn bridge_validation_ignores_user_mode() {
+        let nets = vec![VmNetwork {
+            mode: "user".to_string(),
+            bridge: None,
+            mac: None,
+        }];
+        assert!(validate_bridge_networks(&nets).is_ok());
+    }
 
     fn base_config() -> VmConfig {
         VmConfig {
