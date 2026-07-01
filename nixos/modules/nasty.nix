@@ -473,6 +473,7 @@ in {
          iostat -x 1
          dool -dny 1
          btop                                       interactive CPU/mem/disk/net dashboard
+         diskwatch                                  read-only disk diagnostics TUI (devices, SMART, IO, hot files)
          # → type 'debug' for perf profiling and kernel oops symbolization
          # → type 'benchmark' for fio storage tests
 
@@ -732,6 +733,27 @@ in {
         # what nasty-top's own flake does after nasty-top#17.
         cargoLock.lockFile = "${nastyTopSrc}/Cargo.lock";
         meta.mainProgram = "nasty-top";
+      })
+
+      # diskwatch — third-party read-only disk-diagnostics TUI (MIT,
+      # github:matthart1983/diskwatch). Consolidates lsblk/smartctl/
+      # iostat/df/SMART/hot-files into one console view and understands
+      # bcachefs multi-device mounts, so it complements nasty-top on the
+      # storage side. Packaged inline the same way as nasty-top above:
+      # pinned tag + cargoLock.lockFile, no cargoHash to maintain.
+      (let
+        diskwatchSrc = pkgs.fetchFromGitHub {
+          owner = "matthart1983";
+          repo = "diskwatch";
+          rev = "v0.1.1";
+          hash = "sha256-pveHyT3ljQQ9GdOMhZhcY7QD/pMvL3fLrbM6D5fO+h4=";
+        };
+      in pkgs.rustPlatform.buildRustPackage {
+        pname = "diskwatch";
+        version = "0.1.1";
+        src = diskwatchSrc;
+        cargoLock.lockFile = "${diskwatchSrc}/Cargo.lock";
+        meta.mainProgram = "diskwatch";
       })
 
       (writeShellScriptBin "nasty-cleanup" ''
