@@ -726,6 +726,35 @@
 		return items;
 	});
 
+	// ── Nav mode (#588): opt-in "Common" short menu vs the full grouped tree ──
+	const NAV_MODE_KEY = 'nasty:nav_mode';
+	let navMode: 'full' | 'common' = $state(
+		typeof localStorage !== 'undefined' && localStorage.getItem(NAV_MODE_KEY) === 'common'
+			? 'common'
+			: 'full'
+	);
+	function setNavMode(m: 'full' | 'common') {
+		navMode = m;
+		if (typeof localStorage !== 'undefined') localStorage.setItem(NAV_MODE_KEY, m);
+	}
+
+	// Curated flat short-list of the most-used pages for "Common" mode. Anything
+	// off this list is still reachable via the search box or by flipping to Full.
+	const commonNav = $derived.by((): NavItem[] => {
+		const items: NavItem[] = [
+			{ href: '/', label: 'Dashboard', icon: LayoutDashboard },
+			{ href: '/filesystems', label: 'Filesystems', icon: Database },
+			{ href: '/subvolumes', label: 'Subvolumes', icon: Layers },
+			{ href: '/disks', label: 'Disks', icon: HardDrive },
+			{ href: '/files', label: 'Files', icon: FolderOpen },
+			{ href: '/apps', label: 'Apps', icon: Box },
+		];
+		if (sysInfo?.kvm_available) items.push({ href: '/vms', label: 'VMs', icon: Monitor });
+		items.push({ href: '/backups', label: 'Backups', icon: Archive });
+		items.push({ href: '/logs', label: 'Logs', icon: ScrollText });
+		return items;
+	});
+
 	// Derive current nav entry from path
 	const currentNav = $derived.by(() => {
 		const path = $page.url.pathname;
@@ -794,6 +823,11 @@
 		);
 	});
 	const isSearching = $derived(sidebarSearch.trim().length > 0);
+
+	// While searching, render the full grouped tree so search can reach every page;
+	// otherwise honor the chosen nav mode (Full grouped tree vs Common short-list).
+	const displayNav = $derived(navMode === 'common' ? commonNav : nav);
+	const renderNav = $derived<NavEntry[]>(isSearching ? nav : displayNav);
 
 	function isGroupExpanded(label: string): boolean {
 		return expandedGroups[label] || activeGroup === label;
@@ -995,9 +1029,27 @@
 				</div>
 			{/if}
 
+			<!-- Nav mode toggle (#588): Common short-list vs Full grouped tree — hidden while searching -->
+			{#if !sidebarCollapsed && !isSearching}
+				<div class="shrink-0 px-2 pt-2">
+					<div class="flex rounded-md border border-border p-0.5 text-[0.7rem]">
+						<button
+							onclick={() => setNavMode('common')}
+							class="flex-1 rounded px-2 py-1 transition-colors {navMode === 'common' ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'}"
+							title="Show a short list of the most-used pages"
+						>Common</button>
+						<button
+							onclick={() => setNavMode('full')}
+							class="flex-1 rounded px-2 py-1 transition-colors {navMode === 'full' ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'}"
+							title="Show every page, grouped"
+						>Full</button>
+					</div>
+				</div>
+			{/if}
+
 			<!-- Nav — scrollable -->
 			<nav class="flex-1 overflow-y-auto py-2">
-				{#each nav as entry}
+				{#each renderNav as entry}
 					{#if isGroup(entry)}
 						{@const GroupIcon = entry.icon}
 						{@const expanded = isGroupExpanded(entry.label)}
@@ -1264,19 +1316,6 @@
 						{/if}
 					</div>
 
-					<!-- Theme toggle -->
-					<button
-						onclick={() => theme.toggle()}
-						class="flex items-center rounded-md border-2 border-blue-500/50 px-2.5 py-1.5 text-muted-foreground transition-all hover:bg-accent hover:text-accent-foreground hover:border-blue-400/80 hover:shadow-[0_0_12px_rgba(96,165,250,0.4)] active:shadow-none"
-						title={theme.isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-					>
-						{#if theme.isDark}
-							<Sun size={15} />
-						{:else}
-							<Moon size={15} />
-						{/if}
-					</button>
-
 					<!-- Profile button -->
 					<div class="relative">
 						<button
@@ -1299,6 +1338,19 @@
 									</div>
 								{/if}
 								<button
+									onclick={() => theme.toggle()}
+									class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground rounded-t-lg"
+								>
+									{#if theme.isDark}
+										<Sun size={14} />
+										Light mode
+									{:else}
+										<Moon size={14} />
+										Dark mode
+									{/if}
+								</button>
+								<div class="border-t border-border"></div>
+								<button
 									onclick={handleLogout}
 									class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground rounded-b-lg"
 								>
@@ -1314,10 +1366,11 @@
 						<button
 							onclick={() => { powerOpen = !powerOpen; profileOpen = false; }}
 							disabled={powering}
-							class="flex items-center gap-2 rounded-md border-2 border-blue-500/50 px-3 py-1.5 text-sm text-muted-foreground transition-all hover:bg-accent hover:text-accent-foreground hover:border-blue-400/80 hover:shadow-[0_0_12px_rgba(96,165,250,0.4)] active:shadow-none disabled:opacity-50"
+							title="Power"
+							aria-label="Power"
+							class="flex items-center rounded-md border-2 border-blue-500/50 px-2.5 py-1.5 text-muted-foreground transition-all hover:bg-accent hover:text-accent-foreground hover:border-blue-400/80 hover:shadow-[0_0_12px_rgba(96,165,250,0.4)] active:shadow-none disabled:opacity-50"
 						>
 							<Power size={15} />
-							Power
 						</button>
 						{#if powerOpen}
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
