@@ -113,7 +113,7 @@ jobs:
                 pkgs = (builtins.getFlake \"github:NixOS/nixpkgs/$rev\").legacyPackages.x86_64-linux;
                 names = [
                   \"qemu\" \"docker\" \"openssl\" \"openssh\" \"networkmanager\"
-                  \"samba\" \"nfs-utils\" \"nginx\" \"targetcli-fb\" \"lvm2\"
+                  \"samba\" \"nfs-utils\" \"caddy\" \"targetcli-fb\" \"lvm2\"
                   \"util-linux\" \"glibc\"
                 ];
                 versionOf = name:
