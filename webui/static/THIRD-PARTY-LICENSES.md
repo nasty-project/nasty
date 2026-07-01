@@ -67,7 +67,9 @@ All dependencies use licenses compatible with GPL-3.0.
 | avahi | LGPL-2.1-or-later |
 | bcachefs-tools | GPL-2.0 |
 | btop | Apache-2.0 |
+| caddy | Apache-2.0 |
 | croc | MIT |
+| docker | Apache-2.0 |
 | ethtool | GPL-2.0 |
 | fwupd | LGPL-2.1-or-later |
 | hdparm | BSD-2-Clause |
@@ -76,10 +78,6 @@ All dependencies use licenses compatible with GPL-3.0.
 | iotop-c | GPL-2.0 |
 | iproute2 | GPL-2.0 |
 | jq | MIT |
-| k3s | Apache-2.0 |
-| kubectl | Apache-2.0 |
-| kubernetes-helm | Apache-2.0 |
-| lego | MIT |
 | lm-sensors | GPL-2.0 |
 | lsof | Zlib |
 | nfs-utils | GPL-2.0 |
