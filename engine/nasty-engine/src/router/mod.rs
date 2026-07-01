@@ -955,6 +955,10 @@ pub(super) async fn vm_clone(
 
         new_disks.push(nasty_vm::VmDisk {
             path: cloned.block_device.unwrap_or_default(),
+            // Captured from the fresh loop device by VmService::create
+            // (which runs backfill_disk_sources) so the clone survives a
+            // reboot the same way (#592).
+            source: None,
             interface: "virtio".to_string(),
             readonly: false,
             cache: None,

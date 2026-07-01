@@ -1468,6 +1468,10 @@ export interface NotificationChannel {
 
 export interface VmDisk {
 	path: string;
+	/** Stable backing file for a block-subvolume disk; the engine
+	 * re-resolves `path` from this on start since loop device numbers
+	 * change across reboots (#592). Absent for image-file disks. */
+	source?: string;
 	interface: string;
 	readonly: boolean;
 	cache?: string;

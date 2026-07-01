@@ -160,7 +160,19 @@ impl VmConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VmDisk {
     /// Disk path — block device (/dev/loopX) or image file.
+    ///
+    /// For block-subvolume disks this is a loop device whose number is
+    /// reassigned on every reboot, so it must never be trusted as a
+    /// stable identifier — `source` is. On start we re-resolve `path`
+    /// from `source` (#592) and heal it if the loop device moved.
     pub path: String,
+    /// Stable backing file for a block-subvolume disk (the losetup
+    /// `BACK-FILE`, e.g. `/fs/tank/vms/foo/vol.img`). Loop device
+    /// numbers shuffle across reboots but the backing file does not, so
+    /// this is what we persist and re-resolve `path` from at start time.
+    /// `None` for plain image-file disks, whose `path` is already stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Disk interface: "virtio" (default), "scsi", "ide".
     #[serde(default = "default_disk_interface")]
     pub interface: String,
@@ -410,6 +422,116 @@ fn qmp_socket_path(vm_id: &str) -> String {
     format!("{QMP_DIR}/{vm_id}.qmp")
 }
 
+// ── Loop-device resolution (#592) ───────────────────────────────
+//
+// Block-subvolume disks are backed by a `vol.img` attached to a loop
+// device. The loop *number* is reassigned on every reboot, so a VM
+// config that stores `/dev/loopN` in `path` points at the wrong (or a
+// nonexistent) subvolume after a reboot. The backing file is the stable
+// identifier, so we persist it in `VmDisk.source` and re-resolve the
+// live loop device from it on start. This mirrors how nasty-storage
+// tracks block subvolumes; we parse `losetup` directly here rather than
+// take a dependency on the storage crate.
+
+/// Read `(loop_device, backing_file)` pairs from `losetup`. Returns an
+/// empty vec on failure — callers treat "not found" as "unattached".
+async fn losetup_pairs() -> Vec<(String, String)> {
+    let output = match Command::new("losetup")
+        .args(["--list", "--output", "NAME,BACK-FILE", "--noheadings"])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(o) => {
+            warn!(
+                "losetup --list failed ({}); VM disks may not resolve",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            warn!("could not run losetup: {e}; VM disks may not resolve");
+            return Vec::new();
+        }
+    };
+    parse_losetup_pairs(&String::from_utf8_lossy(&output))
+}
+
+/// Parse `losetup --list --output NAME,BACK-FILE --noheadings` output
+/// into `(device, backing_file)` pairs. Split off for unit testing.
+fn parse_losetup_pairs(output: &str) -> Vec<(String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some(dev), Some(back)) => Some((dev.to_string(), back.to_string())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The backing file a loop device is currently attached to, if any.
+fn backing_file_for_device<'a>(pairs: &'a [(String, String)], device: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(dev, _)| dev == device)
+        .map(|(_, back)| back.as_str())
+}
+
+/// The loop device currently backing a given file, if any.
+fn device_for_backing_file<'a>(pairs: &'a [(String, String)], backing: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(_, back)| back == backing)
+        .map(|(dev, _)| dev.as_str())
+}
+
+/// Populate `source` for any block-device disk that lacks it, by asking
+/// losetup what file the current `/dev/loopN` is backed by. Best-effort:
+/// the loop mapping must still be valid (i.e. captured before a reboot
+/// invalidates it), which is exactly the case at create/update time and
+/// on the first start after upgrading past this fix. Returns whether any
+/// disk changed. Pure counterpart of the losetup call for testability.
+fn backfill_disk_sources(disks: &mut [VmDisk], pairs: &[(String, String)]) -> bool {
+    let mut changed = false;
+    for disk in disks {
+        if disk.source.is_none()
+            && disk.path.starts_with("/dev/loop")
+            && let Some(back) = backing_file_for_device(pairs, &disk.path)
+        {
+            disk.source = Some(back.to_string());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Re-resolve `path` for every disk that has a `source`, using the live
+/// loop mapping. Returns `Ok(changed)` where `changed` is whether any
+/// path moved, or an error naming the first backing file that is no
+/// longer attached to a loop device.
+fn resolve_disk_paths(disks: &mut [VmDisk], pairs: &[(String, String)]) -> Result<bool, VmError> {
+    let mut changed = false;
+    for disk in disks {
+        let Some(source) = disk.source.as_deref() else {
+            continue;
+        };
+        let Some(dev) = device_for_backing_file(pairs, source) else {
+            return Err(VmError::InvalidDiskPath(format!(
+                "backing file {source} is not attached to any loop device"
+            )));
+        };
+        if disk.path != dev {
+            info!("Remapping VM disk {source}: {} → {dev}", disk.path);
+            disk.path = dev.to_string();
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 /// Validate a USB vendor/product ID. We format these directly into the
 /// QEMU command line, so anything but a 4-hex-digit string is a
 /// rejection (defends against a malformed manifest sneaking arbitrary
@@ -579,12 +701,18 @@ impl VmService {
 
         let id = Uuid::new_v4().to_string();
 
+        let mut disks = req.disks.unwrap_or_default();
+        // Capture the stable backing file for each block-device disk now,
+        // while the loop mapping is guaranteed valid, so the disk still
+        // resolves after a reboot renumbers the loop devices (#592).
+        backfill_disk_sources(&mut disks, &losetup_pairs().await);
+
         let config = VmConfig {
             id: id.clone(),
             name: req.name,
             cpus: req.cpus.unwrap_or(1),
             memory_mib: req.memory_mib.unwrap_or(1024),
-            disks: req.disks.unwrap_or_default(),
+            disks,
             networks: req.networks.unwrap_or_else(|| {
                 vec![VmNetwork {
                     mode: "user".to_string(),
@@ -662,7 +790,10 @@ impl VmService {
             if let Some(mem) = req.memory_mib {
                 config.memory_mib = mem;
             }
-            if let Some(disks) = req.disks {
+            if let Some(mut disks) = req.disks {
+                // Capture the stable backing file for new block-device
+                // disks while the loop mapping is still valid (#592).
+                backfill_disk_sources(&mut disks, &losetup_pairs().await);
                 config.disks = disks;
             }
             if let Some(nets) = req.networks {
@@ -763,6 +894,21 @@ impl VmService {
 
         if !self.kvm_available() {
             return Err(VmError::KvmNotAvailable);
+        }
+
+        // Re-resolve block-device disks from their stable backing file
+        // before validating: loop device numbers change across reboots,
+        // so a persisted `/dev/loopN` may now point at the wrong (or no)
+        // subvolume (#592). Backfill `source` for VMs created before this
+        // fix, then heal `path` to the live loop device and persist so
+        // status/list reflect reality.
+        {
+            let pairs = losetup_pairs().await;
+            let mut dirty = backfill_disk_sources(&mut config.disks, &pairs);
+            dirty |= resolve_disk_paths(&mut config.disks, &pairs)?;
+            if dirty {
+                state_dir().save(id, &config).await?;
+            }
         }
 
         // Validate all disk paths exist and are within allowed locations before starting
@@ -1314,6 +1460,129 @@ mod tests {
             vga: None,
             extra_args: None,
         }
+    }
+
+    fn disk(path: &str, source: Option<&str>) -> VmDisk {
+        VmDisk {
+            path: path.to_string(),
+            source: source.map(str::to_string),
+            interface: "virtio".to_string(),
+            readonly: false,
+            cache: None,
+            aio: None,
+            discard: None,
+            iops_rd: None,
+            iops_wr: None,
+        }
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(d, b)| (d.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_losetup_pairs_reads_name_and_backfile() {
+        let out = "/dev/loop0 /fs/tank/vms/foo/vol.img\n/dev/loop3 /fs/tank/vms/bar/vol.img\n";
+        assert_eq!(
+            parse_losetup_pairs(out),
+            pairs(&[
+                ("/dev/loop0", "/fs/tank/vms/foo/vol.img"),
+                ("/dev/loop3", "/fs/tank/vms/bar/vol.img"),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_losetup_pairs_skips_blank_and_partial_lines() {
+        // A NAME with no BACK-FILE (unbacked loop) must be dropped, not
+        // paired with the next line's device.
+        let out = "\n/dev/loop7\n/dev/loop0 /fs/tank/vms/foo/vol.img\n";
+        assert_eq!(
+            parse_losetup_pairs(out),
+            pairs(&[("/dev/loop0", "/fs/tank/vms/foo/vol.img")])
+        );
+    }
+
+    #[test]
+    fn backfill_captures_backing_file_for_loop_disk() {
+        let mut disks = vec![disk("/dev/loop0", None)];
+        let map = pairs(&[("/dev/loop0", "/fs/tank/vms/foo/vol.img")]);
+        assert!(backfill_disk_sources(&mut disks, &map));
+        assert_eq!(disks[0].source.as_deref(), Some("/fs/tank/vms/foo/vol.img"));
+    }
+
+    #[test]
+    fn backfill_leaves_image_file_disks_untouched() {
+        // A plain image-file disk (path already stable) has no loop entry
+        // and must not gain a source.
+        let mut disks = vec![disk("/fs/tank/vms/images/win.img", None)];
+        let map = pairs(&[("/dev/loop0", "/fs/tank/vms/foo/vol.img")]);
+        assert!(!backfill_disk_sources(&mut disks, &map));
+        assert_eq!(disks[0].source, None);
+    }
+
+    #[test]
+    fn backfill_is_idempotent_when_source_present() {
+        let mut disks = vec![disk("/dev/loop9", Some("/fs/tank/vms/foo/vol.img"))];
+        // Even though loop9 now backs a different file, an existing source
+        // is authoritative and must not be overwritten by backfill.
+        let map = pairs(&[("/dev/loop9", "/fs/tank/vms/other/vol.img")]);
+        assert!(!backfill_disk_sources(&mut disks, &map));
+        assert_eq!(disks[0].source.as_deref(), Some("/fs/tank/vms/foo/vol.img"));
+    }
+
+    #[test]
+    fn resolve_heals_path_when_loop_number_moved() {
+        // The reboot scenario from #592: source is stable, but the disk
+        // now lives on a different loop device.
+        let mut disks = vec![disk("/dev/loop0", Some("/fs/tank/vms/foo/vol.img"))];
+        let map = pairs(&[("/dev/loop5", "/fs/tank/vms/foo/vol.img")]);
+        assert!(resolve_disk_paths(&mut disks, &map).unwrap());
+        assert_eq!(disks[0].path, "/dev/loop5");
+    }
+
+    #[test]
+    fn resolve_swaps_two_disks_correctly() {
+        // Two block disks whose loop numbers swapped on reboot must each
+        // land on the loop backing *their own* file, not each other's.
+        let mut disks = vec![
+            disk("/dev/loop0", Some("/fs/tank/vms/foo/vol.img")),
+            disk("/dev/loop1", Some("/fs/tank/vms/bar/vol.img")),
+        ];
+        let map = pairs(&[
+            ("/dev/loop1", "/fs/tank/vms/foo/vol.img"),
+            ("/dev/loop0", "/fs/tank/vms/bar/vol.img"),
+        ]);
+        assert!(resolve_disk_paths(&mut disks, &map).unwrap());
+        assert_eq!(disks[0].path, "/dev/loop1");
+        assert_eq!(disks[1].path, "/dev/loop0");
+    }
+
+    #[test]
+    fn resolve_is_noop_when_path_already_correct() {
+        let mut disks = vec![disk("/dev/loop5", Some("/fs/tank/vms/foo/vol.img"))];
+        let map = pairs(&[("/dev/loop5", "/fs/tank/vms/foo/vol.img")]);
+        assert!(!resolve_disk_paths(&mut disks, &map).unwrap());
+        assert_eq!(disks[0].path, "/dev/loop5");
+    }
+
+    #[test]
+    fn resolve_errors_when_backing_file_unattached() {
+        let mut disks = vec![disk("/dev/loop0", Some("/fs/tank/vms/foo/vol.img"))];
+        let err = resolve_disk_paths(&mut disks, &[]).unwrap_err();
+        assert!(matches!(err, VmError::InvalidDiskPath(_)));
+        assert!(err.to_string().contains("/fs/tank/vms/foo/vol.img"));
+    }
+
+    #[test]
+    fn resolve_ignores_disks_without_source() {
+        // Image-file disks carry no source and must pass through even
+        // when the loop map is empty.
+        let mut disks = vec![disk("/fs/tank/vms/images/win.img", None)];
+        assert!(!resolve_disk_paths(&mut disks, &[]).unwrap());
     }
 
     #[test]
