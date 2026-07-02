@@ -95,6 +95,39 @@ ignore = [
     # rustic_backend exposes per-service opendal features. Tracked in
     # issue #386.
     "RUSTSEC-2025-0052",
+
+    # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 — two DoS-only advisories in
+    # `quick-xml` (NOT RCE / data disclosure):
+    #   * 0194: O(N²) duplicate-attribute-name scan on a start tag —
+    #           CPU exhaustion from a tag with many attributes.
+    #   * 0195: unbounded namespace-declaration allocation in `NsReader`
+    #           — heap/memory exhaustion from a single crafted start tag.
+    # Both are fixed in quick-xml >= 0.41.0.
+    #
+    # Reach in our codebase (two copies, both transitive via the backup
+    # stack, neither a direct dep):
+    #   rustic_backend → opendal
+    #     → opendal-core            → quick-xml 0.39.4   (0194/0195)
+    #     → reqsign-aws-v4 / -google → quick-xml 0.40.1  (0194/0195)
+    #
+    # No bump is available: opendal 0.57.0 and rustic_backend 0.6.2 are
+    # already the newest crates.io releases and both cap quick-xml below
+    # 0.41, so `cargo update` cannot reach the fix (verified — it's a
+    # no-op). The only alternatives are forking/patching opendal, or
+    # waiting on its next release.
+    #
+    # Exposure model: quick-xml here parses XML *responses from the S3 /
+    # Azure / GCS endpoint the operator configured as their backup
+    # target*, over TLS. Triggering either DoS requires controlling (or
+    # MITMing) that operator-chosen, TLS-authenticated endpoint, and the
+    # only casualty is the operator's own backup job stalling / OOMing —
+    # it is not reachable from untrusted network input to the NAS. Same
+    # threat class as the two entries above.
+    #
+    # Remove both when opendal releases a version built on quick-xml
+    # >= 0.41 (and rustic_backend picks it up).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
