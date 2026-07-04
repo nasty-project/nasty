@@ -36,6 +36,8 @@ pub enum VmError {
     InvalidUsbDevice(String),
     #[error("invalid network configuration: {0}")]
     InvalidNetwork(String),
+    #[error("PCI passthrough failed: {0}")]
+    Passthrough(String),
     #[error("QEMU command failed: {0}")]
     QemuFailed(String),
     #[error("QMP error: {0}")]
@@ -55,6 +57,7 @@ impl VmError {
             Self::InvalidDiskPath(_) => -32009,
             Self::InvalidUsbDevice(_) => -32010,
             Self::InvalidNetwork(_) => -32011,
+            Self::Passthrough(_) => -32012,
             Self::QemuFailed(_) => -32006,
             Self::Qmp(_) => -32007,
             Self::Io(_) => -32008,
@@ -955,11 +958,13 @@ impl VmService {
             }
         }
 
-        // Bind passthrough devices to vfio-pci
+        // Bind passthrough devices to vfio-pci. A device that isn't bound
+        // makes QEMU exit with an opaque "Could not open /dev/vfio/NN", so
+        // fail here with the actual reason instead of launching QEMU.
         for dev in &config.passthrough_devices {
-            if let Err(e) = bind_vfio(&dev.address).await {
-                warn!("Failed to bind {} to vfio-pci: {e}", dev.address);
-            }
+            bind_vfio(&dev.address).await.map_err(|e| {
+                VmError::Passthrough(format!("VM '{}': device {}: {e}", config.name, dev.address))
+            })?;
         }
 
         let args = build_qemu_args(&config);
@@ -1333,31 +1338,58 @@ fn build_qemu_args(config: &VmConfig) -> Vec<String> {
 // ── VFIO passthrough helpers ────────────────────────────────────
 
 /// Bind a PCI device to the vfio-pci driver.
+///
+/// Uses the per-device `driver_override` mechanism rather than vfio-pci's
+/// global `new_id` registry: `new_id` rejects a vendor:device pair that is
+/// already registered (EEXIST), which broke the second boot of a VM — the
+/// device had already been unbound from its driver by then and was left
+/// bound to nothing, so `/dev/vfio/N` vanished (#601). `driver_override`
+/// is idempotent and scoped to the one PCI function being passed through,
+/// so it also can't drag sibling devices sharing the same IDs onto vfio-pci.
 async fn bind_vfio(pci_addr: &str) -> Result<(), String> {
-    // Unbind from current driver
-    let driver_path = format!("/sys/bus/pci/devices/{pci_addr}/driver/unbind");
-    if Path::new(&driver_path).exists() {
-        tokio::fs::write(&driver_path, pci_addr)
+    let dev_dir = format!("/sys/bus/pci/devices/{pci_addr}");
+
+    let bound_driver = |dir: String| async move {
+        tokio::fs::read_link(format!("{dir}/driver"))
             .await
-            .map_err(|e| format!("unbind {pci_addr}: {e}"))?;
+            .ok()
+            .and_then(|p| Some(p.file_name()?.to_str()?.to_owned()))
+    };
+
+    // Already on vfio-pci — claimed at boot via vfio-pci.ids, or left
+    // bound by a previous run of this VM. Rebinding would only add churn.
+    let current = bound_driver(dev_dir.clone()).await;
+    if current.as_deref() == Some("vfio-pci") {
+        return Ok(());
     }
 
-    // Get vendor:device ID
-    let vendor = tokio::fs::read_to_string(format!("/sys/bus/pci/devices/{pci_addr}/vendor"))
+    // Steer the next probe of this specific function to vfio-pci.
+    tokio::fs::write(format!("{dev_dir}/driver_override"), "vfio-pci")
         .await
-        .map_err(|e| format!("read vendor: {e}"))?;
-    let device = tokio::fs::read_to_string(format!("/sys/bus/pci/devices/{pci_addr}/device"))
+        .map_err(|e| format!("driver_override: {e}"))?;
+
+    // Release it from its current host driver, if any.
+    if current.is_some() {
+        tokio::fs::write(format!("{dev_dir}/driver/unbind"), pci_addr)
+            .await
+            .map_err(|e| format!("unbind: {e}"))?;
+    }
+
+    // Re-probe; the override routes the device to vfio-pci.
+    tokio::fs::write("/sys/bus/pci/drivers_probe", pci_addr)
         .await
-        .map_err(|e| format!("read device: {e}"))?;
+        .map_err(|e| format!("drivers_probe: {e}"))?;
 
-    let vendor_device = format!("{} {}", vendor.trim(), device.trim());
-
-    // Tell vfio-pci about this device
-    tokio::fs::write("/sys/bus/pci/drivers/vfio-pci/new_id", &vendor_device)
-        .await
-        .map_err(|e| format!("vfio new_id: {e}"))?;
-
-    Ok(())
+    // drivers_probe reports success even when no driver claims the device
+    // (e.g. the vfio-pci module isn't loaded), so verify the binding took.
+    match bound_driver(dev_dir).await.as_deref() {
+        Some("vfio-pci") => Ok(()),
+        other => Err(format!(
+            "device did not bind to vfio-pci (driver after probe: {}); \
+             is the vfio-pci module loaded?",
+            other.unwrap_or("none")
+        )),
+    }
 }
 
 /// List PCI devices available for passthrough.
