@@ -65,6 +65,13 @@ pub struct InterfaceConfig {
     pub ipv6: IpConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+    /// SR-IOV: number of virtual functions to create on this physical
+    /// function. `None` = leave the device alone (default; also what
+    /// every pre-SR-IOV config deserializes to). `Some(0)` explicitly
+    /// removes previously-created VFs. Only meaningful on SR-IOV-capable
+    /// devices — `update()` validates against live `sriov_totalvfs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sriov_num_vfs: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -233,6 +240,21 @@ pub struct LiveInterface {
     pub mtu: u32,
     /// "physical", "infiniband", "bond", "vlan", "bridge", "tunnel"
     pub kind: String,
+    /// SR-IOV PF: maximum VFs the device supports (`sriov_totalvfs`).
+    /// `None` for non-SR-IOV devices and for VFs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sriov_total_vfs: Option<u32>,
+    /// SR-IOV PF: currently-created VF count (`sriov_numvfs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sriov_num_vfs: Option<u32>,
+    /// SR-IOV VF: netdev name of the parent physical function, when
+    /// resolvable through `device/physfn/net/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vf_of: Option<String>,
+    /// SR-IOV VF: index within the parent (which `virtfn<N>` symlink
+    /// points at this device).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vf_index: Option<u32>,
 }
 
 /// Full network state returned by `system.network.get`.
@@ -411,6 +433,39 @@ fn reject_infiniband_refs(
                  parent",
                 mv.parent
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate SR-IOV VF-count requests against live capability. Pure —
+/// `live_caps` maps live interface name → `sriov_totalvfs` (None when
+/// the device exists but isn't SR-IOV-capable). A configured-but-absent
+/// device passes (intent is kept; the presence filter withholds its
+/// profile until it exists).
+fn validate_sriov(
+    cfg: &NetworkConfig,
+    live_caps: &std::collections::HashMap<String, Option<u32>>,
+) -> Result<(), String> {
+    for iface in &cfg.interfaces {
+        let Some(n) = iface.sriov_num_vfs else {
+            continue;
+        };
+        match live_caps.get(&iface.name) {
+            Some(Some(total)) if n > *total => {
+                return Err(format!(
+                    "'{}' supports at most {total} virtual functions (requested {n})",
+                    iface.name
+                ));
+            }
+            Some(None) => {
+                return Err(format!(
+                    "'{}' is not SR-IOV capable — it exposes no sriov_totalvfs; \
+                     VF count cannot be configured on it",
+                    iface.name
+                ));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -678,6 +733,13 @@ impl NetworkService {
         // (Plain L3 on an IB port is fine: it renders as IPoIB.)
         reject_infiniband_refs(&config, &live_kinds)?;
 
+        // SR-IOV VF counts must fit the device's capability.
+        let live_sriov_caps: std::collections::HashMap<String, Option<u32>> = live_ifaces
+            .iter()
+            .map(|i| (i.name.clone(), i.sriov_total_vfs))
+            .collect();
+        validate_sriov(&config, &live_sriov_caps)?;
+
         // A virtual device may take over the name of a stale
         // `interfaces[]` entry whose physical device is gone (kernel
         // rename left it behind). Drop such entries as part of this
@@ -721,7 +783,7 @@ impl NetworkService {
                 .map_err(|e| format!("write {PENDING_REVERT_PATH}: {e}"))?;
 
             persist_config(&config).await?;
-            let outcome = apply_config(&config, mgmt_iface.as_deref()).await?;
+            let outcome = apply_with_vf_settle(&config, mgmt_iface.as_deref(), &live_names).await?;
 
             let txn_id = new_txn_id();
             let revert_at_unix = unix_now() + secs;
@@ -745,7 +807,7 @@ impl NetworkService {
             })
         } else {
             persist_config(&config).await?;
-            let outcome = apply_config(&config, mgmt_iface.as_deref()).await?;
+            let outcome = apply_with_vf_settle(&config, mgmt_iface.as_deref(), &live_names).await?;
 
             info!(
                 "Network config updated ({} interfaces, {} bonds, {} bridges, {} VLANs)",
@@ -1330,6 +1392,7 @@ async fn enumerate_interfaces() -> Vec<LiveInterface> {
 
         let ipv4_addresses = get_addresses(&name, false).await;
         let ipv6_addresses = get_addresses(&name, true).await;
+        let sriov = sriov_metadata(&path);
 
         result.push(LiveInterface {
             name,
@@ -1341,6 +1404,10 @@ async fn enumerate_interfaces() -> Vec<LiveInterface> {
             ipv6_addresses,
             mtu,
             kind: kind.to_string(),
+            sriov_total_vfs: sriov.total_vfs,
+            sriov_num_vfs: sriov.num_vfs,
+            vf_of: sriov.vf_of,
+            vf_index: sriov.vf_index,
         });
     }
 
@@ -1357,6 +1424,60 @@ fn infiniband_names(live: &[LiveInterface]) -> std::collections::HashSet<String>
         .filter(|i| i.kind == "infiniband")
         .map(|i| i.name.clone())
         .collect()
+}
+
+#[derive(Default)]
+struct SriovMetadata {
+    total_vfs: Option<u32>,
+    num_vfs: Option<u32>,
+    vf_of: Option<String>,
+    vf_index: Option<u32>,
+}
+
+/// Read the SR-IOV family facts for one netdev from sysfs.
+/// `path` is `/sys/class/net/<name>`. PFs expose
+/// `device/sriov_totalvfs` + `device/sriov_numvfs`; VFs expose a
+/// `device/physfn` symlink to the parent PCI function, whose
+/// `virtfn<N>` symlinks give the VF its index and whose `net/` dir
+/// names the parent netdev.
+fn sriov_metadata(path: &std::path::Path) -> SriovMetadata {
+    let dev = path.join("device");
+    let read_u32 = |f: &str| -> Option<u32> {
+        std::fs::read_to_string(dev.join(f))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+
+    let mut out = SriovMetadata {
+        total_vfs: read_u32("sriov_totalvfs"),
+        num_vfs: read_u32("sriov_numvfs"),
+        ..Default::default()
+    };
+
+    let physfn = dev.join("physfn");
+    if let Ok(pf_dir) = std::fs::canonicalize(&physfn) {
+        // Parent netdev name (first entry of the PF's net/ dir).
+        out.vf_of = std::fs::read_dir(pf_dir.join("net"))
+            .ok()
+            .and_then(|mut d| d.next()?.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string());
+        // Our index: which virtfn<N> the PF points back at us with.
+        if let (Ok(me), Ok(entries)) = (std::fs::canonicalize(&dev), std::fs::read_dir(&pf_dir)) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if let Some(n) = fname.strip_prefix("virtfn")
+                    && let Ok(idx) = n.parse::<u32>()
+                    && std::fs::canonicalize(entry.path()).is_ok_and(|t| t == me)
+                {
+                    out.vf_index = Some(idx);
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Classify an interface from its sysfs shape. Pure so the
@@ -1865,6 +1986,36 @@ fn outcome_to_apply_errors(outcome: &nm::dbus::NmApplyOutcome) -> Vec<NetworkApp
         .collect()
 }
 
+/// Apply, and when the update both creates VFs (a PF has a VF count)
+/// and configures interfaces that don't exist yet (the VFs
+/// themselves), give NM a moment to materialize the VFs and apply
+/// once more — otherwise the presence filter withholds the VF
+/// profiles until the *next* apply and "set count + configure VF" in
+/// one update needs two clicks. One retry only; the second outcome
+/// wins (it saw the fuller device set).
+async fn apply_with_vf_settle(
+    config: &NetworkConfig,
+    mgmt_iface: Option<&str>,
+    live_names_at_validate: &std::collections::HashSet<String>,
+) -> Result<nm::dbus::NmApplyOutcome, String> {
+    let outcome = apply_config(config, mgmt_iface).await?;
+
+    let creates_vfs = config
+        .interfaces
+        .iter()
+        .any(|i| i.sriov_num_vfs.unwrap_or(0) > 0);
+    let has_absent_config = config
+        .interfaces
+        .iter()
+        .any(|i| !live_names_at_validate.contains(&i.name));
+    if creates_vfs && has_absent_config {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        info!("network apply: re-applying after SR-IOV VF settle");
+        return apply_config(config, mgmt_iface).await;
+    }
+    Ok(outcome)
+}
+
 async fn apply_config(
     config: &NetworkConfig,
     mgmt_iface: Option<&str>,
@@ -2014,6 +2165,7 @@ mod tests {
             ipv4: IpConfig::default(),
             ipv6: IpConfig::default(),
             mtu: None,
+            sriov_num_vfs: None,
         }
     }
 
@@ -2931,6 +3083,82 @@ mod tests {
             retain_live_physical_profiles(profiles, &live_set(&["ib0"])).len(),
             1
         );
+    }
+
+    #[test]
+    fn sriov_validation_rules() {
+        let caps: std::collections::HashMap<String, Option<u32>> = [
+            ("enp6s0f0".to_string(), Some(Some(8))),
+            ("eth0".to_string(), Some(None)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k, v.unwrap()))
+        .collect();
+
+        let mut pf = iface("enp6s0f0");
+        pf.sriov_num_vfs = Some(4);
+        let cfg = NetworkConfig {
+            interfaces: vec![pf],
+            ..Default::default()
+        };
+        assert!(validate_sriov(&cfg, &caps).is_ok(), "within capability");
+
+        let mut too_many = iface("enp6s0f0");
+        too_many.sriov_num_vfs = Some(16);
+        let cfg = NetworkConfig {
+            interfaces: vec![too_many],
+            ..Default::default()
+        };
+        assert!(
+            validate_sriov(&cfg, &caps)
+                .unwrap_err()
+                .contains("at most 8"),
+            "over capability"
+        );
+
+        let mut not_capable = iface("eth0");
+        not_capable.sriov_num_vfs = Some(2);
+        let cfg = NetworkConfig {
+            interfaces: vec![not_capable],
+            ..Default::default()
+        };
+        assert!(
+            validate_sriov(&cfg, &caps)
+                .unwrap_err()
+                .contains("not SR-IOV capable"),
+            "non-capable device"
+        );
+
+        // Absent device: intent kept, validation passes (presence
+        // filter withholds the profile until it exists).
+        let mut ghost = iface("enp99s0");
+        ghost.sriov_num_vfs = Some(4);
+        let cfg = NetworkConfig {
+            interfaces: vec![ghost],
+            ..Default::default()
+        };
+        assert!(validate_sriov(&cfg, &caps).is_ok(), "absent device");
+
+        // Explicit zero (remove VFs) is always fine on a capable PF.
+        let mut zero = iface("enp6s0f0");
+        zero.sriov_num_vfs = Some(0);
+        let cfg = NetworkConfig {
+            interfaces: vec![zero],
+            ..Default::default()
+        };
+        assert!(validate_sriov(&cfg, &caps).is_ok(), "zero VFs");
+    }
+
+    #[test]
+    fn sriov_round_trips_through_layered() {
+        let mut pf = iface("enp6s0f0");
+        pf.sriov_num_vfs = Some(4);
+        let cfg = NetworkConfig {
+            interfaces: vec![pf],
+            ..Default::default()
+        };
+        let layered = layered::to_layered(&cfg);
+        assert_eq!(layered.links[0].sriov_num_vfs, Some(4));
     }
 
     #[test]

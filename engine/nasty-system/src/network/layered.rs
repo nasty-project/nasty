@@ -51,6 +51,10 @@ pub struct Link {
     /// member MAC for bridges, hardware MAC for physical).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
+    /// SR-IOV VF count for physical functions. Meaningless (and never
+    /// set) on virtual link kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sriov_num_vfs: Option<u32>,
     #[serde(flatten)]
     pub kind: LinkKind,
 }
@@ -177,6 +181,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
             enabled: iface.enabled,
             mtu: iface.mtu,
             mac: None,
+            sriov_num_vfs: iface.sriov_num_vfs,
             kind: LinkKind::Physical,
         });
         push_addresses(&mut addresses, &iface.name, &iface.ipv4, &iface.ipv6);
@@ -187,6 +192,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
             enabled: true,
             mtu: bond.mtu,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Bond {
                 members: bond.members.clone(),
                 mode: bond.mode.clone(),
@@ -201,6 +207,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
             enabled: true,
             mtu: bridge.mtu,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Bridge {
                 members: bridge.members.clone(),
                 stp: bridge.stp,
@@ -217,6 +224,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
             enabled: true,
             mtu: vlan.mtu,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Vlan {
                 parent: vlan.parent.clone(),
                 id: vlan.vlan_id,
@@ -230,6 +238,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
             enabled: true,
             mtu: mv.mtu,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Macvlan {
                 parent: mv.parent.clone(),
                 mode: mv.mode.clone(),
@@ -285,6 +294,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
                 kind: LinkKind::Physical,
             });
         }
@@ -362,6 +372,7 @@ pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
                 ipv4,
                 ipv6,
                 mtu: link.mtu,
+                sriov_num_vfs: link.sriov_num_vfs,
             }),
             LinkKind::Bond {
                 members,
@@ -591,6 +602,7 @@ mod tests {
             ipv4: IpConfig::default(),
             ipv6: IpConfig::default(),
             mtu: None,
+            sriov_num_vfs: None,
         }
     }
 
@@ -853,6 +865,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Physical,
         }
     }
@@ -863,6 +876,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Bridge {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 stp: false,
@@ -878,6 +892,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Bond {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 mode: BondMode::Lacp,
@@ -892,6 +907,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Vlan {
                 parent: parent.into(),
                 id,
@@ -985,6 +1001,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Macvlan {
                 parent: parent.into(),
                 mode: "bridge".into(),

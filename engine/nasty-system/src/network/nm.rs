@@ -49,6 +49,12 @@ pub struct NmConnection {
     pub port_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+    /// SR-IOV VF count to create on this PF at activation
+    /// (`sriov.total-vfs`). NM owns VF lifecycle: it writes the
+    /// device's `sriov_numvfs` when the profile activates, which also
+    /// recreates VFs automatically at boot with no engine involvement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sriov_num_vfs: Option<u32>,
     /// Explicit MAC override (NM `cloned-mac-address`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
@@ -440,6 +446,7 @@ fn profile_for_link(
         controller,
         port_type,
         mtu: link.mtu,
+        sriov_num_vfs: link.sriov_num_vfs,
         mac: link.mac.clone(),
         autoconnect: link.enabled,
         ipv4,
@@ -610,6 +617,15 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
             out.push_str(&format!("cloned-mac-address={mac}\n"));
         }
         out.push('\n');
+    }
+
+    // [sriov] — VF count on an SR-IOV PF. NM creates/destroys the VFs
+    // at activation time; autoprobe is left at the global default so
+    // VF host drivers bind normally (passthrough VFs get claimed
+    // per-device via passthrough.nix udev rules instead).
+    if let Some(n) = p.sriov_num_vfs {
+        out.push_str("[sriov]\n");
+        out.push_str(&format!("total-vfs={n}\n\n"));
     }
 
     // [ipv4]
@@ -816,6 +832,13 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
         }
     }
 
+    // [sriov] — see the keyfile serializer note.
+    if let Some(n) = p.sriov_num_vfs {
+        let mut sriov = HashMap::new();
+        sriov.insert("total-vfs".into(), into_value(n));
+        out.insert("sriov".into(), sriov);
+    }
+
     // [ipv4]
     out.insert("ipv4".into(), ip_section_dict(&p.ipv4, Family::V4));
     // [ipv6]
@@ -967,6 +990,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Physical,
         }
     }
@@ -977,6 +1001,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Bridge {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 stp: false,
@@ -992,6 +1017,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Bond {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 mode: BondMode::Lacp,
@@ -1056,6 +1082,29 @@ mod tests {
         // The sibling ethernet port is unaffected by the IB context.
         let eth = find(&profiles, "eth0");
         assert_eq!(eth.conn_type, NmConnectionType::Ethernet);
+    }
+
+    #[test]
+    fn sriov_pf_emits_total_vfs_in_both_serializers() {
+        let mut link = link_phys("enp6s0f0");
+        link.sriov_num_vfs = Some(8);
+        let layered = LayeredConfig {
+            links: vec![link, link_phys("eth0")],
+            ..Default::default()
+        };
+        let profiles = to_nm_profiles(&layered);
+
+        let pf = find(&profiles, "enp6s0f0");
+        let keyfile = serialize_keyfile(pf);
+        assert!(keyfile.contains("[sriov]"), "{keyfile}");
+        assert!(keyfile.contains("total-vfs=8"), "{keyfile}");
+        let dict = to_settings_dict(pf);
+        assert!(dict.contains_key("sriov"));
+
+        // Plain NIC: no [sriov] anywhere.
+        let eth = find(&profiles, "eth0");
+        assert!(!serialize_keyfile(eth).contains("[sriov]"));
+        assert!(!to_settings_dict(eth).contains_key("sriov"));
     }
 
     #[test]
@@ -1186,6 +1235,7 @@ mod tests {
                     enabled: true,
                     mtu: None,
                     mac: None,
+                    sriov_num_vfs: None,
                     kind: LinkKind::Macvlan {
                         parent: "eth1".into(),
                         mode: "bridge".into(),
@@ -1243,6 +1293,7 @@ mod tests {
                     enabled: true,
                     mtu: None,
                     mac: None,
+                    sriov_num_vfs: None,
                     kind: LinkKind::Vlan {
                         parent: "eth0".into(),
                         id: 100,
@@ -1271,6 +1322,7 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
                 kind: LinkKind::Bridge {
                     members: vec![],
                     stp: true,
@@ -1444,6 +1496,7 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
                 kind: LinkKind::Bridge {
                     members: vec![],
                     stp: true,
@@ -1469,6 +1522,7 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
                 kind: LinkKind::Vlan {
                     parent: "eth0".into(),
                     id: 10,
@@ -1586,6 +1640,7 @@ mod tests {
             enabled: true,
             mtu: Some(1400),
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Vlan {
                 parent: "eth0".into(),
                 id: 100,
@@ -1734,6 +1789,7 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
                 kind: LinkKind::Bridge {
                     members: vec![],
                     stp: true,
@@ -1770,6 +1826,7 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
                 kind: LinkKind::Vlan {
                     parent: "eth0".into(),
                     id: 10,
@@ -1916,6 +1973,7 @@ mod tests {
             enabled: true,
             mtu: Some(1400),
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Vlan {
                 parent: "eth0".into(),
                 id: 100,
@@ -2116,6 +2174,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Bridge {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 stp: false,
@@ -2131,6 +2190,7 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
             kind: LinkKind::Bond {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 mode: BondMode::Lacp,

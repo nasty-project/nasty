@@ -396,6 +396,11 @@ pub struct PciDevice {
     pub iommu_group: u32,
     /// Whether the device is currently bound to vfio-pci.
     pub bound_to_vfio: bool,
+    /// Whether this is an SR-IOV virtual function (has a physfn
+    /// parent). VFs are prime passthrough candidates — the host keeps
+    /// the PF and siblings while one VF goes to the VM.
+    #[serde(default)]
+    pub virtual_function: bool,
 }
 
 // ── Service ─────────────────────────────────────────────────────
@@ -1426,6 +1431,8 @@ async fn list_pci_devices() -> Vec<PciDevice> {
                 .and_then(|p| p.file_name()?.to_str()?.parse::<u32>().ok())
                 .unwrap_or(0);
 
+        let virtual_function =
+            std::path::Path::new(&format!("/sys/bus/pci/devices/{address}/physfn")).exists();
         let bound_to_vfio = tokio::fs::read_link(format!("/sys/bus/pci/devices/{address}/driver"))
             .await
             .ok()
@@ -1438,6 +1445,7 @@ async fn list_pci_devices() -> Vec<PciDevice> {
             description,
             iommu_group,
             bound_to_vfio,
+            virtual_function,
         });
     }
 
