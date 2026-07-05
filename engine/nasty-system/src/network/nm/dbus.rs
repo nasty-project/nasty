@@ -65,6 +65,11 @@ trait ConnectionSettings {
 )]
 trait NetworkManager {
     fn get_devices(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
+    /// Reload NM configuration in place. `flags = 0x1` (CONF) rereads
+    /// `NetworkManager.conf` and its conf.d drop-ins — how our
+    /// `unmanaged-devices` changes take effect without restarting NM
+    /// (a restart would bounce every managed connection).
+    fn reload(&self, flags: u32) -> zbus::Result<()>;
     /// Activate a connection on a device. Pass `/` for `specific_object`
     /// to let NM pick (the right call for our case — we don't bind to
     /// a specific access point or VPN secret). Returns the object path
@@ -107,6 +112,20 @@ impl NmDbusClient {
             .await
             .map_err(|e| format!("connect to system DBus: {e}"))?;
         Ok(Self { conn })
+    }
+
+    /// Ask NM to re-read NetworkManager.conf + conf.d drop-ins
+    /// (Reload flag CONF = 0x1). Used after (re)writing the
+    /// InfiniBand `unmanaged-devices` drop-in so ownership changes
+    /// apply without restarting NM.
+    pub async fn reload_conf(&self) -> Result<(), String> {
+        let proxy = NetworkManagerProxy::new(&self.conn)
+            .await
+            .map_err(|e| format!("NM proxy: {e}"))?;
+        proxy
+            .reload(0x1)
+            .await
+            .map_err(|e| format!("NM Reload(CONF): {e}"))
     }
 
     /// Object paths for every persisted connection NM knows about.

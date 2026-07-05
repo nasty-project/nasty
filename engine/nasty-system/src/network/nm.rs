@@ -67,6 +67,11 @@ pub enum NmConnectionType {
     /// of bonds/bridges (NM treats a bridge port as an ethernet
     /// connection with a controller).
     Ethernet,
+    /// `infiniband` — an IPoIB port. Same L3 handling as ethernet but
+    /// a different link layer entirely (20-byte hardware address, no
+    /// Ethernet framing): NM refuses an `802-3-ethernet` profile on an
+    /// IB device, and IB ports can never be bond/bridge members here.
+    Infiniband,
     Bond,
     Bridge,
     Vlan,
@@ -78,6 +83,7 @@ impl NmConnectionType {
     fn keyfile_str(self) -> &'static str {
         match self {
             NmConnectionType::Ethernet => "802-3-ethernet",
+            NmConnectionType::Infiniband => "infiniband",
             NmConnectionType::Bond => "bond",
             NmConnectionType::Bridge => "bridge",
             NmConnectionType::Vlan => "vlan",
@@ -193,6 +199,16 @@ pub struct MacContext {
     /// touch the management path.
     pub live_macs: HashMap<String, String>,
     pub mgmt_iface: Option<String>,
+    /// Live interfaces whose kind is `infiniband` (ARPHRD 32). A
+    /// `Physical` link in this set renders as an NM `infiniband`
+    /// connection instead of `802-3-ethernet` — NM rejects an
+    /// ethernet profile bound to an IPoIB device. The config model
+    /// deliberately doesn't persist link layers (live facts drift),
+    /// so this rides in the render context like the MACs do. All
+    /// production call sites must populate it consistently or the
+    /// desired set flip-flops between profile types across
+    /// apply/preview/reconcile.
+    pub infiniband_ifaces: std::collections::HashSet<String>,
 }
 
 /// Convenience wrapper that calls into [`to_nm_profiles_with_macs`]
@@ -263,7 +279,7 @@ pub fn to_nm_profiles_with_macs(layered: &LayeredConfig, ctx: &MacContext) -> Ve
         .links
         .iter()
         .map(|link| {
-            let mut conn = profile_for_link(link, &addrs_by_link, &master_of);
+            let mut conn = profile_for_link(link, &addrs_by_link, &master_of, ctx);
             // DNS only meaningful on master/standalone connections —
             // member ports have ipv4/ipv6 method=disabled and NM
             // ignores DNS on disabled-method sections anyway, but
@@ -351,6 +367,7 @@ fn profile_for_link(
     link: &Link,
     addrs_by_link: &HashMap<&str, (NmIpSettings, NmIpSettings)>,
     master_of: &HashMap<&str, (&str, &'static str)>,
+    ctx: &MacContext,
 ) -> NmConnection {
     let master = master_of.get(link.name.as_str());
 
@@ -378,6 +395,9 @@ fn profile_for_link(
         .unwrap_or((None, None));
 
     let (conn_type, type_specific) = match &link.kind {
+        LinkKind::Physical if ctx.infiniband_ifaces.contains(&link.name) => {
+            (NmConnectionType::Infiniband, NmTypeSpecific::None)
+        }
         LinkKind::Physical => (NmConnectionType::Ethernet, NmTypeSpecific::None),
         LinkKind::Bond { mode, .. } => (
             NmConnectionType::Bond,
@@ -548,10 +568,26 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
         }
     }
 
+    // [infiniband] is the IB counterpart of [ethernet]: it owns the
+    // transport mode and the MTU (`infiniband.mtu`, not `ethernet.mtu`).
+    // Only datagram mode is emitted — connected mode is deprecated and
+    // unsupported by the in-tree mlx5_ib driver (ConnectX-4+); NM keeps
+    // it solely for legacy mlx4 hardware (#602).
+    if matches!(p.conn_type, NmConnectionType::Infiniband) {
+        out.push_str("[infiniband]\n");
+        out.push_str("transport-mode=datagram\n");
+        if let Some(mtu) = p.mtu {
+            out.push_str(&format!("mtu={mtu}\n"));
+        }
+        out.push('\n');
+    }
+
     // [ethernet] carries MTU for ethernet-like types AND bridges, and
     // cloned-mac for the non-bridge ones. A bridge master's MTU has no
     // `bridge.mtu` (NM rejects it — #580), so it lives here. A bridge's
     // MAC is set via [bridge] mac-address, so no cloned-mac here for it.
+    // Never emitted for infiniband — IB has no 802-3 section and its
+    // MTU lives in [infiniband] above.
     let is_bridge = matches!(p.conn_type, NmConnectionType::Bridge);
     let eth_cloned_mac = if is_bridge { None } else { p.mac.as_ref() };
     let needs_eth_section = matches!(
@@ -735,12 +771,25 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
         }
     }
 
+    // [infiniband] — IB counterpart of [802-3-ethernet]; owns transport
+    // mode and MTU. Datagram only: connected mode is deprecated and
+    // unsupported by the in-tree mlx5_ib driver (#602).
+    if matches!(p.conn_type, NmConnectionType::Infiniband) {
+        let mut ib = HashMap::new();
+        ib.insert("transport-mode".into(), into_value("datagram".to_string()));
+        if let Some(mtu) = p.mtu {
+            ib.insert("mtu".into(), into_value(u32::from(mtu)));
+        }
+        out.insert("infiniband".into(), ib);
+    }
+
     // [802-3-ethernet] carries MTU for ethernet-like types AND bridges,
     // and cloned-mac for the non-bridge ones. NM accepts this section on
     // Ethernet, Bond, VLAN, and Bridge connections — and a bridge master's
     // MTU has nowhere else to go (no `bridge.mtu`), so it lives here (#580).
     // A bridge's MAC is set via `bridge.mac-address` (above), so we don't
-    // emit cloned-mac here for bridges.
+    // emit cloned-mac here for bridges. Infiniband is excluded — its MTU
+    // lives in the `infiniband` section above.
     let needs_eth_section = matches!(
         p.conn_type,
         NmConnectionType::Ethernet
@@ -963,6 +1012,62 @@ mod tests {
     #[test]
     fn empty_layered_produces_no_profiles() {
         assert!(to_nm_profiles(&LayeredConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn infiniband_port_renders_ipoib_profile() {
+        // A Physical link whose live kind is infiniband must become an
+        // NM `infiniband` connection: NM refuses 802-3-ethernet on an
+        // IPoIB device. MTU lives in [infiniband], not [ethernet], and
+        // only datagram mode is emitted (connected is dead in mlx5_ib).
+        let mut link = link_phys("ib0");
+        link.mtu = Some(2044);
+        let layered = LayeredConfig {
+            links: vec![link, link_phys("eth0")],
+            addresses: vec![Address {
+                link: "ib0".into(),
+                family: Family::V4,
+                method: IpMethod::Static,
+                cidr: vec!["10.99.0.1/24".into()],
+                gateway: None,
+            }],
+            ..Default::default()
+        };
+        let ctx = MacContext {
+            infiniband_ifaces: ["ib0".to_string()].into(),
+            ..Default::default()
+        };
+        let profiles = to_nm_profiles_with_macs(&layered, &ctx);
+
+        let ib = find(&profiles, "ib0");
+        assert_eq!(ib.conn_type, NmConnectionType::Infiniband);
+        let keyfile = serialize_keyfile(ib);
+        assert!(keyfile.contains("type=infiniband"), "{keyfile}");
+        assert!(keyfile.contains("[infiniband]"), "{keyfile}");
+        assert!(keyfile.contains("transport-mode=datagram"), "{keyfile}");
+        assert!(!keyfile.contains("[ethernet]"), "{keyfile}");
+        // MTU under [infiniband].
+        assert!(keyfile.contains("mtu=2044"), "{keyfile}");
+
+        let dict = to_settings_dict(ib);
+        assert!(dict.contains_key("infiniband"));
+        assert!(!dict.contains_key("802-3-ethernet"));
+
+        // The sibling ethernet port is unaffected by the IB context.
+        let eth = find(&profiles, "eth0");
+        assert_eq!(eth.conn_type, NmConnectionType::Ethernet);
+    }
+
+    #[test]
+    fn physical_link_without_ib_context_stays_ethernet() {
+        // Same link name, empty context → ethernet. Guards against the
+        // context being accidentally required for ordinary NICs.
+        let layered = LayeredConfig {
+            links: vec![link_phys("ib0")],
+            ..Default::default()
+        };
+        let p = to_nm_profiles(&layered);
+        assert_eq!(p[0].conn_type, NmConnectionType::Ethernet);
     }
 
     #[test]
@@ -2048,6 +2153,7 @@ mod tests {
         let ctx = MacContext {
             live_macs: live_macs(&[("eth0", "aa:..."), ("eth1", "bb:...")]),
             mgmt_iface: Some("eth1".into()),
+            infiniband_ifaces: Default::default(),
         };
         assert_eq!(pick_primary_member(&kind, &ctx), Some("eth1"));
     }
@@ -2065,6 +2171,7 @@ mod tests {
         let ctx = MacContext {
             live_macs: live_macs(&[]),
             mgmt_iface: Some("eth0".into()), // mgmt not in members
+            infiniband_ifaces: Default::default(),
         };
         assert_eq!(pick_primary_member(&kind, &ctx), Some("eth1"));
     }
@@ -2097,6 +2204,7 @@ mod tests {
         let ctx = MacContext {
             live_macs: live_macs(&[("ens18", "bc:24:11:34:a0:27")]),
             mgmt_iface: None,
+            infiniband_ifaces: Default::default(),
         };
         let profiles = to_nm_profiles_with_macs(&layered, &ctx);
         let br = profiles.iter().find(|p| p.id == "nasty-br0").unwrap();
@@ -2123,6 +2231,7 @@ mod tests {
         let ctx = MacContext {
             live_macs: live_macs(&[("ens18", "bc:24:11:34:a0:27")]),
             mgmt_iface: None,
+            infiniband_ifaces: Default::default(),
         };
         let profiles = to_nm_profiles_with_macs(&layered, &ctx);
         let br = profiles.iter().find(|p| p.id == "nasty-br0").unwrap();
@@ -2143,6 +2252,7 @@ mod tests {
         let ctx = MacContext {
             live_macs: live_macs(&[("eth0", "aa:bb:cc:dd:ee:ff")]),
             mgmt_iface: None,
+            infiniband_ifaces: Default::default(),
         };
         let profiles = to_nm_profiles_with_macs(&layered, &ctx);
         let bond = profiles.iter().find(|p| p.id == "nasty-bond0").unwrap();
@@ -2165,6 +2275,7 @@ mod tests {
         let ctx = MacContext {
             live_macs: live_macs(&[("ens18", "bc:24:11:34:a0:27")]),
             mgmt_iface: None,
+            infiniband_ifaces: Default::default(),
         };
         let br = to_nm_profiles_with_macs(&layered, &ctx)
             .into_iter()

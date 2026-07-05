@@ -924,6 +924,13 @@
 							<!-- Inline config when selected -->
 							{#if isSelected}
 								<div class="mt-2 rounded-lg border border-border bg-secondary/20 p-4 space-y-4">
+									{#if iface.kind === 'infiniband'}
+										<p class="text-xs text-muted-foreground">
+											InfiniBand port (IPoIB, datagram mode). Addressing is managed here;
+											bonds, bridges and VLANs are not available on InfiniBand. Unconfigured
+											InfiniBand ports are left untouched for external management.
+										</p>
+									{/if}
 									<!-- IPv4 -->
 									<div>
 										<div class="mb-2 text-sm font-medium">IPv4</div>

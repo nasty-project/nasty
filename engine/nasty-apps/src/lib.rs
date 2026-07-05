@@ -114,7 +114,7 @@ impl AppsError {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IfaceInfo {
     pub name: String,
-    /// "physical" | "bond" | "vlan" | "bridge" | "virtual".
+    /// "physical" | "infiniband" | "bond" | "vlan" | "bridge" | "tunnel".
     pub kind: String,
     /// True when this NIC is enslaved to a bridge (so it's an invalid
     /// macvlan/ipvlan parent — the bridge should be used instead).
@@ -295,6 +295,12 @@ fn validate_network_spec(spec: &ManagedNetwork, ifaces: &[IfaceInfo]) -> Result<
                 Some(i) if i.bridge_member => {
                     return Err(invalid_net(format!(
                         "'{p}' is enslaved to a bridge; use the bridge itself as the parent"
+                    )));
+                }
+                Some(i) if i.kind == "infiniband" => {
+                    return Err(invalid_net(format!(
+                        "'{p}' is an InfiniBand (IPoIB) interface — macvlan/ipvlan \
+                         require an Ethernet parent"
                     )));
                 }
                 Some(_) => {}
