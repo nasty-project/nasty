@@ -435,7 +435,21 @@ async fn validate_request(
 async fn mgmt_iface_bdf(iface: &str) -> Option<String> {
     let device_link = format!("/sys/class/net/{iface}/device");
     let canonical = tokio::fs::canonicalize(&device_link).await.ok()?;
-    Some(canonical.file_name()?.to_str()?.to_ascii_lowercase())
+    bdf_from_device_path(&canonical)
+}
+
+/// Nearest ancestor directory whose name is a BDF. The `device`
+/// symlink doesn't always land on the PCI function itself: virtio
+/// NICs resolve to the virtio-bus child (`.../0000:07:12.0/virtio3`),
+/// and the pre-BDF pair resolver silently mis-read that child's
+/// virtio-bus vendor/device — which never matched a PCI pair, so the
+/// mgmt guard was a no-op for virtio NICs. Walking up to the BDF
+/// component fixes the guard for nested-bus devices.
+fn bdf_from_device_path(path: &std::path::Path) -> Option<String> {
+    path.ancestors()
+        .filter_map(|p| p.file_name()?.to_str())
+        .map(|n| n.to_ascii_lowercase())
+        .find(|n| is_bdf(n))
 }
 
 async fn read_pci_id_field(dev_dir: &std::path::Path, field: &str) -> Option<String> {
@@ -613,6 +627,28 @@ mod tests {
         let nix = render_nix_module(&PassthroughConfig::default());
         assert!(nix.contains("{ ... }: { }"));
         assert!(!nix.contains("udev"));
+    }
+
+    #[test]
+    fn bdf_resolution_walks_up_nested_buses() {
+        use std::path::Path;
+        // virtio NIC: device symlink lands on the virtio-bus child.
+        assert_eq!(
+            bdf_from_device_path(Path::new(
+                "/sys/devices/pci0000:00/0000:00:05.0/0000:07:12.0/virtio3"
+            )),
+            Some("0000:07:12.0".to_string())
+        );
+        // Plain PCI NIC: symlink lands on the function itself.
+        assert_eq!(
+            bdf_from_device_path(Path::new("/sys/devices/pci0000:00/0000:06:00.1")),
+            Some("0000:06:00.1".to_string())
+        );
+        // Non-PCI (USB NIC deep path without BDF): none.
+        assert_eq!(
+            bdf_from_device_path(Path::new("/sys/devices/virtual/net/x")),
+            None
+        );
     }
 
     #[tokio::test]
