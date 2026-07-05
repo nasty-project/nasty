@@ -1,28 +1,51 @@
 //! Persistent vfio-pci passthrough configuration.
 //!
-//! Users mark PCI (vendor, device) ID pairs to be claimed by `vfio-pci`
-//! at boot, before regular drivers can grab them. The flow:
+//! Users mark individual PCI devices (by BDF address) to be claimed by
+//! `vfio-pci` at boot, before regular drivers can grab them. The flow:
 //!
 //! ```text
-//! WebUI toggle
+//! WebUI toggle (per device)
 //!   ↓
 //! state file: /var/lib/nasty/passthrough.json
 //!   ↓
 //! engine writes: /etc/nixos/passthrough.nix
-//!   `{ boot.kernelParams = [ "vfio-pci.ids=AAAA:BBBB,CCCC:DDDD" ]; }`
+//!   `services.udev.extraRules` — one rule per device setting
+//!   `driver_override=vfio-pci` at PCI add time (the driverctl
+//!   approach), so only vfio-pci may ever bind that device
 //!   ↓
 //! wrapper flake imports passthrough.nix
 //!   ↓
-//! next nixos-rebuild + reboot — vfio-pci grabs the device early
+//! next nixos-rebuild + reboot — vfio-pci owns the device from boot
 //! ```
 //!
-//! Passthrough state is keyed by **vendor:device IDs**, not BDFs, because
-//! that's what `vfio-pci.ids=` consumes and because the binding survives
-//! slot moves. Caveat: when two devices share a (vendor, device) pair
-//! (e.g. two identical NICs), marking that pair claims **both**. The
-//! `validate_request` check guards against the mgmt-iface case
-//! specifically; deeper "is this device the boot disk's controller"
-//! detection is a follow-up.
+//! Claims are keyed by **BDF address**, not vendor:device pairs. The
+//! earlier pair-based `vfio-pci.ids=` mechanism couldn't tell identical
+//! devices apart — claiming one SR-IOV VF claimed *every* VF of the
+//! card (they share one device ID), including VFs meant for host
+//! networking, and the management-interface guard couldn't distinguish
+//! the mgmt VF from a sibling. Per-BDF `driver_override` udev rules
+//! give exact one-device granularity and match the runtime bind path
+//! (`bind_vfio` in nasty-vm, #603/#601).
+//!
+//! Trade-off: a BDF changes if the card moves slots (pairs survived
+//! that). A claim whose device vanished is harmless — the udev rule
+//! matches nothing — and the WebUI shows claims with their recorded
+//! vendor/device names so the user can re-claim after a hardware move.
+//!
+//! ## Legacy state compatibility (engine self-update invariant)
+//!
+//! Pre-BDF versions persisted `{ ids: [{vendor, device}] }`. Both
+//! directions must keep working across an engine rollback:
+//!
+//! - **Migration in**: when `devices` is empty but `ids` isn't, each
+//!   pair is resolved against the live PCI bus to *all* matching BDFs
+//!   (preserving the old claim-every-match semantics) on first save.
+//! - **Mirror out**: every save also writes `ids` derived from
+//!   `devices`, so an older engine rolled back onto this state file
+//!   still renders a functional (coarser) `vfio-pci.ids=` config.
+//! - **Divergence**: if an old engine edited `ids` after a rollback,
+//!   the pair set no longer matches `devices`; the newer engine then
+//!   treats `ids` as the fresher intent and re-resolves it.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,8 +56,8 @@ use tracing::{info, warn};
 const STATE_PATH: &str = "/var/lib/nasty/passthrough.json";
 const NIX_PATH: &str = "/etc/nixos/passthrough.nix";
 
-/// One PCI device-class identifier — the granularity vfio-pci.ids
-/// operates at. Not a BDF; that's intentional.
+/// One PCI vendor:device identifier. Retained for the legacy mirror
+/// (`PassthroughConfig::ids`) and for display.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, Hash,
 )]
@@ -52,17 +75,42 @@ impl DeviceId {
     }
 }
 
-/// Persistent passthrough config — what we'd write into the kernel
-/// command line on the next boot.
+/// One claimed PCI device — the granularity of the boot-time claim.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema, Hash,
+)]
+pub struct PassthroughEntry {
+    /// Full BDF address, e.g. `0000:06:00.1`.
+    pub address: String,
+    /// Vendor ID recorded at claim time — display + legacy mirror.
+    pub vendor: String,
+    /// Device ID recorded at claim time — display + legacy mirror.
+    pub device: String,
+}
+
+/// Persistent passthrough config.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PassthroughConfig {
-    /// (vendor, device) pairs to bind to vfio-pci at boot. Order is
-    /// not significant — we sort+dedupe on save and write.
+    /// Per-device claims (authoritative).
+    #[serde(default)]
+    pub devices: Vec<PassthroughEntry>,
+    /// Legacy vendor:device mirror, derived from `devices` on every
+    /// save. Read by pre-BDF engines after a rollback; read by this
+    /// engine only to migrate old state or absorb rollback-era edits.
+    #[serde(default)]
     pub ids: Vec<DeviceId>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct PassthroughUpdate {
+    /// BDF addresses to claim. The engine records each device's
+    /// vendor:device from sysfs at save time.
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    /// Legacy pair form — accepted for older clients; resolved to all
+    /// matching live BDFs (the old semantics). Ignored when
+    /// `addresses` is non-empty.
+    #[serde(default)]
     pub ids: Vec<DeviceId>,
 }
 
@@ -72,18 +120,40 @@ static STATE_LOCK: Mutex<()> = Mutex::const_new(());
 
 pub async fn load() -> PassthroughConfig {
     let _guard = STATE_LOCK.lock().await;
-    nasty_common::load_singleton_or_recover(STATE_PATH).await
+    let cfg: PassthroughConfig = nasty_common::load_singleton_or_recover(STATE_PATH).await;
+    reconcile_legacy(cfg, &scan_pci_inventory().await)
 }
 
-/// Apply a request: validate against the management interface
-/// collision, normalize (sort + dedupe), persist to disk, and
-/// regenerate `/etc/nixos/passthrough.nix`. Returns the saved config.
-///
-/// `mgmt_iface` is the kernel iface name resolved from the calling
-/// client's socket (same `mgmt_iface_for_peer` the network code uses
-/// for risk classification). When `Some`, the validator refuses
-/// requests that would claim a device matching the mgmt iface's
-/// (vendor:device) pair.
+/// Bring a loaded config to the per-device view, absorbing legacy
+/// state. Pure — the PCI inventory is passed in for testability.
+fn reconcile_legacy(
+    mut cfg: PassthroughConfig,
+    inventory: &[PciInventoryEntry],
+) -> PassthroughConfig {
+    let mirror = derive_ids(&cfg.devices);
+    if cfg.devices.is_empty() && !cfg.ids.is_empty() {
+        // Pre-BDF state file: resolve pairs to every matching device.
+        cfg.devices = resolve_pairs(&cfg.ids, inventory);
+        info!(
+            "passthrough: migrated {} legacy id pair(s) to {} device claim(s)",
+            cfg.ids.len(),
+            cfg.devices.len()
+        );
+    } else if !cfg.devices.is_empty() && mirror != cfg.ids {
+        // An older engine edited `ids` after a rollback — its edit is
+        // the fresher intent; re-resolve and drop the stale devices.
+        warn!(
+            "passthrough: legacy ids diverge from device claims (rollback-era edit?) — \
+             re-resolving from ids"
+        );
+        cfg.devices = resolve_pairs(&cfg.ids, inventory);
+    }
+    cfg
+}
+
+/// Apply a request: resolve to per-device claims, validate against the
+/// management interface collision, persist to disk, and regenerate
+/// `/etc/nixos/passthrough.nix`. Returns the saved config.
 ///
 /// The change is **not active until reboot**. Users see a "Reboot
 /// required" banner; the engine doesn't trigger nixos-rebuild
@@ -92,15 +162,40 @@ pub async fn save_and_apply(
     update: PassthroughUpdate,
     mgmt_iface: Option<&str>,
 ) -> Result<PassthroughConfig, String> {
-    let mut normalized = normalize_ids(update.ids);
-    validate_request(&normalized, mgmt_iface).await?;
-    // Defensive: lowercase IDs were already enforced by normalize_ids,
-    // but if a caller bypassed it we still want canonical output.
-    for id in &mut normalized {
-        id.vendor = id.vendor.to_ascii_lowercase();
-        id.device = id.device.to_ascii_lowercase();
-    }
-    let cfg = PassthroughConfig { ids: normalized };
+    let inventory = scan_pci_inventory().await;
+
+    let devices = if !update.addresses.is_empty() {
+        let mut out = BTreeSet::new();
+        for addr in update.addresses {
+            let addr = addr.trim().to_ascii_lowercase();
+            if !is_bdf(&addr) {
+                return Err(format!(
+                    "'{addr}' is not a PCI address (expected dddd:bb:dd.f, e.g. 0000:06:00.1)"
+                ));
+            }
+            let Some(inv) = inventory.iter().find(|e| e.address == addr) else {
+                return Err(format!(
+                    "no PCI device at {addr} — it may have moved slots; refresh the \
+                     hardware page and re-select it"
+                ));
+            };
+            out.insert(PassthroughEntry {
+                address: addr,
+                vendor: inv.vendor.clone(),
+                device: inv.device.clone(),
+            });
+        }
+        out.into_iter().collect()
+    } else {
+        // Legacy pair request (old WebUI) — old claim-all semantics.
+        resolve_pairs(&normalize_ids(update.ids), &inventory)
+    };
+
+    validate_request(&devices, mgmt_iface).await?;
+    let cfg = PassthroughConfig {
+        ids: derive_ids(&devices),
+        devices,
+    };
 
     let _guard = STATE_LOCK.lock().await;
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| format!("serialize: {e}"))?;
@@ -115,9 +210,70 @@ pub async fn save_and_apply(
     write_nix_file(&cfg).await?;
     info!(
         "Passthrough config updated: {} device(s); reboot required to apply",
-        cfg.ids.len()
+        cfg.devices.len()
     );
     Ok(cfg)
+}
+
+/// The legacy mirror: sorted, deduped pairs of the claimed devices.
+fn derive_ids(devices: &[PassthroughEntry]) -> Vec<DeviceId> {
+    devices
+        .iter()
+        .map(|d| DeviceId {
+            vendor: d.vendor.clone(),
+            device: d.device.clone(),
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Resolve pairs to every live device matching them — the semantics
+/// the pair-based mechanism had.
+fn resolve_pairs(ids: &[DeviceId], inventory: &[PciInventoryEntry]) -> Vec<PassthroughEntry> {
+    let wanted: BTreeSet<(&str, &str)> = ids
+        .iter()
+        .map(|i| (i.vendor.as_str(), i.device.as_str()))
+        .collect();
+    inventory
+        .iter()
+        .filter(|e| wanted.contains(&(e.vendor.as_str(), e.device.as_str())))
+        .map(|e| PassthroughEntry {
+            address: e.address.clone(),
+            vendor: e.vendor.clone(),
+            device: e.device.clone(),
+        })
+        .collect()
+}
+
+/// Minimal live-PCI view for claim resolution.
+struct PciInventoryEntry {
+    address: String,
+    vendor: String,
+    device: String,
+}
+
+async fn scan_pci_inventory() -> Vec<PciInventoryEntry> {
+    let mut out = Vec::new();
+    let Ok(mut dir) = tokio::fs::read_dir("/sys/bus/pci/devices").await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let address = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        let (Some(vendor), Some(device)) = (
+            read_pci_id_field(&path, "vendor").await,
+            read_pci_id_field(&path, "device").await,
+        ) else {
+            continue;
+        };
+        out.push(PciInventoryEntry {
+            address,
+            vendor,
+            device,
+        });
+    }
+    out
 }
 
 /// Render `cfg` as a NixOS module fragment and write it to
@@ -125,7 +281,7 @@ pub async fn save_and_apply(
 /// (with a `pathExists` fallback so a fresh install before any
 /// passthrough toggling doesn't fail to evaluate).
 ///
-/// Empty `cfg.ids` produces a no-op module rather than removing the
+/// Empty config produces a no-op module rather than removing the
 /// file — keeps the import contract stable regardless of state.
 async fn write_nix_file(cfg: &PassthroughConfig) -> Result<(), String> {
     let nix_dir = std::path::Path::new(NIX_PATH).parent();
@@ -146,35 +302,54 @@ async fn write_nix_file(cfg: &PassthroughConfig) -> Result<(), String> {
 }
 
 /// Pure renderer — returns the full content for `/etc/nixos/passthrough.nix`.
-/// Always emits a valid module body, even when `cfg.ids` is empty.
+/// Always emits a valid module body, even when nothing is claimed.
+///
+/// Each claim becomes a udev rule that pins `driver_override` when the
+/// PCI device is added, then unbinds whatever grabbed it (built-in
+/// drivers can win the initial race) and reprobes. With the override
+/// set, only vfio-pci may bind; if the vfio-pci module registers later
+/// than the rule runs, its registration probe picks the device up —
+/// either way the device is vfio-bound before any host driver settles
+/// in. `boot.kernelModules` already loads vfio-pci (nasty.nix).
 fn render_nix_module(cfg: &PassthroughConfig) -> String {
-    if cfg.ids.is_empty() {
+    if cfg.devices.is_empty() {
         return "# Generated by nasty-engine. Empty passthrough config.\n\
                 { ... }: { }\n"
             .to_string();
     }
-    let joined = cfg
-        .ids
+    let rules = cfg
+        .devices
         .iter()
-        .map(|id| id.to_vfio_id())
+        .map(|d| {
+            format!(
+                "    # {}:{}\n    ACTION==\"add\", SUBSYSTEM==\"pci\", KERNEL==\"{}\", \
+                 ATTR{{driver_override}}=\"vfio-pci\", RUN+=\"/bin/sh -c 'echo %k > \
+                 /sys/bus/pci/devices/%k/driver/unbind 2>/dev/null || true; echo %k > \
+                 /sys/bus/pci/drivers_probe'\"",
+                d.vendor, d.device, d.address
+            )
+        })
         .collect::<Vec<_>>()
-        .join(",");
+        .join("\n");
     format!(
         "# Generated by nasty-engine. Reboot to apply.\n\
          #\n\
-         # `vfio-pci.ids` is consumed at kernel boot to claim devices for\n\
-         # passthrough before regular drivers (nvidia, e1000e, ...) bind.\n\
-         # Source of truth: /var/lib/nasty/passthrough.json — edit via\n\
-         # the WebUI's Hardware page rather than this file directly.\n\
+         # Each rule pins driver_override=vfio-pci for one PCI device at\n\
+         # add time, so vfio-pci claims it for passthrough before regular\n\
+         # drivers (nvidia, e1000e, mlx5_core, ...) can bind. Per-device —\n\
+         # identical siblings (e.g. SR-IOV VFs sharing one device ID) are\n\
+         # NOT claimed. Source of truth: /var/lib/nasty/passthrough.json —\n\
+         # edit via the WebUI's Hardware page rather than this file.\n\
          {{ ... }}: {{\n\
-         \x20\x20boot.kernelParams = [ \"vfio-pci.ids={joined}\" ];\n\
+         \x20\x20services.udev.extraRules = ''\n\
+         {rules}\n\
+         \x20\x20'';\n\
          }}\n"
     )
 }
 
 /// Sort + dedupe; lowercase the hex strings. Skips obviously-malformed
-/// entries (non-4-hex-digit ids) since they'd produce a kernel param
-/// that fails to parse and silently disables the whole list.
+/// entries (non-4-hex-digit ids).
 fn normalize_ids(ids: Vec<DeviceId>) -> Vec<DeviceId> {
     let mut set = BTreeSet::new();
     for id in ids {
@@ -199,58 +374,68 @@ fn is_hex4(s: &str) -> bool {
     s.len() == 4 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// `dddd:bb:dd.f` — full BDF with domain, lowercase hex.
+fn is_bdf(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 12 {
+        return false;
+    }
+    s.char_indices().all(|(i, c)| match i {
+        4 | 7 => c == ':',
+        10 => c == '.',
+        _ => c.is_ascii_hexdigit(),
+    })
+}
+
 /// Refuse requests that would claim the device on which the caller is
 /// reaching the engine. Returns `Ok(())` if safe, `Err(reason)` if the
 /// request would brick connectivity at next boot.
 ///
-/// MVP scope:
-/// - Resolve mgmt iface name → PCI BDF via `/sys/class/net/<iface>/device`
-///   symlink. Skip the check if the iface isn't directly PCI (e.g.
-///   it's a bridge or bond — the underlying member resolution is a
-///   future enhancement; users with that topology are sophisticated
-///   enough to verify manually).
-/// - Read `/sys/bus/pci/devices/<BDF>/{vendor,device}`.
-/// - Refuse if any requested id matches that pair.
+/// Per-BDF now: the mgmt interface's exact device is refused, while an
+/// identical sibling (same vendor:device, different address — e.g.
+/// another SR-IOV VF of the same card) is allowed. That sibling case
+/// was the pair-based check's blind spot in both directions.
 ///
 /// Out of scope here (planned follow-ups):
 /// - Boot disk's storage controller (refuse claiming it).
 /// - IOMMU group-wide enforcement (some users do partial-group
 ///   passthrough with ACS overrides — refusing it outright would
 ///   block valid setups).
-async fn validate_request(ids: &[DeviceId], mgmt_iface: Option<&str>) -> Result<(), String> {
+async fn validate_request(
+    devices: &[PassthroughEntry],
+    mgmt_iface: Option<&str>,
+) -> Result<(), String> {
     let Some(iface) = mgmt_iface else {
         // Caller couldn't resolve the management iface — fail safe by
         // letting the user proceed. The classifier in the network
         // module makes the same conservative choice.
         return Ok(());
     };
-    let Some(mgmt_id) = mgmt_iface_pci_id(iface).await else {
+    let Some(mgmt_bdf) = mgmt_iface_bdf(iface).await else {
         warn!(
             "passthrough: management iface '{iface}' has no resolvable PCI device — \
              skipping mgmt-collision check, user is on their own"
         );
         return Ok(());
     };
-    if ids.contains(&mgmt_id) {
+    if let Some(hit) = devices.iter().find(|d| d.address == mgmt_bdf) {
         return Err(format!(
-            "refusing to claim {}:{} for passthrough — that pair matches the management \
-             interface '{}', so vfio-pci would steal it at boot and lock you out. \
-             Reach the box on a different interface (e.g. another NIC, or console) and \
-             retry; or buy a second NIC of a different make/model.",
-            mgmt_id.vendor, mgmt_id.device, iface
+            "refusing to claim {} ({}:{}) for passthrough — that is the PCI device \
+             behind the management interface '{}', so vfio-pci would steal it at boot \
+             and lock you out. Reach the box on a different interface (or console) \
+             and retry.",
+            hit.address, hit.vendor, hit.device, iface
         ));
     }
     Ok(())
 }
 
-/// Resolve `<iface>` → DeviceId by reading the `/sys/class/net/<iface>/device`
-/// symlink and the device's vendor/device sysfs files.
-async fn mgmt_iface_pci_id(iface: &str) -> Option<DeviceId> {
+/// Resolve `<iface>` → BDF by reading the `/sys/class/net/<iface>/device`
+/// symlink.
+async fn mgmt_iface_bdf(iface: &str) -> Option<String> {
     let device_link = format!("/sys/class/net/{iface}/device");
     let canonical = tokio::fs::canonicalize(&device_link).await.ok()?;
-    let vendor = read_pci_id_field(&canonical, "vendor").await?;
-    let device = read_pci_id_field(&canonical, "device").await?;
-    Some(DeviceId { vendor, device })
+    Some(canonical.file_name()?.to_str()?.to_ascii_lowercase())
 }
 
 async fn read_pci_id_field(dev_dir: &std::path::Path, field: &str) -> Option<String> {
@@ -275,17 +460,39 @@ mod tests {
         }
     }
 
+    fn entry(addr: &str, v: &str, d: &str) -> PassthroughEntry {
+        PassthroughEntry {
+            address: addr.into(),
+            vendor: v.into(),
+            device: d.into(),
+        }
+    }
+
+    fn inv(addr: &str, v: &str, d: &str) -> PciInventoryEntry {
+        PciInventoryEntry {
+            address: addr.into(),
+            vendor: v.into(),
+            device: d.into(),
+        }
+    }
+
     #[test]
     fn vfio_id_renders_as_vendor_colon_device() {
-        // Format consumed by the kernel's `vfio-pci.ids=` parameter.
         assert_eq!(id("10de", "2204").to_vfio_id(), "10de:2204");
     }
 
     #[test]
+    fn bdf_format_validation() {
+        assert!(is_bdf("0000:06:00.1"));
+        assert!(is_bdf("0000:ff:1f.7"));
+        assert!(!is_bdf("06:00.1")); // missing domain
+        assert!(!is_bdf("0000:06:00")); // missing function
+        assert!(!is_bdf("0000-06-00.1"));
+        assert!(!is_bdf("zzzz:06:00.1"));
+    }
+
+    #[test]
     fn normalize_lowercases_and_sorts_dedupes() {
-        // Real input might come from upper-case lspci output or be
-        // duplicated by overzealous UI clicking. Output should be
-        // canonical: lowercase, sorted, no dupes.
         let raw = vec![
             id("8086", "1539"),
             id("10DE", "2204"),
@@ -300,65 +507,127 @@ mod tests {
 
     #[test]
     fn normalize_drops_malformed_ids() {
-        // 4-hex-digit only. Non-hex or wrong length would generate a
-        // kernel param like `vfio-pci.ids=10de:nope` which the kernel
-        // silently rejects, taking the whole list with it.
         let raw = vec![
             id("10de", "2204"),
             id("zzzz", "0000"),
-            id("10de", "abc"),   // 3 hex digits
-            id("10de", "12345"), // 5 hex digits
+            id("10de", "abc"),
+            id("10de", "12345"),
             id("8086", "1539"),
         ];
         let out = normalize_ids(raw);
+        assert_eq!(out, vec![id("10de", "2204"), id("8086", "1539")]);
+    }
+
+    #[test]
+    fn resolve_pairs_claims_every_matching_device() {
+        // The legacy semantics being preserved: one pair, two identical
+        // NICs → both claimed. This is exactly why pairs can't express
+        // "this VF but not its siblings".
+        let inventory = vec![
+            inv("0000:06:00.0", "15b3", "1018"),
+            inv("0000:06:00.1", "15b3", "1018"),
+            inv("0000:07:00.0", "8086", "1539"),
+        ];
+        let out = resolve_pairs(&[id("15b3", "1018")], &inventory);
         assert_eq!(
-            out,
-            vec![id("10de", "2204"), id("8086", "1539")],
-            "only well-formed ids should survive"
+            out.iter().map(|e| e.address.as_str()).collect::<Vec<_>>(),
+            vec!["0000:06:00.0", "0000:06:00.1"]
         );
     }
 
     #[test]
-    fn render_nix_module_produces_kernel_param_with_joined_ids() {
+    fn reconcile_migrates_legacy_ids_when_devices_empty() {
         let cfg = PassthroughConfig {
-            ids: vec![id("10de", "2204"), id("8086", "1539")],
+            devices: vec![],
+            ids: vec![id("15b3", "1018")],
         };
-        let nix = render_nix_module(&cfg);
-        // The crucial assertion: the joined `vfio-pci.ids=...` exactly
-        // matches what the kernel expects, with comma separators and
-        // colon-paired ids.
-        assert!(nix.contains(r#"boot.kernelParams = [ "vfio-pci.ids=10de:2204,8086:1539" ];"#));
+        let inventory = vec![
+            inv("0000:06:00.1", "15b3", "1018"),
+            inv("0000:07:00.0", "8086", "1539"),
+        ];
+        let out = reconcile_legacy(cfg, &inventory);
+        assert_eq!(out.devices, vec![entry("0000:06:00.1", "15b3", "1018")]);
     }
 
     #[test]
-    fn render_nix_module_emits_noop_when_ids_empty() {
-        // When the user untoggles their last device, the file should
-        // still be valid Nix so the wrapper flake's import keeps
-        // evaluating cleanly. Removing the file would also work, but
-        // emitting a no-op is simpler and idempotent.
-        let cfg = PassthroughConfig::default();
+    fn reconcile_prefers_ids_when_rollback_edited_them() {
+        // devices says the mlx VF; ids says an intel NIC — an old
+        // engine changed the selection after a rollback. The pair set
+        // is the fresher intent.
+        let cfg = PassthroughConfig {
+            devices: vec![entry("0000:06:00.1", "15b3", "1018")],
+            ids: vec![id("8086", "1539")],
+        };
+        let inventory = vec![
+            inv("0000:06:00.1", "15b3", "1018"),
+            inv("0000:07:00.0", "8086", "1539"),
+        ];
+        let out = reconcile_legacy(cfg, &inventory);
+        assert_eq!(out.devices, vec![entry("0000:07:00.0", "8086", "1539")]);
+    }
+
+    #[test]
+    fn reconcile_keeps_consistent_state_untouched() {
+        let cfg = PassthroughConfig {
+            devices: vec![entry("0000:06:00.1", "15b3", "1018")],
+            ids: vec![id("15b3", "1018")],
+        };
+        let out = reconcile_legacy(cfg, &[]);
+        assert_eq!(out.devices, vec![entry("0000:06:00.1", "15b3", "1018")]);
+    }
+
+    #[test]
+    fn derive_ids_dedupes_sibling_devices() {
+        // Two VFs of the same card mirror to ONE legacy pair — a
+        // rolled-back engine then claims both, which is the closest
+        // the coarse mechanism can express.
+        let ids = derive_ids(&[
+            entry("0000:06:00.1", "15b3", "1018"),
+            entry("0000:06:00.2", "15b3", "1018"),
+        ]);
+        assert_eq!(ids, vec![id("15b3", "1018")]);
+    }
+
+    #[test]
+    fn render_nix_module_emits_one_udev_rule_per_device() {
+        let cfg = PassthroughConfig {
+            devices: vec![
+                entry("0000:01:00.0", "1af4", "1041"),
+                entry("0000:06:00.1", "15b3", "1018"),
+            ],
+            ids: vec![],
+        };
         let nix = render_nix_module(&cfg);
+        assert!(nix.contains("services.udev.extraRules"), "{nix}");
+        assert!(
+            nix.contains(r#"KERNEL=="0000:01:00.0", ATTR{driver_override}="vfio-pci""#),
+            "{nix}"
+        );
+        assert!(nix.contains(r#"KERNEL=="0000:06:00.1""#), "{nix}");
+        // No coarse kernel param anymore.
+        assert!(!nix.contains("vfio-pci.ids"), "{nix}");
+    }
+
+    #[test]
+    fn render_nix_module_emits_noop_when_empty() {
+        let nix = render_nix_module(&PassthroughConfig::default());
         assert!(nix.contains("{ ... }: { }"));
-        // No leftover kernelParams line.
-        assert!(!nix.contains("kernelParams"));
+        assert!(!nix.contains("udev"));
     }
 
     #[tokio::test]
     async fn validate_passes_when_mgmt_iface_unknown() {
-        // No mgmt info → conservative-pass, same convention as the
-        // network risk classifier. Without it we couldn't toggle any
-        // passthrough on a freshly-booted box where the engine
-        // doesn't yet know which iface the user is on.
-        let res = validate_request(&[id("10de", "2204")], None).await;
+        let res = validate_request(&[entry("0000:06:00.1", "15b3", "1018")], None).await;
         assert!(res.is_ok());
     }
 
     #[tokio::test]
     async fn validate_passes_when_mgmt_iface_has_no_pci_device() {
-        // Bridges, bonds, and tunnel interfaces don't have a direct
-        // PCI device. We log + skip rather than refuse.
-        // Using a bogus iface name ensures the symlink lookup fails.
-        let res = validate_request(&[id("10de", "2204")], Some("nonexistent-iface-zzz")).await;
+        let res = validate_request(
+            &[entry("0000:06:00.1", "15b3", "1018")],
+            Some("nonexistent-iface-zzz"),
+        )
+        .await;
         assert!(res.is_ok());
     }
 }

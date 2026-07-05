@@ -62,7 +62,7 @@
 	// Persisted passthrough config from the engine. `pending` is the
 	// local edit set (before Apply); each entry is "vendor:device" so
 	// Set membership tests work without a custom equality predicate.
-	let passthroughConfig: PassthroughConfig = $state({ ids: [] });
+	let passthroughConfig: PassthroughConfig = $state({ devices: [], ids: [] });
 	let pending = $state(new Set<string>());
 	let saving = $state(false);
 
@@ -123,11 +123,11 @@
 			summary = s;
 			groups = g;
 			passthroughConfig = p;
-			pending = new Set(p.ids.map((i) => `${i.vendor}:${i.device}`));
+			pending = new Set((p.devices || []).map((d) => d.address));
 		} catch {
 			summary = null;
 			groups = [];
-			passthroughConfig = { ids: [] };
+			passthroughConfig = { devices: [], ids: [] };
 			pending = new Set();
 		}
 		// Only probe SB readiness when the firmware-state read suggests
@@ -164,8 +164,10 @@
 		loading = false;
 	}
 
+	// Claims are per-device (BDF): identical siblings — e.g. SR-IOV
+	// VFs sharing one vendor:device pair — toggle independently.
 	function devKey(d: PciDevice): string {
-		return `${d.vendor_id}:${d.device_id}`;
+		return d.bdf;
 	}
 
 	function togglePassthrough(d: PciDevice) {
@@ -176,11 +178,11 @@
 	}
 
 	function discardPending() {
-		pending = new Set(passthroughConfig.ids.map((i) => `${i.vendor}:${i.device}`));
+		pending = new Set((passthroughConfig.devices || []).map((d) => d.address));
 	}
 
 	let dirty = $derived.by(() => {
-		const saved = new Set(passthroughConfig.ids.map((i) => `${i.vendor}:${i.device}`));
+		const saved = new Set((passthroughConfig.devices || []).map((d) => d.address));
 		if (saved.size !== pending.size) return true;
 		for (const k of pending) if (!saved.has(k)) return true;
 		return false;
@@ -188,17 +190,14 @@
 
 	async function applyPassthrough() {
 		saving = true;
-		const ids = [...pending].map((k) => {
-			const [vendor, device] = k.split(':');
-			return { vendor, device };
-		});
+		const addresses = [...pending];
 		const result = await withToast(
-			() => client.call<PassthroughConfig>('system.passthrough.update', { ids }),
+			() => client.call<PassthroughConfig>('system.passthrough.update', { addresses }),
 			'Passthrough config saved — reboot required to apply',
 		);
 		if (result) {
 			passthroughConfig = result;
-			pending = new Set(result.ids.map((i) => `${i.vendor}:${i.device}`));
+			pending = new Set((result.devices || []).map((d) => d.address));
 			rebootState.set();
 		}
 		saving = false;
@@ -792,7 +791,7 @@
 		<div
 			class="mb-3 flex items-center gap-3 rounded-lg border border-amber-700 bg-amber-950/40 px-4 py-2.5 text-sm"
 		>
-			<span class="font-medium text-amber-200">{pending.size - passthroughConfig.ids.length >= 0 ? '+' : ''}{pending.size - passthroughConfig.ids.length} change{Math.abs(pending.size - passthroughConfig.ids.length) === 1 ? '' : 's'} pending</span>
+			<span class="font-medium text-amber-200">{pending.size - (passthroughConfig.devices || []).length >= 0 ? '+' : ''}{pending.size - (passthroughConfig.devices || []).length} change{Math.abs(pending.size - (passthroughConfig.devices || []).length) === 1 ? '' : 's'} pending</span>
 			<span class="text-xs text-amber-300/80">
 				Apply will rewrite <code class="font-mono">/etc/nixos/passthrough.nix</code> and require a
 				reboot to take effect.

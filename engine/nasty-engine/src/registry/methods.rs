@@ -1506,14 +1506,14 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
             vec![
                 Method {
                     name: "system.passthrough.get",
-                    desc: "Return the persisted PCI vfio-pci passthrough configuration (vendor:device pairs claimed at boot).",
+                    desc: "Return the persisted PCI vfio-pci passthrough configuration (per-device BDF claims applied at boot).",
                     role: MethodRole::Any,
                     params: MethodParams::None,
                     result: Some(gen_schema::<PassthroughConfig>(generator)),
                 },
                 Method {
                     name: "system.passthrough.update",
-                    desc: "Validate, persist, and regenerate the passthrough Nix snippet from a new vendor:device list (reboot required to apply).",
+                    desc: "Validate, persist, and regenerate the passthrough Nix snippet from a new per-device address list (reboot required to apply).",
                     role: MethodRole::Admin,
                     params: MethodParams::Schema(gen_schema::<PassthroughUpdate>(generator)),
                     result: Some(gen_schema::<PassthroughConfig>(generator)),

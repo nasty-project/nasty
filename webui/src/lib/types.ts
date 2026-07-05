@@ -283,7 +283,17 @@ export interface PassthroughDeviceId {
 	device: string;
 }
 
+/** One claimed PCI device — passthrough claims are per-BDF. */
+export interface PassthroughEntry {
+	address: string;
+	vendor: string;
+	device: string;
+}
+
 export interface PassthroughConfig {
+	/** Per-device claims (authoritative). */
+	devices: PassthroughEntry[];
+	/** Legacy vendor:device mirror kept for engine-rollback compat. */
 	ids: PassthroughDeviceId[];
 }
 
