@@ -84,6 +84,36 @@
 	const network = $derived.by((): NetworkConfig | null => {
 		return networkState?.config ?? null;
 	});
+	// Config entries whose device is gone right now (kernel rename,
+	// SR-IOV VF not created yet, card reseated). The engine keeps them
+	// on purpose — surface them so the operator can see the saved
+	// config and remove genuinely stale entries, instead of them
+	// lingering invisibly.
+	const absentConfigured = $derived.by((): InterfaceConfig[] => {
+		if (!networkState || !network) return [];
+		const liveNames = new Set(networkState.interfaces.map(i => i.name));
+		const virtualNames = new Set([
+			...(network.bonds || []).map(b => b.name),
+			...(network.bridges || []).map(b => b.name),
+			...(network.vlans || []).map(v => `${v.parent}.${v.vlan_id}`),
+		]);
+		return (network.interfaces || []).filter(
+			c => !liveNames.has(c.name) && !virtualNames.has(c.name),
+		);
+	});
+
+	async function removeAbsentEntry(name: string) {
+		if (!network) return;
+		const payload: NetworkConfig = {
+			interfaces: (network.interfaces || []).filter(i => i.name !== name),
+			dns: network.dns || [],
+			bonds: network.bonds || [],
+			vlans: network.vlans || [],
+			bridges: network.bridges || [],
+		};
+		await applyNetworkUpdate(payload, `Removed saved config for absent device ${name}`);
+		networkState = await client.call<NetworkState>('system.network.get');
+	}
 	let savingNetwork = $state(false);
 	let netDhcp = $state(true);
 	let netGateway = $state('');
@@ -1023,6 +1053,21 @@
 									{/if}
 								</div>
 							{/if}
+						</div>
+					{/each}
+					{#each absentConfigured as entry (entry.name)}
+						<div class="flex items-center gap-4 rounded-lg border border-dashed border-border px-4 py-3 opacity-70">
+							<div class="flex-1 min-w-0">
+								<div class="flex items-center gap-2">
+									<span class="font-mono text-sm font-medium">{entry.name}</span>
+									<Badge variant="secondary" class="text-[0.6rem]">Device absent</Badge>
+									<Badge variant="outline" class="text-[0.6rem]">Configured</Badge>
+								</div>
+								<div class="mt-0.5 text-xs text-muted-foreground">
+									Saved configuration kept — the device isn't present right now (renamed, removed, or not yet created). It reapplies automatically when the device returns.
+								</div>
+							</div>
+							<Button size="xs" variant="ghost" onclick={() => removeAbsentEntry(entry.name)}>Remove</Button>
 						</div>
 					{/each}
 				</div>
