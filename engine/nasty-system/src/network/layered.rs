@@ -444,6 +444,13 @@ fn group_addresses(addrs: &[Address]) -> HashMap<&str, (IpConfig, IpConfig)> {
 /// persist so structurally-broken input never reaches the kernel.
 /// Callers treat the result as authoritative — a failed validation
 /// is a hard apply error, not a warning.
+///
+/// Deliberately hardware-blind: `LayeredConfig` carries names and
+/// structure only, so this stays a pure function with hermetic tests.
+/// Checks that need live hardware facts (e.g. "is this member an
+/// InfiniBand port?" — `reject_infiniband_refs`) live at the
+/// `update()` boundary in network.rs, where a fresh sysfs snapshot
+/// exists. Don't move them here.
 pub fn validate(layered: &LayeredConfig) -> Result<(), String> {
     // 1. No duplicate link names.
     let mut names = HashSet::new();
