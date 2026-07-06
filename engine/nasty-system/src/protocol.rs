@@ -236,18 +236,9 @@ impl ProtocolService {
 
             // Load kernel modules before starting services (iSCSI/NVMe-oF
             // services require the LIO/nvmet modules to already be present)
-            if proto == Protocol::Iscsi {
-                for module in &["target_core_mod", "iscsi_target_mod"] {
-                    if let Err(e) = modprobe(module).await {
-                        warn!("{e}");
-                    }
-                }
-            }
-            if proto == Protocol::Nvmeof {
-                for module in &["nvmet", "nvmet-tcp"] {
-                    if let Err(e) = modprobe(module).await {
-                        warn!("{e}");
-                    }
+            for module in protocol_modules(proto).await {
+                if let Err(e) = modprobe(module).await {
+                    warn!("{e}");
                 }
             }
 
@@ -277,6 +268,15 @@ impl ProtocolService {
                         "auto-disable persistence for {} failed: {e}",
                         proto.display_name()
                     );
+                }
+            }
+
+            // NFS started with the RDMA toggle on: add the rdma
+            // listener. Warn-only — TCP NFS must keep working even if
+            // the RDMA side can't come up (#602).
+            if !failed && proto == Protocol::Nfs && crate::rdma::enabled().await {
+                if let Err(e) = crate::rdma::activate_nfs_rdma().await {
+                    warn!("NFS-over-RDMA activation failed (TCP NFS unaffected): {e}");
                 }
             }
         }
@@ -316,18 +316,9 @@ impl ProtocolService {
         prepare_protocol(proto).await;
 
         // Load kernel modules before starting services
-        if proto == Protocol::Iscsi {
-            for module in &["target_core_mod", "iscsi_target_mod"] {
-                if let Err(e) = modprobe(module).await {
-                    warn!("{e}");
-                }
-            }
-        }
-        if proto == Protocol::Nvmeof {
-            for module in &["nvmet", "nvmet-tcp"] {
-                if let Err(e) = modprobe(module).await {
-                    warn!("{e}");
-                }
+        for module in protocol_modules(proto).await {
+            if let Err(e) = modprobe(module).await {
+                warn!("{e}");
             }
         }
 
@@ -378,6 +369,15 @@ impl ProtocolService {
         // daemons already active.
         if proto == Protocol::Smb {
             crate::network::rebind_discovery_daemons().await;
+        }
+
+        // NFS started with the RDMA toggle on: add the rdma listener.
+        // Warn-only — TCP NFS must keep working even if the RDMA side
+        // can't come up (#602).
+        if proto == Protocol::Nfs && crate::rdma::enabled().await {
+            if let Err(e) = crate::rdma::activate_nfs_rdma().await {
+                warn!("NFS-over-RDMA activation failed (TCP NFS unaffected): {e}");
+            }
         }
 
         let running = is_protocol_running(proto).await;
@@ -476,7 +476,31 @@ async fn prepare_protocol(proto: Protocol) {
     }
 }
 
-async fn systemctl(action: &str, service: &str) -> Result<(), String> {
+/// Kernel modules a protocol needs before its services start. The
+/// RDMA additions are gated on the per-box toggle so an unopted box
+/// never loads transport modules it can't use (#602).
+async fn protocol_modules(proto: Protocol) -> Vec<&'static str> {
+    let rdma = crate::rdma::enabled().await;
+    match proto {
+        Protocol::Iscsi => {
+            let mut m = vec!["target_core_mod", "iscsi_target_mod"];
+            if rdma {
+                m.push("ib_isert");
+            }
+            m
+        }
+        Protocol::Nvmeof => {
+            let mut m = vec!["nvmet", "nvmet-tcp"];
+            if rdma {
+                m.push("nvmet-rdma");
+            }
+            m
+        }
+        _ => vec![],
+    }
+}
+
+pub(crate) async fn systemctl(action: &str, service: &str) -> Result<(), String> {
     let output = tokio::process::Command::new("systemctl")
         .args([action, service])
         .output()
@@ -491,7 +515,7 @@ async fn systemctl(action: &str, service: &str) -> Result<(), String> {
     }
 }
 
-async fn systemctl_is_active(service: &str) -> bool {
+pub(crate) async fn systemctl_is_active(service: &str) -> bool {
     tokio::process::Command::new("systemctl")
         .args(["is-active", "--quiet", service])
         .status()
@@ -500,7 +524,7 @@ async fn systemctl_is_active(service: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn modprobe(module: &str) -> Result<(), String> {
+pub(crate) async fn modprobe(module: &str) -> Result<(), String> {
     let output = tokio::process::Command::new("modprobe")
         .arg(module)
         .output()

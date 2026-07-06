@@ -212,6 +212,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.secure_boot.enrollment.status"
                 | "system.secure_boot.readiness"
                 | "system.passthrough.get"
+                | "system.rdma.status"
                 | "system.stats"
                 | "system.disks"
                 | "system.network.get"
@@ -527,6 +528,23 @@ pub(super) async fn require_protocol(
     } else {
         None
     }
+}
+
+/// Gate an RDMA-transport request (iSER portal, NVMe-oF rdma port) on
+/// the per-box RDMA opt-in, and load the transport's kernel module on
+/// the way through so a stale unload can't fail the configfs write.
+pub(super) async fn require_rdma(req: &Request, module: &str) -> Option<Response> {
+    if !nasty_system::rdma::enabled().await {
+        return Some(Response::error(
+            req.id.clone(),
+            ErrorCode::InternalError,
+            "RDMA transport is disabled on this box — enable RDMA on the Sharing page              first (requires an RDMA-capable NIC)",
+        ));
+    }
+    if let Err(e) = nasty_system::rdma::ensure_module(module).await {
+        return Some(Response::error(req.id.clone(), ErrorCode::InternalError, e));
+    }
+    None
 }
 
 #[allow(clippy::result_large_err)]

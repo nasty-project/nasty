@@ -33,6 +33,7 @@ export const iscsi = $state({
 	addPortalIp: '',
 	addPortalPort: 3260,
 	addPortalFamily: 'ipv4' as 'ipv4' | 'ipv6',
+	addPortalIser: false,
 	search: '',
 	sortDir: 'asc' as 'asc' | 'desc',
 });
@@ -132,12 +133,14 @@ export async function iscsiAddPortal() {
 			target_id: iscsi.addPortalTarget,
 			ip: iscsi.addPortalIp.trim(),
 			port: iscsi.addPortalPort,
+			iser: iscsi.addPortalIser,
 		}),
 		'Portal added',
 	);
 	if (ok !== undefined) {
 		iscsi.addPortalTarget = '';
 		iscsi.addPortalIp = '';
+		iscsi.addPortalIser = false;
 		iscsi.addPortalPort = 3260;
 		iscsi.addPortalFamily = 'ipv4';
 		await iscsiRefresh();

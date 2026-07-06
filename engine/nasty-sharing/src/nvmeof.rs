@@ -27,6 +27,8 @@ pub enum NvmeofError {
     ConfigFs(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("unsupported transport '{0}' (expected \"tcp\" or \"rdma\")")]
+    InvalidTransport(String),
 }
 
 // ── Data types ──────────────────────────────────────────────────
@@ -404,6 +406,9 @@ impl NvmeofService {
                 subsystem = self
                     .add_port(AddPortRequest {
                         subsystem_id: subsystem.id.clone(),
+                        // Auto-created ports are deliberately TCP: RDMA ports are an
+                        // explicit per-port choice via add_port (and Tailscale is an
+                        // overlay — RDMA over it is meaningless).
                         transport: Some("tcp".to_string()),
                         addr: Some(req.addr.unwrap_or_else(|| "0.0.0.0".to_string())),
                         service_id: Some(svc_port),
@@ -627,6 +632,7 @@ impl NvmeofService {
             .ok_or_else(|| NvmeofError::NotFound(req.subsystem_id.clone()))?;
 
         let transport = req.transport.unwrap_or_else(|| "tcp".to_string());
+        validate_transport(&transport)?;
         let addr = match req.addr {
             Some(a) if !a.is_empty() && a != "0.0.0.0" => a,
             _ => {
@@ -1047,6 +1053,16 @@ fn validate_host_nqn(nqn: &str) -> Result<(), NvmeofError> {
         )));
     }
     Ok(())
+}
+
+/// The two transports nvmet supports on NASty. Lowercase only —
+/// that's what configfs `addr_trtype` accepts; anything else used to
+/// be written through verbatim and die as an opaque configfs EINVAL.
+fn validate_transport(t: &str) -> Result<(), NvmeofError> {
+    match t {
+        "tcp" | "rdma" => Ok(()),
+        other => Err(NvmeofError::InvalidTransport(other.to_string())),
+    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@
 	import type { Subvolume, ProtocolStatus } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
+	import { rdma, rdmaLoad, rdmaSet } from '$lib/sharing/rdma.svelte';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -309,6 +310,7 @@
 			smbLoadProtocol(),
 			iscsiLoadProtocol(),
 			nvmeLoadProtocol(),
+			rdmaLoad(),
 		]);
 	});
 
@@ -497,6 +499,42 @@
 			{/if}
 		</CardContent>
 	</Card>
+{/if}
+
+<!-- RDMA transports (per-box opt-in) — hidden when the engine predates the RPC -->
+{#if rdma.status}
+	<div class="mb-4 rounded-lg border border-border p-4">
+		<div class="flex items-center gap-3">
+			<div class="flex-1">
+				<div class="flex items-center gap-2">
+					<span class="text-sm font-semibold">RDMA transports</span>
+					{#each rdma.status.devices as d (d.name)}
+						<Badge variant="outline" class="text-[0.65rem]">{d.name} · {d.link_layer}{d.netdevs.length ? ` · ${d.netdevs.join(', ')}` : ''}</Badge>
+					{/each}
+					{#if rdma.status.enabled && rdma.status.nfs_rdma_active}
+						<Badge variant="secondary" class="text-[0.65rem]">NFS listener active</Badge>
+					{/if}
+				</div>
+				<p class="mt-1 text-xs text-muted-foreground">
+					{#if !rdma.status.capable}
+						{rdma.status.blocker}
+					{:else if rdma.status.enabled}
+						iSER portals, NFS-over-RDMA (mount with <code class="font-mono">-o rdma,port=20049,vers=4.2</code>) and NVMe-oF RDMA ports are available.
+					{:else}
+						RDMA-capable hardware detected. Enable to offer iSER, NFS-over-RDMA and NVMe-oF RDMA transports on this box.
+					{/if}
+				</p>
+			</div>
+			<Button
+				size="sm"
+				variant={rdma.status.enabled ? 'secondary' : 'default'}
+				disabled={!rdma.status.capable}
+				onclick={() => rdmaSet(!rdma.status!.enabled)}
+			>
+				{rdma.status.enabled ? 'Disable' : 'Enable'}
+			</Button>
+		</div>
+	</div>
 {/if}
 
 <!-- Tab bar with inline status -->
