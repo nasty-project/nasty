@@ -884,19 +884,24 @@ impl NetworkService {
         enumerate_interfaces().await
     }
 
-    /// Idempotent startup pass: delete `nasty-*` NM connection
-    /// profiles that no longer correspond to anything our config
-    /// emits *for the devices that exist right now*.
+    /// Idempotent startup pass: converge NM onto the desired profile
+    /// set for the devices that exist *right now* — create missing
+    /// `nasty-*` profiles, update drifted ones, delete orphans.
     ///
     /// Persisted config is deliberately NOT touched here — see the
-    /// "Absent-device handling" section above.  A `nasty-<name>`
-    /// profile is orphan when it isn't in the desired set, which
-    /// covers both real orphans (config entry deleted) and profiles
-    /// for currently-absent devices (kernel rename, SR-IOV VF not
-    /// created yet).  The latter come back automatically on the
-    /// next apply once the device exists; meanwhile keeping them
-    /// out of NM is what keeps `NetworkManager-wait-online` green
-    /// during upgrades (exit 4, the symptom in discussion #159).
+    /// "Absent-device handling" section above.  Presence-filtering the
+    /// desired set keeps profiles for currently-absent devices (kernel
+    /// rename, SR-IOV VF not created yet, removed card) out of NM,
+    /// which keeps `NetworkManager-wait-online` green during upgrades
+    /// (exit 4, discussion #159).
+    ///
+    /// The converge direction matters as much as the sweep: a device
+    /// that was absent last boot had its profile deleted then, so when
+    /// it's back (card re-inserted, name shifted back after a hardware
+    /// change — the #611-validation finding), THIS pass is what
+    /// recreates and activates its profile. Delete-only reconciliation
+    /// left such interfaces configured-on-disk but dead until the next
+    /// manual apply.
     ///
     /// Best-effort: warnings on every failed sub-step, no error
     /// propagation upward.  Engine startup must not block on this.
@@ -910,21 +915,17 @@ impl NetworkService {
         let live_names: std::collections::HashSet<String> =
             live.iter().map(|i| i.name.clone()).collect();
 
-        // Delete `nasty-*` NM profiles not in the (presence-filtered)
-        // desired set; anything else with our prefix is orphan.
         let desired = retain_live_physical_profiles(
             nm::to_nm_profiles_with_macs(&layered::to_layered(&cfg), &ctx),
             &live_names,
         );
-        let desired_ids: std::collections::HashSet<&str> =
-            desired.iter().map(|p| p.id.as_str()).collect();
 
         let client = match nm::dbus::NmDbusClient::new().await {
             Ok(c) => c,
             Err(e) => {
                 warn!(
                     "reconcile_orphans: NM DBus unavailable ({e}); skipping \
-                     NM-profile sweep — will retry on next engine start"
+                     NM-profile converge — will retry on next engine start"
                 );
                 return;
             }
@@ -933,31 +934,29 @@ impl NetworkService {
         // lives in /etc and can drift (rebuild, manual edit, restore).
         sync_ib_unmanaged_conf(&live, &cfg, Some(&client)).await;
 
-        let existing = match client.list_nasty_connections().await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("reconcile_orphans: list NM connections failed: {e}");
-                return;
-            }
-        };
-        let mut deleted = 0usize;
-        for conn in &existing {
-            if desired_ids.contains(conn.id.as_str()) {
-                continue;
-            }
-            match client.delete_connection(&conn.path).await {
-                Ok(()) => {
-                    info!("reconcile_orphans: deleted orphan NM profile '{}'", conn.id);
-                    deleted += 1;
+        // apply_profiles is the same add/update/delete/activate pass a
+        // normal apply runs; on an already-converged box every profile
+        // lands in `unchanged` and nothing is touched.
+        match nm::dbus::apply_profiles(&client, &desired).await {
+            Ok(outcome) => {
+                if !(outcome.added.is_empty()
+                    && outcome.updated.is_empty()
+                    && outcome.deleted.is_empty())
+                {
+                    info!(
+                        "reconcile_orphans: converged NM profiles ({} added, {} updated, \
+                         {} deleted, {} unchanged)",
+                        outcome.added.len(),
+                        outcome.updated.len(),
+                        outcome.deleted.len(),
+                        outcome.unchanged.len()
+                    );
                 }
-                Err(e) => warn!(
-                    "reconcile_orphans: delete NM profile '{}' failed: {e}",
-                    conn.id
-                ),
+                for (id, msg) in &outcome.errors {
+                    warn!("reconcile_orphans: profile '{id}': {msg}");
+                }
             }
-        }
-        if deleted > 0 {
-            info!("reconcile_orphans: removed {deleted} orphan NM profile(s)");
+            Err(e) => warn!("reconcile_orphans: NM profile converge failed: {e}"),
         }
     }
 
