@@ -535,6 +535,11 @@ async fn main() -> anyhow::Result<()> {
                     proto_states.push((*p, enabled));
                 }
                 state.firewall.init(&proto_states).await;
+                // RDMA transports are a per-box opt-in orthogonal to the
+                // protocol list; restore its firewall rule when enabled.
+                if nasty_system::rdma::enabled().await {
+                    state.firewall.open_rdma().await;
+                }
             }
         })
         .await;

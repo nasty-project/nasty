@@ -8,6 +8,7 @@
 	import { requiredFieldCls } from '$lib/utils';
 	import { validateAddressForFamily } from '$lib/network';
 	import ListenAddressPicker from '$lib/components/ListenAddressPicker.svelte';
+	import { rdma } from '$lib/sharing/rdma.svelte';
 	import {
 		nvme,
 		nvmeToggleSort,
@@ -217,7 +218,7 @@
 												<Label class="text-xs">Transport</Label>
 												<select bind:value={nvme.addPortTransport} class="mt-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs">
 													<option value="tcp">TCP</option>
-													<option value="rdma">RDMA</option>
+													<option value="rdma" disabled={!rdma.status?.enabled}>RDMA{rdma.status?.enabled ? '' : rdma.status?.capable ? ' (enable RDMA in the transports card above)' : ' (requires an RDMA-capable NIC)'}</option>
 												</select>
 											</div>
 											<ListenAddressPicker

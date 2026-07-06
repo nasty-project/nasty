@@ -55,6 +55,12 @@ pub struct Portal {
     pub ip: String,
     /// TCP port number (default iSCSI port is 3260).
     pub port: u16,
+    /// iSER (iSCSI over RDMA) enabled on this portal. Requires the
+    /// per-box RDMA opt-in and an RDMA-capable NIC on the portal's
+    /// address; the router arm gates on both. Defaults false so every
+    /// pre-iSER state file loads unchanged (#602).
+    #[serde(default)]
+    pub iser: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -230,6 +236,10 @@ pub struct AddPortalRequest {
     pub ip: String,
     /// TCP port to listen on. Standard iSCSI port is 3260.
     pub port: u16,
+    /// Enable iSER (iSCSI over RDMA) on this portal. Requires the
+    /// per-box RDMA opt-in (gated in the router).
+    #[serde(default)]
+    pub iser: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -369,6 +379,7 @@ impl IscsiService {
                 let defaults = vec![Portal {
                     ip: "0.0.0.0".to_string(),
                     port: 3260,
+                    iser: false,
                 }];
                 let try_v6 = crate::v6::host_has_global_ipv6().await;
                 (defaults, try_v6)
@@ -385,10 +396,19 @@ impl IscsiService {
         let mut created_portals = Vec::with_capacity(mandatory_portals.len() + 1);
         for portal in &mandatory_portals {
             let np_path = np_path_for(&tpg_path, &portal.ip, portal.port);
-            if let Err(e) = configfs_mkdir(&np_path).await {
+            let created = match configfs_mkdir(&np_path).await {
+                Ok(()) if portal.iser => {
+                    // See add_portal: the iser attr switches the portal's
+                    // transport; captured by saveconfig for boot restore.
+                    configfs_write(&format!("{np_path}/iser"), "1").await
+                }
+                other => other,
+            };
+            if let Err(e) = created {
                 // Best-effort cleanup of what we created so far so the
                 // next attempt doesn't trip the idempotency check with
                 // a stale half-target.
+                let _ = configfs_rmdir(&np_path).await;
                 let _ = configfs_rmdir(&tpg_path).await;
                 let _ = configfs_rmdir(&format!("{ISCSI_BASE}/{iqn}")).await;
                 return Err(e);
@@ -405,6 +425,7 @@ impl IscsiService {
             let v6_portal = Portal {
                 ip: "::".to_string(),
                 port: 3260,
+                iser: false,
             };
             let np_path = np_path_for(&tpg_path, &v6_portal.ip, v6_portal.port);
             match configfs_mkdir(&np_path).await {
@@ -780,15 +801,35 @@ impl IscsiService {
         let np_path = np_path_for(&tpg_path, &ip, req.port);
         configfs_mkdir(&np_path).await?;
 
+        // iSER rides on a normal network portal: LIO switches the
+        // transport when `1` is written to the portal's iser attr
+        // (requires ib_isert, loaded by the router gate). The flag is
+        // captured by `save_lio_config` below, so targetcli's boot
+        // restore replays it — no engine-side replay needed.
+        if req.iser
+            && let Err(e) = configfs_write(&format!("{np_path}/iser"), "1").await
+        {
+            // Roll the portal back so a failed iSER enable doesn't
+            // leave a silent TCP portal where RDMA was requested.
+            let _ = configfs_rmdir(&np_path).await;
+            return Err(e);
+        }
+
         target.portals.push(Portal {
             ip: ip.clone(),
             port: req.port,
+            iser: req.iser,
         });
 
         state_dir().save(&target.id, &target).await?;
         save_lio_config().await;
 
-        info!("Added portal {ip}:{} to target '{}'", req.port, target.iqn);
+        info!(
+            "Added {} portal {ip}:{} to target '{}'",
+            if req.iser { "iSER" } else { "TCP" },
+            req.port,
+            target.iqn
+        );
         Ok(target.redacted())
     }
 

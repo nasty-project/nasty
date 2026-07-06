@@ -142,6 +142,13 @@ pub(super) async fn try_route(
             }
             match parse_params::<nasty_sharing::iscsi::CreateTargetRequest>(req) {
                 Ok(p) => {
+                    if p.portals
+                        .as_deref()
+                        .is_some_and(|ps| ps.iter().any(|portal| portal.iser))
+                        && let Some(r) = require_rdma(req, "ib_isert").await
+                    {
+                        return Some(r);
+                    }
                     if let Some(ref dp) = p.device_path
                         && let Some(conflict) =
                             check_block_device_conflict(state, dp, "iscsi").await
@@ -240,11 +247,18 @@ pub(super) async fn try_route(
             {
                 return Some(r);
             }
-            match parse_params(req) {
-                Ok(p) => match state.iscsi.add_portal(p).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
+            match parse_params::<nasty_sharing::iscsi::AddPortalRequest>(req) {
+                Ok(p) => {
+                    if p.iser
+                        && let Some(r) = require_rdma(req, "ib_isert").await
+                    {
+                        return Some(r);
+                    }
+                    match state.iscsi.add_portal(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
                 Err(e) => invalid(req, e),
             }
         }
@@ -381,11 +395,18 @@ pub(super) async fn try_route(
             {
                 return Some(r);
             }
-            match parse_params(req) {
-                Ok(p) => match state.nvmeof.add_port(p).await {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
+            match parse_params::<nasty_sharing::nvmeof::AddPortRequest>(req) {
+                Ok(p) => {
+                    if p.transport.as_deref() == Some("rdma")
+                        && let Some(r) = require_rdma(req, "nvmet-rdma").await
+                    {
+                        return Some(r);
+                    }
+                    match state.nvmeof.add_port(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
                 Err(e) => invalid(req, e),
             }
         }

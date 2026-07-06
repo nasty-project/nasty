@@ -278,6 +278,26 @@ export interface UsbDevice {
  * Granularity: vendor:device, not BDF, so the binding survives slot
  * moves. Caveat: marking a (vendor, device) pair claims **all**
  * matching devices. */
+/** One RDMA device from /sys/class/infiniband (`system.rdma.status`). */
+export interface RdmaDevice {
+	name: string;
+	/** "InfiniBand" | "Ethernet" (RoCE / soft-RoCE). */
+	link_layer: string;
+	netdevs: string[];
+}
+
+/** RDMA capability + opt-in state from `system.rdma.status`. */
+export interface RdmaStatus {
+	enabled: boolean;
+	capable: boolean;
+	devices: RdmaDevice[];
+	ib_isert_available: boolean;
+	nvmet_rdma_available: boolean;
+	nfs_rdma_available: boolean;
+	nfs_rdma_active: boolean;
+	blocker?: string | null;
+}
+
 export interface PassthroughDeviceId {
 	vendor: string;
 	device: string;
@@ -647,6 +667,8 @@ export interface IscsiTarget {
 export interface Portal {
 	ip: string;
 	port: number;
+	/** iSER (iSCSI over RDMA) portal. */
+	iser?: boolean;
 }
 
 export interface Lun {

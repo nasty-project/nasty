@@ -58,6 +58,7 @@ use nasty_system::notifications::{ChannelType, NotificationConfig};
 use nasty_system::nut::{NutConfig, NutConfigUpdate, UpsStatus};
 use nasty_system::passthrough::{PassthroughConfig, PassthroughUpdate};
 use nasty_system::protocol::ProtocolStatus;
+use nasty_system::rdma::{RdmaSetRequest, RdmaStatus};
 use nasty_system::secure_boot::ReadinessReport;
 use nasty_system::secure_boot_enrollment::{EnrollmentState, EnrollmentStatusResponse};
 use nasty_system::settings::{AcmeStatus, HostTlsStatus, OidcSettings, Settings, SettingsUpdate};
@@ -1497,6 +1498,26 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Any,
                     params: MethodParams::None,
                     result: Some(gen_schema::<UpsStatus>(generator)),
+                },
+            ],
+        ),
+        // ── System: RDMA transports ──────────────────────────────────────
+        (
+            "System RDMA",
+            vec![
+                Method {
+                    name: "system.rdma.status",
+                    desc: "Return RDMA capability and opt-in state: detected RDMA devices (InfiniBand/RoCE), transport-module availability, and whether nfsd has an RDMA listener.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<RdmaStatus>(generator)),
+                },
+                Method {
+                    name: "system.rdma.set",
+                    desc: "Enable or disable RDMA share transports on this box (per-box opt-in; enabling requires an RDMA-capable device, disabling requires no remaining RDMA ports/portals).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<RdmaSetRequest>(generator)),
+                    result: Some(gen_schema::<RdmaStatus>(generator)),
                 },
             ],
         ),

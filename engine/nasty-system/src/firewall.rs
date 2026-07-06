@@ -179,6 +179,17 @@ pub fn webui_ports() -> Vec<PortSpec> {
     vec![tcp(80), tcp(443)]
 }
 
+/// Ports for the RDMA share transports (per-box opt-in, #602).
+/// udp/4791 is RoCEv2's encapsulation port — ALL RoCE traffic
+/// (NVMe/RDMA "4420", NFS-RDMA "20049", iSER) rides inside it; those
+/// numbers are RDMA-CM service ids, not IP ports. tcp/20049 covers
+/// iWARP NFS-RDMA. Native InfiniBand never traverses netfilter — no
+/// rule is needed or possible. Consequence for operators: per-service
+/// source restrictions on RoCE can only filter at 4791 granularity.
+pub fn rdma_ports() -> Vec<PortSpec> {
+    vec![udp(4791), tcp(20049)]
+}
+
 // ── Firewall service ───────────────────────────────────────────
 
 pub struct FirewallService {
@@ -299,6 +310,44 @@ impl FirewallService {
         }
     }
 
+    /// Open the named RDMA transport rule (per-box opt-in, #602).
+    pub async fn open_rdma(&self) {
+        let mut state = self.state.lock().await;
+        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "rdma") {
+            if rule.active {
+                return;
+            }
+            rule.active = true;
+        } else {
+            state.rules.push(FirewallRule {
+                service: "rdma".to_string(),
+                ports: rdma_ports(),
+                active: true,
+            });
+        }
+        if let Err(e) = apply_nftables(&state).await {
+            error!("Failed to open firewall for rdma: {e}");
+        } else {
+            info!("Firewall: opened ports for rdma");
+        }
+    }
+
+    /// Close the named RDMA transport rule.
+    pub async fn close_rdma(&self) {
+        let mut state = self.state.lock().await;
+        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "rdma") {
+            if !rule.active {
+                return;
+            }
+            rule.active = false;
+        }
+        if let Err(e) = apply_nftables(&state).await {
+            error!("Failed to close firewall for rdma: {e}");
+        } else {
+            info!("Firewall: closed ports for rdma");
+        }
+    }
+
     /// Get current firewall status including restrictions.
     pub async fn status(&self) -> FirewallStatus {
         let state = self.state.lock().await;
@@ -346,6 +395,8 @@ impl FirewallService {
         if let Some(rule) = state.rules.iter_mut().find(|r| r.service == service) {
             let base_ports = if service == "webui" {
                 webui_ports()
+            } else if service == "rdma" {
+                rdma_ports()
             } else if let Some(proto) = Protocol::from_name(service) {
                 ports_for_protocol(proto)
             } else {

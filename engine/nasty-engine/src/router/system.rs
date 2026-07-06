@@ -88,6 +88,52 @@ pub(super) async fn try_route(
                 Err(e) => err(req, e.to_string()),
             }
         }
+        "system.rdma.status" => ok(req, nasty_system::rdma::status().await),
+        "system.rdma.set" => match parse_params::<nasty_system::rdma::RdmaSetRequest>(req) {
+            Ok(p) => {
+                if !p.enabled {
+                    // Refuse while share config still expects RDMA —
+                    // disabling under live consumers would strand them
+                    // (nvmet-rdma port writes fail, iSER portals die).
+                    let mut consumers: Vec<String> = Vec::new();
+                    if let Ok(subsystems) = state.nvmeof.list().await {
+                        for s in subsystems {
+                            if s.ports.iter().any(|port| port.transport == "rdma") {
+                                consumers.push(format!("NVMe-oF subsystem '{}'", s.nqn));
+                            }
+                        }
+                    }
+                    if let Ok(targets) = state.iscsi.list().await {
+                        for t in targets {
+                            if t.portals.iter().any(|portal| portal.iser) {
+                                consumers.push(format!("iSCSI target '{}' (iSER portal)", t.iqn));
+                            }
+                        }
+                    }
+                    if !consumers.is_empty() {
+                        return Some(err(
+                            req,
+                            format!(
+                                "cannot disable RDMA while these still use it: {} — remove the RDMA ports/portals first",
+                                consumers.join(", ")
+                            ),
+                        ));
+                    }
+                }
+                match nasty_system::rdma::set_enabled(p.enabled).await {
+                    Ok(status) => {
+                        if p.enabled {
+                            state.firewall.open_rdma().await;
+                        } else {
+                            state.firewall.close_rdma().await;
+                        }
+                        ok(req, status)
+                    }
+                    Err(e) => err(req, e),
+                }
+            }
+            Err(e) => err(req, e.to_string()),
+        },
         "system.passthrough.get" => ok(req, nasty_system::passthrough::load().await),
         "system.passthrough.update" => {
             match parse_params::<nasty_system::passthrough::PassthroughUpdate>(req) {

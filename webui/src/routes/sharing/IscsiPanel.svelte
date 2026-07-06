@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
+	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -7,6 +8,7 @@
 	import { requiredFieldCls } from '$lib/utils';
 	import { validateAddressForFamily } from '$lib/network';
 	import ListenAddressPicker from '$lib/components/ListenAddressPicker.svelte';
+	import { rdma } from '$lib/sharing/rdma.svelte';
 	import {
 		iscsi,
 		iscsiToggleSort,
@@ -150,6 +152,7 @@
 											{#each target.portals as p}
 												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
 													<span class="font-mono text-xs">{p.ip.includes(':') && p.ip !== '0.0.0.0' ? `[${p.ip}]` : p.ip}:{p.port}</span>
+													{#if p.iser}<Badge variant="secondary" class="text-[0.6rem]">iSER</Badge>{/if}
 													{#if target.portals.length > 1}
 														<Button variant="destructive" size="xs" onclick={() => iscsiRemovePortal(target.id, p.ip, p.port)}>Remove</Button>
 													{/if}
@@ -167,6 +170,13 @@
 												placeholderV4="0.0.0.0 or 192.168.1.10"
 												placeholderV6=":: or fd00::1"
 											/>
+											<label class="mt-3 flex items-center gap-2 text-xs {rdma.status?.enabled ? '' : 'opacity-50'}">
+												<input type="checkbox" bind:checked={iscsi.addPortalIser} disabled={!rdma.status?.enabled} class="h-3.5 w-3.5" />
+												iSER (iSCSI over RDMA)
+												{#if !rdma.status?.enabled}
+													<span class="text-muted-foreground">— {rdma.status?.capable ? 'enable RDMA in the transports card above' : 'requires an RDMA-capable NIC'}</span>
+												{/if}
+											</label>
 											<div class="mt-3 flex items-end gap-2">
 												<div>
 													<Label class="text-xs">Port</Label>
@@ -180,7 +190,7 @@
 											{/if}
 										</div>
 									{:else}
-										<Button size="xs" variant="outline" class="mt-2" onclick={() => { iscsi.addPortalTarget = target.id; iscsi.addPortalIp = ''; iscsi.addPortalPort = 3260; iscsi.addPortalFamily = 'ipv4'; }}>+ Add Portal</Button>
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => { iscsi.addPortalTarget = target.id; iscsi.addPortalIp = ''; iscsi.addPortalPort = 3260; iscsi.addPortalFamily = 'ipv4'; iscsi.addPortalIser = false; }}>+ Add Portal</Button>
 									{/if}
 								</div>
 
