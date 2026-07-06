@@ -11,7 +11,7 @@ mod fs;
 mod guestshare;
 mod notifications;
 mod service;
-mod share;
+pub(crate) mod share;
 mod smb;
 mod snapshot;
 mod subvolume;

@@ -21,7 +21,7 @@ use nasty_apps::{
 use nasty_backup::{BackupProfile, BackupSnapshot, BackupStatus};
 use nasty_sharing::iscsi::{
     AddAclRequest, AddLunRequest, AddPortalRequest, CreateTargetRequest, DeleteTargetRequest,
-    IscsiTarget, RemoveAclRequest, RemoveLunRequest, RemovePortalRequest,
+    IscsiTarget, RemoveAclRequest, RemoveLunRequest, RemovePortalRequest, SetPortalsRequest,
 };
 use nasty_sharing::nfs::{
     CreateNfsShareRequest, DeleteNfsShareRequest, NfsShare, UpdateNfsShareRequest,
@@ -977,6 +977,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     desc: "Remove a listening portal from an iSCSI target. The last portal cannot be removed; add a replacement first.",
                     role: MethodRole::Admin,
                     params: MethodParams::Schema(gen_schema::<RemovePortalRequest>(generator)),
+                    result: Some(gen_schema::<IscsiTarget>(generator)),
+                },
+                Method {
+                    name: "share.iscsi.set_portals",
+                    desc: "Replace an iSCSI target's portal set in one call. The engine orders the transition (adds before removes where possible, conflicting adds after), so swapping the wildcard portal for a specific address on the same port works directly — no temporary portal needed.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<SetPortalsRequest>(generator)),
                     result: Some(gen_schema::<IscsiTarget>(generator)),
                 },
             ],
