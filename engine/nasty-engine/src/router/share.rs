@@ -16,6 +16,82 @@ pub(super) async fn try_route(
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
+    let resp = route_inner(req, state, session).await?;
+    // iSCSI/NVMe-oF firewall rules follow the configured portal ports
+    // (#602). Resync after any mutation that can change them; gate
+    // refusals and errors return early above or carry `error`, so only
+    // real changes pay the recompute.
+    if resp.error.is_none()
+        && matches!(
+            req.method.as_str(),
+            "share.iscsi.create"
+                | "share.iscsi.delete"
+                | "share.iscsi.add_portal"
+                | "share.iscsi.remove_portal"
+                | "share.iscsi.set_portals"
+                | "share.nvmeof.create"
+                | "share.nvmeof.delete"
+                | "share.nvmeof.add_port"
+                | "share.nvmeof.remove_port"
+        )
+    {
+        sync_portal_firewall_ports(state).await;
+    }
+    Some(resp)
+}
+
+/// Recompute the iSCSI and NVMe-oF firewall port sets from the
+/// configured portals. Defaults to the protocol's standard port while
+/// no targets exist, so enabling the protocol opens what the next
+/// `create` will bind. NVMe-oF RDMA listeners are excluded — RoCE
+/// rides udp/4791 under the separate `rdma` rule, and native IB never
+/// traverses netfilter.
+pub(crate) async fn sync_portal_firewall_ports(state: &AppState) {
+    use nasty_system::firewall::{PortSpec, Transport};
+    use nasty_system::protocol::Protocol;
+    use std::collections::BTreeSet;
+
+    let tcp = |port: u16| PortSpec {
+        port,
+        transport: Transport::Tcp,
+        source: None,
+        iface: None,
+    };
+
+    let mut iscsi_ports: BTreeSet<u16> = BTreeSet::new();
+    if let Ok(targets) = state.iscsi.list().await {
+        iscsi_ports.extend(targets.iter().flat_map(|t| t.portals.iter().map(|p| p.port)));
+    }
+    if iscsi_ports.is_empty() {
+        iscsi_ports.insert(3260);
+    }
+    state
+        .firewall
+        .set_service_ports(Protocol::Iscsi, iscsi_ports.into_iter().map(tcp).collect())
+        .await;
+
+    let mut nvmeof_ports: BTreeSet<u16> = BTreeSet::new();
+    if let Ok(subsystems) = state.nvmeof.list().await {
+        nvmeof_ports.extend(subsystems.iter().flat_map(|s| {
+            s.ports
+                .iter()
+                .filter(|p| p.transport == "tcp")
+                .filter_map(|p| p.service_id.parse::<u16>().ok())
+        }));
+    }
+    if nvmeof_ports.is_empty() {
+        nvmeof_ports.insert(4420);
+    }
+    state
+        .firewall
+        .set_service_ports(
+            Protocol::Nvmeof,
+            nvmeof_ports.into_iter().map(tcp).collect(),
+        )
+        .await;
+}
+
+async fn route_inner(req: &Request, state: &AppState, session: &Session) -> Option<Response> {
     Some(match req.method.as_str() {
         "share.nfs.list" => match state.nfs.list().await {
             Ok(v) => ok(req, v),
@@ -255,6 +331,27 @@ pub(super) async fn try_route(
                         return Some(r);
                     }
                     match state.iscsi.add_portal(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
+                Err(e) => invalid(req, e),
+            }
+        }
+        "share.iscsi.set_portals" => {
+            if let Some(r) =
+                require_protocol(state, req, nasty_system::protocol::Protocol::Iscsi).await
+            {
+                return Some(r);
+            }
+            match parse_params::<nasty_sharing::iscsi::SetPortalsRequest>(req) {
+                Ok(p) => {
+                    if p.portals.iter().any(|portal| portal.iser)
+                        && let Some(r) = require_rdma(req, "ib_isert").await
+                    {
+                        return Some(r);
+                    }
+                    match state.iscsi.set_portals(p).await {
                         Ok(v) => ok(req, v),
                         Err(e) => err(req, e),
                     }
