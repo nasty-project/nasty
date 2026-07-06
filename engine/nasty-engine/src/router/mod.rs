@@ -538,7 +538,7 @@ pub(super) async fn require_rdma(req: &Request, module: &str) -> Option<Response
         return Some(Response::error(
             req.id.clone(),
             ErrorCode::InternalError,
-            "RDMA transport is disabled on this box — enable RDMA on the Sharing page              first (requires an RDMA-capable NIC)",
+            "RDMA transport is disabled on this box — enable RDMA on the Sharing page first (requires an RDMA-capable NIC)",
         ));
     }
     if let Err(e) = nasty_system::rdma::ensure_module(module).await {

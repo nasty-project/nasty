@@ -114,7 +114,7 @@ pub(super) async fn try_route(
                         return Some(err(
                             req,
                             format!(
-                                "cannot disable RDMA while these still use it: {} — remove                                  the RDMA ports/portals first",
+                                "cannot disable RDMA while these still use it: {} — remove the RDMA ports/portals first",
                                 consumers.join(", ")
                             ),
                         ));
