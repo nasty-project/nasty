@@ -249,10 +249,10 @@ pub(super) async fn try_route(
             }
             match parse_params::<nasty_sharing::iscsi::AddPortalRequest>(req) {
                 Ok(p) => {
-                    if p.iser {
-                        if let Some(r) = require_rdma(req, "ib_isert").await {
-                            return Some(r);
-                        }
+                    if p.iser
+                        && let Some(r) = require_rdma(req, "ib_isert").await
+                    {
+                        return Some(r);
                     }
                     match state.iscsi.add_portal(p).await {
                         Ok(v) => ok(req, v),
@@ -397,10 +397,10 @@ pub(super) async fn try_route(
             }
             match parse_params::<nasty_sharing::nvmeof::AddPortRequest>(req) {
                 Ok(p) => {
-                    if p.transport.as_deref() == Some("rdma") {
-                        if let Some(r) = require_rdma(req, "nvmet-rdma").await {
-                            return Some(r);
-                        }
+                    if p.transport.as_deref() == Some("rdma")
+                        && let Some(r) = require_rdma(req, "nvmet-rdma").await
+                    {
+                        return Some(r);
                     }
                     match state.nvmeof.add_port(p).await {
                         Ok(v) => ok(req, v),
