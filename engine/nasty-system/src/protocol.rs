@@ -274,10 +274,12 @@ impl ProtocolService {
             // NFS started with the RDMA toggle on: add the rdma
             // listener. Warn-only — TCP NFS must keep working even if
             // the RDMA side can't come up (#602).
-            if !failed && proto == Protocol::Nfs && crate::rdma::enabled().await {
-                if let Err(e) = crate::rdma::activate_nfs_rdma().await {
-                    warn!("NFS-over-RDMA activation failed (TCP NFS unaffected): {e}");
-                }
+            if !failed
+                && proto == Protocol::Nfs
+                && crate::rdma::enabled().await
+                && let Err(e) = crate::rdma::activate_nfs_rdma().await
+            {
+                warn!("NFS-over-RDMA activation failed (TCP NFS unaffected): {e}");
             }
         }
     }
@@ -374,10 +376,11 @@ impl ProtocolService {
         // NFS started with the RDMA toggle on: add the rdma listener.
         // Warn-only — TCP NFS must keep working even if the RDMA side
         // can't come up (#602).
-        if proto == Protocol::Nfs && crate::rdma::enabled().await {
-            if let Err(e) = crate::rdma::activate_nfs_rdma().await {
-                warn!("NFS-over-RDMA activation failed (TCP NFS unaffected): {e}");
-            }
+        if proto == Protocol::Nfs
+            && crate::rdma::enabled().await
+            && let Err(e) = crate::rdma::activate_nfs_rdma().await
+        {
+            warn!("NFS-over-RDMA activation failed (TCP NFS unaffected): {e}");
         }
 
         let running = is_protocol_running(proto).await;
