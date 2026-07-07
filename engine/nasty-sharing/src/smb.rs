@@ -164,6 +164,9 @@ impl SmbService {
     pub async fn create(&self, req: CreateSmbShareRequest) -> Result<SmbShare, SmbError> {
         validate_share_name(&req.name)?;
         validate_share_path(&req.path)?;
+        if let Some(ref valid_users) = req.valid_users {
+            validate_valid_users(valid_users)?;
+        }
 
         if !Path::new(&req.path).exists() {
             return Err(SmbError::PathNotFound(req.path));
@@ -245,6 +248,7 @@ impl SmbService {
             share.guest_ok = guest_ok;
         }
         if let Some(valid_users) = req.valid_users {
+            validate_valid_users(&valid_users)?;
             share.valid_users = valid_users;
         }
         if let Some(extra_params) = req.extra_params {
@@ -333,6 +337,67 @@ fn validate_share_path(path: &str) -> Result<(), SmbError> {
              (newline, CR, NUL, double-quote, '#')"
                 .to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// Validate share `valid_users` entries. Three accepted shapes:
+/// local `name`, local `@group`, and domain `DOMAIN\name` (optionally
+/// `@DOMAIN\group`) — the backslash carve-out for AD member mode.
+/// Everything is checked against config-injection characters the same
+/// way validate_share_path is; the domain part follows NetBIOS rules
+/// (≤15 chars, alphanumeric + hyphen).
+fn validate_valid_users(entries: &[String]) -> Result<(), SmbError> {
+    for raw in entries {
+        let entry = raw.strip_prefix('@').unwrap_or(raw);
+        if entry.is_empty() || entry.len() > 256 {
+            return Err(SmbError::InvalidName(format!(
+                "invalid valid_users entry '{raw}'"
+            )));
+        }
+        if entry
+            .chars()
+            .any(|c| c.is_control() || matches!(c, ';' | '"' | '#' | '=' | '\n' | '\r'))
+        {
+            return Err(SmbError::InvalidName(format!(
+                "valid_users entry '{raw}' contains forbidden characters"
+            )));
+        }
+        match entry.split('\\').collect::<Vec<_>>().as_slice() {
+            // Local user or group: existing character policy.
+            [name] => {
+                if !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                {
+                    return Err(SmbError::InvalidName(format!(
+                        "invalid user/group name '{raw}'"
+                    )));
+                }
+            }
+            // DOMAIN\name: NetBIOS domain + AD account (spaces/dots legal).
+            [domain, name] => {
+                let domain_ok = !domain.is_empty()
+                    && domain.len() <= 15
+                    && domain
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-');
+                let name_ok = !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '));
+                if !domain_ok || !name_ok {
+                    return Err(SmbError::InvalidName(format!(
+                        "invalid domain principal '{raw}'"
+                    )));
+                }
+            }
+            _ => {
+                return Err(SmbError::InvalidName(format!(
+                    "invalid valid_users entry '{raw}'"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -1054,6 +1119,38 @@ mod tests {
     #[test]
     fn validate_share_path_rejects_empty() {
         assert!(validate_share_path("").is_err());
+    }
+
+    #[test]
+    fn validate_valid_users_accepts_local_group_and_domain_forms() {
+        assert!(validate_valid_users(&["alice".into()]).is_ok());
+        assert!(validate_valid_users(&["@staff".into()]).is_ok());
+        assert!(validate_valid_users(&["CORP\\alice".into()]).is_ok());
+        assert!(validate_valid_users(&["@CORP\\domain admins".into()]).is_ok());
+        // AD account names may contain dots and spaces.
+        assert!(validate_valid_users(&["CORP\\svc account.backup".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_valid_users_rejects_injection_shapes() {
+        // Same smuggling shapes validate_share_path pins (newline/config
+        // injection), plus structural garbage.
+        assert!(validate_valid_users(&["alice\ninclude = /etc/passwd".into()]).is_err());
+        assert!(validate_valid_users(&["alice;rm".into()]).is_err());
+        assert!(
+            validate_valid_users(&["CORP\\\\alice".into()]).is_err(),
+            "double backslash"
+        );
+        assert!(
+            validate_valid_users(&["\\alice".into()]).is_err(),
+            "empty domain part"
+        );
+        assert!(
+            validate_valid_users(&["CORP\\".into()]).is_err(),
+            "empty account part"
+        );
+        assert!(validate_valid_users(&["".into()]).is_err());
+        assert!(validate_valid_users(&["THISNETBIOSNAMEISTOOLONG\\alice".into()]).is_err());
     }
 
     // ── render_share_conf ──────────────────────────────────────────
