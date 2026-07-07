@@ -49,12 +49,18 @@ pub struct IscsiTarget {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Portal {
     /// IP address the portal listens on (use `0.0.0.0` for all interfaces).
     pub ip: String,
     /// TCP port number (default iSCSI port is 3260).
     pub port: u16,
+    /// iSER (iSCSI over RDMA) enabled on this portal. Requires the
+    /// per-box RDMA opt-in and an RDMA-capable NIC on the portal's
+    /// address; the router arm gates on both. Defaults false so every
+    /// pre-iSER state file loads unchanged (#602).
+    #[serde(default)]
+    pub iser: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -230,6 +236,21 @@ pub struct AddPortalRequest {
     pub ip: String,
     /// TCP port to listen on. Standard iSCSI port is 3260.
     pub port: u16,
+    /// Enable iSER (iSCSI over RDMA) on this portal. Requires the
+    /// per-box RDMA opt-in (gated in the router).
+    #[serde(default)]
+    pub iser: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetPortalsRequest {
+    /// ID of the target whose portal set is being replaced.
+    pub target_id: String,
+    /// Desired complete portal set. Entries missing from this list are
+    /// removed, new ones are added; the engine orders the transition so
+    /// same-port wildcard↔specific swaps work in one call. Must not be
+    /// empty — a target with zero portals is unreachable.
+    pub portals: Vec<Portal>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -369,6 +390,7 @@ impl IscsiService {
                 let defaults = vec![Portal {
                     ip: "0.0.0.0".to_string(),
                     port: 3260,
+                    iser: false,
                 }];
                 let try_v6 = crate::v6::host_has_global_ipv6().await;
                 (defaults, try_v6)
@@ -384,8 +406,7 @@ impl IscsiService {
         // so cleanup is just rmdir'ing the TPG and the target dir.
         let mut created_portals = Vec::with_capacity(mandatory_portals.len() + 1);
         for portal in &mandatory_portals {
-            let np_path = np_path_for(&tpg_path, &portal.ip, portal.port);
-            if let Err(e) = configfs_mkdir(&np_path).await {
+            if let Err(e) = create_np(&tpg_path, portal).await {
                 // Best-effort cleanup of what we created so far so the
                 // next attempt doesn't trip the idempotency check with
                 // a stale half-target.
@@ -405,6 +426,7 @@ impl IscsiService {
             let v6_portal = Portal {
                 ip: "::".to_string(),
                 port: 3260,
+                iser: false,
             };
             let np_path = np_path_for(&tpg_path, &v6_portal.ip, v6_portal.port);
             match configfs_mkdir(&np_path).await {
@@ -777,18 +799,23 @@ impl IscsiService {
         }
 
         let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
-        let np_path = np_path_for(&tpg_path, &ip, req.port);
-        configfs_mkdir(&np_path).await?;
-
-        target.portals.push(Portal {
+        let portal = Portal {
             ip: ip.clone(),
             port: req.port,
-        });
+            iser: req.iser,
+        };
+        create_np(&tpg_path, &portal).await?;
+        target.portals.push(portal);
 
         state_dir().save(&target.id, &target).await?;
         save_lio_config().await;
 
-        info!("Added portal {ip}:{} to target '{}'", req.port, target.iqn);
+        info!(
+            "Added {} portal {ip}:{} to target '{}'",
+            if req.iser { "iSER" } else { "TCP" },
+            req.port,
+            target.iqn
+        );
         Ok(target.redacted())
     }
 
@@ -831,9 +858,99 @@ impl IscsiService {
         );
         Ok(target.redacted())
     }
+
+    /// Replace a target's portal set in one call. The planner orders
+    /// the add/remove steps so a same-port wildcard↔specific swap (or
+    /// an iser toggle) works directly — no temporary portal on a third
+    /// port, which is the dance operators were forced into before
+    /// (#602). Non-conflicting additions run before removals so a
+    /// replacement portal is reachable before the old one goes away.
+    pub async fn set_portals(&self, req: SetPortalsRequest) -> Result<IscsiTarget, IscsiError> {
+        let mut target: IscsiTarget = state_dir()
+            .load(&req.target_id)
+            .await
+            .ok_or_else(|| IscsiError::NotFound(req.target_id.clone()))?;
+
+        let steps = plan_portal_transition(&target.portals, &req.portals)?;
+        if steps.is_empty() {
+            return Ok(target.redacted());
+        }
+
+        let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
+        let mut applied: Vec<&PortalStep> = Vec::with_capacity(steps.len());
+        for step in &steps {
+            let result = match step {
+                PortalStep::Add(p) => create_np(&tpg_path, p).await,
+                PortalStep::Remove(p) => {
+                    configfs_rmdir(&np_path_for(&tpg_path, &p.ip, p.port)).await
+                }
+            };
+            if let Err(e) = result {
+                // Unwind in reverse so configfs matches the stored
+                // state we are about to NOT overwrite. Best effort — a
+                // portal that fails to restore is logged, and the next
+                // set_portals attempt re-plans from stored state.
+                for done in applied.into_iter().rev() {
+                    match done {
+                        PortalStep::Add(p) => {
+                            let _ = configfs_rmdir(&np_path_for(&tpg_path, &p.ip, p.port)).await;
+                        }
+                        PortalStep::Remove(p) => {
+                            if create_np(&tpg_path, p).await.is_err() {
+                                tracing::warn!(
+                                    "portal set rollback: failed to restore {}:{} on '{}'",
+                                    p.ip,
+                                    p.port,
+                                    target.iqn
+                                );
+                            }
+                        }
+                    }
+                }
+                return Err(e);
+            }
+            match step {
+                PortalStep::Add(p) => target.portals.push(p.clone()),
+                PortalStep::Remove(p) => target
+                    .portals
+                    .retain(|q| !(q.ip == p.ip && q.port == p.port)),
+            }
+            applied.push(step);
+        }
+
+        state_dir().save(&target.id, &target).await?;
+        save_lio_config().await;
+
+        info!(
+            "Replaced portal set on target '{}' ({} steps, {} portals)",
+            target.iqn,
+            steps.len(),
+            target.portals.len()
+        );
+        Ok(target.redacted())
+    }
 }
 
 // ── configfs helpers ────────────────────────────────────────────
+
+/// Create a network portal (np) directory, flipping it to iSER when
+/// requested. iSER rides on a normal network portal: LIO switches the
+/// transport when `1` is written to the portal's iser attr (requires
+/// ib_isert, loaded by the router gate). The flag is captured by
+/// `save_lio_config`, so targetcli's boot restore replays it — no
+/// engine-side replay needed. A failed iSER flip rolls the np back so
+/// RDMA-requested portals never silently degrade to TCP.
+async fn create_np(tpg_path: &str, portal: &Portal) -> Result<(), IscsiError> {
+    let np_path = np_path_for(tpg_path, &portal.ip, portal.port);
+    configfs_mkdir(&np_path).await?;
+    if portal.iser
+        && let Err(e) = configfs_write(&format!("{np_path}/iser"), "1").await
+    {
+        let _ = configfs_rmdir(&np_path).await;
+        return Err(e);
+    }
+    Ok(())
+}
 
 async fn configfs_mkdir(path: &str) -> Result<(), IscsiError> {
     tokio::fs::create_dir_all(path)
@@ -1034,6 +1151,83 @@ async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
 /// Build the configfs `np/<addr>` path for a portal. LIO's configfs
 /// expects IPv6 addresses bracketed (`[::]:3260`) so the `:` between
 /// address and port stays unambiguous; IPv4 stays bare.
+/// One step of a portal-set transition. Steps are applied in order;
+/// see `plan_portal_transition` for the ordering contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortalStep {
+    Add(Portal),
+    Remove(Portal),
+}
+
+/// Compute the ordered configfs steps that turn `current` into
+/// `desired`.
+///
+/// Ordering contract (the reason this planner exists, #602): the
+/// kernel refuses an np on a port that a same-family wildcard already
+/// binds (and the reverse), and an iser toggle reuses the same np
+/// directory — so adds that collide with a pending remove are deferred
+/// until after the removes. Everything else is added first, so a
+/// replacement portal is reachable before the old one goes away.
+fn plan_portal_transition(
+    current: &[Portal],
+    desired: &[Portal],
+) -> Result<Vec<PortalStep>, IscsiError> {
+    if desired.is_empty() {
+        return Err(IscsiError::CommandFailed(
+            "portal set cannot be empty — target would become unreachable".to_string(),
+        ));
+    }
+
+    let mut normalized: Vec<Portal> = Vec::with_capacity(desired.len());
+    for p in desired {
+        let ip = validate_portal_ip(&p.ip)?;
+        if p.port == 0 {
+            return Err(IscsiError::CommandFailed(
+                "portal port must be non-zero".to_string(),
+            ));
+        }
+        if normalized.iter().any(|q| q.ip == ip && q.port == p.port) {
+            return Err(IscsiError::CommandFailed(format!(
+                "duplicate portal {ip}:{} in requested set",
+                p.port
+            )));
+        }
+        normalized.push(Portal {
+            ip,
+            port: p.port,
+            iser: p.iser,
+        });
+    }
+
+    let removes: Vec<Portal> = current
+        .iter()
+        .filter(|c| !normalized.contains(c))
+        .cloned()
+        .collect();
+    let adds: Vec<Portal> = normalized
+        .into_iter()
+        .filter(|d| !current.contains(d))
+        .collect();
+
+    let is_v6 = |ip: &str| ip.contains(':');
+    let is_wildcard = |ip: &str| ip == "0.0.0.0" || ip == "::";
+    let conflicts = |a: &Portal, r: &Portal| {
+        a.port == r.port
+            && is_v6(&a.ip) == is_v6(&r.ip)
+            && (a.ip == r.ip || is_wildcard(&a.ip) || is_wildcard(&r.ip))
+    };
+
+    let (deferred, immediate): (Vec<_>, Vec<_>) = adds
+        .into_iter()
+        .partition(|a| removes.iter().any(|r| conflicts(a, r)));
+
+    let mut steps: Vec<PortalStep> = Vec::new();
+    steps.extend(immediate.into_iter().map(PortalStep::Add));
+    steps.extend(removes.into_iter().map(PortalStep::Remove));
+    steps.extend(deferred.into_iter().map(PortalStep::Add));
+    Ok(steps)
+}
+
 fn np_path_for(tpg_path: &str, ip: &str, port: u16) -> String {
     if ip.contains(':') {
         format!("{tpg_path}/np/[{ip}]:{port}")
@@ -1286,5 +1480,164 @@ mod tests {
             msg.contains(non_secret_value),
             "non-secret values must surface in errors for diagnostics: {msg}"
         );
+    }
+
+    // ── plan_portal_transition ────────────────────────────────────
+    //
+    // The planner exists because of the dance dsevost hit on #602:
+    // swapping the default wildcard 0.0.0.0:3260 for a specific-IP
+    // portal on the same port required a temporary portal on a third
+    // port. The kernel refuses a specific-IP np while a same-family
+    // wildcard binds that port (and vice versa), so ordering is the
+    // whole point: conflicting adds must run after the removes.
+
+    fn p(ip: &str, port: u16) -> Portal {
+        Portal {
+            ip: ip.into(),
+            port,
+            iser: false,
+        }
+    }
+
+    fn p_iser(ip: &str, port: u16) -> Portal {
+        Portal {
+            ip: ip.into(),
+            port,
+            iser: true,
+        }
+    }
+
+    #[test]
+    fn planner_swaps_wildcard_for_specific_on_same_port_remove_first() {
+        let steps =
+            plan_portal_transition(&[p("0.0.0.0", 3260)], &[p("192.168.255.248", 3260)]).unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                PortalStep::Remove(p("0.0.0.0", 3260)),
+                PortalStep::Add(p("192.168.255.248", 3260)),
+            ]
+        );
+    }
+
+    #[test]
+    fn planner_swaps_specific_for_wildcard_on_same_port_remove_first() {
+        let steps =
+            plan_portal_transition(&[p("192.168.255.248", 3260)], &[p("0.0.0.0", 3260)]).unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                PortalStep::Remove(p("192.168.255.248", 3260)),
+                PortalStep::Add(p("0.0.0.0", 3260)),
+            ]
+        );
+    }
+
+    #[test]
+    fn planner_adds_nonconflicting_portals_before_removes() {
+        // Availability: the new portal on a free port comes up before
+        // the old one goes away.
+        let steps = plan_portal_transition(&[p("0.0.0.0", 3260)], &[p("10.0.0.1", 3261)]).unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                PortalStep::Add(p("10.0.0.1", 3261)),
+                PortalStep::Remove(p("0.0.0.0", 3260)),
+            ]
+        );
+    }
+
+    #[test]
+    fn planner_emits_nothing_for_unchanged_set() {
+        let current = [p("0.0.0.0", 3260), p_iser("10.0.0.1", 3260)];
+        let steps = plan_portal_transition(&current, &current).unwrap();
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn planner_removes_only_the_dropped_portal() {
+        let steps = plan_portal_transition(
+            &[p("10.0.0.1", 3260), p("10.0.0.2", 3260)],
+            &[p("10.0.0.1", 3260)],
+        )
+        .unwrap();
+        assert_eq!(steps, vec![PortalStep::Remove(p("10.0.0.2", 3260))]);
+    }
+
+    #[test]
+    fn planner_allows_same_port_on_different_specific_ips() {
+        // Two specific IPs sharing a port is a legal LIO config — no
+        // conflict, plain add.
+        let steps = plan_portal_transition(
+            &[p("10.0.0.1", 3260)],
+            &[p("10.0.0.1", 3260), p("10.0.0.2", 3260)],
+        )
+        .unwrap();
+        assert_eq!(steps, vec![PortalStep::Add(p("10.0.0.2", 3260))]);
+    }
+
+    #[test]
+    fn planner_scopes_wildcard_conflicts_to_address_family() {
+        // The create path relies on 0.0.0.0:3260 and [::]:3260
+        // coexisting — a v6 wildcard must not be deferred behind a v4
+        // wildcard removal that isn't happening.
+        let steps =
+            plan_portal_transition(&[p("0.0.0.0", 3260)], &[p("0.0.0.0", 3260), p("::", 3260)])
+                .unwrap();
+        assert_eq!(steps, vec![PortalStep::Add(p("::", 3260))]);
+    }
+
+    #[test]
+    fn planner_treats_iser_toggle_as_remove_then_add() {
+        // Same np directory — the remove must precede the re-add.
+        let steps =
+            plan_portal_transition(&[p("10.0.0.1", 3260)], &[p_iser("10.0.0.1", 3260)]).unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                PortalStep::Remove(p("10.0.0.1", 3260)),
+                PortalStep::Add(p_iser("10.0.0.1", 3260)),
+            ]
+        );
+    }
+
+    #[test]
+    fn planner_rejects_empty_desired_set() {
+        // A target with zero portals is unreachable — same invariant
+        // remove_portal enforces.
+        assert!(plan_portal_transition(&[p("0.0.0.0", 3260)], &[]).is_err());
+    }
+
+    #[test]
+    fn planner_rejects_duplicate_ip_port_pairs() {
+        // Two entries for the same np (even if the iser flag differs)
+        // are contradictory intent, not a valid set.
+        assert!(
+            plan_portal_transition(
+                &[p("0.0.0.0", 3260)],
+                &[p("10.0.0.1", 3260), p_iser("10.0.0.1", 3260)],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn planner_normalizes_bracketed_v6_addresses() {
+        let steps = plan_portal_transition(
+            &[p("0.0.0.0", 3260)],
+            &[p("0.0.0.0", 3260), p("[fd00::1]", 3261)],
+        )
+        .unwrap();
+        assert_eq!(steps, vec![PortalStep::Add(p("fd00::1", 3261))]);
+    }
+
+    #[test]
+    fn planner_rejects_invalid_ip() {
+        assert!(plan_portal_transition(&[], &[p("not-an-ip", 3260)]).is_err());
+    }
+
+    #[test]
+    fn planner_rejects_port_zero() {
+        assert!(plan_portal_transition(&[], &[p("10.0.0.1", 0)]).is_err());
     }
 }

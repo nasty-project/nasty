@@ -49,6 +49,15 @@ pub struct NmConnection {
     pub port_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+    /// SR-IOV VF count to create on this PF at activation
+    /// (`sriov.total-vfs`). NM owns VF lifecycle: it writes the
+    /// device's `sriov_numvfs` when the profile activates, which also
+    /// recreates VFs automatically at boot with no engine involvement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sriov_num_vfs: Option<u32>,
+    /// SR-IOV per-VF properties, emitted as `sriov.vfs` entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vfs: Vec<super::VfConfig>,
     /// Explicit MAC override (NM `cloned-mac-address`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
@@ -440,6 +449,8 @@ fn profile_for_link(
         controller,
         port_type,
         mtu: link.mtu,
+        sriov_num_vfs: link.sriov_num_vfs,
+        vfs: link.vfs.clone(),
         mac: link.mac.clone(),
         autoconnect: link.enabled,
         ipv4,
@@ -499,6 +510,27 @@ fn deterministic_uuid_for(name: &str) -> String {
 /// Render an `NmConnection` to NM `.nmconnection` keyfile text. The
 /// output is what NM would consume from
 /// `/etc/NetworkManager/system-connections/<id>.nmconnection`.
+/// VF attribute string in NM's `nm_utils_sriov_vf_to_str` shape with
+/// the index omitted: space-separated `attr=val` pairs in attribute
+/// name order, `vlans=ID[.QOS[.PROTO]]` appended last. This is exactly
+/// what NM's keyfile writer puts after `vf.<index>=`.
+fn vf_attr_string(vf: &super::VfConfig) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(mac) = &vf.mac {
+        parts.push(format!("mac={mac}"));
+    }
+    if let Some(sc) = vf.spoof_check {
+        parts.push(format!("spoof-check={sc}"));
+    }
+    if let Some(t) = vf.trust {
+        parts.push(format!("trust={t}"));
+    }
+    if let Some(vlan) = vf.vlan {
+        parts.push(format!("vlans={vlan}"));
+    }
+    parts.join(" ")
+}
+
 pub fn serialize_keyfile(p: &NmConnection) -> String {
     let mut out = String::new();
 
@@ -608,6 +640,21 @@ pub fn serialize_keyfile(p: &NmConnection) -> String {
         }
         if let Some(mac) = eth_cloned_mac {
             out.push_str(&format!("cloned-mac-address={mac}\n"));
+        }
+        out.push('\n');
+    }
+
+    // [sriov] — VF count on an SR-IOV PF. NM creates/destroys the VFs
+    // at activation time; autoprobe is left at the global default so
+    // VF host drivers bind normally (passthrough VFs get claimed
+    // per-device via passthrough.nix udev rules instead).
+    if let Some(n) = p.sriov_num_vfs {
+        out.push_str("[sriov]\n");
+        out.push_str(&format!("total-vfs={n}\n"));
+        // One `vf.<index>` key per configured VF — the shape NM's own
+        // keyfile writer produces (nm-keyfile.c, sriov_vfs_writer).
+        for vf in &p.vfs {
+            out.push_str(&format!("vf.{}={}\n", vf.index, vf_attr_string(vf)));
         }
         out.push('\n');
     }
@@ -816,6 +863,41 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
         }
     }
 
+    // [sriov] — see the keyfile serializer note.
+    if let Some(n) = p.sriov_num_vfs {
+        let mut sriov = HashMap::new();
+        sriov.insert("total-vfs".into(), into_value(n));
+        // `vfs` is aa{sv} with `vlans` nested as aa{sv} of
+        // {id, qos, protocol} — NM's vfs_to_dbus shape
+        // (nm-setting-sriov.c). protocol 0 = 802.1Q.
+        if !p.vfs.is_empty() {
+            let mut vfs: Vec<HashMap<String, OwnedValue>> = Vec::new();
+            for vf in &p.vfs {
+                let mut e = HashMap::new();
+                e.insert("index".into(), into_value(vf.index));
+                if let Some(mac) = &vf.mac {
+                    e.insert("mac".into(), into_value(mac.clone()));
+                }
+                if let Some(sc) = vf.spoof_check {
+                    e.insert("spoof-check".into(), into_value(sc));
+                }
+                if let Some(t) = vf.trust {
+                    e.insert("trust".into(), into_value(t));
+                }
+                if let Some(vlan) = vf.vlan {
+                    let mut v: HashMap<String, OwnedValue> = HashMap::new();
+                    v.insert("id".into(), into_value(u32::from(vlan)));
+                    v.insert("qos".into(), into_value(0u32));
+                    v.insert("protocol".into(), into_value(0u32));
+                    e.insert("vlans".into(), into_value(vec![v]));
+                }
+                vfs.push(e);
+            }
+            sriov.insert("vfs".into(), into_value(vfs));
+        }
+        out.insert("sriov".into(), sriov);
+    }
+
     // [ipv4]
     out.insert("ipv4".into(), ip_section_dict(&p.ipv4, Family::V4));
     // [ipv6]
@@ -967,6 +1049,8 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
             kind: LinkKind::Physical,
         }
     }
@@ -977,6 +1061,8 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
             kind: LinkKind::Bridge {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 stp: false,
@@ -992,6 +1078,8 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
             kind: LinkKind::Bond {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 mode: BondMode::Lacp,
@@ -1056,6 +1144,111 @@ mod tests {
         // The sibling ethernet port is unaffected by the IB context.
         let eth = find(&profiles, "eth0");
         assert_eq!(eth.conn_type, NmConnectionType::Ethernet);
+    }
+
+    #[test]
+    fn sriov_pf_emits_total_vfs_in_both_serializers() {
+        let mut link = link_phys("enp6s0f0");
+        link.sriov_num_vfs = Some(8);
+        let layered = LayeredConfig {
+            links: vec![link, link_phys("eth0")],
+            ..Default::default()
+        };
+        let profiles = to_nm_profiles(&layered);
+
+        let pf = find(&profiles, "enp6s0f0");
+        let keyfile = serialize_keyfile(pf);
+        assert!(keyfile.contains("[sriov]"), "{keyfile}");
+        assert!(keyfile.contains("total-vfs=8"), "{keyfile}");
+        let dict = to_settings_dict(pf);
+        assert!(dict.contains_key("sriov"));
+
+        // Plain NIC: no [sriov] anywhere.
+        let eth = find(&profiles, "eth0");
+        assert!(!serialize_keyfile(eth).contains("[sriov]"));
+        assert!(!to_settings_dict(eth).contains_key("sriov"));
+
+        // Count-only PF: no per-VF keys.
+        assert!(!keyfile.contains("vf."), "{keyfile}");
+    }
+
+    fn pf_with_vf_properties() -> LayeredConfig {
+        let mut link = link_phys("enp6s0f0");
+        link.sriov_num_vfs = Some(8);
+        link.vfs = vec![
+            crate::network::VfConfig {
+                index: 0,
+                vlan: Some(100),
+                mac: Some("00:11:22:33:44:55".into()),
+                trust: Some(true),
+                spoof_check: Some(false),
+            },
+            crate::network::VfConfig {
+                index: 3,
+                vlan: Some(200),
+                mac: None,
+                trust: None,
+                spoof_check: None,
+            },
+        ];
+        LayeredConfig {
+            links: vec![link],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sriov_vf_properties_emit_as_keyfile_vf_keys() {
+        // NM's keyfile writer (nm-keyfile.c, sriov_vfs_writer) stores
+        // one `vf.<index>` key per VF whose value is the attribute
+        // string without the index: space-separated `attr=val` pairs
+        // in name order, `vlans=ID[.QOS[.PROTO]]` last. Pin the exact
+        // shape so NM parses what we write.
+        let profiles = to_nm_profiles(&pf_with_vf_properties());
+        let keyfile = serialize_keyfile(find(&profiles, "enp6s0f0"));
+        assert!(
+            keyfile.contains("vf.0=mac=00:11:22:33:44:55 spoof-check=false trust=true vlans=100"),
+            "{keyfile}"
+        );
+        assert!(keyfile.contains("vf.3=vlans=200"), "{keyfile}");
+    }
+
+    #[test]
+    fn sriov_vf_properties_emit_as_dbus_vardicts() {
+        // NM's D-Bus shape (nm-setting-sriov.c, vfs_to_dbus): `vfs` is
+        // aa{sv}, each VF vardict carrying `index` (u) plus attributes,
+        // with `vlans` nested as aa{sv} of {id, qos, protocol}.
+        let profiles = to_nm_profiles(&pf_with_vf_properties());
+        let dict = to_settings_dict(find(&profiles, "enp6s0f0"));
+        let sriov = dict.get("sriov").expect("sriov section");
+
+        let outer = sriov.get("vfs").expect("vfs key").try_clone().unwrap();
+        let arr: zbus::zvariant::Array = outer.try_into().expect("vfs is an array");
+        let first: zbus::zvariant::Value = arr.iter().next().unwrap().try_clone().unwrap();
+        let entry: zbus::zvariant::Dict = first.try_into().expect("vf entry is a dict");
+        let vf: HashMap<String, OwnedValue> = entry.try_into().unwrap();
+
+        let index: u32 = vf["index"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(index, 0);
+        let mac: String = vf["mac"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(mac, "00:11:22:33:44:55");
+        let trust: bool = vf["trust"].try_clone().unwrap().try_into().unwrap();
+        assert!(trust);
+        let spoof: bool = vf["spoof-check"].try_clone().unwrap().try_into().unwrap();
+        assert!(!spoof);
+
+        let vlans = vf["vlans"].try_clone().unwrap();
+        let vlans_arr: zbus::zvariant::Array = vlans.try_into().expect("vlans is an array");
+        let vlan_entry: zbus::zvariant::Value =
+            vlans_arr.iter().next().unwrap().try_clone().unwrap();
+        let vlan_dict: zbus::zvariant::Dict = vlan_entry.try_into().unwrap();
+        let vlan: HashMap<String, OwnedValue> = vlan_dict.try_into().unwrap();
+        let id: u32 = vlan["id"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(id, 100);
+        let qos: u32 = vlan["qos"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(qos, 0);
+        let protocol: u32 = vlan["protocol"].try_clone().unwrap().try_into().unwrap();
+        assert_eq!(protocol, 0, "0 = 802.1Q");
     }
 
     #[test]
@@ -1186,6 +1379,8 @@ mod tests {
                     enabled: true,
                     mtu: None,
                     mac: None,
+                    sriov_num_vfs: None,
+                    vfs: Vec::new(),
                     kind: LinkKind::Macvlan {
                         parent: "eth1".into(),
                         mode: "bridge".into(),
@@ -1243,6 +1438,8 @@ mod tests {
                     enabled: true,
                     mtu: None,
                     mac: None,
+                    sriov_num_vfs: None,
+                    vfs: Vec::new(),
                     kind: LinkKind::Vlan {
                         parent: "eth0".into(),
                         id: 100,
@@ -1271,6 +1468,8 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
+                vfs: Vec::new(),
                 kind: LinkKind::Bridge {
                     members: vec![],
                     stp: true,
@@ -1444,6 +1643,8 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
+                vfs: Vec::new(),
                 kind: LinkKind::Bridge {
                     members: vec![],
                     stp: true,
@@ -1469,6 +1670,8 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
+                vfs: Vec::new(),
                 kind: LinkKind::Vlan {
                     parent: "eth0".into(),
                     id: 10,
@@ -1586,6 +1789,8 @@ mod tests {
             enabled: true,
             mtu: Some(1400),
             mac: None,
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
             kind: LinkKind::Vlan {
                 parent: "eth0".into(),
                 id: 100,
@@ -1734,6 +1939,8 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
+                vfs: Vec::new(),
                 kind: LinkKind::Bridge {
                     members: vec![],
                     stp: true,
@@ -1770,6 +1977,8 @@ mod tests {
                 enabled: true,
                 mtu: None,
                 mac: None,
+                sriov_num_vfs: None,
+                vfs: Vec::new(),
                 kind: LinkKind::Vlan {
                     parent: "eth0".into(),
                     id: 10,
@@ -1916,6 +2125,8 @@ mod tests {
             enabled: true,
             mtu: Some(1400),
             mac: None,
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
             kind: LinkKind::Vlan {
                 parent: "eth0".into(),
                 id: 100,
@@ -2116,6 +2327,8 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
             kind: LinkKind::Bridge {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 stp: false,
@@ -2131,6 +2344,8 @@ mod tests {
             enabled: true,
             mtu: None,
             mac: None,
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
             kind: LinkKind::Bond {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
                 mode: BondMode::Lacp,

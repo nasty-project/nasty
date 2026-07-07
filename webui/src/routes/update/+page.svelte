@@ -524,6 +524,17 @@
 						checkInfo = null; // clear stale "available" after upgrade
 						await loadVersionPage();
 						writeVersionPageAction(null);
+						// Nudge the layout's cached sysInfo so the top-bar
+						// bcachefs chip clears without a manual reload. The
+						// same nudge exists in loadStatus() for the
+						// came-back-to-the-page case, but when the operator
+						// sits here watching the rebuild, THIS branch detects
+						// completion — and a bcachefs-tools-only switch never
+						// restarts the engine, so the reconnect-driven refresh
+						// doesn't fire either. Reconcile (spaced retries), not
+						// a single trigger: the fetch can race the settling
+						// rebuild.
+						sysInfoRefresh.triggerReconcile();
 						if (status.state === 'success') {
 						if (status.webui_changed) refreshState.set();
 						if (status.reboot_required) rebootState.set();

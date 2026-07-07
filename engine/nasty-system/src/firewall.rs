@@ -77,7 +77,7 @@ pub enum Transport {
     Udp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PortSpec {
     pub port: u16,
     pub transport: Transport,
@@ -177,6 +177,17 @@ pub fn ports_for_protocol(proto: Protocol) -> Vec<PortSpec> {
 /// Ports for the WebUI — always present but can have source restrictions.
 pub fn webui_ports() -> Vec<PortSpec> {
     vec![tcp(80), tcp(443)]
+}
+
+/// Ports for the RDMA share transports (per-box opt-in, #602).
+/// udp/4791 is RoCEv2's encapsulation port — ALL RoCE traffic
+/// (NVMe/RDMA "4420", NFS-RDMA "20049", iSER) rides inside it; those
+/// numbers are RDMA-CM service ids, not IP ports. tcp/20049 covers
+/// iWARP NFS-RDMA. Native InfiniBand never traverses netfilter — no
+/// rule is needed or possible. Consequence for operators: per-service
+/// source restrictions on RoCE can only filter at 4791 granularity.
+pub fn rdma_ports() -> Vec<PortSpec> {
+    vec![udp(4791), tcp(20049)]
 }
 
 // ── Firewall service ───────────────────────────────────────────
@@ -299,6 +310,44 @@ impl FirewallService {
         }
     }
 
+    /// Open the named RDMA transport rule (per-box opt-in, #602).
+    pub async fn open_rdma(&self) {
+        let mut state = self.state.lock().await;
+        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "rdma") {
+            if rule.active {
+                return;
+            }
+            rule.active = true;
+        } else {
+            state.rules.push(FirewallRule {
+                service: "rdma".to_string(),
+                ports: rdma_ports(),
+                active: true,
+            });
+        }
+        if let Err(e) = apply_nftables(&state).await {
+            error!("Failed to open firewall for rdma: {e}");
+        } else {
+            info!("Firewall: opened ports for rdma");
+        }
+    }
+
+    /// Close the named RDMA transport rule.
+    pub async fn close_rdma(&self) {
+        let mut state = self.state.lock().await;
+        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "rdma") {
+            if !rule.active {
+                return;
+            }
+            rule.active = false;
+        }
+        if let Err(e) = apply_nftables(&state).await {
+            error!("Failed to close firewall for rdma: {e}");
+        } else {
+            info!("Firewall: closed ports for rdma");
+        }
+    }
+
     /// Get current firewall status including restrictions.
     pub async fn status(&self) -> FirewallStatus {
         let state = self.state.lock().await;
@@ -346,6 +395,8 @@ impl FirewallService {
         if let Some(rule) = state.rules.iter_mut().find(|r| r.service == service) {
             let base_ports = if service == "webui" {
                 webui_ports()
+            } else if service == "rdma" {
+                rdma_ports()
             } else if let Some(proto) = Protocol::from_name(service) {
                 ports_for_protocol(proto)
             } else {
@@ -363,6 +414,62 @@ impl FirewallService {
     pub async fn get_restrictions(&self) -> HashMap<String, Vec<String>> {
         self.restrictions.lock().await.services.clone()
     }
+
+    /// Point a service's firewall rule at a new port set. iSCSI and
+    /// NVMe-oF listen on operator-chosen portal ports, so their rules
+    /// follow the configured portals instead of the protocol default
+    /// (#602: a portal on a custom port was silently unreachable).
+    /// Preserves the rule's open/closed state; no-op (and no nft
+    /// apply) when the effective set is unchanged.
+    pub async fn set_service_ports(&self, proto: Protocol, ports: Vec<PortSpec>) {
+        let mut state = self.state.lock().await;
+        let restrictions = self.restrictions.lock().await;
+        if !replace_rule_ports(&mut state, &restrictions, proto.name(), ports) {
+            return;
+        }
+        if let Err(e) = apply_nftables(&state).await {
+            error!("Failed to update firewall ports for {}: {e}", proto.name());
+        } else {
+            info!("Firewall: updated ports for {}", proto.name());
+        }
+    }
+}
+
+/// Replace `service`'s port set in `state`, re-applying that service's
+/// source/interface restrictions. Creates the rule (closed) when the
+/// service has none yet, so a later `open` keeps the right ports.
+/// Returns whether anything changed, so callers can skip the nft apply.
+fn replace_rule_ports(
+    state: &mut FirewallState,
+    restrictions: &FirewallRestrictions,
+    service: &str,
+    ports: Vec<PortSpec>,
+) -> bool {
+    let sources = restrictions
+        .services
+        .get(service)
+        .cloned()
+        .unwrap_or_default();
+    let ifaces = restrictions
+        .interfaces
+        .get(service)
+        .cloned()
+        .unwrap_or_default();
+    let ports = apply_restrictions(ports, &sources, &ifaces);
+
+    if let Some(rule) = state.rules.iter_mut().find(|r| r.service == service) {
+        if rule.ports == ports {
+            return false;
+        }
+        rule.ports = ports;
+    } else {
+        state.rules.push(FirewallRule {
+            service: service.to_string(),
+            ports,
+            active: false,
+        });
+    }
+    true
 }
 
 /// Apply source and interface restrictions to a set of ports.
@@ -589,5 +696,93 @@ mod tests {
 
         let mut populated = restrictions_with(&[("nfs", &["enp4s0"])]);
         assert!(!populated.strip_iface_refs(&[]));
+    }
+
+    // ── replace_rule_ports ────────────────────────────────────────
+    //
+    // iSCSI/NVMe-oF listen ports follow their configured portals
+    // (#602: a portal on a custom port was unreachable because the
+    // service rule was pinned to the default port). These pin the
+    // port-replacement semantics the engine relies on after every
+    // portal mutation.
+
+    fn state_with_rule(service: &str, ports: Vec<PortSpec>, active: bool) -> FirewallState {
+        FirewallState {
+            rules: vec![FirewallRule {
+                service: service.to_string(),
+                ports,
+                active,
+            }],
+        }
+    }
+
+    fn no_restrictions() -> FirewallRestrictions {
+        FirewallRestrictions {
+            services: HashMap::new(),
+            interfaces: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn replace_rule_ports_swaps_ports_and_keeps_active_flag() {
+        let mut state = state_with_rule("iscsi", vec![tcp(3260)], true);
+        let changed = replace_rule_ports(
+            &mut state,
+            &no_restrictions(),
+            "iscsi",
+            vec![tcp(3260), tcp(3261)],
+        );
+        assert!(changed);
+        assert_eq!(state.rules[0].ports, vec![tcp(3260), tcp(3261)]);
+        assert!(state.rules[0].active, "active flag must survive the swap");
+    }
+
+    #[test]
+    fn replace_rule_ports_preserves_inactive_flag() {
+        let mut state = state_with_rule("iscsi", vec![tcp(3260)], false);
+        replace_rule_ports(&mut state, &no_restrictions(), "iscsi", vec![tcp(3999)]);
+        assert!(
+            !state.rules[0].active,
+            "a disabled service must not be opened by a port resync"
+        );
+        assert_eq!(state.rules[0].ports, vec![tcp(3999)]);
+    }
+
+    #[test]
+    fn replace_rule_ports_applies_service_restrictions_to_new_ports() {
+        let mut state = state_with_rule("iscsi", vec![tcp(3260)], true);
+        let restrictions = FirewallRestrictions {
+            services: HashMap::from([("iscsi".to_string(), vec!["192.168.1.0/24".to_string()])]),
+            interfaces: HashMap::new(),
+        };
+        replace_rule_ports(&mut state, &restrictions, "iscsi", vec![tcp(3261)]);
+        assert_eq!(state.rules[0].ports.len(), 1);
+        assert_eq!(state.rules[0].ports[0].port, 3261);
+        assert_eq!(
+            state.rules[0].ports[0].source.as_deref(),
+            Some("192.168.1.0/24"),
+            "restrictions must be re-applied to the replacement ports"
+        );
+    }
+
+    #[test]
+    fn replace_rule_ports_creates_inactive_rule_for_unknown_service() {
+        // A resync can land before the service was ever opened; the
+        // rule must exist (so a later `open` keeps the right ports)
+        // but stay closed.
+        let mut state = FirewallState::default();
+        let changed = replace_rule_ports(&mut state, &no_restrictions(), "nvmeof", vec![tcp(4421)]);
+        assert!(changed);
+        assert_eq!(state.rules.len(), 1);
+        assert_eq!(state.rules[0].service, "nvmeof");
+        assert_eq!(state.rules[0].ports, vec![tcp(4421)]);
+        assert!(!state.rules[0].active);
+    }
+
+    #[test]
+    fn replace_rule_ports_reports_unchanged_for_identical_set() {
+        let mut state = state_with_rule("iscsi", vec![tcp(3260)], true);
+        let changed = replace_rule_ports(&mut state, &no_restrictions(), "iscsi", vec![tcp(3260)]);
+        assert!(!changed, "identical port set must not trigger an nft apply");
     }
 }

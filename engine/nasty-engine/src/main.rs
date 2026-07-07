@@ -535,6 +535,15 @@ async fn main() -> anyhow::Result<()> {
                     proto_states.push((*p, enabled));
                 }
                 state.firewall.init(&proto_states).await;
+                // RDMA transports are a per-box opt-in orthogonal to the
+                // protocol list; restore its firewall rule when enabled.
+                if nasty_system::rdma::enabled().await {
+                    state.firewall.open_rdma().await;
+                }
+                // iSCSI/NVMe-oF rules follow configured portal ports
+                // (#602); replace the static defaults with the real
+                // port sets from restored targets.
+                router::share::sync_portal_firewall_ports(&state).await;
             }
         })
         .await;

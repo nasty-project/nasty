@@ -1381,6 +1381,7 @@
 								/>
 								<div>
 									<span class="font-mono">{dev.address}</span>
+									{#if dev.virtual_function}<Badge variant="secondary" class="ml-1 text-[0.6rem]">VF</Badge>{/if}
 									<span class="text-muted-foreground ml-1">{dev.description}</span>
 									<span class="text-muted-foreground ml-1">(IOMMU group {dev.iommu_group})</span>
 								</div>

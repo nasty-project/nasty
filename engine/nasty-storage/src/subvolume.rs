@@ -2050,51 +2050,142 @@ pub(crate) struct ProjectQuotaInfo {
     pub hard_bytes: u64,
 }
 
+/// Split a Linux `dev_t` into (major, minor) — glibc's bit layout:
+/// 12-bit major at bits 8–19 (high part at 32+), 8-bit minor low with
+/// the high part at bits 20+.
+fn split_dev_t(dev: u64) -> (u32, u32) {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff_u64);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff_u64);
+    (major as u32, minor as u32)
+}
+
+/// Resolve a `dev_t` to its `/dev/<name>` block device via the
+/// kernel's `<base>/<major>:<minor>` symlinks (base is
+/// `/sys/dev/block` in production). The symlink target's basename is
+/// the kernel device name.
+fn block_device_for_dev(base: &std::path::Path, dev: u64) -> Option<String> {
+    let (major, minor) = split_dev_t(dev);
+    let target = std::fs::read_link(base.join(format!("{major}:{minor}"))).ok()?;
+    let name = target.file_name()?.to_str()?;
+    Some(format!("/dev/{name}"))
+}
+
+/// Convert quotactl block-quota fields to [`ProjectQuotaInfo`]:
+/// `dqb_curspace` is in bytes, `dqb_bhardlimit` in 1KiB blocks
+/// (QIF_DQBLKSIZE). `0` stays `0` — the "no limit" convention shared
+/// with the old repquota parser.
+// Only the linux-gated quotactl path calls this in production code.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn project_quota_info(curspace_bytes: u64, bhardlimit_blocks: u64) -> ProjectQuotaInfo {
+    ProjectQuotaInfo {
+        used_bytes: curspace_bytes,
+        hard_bytes: bhardlimit_blocks.saturating_mul(1024),
+    }
+}
+
+/// Enumerate all project quotas on `device` via Q_GETNEXTQUOTA.
+///
+/// Direct quotactl instead of shelling to repquota: quota-tools
+/// resolves the /proc/mounts *source string* to pick its quotactl
+/// device, and bcachefs ≥ 1.38.8 reports multi-device filesystems as
+/// a by-uuid symlink that can resolve to a member whose dev_t is not
+/// the superblock's — every repquota invocation then fails with
+/// ENODEV. The caller hands us the device that actually matches the
+/// mountpoint's st_dev, so the kernel lookup always succeeds.
+#[cfg(target_os = "linux")]
+fn read_project_quotas(device: &str) -> std::io::Result<HashMap<u32, ProjectQuotaInfo>> {
+    // struct if_nextdqblk from linux/quota.h.
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct IfNextDqblk {
+        dqb_bhardlimit: u64,
+        dqb_bsoftlimit: u64,
+        dqb_curspace: u64,
+        dqb_ihardlimit: u64,
+        dqb_isoftlimit: u64,
+        dqb_curinodes: u64,
+        dqb_btime: u64,
+        dqb_itime: u64,
+        dqb_valid: u32,
+        dqb_id: u32,
+    }
+    const Q_GETNEXTQUOTA: libc::c_int = 0x800009;
+    const PRJQUOTA: libc::c_int = 2;
+    let cmd = (Q_GETNEXTQUOTA << 8) | PRJQUOTA;
+
+    let cdev = std::ffi::CString::new(device)
+        .map_err(|_| std::io::Error::other("device path contains NUL"))?;
+    let mut out = HashMap::new();
+    let mut id: u32 = 0;
+    // Bounded: each iteration returns the next *allocated* quota entry,
+    // so this only loops once per project that actually exists. The cap
+    // is a runaway guard, far above any real subvolume count.
+    for _ in 0..100_000 {
+        let mut blk = IfNextDqblk::default();
+        let rc = unsafe {
+            libc::quotactl(
+                cmd,
+                cdev.as_ptr(),
+                id as libc::c_int,
+                &mut blk as *mut IfNextDqblk as *mut libc::c_char,
+            )
+        };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            // ENOENT/ESRCH: no further entries — normal loop end (also
+            // the "no quotas at all" case on the first call).
+            match err.raw_os_error() {
+                Some(libc::ENOENT) | Some(libc::ESRCH) => break,
+                _ => return Err(err),
+            }
+        }
+        if blk.dqb_id > 0 {
+            out.insert(
+                blk.dqb_id,
+                project_quota_info(blk.dqb_curspace, blk.dqb_bhardlimit),
+            );
+        }
+        id = match blk.dqb_id.checked_add(1) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    Ok(out)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_project_quotas(_device: &str) -> std::io::Result<HashMap<u32, ProjectQuotaInfo>> {
+    Ok(HashMap::new())
+}
+
 /// Query project quota usage for all projects on a filesystem in one shot.
 /// Returns a map of project_id → (used, hard limit).
-/// Falls back to empty map if repquota is unavailable or fails.
+/// Falls back to empty map if quota information is unavailable.
 async fn query_project_usages(mount_point: &str) -> HashMap<u32, ProjectQuotaInfo> {
-    let mut usages = HashMap::new();
+    use std::os::unix::fs::MetadataExt;
 
-    // repquota -P --raw-grace outputs KB values with numeric project IDs when using -n
-    let output = match cmd::run_ok("repquota", &["-P", "--raw-grace", "-n", mount_point]).await {
-        Ok(o) => o,
+    // The device quotactl needs is the one backing the mountpoint's
+    // st_dev — NOT the /proc/mounts source string (see
+    // read_project_quotas). /sys/dev/block maps dev_t → kernel name.
+    let dev = match tokio::fs::metadata(mount_point).await {
+        Ok(m) => m.dev(),
         Err(e) => {
-            warn!("repquota failed on {mount_point}: {e}");
-            return usages;
+            warn!("quota query: stat {mount_point} failed: {e}");
+            return HashMap::new();
         }
     };
+    let Some(device) = block_device_for_dev(std::path::Path::new("/sys/dev/block"), dev) else {
+        warn!("quota query: no block device found for {mount_point} (dev_t {dev})");
+        return HashMap::new();
+    };
 
-    // Parse lines like: "#1689127545 -- 125486988 1073741824000 1073741824000 0 78 0 0 0"
-    // Fields: project_name status used_kb soft_kb hard_kb grace files_used files_soft files_hard files_grace
-    for line in output.lines() {
-        let line = line.trim();
-        if !line.starts_with('#') {
-            continue;
+    match read_project_quotas(&device) {
+        Ok(usages) => usages,
+        Err(e) => {
+            warn!("quota query via quotactl failed on {mount_point} ({device}): {e}");
+            HashMap::new()
         }
-        let id_str = &line[1..]; // strip '#'
-        let mut parts = id_str.split_whitespace();
-        let projid: u32 = match parts.next().and_then(|s| s.parse().ok()) {
-            Some(id) if id > 0 => id,
-            _ => continue,
-        };
-        let _status = parts.next(); // "--" or "+-" etc
-        let used_kb: u64 = match parts.next().and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        let _soft_kb = parts.next();
-        let hard_kb: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        usages.insert(
-            projid,
-            ProjectQuotaInfo {
-                used_bytes: used_kb * 1024,
-                hard_bytes: hard_kb * 1024,
-            },
-        );
     }
-
-    usages
 }
 
 /// Build a map of canonical backing-file path → loop device name.
@@ -2223,6 +2314,57 @@ async fn materialize_subvol_from_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── project quota via quotactl (bcachefs ≥ 1.38.8, #623) ──────
+    //
+    // repquota resolves the /proc/mounts source string, which for
+    // 1.38.8 multi-device filesystems is a by-uuid symlink that can
+    // point at a member whose dev_t differs from the superblock's —
+    // quotactl(ENODEV) with no repquota invocation that works. The
+    // engine now calls quotactl directly against the device that
+    // matches the mountpoint's st_dev; these pin the pure pieces.
+
+    #[test]
+    fn split_dev_t_matches_linux_encoding() {
+        // 8:16 (/dev/sdb) — the classic low-bits layout.
+        assert_eq!(split_dev_t(0x810), (8, 16));
+        // 259:5 — nvme partition majors live in the 12-bit field.
+        assert_eq!(split_dev_t(0x10305), (259, 5));
+        // minor > 255 spills into the high minor bits (bits 20+).
+        assert_eq!(split_dev_t((0x100 << 12) | (8 << 8)), (8, 256));
+    }
+
+    #[test]
+    fn block_device_resolves_via_sys_dev_block_symlink() {
+        let base = std::env::temp_dir().join(format!("nasty-devblk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::os::unix::fs::symlink(
+            "../../devices/pci0000:00/0000:00:1f.2/host1/block/sdb",
+            base.join("8:16"),
+        )
+        .unwrap();
+        assert_eq!(
+            block_device_for_dev(&base, 0x810).as_deref(),
+            Some("/dev/sdb")
+        );
+        assert_eq!(
+            block_device_for_dev(&base, 0x830),
+            None,
+            "unknown dev_t yields None"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn project_quota_info_uses_bytes_for_usage_and_1k_blocks_for_limit() {
+        // quotactl reports curspace in bytes but limits in 1KiB blocks
+        // (QIF_DQBLKSIZE) — the same split repquota's KB output had.
+        let info = project_quota_info(125_486_988 * 1024, 1_048_576_000);
+        assert_eq!(info.used_bytes, 125_486_988 * 1024);
+        assert_eq!(info.hard_bytes, 1_048_576_000 * 1024);
+        // 0 = "no limit", preserved as 0 (existing convention).
+        assert_eq!(project_quota_info(42, 0).hard_bytes, 0);
+    }
 
     #[test]
     fn validate_subvolume_name_accepts_typical_names() {

@@ -568,6 +568,8 @@ mod tests {
 
     fn ethernet_profile(id: &str) -> NmConnection {
         NmConnection {
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
             id: id.into(),
             uuid: format!("uuid-for-{id}"),
             conn_type: NmConnectionType::Ethernet,

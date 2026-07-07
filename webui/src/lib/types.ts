@@ -278,6 +278,26 @@ export interface UsbDevice {
  * Granularity: vendor:device, not BDF, so the binding survives slot
  * moves. Caveat: marking a (vendor, device) pair claims **all**
  * matching devices. */
+/** One RDMA device from /sys/class/infiniband (`system.rdma.status`). */
+export interface RdmaDevice {
+	name: string;
+	/** "InfiniBand" | "Ethernet" (RoCE / soft-RoCE). */
+	link_layer: string;
+	netdevs: string[];
+}
+
+/** RDMA capability + opt-in state from `system.rdma.status`. */
+export interface RdmaStatus {
+	enabled: boolean;
+	capable: boolean;
+	devices: RdmaDevice[];
+	ib_isert_available: boolean;
+	nvmet_rdma_available: boolean;
+	nfs_rdma_available: boolean;
+	nfs_rdma_active: boolean;
+	blocker?: string | null;
+}
+
 export interface PassthroughDeviceId {
 	vendor: string;
 	device: string;
@@ -647,6 +667,8 @@ export interface IscsiTarget {
 export interface Portal {
 	ip: string;
 	port: number;
+	/** iSER (iSCSI over RDMA) portal. */
+	iser?: boolean;
 }
 
 export interface Lun {
@@ -1153,6 +1175,23 @@ export interface InterfaceConfig {
 	ipv4: IpConfig;
 	ipv6: IpConfig;
 	mtu: number | null;
+	/** SR-IOV: VFs to create on this PF (absent = leave alone). */
+	sriov_num_vfs?: number | null;
+	/** SR-IOV: per-VF properties, applied alongside the VF count. */
+	vfs?: VfConfig[];
+}
+
+/** Per-VF properties on an SR-IOV PF (`ip link set <pf> vf <n> ...`). */
+export interface VfConfig {
+	index: number;
+	/** 802.1Q VLAN (1–4094); absent = untagged. */
+	vlan?: number | null;
+	/** Administrative MAC. */
+	mac?: string | null;
+	/** VF trust (promiscuous mode / MAC changes from the guest). */
+	trust?: boolean | null;
+	/** Spoof checking. */
+	spoof_check?: boolean | null;
 }
 
 export type BondMode = 'lacp' | 'active_backup' | 'balance_rr' | 'balance_xor';
@@ -1212,6 +1251,14 @@ export interface LiveInterface {
 	ipv6_addresses: string[];
 	mtu: number;
 	kind: string;
+	/** SR-IOV PF: maximum VFs the device supports. */
+	sriov_total_vfs?: number | null;
+	/** SR-IOV PF: currently-created VF count. */
+	sriov_num_vfs?: number | null;
+	/** SR-IOV VF: parent PF's interface name. */
+	vf_of?: string | null;
+	/** SR-IOV VF: index within the parent. */
+	vf_index?: number | null;
 }
 
 export interface NetworkState {
@@ -1559,6 +1606,8 @@ export interface PciDevice {
 	description: string;
 	iommu_group: number;
 	bound_to_vfio: boolean;
+	/** SR-IOV virtual function (has a physfn parent). */
+	virtual_function?: boolean;
 }
 
 // ── Apps ────────────────────────────────────────────────────
