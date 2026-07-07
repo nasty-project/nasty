@@ -2050,26 +2050,6 @@ pub(crate) struct ProjectQuotaInfo {
     pub hard_bytes: u64,
 }
 
-/// Split a Linux `dev_t` into (major, minor) — glibc's bit layout:
-/// 12-bit major at bits 8–19 (high part at 32+), 8-bit minor low with
-/// the high part at bits 20+.
-fn split_dev_t(dev: u64) -> (u32, u32) {
-    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff_u64);
-    let minor = (dev & 0xff) | ((dev >> 12) & !0xff_u64);
-    (major as u32, minor as u32)
-}
-
-/// Resolve a `dev_t` to its `/dev/<name>` block device via the
-/// kernel's `<base>/<major>:<minor>` symlinks (base is
-/// `/sys/dev/block` in production). The symlink target's basename is
-/// the kernel device name.
-fn block_device_for_dev(base: &std::path::Path, dev: u64) -> Option<String> {
-    let (major, minor) = split_dev_t(dev);
-    let target = std::fs::read_link(base.join(format!("{major}:{minor}"))).ok()?;
-    let name = target.file_name()?.to_str()?;
-    Some(format!("/dev/{name}"))
-}
-
 /// Convert quotactl block-quota fields to [`ProjectQuotaInfo`]:
 /// `dqb_curspace` is in bytes, `dqb_bhardlimit` in 1KiB blocks
 /// (QIF_DQBLKSIZE). `0` stays `0` — the "no limit" convention shared
@@ -2083,17 +2063,21 @@ fn project_quota_info(curspace_bytes: u64, bhardlimit_blocks: u64) -> ProjectQuo
     }
 }
 
-/// Enumerate all project quotas on `device` via Q_GETNEXTQUOTA.
+/// Enumerate all project quotas on the filesystem at `mount_point`
+/// via `quotactl_fd(2)` + Q_GETNEXTQUOTA.
 ///
-/// Direct quotactl instead of shelling to repquota: quota-tools
-/// resolves the /proc/mounts *source string* to pick its quotactl
-/// device, and bcachefs ≥ 1.38.8 reports multi-device filesystems as
-/// a by-uuid symlink that can resolve to a member whose dev_t is not
-/// the superblock's — every repquota invocation then fails with
-/// ENODEV. The caller hands us the device that actually matches the
-/// mountpoint's st_dev, so the kernel lookup always succeeds.
+/// fd-based instead of shelling to repquota or resolving a device
+/// path: on multi-device bcachefs there is exactly one `sb->s_dev`
+/// but N member paths, and every path-based resolution can pick the
+/// wrong one — quota-tools resolves the /proc/mounts source string
+/// (a by-uuid symlink since 1.38.8, pointing at an arbitrary member),
+/// and even the mountpoint's own st_dev dangles after the primary
+/// member is removed (koverstreet/bcachefs#1106). An fd on the
+/// mountpoint identifies the superblock directly, immune to both.
+/// quotactl_fd needs Linux ≥ 5.14; bcachefs itself needs ≥ 6.16.
 #[cfg(target_os = "linux")]
-fn read_project_quotas(device: &str) -> std::io::Result<HashMap<u32, ProjectQuotaInfo>> {
+fn read_project_quotas(mount_point: &str) -> std::io::Result<HashMap<u32, ProjectQuotaInfo>> {
+    use std::os::fd::AsRawFd;
     // struct if_nextdqblk from linux/quota.h.
     #[repr(C)]
     #[derive(Default, Clone, Copy)]
@@ -2113,8 +2097,8 @@ fn read_project_quotas(device: &str) -> std::io::Result<HashMap<u32, ProjectQuot
     const PRJQUOTA: libc::c_int = 2;
     let cmd = (Q_GETNEXTQUOTA << 8) | PRJQUOTA;
 
-    let cdev = std::ffi::CString::new(device)
-        .map_err(|_| std::io::Error::other("device path contains NUL"))?;
+    let dir = std::fs::File::open(mount_point)?;
+    let fd = dir.as_raw_fd();
     let mut out = HashMap::new();
     let mut id: u32 = 0;
     // Bounded: each iteration returns the next *allocated* quota entry,
@@ -2123,9 +2107,10 @@ fn read_project_quotas(device: &str) -> std::io::Result<HashMap<u32, ProjectQuot
     for _ in 0..100_000 {
         let mut blk = IfNextDqblk::default();
         let rc = unsafe {
-            libc::quotactl(
+            libc::syscall(
+                libc::SYS_quotactl_fd,
+                fd,
                 cmd,
-                cdev.as_ptr(),
                 id as libc::c_int,
                 &mut blk as *mut IfNextDqblk as *mut libc::c_char,
             )
@@ -2154,7 +2139,7 @@ fn read_project_quotas(device: &str) -> std::io::Result<HashMap<u32, ProjectQuot
 }
 
 #[cfg(not(target_os = "linux"))]
-fn read_project_quotas(_device: &str) -> std::io::Result<HashMap<u32, ProjectQuotaInfo>> {
+fn read_project_quotas(_mount_point: &str) -> std::io::Result<HashMap<u32, ProjectQuotaInfo>> {
     Ok(HashMap::new())
 }
 
@@ -2162,27 +2147,10 @@ fn read_project_quotas(_device: &str) -> std::io::Result<HashMap<u32, ProjectQuo
 /// Returns a map of project_id → (used, hard limit).
 /// Falls back to empty map if quota information is unavailable.
 async fn query_project_usages(mount_point: &str) -> HashMap<u32, ProjectQuotaInfo> {
-    use std::os::unix::fs::MetadataExt;
-
-    // The device quotactl needs is the one backing the mountpoint's
-    // st_dev — NOT the /proc/mounts source string (see
-    // read_project_quotas). /sys/dev/block maps dev_t → kernel name.
-    let dev = match tokio::fs::metadata(mount_point).await {
-        Ok(m) => m.dev(),
-        Err(e) => {
-            warn!("quota query: stat {mount_point} failed: {e}");
-            return HashMap::new();
-        }
-    };
-    let Some(device) = block_device_for_dev(std::path::Path::new("/sys/dev/block"), dev) else {
-        warn!("quota query: no block device found for {mount_point} (dev_t {dev})");
-        return HashMap::new();
-    };
-
-    match read_project_quotas(&device) {
+    match read_project_quotas(mount_point) {
         Ok(usages) => usages,
         Err(e) => {
-            warn!("quota query via quotactl failed on {mount_point} ({device}): {e}");
+            warn!("quota query via quotactl_fd failed on {mount_point}: {e}");
             HashMap::new()
         }
     }
@@ -2315,45 +2283,15 @@ async fn materialize_subvol_from_snapshot(
 mod tests {
     use super::*;
 
-    // ── project quota via quotactl (bcachefs ≥ 1.38.8, #623) ──────
+    // ── project quota via quotactl_fd (bcachefs ≥ 1.38.8, #623) ───
     //
     // repquota resolves the /proc/mounts source string, which for
     // 1.38.8 multi-device filesystems is a by-uuid symlink that can
     // point at a member whose dev_t differs from the superblock's —
     // quotactl(ENODEV) with no repquota invocation that works. The
-    // engine now calls quotactl directly against the device that
-    // matches the mountpoint's st_dev; these pin the pure pieces.
-
-    #[test]
-    fn split_dev_t_matches_linux_encoding() {
-        // 8:16 (/dev/sdb) — the classic low-bits layout.
-        assert_eq!(split_dev_t(0x810), (8, 16));
-        // 259:5 — nvme partition majors live in the 12-bit field.
-        assert_eq!(split_dev_t(0x10305), (259, 5));
-        // minor > 255 spills into the high minor bits (bits 20+).
-        assert_eq!(split_dev_t((0x100 << 12) | (8 << 8)), (8, 256));
-    }
-
-    #[test]
-    fn block_device_resolves_via_sys_dev_block_symlink() {
-        let base = std::env::temp_dir().join(format!("nasty-devblk-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&base).unwrap();
-        std::os::unix::fs::symlink(
-            "../../devices/pci0000:00/0000:00:1f.2/host1/block/sdb",
-            base.join("8:16"),
-        )
-        .unwrap();
-        assert_eq!(
-            block_device_for_dev(&base, 0x810).as_deref(),
-            Some("/dev/sdb")
-        );
-        assert_eq!(
-            block_device_for_dev(&base, 0x830),
-            None,
-            "unknown dev_t yields None"
-        );
-        std::fs::remove_dir_all(&base).ok();
-    }
+    // engine now calls quotactl_fd(2) with an fd on the mountpoint,
+    // which is also immune to the removed-primary-member dangling
+    // s_dev of koverstreet/bcachefs#1106.
 
     #[test]
     fn project_quota_info_uses_bytes_for_usage_and_1k_blocks_for_limit() {
