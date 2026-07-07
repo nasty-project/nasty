@@ -5,10 +5,10 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
     # ── bcachefs override (optional) ──────────────────────────────
-    # Pinned to v1.38.6 release tag.
+    # Pinned to v1.38.8 release tag.
     # To revert to pure nixpkgs: comment out these two lines.
     # No other changes needed — bcachefs.nix defaults to pkgs.bcachefs-tools.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.6";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.8";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
     # ── lanzaboote (Secure Boot for NixOS) ─────────────────────────
@@ -191,6 +191,11 @@
         # Nixpkgs' base derivation hasn't picked this up yet, so we add it
         # to buildInputs here so the override builds against the new release.
         buildInputs = (old.buildInputs or []) ++ [ pkgs.libunwind ];
+        # v1.38.8 drives the `bindgen` CLI from fs/build.rs (codegen.rs
+        # execs $BINDGEN, default "bindgen") instead of using bindgen as
+        # a build-dependency library. rust-bindgen is the wrapped binary
+        # with its libclang plumbing included.
+        nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ pkgs.rust-bindgen ];
       });
     in base.overrideAttrs (old: {
       passthru = old.passthru // {
@@ -199,12 +204,13 @@
         kernelModule = { lib, stdenv, kernelModuleMakeFlags, kernel }:
           (old.passthru.kernelModule { inherit lib stdenv kernelModuleMakeFlags kernel; }).overrideAttrs (kOld: {
             postPatch = (kOld.postPatch or "") + ''
-              # ccflags-y in the top-level Makefile only covers objects built
-              # there.  The actual compilation happens in src/fs/bcachefs/,
-              # so we patch that subdir's Makefile, inside the BCACHEFS_DKMS
-              # block where CONFIG_BCACHEFS_FS is already set.
-              sed -i 's|# Enable other features here?|# Enable other features here?\n\tCONFIG_BCACHEFS_QUOTA := y\n\tccflags-y += -DCONFIG_BCACHEFS_QUOTA|' \
-                src/fs/bcachefs/Makefile
+              # Quota needs no patching since v1.38.8: fs/Makefile enables
+              # CONFIG_BCACHEFS_QUOTA for DKMS builds whenever the host
+              # kernel has CONFIG_QUOTA (NixOS kernels do), routed through
+              # bcachefs-config-cppflags so the C compile and bindgen agree
+              # on struct layout. Any future config injection here must use
+              # that variable too — a bare `ccflags-y +=` diverges from
+              # bindgen and corrupts memory silently (see fs/Makefile).
               # @NASTY_DEBUG_CHECKS_LINE@
             '';
           });
