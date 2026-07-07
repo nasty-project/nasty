@@ -1,4 +1,5 @@
 pub mod alerts;
+pub mod domain;
 pub mod firewall;
 pub mod firmware;
 pub mod guest_tools;
