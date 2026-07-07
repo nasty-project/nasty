@@ -113,6 +113,58 @@ pub fn validate_idmap_base(base: u32) -> Result<(), DomainError> {
     Ok(())
 }
 
+/// Path to the Samba ADS configuration fragment.
+pub const DOMAIN_SMB_CONF_PATH: &str = "/etc/samba/nasty-domain.conf";
+
+/// Path to the Kerberos configuration.
+pub const KRB5_CONF_PATH: &str = "/etc/samba/nasty-krb5.conf";
+
+/// Render the `[global]`-scope Samba configuration block for Active Directory.
+///
+/// Produces configuration suitable for `/etc/samba/nasty-domain.conf`.
+/// Realm and workgroup are safe to interpolate — `validate_realm` guarantees
+/// they contain no shell/config-injection characters before a `DomainConfig` can exist.
+pub fn render_domain_smb_conf(cfg: &DomainConfig) -> String {
+    let base = cfg.idmap_base;
+    let end = base + IDMAP_RANGE_SPAN - 1;
+    format!(
+        "# Managed by NASty — Active Directory member configuration.\n\
+         # Rendered at domain join; emptied at leave. Do not edit manually.\n\
+         security = ADS\n\
+         realm = {realm}\n\
+         workgroup = {wg}\n\
+         kerberos method = secrets and keytab\n\
+         winbind refresh tickets = yes\n\
+         winbind offline logon = yes\n\
+         winbind enum users = no\n\
+         winbind enum groups = no\n\
+         idmap config * : backend = tdb\n\
+         idmap config * : range = 65000-65535\n\
+         idmap config {wg} : backend = rid\n\
+         idmap config {wg} : range = {base}-{end}\n\
+         template shell = /run/current-system/sw/bin/nologin\n\
+         template homedir = /var/empty\n",
+        realm = cfg.realm,
+        wg = cfg.workgroup,
+    )
+}
+
+/// Render the Kerberos configuration.
+///
+/// Produces configuration suitable for `/etc/samba/nasty-krb5.conf`.
+/// Realm is safe to interpolate — `validate_realm` guarantees it contains
+/// no shell/config-injection characters.
+pub fn render_krb5_conf(realm: &str) -> String {
+    format!(
+        "# Managed by NASty — rendered at domain join.\n\
+         [libdefaults]\n\
+         \tdefault_realm = {realm}\n\
+         \tdns_lookup_realm = false\n\
+         \tdns_lookup_kdc = true\n\
+         \trdns = false\n",
+    )
+}
+
 /// Service for managing domain join state.
 pub struct DomainService;
 
@@ -256,5 +308,46 @@ mod tests {
             .await
             .expect("second clear: no panic"); // idempotent
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn render_domain_smb_conf_emits_ads_block() {
+        let cfg = DomainConfig {
+            realm: "CORP.EXAMPLE.COM".into(),
+            workgroup: "CORP".into(),
+            idmap_base: 100_000,
+        };
+        let conf = render_domain_smb_conf(&cfg);
+        assert!(conf.contains("security = ADS"), "{conf}");
+        assert!(conf.contains("realm = CORP.EXAMPLE.COM"), "{conf}");
+        assert!(conf.contains("workgroup = CORP"), "{conf}");
+        // Deterministic algorithmic mapping — same user, same UID, forever.
+        assert!(conf.contains("idmap config CORP : backend = rid"), "{conf}");
+        assert!(
+            conf.contains("idmap config CORP : range = 100000-999999"),
+            "{conf}"
+        );
+        // The default (*) range must not overlap the domain range.
+        assert!(
+            conf.contains("idmap config * : range = 65000-65535"),
+            "{conf}"
+        );
+        // DC outage tolerance for recently-seen users.
+        assert!(conf.contains("winbind offline logon = yes"), "{conf}");
+        // Explicit namespaces — never ambiguous with local users.
+        assert!(!conf.contains("winbind use default domain"), "{conf}");
+        assert!(
+            conf.contains("kerberos method = secrets and keytab"),
+            "{conf}"
+        );
+    }
+
+    #[test]
+    fn render_krb5_conf_pins_realm_and_dns_lookup() {
+        let conf = render_krb5_conf("CORP.EXAMPLE.COM");
+        assert!(conf.contains("default_realm = CORP.EXAMPLE.COM"), "{conf}");
+        // DCs are found via DNS SRV — no static kdc lines to go stale.
+        assert!(conf.contains("dns_lookup_kdc = true"), "{conf}");
+        assert!(conf.contains("rdns = false"), "{conf}");
     }
 }
