@@ -471,23 +471,41 @@ async fn remove_share_conf(id: &str) {
 async fn rebuild_include_list() -> Result<(), SmbError> {
     tokio::fs::create_dir_all(NASTY_SMB_SHARE_DIR).await?;
 
+    let mut share_conf_names = Vec::new();
+    let mut dir = tokio::fs::read_dir(NASTY_SMB_SHARE_DIR).await?;
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy().into_owned();
+        if name.ends_with(".conf") {
+            share_conf_names.push(name);
+        }
+    }
+
+    let includes = render_include_list(&share_conf_names);
+    tokio::fs::write(NASTY_SMB_CONF_PATH, &includes).await?;
+    Ok(())
+}
+
+/// Build the contents of `smb.nasty.conf`: header comment, engine-managed
+/// global includes (domain, tuning), then one `include =` line per per-share
+/// config file name. Pure so it's testable without a filesystem.
+fn render_include_list(share_conf_names: &[String]) -> String {
     let mut includes = String::from("# Managed by NASty — do not edit manually\n");
     includes.push_str("# Per-share configs in /etc/samba/nasty.d/\n\n");
+
+    // Domain (AD member) global parameters. The file exists on every box
+    // (tmpfiles) and is empty until a join renders the ADS block into it,
+    // so unjoined boxes get byte-identical effective config.
+    includes.push_str("include = /etc/samba/nasty-domain.conf\n\n");
 
     // Include engine-managed performance tuning (thread counts, timeouts, etc)
     includes.push_str("include = /etc/samba/nasty-tuning.conf\n\n");
 
-    let mut dir = tokio::fs::read_dir(NASTY_SMB_SHARE_DIR).await?;
-    while let Ok(Some(entry)) = dir.next_entry().await {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.ends_with(".conf") {
-            includes.push_str(&format!("include = {NASTY_SMB_SHARE_DIR}/{name}\n"));
-        }
+    for name in share_conf_names {
+        includes.push_str(&format!("include = {NASTY_SMB_SHARE_DIR}/{name}\n"));
     }
 
-    tokio::fs::write(NASTY_SMB_CONF_PATH, &includes).await?;
-    Ok(())
+    includes
 }
 
 /// Path to the per-share SMB config file.
@@ -1117,6 +1135,27 @@ mod tests {
         assert!(alpha_pos < middle_pos && middle_pos < zeta_pos);
         // Injection chars in the value got stripped.
         assert!(out.contains("    middle = vinjectedx\n"));
+    }
+
+    // ── render_include_list ──────────────────────────────────────────
+
+    #[test]
+    fn include_list_puts_domain_conf_first() {
+        let rendered = render_include_list(&["abc.conf".to_string()]);
+        let domain_pos = rendered
+            .find("include = /etc/samba/nasty-domain.conf")
+            .expect("domain include present");
+        let tuning_pos = rendered
+            .find("include = /etc/samba/nasty-tuning.conf")
+            .unwrap();
+        let share_pos = rendered
+            .find("include = /etc/samba/nasty.d/abc.conf")
+            .unwrap();
+        // Global-scope ADS params must land before any share section opens.
+        assert!(
+            domain_pos < tuning_pos && tuning_pos < share_pos,
+            "{rendered}"
+        );
     }
 
     // ── Time Machine ───────────────────────────────────────────────────
