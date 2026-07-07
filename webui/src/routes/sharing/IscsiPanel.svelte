@@ -20,6 +20,7 @@
 		iscsiAddAcl,
 		iscsiRemoveAcl,
 		iscsiAddPortal,
+		iscsiReplacePortal,
 		iscsiRemovePortal,
 		iscsiLoadSubvolumes,
 	} from '$lib/sharing/iscsi.svelte';
@@ -56,6 +57,27 @@
 		if (!iscsi.addPortalIp || addPortalIpError) { addPortalTried = true; return; }
 		addPortalTried = false;
 		await iscsiAddPortal();
+	}
+	async function iscsiReplacePortalGuarded() {
+		if (!iscsi.addPortalIp || addPortalIpError) { addPortalTried = true; return; }
+		addPortalTried = false;
+		await iscsiReplacePortal();
+	}
+	function startEditPortal(targetId: string, p: { ip: string; port: number; iser?: boolean }) {
+		iscsi.addPortalTarget = '';
+		iscsi.editPortalTarget = targetId;
+		iscsi.editPortalOrigIp = p.ip;
+		iscsi.editPortalOrigPort = p.port;
+		iscsi.addPortalIp = p.ip;
+		iscsi.addPortalPort = p.port;
+		iscsi.addPortalIser = p.iser ?? false;
+		iscsi.addPortalFamily = p.ip.includes(':') ? 'ipv6' : 'ipv4';
+		addPortalTried = false;
+	}
+	function cancelPortalForm() {
+		iscsi.addPortalTarget = '';
+		iscsi.editPortalTarget = '';
+		addPortalTried = false;
 	}
 
 	const iscsiFiltered = $derived(
@@ -153,6 +175,7 @@
 												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
 													<span class="font-mono text-xs">{p.ip.includes(':') && p.ip !== '0.0.0.0' ? `[${p.ip}]` : p.ip}:{p.port}</span>
 													{#if p.iser}<Badge variant="secondary" class="text-[0.6rem]">iSER</Badge>{/if}
+													<Button variant="outline" size="xs" onclick={() => startEditPortal(target.id, p)}>Edit</Button>
 													{#if target.portals.length > 1}
 														<Button variant="destructive" size="xs" onclick={() => iscsiRemovePortal(target.id, p.ip, p.port)}>Remove</Button>
 													{/if}
@@ -160,7 +183,7 @@
 											{/each}
 										</div>
 									{/if}
-									{#if iscsi.addPortalTarget === target.id}
+									{#if iscsi.addPortalTarget === target.id || iscsi.editPortalTarget === target.id}
 										<div class="mt-3 rounded border p-3">
 											<ListenAddressPicker
 												bind:address={iscsi.addPortalIp}
@@ -182,15 +205,19 @@
 													<Label class="text-xs">Port</Label>
 													<Input type="number" bind:value={iscsi.addPortalPort} class="mt-1 h-8 w-24 text-xs" />
 												</div>
-												<Button size="xs" onclick={iscsiAddPortalGuarded}>Add</Button>
-												<Button size="xs" variant="ghost" onclick={() => { iscsi.addPortalTarget = ''; addPortalTried = false; }}>Cancel</Button>
+												{#if iscsi.editPortalTarget === target.id}
+													<Button size="xs" onclick={iscsiReplacePortalGuarded}>Save</Button>
+												{:else}
+													<Button size="xs" onclick={iscsiAddPortalGuarded}>Add</Button>
+												{/if}
+												<Button size="xs" variant="ghost" onclick={cancelPortalForm}>Cancel</Button>
 											</div>
 											{#if !iscsi.addPortalIp && addPortalTried}
 												<p class="mt-1 text-[0.7rem] text-amber-500">Listen address is required.</p>
 											{/if}
 										</div>
 									{:else}
-										<Button size="xs" variant="outline" class="mt-2" onclick={() => { iscsi.addPortalTarget = target.id; iscsi.addPortalIp = ''; iscsi.addPortalPort = 3260; iscsi.addPortalFamily = 'ipv4'; iscsi.addPortalIser = false; }}>+ Add Portal</Button>
+										<Button size="xs" variant="outline" class="mt-2" onclick={() => { iscsi.editPortalTarget = ''; iscsi.addPortalTarget = target.id; iscsi.addPortalIp = ''; iscsi.addPortalPort = 3260; iscsi.addPortalFamily = 'ipv4'; iscsi.addPortalIser = false; }}>+ Add Portal</Button>
 									{/if}
 								</div>
 

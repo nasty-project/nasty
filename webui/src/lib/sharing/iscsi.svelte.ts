@@ -34,6 +34,12 @@ export const iscsi = $state({
 	addPortalPort: 3260,
 	addPortalFamily: 'ipv4' as 'ipv4' | 'ipv6',
 	addPortalIser: false,
+	// Edit mode reuses the addPortal* form fields; these remember which
+	// portal is being replaced so set_portals can swap it in one call
+	// (same-port wildcard→specific swaps included).
+	editPortalTarget: '',
+	editPortalOrigIp: '',
+	editPortalOrigPort: 0,
 	search: '',
 	sortDir: 'asc' as 'asc' | 'desc',
 });
@@ -139,6 +145,35 @@ export async function iscsiAddPortal() {
 	);
 	if (ok !== undefined) {
 		iscsi.addPortalTarget = '';
+		iscsi.addPortalIp = '';
+		iscsi.addPortalIser = false;
+		iscsi.addPortalPort = 3260;
+		iscsi.addPortalFamily = 'ipv4';
+		await iscsiRefresh();
+	}
+}
+
+/** Replace the portal being edited with the form values via
+ *  share.iscsi.set_portals. The engine plans the transition, so
+ *  swapping the wildcard portal for a specific address on the same
+ *  port works directly — the old add-then-remove dance through a
+ *  temporary port is gone (#602). */
+export async function iscsiReplacePortal() {
+	const target = iscsi.targets.find(t => t.id === iscsi.editPortalTarget);
+	if (!target || !iscsi.addPortalIp) return;
+	const portals = target.portals.map(p =>
+		p.ip === iscsi.editPortalOrigIp && p.port === iscsi.editPortalOrigPort
+			? { ip: iscsi.addPortalIp.trim(), port: iscsi.addPortalPort, iser: iscsi.addPortalIser }
+			: { ip: p.ip, port: p.port, iser: p.iser ?? false }
+	);
+	const ok = await withToast(
+		() => client.call('share.iscsi.set_portals', { target_id: iscsi.editPortalTarget, portals }),
+		'Portal updated',
+	);
+	if (ok !== undefined) {
+		iscsi.editPortalTarget = '';
+		iscsi.editPortalOrigIp = '';
+		iscsi.editPortalOrigPort = 0;
 		iscsi.addPortalIp = '';
 		iscsi.addPortalIser = false;
 		iscsi.addPortalPort = 3260;
