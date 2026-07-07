@@ -132,25 +132,48 @@ impl DomainService {
 
     /// Load domain configuration from disk if it exists.
     pub async fn load_config() -> Option<DomainConfig> {
-        match tokio::fs::read_to_string(CONFIG_PATH).await {
+        Self::load_config_at(Path::new(CONFIG_PATH)).await
+    }
+
+    /// Persist domain configuration to disk.
+    pub async fn save_config(config: &DomainConfig) -> Result<(), DomainError> {
+        Self::save_config_at(Path::new(CONFIG_PATH), config).await
+    }
+
+    /// Clear domain configuration (leave domain).
+    pub async fn clear_config() -> Result<(), DomainError> {
+        Self::clear_config_at(Path::new(CONFIG_PATH)).await
+    }
+
+    /// Load domain configuration from an arbitrary path if it exists.
+    ///
+    /// Absence of the file, or unparseable contents, both mean "not joined" —
+    /// this never panics on corrupt state.
+    pub(crate) async fn load_config_at(path: &Path) -> Option<DomainConfig> {
+        match tokio::fs::read_to_string(path).await {
             Ok(content) => serde_json::from_str(&content).ok(),
             Err(_) => None,
         }
     }
 
-    /// Persist domain configuration to disk.
-    pub async fn save_config(config: &DomainConfig) -> Result<(), DomainError> {
-        let dir = Path::new(CONFIG_PATH).parent().unwrap();
+    /// Persist domain configuration to an arbitrary path, creating parent dirs.
+    pub(crate) async fn save_config_at(
+        path: &Path,
+        config: &DomainConfig,
+    ) -> Result<(), DomainError> {
+        let dir = path.parent().unwrap();
         tokio::fs::create_dir_all(dir).await?;
         let json =
             serde_json::to_string(config).map_err(|e| DomainError::Io(std::io::Error::other(e)))?;
-        tokio::fs::write(CONFIG_PATH, json).await?;
+        tokio::fs::write(path, json).await?;
         Ok(())
     }
 
-    /// Clear domain configuration (leave domain).
-    pub async fn clear_config() -> Result<(), DomainError> {
-        match tokio::fs::remove_file(CONFIG_PATH).await {
+    /// Clear domain configuration at an arbitrary path (leave domain).
+    ///
+    /// Idempotent: clearing an already-absent config is not an error.
+    pub(crate) async fn clear_config_at(path: &Path) -> Result<(), DomainError> {
+        match tokio::fs::remove_file(path).await {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
@@ -199,5 +222,39 @@ mod tests {
         assert!(validate_idmap_base(65_535).is_err());
         assert!(validate_idmap_base(65_536).is_ok());
         assert!(validate_idmap_base(DEFAULT_IDMAP_BASE).is_ok());
+    }
+
+    #[tokio::test]
+    async fn config_round_trips_and_clear_means_not_joined() {
+        let dir = std::env::temp_dir().join(format!("nasty-domain-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.json");
+        // Absent file == not joined.
+        assert!(DomainService::load_config_at(&path).await.is_none());
+        let cfg = DomainConfig {
+            realm: "CORP.EXAMPLE.COM".into(),
+            workgroup: "CORP".into(),
+            idmap_base: 100_000,
+        };
+        // Save creates the parent dir and the file.
+        DomainService::save_config_at(&path, &cfg)
+            .await
+            .expect("save");
+        let loaded = DomainService::load_config_at(&path).await.expect("loaded");
+        assert_eq!(loaded.realm, "CORP.EXAMPLE.COM");
+        assert_eq!(loaded.workgroup, "CORP");
+        assert_eq!(loaded.idmap_base, 100_000);
+        // Corrupt JSON degrades to "not joined", never panics.
+        tokio::fs::write(&path, b"{not json").await.unwrap();
+        assert!(DomainService::load_config_at(&path).await.is_none());
+        // Clear is idempotent.
+        DomainService::save_config_at(&path, &cfg)
+            .await
+            .expect("save again");
+        DomainService::clear_config_at(&path).await.expect("clear");
+        assert!(DomainService::load_config_at(&path).await.is_none());
+        DomainService::clear_config_at(&path)
+            .await
+            .expect("second clear: no panic"); // idempotent
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
