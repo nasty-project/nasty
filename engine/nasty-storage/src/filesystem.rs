@@ -2220,16 +2220,21 @@ impl FilesystemService {
 
             // Read /proc/mounts to know which devices are *actually* mounted.
             // lsblk's mountpoint field can be stale after bcachefs device removal/wipe.
+            // bcachefs sources come in three shapes across module versions:
+            // a plain device, a colon-joined member list (< 1.38.8), or a
+            // single /dev/disk/by-uuid/<fs-uuid> (≥ 1.38.8 multi-device) that
+            // must be expanded to real members via sysfs.
             let mounted_devices: std::collections::HashSet<String> =
                 tokio::fs::read_to_string("/proc/mounts")
                     .await
                     .unwrap_or_default()
                     .lines()
                     .flat_map(|line| {
-                        // Each line: "device mountpoint fstype options ..."
-                        // bcachefs uses colon-separated multi-device: "/dev/sdb:/dev/sdc /fs/first ..."
                         let dev_field = line.split_whitespace().next().unwrap_or("");
-                        dev_field.split(':').map(String::from).collect::<Vec<_>>()
+                        resolve_mount_devices(
+                            dev_field.split(':').map(String::from).collect::<Vec<_>>(),
+                            std::path::Path::new(SYSFS_BCACHEFS),
+                        )
                     })
                     .collect();
 
@@ -4372,6 +4377,65 @@ fn parse_bcachefs_mount_line(line: &str) -> Option<ProcMountsBcachefs> {
     })
 }
 
+/// If the parsed mount source is the bcachefs ≥1.38.8 multi-device
+/// form — a single `/dev/disk/by-uuid/<fs-uuid>` entry — return the
+/// UUID. Older modules report the colon-joined member list instead,
+/// and single-device mounts a plain device path; both return None.
+fn by_uuid_source(devices: &[String]) -> Option<&str> {
+    match devices {
+        [only] => only.strip_prefix("/dev/disk/by-uuid/"),
+        _ => None,
+    }
+}
+
+/// Resolve a mounted filesystem's member devices from sysfs:
+/// `<base>/<uuid>/dev-N/block` symlinks point at the members' block
+/// device sysfs nodes, whose basename is the kernel device name.
+/// Returns None when the filesystem has no sysfs presence (not
+/// mounted, or gone by the time we look). Ordered by member index so
+/// output is stable across udev enumeration order.
+fn sysfs_fs_members(base: &std::path::Path, uuid: &str) -> Option<Vec<String>> {
+    let fs_dir = base.join(uuid);
+    let entries = std::fs::read_dir(&fs_dir).ok()?;
+    let mut members: Vec<(u32, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(idx) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("dev-"))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(target) = std::fs::read_link(entry.path().join("block")) else {
+            continue;
+        };
+        if let Some(dev_name) = target.file_name().and_then(|n| n.to_str()) {
+            members.push((idx, format!("/dev/{dev_name}")));
+        }
+    }
+    if members.is_empty() {
+        return None;
+    }
+    members.sort_by_key(|(idx, _)| *idx);
+    Some(members.into_iter().map(|(_, path)| path).collect())
+}
+
+/// Replace a by-uuid mount source with the real member list from
+/// sysfs. Colon-list and plain-device sources pass through untouched;
+/// a by-uuid source whose sysfs entry is missing (unmount race) also
+/// passes through — a stale-looking path beats claiming the
+/// filesystem has no mounted devices at all.
+fn resolve_mount_devices(devices: Vec<String>, sysfs_base: &std::path::Path) -> Vec<String> {
+    match by_uuid_source(&devices).and_then(|uuid| sysfs_fs_members(sysfs_base, uuid)) {
+        Some(members) => members,
+        None => devices,
+    }
+}
+
+/// Where the kernel exposes mounted bcachefs filesystems.
+const SYSFS_BCACHEFS: &str = "/sys/fs/bcachefs";
+
 /// Parse /proc/mounts for bcachefs entries.
 /// Returns map of mount_point -> list of devices.
 async fn read_bcachefs_mounts() -> Result<HashMap<String, Vec<String>>, FilesystemError> {
@@ -4381,7 +4445,12 @@ async fn read_bcachefs_mounts() -> Result<HashMap<String, Vec<String>>, Filesyst
     let mounts = content
         .lines()
         .filter_map(parse_bcachefs_mount_line)
-        .map(|m| (m.mount_point, m.devices))
+        .map(|m| {
+            (
+                m.mount_point,
+                resolve_mount_devices(m.devices, std::path::Path::new(SYSFS_BCACHEFS)),
+            )
+        })
         .collect();
     Ok(mounts)
 }
@@ -5989,6 +6058,89 @@ weird_future_op: ...
         assert!(parse_bcachefs_mount_line("").is_none());
         assert!(parse_bcachefs_mount_line("/dev/sda").is_none());
         assert!(parse_bcachefs_mount_line("/dev/sda /mnt").is_none());
+    }
+
+    // ── by-uuid mount source resolution (bcachefs ≥ 1.38.8) ───────
+    //
+    // The 1.38.8 kernel module's show_devname reports multi-device
+    // filesystems as `/dev/disk/by-uuid/<fs-uuid>` in /proc/mounts
+    // instead of the colon-joined member list. Splitting that on ':'
+    // yields a path that matches no member device, so the engine
+    // believed the filesystem wasn't mounted at all (the ".41 says
+    // filesystem is missing" report). Members must come from sysfs.
+
+    #[test]
+    fn by_uuid_source_detected_only_for_single_by_uuid_entry() {
+        assert_eq!(
+            by_uuid_source(&["/dev/disk/by-uuid/cf4eabd3-14a5-4bbb-87a6-d6f217cdfb47".into()]),
+            Some("cf4eabd3-14a5-4bbb-87a6-d6f217cdfb47")
+        );
+        assert_eq!(by_uuid_source(&["/dev/sda".into()]), None);
+        assert_eq!(
+            by_uuid_source(&["/dev/sdb".into(), "/dev/sdd".into()]),
+            None
+        );
+        assert_eq!(by_uuid_source(&[]), None);
+    }
+
+    /// Build a fake `/sys/fs/bcachefs/<uuid>/dev-N/block` tree under a
+    /// unique temp dir. Returns (base, uuid); caller removes base.
+    fn sysfs_fixture(members: &[(&str, &str)]) -> (std::path::PathBuf, String) {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let base = std::env::temp_dir().join(format!("nasty-sysfs-{}", uuid::Uuid::new_v4()));
+        let fs_dir = base.join(&uuid);
+        for (devdir, target) in members {
+            let d = fs_dir.join(devdir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::os::unix::fs::symlink(target, d.join("block")).unwrap();
+        }
+        (base, uuid)
+    }
+
+    #[test]
+    fn sysfs_members_resolve_block_symlink_basenames_in_index_order() {
+        let (base, uuid) = sysfs_fixture(&[
+            ("dev-1", "../../../devices/pci0000:00/host1/block/sdd"),
+            ("dev-0", "../../../devices/pci0000:00/host0/block/sdb"),
+            ("dev-10", "../../../devices/pci0000:00/host2/block/sde"),
+        ]);
+        let members = sysfs_fs_members(&base, &uuid).expect("members resolve");
+        assert_eq!(
+            members,
+            vec![
+                "/dev/sdb".to_string(),
+                "/dev/sdd".to_string(),
+                "/dev/sde".to_string()
+            ],
+            "sorted by member index, numerically (dev-10 after dev-1)"
+        );
+        assert!(
+            sysfs_fs_members(&base, "00000000-0000-0000-0000-000000000000").is_none(),
+            "unknown uuid (unmounted fs) yields None"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn resolve_mount_devices_swaps_by_uuid_source_for_sysfs_members() {
+        let (base, uuid) = sysfs_fixture(&[("dev-0", "../sdb"), ("dev-1", "../sdd")]);
+
+        let resolved = resolve_mount_devices(vec![format!("/dev/disk/by-uuid/{uuid}")], &base);
+        assert_eq!(
+            resolved,
+            vec!["/dev/sdb".to_string(), "/dev/sdd".to_string()]
+        );
+
+        // Old-format colon lists pass through untouched.
+        let raw = vec!["/dev/sdb".to_string(), "/dev/sdd".to_string()];
+        assert_eq!(resolve_mount_devices(raw.clone(), &base), raw);
+
+        // A by-uuid source whose sysfs entry is gone (fs racing an
+        // unmount) keeps the raw source rather than reporting nothing.
+        let ghost = vec!["/dev/disk/by-uuid/dead-beef".to_string()];
+        assert_eq!(resolve_mount_devices(ghost.clone(), &base), ghost);
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     // ── parse_bcachefs_opt ─────────────────────────────────────────
