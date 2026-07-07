@@ -3013,6 +3013,7 @@ dependencies = [
 name = "nasty-storage"
 version = "0.0.13"
 dependencies = [
+ "libc",
  "nasty-common",
  "schemars 1.2.1",
  "serde",
