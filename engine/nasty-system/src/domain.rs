@@ -371,6 +371,34 @@ async fn preflight(realm: &str) -> Result<Vec<String>, DomainError> {
     Ok(dcs)
 }
 
+/// Best-effort teardown of everything `join` may have touched, in
+/// reverse order. When `leave_ad` carries credentials, the machine
+/// account was already created — attempt a `net ads leave` so AD and
+/// local state don't diverge. Every step is best-effort: unwind runs
+/// on an already-failing path, and a secondary failure must not mask
+/// the original error (log it instead).
+async fn unwind_join_artifacts(leave_ad: Option<(&str, &str)>) {
+    if let Some((user, pass)) = leave_ad
+        && let Err(e) = run_cmd_stdin(
+            "net",
+            &["ads", "leave", "-U", user],
+            &[("KRB5_CONFIG", KRB5_CONF_PATH)],
+            pass,
+        )
+        .await
+    {
+        tracing::warn!(
+            "join unwind: net ads leave failed (stale computer account left in AD): {e}"
+        );
+    }
+    let _ = tokio::fs::write(DOMAIN_SMB_CONF_PATH, "").await;
+    let _ = tokio::fs::write(KRB5_CONF_PATH, "").await;
+    if tokio::fs::remove_file(RESOLVED_DROPIN_PATH).await.is_ok() {
+        let _ = systemctl("restart", "systemd-resolved.service").await;
+    }
+    let _ = systemctl("stop", "samba-winbindd.service").await;
+}
+
 /// Request to join an Active Directory domain.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JoinDomainRequest {
@@ -477,9 +505,11 @@ impl DomainService {
     /// render krb5/smb config → per-domain DNS routing to the discovered
     /// DCs → restart winbindd → `net ads join` (credential via stdin,
     /// used once, never persisted) → verify the trust with `wbinfo -t` →
-    /// best-effort AD DNS registration → persist state. Any failure prior
-    /// to persisting state rolls the rendered configs back and stops
-    /// winbindd, restoring the pre-join state.
+    /// best-effort AD DNS registration → persist state. Every fallible step
+    /// funnels through a single unwind path (`unwind_join_artifacts`) on
+    /// failure, restoring the pre-join state; once `net ads join` has
+    /// succeeded, unwind also attempts `net ads leave` (including on a
+    /// later `save_config` failure) so AD and local state don't diverge.
     pub async fn join(&self, req: JoinDomainRequest) -> Result<DomainStatus, DomainError> {
         if Self::load_config().await.is_some() {
             return Err(DomainError::AlreadyJoined);
@@ -493,105 +523,93 @@ impl DomainService {
             idmap_base,
         };
 
-        // Render krb5 first — preflight's `net ads info` reads it.
-        tokio::fs::write(KRB5_CONF_PATH, render_krb5_conf(&cfg.realm)).await?;
-        let dcs = match preflight(&cfg.realm).await {
-            Ok(dcs) => dcs,
-            Err(e) => {
-                let _ = tokio::fs::write(KRB5_CONF_PATH, "").await;
-                return Err(e);
+        let mut joined_in_ad = false;
+        let result: Result<(), DomainError> = async {
+            // Render krb5 first — preflight's `net ads info` reads it.
+            tokio::fs::write(KRB5_CONF_PATH, render_krb5_conf(&cfg.realm)).await?;
+            let dcs = preflight(&cfg.realm).await?;
+
+            // Per-domain DNS routing: AD-zone queries go to the DCs from here
+            // on (spec join-flow step 6). Resolve the discovered DC
+            // hostnames to IPs through the still-working current resolvers.
+            let mut dc_ips = Vec::new();
+            for dc in dcs.iter().take(3) {
+                if let Ok(out) = run_cmd("resolvectl", &["query", dc], &[]).await {
+                    dc_ips.extend(parse_resolvectl_addresses(&out));
+                }
             }
-        };
-
-        // Per-domain DNS routing: AD-zone queries go to the DCs from here on
-        // (spec join-flow step 6). Resolve the discovered DC hostnames to IPs
-        // through the still-working current resolvers.
-        let mut dc_ips = Vec::new();
-        for dc in dcs.iter().take(3) {
-            if let Ok(out) = run_cmd("resolvectl", &["query", dc], &[]).await {
-                dc_ips.extend(parse_resolvectl_addresses(&out));
-            }
-        }
-        if !dc_ips.is_empty() {
-            tokio::fs::create_dir_all("/etc/systemd/resolved.conf.d").await?;
-            tokio::fs::write(
-                RESOLVED_DROPIN_PATH,
-                render_resolved_dropin(&cfg.realm, &dc_ips),
-            )
-            .await?;
-            let _ = systemctl("restart", "systemd-resolved.service").await;
-        }
-
-        tokio::fs::write(DOMAIN_SMB_CONF_PATH, render_domain_smb_conf(&cfg)).await?;
-        systemctl("restart", "samba-winbindd.service")
-            .await
-            .map_err(DomainError::CommandFailed)?;
-
-        // Credential via stdin (`net ads join -U user` prompts on stdin when
-        // no %password is attached). NEVER put the password in argv.
-        let mut join_args = vec![
-            "ads",
-            "join",
-            "-U",
-            req.username.as_str(),
-            "--no-dns-updates",
-        ];
-        let ou_arg;
-        if let Some(ou) = &req.ou {
-            ou_arg = format!("createcomputer={ou}");
-            join_args.push(&ou_arg);
-        }
-        let join_out = run_cmd_stdin(
-            "net",
-            &join_args,
-            &[("KRB5_CONFIG", KRB5_CONF_PATH)],
-            &req.password,
-        )
-        .await;
-
-        match join_out {
-            Ok(_) => {}
-            Err(e) => {
-                // Roll back: empty the rendered configs, drop the DNS routing,
-                // stop winbindd.
-                let _ = tokio::fs::write(DOMAIN_SMB_CONF_PATH, "").await;
-                let _ = tokio::fs::write(KRB5_CONF_PATH, "").await;
-                let _ = tokio::fs::remove_file(RESOLVED_DROPIN_PATH).await;
+            if !dc_ips.is_empty() {
+                tokio::fs::create_dir_all("/etc/systemd/resolved.conf.d").await?;
+                tokio::fs::write(
+                    RESOLVED_DROPIN_PATH,
+                    render_resolved_dropin(&cfg.realm, &dc_ips),
+                )
+                .await?;
                 let _ = systemctl("restart", "systemd-resolved.service").await;
-                let _ = systemctl("stop", "samba-winbindd.service").await;
-                return Err(e);
             }
-        }
 
-        // Verify the trust before declaring success.
-        if let Err(e) = run_cmd("wbinfo", &["-t"], &[]).await {
-            let _ = run_cmd_stdin(
+            tokio::fs::write(DOMAIN_SMB_CONF_PATH, render_domain_smb_conf(&cfg)).await?;
+            systemctl("restart", "samba-winbindd.service")
+                .await
+                .map_err(DomainError::CommandFailed)?;
+
+            // Credential via stdin (`net ads join -U user` prompts on stdin
+            // when no %password is attached). NEVER put the password in argv.
+            let mut join_args = vec![
+                "ads",
+                "join",
+                "-U",
+                req.username.as_str(),
+                "--no-dns-updates",
+            ];
+            let ou_arg;
+            if let Some(ou) = &req.ou {
+                ou_arg = format!("createcomputer={ou}");
+                join_args.push(&ou_arg);
+            }
+            run_cmd_stdin(
                 "net",
-                &["ads", "leave", "-U", &req.username],
+                &join_args,
                 &[("KRB5_CONFIG", KRB5_CONF_PATH)],
                 &req.password,
             )
+            .await?;
+            // The machine account now exists in AD — from here on, any
+            // failure must attempt `net ads leave` during unwind.
+            joined_in_ad = true;
+
+            // Verify the trust before declaring success.
+            run_cmd("wbinfo", &["-t"], &[]).await.map_err(|e| {
+                DomainError::CommandFailed(format!(
+                    "joined but the trust check failed (wbinfo -t): {e}"
+                ))
+            })?;
+
+            // Register our A record in AD DNS (best-effort — some sites
+            // restrict it).
+            if let Err(e) = run_cmd(
+                "net",
+                &["ads", "dns", "register"],
+                &[("KRB5_CONFIG", KRB5_CONF_PATH)],
+            )
+            .await
+            {
+                tracing::warn!("AD DNS register failed (non-fatal): {e}");
+            }
+
+            Self::save_config(&cfg).await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            unwind_join_artifacts(
+                joined_in_ad.then_some((req.username.as_str(), req.password.as_str())),
+            )
             .await;
-            let _ = tokio::fs::write(DOMAIN_SMB_CONF_PATH, "").await;
-            let _ = tokio::fs::write(KRB5_CONF_PATH, "").await;
-            let _ = systemctl("stop", "samba-winbindd.service").await;
-            return Err(DomainError::CommandFailed(format!(
-                "joined but the trust check failed (wbinfo -t): {e}"
-            )));
+            return Err(e);
         }
 
-        // Register our A record in AD DNS (best-effort — some sites restrict it).
-        if let Err(e) = run_cmd(
-            "net",
-            &["ads", "dns", "register"],
-            &[("KRB5_CONFIG", KRB5_CONF_PATH)],
-        )
-        .await
-        {
-            tracing::warn!("AD DNS register failed (non-fatal): {e}");
-        }
-
-        Self::save_config(&cfg).await?;
         // smbd reloads pick up the ADS block via the include chain.
         let _ = run_cmd("smbcontrol", &["all", "reload-config"], &[]).await;
         tracing::info!(
