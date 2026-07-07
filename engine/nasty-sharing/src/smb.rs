@@ -444,10 +444,25 @@ fn render_share_conf(share: &SmbShare) -> String {
     }
 
     if !share.valid_users.is_empty() {
+        // smb.conf list parameters split on whitespace, so an unquoted
+        // entry containing a space (e.g. an AD group like `CORP\domain
+        // admins`) would be parsed as two separate tokens. Quote any
+        // entry with a space to preserve its boundary. This is safe from
+        // quote-injection because validate_valid_users already rejects
+        // '"' in entries at the API boundary, and sanitize_smb_value
+        // doesn't strip '"' — so a validated entry can't smuggle its own
+        // closing quote.
         let sanitized_users: Vec<String> = share
             .valid_users
             .iter()
-            .map(|u| sanitize_smb_value(u))
+            .map(|u| {
+                let s = sanitize_smb_value(u);
+                if s.contains(' ') {
+                    format!("\"{s}\"")
+                } else {
+                    s
+                }
+            })
             .collect();
         conf.push_str(&format!(
             "    valid users = {}\n",
@@ -1210,6 +1225,21 @@ mod tests {
         let out = render_share_conf(&share);
         assert!(!out.contains("force user"));
         assert!(out.contains("    valid users = @admins @users\n"));
+    }
+
+    #[test]
+    fn render_share_conf_quotes_spaced_valid_users_entries() {
+        // AD group names commonly contain spaces (`CORP\domain admins`).
+        // Unquoted, Samba splits the space-joined `valid users` list into
+        // two tokens — a broken group ref plus a bare `admins` that can
+        // match an unintended account. Quoting preserves entry boundaries.
+        let mut share = minimal_share();
+        share.valid_users = vec!["@CORP\\domain admins".to_string(), "alice".to_string()];
+        let conf = render_share_conf(&share);
+        assert!(
+            conf.contains("valid users = \"@CORP\\domain admins\" alice"),
+            "{conf}"
+        );
     }
 
     #[test]
