@@ -332,6 +332,25 @@ async fn run_cmd_stdin(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Filter principals by prefix of the account name (case-insensitive),
+/// respecting a limit. The input is the raw output of `wbinfo -u` or `wbinfo -g`.
+fn filter_principals(raw: &str, prefix: &str, limit: usize) -> Vec<DomainPrincipal> {
+    let prefix = prefix.to_lowercase();
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            l.rsplit_once('\\')
+                .map(|(_, account)| account.to_lowercase().starts_with(&prefix))
+                .unwrap_or(false)
+        })
+        .take(limit)
+        .map(|l| DomainPrincipal {
+            name: l.to_string(),
+        })
+        .collect()
+}
+
 /// Fail fast with actionable errors before Kerberos gets a chance to
 /// produce cryptic ones. Checks, in order: the realm's LDAP SRV records
 /// resolve; a DC answers `net ads info`; clock skew is within bounds.
@@ -446,6 +465,13 @@ pub struct DomainStatus {
     pub dc_reachable: Option<bool>,
     /// Clock skew (seconds, DC minus local) observed via `net ads info`.
     pub clock_skew_seconds: Option<i64>,
+}
+
+/// A principal (user or group) from the domain.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DomainPrincipal {
+    /// The principal name in `DOMAIN\account` format.
+    pub name: String,
 }
 
 /// Service for managing domain join state.
@@ -701,6 +727,44 @@ impl DomainService {
         }
     }
 
+    /// Search for domain users by name prefix.
+    ///
+    /// Runs `wbinfo -u`, filters results to match the prefix (case-insensitive),
+    /// and returns up to 50 results. The prefix must be at least 2 characters
+    /// to prevent bulk enumeration.
+    #[allow(dead_code)]
+    pub async fn search_users(&self, prefix: &str) -> Result<Vec<DomainPrincipal>, DomainError> {
+        self.search(prefix, "-u").await
+    }
+
+    /// Search for domain groups by name prefix.
+    ///
+    /// Runs `wbinfo -g`, filters results to match the prefix (case-insensitive),
+    /// and returns up to 50 results. The prefix must be at least 2 characters
+    /// to prevent bulk enumeration.
+    #[allow(dead_code)]
+    pub async fn search_groups(&self, prefix: &str) -> Result<Vec<DomainPrincipal>, DomainError> {
+        self.search(prefix, "-g").await
+    }
+
+    /// Perform a principal search with the given wbinfo flag.
+    ///
+    /// Common code for `search_users` and `search_groups`.
+    /// Validates that the system is joined, the prefix is at least 2 characters,
+    /// then runs `wbinfo <flag>` and filters the results.
+    async fn search(&self, prefix: &str, flag: &str) -> Result<Vec<DomainPrincipal>, DomainError> {
+        if Self::load_config().await.is_none() {
+            return Err(DomainError::NotJoined);
+        }
+        if prefix.trim().len() < 2 {
+            return Err(DomainError::Validation(
+                "search prefix must be at least 2 characters".into(),
+            ));
+        }
+        let raw = run_cmd("wbinfo", &[flag], &[]).await?;
+        Ok(filter_principals(&raw, prefix.trim(), 50))
+    }
+
     /// Load domain configuration from an arbitrary path if it exists.
     ///
     /// Absence of the file, or unparseable contents, both mean "not joined" —
@@ -901,5 +965,17 @@ _ldap._tcp.corp.example.com IN SRV 0 100 389 dc2.corp.example.com\n\n\
         // `date -u -j -f "%Y-%m-%d %H:%M:%S" "2026-07-07 12:34:56" +%s` => 1783427696
         assert_eq!(parse_net_ads_server_time(out), Some(1783427696));
         assert_eq!(parse_net_ads_server_time("no time here"), None);
+    }
+
+    #[test]
+    fn filter_principals_matches_prefix_case_insensitively_and_caps() {
+        let raw = "CORP\\alice\nCORP\\albert\nCORP\\bob\nCORP\\Alfred\n";
+        let hits = filter_principals(raw, "al", 50);
+        let names: Vec<&str> = hits.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["CORP\\alice", "CORP\\albert", "CORP\\Alfred"]);
+        // Prefix matches the account part, not the domain part.
+        assert!(filter_principals(raw, "corp", 50).is_empty());
+        // Limit is a hard cap.
+        assert_eq!(filter_principals(raw, "al", 2).len(), 2);
     }
 }
