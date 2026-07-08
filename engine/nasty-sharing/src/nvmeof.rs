@@ -218,6 +218,17 @@ impl NvmeofService {
             return;
         }
 
+        // Boot restore races the network coming up: a port bound to a
+        // specific address whose interface isn't configured yet fails to
+        // bind with EADDRNOTAVAIL and never retries (#625). Wait for those
+        // addresses to appear before binding. Wildcard-bound ports and
+        // already-ready addresses don't wait.
+        let addrs: Vec<String> = subsystems
+            .iter()
+            .flat_map(|s| s.ports.iter().map(|p| p.addr.clone()))
+            .collect();
+        wait_for_port_addresses(&addrs, std::time::Duration::from_secs(45)).await;
+
         for subsys in &subsystems {
             info!("Restoring NVMe-oF subsystem: {}", subsys.nqn);
 
@@ -288,12 +299,23 @@ impl NvmeofService {
 
                 let port_path = format!("{NVMET_BASE}/ports/{actual_port_id}");
                 let link = format!("{port_path}/subsystems/{}", subsys.nqn);
-                let _ = configfs_symlink(&format!("{NVMET_BASE}/subsystems/{}", subsys.nqn), &link)
-                    .await;
-                info!(
-                    "  Restored port {} ({}:{})",
-                    actual_port_id, port.addr, port.service_id
-                );
+                // Linking the subsystem is what triggers the kernel transport
+                // bind, so this is where EADDRNOTAVAIL surfaces. Report it
+                // instead of swallowing it (#625) — a silent failure left the
+                // target dead with no clue in the logs.
+                match configfs_symlink(&format!("{NVMET_BASE}/subsystems/{}", subsys.nqn), &link)
+                    .await
+                {
+                    Ok(()) => info!(
+                        "  Restored port {} ({}:{})",
+                        actual_port_id, port.addr, port.service_id
+                    ),
+                    Err(e) => warn!(
+                        "  NVMe-oF port {} bind to {}:{} failed ({e}) — the address may not \
+                         be up yet; re-add the portal once its interface is active",
+                        actual_port_id, port.addr, port.service_id
+                    ),
+                }
             }
         }
 
@@ -875,6 +897,62 @@ impl NvmeofService {
 
 /// Scan all existing configfs ports for one matching the given transport/addr/service_id.
 /// Returns the port_id if found, so multiple subsystems can share a single listener.
+/// True for the bind-any addresses, which the kernel accepts regardless
+/// of link state.
+fn is_wildcard_addr(addr: &str) -> bool {
+    addr == "0.0.0.0" || addr == "::"
+}
+
+/// Whether `addr` is currently assigned to a local interface — tested by
+/// attempting a socket bind to it, which fails with EADDRNOTAVAIL exactly
+/// when nvmet's port bind would. Wildcards and unparseable addresses are
+/// treated as ready (never block on them).
+fn addr_is_local(addr: &str) -> bool {
+    if is_wildcard_addr(addr) {
+        return true;
+    }
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(ip) => std::net::TcpListener::bind((ip, 0)).is_ok(),
+        Err(_) => true,
+    }
+}
+
+/// Wait until every specific (non-wildcard) port address is assigned to a
+/// local interface, sharing one deadline. nvmet binds each restored port
+/// to its exact address; on reboot the engine restores before the network
+/// has configured those addresses, so the bind fails with EADDRNOTAVAIL
+/// (-99) and — since nothing retries — the target stays dead until a manual
+/// re-add (#625). Ready addresses return immediately; only genuinely-absent
+/// ones wait. Best-effort: any still missing at the deadline are logged and
+/// restore proceeds.
+async fn wait_for_port_addresses(addrs: &[String], timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut pending: Vec<&String> = addrs.iter().filter(|a| !is_wildcard_addr(a)).collect();
+    pending.sort();
+    pending.dedup();
+    if pending.is_empty() {
+        return;
+    }
+    loop {
+        pending.retain(|a| !addr_is_local(a));
+        if pending.is_empty() {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            for a in &pending {
+                warn!(
+                    "NVMe-oF: address {a} is not on any local interface after {}s — its \
+                     target port may fail to bind until the link is up; re-add the portal \
+                     once the interface is active",
+                    timeout.as_secs()
+                );
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 async fn find_existing_port(
     transport: &str,
     addr: &str,
@@ -1068,6 +1146,55 @@ fn validate_transport(t: &str) -> Result<(), NvmeofError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── port-address readiness (reboot restore race, #625) ────────
+
+    #[test]
+    fn is_wildcard_addr_matches_bind_any() {
+        assert!(is_wildcard_addr("0.0.0.0"));
+        assert!(is_wildcard_addr("::"));
+        assert!(!is_wildcard_addr("192.168.255.248"));
+        assert!(!is_wildcard_addr("fd00::1"));
+    }
+
+    #[test]
+    fn addr_is_local_true_for_loopback_and_wildcards() {
+        // Loopback is always assigned; wildcards always "ready".
+        assert!(addr_is_local("127.0.0.1"));
+        assert!(addr_is_local("::1"));
+        assert!(addr_is_local("0.0.0.0"));
+        assert!(addr_is_local("::"));
+        // Unparseable → don't block on it.
+        assert!(addr_is_local("not-an-ip"));
+    }
+
+    #[test]
+    fn addr_is_local_false_for_unassigned_address() {
+        // TEST-NET-1 (RFC 5737) — guaranteed not assigned to this host.
+        assert!(!addr_is_local("192.0.2.1"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_addresses_returns_fast_when_ready() {
+        // All ready (loopback + wildcard) → returns well within the timeout.
+        let start = std::time::Instant::now();
+        wait_for_port_addresses(
+            &["127.0.0.1".into(), "0.0.0.0".into()],
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_addresses_gives_up_at_deadline() {
+        // Unassigned address → waits out the (short) deadline, then proceeds.
+        let start = std::time::Instant::now();
+        wait_for_port_addresses(&["192.0.2.1".into()], std::time::Duration::from_millis(700)).await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= std::time::Duration::from_millis(700));
+        assert!(elapsed < std::time::Duration::from_secs(3));
+    }
 
     #[test]
     fn validate_subsystem_name_accepts_typical_names() {

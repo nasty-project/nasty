@@ -387,7 +387,11 @@ async fn main() -> anyhow::Result<()> {
         .boot_status
         .run_phase(
             "nvmeof.restore",
-            secs(30), // configfs writes — fast unless many subsystems
+            // configfs writes are fast, but restore first waits (up to 45s)
+            // for specific port addresses to come up so binds don't race the
+            // network and fail with EADDRNOTAVAIL (#625). Budget covers the
+            // wait plus the writes.
+            secs(75),
             state.nvmeof.restore(),
         )
         .await;
