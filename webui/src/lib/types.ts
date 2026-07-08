@@ -654,6 +654,24 @@ export interface SmbGroup {
 	members: string[];
 }
 
+// ── Active Directory ───────────────────────────────────────
+
+/** Wire shape of `domain.status`. */
+export interface DomainStatus {
+	joined: boolean;
+	realm: string | null;
+	workgroup: string | null;
+	idmap_base: number | null;
+	trust_ok: boolean | null;
+	dc_reachable: boolean | null;
+	clock_skew_seconds: number | null;
+}
+
+/** One AD principal from `domain.user.list` / `domain.group.list` — name is `DOMAIN\name`. */
+export interface DomainPrincipal {
+	name: string;
+}
+
 export interface IscsiTarget {
 	id: string;
 	iqn: string;
