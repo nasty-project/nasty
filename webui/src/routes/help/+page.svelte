@@ -99,6 +99,21 @@
 					detail: 'Reconcile moves data between devices to maintain the desired layout — for example, after adding or removing a disk, or after changing tiering targets. It runs automatically when enabled.',
 				},
 				{
+					term: 'Evacuate',
+					summary: 'Moving all data off a device so it can be removed from the filesystem.',
+					detail: 'When you need to replace or decommission a disk, evacuate migrates every block off that device onto other devices in the pool. The device is non-writable during evacuation but stays in the filesystem; once finished it reports as "evacuated" and can be removed. Progress is visible in the Operations page and the sidebar status band. Always evacuate before removing a device — pulling one without evacuating can put the filesystem into degraded mode.',
+				},
+				{
+					term: 'Fsck',
+					summary: 'A filesystem check that verifies bcachefs metadata is consistent.',
+					detail: 'Fsck scans the filesystem\'s metadata for structural issues — missing extents, incorrect reference counts, orphaned blocks. NASty offers two modes from the Operations page: a safe read-only check (reports issues without touching anything), and a repair pass that rewrites metadata to fix what was found. Run a check after an unclean shutdown or power loss. Unlike scrub (which verifies data checksums at the block level), fsck checks the structural integrity of the filesystem itself.',
+				},
+				{
+					term: 'Copy GC',
+					summary: 'A background process that reclaims free space by compacting fragmented data.',
+					detail: 'Copy GC (copy garbage collection) reads partially-empty data blocks and rewrites their live data into fuller ones so the empties can be freed — the main mechanism for reclaiming space after deletions and overwrites. It runs automatically and most users never need to touch it. Under Operations you can pause it during performance-sensitive workloads. When a "needs_gc" flag appears on the filesystem, a full GC pass can be triggered manually.',
+				},
+				{
 					term: 'Erasure Coding',
 					summary: 'Parity-based redundancy that uses less space than mirroring.',
 					detail: 'Instead of storing N full copies, erasure coding stores data plus parity blocks across multiple devices. Roughly: with replicas=2 and EC on, the layout is RAID-5-like (one parity); replicas=3 with EC is RAID-6-like (two parity). Usable capacity scales with (devices − parity) / devices, which is much better than 1/replicas mirroring once you have several disks. Trade-off: rebuilds and small writes are more expensive. Toggle when creating the filesystem.',
@@ -193,6 +208,11 @@
 					summary: 'A virtual L2 switch that lets VMs (and apps) share the host LAN.',
 					detail: 'A bridge ties one or more host interfaces together so guests attached to it appear as ordinary devices on your physical network — they can pull DHCP from your router and be reached directly by IP. Configured under Network → Bridges; VMs select a bridge as their NIC backing instead of the default user-mode networking.',
 				},
+				{
+					term: 'Ingress',
+					summary: 'Reverse proxy routing that gives apps a public URL with automatic TLS.',
+					detail: 'When you install an app, NASty can expose it through the Caddy reverse proxy — giving it a hostname or subpath on your NASty domain. The Ingress page lists every route Caddy is serving (host matches, path prefixes, catch-all). Routes are managed per-app under the app\'s settings: toggle the subdomain, pick a port, or add custom path rules. All ingress traffic goes through port 443 with TLS handled automatically.',
+				},
 			],
 		},
 		{
@@ -237,6 +257,11 @@
 					term: 'UPS / NUT',
 					summary: 'Talks to a battery backup so NASty can shut down cleanly on power loss.',
 					detail: 'NUT (Network UPS Tools) lets NASty read state from a USB- or network-attached UPS. When the UPS reports low battery, NASty shuts down gracefully so you don\'t lose data to a hard power-off. Optional — enable it under Services if you have a UPS connected.',
+				},
+				{
+					term: 'Firewall',
+					summary: 'A packet filter that controls which traffic reaches NASty and its services.',
+					detail: 'NASty uses nftables for firewall rules, managed from the Firewall page. Each service (NFS, SMB, SSH, etc.) lists its port and current rule — open to all, restricted to specific source IPs or networks, or closed. Rules apply to selected interfaces (LAN, VPN) independently. Published app ports also appear here for visibility. The firewall is deny-by-default: only explicitly opened traffic is accepted.',
 				},
 			],
 		},
