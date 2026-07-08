@@ -274,6 +274,19 @@ fn parse_net_ads_server_time(output: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3_600 + m * 60 + s)
 }
 
+/// Kerberos-relevant skew between DC and local time, or None when the
+/// server time is unusable. DCs answering anonymous `net ads info`
+/// queries may report epoch zero for the time field — a sentinel, not
+/// a clock reading; treating it as real skew blocked every join with
+/// a ~56-year skew error (caught live by the ad-member VM test).
+fn effective_skew(server_time: i64, local: i64) -> Option<i64> {
+    // Anything before ~2001 is a sentinel or a badly broken DC clock;
+    // either way, Kerberos itself will produce the authoritative error
+    // if real skew exists — don't fabricate one from a sentinel.
+    const SANE_SERVER_TIME_FLOOR: i64 = 1_000_000_000;
+    (server_time >= SANE_SERVER_TIME_FLOOR).then(|| server_time - local)
+}
+
 /// Run a command, capturing stdout+stderr. Returns stdout on success;
 /// on non-zero exit (or a spawn failure) returns `CommandFailed` carrying
 /// stderr (or the spawn error).
@@ -388,12 +401,19 @@ async fn preflight(realm: &str) -> Result<Vec<String>, DomainError> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let skew = (server_time - local).abs();
-        if skew > 240 {
-            return Err(DomainError::Preflight(format!(
-                "clock skew vs domain controller is {skew}s — Kerberos tolerates \
-                 ~300s. Fix NTP before joining."
-            )));
+        if let Some(skew) = effective_skew(server_time, local) {
+            if skew.abs() > 240 {
+                return Err(DomainError::Preflight(format!(
+                    "clock skew vs domain controller is {}s — Kerberos tolerates \
+                     ~300s. Fix NTP before joining.",
+                    skew.abs()
+                )));
+            }
+        } else {
+            tracing::warn!(
+                "DC did not report a usable server time; skipping preflight \
+                 clock-skew check (Kerberos will enforce it)"
+            );
         }
     }
     Ok(dcs)
@@ -721,13 +741,12 @@ impl DomainService {
         let (dc_reachable, clock_skew_seconds) =
             match run_cmd("net", &["ads", "info"], &[("KRB5_CONFIG", KRB5_CONF_PATH)]).await {
                 Ok(out) => {
-                    let skew = parse_net_ads_server_time(&out).map(|t| {
-                        let local = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        t - local
-                    });
+                    let local = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let skew =
+                        parse_net_ads_server_time(&out).and_then(|t| effective_skew(t, local));
                     (Some(true), skew)
                 }
                 Err(_) => (Some(false), None),
@@ -997,6 +1016,16 @@ _ldap._tcp.nasty.test IN SRV 0 100 389 dc.nasty.test. -- link: eth1\n\n\
         // `date -u -j -f "%Y-%m-%d %H:%M:%S" "2026-07-07 12:34:56" +%s` => 1783427696
         assert_eq!(parse_net_ads_server_time(out), Some(1783427696));
         assert_eq!(parse_net_ads_server_time("no time here"), None);
+    }
+
+    #[test]
+    fn effective_skew_ignores_sentinel_server_times() {
+        let now = 1_783_517_309;
+        // Epoch-zero sentinel from an anonymous net ads info query.
+        assert_eq!(effective_skew(0, now), None);
+        // Real times produce signed skew.
+        assert_eq!(effective_skew(now + 120, now), Some(120));
+        assert_eq!(effective_skew(now - 300, now), Some(-300));
     }
 
     #[test]
