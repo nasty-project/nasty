@@ -571,8 +571,10 @@ impl DomainService {
     /// stdin, used once, never persisted; it validates the configured
     /// workgroup against the DC, so it must already be right) → start
     /// winbindd (only now does a machine secret exist) →
-    /// verify the trust with `wbinfo -t` → best-effort AD DNS registration →
-    /// persist state. Every fallible step
+    /// verify the trust with `wbinfo -t` → warm winbind by polling identity
+    /// resolution for the domain Administrator (best-effort; a cold cache
+    /// otherwise fails the first domain-user SMB access) → best-effort AD
+    /// DNS registration → persist state. Every fallible step
     /// funnels through a single unwind path (`unwind_join_artifacts`) on
     /// failure, restoring the pre-join state; once `net ads join` has
     /// succeeded, unwind also attempts `net ads leave` (including on a
@@ -703,6 +705,34 @@ impl DomainService {
                     "joined but the trust check failed (wbinfo -t): {e}"
                 ))
             })?;
+
+            // Warm winbind before returning: `wbinfo -t` passing means the trust
+            // secret is good, but the first identity lookup after join can still
+            // fail until winbind has established its DC connection and idmap — a
+            // domain user's first SMB access would hit LOGON_FAILURE (smbd can't
+            // map the UID). Poll a guaranteed-present principal (the domain
+            // Administrator) until full name→uid resolution works, so the first
+            // real access doesn't land on a cold cache. Best-effort: a timeout
+            // here doesn't fail the join (winbind warms within seconds in
+            // practice), it just logs.
+            {
+                let probe = format!("{}\\administrator", cfg.workgroup);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                loop {
+                    if run_cmd("wbinfo", &["-i", &probe], &[]).await.is_ok() {
+                        tracing::info!("winbind identity resolution is live");
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            "winbind not yet resolving domain identities after join; \
+                             the first domain-user access may need a retry"
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
 
             // Register our A record in AD DNS (best-effort — some sites
             // restrict it).
