@@ -183,9 +183,14 @@ pub const RESOLVED_DROPIN_PATH: &str = "/etc/systemd/resolved.conf.d/nasty-ad.co
 fn parse_resolvectl_srv(output: &str) -> Vec<String> {
     output
         .lines()
-        .filter(|l| l.contains(" SRV "))
-        .filter_map(|l| l.split_whitespace().last())
-        .map(|t| t.trim_end_matches('.').to_string())
+        .filter_map(|l| {
+            let tokens: Vec<&str> = l.split_whitespace().collect();
+            let srv = tokens.iter().position(|t| *t == "SRV")?;
+            // SRV RDATA: priority weight port target
+            tokens
+                .get(srv + 4)
+                .map(|t| t.trim_end_matches('.').to_string())
+        })
         .collect()
 }
 
@@ -195,8 +200,12 @@ fn parse_resolvectl_addresses(output: &str) -> Vec<String> {
     output
         .lines()
         .filter_map(|l| l.split_once(": "))
-        .map(|(_, addr)| addr.trim().to_string())
-        .filter(|a| a.parse::<std::net::IpAddr>().is_ok())
+        .filter_map(|(_, rest)| {
+            rest.split_whitespace()
+                .next()
+                .filter(|a| a.parse::<std::net::IpAddr>().is_ok())
+                .map(str::to_string)
+        })
         .collect()
 }
 
@@ -941,6 +950,18 @@ _ldap._tcp.corp.example.com IN SRV 0 100 389 dc2.corp.example.com\n\n\
             ]
         );
         assert!(parse_resolvectl_srv("-- no data --\n").is_empty());
+
+        // Real resolvectl appends link annotations — the target is the
+        // 4th RDATA token after "SRV" (prio weight port target), NOT
+        // the last token on the line (caught live by the ad-member VM
+        // test: the old parser returned "eth1" as a DC hostname).
+        let annotated = "\
+_ldap._tcp.nasty.test IN SRV 0 100 389 dc.nasty.test. -- link: eth1\n\n\
+-- Information acquired via protocol DNS in 1.2ms.\n";
+        assert_eq!(
+            parse_resolvectl_srv(annotated),
+            vec!["dc.nasty.test".to_string()]
+        );
     }
 
     #[test]
@@ -949,6 +970,12 @@ _ldap._tcp.corp.example.com IN SRV 0 100 389 dc2.corp.example.com\n\n\
         assert_eq!(
             parse_resolvectl_addresses(out),
             vec!["10.0.0.5".to_string()]
+        );
+
+        let annotated = "dc.nasty.test: 192.168.1.1                  -- link: eth1\n";
+        assert_eq!(
+            parse_resolvectl_addresses(annotated),
+            vec!["192.168.1.1".to_string()]
         );
     }
 
