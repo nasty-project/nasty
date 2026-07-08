@@ -564,11 +564,13 @@ impl DomainService {
     /// Join an Active Directory domain.
     ///
     /// Sequence: preflight (DNS SRV + DC reachability + clock skew) →
-    /// render krb5/smb config → per-domain DNS routing to the discovered
-    /// DCs → `net ads join` (credential via stdin, used once, never
-    /// persisted) → ask the DC for the real NetBIOS domain (`net ads
-    /// workgroup`) and re-render the idmap block if the derived guess was
-    /// wrong → start winbindd (only now does a machine secret exist) →
+    /// render krb5 → per-domain DNS routing to the discovered DCs → ask a
+    /// DC for the real NetBIOS domain (`net ads workgroup`, anonymous and
+    /// pre-join) since the realm-derived guess can be wrong → render the smb
+    /// config with the correct workgroup → `net ads join` (credential via
+    /// stdin, used once, never persisted; it validates the configured
+    /// workgroup against the DC, so it must already be right) → start
+    /// winbindd (only now does a machine secret exist) →
     /// verify the trust with `wbinfo -t` → best-effort AD DNS registration →
     /// persist state. Every fallible step
     /// funnels through a single unwind path (`unwind_join_artifacts`) on
@@ -626,6 +628,41 @@ impl DomainService {
                 );
             }
 
+            // The NetBIOS domain name is set at provision and is NOT derivable
+            // from the realm (realm ADTEST.LAN can have NetBIOS domain NASTYAD).
+            // net ads join validates the configured workgroup against the DC
+            // and refuses on mismatch, so we must learn the real name BEFORE
+            // rendering the config and joining — query a DC directly (anonymous,
+            // pre-join). Fall back to the realm-derived guess if the query fails.
+            let workgroup = match run_cmd(
+                "net",
+                &["ads", "workgroup", "-S", &dcs[0], "--realm", &cfg.realm],
+                &[("KRB5_CONFIG", KRB5_CONF_PATH)],
+            )
+            .await
+            {
+                Ok(out) => match parse_net_ads_workgroup(&out) {
+                    Some(wg) => {
+                        if wg != cfg.workgroup {
+                            tracing::info!(
+                                "NetBIOS domain is {wg} (realm suggested {}); using the domain's real name",
+                                cfg.workgroup
+                            );
+                        }
+                        wg
+                    }
+                    None => {
+                        tracing::warn!("could not parse NetBIOS domain from the DC; using derived guess {}", cfg.workgroup);
+                        cfg.workgroup.clone()
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("NetBIOS domain query failed ({e}); using derived guess {}", cfg.workgroup);
+                    cfg.workgroup.clone()
+                }
+            };
+            cfg.workgroup = workgroup;
+
             tokio::fs::write(DOMAIN_SMB_CONF_PATH, render_domain_smb_conf(&cfg)).await?;
 
             // Credential via stdin (`net ads join -U user` prompts on stdin
@@ -652,33 +689,6 @@ impl DomainService {
             // The machine account now exists in AD — from here on, any
             // failure must attempt `net ads leave` during unwind.
             joined_in_ad = true;
-
-            // The NetBIOS domain is set at provision, independent of the
-            // realm — `derive_workgroup` only guesses it from the first
-            // label. Now that we've joined, ask the DC for the real name and
-            // re-render the idmap block if the guess was wrong.
-            match run_cmd("net", &["ads", "workgroup"], &[("KRB5_CONFIG", KRB5_CONF_PATH)])
-                .await
-                .map(|out| parse_net_ads_workgroup(&out))
-            {
-                Ok(Some(real)) if real != cfg.workgroup => {
-                    tracing::info!(
-                        "NetBIOS domain is {real} (realm suggested {}) — using the domain's real name",
-                        cfg.workgroup
-                    );
-                    cfg.workgroup = real;
-                    tokio::fs::write(DOMAIN_SMB_CONF_PATH, render_domain_smb_conf(&cfg)).await?;
-                }
-                Ok(Some(_)) => {} // guess matched the DC — nothing to correct.
-                Ok(None) => tracing::warn!(
-                    "could not parse `net ads workgroup`; keeping derived workgroup {} (usually right)",
-                    cfg.workgroup
-                ),
-                Err(e) => tracing::warn!(
-                    "net ads workgroup failed; keeping derived workgroup {} (usually right): {e}",
-                    cfg.workgroup
-                ),
-            }
 
             // Start winbindd now that a machine secret exists — pre-join it
             // has no job and can wedge on name collisions. Restart is
