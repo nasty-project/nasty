@@ -148,7 +148,11 @@ failing.
   `SubvolumeService` registry. So no rollback or snapshot-restore path can
   reach `/var/lib/samba/private/secrets.tdb` at all — rotation stays on,
   and no config change is needed here. `domain.status` remains the safety
-  net for the (now purely theoretical) broken-trust case.
+  net for the (now purely theoretical) broken-trust case. Two further restore
+  surfaces were checked and are also safe today: `nasty-backup` implements no
+  restore path at all yet, and the file-level snapshot restore endpoint is
+  jailed to `/fs` — if backup-restore functionality is ever added, revisit
+  this conclusion.
 - **Time dependency.** Kerberos needs sane clocks. Preflight checks skew at
   join; `domain.status` monitors it afterwards.
 
