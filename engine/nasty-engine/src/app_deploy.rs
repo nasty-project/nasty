@@ -47,6 +47,10 @@ struct DeployRequest {
     image: Option<String>,
     /// For compose: docker-compose.yml content
     compose_file: Option<String>,
+    /// For compose: optional `.env` file contents (Immich/Nextcloud-style
+    /// config). Written to the project directory for `${VAR}` substitution.
+    #[serde(default)]
+    env_file: Option<String>,
     /// For simple: JSON-encoded InstallAppRequest params (ports, env, volumes, etc.)
     install_params: Option<serde_json::Value>,
     /// Compose only: opt out of the strict sandbox so containers can request
@@ -431,13 +435,19 @@ async fn deploy_compose(
         return;
     }
 
-    // Write .env. Failure here is non-fatal for `docker compose` (it
-    // falls back to the project name from --project-name) but it can
-    // mask why a `${COMPOSE_PROJECT_NAME}` interpolation came back
-    // empty in user-supplied YAML — log so it's debuggable.
-    let env_content = format!("COMPOSE_PROJECT_NAME={}\n", req.name);
+    // Write .env: NASty's managed COMPOSE_PROJECT_NAME plus the operator's
+    // pasted dotenv (Immich/Nextcloud-style config). Compose reads it from
+    // the project directory for `${VAR}` substitution and defaults. Shared
+    // renderer so `compose_get` can split the operator's part back out.
+    // Failure is non-fatal for the project name (--project-name covers it)
+    // but a missing user env would leave `${VAR}` empty — log it.
     let env_path = format!("{}/.env", compose_dir);
-    if let Err(e) = tokio::fs::write(&env_path, &env_content).await {
+    if let Err(e) = tokio::fs::write(
+        &env_path,
+        nasty_apps::render_env_file(&req.name, req.env_file.as_deref()),
+    )
+    .await
+    {
         tracing::warn!("compose .env write to {env_path} failed: {e}");
     }
 

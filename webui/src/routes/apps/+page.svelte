@@ -289,6 +289,9 @@
 	// Compose mode state
 	let composeName = $state('');
 	let composeContent = $state('');
+	// Optional .env pasted alongside the compose file (Immich/Nextcloud
+	// style). Written to the project dir for ${VAR} substitution.
+	let composeEnv = $state('');
 	let showCompose = $state(false);
 	let editingCompose: string | null = $state(null);
 
@@ -1521,13 +1524,14 @@
 			kind: 'compose',
 			name,
 			compose_file: composeContent,
+			env_file: composeEnv.trim() ? composeEnv : null,
 			allow_unsafe: composeAllowUnsafe,
 			ingress_host_port: newIngressPort,
 		});
 		if (ok) {
 			showCompose = false;
 			editingCompose = null;
-			composeName = ''; composeContent = ''; composeTried = false;
+			composeName = ''; composeContent = ''; composeEnv = ''; composeTried = false;
 			composeAllowUnsafe = false;
 		}
 		await refresh();
@@ -1535,13 +1539,14 @@
 
 	async function editCompose(name: string) {
 		const content = await withToast(
-			() => client.call<string>('apps.compose.get', { name }),
+			() => client.call<{ compose_file: string; env_file: string | null }>('apps.compose.get', { name }),
 			''
 		);
 		if (content === undefined) return;
 		editingCompose = name;
 		composeName = name;
-		composeContent = content;
+		composeContent = content.compose_file;
+		composeEnv = content.env_file ?? '';
 		// Pre-fill the unsafe flag from the live apps list — compose apps store
 		// it in .nasty-meta.json next to the yaml; the engine surfaces it on App.
 		composeAllowUnsafe = apps.find(a => a.name === name)?.unsafe_mode ?? false;
@@ -1563,7 +1568,7 @@
 		if (composeLintTimer) { clearTimeout(composeLintTimer); composeLintTimer = null; }
 		composeTcpPorts = [];
 		newIngressPort = null;
-		composeName = ''; composeContent = ''; composeTried = false;
+		composeName = ''; composeContent = ''; composeEnv = ''; composeTried = false;
 		composeAllowUnsafe = false;
 	}
 
@@ -2232,6 +2237,21 @@
 							{:else if composeLint?.valid && composeLint.schema_checked && composeContent.trim()}
 								<p class="mt-1 text-xs text-green-600">✓ Valid compose file</p>
 							{/if}
+						</div>
+						<!-- Optional .env — Compose reads it for ${VAR} substitution -->
+						<div class="mb-4">
+							<Label for="compose-env">.env file <span class="text-xs font-normal text-muted-foreground">(optional)</span></Label>
+							<textarea
+								id="compose-env"
+								bind:value={composeEnv}
+								spellcheck="false"
+								autocomplete="off"
+								placeholder="DB_PASSWORD=changeme&#10;UPLOAD_LOCATION=/fs/tank/immich"
+								class="mt-1 h-40 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-sm"
+							></textarea>
+							<p class="mt-1 text-xs text-muted-foreground">
+								For stacks configured via a dotenv file (Immich, Nextcloud, …). Paste it here and Compose uses it for <code>${'{'}VAR{'}'}</code> substitution. NASty manages <code>COMPOSE_PROJECT_NAME</code> itself.
+							</p>
 						</div>
 						<!-- Allow unsafe — opt out of strict compose sandbox -->
 						<div class="mb-4 rounded-md border border-border p-3">
