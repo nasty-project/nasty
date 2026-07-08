@@ -1765,6 +1765,29 @@ in {
       };
     };
 
+    # The samba module emits [global] keys alphabetically and always
+    # injects `security=user`, which lands AFTER our include — smb.conf
+    # is last-one-wins, so the AD member mode the engine renders into
+    # the include chain was silently clobbered (net ads join: "Invalid
+    # configuration", caught live by the ad-member VM test). Take over
+    # the top-level file so the engine-managed include is the LAST
+    # directive: the static defaults below match what the module
+    # emitted; the include chain overrides security/realm when joined
+    # and is empty otherwise (unjoined boxes keep identical behavior).
+    environment.etc."samba/smb.conf".source = mkIf cfg.smb.enable (lib.mkForce (pkgs.writeText "smb.conf" ''
+      [global]
+      guest account = nobody
+      invalid users = root
+      map to guest = Never
+      passwd program = /run/wrappers/bin/passwd %u
+      security = user
+      server min protocol = SMB2
+      server signing = auto
+      server string = NASty NAS
+      # Engine-managed chain — keep as the last directive.
+      include = /etc/samba/smb.nasty.conf
+    ''));
+
     # The engine renders Kerberos config at domain-join time (a runtime
     # operation, not a rebuild) into an engine-owned path. Route winbindd
     # and everything the engine execs (net, wbinfo) through it instead of
