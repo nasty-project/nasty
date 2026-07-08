@@ -15,12 +15,18 @@ let
   domain = "NASTYAD";
   adminPass = "Passw0rd.123";
 
-  # The AD DC needs a samba built with LDAP + domain-controller support;
-  # nixpkgs' default samba is --without-ad-dc.
-  sambaDc = pkgs.samba.override {
-    enableLDAP = true;
-    enableDomainController = true;
-  };
+  # DC-capable samba. The pinned nixpkgs' samba lacks the pythonPath
+  # addition for DC builds that nixpkgs master later gained —
+  # samba-tool's provision path imports `cryptography` (samba.gkdi).
+  # Backport it here; test-only, the member side never runs samba-tool.
+  sambaDc =
+    (pkgs.samba.override {
+      enableLDAP = true;
+      enableDomainController = true;
+    }).overrideAttrs
+      (old: {
+        pythonPath = (old.pythonPath or [ ]) ++ [ pkgs.python3Packages.cryptography ];
+      });
 
   pythonWithWs = pkgs.python3.withPackages (ps: [ ps.websocket-client ]);
 
