@@ -189,6 +189,7 @@ pkgs.testers.runNixOSTest {
       path = [ sambaDc ];
       serviceConfig.Type = "notify";
       serviceConfig.NotifyAccess = "all";
+      serviceConfig.StateDirectory = "samba";
       script = ''
         if [ ! -f /var/lib/samba/private/krb5.conf ]; then
           rm -f /etc/samba/smb.conf
