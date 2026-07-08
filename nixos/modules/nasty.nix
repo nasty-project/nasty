@@ -1774,19 +1774,21 @@ in {
     # directive: the static defaults below match what the module
     # emitted; the include chain overrides security/realm when joined
     # and is empty otherwise (unjoined boxes keep identical behavior).
-    environment.etc."samba/smb.conf".source = mkIf cfg.smb.enable (lib.mkForce (pkgs.writeText "smb.conf" ''
-      [global]
-      guest account = nobody
-      invalid users = root
-      map to guest = Never
-      passwd program = /run/wrappers/bin/passwd %u
-      security = user
-      server min protocol = SMB2
-      server signing = auto
-      server string = NASty NAS
-      # Engine-managed chain — keep as the last directive.
-      include = /etc/samba/smb.nasty.conf
-    ''));
+    environment.etc."samba/smb.conf" = mkIf cfg.smb.enable {
+      source = lib.mkForce (pkgs.writeText "smb.conf" ''
+        [global]
+        guest account = nobody
+        invalid users = root
+        map to guest = Never
+        passwd program = /run/wrappers/bin/passwd %u
+        security = user
+        server min protocol = SMB2
+        server signing = auto
+        server string = NASty NAS
+        # Engine-managed chain — keep as the last directive.
+        include = /etc/samba/smb.nasty.conf
+      '');
+    };
 
     # The engine renders Kerberos config at domain-join time (a runtime
     # operation, not a rebuild) into an engine-owned path. Route winbindd
