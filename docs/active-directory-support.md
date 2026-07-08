@@ -106,11 +106,17 @@ shares are unaffected.
 
 ### Health
 
-`domain.status` is wired into the existing monitoring surface: trust secret
-check (`wbinfo -t`), DC reachability, clock skew. This is also the safety
-net for the machine-account-rotation risk below — a broken trust is
-surfaced with a re-join action instead of operators discovering shares
-failing.
+Phase 1 ships the `domain.status` method — trust secret check
+(`wbinfo -t`), DC reachability, and clock skew — surfaced as indicator
+pills on the Settings → Directory card. That status method is also the
+safety net for the machine-account-rotation risk below: a broken trust is
+visible on the card rather than discovered when shares start failing.
+
+Two pieces are explicit phase-2 follow-ups, not shipped here: wiring
+`domain.status` into the alert-rule engine so a degraded trust raises a
+notification without an operator loading the page, and a guided re-join
+flow that walks an operator through recovering a broken trust. Until
+those land, recovery is the manual leave/join path.
 
 ### Testing
 
