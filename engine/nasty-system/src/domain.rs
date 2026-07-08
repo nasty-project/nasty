@@ -572,21 +572,25 @@ impl DomainService {
     /// Join an Active Directory domain.
     ///
     /// Sequence: preflight (DNS SRV + DC reachability + clock skew) →
-    /// render krb5 → per-domain DNS routing to the discovered DCs → ask a
-    /// DC for the real NetBIOS domain (`net ads workgroup`, anonymous and
-    /// pre-join) since the realm-derived guess can be wrong → render the smb
-    /// config with the correct workgroup → `net ads join` (credential via
-    /// stdin, used once, never persisted; it validates the configured
-    /// workgroup against the DC, so it must already be right) → start
-    /// winbindd (only now does a machine secret exist) →
-    /// verify the trust with `wbinfo -t` → warm winbind by polling identity
-    /// resolution for the domain Administrator (best-effort; a cold cache
-    /// otherwise fails the first domain-user SMB access) → best-effort AD
-    /// DNS registration → persist state. Every fallible step
-    /// funnels through a single unwind path (`unwind_join_artifacts`) on
-    /// failure, restoring the pre-join state; once `net ads join` has
-    /// succeeded, unwind also attempts `net ads leave` (including on a
-    /// later `save_config` failure) so AD and local state don't diverge.
+    /// render krb5 → ask a DC for the real NetBIOS domain (`net ads
+    /// workgroup`, anonymous and pre-join) since the realm-derived guess can
+    /// be wrong → render the smb config with the correct workgroup →
+    /// `net ads join` (credential via stdin, used once, never persisted;
+    /// it validates the configured workgroup against the DC, so it must
+    /// already be right; `--realm` is passed explicitly so DC discovery
+    /// never falls back to NetBIOS) → per-domain DNS routing to the
+    /// discovered DCs (deferred until after the join succeeds — restarting
+    /// systemd-resolved any earlier leaves DNS briefly unavailable, which
+    /// makes `net ads join` itself fail to find a DC) → start winbindd
+    /// (only now does a machine secret exist) → verify the trust with
+    /// `wbinfo -t` → warm winbind by polling identity resolution for the
+    /// domain Administrator (best-effort; a cold cache otherwise fails the
+    /// first domain-user SMB access) → best-effort AD DNS registration →
+    /// persist state. Every fallible step funnels through a single unwind
+    /// path (`unwind_join_artifacts`) on failure, restoring the pre-join
+    /// state; once `net ads join` has succeeded, unwind also attempts
+    /// `net ads leave` (including on a later `save_config` failure) so AD
+    /// and local state don't diverge.
     pub async fn join(&self, req: JoinDomainRequest) -> Result<DomainStatus, DomainError> {
         if Self::load_config().await.is_some() {
             return Err(DomainError::AlreadyJoined);
@@ -605,38 +609,6 @@ impl DomainService {
             // Render krb5 first — preflight's `net ads info` reads it.
             tokio::fs::write(KRB5_CONF_PATH, render_krb5_conf(&cfg.realm)).await?;
             let dcs = preflight(&cfg.realm).await?;
-
-            // Per-domain DNS routing: AD-zone queries go to the DCs from here
-            // on (spec join-flow step 6). Resolve the discovered DC
-            // hostnames to IPs through the still-working current resolvers.
-            let mut dc_ips = Vec::new();
-            for dc in dcs.iter().take(3) {
-                if let Ok(out) = run_cmd("resolvectl", &["query", dc], &[]).await {
-                    dc_ips.extend(parse_resolvectl_addresses(&out));
-                }
-            }
-            if !dc_ips.is_empty() {
-                tokio::fs::create_dir_all("/run/systemd/resolved.conf.d").await?;
-                tokio::fs::write(
-                    RESOLVED_DROPIN_PATH,
-                    render_resolved_dropin(&cfg.realm, &dc_ips),
-                )
-                .await?;
-                let _ = systemctl("restart", "systemd-resolved.service").await;
-            } else {
-                // Resolving the DC hostnames to IPs failed, so we can't write
-                // the per-domain routing drop-in. The join can still succeed
-                // via the current resolvers, but AD-zone resolution afterwards
-                // (winbind, Kerberos referrals) depends entirely on those
-                // existing resolvers continuing to answer for the realm — if
-                // they don't, name lookups into the domain will fail.
-                tracing::warn!(
-                    realm = %cfg.realm,
-                    "Domain join proceeding without AD DNS routing: could not \
-                     resolve any DC address; AD-zone resolution now depends on \
-                     the box's existing resolvers"
-                );
-            }
 
             // The NetBIOS domain name is set at provision and is NOT derivable
             // from the realm (realm ADTEST.LAN can have NetBIOS domain NASTYAD).
@@ -683,6 +655,8 @@ impl DomainService {
                 "-U",
                 req.username.as_str(),
                 "--no-dns-updates",
+                "--realm",
+                cfg.realm.as_str(),
             ];
             let ou_arg;
             if let Some(ou) = &req.ou {
@@ -699,6 +673,44 @@ impl DomainService {
             // The machine account now exists in AD — from here on, any
             // failure must attempt `net ads leave` during unwind.
             joined_in_ad = true;
+
+            // Per-domain DNS routing: AD-zone queries go to the DCs from here
+            // on (spec join-flow step 6). Resolve the discovered DC
+            // hostnames to IPs through the still-working current resolvers.
+            // Done only now (after the join has already succeeded) because
+            // restarting systemd-resolved mid-join left DNS briefly
+            // unavailable, causing `net ads join` to fall back to NetBIOS
+            // discovery and fail. Preflight/join rely on the operator's DNS
+            // already resolving the realm; this routing is for ongoing
+            // operation (winbind resolving the DC by name).
+            let mut dc_ips = Vec::new();
+            for dc in dcs.iter().take(3) {
+                if let Ok(out) = run_cmd("resolvectl", &["query", dc], &[]).await {
+                    dc_ips.extend(parse_resolvectl_addresses(&out));
+                }
+            }
+            if !dc_ips.is_empty() {
+                tokio::fs::create_dir_all("/run/systemd/resolved.conf.d").await?;
+                tokio::fs::write(
+                    RESOLVED_DROPIN_PATH,
+                    render_resolved_dropin(&cfg.realm, &dc_ips),
+                )
+                .await?;
+                let _ = systemctl("restart", "systemd-resolved.service").await;
+            } else {
+                // Resolving the DC hostnames to IPs failed, so we can't write
+                // the per-domain routing drop-in. The join has already
+                // succeeded, but AD-zone resolution afterwards (winbind,
+                // Kerberos referrals) depends entirely on the existing
+                // resolvers continuing to answer for the realm — if they
+                // don't, name lookups into the domain will fail.
+                tracing::warn!(
+                    realm = %cfg.realm,
+                    "Domain joined without AD DNS routing: could not resolve \
+                     any DC address; AD-zone resolution now depends on the \
+                     box's existing resolvers"
+                );
+            }
 
             // Start winbindd now that a machine secret exists — pre-join it
             // has no job and can wedge on name collisions. Restart is
