@@ -175,7 +175,15 @@ pub fn render_krb5_conf(realm: &str) -> String {
 
 /// Path to the resolved(1) drop-in that routes AD-zone DNS queries to the
 /// domain controllers without replacing the box's own resolvers.
-pub const RESOLVED_DROPIN_PATH: &str = "/etc/systemd/resolved.conf.d/nasty-ad.conf";
+///
+/// Lives under `/run` (not `/etc`) because `/etc/systemd/resolved.conf.d`
+/// is read-only on NixOS — `systemd-resolved` reads runtime drop-ins from
+/// `/run/systemd/resolved.conf.d` just as well, and `/run` is always
+/// writable. This means the drop-in does not survive a reboot, but that's
+/// fine: `join` is not persistent across reboots for this routing either
+/// (it's re-created here on each join), and a persistent setup should
+/// point the box's own DNS at the AD DNS servers instead.
+pub const RESOLVED_DROPIN_PATH: &str = "/run/systemd/resolved.conf.d/nasty-ad.conf";
 
 /// Extract domain controller hostnames from `resolvectl query --type=SRV
 /// _ldap._tcp.<realm>` output (e.g. lines like
@@ -608,7 +616,7 @@ impl DomainService {
                 }
             }
             if !dc_ips.is_empty() {
-                tokio::fs::create_dir_all("/etc/systemd/resolved.conf.d").await?;
+                tokio::fs::create_dir_all("/run/systemd/resolved.conf.d").await?;
                 tokio::fs::write(
                     RESOLVED_DROPIN_PATH,
                     render_resolved_dropin(&cfg.realm, &dc_ips),
