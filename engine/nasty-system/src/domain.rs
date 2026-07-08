@@ -296,9 +296,23 @@ fn effective_skew(server_time: i64, local: i64) -> Option<i64> {
     (server_time >= SANE_SERVER_TIME_FLOOR).then(|| server_time - local)
 }
 
+/// Construct a command error message from output, including both stdout and
+/// stderr. Prefers stderr if non-empty, otherwise stdout, otherwise "(no output)".
+fn command_error(program: &str, output: &std::process::Output) -> DomainError {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = match (stderr.trim(), stdout.trim()) {
+        (e, o) if !e.is_empty() && !o.is_empty() => format!("{e} / {o}"),
+        (e, _) if !e.is_empty() => e.to_string(),
+        (_, o) if !o.is_empty() => o.to_string(),
+        _ => "(no output)".to_string(),
+    };
+    DomainError::CommandFailed(format!("{program} exited with {}: {detail}", output.status,))
+}
+
 /// Run a command, capturing stdout+stderr. Returns stdout on success;
 /// on non-zero exit (or a spawn failure) returns `CommandFailed` carrying
-/// stderr (or the spawn error).
+/// both stdout and stderr (or the spawn error).
 async fn run_cmd(
     program: &str,
     args: &[&str],
@@ -311,12 +325,7 @@ async fn run_cmd(
         .await
         .map_err(|e| DomainError::CommandFailed(format!("failed to run {program}: {e}")))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DomainError::CommandFailed(format!(
-            "{program} exited with {}: {}",
-            output.status,
-            stderr.trim()
-        )));
+        return Err(command_error(program, &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -353,12 +362,7 @@ async fn run_cmd_stdin(
         .await
         .map_err(|e| DomainError::CommandFailed(format!("failed to run {program}: {e}")))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DomainError::CommandFailed(format!(
-            "{program} exited with {}: {}",
-            output.status,
-            stderr.trim()
-        )));
+        return Err(command_error(program, &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
