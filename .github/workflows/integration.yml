@@ -75,6 +75,7 @@ jobs:
           nix build \
             .#checks.x86_64-linux.bcachefs-smoke \
             .#checks.x86_64-linux.appliance-smoke \
+            .#checks.x86_64-linux.ad-member \
             -L --print-build-logs
 
       - name: Build and push packages to Cachix
