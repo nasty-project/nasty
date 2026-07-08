@@ -11,7 +11,7 @@
 { pkgs, nasty-engine, nasty-webui, nasty-bcachefs-tools }:
 
 let
-  realm = "NASTY.TEST";
+  realm = "ADTEST.LAN";
   domain = "NASTYAD";
   adminPass = "Passw0rd.123";
 
