@@ -135,12 +135,20 @@ failing.
 - **Machine account password rotation vs rollback.** AD machine accounts
   rotate their password (30-day default) into `secrets.tdb`. A version
   rollback or restored snapshot that resurrects an old `secrets.tdb`
-  silently desyncs the box from the domain. **Verify during
-  implementation:** confirm `/var/lib/samba` lives on state that survives
-  version switches and is not touched by subvolume rollbacks. If it is at
-  risk, prefer `machine password timeout = 0` (no rotation — a common
-  appliance choice) over relocating the tdb. Either way `domain.status`
-  detects a broken trust.
+  silently desyncs the box from the domain. **Resolved:** `/var/lib` is
+  state on the root filesystem, untouched by `nixos-rebuild` generation
+  switches or rollbacks (`nixos/modules/nasty.nix:1128`). The root
+  filesystem itself is always plain ext4 on its own partition, created by
+  the installer (`nixos/iso.nix:248,254,268`) and never registered with
+  `nasty-storage`'s `FilesystemService` — every NASty-managed bcachefs pool
+  mounts under `/fs/<name>` (`NASTY_MOUNT_BASE`,
+  `engine/nasty-storage/src/filesystem.rs:14`), and both subvolume rollback
+  (`engine/nasty-engine/src/subvol_rollback.rs`) and snapshots
+  (`engine/nasty-snapshot`) operate exclusively through that
+  `SubvolumeService` registry. So no rollback or snapshot-restore path can
+  reach `/var/lib/samba/private/secrets.tdb` at all — rotation stays on,
+  and no config change is needed here. `domain.status` remains the safety
+  net for the (now purely theoretical) broken-trust case.
 - **Time dependency.** Kerberos needs sane clocks. Preflight checks skew at
   join; `domain.status` monitors it afterwards.
 
