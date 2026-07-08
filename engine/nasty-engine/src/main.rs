@@ -244,6 +244,7 @@ async fn main() -> anyhow::Result<()> {
             "nvmeof.remap_device_paths",
             "iscsi.remap_device_paths",
             "protocols.restore",
+            "smb.scaffold_config",
             "domain.restore",
             "nvmeof.restore",
             "vms.restore",
@@ -339,6 +340,29 @@ async fn main() -> anyhow::Result<()> {
             secs(90), // 9 systemd services × up to ~10s each on a bursty box
             state.protocols.restore(),
         )
+        .await;
+
+    // Rebuild the smb.nasty.conf include chain before anything AD-related
+    // runs. tmpfiles ships that file empty and only a share mutation ever
+    // rewrote it, so fresh and upgraded boxes carried no
+    // `include = /etc/samba/nasty-domain.conf` — the domain join below (and
+    // winbindd) would see no ADS globals. The rebuild is idempotent, so this
+    // is safe on every boot; it must run BEFORE domain.restore.
+    state
+        .boot_status
+        .run_phase("smb.scaffold_config", secs(15), {
+            let state = state.clone();
+            async move {
+                match state.smb.ensure_config_scaffolding().await {
+                    Ok(()) => {
+                        tracing::info!("Rebuilt /etc/samba/smb.nasty.conf include chain at boot");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to rebuild smb.nasty.conf include chain: {e}");
+                    }
+                }
+            }
+        })
         .await;
 
     // If we're joined to an Active Directory domain, make sure winbindd is

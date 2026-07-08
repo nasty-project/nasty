@@ -150,6 +150,22 @@ impl SmbService {
         Self
     }
 
+    /// Ensure `/etc/samba/smb.nasty.conf` holds the current include chain,
+    /// rebuilding it from the per-share configs on disk.
+    ///
+    /// tmpfiles creates that file *empty*, and until this branch the only
+    /// writer was a share create/update/delete. A box that joins a domain
+    /// before ever mutating a share therefore had no `include =
+    /// /etc/samba/nasty-domain.conf` in effect, so `net ads join`/winbindd
+    /// never saw the ADS globals — AD join was dead on arrival on fresh
+    /// installs and stayed dead on every upgraded box until the first share
+    /// mutation. Calling this at boot guarantees the chain exists before any
+    /// join runs. The rebuild is idempotent and cheap (a directory scan plus
+    /// one file write), so it is safe to run unconditionally on every boot.
+    pub async fn ensure_config_scaffolding(&self) -> Result<(), SmbError> {
+        rebuild_include_list().await
+    }
+
     pub async fn list(&self) -> Result<Vec<SmbShare>, SmbError> {
         Ok(state_dir().load_all().await)
     }
