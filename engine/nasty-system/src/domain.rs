@@ -274,6 +274,15 @@ fn parse_net_ads_server_time(output: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3_600 + m * 60 + s)
 }
 
+/// Parse `net ads workgroup` output: "Workgroup: NASTYAD".
+fn parse_net_ads_workgroup(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Workgroup:"))
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+}
+
 /// Kerberos-relevant skew between DC and local time, or None when the
 /// server time is unusable. DCs answering anonymous `net ads info`
 /// queries may report epoch zero for the time field — a sentinel, not
@@ -552,9 +561,12 @@ impl DomainService {
     ///
     /// Sequence: preflight (DNS SRV + DC reachability + clock skew) →
     /// render krb5/smb config → per-domain DNS routing to the discovered
-    /// DCs → restart winbindd → `net ads join` (credential via stdin,
-    /// used once, never persisted) → verify the trust with `wbinfo -t` →
-    /// best-effort AD DNS registration → persist state. Every fallible step
+    /// DCs → `net ads join` (credential via stdin, used once, never
+    /// persisted) → ask the DC for the real NetBIOS domain (`net ads
+    /// workgroup`) and re-render the idmap block if the derived guess was
+    /// wrong → start winbindd (only now does a machine secret exist) →
+    /// verify the trust with `wbinfo -t` → best-effort AD DNS registration →
+    /// persist state. Every fallible step
     /// funnels through a single unwind path (`unwind_join_artifacts`) on
     /// failure, restoring the pre-join state; once `net ads join` has
     /// succeeded, unwind also attempts `net ads leave` (including on a
@@ -566,7 +578,7 @@ impl DomainService {
         let realm = validate_realm(&req.realm)?;
         let idmap_base = req.idmap_base.unwrap_or(DEFAULT_IDMAP_BASE);
         validate_idmap_base(idmap_base)?;
-        let cfg = DomainConfig {
+        let mut cfg = DomainConfig {
             workgroup: derive_workgroup(&realm),
             realm,
             idmap_base,
@@ -611,9 +623,6 @@ impl DomainService {
             }
 
             tokio::fs::write(DOMAIN_SMB_CONF_PATH, render_domain_smb_conf(&cfg)).await?;
-            systemctl("restart", "samba-winbindd.service")
-                .await
-                .map_err(DomainError::CommandFailed)?;
 
             // Credential via stdin (`net ads join -U user` prompts on stdin
             // when no %password is attached). NEVER put the password in argv.
@@ -639,6 +648,40 @@ impl DomainService {
             // The machine account now exists in AD — from here on, any
             // failure must attempt `net ads leave` during unwind.
             joined_in_ad = true;
+
+            // The NetBIOS domain is set at provision, independent of the
+            // realm — `derive_workgroup` only guesses it from the first
+            // label. Now that we've joined, ask the DC for the real name and
+            // re-render the idmap block if the guess was wrong.
+            match run_cmd("net", &["ads", "workgroup"], &[("KRB5_CONFIG", KRB5_CONF_PATH)])
+                .await
+                .map(|out| parse_net_ads_workgroup(&out))
+            {
+                Ok(Some(real)) if real != cfg.workgroup => {
+                    tracing::info!(
+                        "NetBIOS domain is {real} (realm suggested {}) — using the domain's real name",
+                        cfg.workgroup
+                    );
+                    cfg.workgroup = real;
+                    tokio::fs::write(DOMAIN_SMB_CONF_PATH, render_domain_smb_conf(&cfg)).await?;
+                }
+                Ok(Some(_)) => {} // guess matched the DC — nothing to correct.
+                Ok(None) => tracing::warn!(
+                    "could not parse `net ads workgroup`; keeping derived workgroup {} (usually right)",
+                    cfg.workgroup
+                ),
+                Err(e) => tracing::warn!(
+                    "net ads workgroup failed; keeping derived workgroup {} (usually right): {e}",
+                    cfg.workgroup
+                ),
+            }
+
+            // Start winbindd now that a machine secret exists — pre-join it
+            // has no job and can wedge on name collisions. Restart is
+            // idempotent (a no-op if it was never started).
+            systemctl("restart", "samba-winbindd.service")
+                .await
+                .map_err(DomainError::CommandFailed)?;
 
             // Verify the trust before declaring success.
             run_cmd("wbinfo", &["-t"], &[]).await.map_err(|e| {
@@ -1016,6 +1059,15 @@ _ldap._tcp.nasty.test IN SRV 0 100 389 dc.nasty.test. -- link: eth1\n\n\
         // `date -u -j -f "%Y-%m-%d %H:%M:%S" "2026-07-07 12:34:56" +%s` => 1783427696
         assert_eq!(parse_net_ads_server_time(out), Some(1783427696));
         assert_eq!(parse_net_ads_server_time("no time here"), None);
+    }
+
+    #[test]
+    fn parse_net_ads_workgroup_reads_name() {
+        assert_eq!(
+            parse_net_ads_workgroup("Workgroup: NASTYAD\n").as_deref(),
+            Some("NASTYAD")
+        );
+        assert_eq!(parse_net_ads_workgroup("no workgroup line"), None);
     }
 
     #[test]
