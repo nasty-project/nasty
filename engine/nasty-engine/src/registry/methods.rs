@@ -48,6 +48,7 @@ use nasty_storage::subvolume::{
     Snapshot, Subvolume, UpdateSubvolumeRequest,
 };
 use nasty_system::alerts::{ActiveAlert, AlertRule, AlertRuleUpdate};
+use nasty_system::domain::{DomainPrincipal, DomainStatus, JoinDomainRequest, LeaveDomainRequest};
 use nasty_system::firewall::FirewallStatus;
 use nasty_system::firmware::{FirmwareConstraints, FirmwareDevice, FirmwareUpdateResult};
 use nasty_system::guest_tools::{GuestToolsStatus, GuestToolsUpdate};
@@ -2249,6 +2250,53 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                         "Username to remove.",
                     )),
                     result: None,
+                },
+            ],
+        ),
+        // ── Active Directory ────────────────────────────────────────────
+        (
+            "Active Directory",
+            vec![
+                Method {
+                    name: "domain.status",
+                    desc: "Report AD membership: joined state, realm, trust health (wbinfo -t), DC reachability, and clock skew.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<DomainStatus>(generator)),
+                },
+                Method {
+                    name: "domain.join",
+                    desc: "Join an Active Directory domain. Runs preflight (DNS SRV, DC reachability, clock skew) before touching Kerberos; the admin credential is used once over stdin and never stored. Configuration rolls back on any failure.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<JoinDomainRequest>(generator)),
+                    result: Some(gen_schema::<DomainStatus>(generator)),
+                },
+                Method {
+                    name: "domain.leave",
+                    desc: "Leave the AD domain. With credentials the computer account is removed from AD; with force=true the leave is local-only and the account goes stale.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<LeaveDomainRequest>(generator)),
+                    result: None,
+                },
+                Method {
+                    name: "domain.user.list",
+                    desc: "Search domain users by account-name prefix (min 2 chars, capped at 50). Live winbind query — domain users are never copied into NASty.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one(
+                        "prefix",
+                        "Account name prefix to search for.",
+                    )),
+                    result: Some(gen_schema::<Vec<DomainPrincipal>>(generator)),
+                },
+                Method {
+                    name: "domain.group.list",
+                    desc: "Search domain groups by name prefix (min 2 chars, capped at 50).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one(
+                        "prefix",
+                        "Group name prefix to search for.",
+                    )),
+                    result: Some(gen_schema::<Vec<DomainPrincipal>>(generator)),
                 },
             ],
         ),

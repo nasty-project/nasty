@@ -79,6 +79,7 @@ pub struct AppState {
     pub nfs: nasty_sharing::NfsService,
     pub guest_shares: guestshare::GuestShareService,
     pub smb: nasty_sharing::SmbService,
+    pub domain: nasty_system::domain::DomainService,
     pub iscsi: nasty_sharing::IscsiService,
     pub nvmeof: Arc<nasty_sharing::NvmeofService>,
     pub vms: nasty_vm::VmService,
@@ -222,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         nfs: nasty_sharing::NfsService::new(),
         guest_shares: guestshare::GuestShareService::new(),
         smb: nasty_sharing::SmbService::new(),
+        domain: nasty_system::domain::DomainService::new(),
         iscsi: nasty_sharing::IscsiService::new(),
         nvmeof,
         vms: nasty_vm::VmService::new(),
@@ -242,6 +244,8 @@ async fn main() -> anyhow::Result<()> {
             "nvmeof.remap_device_paths",
             "iscsi.remap_device_paths",
             "protocols.restore",
+            "smb.scaffold_config",
+            "domain.restore",
             "nvmeof.restore",
             "vms.restore",
             "apps.restore",
@@ -336,6 +340,44 @@ async fn main() -> anyhow::Result<()> {
             secs(90), // 9 systemd services × up to ~10s each on a bursty box
             state.protocols.restore(),
         )
+        .await;
+
+    // Rebuild the smb.nasty.conf include chain before anything AD-related
+    // runs. tmpfiles ships that file empty and only a share mutation ever
+    // rewrote it, so fresh and upgraded boxes carried no
+    // `include = /etc/samba/nasty-domain.conf` — the domain join below (and
+    // winbindd) would see no ADS globals. The rebuild is idempotent, so this
+    // is safe on every boot; it must run BEFORE domain.restore.
+    state
+        .boot_status
+        .run_phase("smb.scaffold_config", secs(15), {
+            let state = state.clone();
+            async move {
+                match state.smb.ensure_config_scaffolding().await {
+                    Ok(()) => {
+                        tracing::info!("Rebuilt /etc/samba/smb.nasty.conf include chain at boot");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to rebuild smb.nasty.conf include chain: {e}");
+                    }
+                }
+            }
+        })
+        .await;
+
+    // If we're joined to an Active Directory domain, make sure winbindd is
+    // running — `domain.join` already starts it, but a plain reboot doesn't
+    // go through that path.
+    state
+        .boot_status
+        .run_phase("domain.restore", secs(15), {
+            let state = state.clone();
+            async move {
+                if state.domain.is_joined().await {
+                    state.domain.ensure_winbindd().await;
+                }
+            }
+        })
         .await;
 
     // SSH password auth is managed via /var/lib/nasty/sshd_override.conf

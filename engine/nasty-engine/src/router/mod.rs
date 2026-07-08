@@ -7,6 +7,7 @@ mod audit;
 mod auth;
 mod backup;
 mod bcachefs;
+mod domain;
 mod fs;
 mod guestshare;
 mod notifications;
@@ -200,6 +201,17 @@ fn is_read_only(method: &str) -> bool {
     // `system.ssh.status`, `system.nut.status`, `system.acme.status`,
     // `system.firewall.status`, `system.tls.host_statuses`,
     // `fs.reconcile.status`, …), so this is safe.
+    //
+    // Carve-outs that must NOT match the suffix heuristics: the registry
+    // declares `domain.user.list` / `domain.group.list` as Admin, but their
+    // `.list` suffix would otherwise slip them into the universally-allowed
+    // read set. They spawn `wbinfo` to enumerate Active Directory principals
+    // (users/groups) out of the joined directory, so they are privileged
+    // reads gated on Admin, not routine reads. Returning false here defers
+    // enforcement to the role check (Admin only), matching the registry.
+    if matches!(method, "domain.user.list" | "domain.group.list") {
+        return false;
+    }
     method.ends_with(".list")
         || method.ends_with(".get")
         || method.ends_with(".status")
@@ -468,6 +480,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "share" => share::try_route(req, state, session).await,
         "guestshare" => guestshare::try_route(req, state, session).await,
         "smb" => smb::try_route(req, state, session).await,
+        "domain" => domain::try_route(req, state, session).await,
         "service" => service::try_route(req, state, session).await,
         "system" => {
             // `system.alerts` lives in the alerts module; everything else
@@ -1357,6 +1370,16 @@ mod tests {
         ] {
             assert!(!is_read_only(m), "expected {m} to be a write");
         }
+    }
+
+    /// Domain principal enumeration is Admin-gated in the registry, so it
+    /// must NOT be classified as a routine read despite its `.list` suffix
+    /// — otherwise ReadOnly/Operator users could enumerate directory
+    /// principals via wbinfo. Enforcement defers to the Admin role check.
+    #[test]
+    fn domain_principal_search_is_not_read_only() {
+        assert!(!is_read_only("domain.user.list"));
+        assert!(!is_read_only("domain.group.list"));
     }
 
     /// The .list / .get suffix matches that existed before this

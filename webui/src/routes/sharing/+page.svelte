@@ -47,6 +47,7 @@
 		nvmeRefresh,
 		nvmeLoadProtocol,
 	} from '$lib/sharing/nvmeof.svelte';
+	import { domainRefresh } from '$lib/domain.svelte';
 
 	// Guest shares are public web links (managed in their own panel), a peer
 	// of the network protocols but with no create-wizard / protocol service.
@@ -312,6 +313,11 @@
 			nvmeLoadProtocol(),
 			rdmaLoad(),
 		]);
+		// Load AD membership so SmbPanel's domain-user picker appears when the
+		// box is joined — otherwise the picker only ever showed after visiting
+		// Settings (the only other place that calls domainRefresh). Fire-and-
+		// forget: domainRefresh swallows its own errors.
+		domainRefresh();
 	});
 
 	onDestroy(() => client.offEvent(handleEvent));

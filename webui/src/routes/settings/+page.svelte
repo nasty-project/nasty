@@ -15,6 +15,7 @@
 	} from '$lib/network';
 	import { confirm } from '$lib/confirm.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
+	import { domain, domainRefresh, domainJoin, domainLeave } from '$lib/domain.svelte';
 	import type { Settings, SystemInfo, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NetIfStats, IpConfig, InterfaceConfig, VfConfig } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -182,6 +183,28 @@
 	// Telemetry
 	let sendingTelemetry = $state(false);
 
+	// Directory (Active Directory)
+	let domainJoinTried = $state(false);
+	let domainAdvanced = $state(false);
+	let domainLeaveOpen = $state(false);
+	let domainLeaveForce = $state(false);
+	let domainLeaveUsername = $state('');
+	let domainLeavePassword = $state('');
+
+	async function domainJoinGuarded() {
+		if (!domain.realm || !domain.username || !domain.password) { domainJoinTried = true; return; }
+		domainJoinTried = false;
+		await domainJoin();
+	}
+
+	async function domainLeaveConfirmed() {
+		await domainLeave(domainLeaveForce, domainLeaveUsername, domainLeavePassword);
+		domainLeaveOpen = false;
+		domainLeaveForce = false;
+		domainLeaveUsername = '';
+		domainLeavePassword = '';
+	}
+
 	// ── Metrics tab state ───────────────────────────────────
 	let metricsText = $state('');
 	let metricsLoading = $state(false);
@@ -261,6 +284,7 @@
 			logFilter = liveLogFilter;
 			syncNetworkForm();
 		});
+		await domainRefresh();
 	});
 
 	function syncNetworkForm() {
@@ -912,6 +936,137 @@
 				</Button>
 			</section>
 
+			<!-- Directory (Active Directory) -->
+			<section class="rounded-lg border border-border p-5">
+				<h2 class="mb-4 text-base font-semibold">Directory (Active Directory)</h2>
+
+				{#if domain.loading}
+					<p class="text-sm text-muted-foreground">Loading...</p>
+				{:else if !domain.status?.joined}
+					<div class="mb-3">
+						<label for="domain-realm" class="text-sm text-muted-foreground">Realm {#if !domain.realm && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
+						<input
+							id="domain-realm"
+							type="text"
+							bind:value={domain.realm}
+							placeholder="corp.example.com"
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.realm, domainJoinTried)}"
+						/>
+					</div>
+					<div class="mb-3">
+						<label for="domain-username" class="text-sm text-muted-foreground">Username {#if !domain.username && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
+						<input
+							id="domain-username"
+							type="text"
+							bind:value={domain.username}
+							placeholder="Administrator"
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.username, domainJoinTried)}"
+						/>
+					</div>
+					<div class="mb-3">
+						<label for="domain-password" class="text-sm text-muted-foreground">Password {#if !domain.password && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
+						<input
+							id="domain-password"
+							type="password"
+							bind:value={domain.password}
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.password, domainJoinTried)}"
+						/>
+					</div>
+
+					<button
+						type="button"
+						onclick={() => domainAdvanced = !domainAdvanced}
+						class="mb-3 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+					>
+						{#if domainAdvanced}<ChevronDown class="h-3 w-3" />{:else}<ChevronRight class="h-3 w-3" />{/if}
+						Advanced
+					</button>
+					{#if domainAdvanced}
+						<div class="mb-3">
+							<label for="domain-ou" class="text-sm text-muted-foreground">Organizational Unit</label>
+							<input
+								id="domain-ou"
+								type="text"
+								bind:value={domain.ou}
+								placeholder="OU=Servers,DC=corp,DC=example,DC=com"
+								class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+							/>
+						</div>
+					{/if}
+
+					<Button size="sm" onclick={domainJoinGuarded} disabled={domain.joining}>
+						{domain.joining ? 'Joining… (this contacts the domain controller)' : 'Join'}
+					</Button>
+				{:else}
+					<div class="mb-3 flex items-center justify-between">
+						<span class="text-sm text-muted-foreground">Realm</span>
+						<span class="text-sm font-medium font-mono">{domain.status.realm ?? '—'}</span>
+					</div>
+					<div class="mb-4 flex items-center justify-between">
+						<span class="text-sm text-muted-foreground">Workgroup</span>
+						<span class="text-sm font-medium font-mono">{domain.status.workgroup ?? '—'}</span>
+					</div>
+
+					<div class="mb-4 flex flex-wrap gap-1.5">
+						<Badge
+							variant={domain.status.trust_ok ? 'default' : domain.status.trust_ok === false ? 'destructive' : 'secondary'}
+							class="text-[0.65rem]"
+						>Trust: {domain.status.trust_ok ? 'OK' : domain.status.trust_ok === false ? 'Broken' : 'Unknown'}</Badge>
+						<Badge
+							variant={domain.status.dc_reachable ? 'default' : domain.status.dc_reachable === false ? 'destructive' : 'secondary'}
+							class="text-[0.65rem]"
+						>DC: {domain.status.dc_reachable ? 'Reachable' : domain.status.dc_reachable === false ? 'Unreachable' : 'Unknown'}</Badge>
+						<Badge
+							variant="outline"
+							class="text-[0.65rem] {Math.abs(domain.status.clock_skew_seconds ?? 0) > 120 ? 'border-amber-500/40 bg-amber-500/10 text-amber-400' : ''}"
+						>Clock skew: {domain.status.clock_skew_seconds ?? 0}s</Badge>
+					</div>
+
+					{#if !domainLeaveOpen}
+						<Button size="sm" variant="destructive" onclick={() => domainLeaveOpen = true}>Leave Domain</Button>
+					{:else}
+						<div class="space-y-3 rounded-md border border-border p-3">
+							<div class="flex w-fit rounded-md border border-border text-xs">
+								<button
+									onclick={() => domainLeaveForce = false}
+									class="rounded-l-md px-3 py-1 font-medium transition-colors {!domainLeaveForce ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
+								>With credentials</button>
+								<button
+									onclick={() => domainLeaveForce = true}
+									class="rounded-r-md px-3 py-1 font-medium transition-colors {domainLeaveForce ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
+								>Force local</button>
+							</div>
+							{#if !domainLeaveForce}
+								<div>
+									<label for="domain-leave-user" class="text-xs text-muted-foreground">Username</label>
+									<input
+										id="domain-leave-user"
+										type="text"
+										bind:value={domainLeaveUsername}
+										placeholder="Administrator"
+										class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+									/>
+								</div>
+								<div>
+									<label for="domain-leave-pass" class="text-xs text-muted-foreground">Password</label>
+									<input
+										id="domain-leave-pass"
+										type="password"
+										bind:value={domainLeavePassword}
+										class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+									/>
+								</div>
+							{:else}
+								<p class="text-xs text-amber-500">Local-only leave: the computer account stays behind in AD until an admin removes it manually.</p>
+							{/if}
+							<div class="flex gap-2">
+								<Button size="sm" variant="destructive" onclick={domainLeaveConfirmed}>Confirm Leave</Button>
+								<Button size="sm" variant="secondary" onclick={() => { domainLeaveOpen = false; domainLeaveForce = false; domainLeaveUsername = ''; domainLeavePassword = ''; }}>Cancel</Button>
+							</div>
+						</div>
+					{/if}
+				{/if}
+			</section>
 
 			</div>
 		</div>

@@ -22,8 +22,21 @@
 		smbLoadSubvolumes,
 		smbEnsureSystemUsers,
 	} from '$lib/sharing/smb.svelte';
+	import { domain, domainSearchUsers } from '$lib/domain.svelte';
+	import type { SmbShare, DomainPrincipal } from '$lib/types';
 
 	const client = getClient();
+
+	let domainSearch = $state('');
+	let domainHits: DomainPrincipal[] = $state([]);
+
+	/** Append `entry` (a system username or `@group`) to a share's
+	 * valid_users and persist. Shared by the system-user/group buttons
+	 * and the domain-user search results below them. */
+	function addValidUser(share: SmbShare, entry: string) {
+		const valid_users = [...share.valid_users, entry];
+		withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `${entry} added`).then(() => smbRefresh());
+	}
 
 	/** Gates the amber required-field decoration on the SMB create form
 	 * until the operator has clicked Create at least once with a missing
@@ -222,21 +235,29 @@
 										</div>
 									{/if}
 									{#if smb.addUserShare === share.id}
-										<div class="flex flex-wrap gap-1.5" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-											{#each smb.systemUsers.filter(u => !share.valid_users.includes(u.username)) as user}
-												<Button size="xs" variant="secondary" onclick={() => {
-													const valid_users = [...share.valid_users, user.username];
-													withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `${user.username} added`).then(() => smbRefresh());
-												}}>{user.username}</Button>
-											{/each}
-											{#each smb.groups.filter(g => !share.valid_users.includes(`@${g.name}`)) as group}
-												<Button size="xs" variant="secondary" class="text-blue-400" onclick={() => {
-													const valid_users = [...share.valid_users, `@${group.name}`];
-													withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `@${group.name} added`).then(() => smbRefresh());
-												}}>@{group.name}</Button>
-											{/each}
-											<Button size="xs" variant="secondary" onclick={() => goto('/users')}>Create User / Group</Button>
-											<Button variant="secondary" size="xs" onclick={() => { smb.addUserShare = null; }}>Done</Button>
+										<div role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+											<div class="flex flex-wrap gap-1.5">
+												{#each smb.systemUsers.filter(u => !share.valid_users.includes(u.username)) as user}
+													<Button size="xs" variant="secondary" onclick={() => addValidUser(share, user.username)}>{user.username}</Button>
+												{/each}
+												{#each smb.groups.filter(g => !share.valid_users.includes(`@${g.name}`)) as group}
+													<Button size="xs" variant="secondary" class="text-blue-400" onclick={() => addValidUser(share, `@${group.name}`)}>@{group.name}</Button>
+												{/each}
+												<Button size="xs" variant="secondary" onclick={() => goto('/users')}>Create User / Group</Button>
+												<Button variant="secondary" size="xs" onclick={() => { smb.addUserShare = null; }}>Done</Button>
+											</div>
+											{#if domain.status?.joined}
+												<div class="mt-2">
+													<Input bind:value={domainSearch} placeholder="Search domain users (2+ chars)…" class="h-8 text-xs"
+														oninput={async () => { domainHits = await domainSearchUsers(domainSearch); }} />
+													{#each domainHits.filter(p => !share.valid_users.includes(p.name)) as p}
+														<button class="block w-full rounded px-2 py-1 text-left font-mono text-xs hover:bg-secondary/50"
+															onclick={() => addValidUser(share, p.name)}>
+															{p.name}
+														</button>
+													{/each}
+												</div>
+											{/if}
 										</div>
 									{:else}
 										<Button variant="secondary" size="xs" onclick={(e) => {

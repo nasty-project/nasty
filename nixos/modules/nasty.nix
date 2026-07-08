@@ -52,6 +52,12 @@ let
     };
   };
 
+  # ADS member mode needs LDAP support; nixpkgs' default samba is built
+  # --without-ldap --without-ads. One binding so smbd, the CLI tools, and
+  # winbindd all come from the same build. This changes the samba binary
+  # on EVERY box (joined or not) — the appliance-smoke test gates it.
+  sambaAds = pkgs.samba.override { enableLDAP = true; };
+
   # ── Plymouth boot splash ────────────────────────────────────
   nasty-logo-png = pkgs.runCommand "nasty-logo.png" {
     nativeBuildInputs = [ pkgs.librsvg ];
@@ -1432,7 +1438,7 @@ in {
         fi
       '')
     ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
-      ++ lib.optionals cfg.smb.enable [ samba ]
+      ++ lib.optionals cfg.smb.enable [ sambaAds ]
       ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
       ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ]
       ++ lib.optionals cfg.nut.enable [ pkgs.nut ]
@@ -1469,6 +1475,8 @@ in {
       "d /etc/exports.d 0755 root root -"
       "d /etc/target 0750 root root -"
       "f /etc/samba/smb.nasty.conf 0644 root root -"
+      "f /etc/samba/nasty-domain.conf 0644 root root -"
+      "f /etc/samba/nasty-krb5.conf 0644 root root -"
       "d /etc/samba/nasty.d 0755 root root -"
       # Real, engine-writable dir for the dynamic Time Machine `_adisk`
       # Avahi service file (otherwise only populated by static
@@ -1613,7 +1621,7 @@ in {
         sbctl                        # SB enrollment + signing-state checks for PR #2's WebUI ceremony (`sbctl verify`, `sbctl list-enrolled-keys`). Read paths only from the engine; writes go through lanzaboote's install hooks, never direct sbctl-from-engine calls.
         keyutils                     # keyctl — fs.lock revokes the bcachefs unlock key from the kernel session keyring; without this the call fails with "No such file or directory" even though every other tool we shell out to is here
       ] ++ lib.optionals cfg.nfs.enable [ nfs-utils ]
-        ++ lib.optionals cfg.smb.enable [ samba shadow.out ]
+        ++ lib.optionals cfg.smb.enable [ sambaAds shadow.out ]
         ++ lib.optionals cfg.iscsi.enable [ targetcli-fixed ]
         ++ lib.optionals cfg.nvmeof.enable [ nvme-cli ]
         ++ lib.optionals cfg.nut.enable [ pkgs.nut ]
@@ -1733,6 +1741,8 @@ in {
 
     services.samba = mkIf cfg.smb.enable {
       enable = true;
+      package = sambaAds;
+      winbindd.enable = true;
       settings = {
         global = {
           "server string" = "NASty NAS";
@@ -1755,6 +1765,46 @@ in {
       };
     };
 
+    # The samba module emits [global] keys alphabetically and always
+    # injects `security=user`, which lands AFTER our include — smb.conf
+    # is last-one-wins, so the AD member mode the engine renders into
+    # the include chain was silently clobbered (net ads join: "Invalid
+    # configuration", caught live by the ad-member VM test). Take over
+    # the top-level file so the engine-managed include is the LAST
+    # directive: the static defaults below match what the module
+    # emitted; the include chain overrides security/realm when joined
+    # and is empty otherwise (unjoined boxes keep identical behavior).
+    environment.etc."samba/smb.conf" = mkIf cfg.smb.enable {
+      source = lib.mkForce (pkgs.writeText "smb.conf" ''
+        [global]
+        guest account = nobody
+        invalid users = root
+        map to guest = Never
+        passwd program = /run/wrappers/bin/passwd %u
+        security = user
+        server min protocol = SMB2
+        server signing = auto
+        server string = NASty NAS
+        # Engine-managed chain — keep as the last directive.
+        include = /etc/samba/smb.nasty.conf
+      '');
+    };
+
+    # The engine renders Kerberos config at domain-join time (a runtime
+    # operation, not a rebuild) into an engine-owned path. Route winbindd
+    # and everything the engine execs (net, wbinfo) through it instead of
+    # owning the global /etc/krb5.conf.
+    systemd.services.samba-winbindd.environment = mkIf cfg.smb.enable {
+      KRB5_CONFIG = "/etc/samba/nasty-krb5.conf";
+    };
+
+    # Winbind NSS: domain users/groups resolve through nsswitch while
+    # joined. Present on every box; instant not-found while winbindd
+    # isn't running, so unjoined boxes are unaffected.
+    system.nssModules = mkIf cfg.smb.enable [ sambaAds ];
+    system.nssDatabases.passwd = mkIf cfg.smb.enable (lib.mkAfter [ "winbind" ]);
+    system.nssDatabases.group = mkIf cfg.smb.enable (lib.mkAfter [ "winbind" ]);
+
     # Ensure the SMB tuning config exists (empty) so Samba doesn't fail on startup
     # before the engine has written any tuning settings. No [global] header needed —
     # this file is included from within the [global] section of smb.nasty.conf.
@@ -1764,9 +1814,10 @@ in {
     };
 
     # Prevent Samba from auto-starting at boot. NixOS enables samba.target in
-    # multi-user.target, which then pulls in all three daemons via samba.target.wants.
-    # Override the target's wantedBy to break that chain; the engine starts Samba
-    # on demand when the user enables the protocol.
+    # multi-user.target, which then pulls in all four daemons (smbd, nmbd,
+    # wsdd, winbindd) via samba.target.wants. Override the target's wantedBy
+    # to break that chain; the engine starts smbd/nmbd/wsdd via the protocol
+    # toggle and winbindd only while joined to a domain.
     systemd.targets.samba.wantedBy = mkIf cfg.smb.enable (lib.mkForce []);
 
     # ── SMB network discovery ──────────────────────────────────

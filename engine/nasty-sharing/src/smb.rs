@@ -150,6 +150,22 @@ impl SmbService {
         Self
     }
 
+    /// Ensure `/etc/samba/smb.nasty.conf` holds the current include chain,
+    /// rebuilding it from the per-share configs on disk.
+    ///
+    /// tmpfiles creates that file *empty*, and until this branch the only
+    /// writer was a share create/update/delete. A box that joins a domain
+    /// before ever mutating a share therefore had no `include =
+    /// /etc/samba/nasty-domain.conf` in effect, so `net ads join`/winbindd
+    /// never saw the ADS globals — AD join was dead on arrival on fresh
+    /// installs and stayed dead on every upgraded box until the first share
+    /// mutation. Calling this at boot guarantees the chain exists before any
+    /// join runs. The rebuild is idempotent and cheap (a directory scan plus
+    /// one file write), so it is safe to run unconditionally on every boot.
+    pub async fn ensure_config_scaffolding(&self) -> Result<(), SmbError> {
+        rebuild_include_list().await
+    }
+
     pub async fn list(&self) -> Result<Vec<SmbShare>, SmbError> {
         Ok(state_dir().load_all().await)
     }
@@ -164,6 +180,9 @@ impl SmbService {
     pub async fn create(&self, req: CreateSmbShareRequest) -> Result<SmbShare, SmbError> {
         validate_share_name(&req.name)?;
         validate_share_path(&req.path)?;
+        if let Some(ref valid_users) = req.valid_users {
+            validate_valid_users(valid_users)?;
+        }
 
         if !Path::new(&req.path).exists() {
             return Err(SmbError::PathNotFound(req.path));
@@ -245,6 +264,7 @@ impl SmbService {
             share.guest_ok = guest_ok;
         }
         if let Some(valid_users) = req.valid_users {
+            validate_valid_users(&valid_users)?;
             share.valid_users = valid_users;
         }
         if let Some(extra_params) = req.extra_params {
@@ -337,6 +357,67 @@ fn validate_share_path(path: &str) -> Result<(), SmbError> {
     Ok(())
 }
 
+/// Validate share `valid_users` entries. Three accepted shapes:
+/// local `name`, local `@group`, and domain `DOMAIN\name` (optionally
+/// `@DOMAIN\group`) — the backslash carve-out for AD member mode.
+/// Everything is checked against config-injection characters the same
+/// way validate_share_path is; the domain part follows NetBIOS rules
+/// (≤15 chars, alphanumeric + hyphen).
+fn validate_valid_users(entries: &[String]) -> Result<(), SmbError> {
+    for raw in entries {
+        let entry = raw.strip_prefix('@').unwrap_or(raw);
+        if entry.is_empty() || entry.len() > 256 {
+            return Err(SmbError::InvalidName(format!(
+                "invalid valid_users entry '{raw}'"
+            )));
+        }
+        if entry
+            .chars()
+            .any(|c| c.is_control() || matches!(c, ';' | '"' | '#' | '=' | '\n' | '\r'))
+        {
+            return Err(SmbError::InvalidName(format!(
+                "valid_users entry '{raw}' contains forbidden characters"
+            )));
+        }
+        match entry.split('\\').collect::<Vec<_>>().as_slice() {
+            // Local user or group: existing character policy.
+            [name] => {
+                if !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                {
+                    return Err(SmbError::InvalidName(format!(
+                        "invalid user/group name '{raw}'"
+                    )));
+                }
+            }
+            // DOMAIN\name: NetBIOS domain + AD account (spaces/dots legal).
+            [domain, name] => {
+                let domain_ok = !domain.is_empty()
+                    && domain.len() <= 15
+                    && domain
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-');
+                let name_ok = !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '));
+                if !domain_ok || !name_ok {
+                    return Err(SmbError::InvalidName(format!(
+                        "invalid domain principal '{raw}'"
+                    )));
+                }
+            }
+            _ => {
+                return Err(SmbError::InvalidName(format!(
+                    "invalid valid_users entry '{raw}'"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Render a single share config section. Pure: no I/O.
 fn render_share_conf(share: &SmbShare) -> String {
     let mut conf = format!("[{}]\n", sanitize_smb_value(&share.name));
@@ -379,10 +460,25 @@ fn render_share_conf(share: &SmbShare) -> String {
     }
 
     if !share.valid_users.is_empty() {
+        // smb.conf list parameters split on whitespace, so an unquoted
+        // entry containing a space (e.g. an AD group like `CORP\domain
+        // admins`) would be parsed as two separate tokens. Quote any
+        // entry with a space to preserve its boundary. This is safe from
+        // quote-injection because validate_valid_users already rejects
+        // '"' in entries at the API boundary, and sanitize_smb_value
+        // doesn't strip '"' — so a validated entry can't smuggle its own
+        // closing quote.
         let sanitized_users: Vec<String> = share
             .valid_users
             .iter()
-            .map(|u| sanitize_smb_value(u))
+            .map(|u| {
+                let s = sanitize_smb_value(u);
+                if s.contains(' ') {
+                    format!("\"{s}\"")
+                } else {
+                    s
+                }
+            })
             .collect();
         conf.push_str(&format!(
             "    valid users = {}\n",
@@ -471,23 +567,41 @@ async fn remove_share_conf(id: &str) {
 async fn rebuild_include_list() -> Result<(), SmbError> {
     tokio::fs::create_dir_all(NASTY_SMB_SHARE_DIR).await?;
 
+    let mut share_conf_names = Vec::new();
+    let mut dir = tokio::fs::read_dir(NASTY_SMB_SHARE_DIR).await?;
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let name = entry.file_name();
+        let name = name.to_string_lossy().into_owned();
+        if name.ends_with(".conf") {
+            share_conf_names.push(name);
+        }
+    }
+
+    let includes = render_include_list(&share_conf_names);
+    tokio::fs::write(NASTY_SMB_CONF_PATH, &includes).await?;
+    Ok(())
+}
+
+/// Build the contents of `smb.nasty.conf`: header comment, engine-managed
+/// global includes (domain, tuning), then one `include =` line per per-share
+/// config file name. Pure so it's testable without a filesystem.
+fn render_include_list(share_conf_names: &[String]) -> String {
     let mut includes = String::from("# Managed by NASty — do not edit manually\n");
     includes.push_str("# Per-share configs in /etc/samba/nasty.d/\n\n");
+
+    // Domain (AD member) global parameters. The file exists on every box
+    // (tmpfiles) and is empty until a join renders the ADS block into it,
+    // so unjoined boxes get byte-identical effective config.
+    includes.push_str("include = /etc/samba/nasty-domain.conf\n\n");
 
     // Include engine-managed performance tuning (thread counts, timeouts, etc)
     includes.push_str("include = /etc/samba/nasty-tuning.conf\n\n");
 
-    let mut dir = tokio::fs::read_dir(NASTY_SMB_SHARE_DIR).await?;
-    while let Ok(Some(entry)) = dir.next_entry().await {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.ends_with(".conf") {
-            includes.push_str(&format!("include = {NASTY_SMB_SHARE_DIR}/{name}\n"));
-        }
+    for name in share_conf_names {
+        includes.push_str(&format!("include = {NASTY_SMB_SHARE_DIR}/{name}\n"));
     }
 
-    tokio::fs::write(NASTY_SMB_CONF_PATH, &includes).await?;
-    Ok(())
+    includes
 }
 
 /// Path to the per-share SMB config file.
@@ -1038,6 +1152,38 @@ mod tests {
         assert!(validate_share_path("").is_err());
     }
 
+    #[test]
+    fn validate_valid_users_accepts_local_group_and_domain_forms() {
+        assert!(validate_valid_users(&["alice".into()]).is_ok());
+        assert!(validate_valid_users(&["@staff".into()]).is_ok());
+        assert!(validate_valid_users(&["CORP\\alice".into()]).is_ok());
+        assert!(validate_valid_users(&["@CORP\\domain admins".into()]).is_ok());
+        // AD account names may contain dots and spaces.
+        assert!(validate_valid_users(&["CORP\\svc account.backup".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_valid_users_rejects_injection_shapes() {
+        // Same smuggling shapes validate_share_path pins (newline/config
+        // injection), plus structural garbage.
+        assert!(validate_valid_users(&["alice\ninclude = /etc/passwd".into()]).is_err());
+        assert!(validate_valid_users(&["alice;rm".into()]).is_err());
+        assert!(
+            validate_valid_users(&["CORP\\\\alice".into()]).is_err(),
+            "double backslash"
+        );
+        assert!(
+            validate_valid_users(&["\\alice".into()]).is_err(),
+            "empty domain part"
+        );
+        assert!(
+            validate_valid_users(&["CORP\\".into()]).is_err(),
+            "empty account part"
+        );
+        assert!(validate_valid_users(&["".into()]).is_err());
+        assert!(validate_valid_users(&["THISNETBIOSNAMEISTOOLONG\\alice".into()]).is_err());
+    }
+
     // ── render_share_conf ──────────────────────────────────────────
 
     #[test]
@@ -1098,6 +1244,21 @@ mod tests {
     }
 
     #[test]
+    fn render_share_conf_quotes_spaced_valid_users_entries() {
+        // AD group names commonly contain spaces (`CORP\domain admins`).
+        // Unquoted, Samba splits the space-joined `valid users` list into
+        // two tokens — a broken group ref plus a bare `admins` that can
+        // match an unintended account. Quoting preserves entry boundaries.
+        let mut share = minimal_share();
+        share.valid_users = vec!["@CORP\\domain admins".to_string(), "alice".to_string()];
+        let conf = render_share_conf(&share);
+        assert!(
+            conf.contains("valid users = \"@CORP\\domain admins\" alice"),
+            "{conf}"
+        );
+    }
+
+    #[test]
     fn render_share_conf_extra_params_sorted_and_sanitized() {
         let mut share = minimal_share();
         share
@@ -1117,6 +1278,27 @@ mod tests {
         assert!(alpha_pos < middle_pos && middle_pos < zeta_pos);
         // Injection chars in the value got stripped.
         assert!(out.contains("    middle = vinjectedx\n"));
+    }
+
+    // ── render_include_list ──────────────────────────────────────────
+
+    #[test]
+    fn include_list_puts_domain_conf_first() {
+        let rendered = render_include_list(&["abc.conf".to_string()]);
+        let domain_pos = rendered
+            .find("include = /etc/samba/nasty-domain.conf")
+            .expect("domain include present");
+        let tuning_pos = rendered
+            .find("include = /etc/samba/nasty-tuning.conf")
+            .unwrap();
+        let share_pos = rendered
+            .find("include = /etc/samba/nasty.d/abc.conf")
+            .unwrap();
+        // Global-scope ADS params must land before any share section opens.
+        assert!(
+            domain_pos < tuning_pos && tuning_pos < share_pos,
+            "{rendered}"
+        );
     }
 
     // ── Time Machine ───────────────────────────────────────────────────
