@@ -9,11 +9,12 @@ pub mod scheduler;
 
 use jobs::{BackupJob, BackupJobKind, JobError, JobRegistry};
 use nasty_common::secrets::{self, EncryptedBlob, SecretsStatus};
+use restore::{RestoreProgress, RestoreProgressBars, validate_restore_dest};
 use rustic_backend::BackendOptions;
 use rustic_core::{
     BackupOptions, CheckOptions, ConfigOptions, Credentials, ForgetGroups, Grouped, KeepOptions,
-    KeyOptions, PathList, Repository, RepositoryOptions, SnapshotGroupCriterion, SnapshotOptions,
-    repofile::SnapshotFile,
+    KeyOptions, LocalDestination, LsOptions, PathList, Repository, RepositoryOptions,
+    RestoreOptions, SnapshotGroupCriterion, SnapshotOptions, repofile::SnapshotFile,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,10 @@ use std::collections::BTreeMap;
 use tracing::{error, info, warn};
 
 const STATE_PATH: &str = "/var/lib/nasty/backups.json";
+
+/// Root that every restore destination must resolve under — bcachefs
+/// storage. Mirrors `guestshare.rs`'s FILES_ROOT jail.
+const FS_ROOT: &str = "/fs";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -737,6 +742,16 @@ pub struct BackupStatus {
     pub progress: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RestoreSummary {
+    /// Number of files written to the destination.
+    pub files_restored: u64,
+    /// Total bytes written to the destination.
+    pub bytes_restored: u64,
+    /// Absolute destination the snapshot was restored into.
+    pub dest: String,
+}
+
 // ── Errors ─────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -775,6 +790,24 @@ fn make_repo(
         .map_err(|e| BackupError::Failed(format!("backend: {e}")))?;
     let repo_opts = RepositoryOptions::default();
     Repository::new(&repo_opts, &backends).map_err(|e| BackupError::Failed(format!("repo: {e}")))
+}
+
+/// Like [`make_repo`] but builds the repository with a live progress-bar
+/// backend so restore-byte progress can be surfaced on the job. Same
+/// secret-resolution contract as `make_repo`.
+fn make_repo_with_progress(
+    profile: &BackupProfile,
+    resolved: &ResolvedTargetSecrets,
+    progress: RestoreProgress,
+) -> Result<Repository<()>, BackupError> {
+    let backends = profile
+        .target
+        .to_backend_options(resolved)
+        .to_backends()
+        .map_err(|e| BackupError::Failed(format!("backend: {e}")))?;
+    let repo_opts = RepositoryOptions::default();
+    Repository::new_with_progress(&repo_opts, &backends, RestoreProgressBars(progress))
+        .map_err(|e| BackupError::Failed(format!("repo: {e}")))
 }
 
 fn creds(password: &str) -> Credentials {
@@ -1074,6 +1107,71 @@ impl BackupService {
         Ok(job)
     }
 
+    /// Validate the destination under `/fs`, start a `Restore` job, and
+    /// spawn the background worker plus a 1 s progress poller. Returns
+    /// the `Pending` job immediately (poll `backup.jobs.get`). Dest and
+    /// job-collision errors surface synchronously as `BackupError`.
+    pub async fn start_restore(
+        &self,
+        profile_id: &str,
+        snapshot_id: &str,
+        dest: &str,
+        allow_overwrite: bool,
+    ) -> Result<BackupJob, BackupError> {
+        // Pre-flight: jail + fs-exists + non-empty gate, before any job.
+        let resolved_dest = validate_restore_dest(
+            std::path::Path::new(dest),
+            std::path::Path::new(FS_ROOT),
+            allow_overwrite,
+        )
+        .map_err(|e| BackupError::Failed(e.to_string()))?;
+
+        let job = self
+            .jobs
+            .start(profile_id, BackupJobKind::Restore)
+            .await
+            .map_err(|e| BackupError::Failed(e.to_string()))?;
+
+        let job_id = job.id.clone();
+        let profile_id = profile_id.to_string();
+        let snapshot_id = snapshot_id.to_string();
+        let registry = self.jobs.clone();
+        let service = self.clone_for_task();
+        let progress = RestoreProgress::new();
+        let poll_progress = progress.clone();
+
+        tokio::spawn(async move {
+            registry.mark_running(&job_id).await;
+
+            let work = service.restore_inner(&profile_id, &snapshot_id, resolved_dest, progress);
+            tokio::pin!(work);
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+            ticker.tick().await; // first tick fires immediately; skip it
+
+            loop {
+                tokio::select! {
+                    res = &mut work => {
+                        match res {
+                            Ok(summary) => {
+                                let value = serde_json::to_value(&summary)
+                                    .unwrap_or(serde_json::Value::Null);
+                                registry.mark_progress(&job_id, 1.0).await;
+                                registry.mark_succeeded(&job_id, value).await;
+                            }
+                            Err(e) => registry.mark_failed(&job_id, e.to_string()).await,
+                        }
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        registry.mark_progress(&job_id, poll_progress.fraction()).await;
+                    }
+                }
+            }
+        });
+
+        Ok(job)
+    }
+
     pub async fn init_repo(&self, id: &str) -> Result<String, BackupError> {
         let profile = self.get_profile_internal(id).await?;
         let password = resolve_profile_password(&profile).await?;
@@ -1212,6 +1310,77 @@ impl BackupService {
                     tags: s.tags.iter().map(|t| t.to_string()).collect(),
                 })
                 .collect())
+        })
+        .await
+        .map_err(|e| BackupError::Failed(format!("spawn: {e}")))?
+    }
+
+    /// Restore a whole snapshot into an already-validated destination.
+    /// Opens the repo with a progress backend, resolves the snapshot's
+    /// root node, and restores it (merge semantics: create/overwrite,
+    /// never delete). Returns a summary of what was written.
+    async fn restore_inner(
+        &self,
+        profile_id: &str,
+        snapshot_id: &str,
+        dest: std::path::PathBuf,
+        progress: RestoreProgress,
+    ) -> Result<RestoreSummary, BackupError> {
+        let profile = self.get_profile_internal(profile_id).await?;
+        let password = resolve_profile_password(&profile).await?;
+        let resolved = profile.resolve_runtime().await?;
+        let snapshot_id = snapshot_id.to_string();
+        let dest_str = dest.to_string_lossy().to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let repo = make_repo_with_progress(&profile, &resolved, progress)?;
+            let repo = repo
+                .open(&creds(&password))
+                .map_err(|e| BackupError::Failed(format!("open: {e}")))?;
+            let repo = repo
+                .to_indexed()
+                .map_err(|e| BackupError::Failed(format!("index: {e}")))?;
+
+            // Resolve the snapshot's root node ("<id>" with no subpath).
+            let node = repo
+                .node_from_snapshot_path(&snapshot_id, |_| true)
+                .map_err(|e| BackupError::Failed(format!("snapshot not found: {e}")))?;
+
+            // Destination directory (create=true, expect_file=false).
+            let dest = LocalDestination::new(&dest_str, true, false)
+                .map_err(|e| BackupError::Failed(format!("destination: {e}")))?;
+
+            let opts = RestoreOptions::default(); // delete = false
+
+            // prepare_restore consumes a node streamer; restore needs a
+            // fresh one, so build the recursive streamer twice.
+            let plan = repo
+                .prepare_restore(
+                    &opts,
+                    repo.ls(&node, &LsOptions::default())
+                        .map_err(|e| BackupError::Failed(format!("list: {e}")))?,
+                    &dest,
+                    false,
+                )
+                .map_err(|e| BackupError::Failed(format!("prepare: {e}")))?;
+
+            let files_restored = plan.stats.files.restore;
+            let bytes_restored = plan.restore_size;
+
+            repo.restore(
+                plan,
+                &opts,
+                repo.ls(&node, &LsOptions::default())
+                    .map_err(|e| BackupError::Failed(format!("list: {e}")))?,
+                &dest,
+            )
+            .map_err(|e| BackupError::Failed(format!("restore: {e}")))?;
+
+            Ok::<_, BackupError>(RestoreSummary {
+                files_restored,
+                bytes_restored,
+                dest: dest_str,
+            })
         })
         .await
         .map_err(|e| BackupError::Failed(format!("spawn: {e}")))?
