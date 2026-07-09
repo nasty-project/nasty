@@ -395,6 +395,26 @@
 	let snapshots: BackupSnapshot[] = $state([]);
 	let snapshotsLoading = $state(false);
 
+	// Restore dialog
+	let restoreSnapshot: BackupSnapshot | null = $state(null);
+	let restoreProfileId: string | null = $state(null);
+	let restoreFs = $state('');
+	let restoreSubpath = $state('');
+	let restoreAllowOverwrite = $state(false);
+
+	function openRestore(profileId: string, snap: BackupSnapshot) {
+		restoreProfileId = profileId;
+		restoreSnapshot = snap;
+		restoreFs = filesystems.find(f => f.mounted)?.name ?? '';
+		restoreSubpath = '';
+		restoreAllowOverwrite = false;
+	}
+
+	function closeRestore() {
+		restoreSnapshot = null;
+		restoreProfileId = null;
+	}
+
 	// Page-scoped handle for the post-runBackup status poll so onDestroy can
 	// cancel it on SPA navigation — otherwise the 3-second interval keeps
 	// running until the backup finishes server-side, which can be minutes.
@@ -422,23 +442,16 @@
 		for (const id of Object.keys(jobPollers)) stopJobPoll(id);
 	}
 
-	/** Common path for backup.repo.init / backup.run / backup.repo.check:
-	 * fire the RPC, store the returned BackupJob keyed by profile id,
-	 * then poll backup.jobs.get every 2 s until it lands in a terminal
-	 * state. On success calls onSuccess (typically a list refresh) so
-	 * the operator sees the new repo_initialized / last_run state
-	 * immediately. */
-	async function startBackupJob(
+	/** Attach a 2 s poll for an already-started job, updating the inline
+	 * activeJobs badge until it terminates. Shared by startBackupJob,
+	 * rehydrateJobPolling (jobs discovered server-side on mount), and
+	 * startRestore — previously each of these carried its own copy of
+	 * this loop. */
+	function attachJobPoll(
 		profileId: string,
-		method: 'backup.repo.init' | 'backup.run' | 'backup.repo.check',
-		startMessage: string,
+		job: BackupJob,
 		onSuccess?: () => Promise<void> | void,
 	) {
-		const job = await withToast(
-			() => client.call<BackupJob>(method, { id: profileId }),
-			startMessage,
-		);
-		if (!job) return;
 		activeJobs[profileId] = job;
 		stopJobPoll(profileId);
 		jobPollers[profileId] = setInterval(async () => {
@@ -465,9 +478,55 @@
 		}, 2000);
 	}
 
+	/** Common path for backup.repo.init / backup.run / backup.repo.check:
+	 * fire the RPC, then hand the returned BackupJob to attachJobPoll. On
+	 * success calls onSuccess (typically a list refresh) so the operator
+	 * sees the new repo_initialized / last_run state immediately. */
+	async function startBackupJob(
+		profileId: string,
+		method: 'backup.repo.init' | 'backup.run' | 'backup.repo.check',
+		startMessage: string,
+		onSuccess?: () => Promise<void> | void,
+	) {
+		const job = await withToast(
+			() => client.call<BackupJob>(method, { id: profileId }),
+			startMessage,
+		);
+		if (!job) return;
+		attachJobPoll(profileId, job, onSuccess);
+	}
+
+	/** Fire backup.restore and poll it to completion, reusing the same
+	 * activeJobs badge + progress bar as the other backup jobs. */
+	async function startRestore() {
+		if (!restoreProfileId || !restoreSnapshot || !restoreFs) return;
+		const sub = restoreSubpath.replace(/^\/+/, '').trim();
+		const dest = sub ? `/fs/${restoreFs}/${sub}` : `/fs/${restoreFs}`;
+		const profileId = restoreProfileId;
+		const snapshotId = restoreSnapshot.id;
+		const allow = restoreAllowOverwrite;
+		closeRestore();
+		const job = await withToast(
+			() => client.call<BackupJob>('backup.restore', {
+				id: profileId,
+				snapshot_id: snapshotId,
+				dest,
+				allow_overwrite: allow,
+			}),
+			'Restore started',
+		);
+		if (!job) return;
+		attachJobPoll(profileId, job, refresh);
+	}
+
 	onMount(async () => {
 		await refresh();
 		loading = false;
+		// Load filesystems (and subvolumes) up front rather than only when
+		// the create form is opened — the restore dialog's destination
+		// filesystem <select> needs this list too, and it may be reached
+		// straight from Snapshots without ever opening Create.
+		loadSourceData();
 		// Fetch the at-rest secrets backend status (cheap RPC, runs a
 		// systemd-creds probe round-trip server-side) and drop the
 		// result into the page-header pill. Errors degrade silently
@@ -499,38 +558,16 @@
 			newSources = '/var/lib/nasty';
 			newSchedule = '0 3 * * *';
 			selectedSources = new Set(['/var/lib/nasty']);
-			loadSourceData();
 		}
 	});
 
 	/** Re-attach a polling timer for a job we discovered server-side
 	 * on page mount (rather than created via startBackupJob in this
-	 * session). The polling-loop body is identical to startBackupJob's
-	 * setInterval callback — same terminal-state handling, same
-	 * cleanup. */
+	 * session). Delegates to attachJobPoll — same terminal-state
+	 * handling, same cleanup — always refreshing the profile list on
+	 * completion since we don't know the caller's context here. */
 	function rehydrateJobPolling(job: BackupJob) {
-		activeJobs[job.profile_id] = job;
-		stopJobPoll(job.profile_id);
-		jobPollers[job.profile_id] = setInterval(async () => {
-			try {
-				const updated = await client.call<BackupJob>('backup.jobs.get', { id: job.id });
-				activeJobs[job.profile_id] = updated;
-				if (updated.state === 'succeeded' || updated.state === 'failed') {
-					stopJobPoll(job.profile_id);
-					if (updated.state === 'failed') {
-						await withToast(
-							() => Promise.reject({ message: updated.error ?? 'backup job failed' }),
-							'',
-						);
-					}
-					delete activeJobs[job.profile_id];
-					await refresh();
-				}
-			} catch {
-				stopJobPoll(job.profile_id);
-				delete activeJobs[job.profile_id];
-			}
-		}, 2000);
+		attachJobPoll(job.profile_id, job, refresh);
 	}
 
 	onDestroy(() => {
@@ -916,8 +953,13 @@
 									{#if activeJobs[profile.id]}
 										{@const job = activeJobs[profile.id]}
 										<Badge variant="outline" class="text-[0.6rem] animate-pulse">
-											{job.kind === 'init_repo' ? 'Initializing…' : job.kind === 'run_backup' ? 'Backing up…' : 'Checking…'}
+											{job.kind === 'init_repo' ? 'Initializing…' : job.kind === 'run_backup' ? 'Backing up…' : job.kind === 'restore' ? 'Restoring…' : 'Checking…'}
 										</Badge>
+										{#if job.kind === 'restore' && job.progress_fraction != null}
+											<div class="bg-muted h-1.5 w-24 overflow-hidden rounded">
+												<div class="bg-primary h-full" style="width: {Math.round((job.progress_fraction ?? 0) * 100)}%"></div>
+											</div>
+										{/if}
 									{/if}
 									{#if profile.schedule}
 										<Badge variant="outline" class="text-[0.6rem]">{describeSchedule(profile.schedule)}</Badge>
@@ -1120,6 +1162,7 @@
 								<th class="p-2 text-left">Time</th>
 								<th class="p-2 text-left">Host</th>
 								<th class="p-2 text-left">Paths</th>
+								<th class="p-2 text-left"></th>
 							</tr>
 						</thead>
 						<tbody>
@@ -1129,6 +1172,16 @@
 									<td class="p-2 text-xs">{snap.time.slice(0, 19).replace('T', ' ')}</td>
 									<td class="p-2 text-xs">{snap.hostname}</td>
 									<td class="p-2 text-xs text-muted-foreground">{snap.paths.join(', ')}</td>
+									<td class="p-2 text-right">
+										<Button
+											size="xs"
+											variant="secondary"
+											disabled={viewSnapshotsId !== null && activeJobs[viewSnapshotsId] !== undefined}
+											onclick={() => { if (viewSnapshotsId) openRestore(viewSnapshotsId, snap); }}
+										>
+											Restore
+										</Button>
+									</td>
 								</tr>
 							{/each}
 						</tbody>
@@ -1136,6 +1189,52 @@
 				{/if}
 			</div>
 		</div>
+	</div>
+{/if}
+
+<!-- Restore dialog -->
+{#if restoreSnapshot}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" role="button" tabindex="-1" onclick={closeRestore} onkeydown={(e) => { if (e.key === 'Escape') closeRestore(); }}>
+		<Card class="w-[32rem] max-w-[90vw]" role="presentation" onclick={(e: MouseEvent) => e.stopPropagation()} onkeydown={(e: KeyboardEvent) => e.stopPropagation()}>
+			<CardContent class="pt-6 space-y-4">
+				<div class="flex items-center justify-between">
+					<span class="text-sm font-semibold">Restore snapshot</span>
+					<Button variant="ghost" size="xs" onclick={closeRestore}>Close</Button>
+				</div>
+				<p class="text-xs text-muted-foreground">
+					Restoring snapshot {restoreSnapshot.id.slice(0, 8)} from {restoreSnapshot.time.slice(0, 19).replace('T', ' ')}.
+					Files are written into the chosen filesystem; existing files are only replaced
+					when overwrite is enabled, and nothing else is deleted.
+				</p>
+
+				<div>
+					<Label for="restore-fs">Destination filesystem</Label>
+					<select id="restore-fs" class="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" bind:value={restoreFs}>
+						{#each filesystems.filter(f => f.mounted) as fs}
+							<option value={fs.name}>{fs.name}</option>
+						{/each}
+					</select>
+				</div>
+
+				<div>
+					<Label for="restore-subpath">Subfolder <span class="text-xs font-normal text-muted-foreground">(optional)</span></Label>
+					<Input id="restore-subpath" bind:value={restoreSubpath} placeholder="restored/2026-07-09" class="mt-1 font-mono" />
+					<p class="mt-1 text-xs text-muted-foreground font-mono">
+						Destination: /fs/{restoreFs || '<fs>'}{restoreSubpath ? '/' + restoreSubpath.replace(/^\/+/, '') : ''}
+					</p>
+				</div>
+
+				<label class="flex items-center gap-2 text-sm">
+					<input type="checkbox" bind:checked={restoreAllowOverwrite} class="rounded border-input" />
+					Overwrite existing files (allow restoring into a non-empty folder)
+				</label>
+
+				<div class="flex justify-end gap-2">
+					<Button variant="secondary" size="sm" onclick={closeRestore}>Cancel</Button>
+					<Button size="sm" disabled={!restoreFs} onclick={startRestore}>Restore</Button>
+				</div>
+			</CardContent>
+		</Card>
 	</div>
 {/if}
 
