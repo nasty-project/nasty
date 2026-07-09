@@ -207,7 +207,8 @@ mod tests {
         // Tailscale / SSH side-effects
         assert_eq!(translate("system.tailscale.connect").0, HttpVerb::Post);
         assert_eq!(translate("system.tailscale.disconnect").0, HttpVerb::Post);
-        // Backup runs
+        // Backup operations
         assert_eq!(translate("backup.run").0, HttpVerb::Post);
+        assert_eq!(translate("backup.restore").0, HttpVerb::Post);
     }
 }
