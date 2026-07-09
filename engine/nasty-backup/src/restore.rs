@@ -3,7 +3,10 @@
 //! job's `progress_fraction`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use rustic_core::{Progress, ProgressBars, ProgressType, RusticProgress};
 use thiserror::Error;
 
 /// Reasons a restore destination is rejected before any work starts.
@@ -84,6 +87,68 @@ pub fn validate_restore_dest(
     }
 
     Ok(resolved)
+}
+
+/// Shared, cheap-to-clone handle to a restore's byte counters. The
+/// spawned restore updates it via the `ProgressBars` hook; a poller
+/// reads `fraction()` and writes it onto the job.
+#[derive(Debug, Clone, Default)]
+pub struct RestoreProgress {
+    inner: Arc<RestoreCounters>,
+}
+
+#[derive(Debug, Default)]
+struct RestoreCounters {
+    total: AtomicU64,
+    done: AtomicU64,
+}
+
+impl RestoreProgress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fraction restored in `[0.0, 1.0]`; `0.0` until a total is known.
+    pub fn fraction(&self) -> f64 {
+        let total = self.inner.total.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        let done = self.inner.done.load(Ordering::Relaxed);
+        (done as f64 / total as f64).clamp(0.0, 1.0)
+    }
+}
+
+/// `ProgressBars` impl that feeds only the restore-bytes progress into a
+/// `RestoreProgress`. Non-byte progress (open/index/collect counters) is
+/// hidden and ignored so the fraction stays a clean bytes measure.
+#[derive(Debug)]
+pub struct RestoreProgressBars(pub RestoreProgress);
+
+impl ProgressBars for RestoreProgressBars {
+    fn progress(&self, progress_type: ProgressType, _prefix: &str) -> Progress {
+        match progress_type {
+            ProgressType::Bytes => Progress::new(BytesProgress(self.0.clone())),
+            _ => Progress::hidden(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BytesProgress(RestoreProgress);
+
+impl RusticProgress for BytesProgress {
+    fn is_hidden(&self) -> bool {
+        false
+    }
+    fn set_length(&self, len: u64) {
+        self.0.inner.total.store(len, Ordering::Relaxed);
+    }
+    fn set_title(&self, _title: &str) {}
+    fn inc(&self, inc: u64) {
+        self.0.inner.done.fetch_add(inc, Ordering::Relaxed);
+    }
+    fn finish(&self) {}
 }
 
 #[cfg(test)]
@@ -175,5 +240,35 @@ mod tests {
         let dest = root.path().join("fsname").join("empty");
         std::fs::create_dir(&dest).unwrap();
         assert!(validate_restore_dest(&dest, root.path(), false).is_ok());
+    }
+
+    #[test]
+    fn progress_bytes_tracks_fraction() {
+        use rustic_core::{ProgressBars, ProgressType};
+
+        let progress = RestoreProgress::new();
+        assert_eq!(progress.fraction(), 0.0);
+
+        let bars = RestoreProgressBars(progress.clone());
+        let p = bars.progress(ProgressType::Bytes, "restoring file contents...");
+        p.set_length(100);
+        p.inc(25);
+        assert_eq!(progress.fraction(), 0.25);
+        p.inc(75);
+        assert_eq!(progress.fraction(), 1.0);
+    }
+
+    #[test]
+    fn progress_non_bytes_is_hidden_and_ignored() {
+        use rustic_core::{ProgressBars, ProgressType};
+
+        let progress = RestoreProgress::new();
+        let bars = RestoreProgressBars(progress.clone());
+        let p = bars.progress(ProgressType::Counter, "counting...");
+        assert!(p.is_hidden());
+        p.set_length(100);
+        p.inc(50);
+        // A Counter progress must not move the restore fraction.
+        assert_eq!(progress.fraction(), 0.0);
     }
 }
