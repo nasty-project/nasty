@@ -1126,6 +1126,8 @@ impl BackupService {
         )
         .map_err(|e| BackupError::Failed(e.to_string()))?;
 
+        // Intentionally does NOT set `self.running` — restore concurrency is tracked via the
+        // JobRegistry (`self.jobs`) below, so `backup.status()`'s `running` field reflects only backup runs.
         let job = self
             .jobs
             .start(profile_id, BackupJobKind::Restore)

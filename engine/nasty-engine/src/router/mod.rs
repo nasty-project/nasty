@@ -139,6 +139,14 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "apps.appdata.relocate"
                 | "apps.ingress.set"
                 | "apps.ingress.remove"
+                // Docker network management (#435, #438). Registered as
+                // MethodRole::Operator since the feature shipped, but never
+                // added here — same drift class as `backup.restore` below,
+                // surfaced by the new `operator_role_methods_are_operator_allowed`
+                // guard test. Pre-existing gap, unrelated to backup/restore;
+                // fixing here because the guard test now enforces it.
+                | "apps.networks.create"
+                | "apps.networks.remove"
                 // Backup lifecycle is operator territory in a NAS
                 // appliance — same role that manages shares + apps
                 // typically manages where the data is copied. The
@@ -153,6 +161,7 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "backup.run"
                 | "backup.repo.check"
                 | "backup.repo.init"
+                | "backup.restore"
                 // Service-protocol toggles (NFS/SMB/iSCSI/NVMe-oF
                 // server services + SSH/mDNS/SMART). Operators were
                 // creating shares for protocols they couldn't turn
@@ -1310,7 +1319,7 @@ pub(super) async fn read_bcachefs_error_count(uuid: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::is_read_only;
+    use super::{is_operator_allowed, is_read_only};
 
     /// Regression for the Filesystems-page refresh loop on .71:
     /// before this fix, `fs.tpm.status` was classified as a write
@@ -1391,5 +1400,38 @@ mod tests {
         assert!(is_read_only("subvolume.get"));
         assert!(is_read_only("snapshot.get"));
         assert!(is_read_only("fs.get"));
+    }
+
+    /// Registry↔allowlist consistency guard.
+    ///
+    /// The registry's `role: MethodRole::Operator` on a method is a
+    /// *declaration* of intent — it doesn't enforce anything by itself.
+    /// Enforcement happens here, in `is_operator_allowed`'s hand-maintained
+    /// `matches!` list. `backup.restore` shipped with `role:
+    /// MethodRole::Operator` in the registry but was never added to this
+    /// allowlist, so Operators got "Permission denied" and only Admins
+    /// could restore — the registry and the enforcement path silently
+    /// drifted apart. This test closes that gap for every method, not
+    /// just backup.restore: any future method registered as Operator-role
+    /// that's missing from `is_operator_allowed` now fails CI instead of
+    /// shipping.
+    #[test]
+    fn operator_role_methods_are_operator_allowed() {
+        use crate::registry::{MethodRole, build_full_registry};
+
+        let (_g, groups) = build_full_registry();
+        let mut missing = Vec::new();
+        for (_, methods) in &groups {
+            for m in methods {
+                if m.role == MethodRole::Operator && !is_operator_allowed(m.name) {
+                    missing.push(m.name);
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "methods registered as MethodRole::Operator but missing from \
+             is_operator_allowed's allowlist: {missing:?}"
+        );
     }
 }
