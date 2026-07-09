@@ -199,10 +199,16 @@
       });
     in base.overrideAttrs (old: {
       passthru = old.passthru // {
-        # kernelModule must keep the same named-attr signature that callPackage
-        # expects: { lib, stdenv, kernelModuleMakeFlags, kernel } -> drv.
-        kernelModule = { lib, stdenv, kernelModuleMakeFlags, kernel }:
-          (old.passthru.kernelModule { inherit lib stdenv kernelModuleMakeFlags kernel; }).overrideAttrs (kOld: {
+        # kernelModule must mirror nixpkgs' kernel-module.nix argument set so
+        # `callPackage` fills them and we can forward them to the wrapped
+        # derivation. nixpkgs added `rustPlatform` here (bcachefs's kernel
+        # module is gaining Rust) — forward it too, or eval fails with
+        # "called without required argument 'rustPlatform'". Keep this in
+        # sync with pkgs/by-name/bc/bcachefs-tools/kernel-module.nix.
+        kernelModule = { lib, stdenv, kernelModuleMakeFlags, kernel, rustPlatform }:
+          (old.passthru.kernelModule {
+            inherit lib stdenv kernelModuleMakeFlags kernel rustPlatform;
+          }).overrideAttrs (kOld: {
             postPatch = (kOld.postPatch or "") + ''
               # Quota needs no patching since v1.38.8: fs/Makefile enables
               # CONFIG_BCACHEFS_QUOTA for DKMS builds whenever the host
