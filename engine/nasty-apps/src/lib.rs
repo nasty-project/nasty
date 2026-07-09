@@ -1504,6 +1504,43 @@ async fn remove_startup_override(app_name: &str) {
     }
 }
 
+/// Marks where NASty's managed `.env` header ends and the operator's
+/// pasted dotenv begins, so the two can be recombined on write and split
+/// apart on read without the operator ever seeing NASty's bookkeeping.
+const ENV_USER_MARKER: &str = "# >>> NASty: user-provided .env >>>";
+
+/// Render the project `.env`: NASty's managed `COMPOSE_PROJECT_NAME`
+/// header, followed by the operator's pasted dotenv (Immich/Nextcloud
+/// style config) when present. Compose reads this file from the project
+/// directory automatically — that's how the existing project-name line
+/// already reaches it — so no invocation change is needed.
+///
+/// Public so the streaming deploy handler — which writes the compose
+/// files itself rather than via `compose_install` — produces byte-
+/// identical `.env` layout to what `compose_get`/[`extract_user_env`]
+/// read back.
+pub fn render_env_file(app_name: &str, user_env: Option<&str>) -> String {
+    let mut out = format!("COMPOSE_PROJECT_NAME={app_name}\n");
+    if let Some(user) = user_env {
+        let user = user.trim();
+        if !user.is_empty() {
+            out.push_str(ENV_USER_MARKER);
+            out.push('\n');
+            out.push_str(user);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Recover just the operator's pasted dotenv from a rendered `.env`,
+/// dropping NASty's managed header. `None` when no user content was
+/// stored (the marker is absent).
+fn extract_user_env(env_file: &str) -> Option<String> {
+    let user = env_file.split_once(ENV_USER_MARKER)?.1.trim_matches('\n');
+    (!user.is_empty()).then(|| user.to_string())
+}
+
 /// The `-f` args for a `docker compose` invocation: always the user's
 /// compose file, plus the startup override when it exists (managed stacks).
 /// Single source of truth so install/update/restore/set_startup agree.
@@ -1910,6 +1947,23 @@ pub struct InstallComposeRequest {
     pub name: String,
     /// Contents of docker-compose.yml.
     pub compose_file: String,
+    /// Optional `.env` file contents. Compose reads it from the project
+    /// directory for `${VAR}` substitution and defaults — the deployment
+    /// method Immich/Nextcloud and similar expect. Absent or empty means
+    /// no operator env. NASty's `COMPOSE_PROJECT_NAME` is managed
+    /// separately and prepended automatically.
+    #[serde(default)]
+    pub env_file: Option<String>,
+}
+
+/// Compose app source returned by `apps.compose.get` for the editor.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ComposeContent {
+    /// docker-compose.yml text.
+    pub compose_file: String,
+    /// Operator-provided `.env` text, or null when none was stored.
+    /// NASty's managed `COMPOSE_PROJECT_NAME` header is stripped.
+    pub env_file: Option<String>,
 }
 
 /// Set NASty-managed startup ordering for a compose stack (#437).
@@ -4053,9 +4107,14 @@ impl AppsService {
         )
         .await?;
 
-        // Write a .env file with project name
-        let env_content = format!("COMPOSE_PROJECT_NAME={name}\n", name = req.name,);
-        tokio::fs::write(format!("{}/.env", project_dir), &env_content).await?;
+        // Write the project .env: managed COMPOSE_PROJECT_NAME plus the
+        // operator's pasted dotenv (if any). Compose reads it from the
+        // project directory automatically.
+        tokio::fs::write(
+            format!("{}/.env", project_dir),
+            render_env_file(&req.name, req.env_file.as_deref()),
+        )
+        .await?;
 
         // Validate compose file before deploying
         let compose_path = format!("{}/docker-compose.yml", project_dir);
@@ -4166,6 +4225,14 @@ impl AppsService {
         tokio::fs::write(
             format!("{}/docker-compose.yml", project_dir),
             &req.compose_file,
+        )
+        .await?;
+
+        // Re-render the .env so edits to the operator's dotenv take effect
+        // (and clearing it drops back to the managed project-name only).
+        tokio::fs::write(
+            format!("{}/.env", project_dir),
+            render_env_file(&req.name, req.env_file.as_deref()),
         )
         .await?;
 
@@ -4355,11 +4422,21 @@ impl AppsService {
         Ok(())
     }
 
-    pub async fn compose_get(&self, name: &str) -> Result<String, AppsError> {
-        let path = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
-        tokio::fs::read_to_string(&path)
+    pub async fn compose_get(&self, name: &str) -> Result<ComposeContent, AppsError> {
+        let dir = format!("{}/{}", COMPOSE_DIR, name);
+        let compose_file = tokio::fs::read_to_string(format!("{dir}/docker-compose.yml"))
             .await
-            .map_err(|_| AppsError::AppNotFound(name.to_string()))
+            .map_err(|_| AppsError::AppNotFound(name.to_string()))?;
+        // The .env may not exist on very old stacks; its absence just means
+        // no operator env. Strip NASty's managed header before returning.
+        let env_file = tokio::fs::read_to_string(format!("{dir}/.env"))
+            .await
+            .ok()
+            .and_then(|e| extract_user_env(&e));
+        Ok(ComposeContent {
+            compose_file,
+            env_file,
+        })
     }
 
     pub async fn compose_logs(&self, name: &str, tail: Option<u32>) -> Result<String, AppsError> {
@@ -6460,10 +6537,50 @@ async fn fetch_manifest_json(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppVolume, StartupConfig, compose_file_args, docker_data_root_status,
-        render_startup_override, validate_simple_volumes,
+        AppVolume, StartupConfig, compose_file_args, docker_data_root_status, extract_user_env,
+        render_env_file, render_startup_override, validate_simple_volumes,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn env_file_project_name_only_when_no_user_env() {
+        assert_eq!(
+            render_env_file("immich", None),
+            "COMPOSE_PROJECT_NAME=immich\n"
+        );
+        // Whitespace-only user env is treated as none.
+        assert_eq!(
+            render_env_file("immich", Some("  \n \n")),
+            "COMPOSE_PROJECT_NAME=immich\n"
+        );
+    }
+
+    #[test]
+    fn env_file_appends_user_env_after_marker() {
+        let rendered = render_env_file("immich", Some("DB_PASSWORD=secret\nUPLOAD_LOCATION=/fs/x"));
+        assert!(rendered.starts_with("COMPOSE_PROJECT_NAME=immich\n"));
+        assert!(rendered.contains("DB_PASSWORD=secret\nUPLOAD_LOCATION=/fs/x\n"));
+        // The project name comes before the user block.
+        assert!(
+            rendered.find("COMPOSE_PROJECT_NAME").unwrap() < rendered.find("DB_PASSWORD").unwrap()
+        );
+    }
+
+    #[test]
+    fn user_env_round_trips_and_hides_managed_header() {
+        let user = "DB_PASSWORD=secret\n# a comment\nUPLOAD_LOCATION=/fs/x";
+        let extracted = extract_user_env(&render_env_file("immich", Some(user)));
+        assert_eq!(extracted.as_deref(), Some(user));
+        // No user env → nothing to extract, and the managed line never leaks.
+        assert_eq!(extract_user_env(&render_env_file("immich", None)), None);
+        assert!(!render_env_file("immich", Some(user)).is_empty());
+    }
+
+    #[test]
+    fn extract_user_env_none_for_legacy_env_without_marker() {
+        // A .env written before this feature (project name only) has no marker.
+        assert_eq!(extract_user_env("COMPOSE_PROJECT_NAME=old\n"), None);
+    }
 
     #[test]
     fn startup_override_pins_each_service_to_no() {
