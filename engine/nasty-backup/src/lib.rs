@@ -4,6 +4,7 @@
 //! library directly for backup operations (restic-compatible repo format).
 
 pub mod jobs;
+pub mod restore;
 pub mod scheduler;
 
 use jobs::{BackupJob, BackupJobKind, JobError, JobRegistry};
