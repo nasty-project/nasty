@@ -161,12 +161,15 @@ read-only `published_app_ports`).
   apply and surface the apply error). The rule stays in JSON and takes effect
   on the next successful apply or reboot; there is no bespoke rollback —
   consistency with the existing code beats a one-off transaction.
-- **Interface disappearance.** Today `strip_iface_refs` *drops* a vanished
-  interface from service restrictions. For a custom rule that would *widen* it
-  to all interfaces — the wrong direction for an explicitly opened port. So a
-  custom rule pinned to a now-removed interface is **disabled (fail-closed)**,
-  not widened, and the UI shows it disabled with a hint. This extends the
-  existing interface-sync logic rather than reusing it verbatim.
+- **Interface disappearance needs no special handling.** The renderer emits
+  `iifname "<iface>"` (a per-packet string match), not `iif <index>`.
+  `iifname` tolerates an absent interface: the rule simply matches no traffic
+  and the `nft -f` load still succeeds. So a custom rule pinned to a
+  since-removed interface is **naturally inert — fail-closed by construction**
+  — with no widening and no ruleset breakage, and therefore no disable/strip
+  logic. (`strip_iface_refs`, the analogous helper for service restrictions,
+  is defined but not wired to any live interface-removal event; custom rules
+  deliberately do not depend on it.)
 
 ## WebUI
 
@@ -190,8 +193,8 @@ read-only `published_app_ports`).
 - **Unit** (`firewall.rs`): the validation matrix (range sanity; collision
   refuse against a disabled protocol port, a portal port, and transport-
   sensitivity; exact-duplicate refuse; overlapping-range allow); nft rendering
-  (range vs single port; `enabled=false` omitted from the ruleset);
-  interface-disappearance disables the rule fail-closed.
+  (range vs single port; `enabled=false` omitted from the ruleset; a rule with
+  an `iface` renders `iifname "<iface>"` so an absent interface is inert).
 - **Router layer:** the Docker-overlap warning, tested with a stubbed
   published-ports list (or noted as integration if the harness makes it
   awkward).
