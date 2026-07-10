@@ -80,6 +80,10 @@ pub enum Transport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PortSpec {
     pub port: u16,
+    /// Optional end of a contiguous port range (`port`..=`to`). `None`
+    /// means a single port. First used by the DC role's dynamic-RPC range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<u16>,
     pub transport: Transport,
     /// Optional source IP/CIDR restriction (e.g. "192.168.1.0/24").
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,7 +244,8 @@ pub fn service_port_conflict(
 ) -> Option<String> {
     for rule in &state.rules {
         for port in &rule.ports {
-            if port.transport == transport && port.port >= from && port.port <= to {
+            let hi = port.to.unwrap_or(port.port);
+            if port.transport == transport && port.port <= to && hi >= from {
                 return Some(rule.service.clone());
             }
         }
@@ -292,6 +297,7 @@ pub struct PublishedAppPort {
 fn tcp(port: u16) -> PortSpec {
     PortSpec {
         port,
+        to: None,
         transport: Transport::Tcp,
         source: None,
         iface: None,
@@ -301,7 +307,18 @@ fn tcp(port: u16) -> PortSpec {
 fn udp(port: u16) -> PortSpec {
     PortSpec {
         port,
+        to: None,
         transport: Transport::Udp,
+        source: None,
+        iface: None,
+    }
+}
+
+fn tcp_range(from: u16, to: u16) -> PortSpec {
+    PortSpec {
+        port: from,
+        to: Some(to),
+        transport: Transport::Tcp,
         source: None,
         iface: None,
     }
@@ -338,6 +355,26 @@ pub fn webui_ports() -> Vec<PortSpec> {
 /// source restrictions on RoCE can only filter at 4791 granularity.
 pub fn rdma_ports() -> Vec<PortSpec> {
     vec![udp(4791), tcp(20049)]
+}
+
+/// Ports for the Active Directory DC role (#20): DNS, Kerberos +
+/// kpasswd, RPC endpoint mapper, NetBIOS, LDAP(S), SMB, Global Catalog,
+/// and the dynamic RPC range. Deliberately no NTP — the box does not
+/// serve time to domain clients (documented limitation).
+pub fn dc_ports() -> Vec<PortSpec> {
+    let mut ports = Vec::new();
+    for p in [53u16, 88, 464] {
+        ports.push(tcp(p));
+        ports.push(udp(p));
+    }
+    for p in [135u16, 139, 389, 445, 636, 3268, 3269] {
+        ports.push(tcp(p));
+    }
+    for p in [137u16, 138] {
+        ports.push(udp(p));
+    }
+    ports.push(tcp_range(49152, 65535));
+    ports
 }
 
 // ── Firewall service ───────────────────────────────────────────
@@ -503,6 +540,46 @@ impl FirewallService {
             error!("Failed to close firewall for rdma: {e}");
         } else {
             info!("Firewall: closed ports for rdma");
+        }
+    }
+
+    /// Open the named Active Directory DC rule (#20, per-box opt-in).
+    pub async fn open_dc(&self) {
+        let mut state = self.state.lock().await;
+        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "dc") {
+            if rule.active {
+                return;
+            }
+            rule.active = true;
+        } else {
+            state.rules.push(FirewallRule {
+                service: "dc".to_string(),
+                ports: dc_ports(),
+                active: true,
+            });
+        }
+        let custom = self.custom.lock().await;
+        if let Err(e) = apply_nftables(&state, &custom).await {
+            error!("Failed to open firewall for dc: {e}");
+        } else {
+            info!("Firewall: opened ports for dc");
+        }
+    }
+
+    /// Close the named Active Directory DC rule.
+    pub async fn close_dc(&self) {
+        let mut state = self.state.lock().await;
+        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "dc") {
+            if !rule.active {
+                return;
+            }
+            rule.active = false;
+        }
+        let custom = self.custom.lock().await;
+        if let Err(e) = apply_nftables(&state, &custom).await {
+            error!("Failed to close firewall for dc: {e}");
+        } else {
+            info!("Firewall: closed ports for dc");
         }
     }
 
@@ -746,6 +823,7 @@ fn apply_restrictions(
                 for iface in ifaces {
                     result.push(PortSpec {
                         port: port.port,
+                        to: port.to,
                         transport: port.transport,
                         source: Some(src.clone()),
                         iface: Some(iface.clone()),
@@ -756,6 +834,7 @@ fn apply_restrictions(
             for src in sources {
                 result.push(PortSpec {
                     port: port.port,
+                    to: port.to,
                     transport: port.transport,
                     source: Some(src.clone()),
                     iface: None,
@@ -765,6 +844,7 @@ fn apply_restrictions(
             for iface in ifaces {
                 result.push(PortSpec {
                     port: port.port,
+                    to: port.to,
                     transport: port.transport,
                     source: None,
                     iface: Some(iface.clone()),
@@ -881,7 +961,10 @@ pub fn render_ruleset(state: &FirewallState, custom: &[CustomRule]) -> String {
             if let Some(ref src) = port.source {
                 conditions.push(saddr_clause(src));
             }
-            conditions.push(format!("{proto} dport {}", port.port));
+            match port.to {
+                Some(to) => conditions.push(format!("{proto} dport {}-{to}", port.port)),
+                None => conditions.push(format!("{proto} dport {}", port.port)),
+            }
             rules.push_str(&format!(
                 "        {} accept # {}\n",
                 conditions.join(" "),
@@ -1255,6 +1338,7 @@ mod tests {
             service: "smb".into(),
             ports: vec![PortSpec {
                 port: 445,
+                to: None,
                 transport: Transport::Tcp,
                 source: None,
                 iface: None,
@@ -1265,6 +1349,7 @@ mod tests {
             service: "nfs".into(),
             ports: vec![PortSpec {
                 port: 2049,
+                to: None,
                 transport: Transport::Tcp,
                 source: None,
                 iface: None,
@@ -1296,5 +1381,84 @@ mod tests {
             service_port_conflict(&state, Transport::Tcp, 32400, 32400),
             None
         );
+    }
+
+    // ── ranged service ports + dc rule set (#20) ─────────────────────
+
+    #[test]
+    fn render_emits_ranged_service_port() {
+        let mut state = FirewallState::default();
+        state.rules.push(FirewallRule {
+            service: "dc".into(),
+            ports: vec![PortSpec {
+                port: 49152,
+                to: Some(65535),
+                transport: Transport::Tcp,
+                source: None,
+                iface: None,
+            }],
+            active: true,
+        });
+        let out = render_ruleset(&state, &[]);
+        assert!(
+            out.contains("tcp dport 49152-65535 accept # dc"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn service_conflict_matches_ranged_service_ports() {
+        let mut state = FirewallState::default();
+        state.rules.push(FirewallRule {
+            service: "dc".into(),
+            ports: vec![PortSpec {
+                port: 49152,
+                to: Some(65535),
+                transport: Transport::Tcp,
+                source: None,
+                iface: None,
+            }],
+            active: false, // inactive still owns its ports
+        });
+        // custom range overlapping the service range → conflict
+        assert_eq!(
+            service_port_conflict(&state, Transport::Tcp, 50000, 50010).as_deref(),
+            Some("dc")
+        );
+        // below the range → free
+        assert_eq!(
+            service_port_conflict(&state, Transport::Tcp, 40000, 49151),
+            None
+        );
+    }
+
+    #[test]
+    fn dc_ports_cover_ad_services() {
+        let ports = dc_ports();
+        let has = |t: Transport, p: u16| {
+            ports
+                .iter()
+                .any(|s| s.transport == t && s.port == p && s.to.is_none())
+        };
+        for p in [53u16, 88, 464] {
+            assert!(
+                has(Transport::Tcp, p) && has(Transport::Udp, p),
+                "missing tcp+udp {p}"
+            );
+        }
+        for p in [135u16, 139, 389, 445, 636, 3268, 3269] {
+            assert!(has(Transport::Tcp, p), "missing tcp {p}");
+        }
+        for p in [137u16, 138] {
+            assert!(has(Transport::Udp, p), "missing udp {p}");
+        }
+        assert!(
+            ports
+                .iter()
+                .any(|s| s.transport == Transport::Tcp && s.port == 49152 && s.to == Some(65535)),
+            "missing RPC range"
+        );
+        // No NTP — the box does not serve time.
+        assert!(!ports.iter().any(|s| s.port == 123));
     }
 }

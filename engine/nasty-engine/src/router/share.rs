@@ -53,6 +53,7 @@ pub(crate) async fn sync_portal_firewall_ports(state: &AppState) {
 
     let tcp = |port: u16| PortSpec {
         port,
+        to: None,
         transport: Transport::Tcp,
         source: None,
         iface: None,
