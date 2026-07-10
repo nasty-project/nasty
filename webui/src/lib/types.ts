@@ -1458,6 +1458,14 @@ export interface BackupSnapshot {
 	tags: string[];
 }
 
+/** Result payload of a completed `restore` job (mirrors `BackupJob.result`
+ * for `BackupJobKind::Restore`). */
+export interface RestoreSummary {
+	files_restored: number;
+	bytes_restored: number;
+	dest: string;
+}
+
 export interface BackupStatus {
 	running: boolean;
 	profile_id: string | null;
@@ -1469,7 +1477,7 @@ export interface BackupStatus {
  * `backup.jobs.get`/`backup.jobs.list`. The engine starts the work in
  * a background tokio task and the client watches the state transition
  * Pending → Running → Succeeded|Failed. Read-only on the client side. */
-export type BackupJobKind = 'init_repo' | 'run_backup' | 'check_repo';
+export type BackupJobKind = 'init_repo' | 'run_backup' | 'check_repo' | 'restore';
 export type BackupJobState = 'pending' | 'running' | 'succeeded' | 'failed';
 
 export interface BackupJob {
@@ -1481,9 +1489,12 @@ export interface BackupJob {
 	started_at?: string | null;
 	finished_at?: string | null;
 	progress?: string | null;
+	/** Coarse restore progress in [0,1]; set only by `restore` jobs. */
+	progress_fraction?: number | null;
 	/** Engine result payload on success. For `init_repo`/`check_repo`
 	 * this is a status message string; for `run_backup` it's a
-	 * `BackupRunResult` JSON object (bytes_added, files_new, …). */
+	 * `BackupRunResult` JSON object (bytes_added, files_new, …); for
+	 * `restore` it's a `RestoreSummary`. */
 	result?: unknown;
 	error?: string | null;
 }

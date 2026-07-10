@@ -43,14 +43,16 @@ fn now_rfc3339() -> String {
 /// What the engine is doing on behalf of the job. The shape of the
 /// success [`BackupJob::result`] payload depends on this kind: an
 /// `InitRepo` job's success result is a plain message string,
-/// a `RunBackup` job's is a `BackupRunResult` JSON object, and
+/// a `RunBackup` job's is a `BackupRunResult` JSON object,
 /// `CheckRepo` is the rustic check message.
+/// A `Restore` job's success result is a `RestoreSummary` JSON object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupJobKind {
     InitRepo,
     RunBackup,
     CheckRepo,
+    Restore,
 }
 
 impl BackupJobKind {
@@ -59,6 +61,7 @@ impl BackupJobKind {
             BackupJobKind::InitRepo => "init",
             BackupJobKind::RunBackup => "run",
             BackupJobKind::CheckRepo => "check",
+            BackupJobKind::Restore => "restore",
         }
     }
 }
@@ -113,6 +116,11 @@ pub struct BackupJob {
     /// callback we don't yet wire); empty in this Phase 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<String>,
+    /// Coarse restore progress as a fraction in `[0.0, 1.0]`. Populated
+    /// only by `Restore` jobs (bytes restored / total). `None` until the
+    /// first progress tick and for non-restore kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_fraction: Option<f64>,
     /// Engine result payload on success. Shape depends on `kind`:
     /// JSON string for `InitRepo` / `CheckRepo`, `BackupRunResult`
     /// JSON object for `RunBackup`.
@@ -135,6 +143,7 @@ impl BackupJob {
             started_at: None,
             finished_at: None,
             progress: None,
+            progress_fraction: None,
             result: None,
             error: None,
         }
@@ -208,6 +217,15 @@ impl JobRegistry {
         if let Some(job) = map.get_mut(job_id) {
             job.state = BackupJobState::Running;
             job.started_at = Some(now_rfc3339());
+        }
+    }
+
+    /// Update a job's coarse progress fraction. Clamped to `[0.0, 1.0]`.
+    /// No-op if the job no longer exists (GC'd / swept).
+    pub async fn mark_progress(&self, job_id: &str, fraction: f64) {
+        let mut map = self.inner.write().await;
+        if let Some(job) = map.get_mut(job_id) {
+            job.progress_fraction = Some(fraction.clamp(0.0, 1.0));
         }
     }
 
@@ -465,5 +483,32 @@ mod tests {
             .await;
         reg.mark_failed("does-not-exist", "irrelevant".into()).await;
         assert!(reg.list(None).await.is_empty());
+    }
+
+    #[test]
+    fn restore_kind_has_label() {
+        assert_eq!(BackupJobKind::Restore.label(), "restore");
+    }
+
+    #[tokio::test]
+    async fn mark_progress_sets_clamped_fraction() {
+        let reg = JobRegistry::new();
+        let job = reg
+            .start("profile-p", BackupJobKind::Restore)
+            .await
+            .unwrap();
+        reg.mark_running(&job.id).await;
+
+        reg.mark_progress(&job.id, 0.42).await;
+        assert_eq!(
+            reg.get(&job.id).await.unwrap().progress_fraction,
+            Some(0.42)
+        );
+
+        // Out-of-range values clamp into [0.0, 1.0].
+        reg.mark_progress(&job.id, 1.5).await;
+        assert_eq!(reg.get(&job.id).await.unwrap().progress_fraction, Some(1.0));
+        reg.mark_progress(&job.id, -0.3).await;
+        assert_eq!(reg.get(&job.id).await.unwrap().progress_fraction, Some(0.0));
     }
 }

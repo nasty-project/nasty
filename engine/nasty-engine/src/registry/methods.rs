@@ -2361,6 +2361,22 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     result: Some(gen_schema::<Vec<BackupSnapshot>>(generator)),
                 },
                 Method {
+                    name: "backup.restore",
+                    desc: "Restore a whole snapshot into a destination under /fs. Validates the destination (jailed to a mounted filesystem, non-empty destinations require allow_overwrite) then spawns a background Restore job; poll backup.jobs.get for progress_fraction and completion. Returns a BackupJob handle immediately.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::AdHoc(serde_json::json!({
+                        "type": "object",
+                        "required": ["id", "snapshot_id", "dest"],
+                        "properties": {
+                            "id": { "type": "string", "description": "Backup profile identifier (identifies the repo + credentials)." },
+                            "snapshot_id": { "type": "string", "description": "Snapshot id to restore (from backup.snapshots)." },
+                            "dest": { "type": "string", "description": "Absolute destination path; must resolve under /fs." },
+                            "allow_overwrite": { "type": "boolean", "description": "Permit restoring into a non-empty destination (default false)." }
+                        }
+                    })),
+                    result: Some(gen_schema::<nasty_backup::jobs::BackupJob>(generator)),
+                },
+                Method {
                     name: "backup.repo.init",
                     desc: "Initialize a fresh rustic repository at the profile's target using its password, then mark the profile as `repo_initialized`. Returns a BackupJob handle immediately; init can take 30+ seconds on remote REST / S3 targets so the actual work runs in the background and the caller polls backup.jobs.get for completion.",
                     role: MethodRole::Operator,

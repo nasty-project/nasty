@@ -20,3 +20,6 @@ rustic_core = "0.12"
 rustic_backend = "0.6"
 jiff = "0.2"
 url = "2"
+
+[dev-dependencies]
+tempfile = "3"

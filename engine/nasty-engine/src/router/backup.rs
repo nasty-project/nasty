@@ -11,6 +11,15 @@ use super::*;
 use crate::AppState;
 use crate::auth::{Role, Session};
 
+#[derive(Deserialize)]
+struct RestoreParams {
+    id: String,
+    snapshot_id: String,
+    dest: String,
+    #[serde(default)]
+    allow_overwrite: bool,
+}
+
 pub(super) async fn try_route(
     req: &Request,
     state: &AppState,
@@ -79,6 +88,17 @@ pub(super) async fn try_route(
                 Err(e) => err(req, e.to_rpc_error()),
             },
             Err(r) => r,
+        },
+        "backup.restore" => match parse_params::<RestoreParams>(req) {
+            Ok(p) => match state
+                .backups
+                .start_restore(&p.id, &p.snapshot_id, &p.dest, p.allow_overwrite)
+                .await
+            {
+                Ok(job) => ok(req, job),
+                Err(e) => err(req, e.to_rpc_error()),
+            },
+            Err(e) => err(req, e),
         },
         "backup.repo.check" => match require_str(req, "id") {
             Ok(id) => match state.backups.start_check_repo(id).await {
