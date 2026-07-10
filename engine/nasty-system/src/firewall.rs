@@ -102,6 +102,50 @@ pub struct FirewallState {
     pub rules: Vec<FirewallRule>,
 }
 
+/// A user-managed firewall port rule (issue #620). Opens a single TCP/UDP
+/// port or a contiguous range on the host `input` chain, independent of
+/// NASty's service model. Persisted to `firewall-custom.json` and rendered
+/// into `table inet nasty` alongside the service rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CustomRule {
+    /// Engine-generated opaque id (UUID). Stable across label edits; used as
+    /// the nft comment so free-text never enters the ruleset.
+    pub id: String,
+    /// Required human label ("Plex (host mode)"). UI only.
+    pub label: String,
+    pub transport: Transport,
+    /// Low port of the range (== `to` for a single port).
+    pub from: u16,
+    /// High port of the range.
+    pub to: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
+    pub enabled: bool,
+}
+
+const CUSTOM_PATH: &str = "/var/lib/nasty/firewall-custom.json";
+
+/// Load persisted custom rules; empty on missing/corrupt file (same
+/// tolerance as `FirewallRestrictions::load`).
+fn load_custom_rules() -> Vec<CustomRule> {
+    std::fs::read_to_string(CUSTOM_PATH)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+// Unused until a later task (#620) adds the API surface that mutates
+// custom rules (add/edit/delete/enable/disable) and persists them.
+#[allow(dead_code)]
+async fn save_custom_rules(rules: &[CustomRule]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(rules).map_err(|e| format!("serialize: {e}"))?;
+    tokio::fs::write(CUSTOM_PATH, json)
+        .await
+        .map_err(|e| format!("write {CUSTOM_PATH}: {e}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FirewallStatus {
     pub active: bool,
@@ -120,6 +164,10 @@ pub struct FirewallStatus {
     /// itself has no knowledge of Docker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub published_app_ports: Vec<PublishedAppPort>,
+    /// User-managed custom port rules (issue #620). Rendered into the
+    /// firewall alongside service rules; editable on the Firewall page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_rules: Vec<CustomRule>,
 }
 
 /// One host port published by a Docker-managed app. Read-only; surfaced
@@ -195,6 +243,7 @@ pub fn rdma_ports() -> Vec<PortSpec> {
 pub struct FirewallService {
     state: tokio::sync::Mutex<FirewallState>,
     restrictions: tokio::sync::Mutex<FirewallRestrictions>,
+    custom: tokio::sync::Mutex<Vec<CustomRule>>,
 }
 
 impl Default for FirewallService {
@@ -208,6 +257,7 @@ impl FirewallService {
         Self {
             state: tokio::sync::Mutex::new(FirewallState::default()),
             restrictions: tokio::sync::Mutex::new(FirewallRestrictions::default()),
+            custom: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -217,6 +267,8 @@ impl FirewallService {
         let mut state = self.state.lock().await;
         let mut restrictions = self.restrictions.lock().await;
         *restrictions = FirewallRestrictions::load();
+        let mut custom = self.custom.lock().await;
+        *custom = load_custom_rules();
 
         // WebUI is always open
         let webui_sources = restrictions
@@ -259,7 +311,7 @@ impl FirewallService {
             });
         }
 
-        if let Err(e) = apply_nftables(&state).await {
+        if let Err(e) = apply_nftables(&state, &custom).await {
             error!("Failed to apply initial firewall rules: {e}");
         } else {
             info!("Firewall initialized with {} rules", state.rules.len());
@@ -286,7 +338,8 @@ impl FirewallService {
                 active: true,
             });
         }
-        if let Err(e) = apply_nftables(&state).await {
+        let custom = self.custom.lock().await;
+        if let Err(e) = apply_nftables(&state, &custom).await {
             error!("Failed to open firewall for {name}: {e}");
         } else {
             info!("Firewall: opened ports for {name}");
@@ -303,7 +356,8 @@ impl FirewallService {
             }
             rule.active = false;
         }
-        if let Err(e) = apply_nftables(&state).await {
+        let custom = self.custom.lock().await;
+        if let Err(e) = apply_nftables(&state, &custom).await {
             error!("Failed to close firewall for {name}: {e}");
         } else {
             info!("Firewall: closed ports for {name}");
@@ -325,7 +379,8 @@ impl FirewallService {
                 active: true,
             });
         }
-        if let Err(e) = apply_nftables(&state).await {
+        let custom = self.custom.lock().await;
+        if let Err(e) = apply_nftables(&state, &custom).await {
             error!("Failed to open firewall for rdma: {e}");
         } else {
             info!("Firewall: opened ports for rdma");
@@ -341,7 +396,8 @@ impl FirewallService {
             }
             rule.active = false;
         }
-        if let Err(e) = apply_nftables(&state).await {
+        let custom = self.custom.lock().await;
+        if let Err(e) = apply_nftables(&state, &custom).await {
             error!("Failed to close firewall for rdma: {e}");
         } else {
             info!("Firewall: closed ports for rdma");
@@ -352,6 +408,7 @@ impl FirewallService {
     pub async fn status(&self) -> FirewallStatus {
         let state = self.state.lock().await;
         let restrictions = self.restrictions.lock().await;
+        let custom = self.custom.lock().await;
         FirewallStatus {
             active: true,
             rules: state.rules.clone(),
@@ -360,6 +417,7 @@ impl FirewallService {
             // Populated by the engine layer (router) which has the apps
             // handle; the firewall module has no Docker knowledge.
             published_app_ports: Vec::new(),
+            custom_rules: custom.clone(),
         }
     }
 
@@ -405,7 +463,8 @@ impl FirewallService {
             rule.ports = apply_restrictions(base_ports, &sources, &ifaces);
         }
 
-        apply_nftables(&state).await?;
+        let custom = self.custom.lock().await;
+        apply_nftables(&state, &custom).await?;
         info!("Firewall: updated restrictions for {service}");
         Ok(())
     }
@@ -427,7 +486,8 @@ impl FirewallService {
         if !replace_rule_ports(&mut state, &restrictions, proto.name(), ports) {
             return;
         }
-        if let Err(e) = apply_nftables(&state).await {
+        let custom = self.custom.lock().await;
+        if let Err(e) = apply_nftables(&state, &custom).await {
             error!("Failed to update firewall ports for {}: {e}", proto.name());
         } else {
             info!("Firewall: updated ports for {}", proto.name());
@@ -522,47 +582,8 @@ fn apply_restrictions(
 // ── nftables application ───────────────────────────────────────
 
 /// Generate and apply the full nftables ruleset atomically.
-async fn apply_nftables(state: &FirewallState) -> Result<(), String> {
-    let mut rules = String::new();
-    rules.push_str("table inet nasty {\n");
-    rules.push_str("    chain input {\n");
-    rules.push_str("        type filter hook input priority 0; policy drop;\n");
-    rules.push_str("        ct state established,related accept\n");
-    rules.push_str("        ct state invalid drop\n");
-    rules.push_str("        iif lo accept\n");
-    rules.push_str("        # ICMP/ICMPv6 — always allow\n");
-    rules.push_str("        ip protocol icmp accept\n");
-    rules.push_str("        ip6 nexthdr icmpv6 accept\n");
-    rules.push_str("        # DHCPv6 client\n");
-    rules.push_str("        udp dport 546 accept\n");
-
-    for rule in &state.rules {
-        if !rule.active {
-            continue;
-        }
-        for port in &rule.ports {
-            let proto = match port.transport {
-                Transport::Tcp => "tcp",
-                Transport::Udp => "udp",
-            };
-            let mut conditions = Vec::new();
-            if let Some(ref iface) = port.iface {
-                conditions.push(format!("iifname \"{iface}\""));
-            }
-            if let Some(ref src) = port.source {
-                conditions.push(format!("ip saddr {src}"));
-            }
-            conditions.push(format!("{proto} dport {}", port.port));
-            rules.push_str(&format!(
-                "        {} accept # {}\n",
-                conditions.join(" "),
-                rule.service
-            ));
-        }
-    }
-
-    rules.push_str("    }\n");
-    rules.push_str("}\n");
+async fn apply_nftables(state: &FirewallState, custom: &[CustomRule]) -> Result<(), String> {
+    let rules = render_ruleset(state, custom);
 
     // Apply atomically: flush + load
     let flush = Command::new("nft")
@@ -601,6 +622,79 @@ async fn apply_nftables(state: &FirewallState) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Build the full `table inet nasty` ruleset text from the service rules and
+/// the custom rules. Pure — no I/O — so it can be unit-tested.
+pub fn render_ruleset(state: &FirewallState, custom: &[CustomRule]) -> String {
+    let mut rules = String::new();
+    rules.push_str("table inet nasty {\n");
+    rules.push_str("    chain input {\n");
+    rules.push_str("        type filter hook input priority 0; policy drop;\n");
+    rules.push_str("        ct state established,related accept\n");
+    rules.push_str("        ct state invalid drop\n");
+    rules.push_str("        iif lo accept\n");
+    rules.push_str("        # ICMP/ICMPv6 — always allow\n");
+    rules.push_str("        ip protocol icmp accept\n");
+    rules.push_str("        ip6 nexthdr icmpv6 accept\n");
+    rules.push_str("        # DHCPv6 client\n");
+    rules.push_str("        udp dport 546 accept\n");
+
+    for rule in &state.rules {
+        if !rule.active {
+            continue;
+        }
+        for port in &rule.ports {
+            let proto = match port.transport {
+                Transport::Tcp => "tcp",
+                Transport::Udp => "udp",
+            };
+            let mut conditions = Vec::new();
+            if let Some(ref iface) = port.iface {
+                conditions.push(format!("iifname \"{iface}\""));
+            }
+            if let Some(ref src) = port.source {
+                conditions.push(format!("ip saddr {src}"));
+            }
+            conditions.push(format!("{proto} dport {}", port.port));
+            rules.push_str(&format!(
+                "        {} accept # {}\n",
+                conditions.join(" "),
+                rule.service
+            ));
+        }
+    }
+
+    for rule in custom {
+        if !rule.enabled {
+            continue;
+        }
+        let proto = match rule.transport {
+            Transport::Tcp => "tcp",
+            Transport::Udp => "udp",
+        };
+        let mut conditions = Vec::new();
+        if let Some(ref iface) = rule.iface {
+            conditions.push(format!("iifname \"{iface}\""));
+        }
+        if let Some(ref src) = rule.source {
+            conditions.push(format!("ip saddr {src}"));
+        }
+        if rule.from == rule.to {
+            conditions.push(format!("{proto} dport {}", rule.from));
+        } else {
+            conditions.push(format!("{proto} dport {}-{}", rule.from, rule.to));
+        }
+        rules.push_str(&format!(
+            "        {} accept # custom:{}\n",
+            conditions.join(" "),
+            rule.id
+        ));
+    }
+
+    rules.push_str("    }\n");
+    rules.push_str("}\n");
+    rules
 }
 
 #[cfg(test)]
@@ -784,5 +878,69 @@ mod tests {
         let mut state = state_with_rule("iscsi", vec![tcp(3260)], true);
         let changed = replace_rule_ports(&mut state, &no_restrictions(), "iscsi", vec![tcp(3260)]);
         assert!(!changed, "identical port set must not trigger an nft apply");
+    }
+
+    // ── render_ruleset custom rules (#620) ──────────────────────────
+
+    #[test]
+    fn render_includes_enabled_custom_single_port() {
+        let state = FirewallState::default();
+        let custom = vec![CustomRule {
+            id: "id1".into(),
+            label: "plex".into(),
+            transport: Transport::Tcp,
+            from: 32400,
+            to: 32400,
+            source: None,
+            iface: None,
+            enabled: true,
+        }];
+        let out = render_ruleset(&state, &custom);
+        assert!(
+            out.contains("tcp dport 32400 accept # custom:id1"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_includes_range_and_conditions() {
+        let state = FirewallState::default();
+        let custom = vec![CustomRule {
+            id: "id2".into(),
+            label: "games".into(),
+            transport: Transport::Udp,
+            from: 8000,
+            to: 8010,
+            source: Some("10.0.0.0/8".into()),
+            iface: Some("eth0".into()),
+            enabled: true,
+        }];
+        let out = render_ruleset(&state, &custom);
+        assert!(
+            out.contains(
+                "iifname \"eth0\" ip saddr 10.0.0.0/8 udp dport 8000-8010 accept # custom:id2"
+            ),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_omits_disabled_custom() {
+        let state = FirewallState::default();
+        let custom = vec![CustomRule {
+            id: "id3".into(),
+            label: "off".into(),
+            transport: Transport::Tcp,
+            from: 9999,
+            to: 9999,
+            source: None,
+            iface: None,
+            enabled: false,
+        }];
+        let out = render_ruleset(&state, &custom);
+        assert!(
+            !out.contains("9999"),
+            "disabled rule must not render; got:\n{out}"
+        );
     }
 }
