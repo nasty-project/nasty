@@ -1337,6 +1337,20 @@ export interface PublishedAppPort {
 	transport: string;
 }
 
+/** Operator-defined port rule (#620), for opening ports on the host that
+ * aren't already covered by a service or Docker's published-port DNAT
+ * (e.g. `network_mode: host` apps). Managed via `system.firewall.custom.*`. */
+export interface CustomRule {
+	id: string;
+	label: string;
+	transport: 'tcp' | 'udp';
+	from: number;
+	to: number;
+	source?: string | null;
+	iface?: string | null;
+	enabled: boolean;
+}
+
 export interface FirewallStatus {
 	active: boolean;
 	rules: FirewallRule[];
@@ -1345,6 +1359,8 @@ export interface FirewallStatus {
 	/** Host ports Docker apps publish. NOT governed by this firewall (Docker
 	 * DNATs them past the input chain) — shown read-only for visibility. */
 	published_app_ports?: PublishedAppPort[];
+	/** Operator-defined custom port rules (#620). */
+	custom_rules?: CustomRule[];
 }
 
 export interface AlertRule {
