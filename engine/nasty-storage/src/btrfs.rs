@@ -86,6 +86,17 @@ pub struct BtrfsSubvolume {
     pub backend: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BtrfsSnapshot {
+    pub id: u64,
+    /// Snapshot name (`<subvolume>@<label>`).
+    pub name: String,
+    /// The subvolume this snapshot was taken from, when derivable.
+    pub subvolume: Option<String>,
+    pub filesystem: String,
+    pub backend: String,
+}
+
 
 // ── persisted state ─────────────────────────────────────────────
 
@@ -382,6 +393,103 @@ impl BtrfsService {
         .await
         .map_err(BtrfsError::CommandFailed)?;
         self.subvolume_get(name, new_name).await
+    }
+
+    // ── snapshots ───────────────────────────────────────────────
+
+    pub async fn snapshot_list(&self, name: &str) -> Result<Vec<BtrfsSnapshot>> {
+        let mnt = self.mounted_path(name).await?;
+        let raw = run_ok("btrfs", &["subvolume", "list", &mnt])
+            .await
+            .map_err(BtrfsError::CommandFailed)?;
+        Ok(parse_subvolume_list(&raw)
+            .into_iter()
+            .filter_map(|(id, path)| {
+                let snap = path.strip_prefix(&format!("{SNAPSHOT_DIR}/"))?.to_string();
+                let subvolume = snap.split_once('@').map(|(s, _)| s.to_string());
+                Some(BtrfsSnapshot {
+                    id,
+                    name: snap,
+                    subvolume,
+                    filesystem: name.to_string(),
+                    backend: "btrfs".to_string(),
+                })
+            })
+            .collect())
+    }
+
+    /// Read-only snapshot of `subvol` as `<subvol>@<label>`.
+    pub async fn snapshot_create(
+        &self,
+        name: &str,
+        subvol: &str,
+        label: &str,
+    ) -> Result<BtrfsSnapshot> {
+        validate_subpath(subvol)?;
+        validate_name(label)?;
+        let mnt = self.mounted_path(name).await?;
+        let snapdir = format!("{mnt}/{SNAPSHOT_DIR}");
+        tokio::fs::create_dir_all(&snapdir)
+            .await
+            .map_err(|e| BtrfsError::CommandFailed(format!("mkdir {snapdir}: {e}")))?;
+        let snap_name = format!("{}@{label}", subvol.replace('/', "_"));
+        run_ok(
+            "btrfs",
+            &[
+                "subvolume",
+                "snapshot",
+                "-r",
+                &format!("{mnt}/{subvol}"),
+                &format!("{snapdir}/{snap_name}"),
+            ],
+        )
+        .await
+        .map_err(BtrfsError::CommandFailed)?;
+        self.snapshot_list(name)
+            .await?
+            .into_iter()
+            .find(|s| s.name == snap_name)
+            .ok_or_else(|| BtrfsError::CommandFailed("created snapshot not listed".into()))
+    }
+
+    /// Writable subvolume from an existing (read-only) snapshot.
+    pub async fn snapshot_clone(
+        &self,
+        name: &str,
+        snap_name: &str,
+        new_name: &str,
+    ) -> Result<BtrfsSubvolume> {
+        validate_subpath(snap_name)?;
+        validate_subpath(new_name)?;
+        let mnt = self.mounted_path(name).await?;
+        run_ok(
+            "btrfs",
+            &[
+                "subvolume",
+                "snapshot",
+                &format!("{mnt}/{SNAPSHOT_DIR}/{snap_name}"),
+                &format!("{mnt}/{new_name}"),
+            ],
+        )
+        .await
+        .map_err(BtrfsError::CommandFailed)?;
+        self.subvolume_get(name, new_name).await
+    }
+
+    pub async fn snapshot_delete(&self, name: &str, snap_name: &str) -> Result<()> {
+        validate_subpath(snap_name)?;
+        let mnt = self.mounted_path(name).await?;
+        run_ok(
+            "btrfs",
+            &[
+                "subvolume",
+                "delete",
+                &format!("{mnt}/{SNAPSHOT_DIR}/{snap_name}"),
+            ],
+        )
+        .await
+        .map_err(BtrfsError::CommandFailed)?;
+        Ok(())
     }
 
     // ── internals ───────────────────────────────────────────────
