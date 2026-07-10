@@ -97,6 +97,25 @@ pub struct BtrfsSnapshot {
     pub backend: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BtrfsUsage {
+    pub filesystem: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+    pub devices: Vec<String>,
+    pub backend: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BtrfsScrubStatus {
+    pub filesystem: String,
+    /// `running`, `finished`, `aborted`, `interrupted`, or `never`.
+    pub status: String,
+    pub bytes_scrubbed: u64,
+    pub error_summary: String,
+    pub backend: String,
+}
 
 // ── persisted state ─────────────────────────────────────────────
 
@@ -296,6 +315,121 @@ impl BtrfsService {
             }
         }
         failures
+    }
+
+    /// Capacity summary for a mounted filesystem.
+    pub async fn usage(&self, name: &str) -> Result<BtrfsUsage> {
+        let fs = self.get(name).await?;
+        if !fs.mounted {
+            return Err(BtrfsError::InvalidInput(format!(
+                "filesystem '{name}' is not mounted"
+            )));
+        }
+        Ok(BtrfsUsage {
+            filesystem: name.to_string(),
+            total_bytes: fs.total_bytes,
+            used_bytes: fs.used_bytes,
+            available_bytes: fs.available_bytes,
+            devices: fs.devices,
+            backend: "btrfs".to_string(),
+        })
+    }
+
+    // ── scrub ───────────────────────────────────────────────────
+
+    pub async fn scrub_start(&self, name: &str) -> Result<()> {
+        let mnt = self.mounted_path(name).await?;
+        run_ok("btrfs", &["scrub", "start", &mnt])
+            .await
+            .map_err(BtrfsError::CommandFailed)?;
+        Ok(())
+    }
+
+    pub async fn scrub_status(&self, name: &str) -> Result<BtrfsScrubStatus> {
+        let mnt = self.mounted_path(name).await?;
+        let raw = run_ok("btrfs", &["scrub", "status", "-B", "--raw", &mnt])
+            .await
+            .map_err(BtrfsError::CommandFailed)?;
+        let (status, bytes_scrubbed, error_summary) = parse_scrub_status(&raw);
+        Ok(BtrfsScrubStatus {
+            filesystem: name.to_string(),
+            status,
+            bytes_scrubbed,
+            error_summary,
+            backend: "btrfs".to_string(),
+        })
+    }
+
+    pub async fn scrub_cancel(&self, name: &str) -> Result<()> {
+        let mnt = self.mounted_path(name).await?;
+        run_ok("btrfs", &["scrub", "cancel", &mnt])
+            .await
+            .map_err(BtrfsError::CommandFailed)?;
+        Ok(())
+    }
+
+    // ── devices ─────────────────────────────────────────────────
+
+    pub async fn device_add(&self, name: &str, device: &str) -> Result<BtrfsFilesystem> {
+        if !Path::new(device).exists() {
+            return Err(BtrfsError::InvalidInput(format!(
+                "device {device} does not exist"
+            )));
+        }
+        let mnt = self.mounted_path(name).await?;
+        run_ok("btrfs", &["device", "add", "-f", device, &mnt])
+            .await
+            .map_err(BtrfsError::CommandFailed)?;
+        self.get(name).await
+    }
+
+    /// Remove a device; btrfs migrates its data off implicitly.
+    pub async fn device_remove(&self, name: &str, device: &str) -> Result<BtrfsFilesystem> {
+        let mnt = self.mounted_path(name).await?;
+        run_ok("btrfs", &["device", "remove", device, &mnt])
+            .await
+            .map_err(BtrfsError::CommandFailed)?;
+        self.get(name).await
+    }
+
+    // ── options ─────────────────────────────────────────────────
+
+    /// Update the compression mount option; takes effect immediately via
+    /// remount when the filesystem is mounted, and persists for future
+    /// mounts. `none` clears it.
+    pub async fn update_compression(
+        &self,
+        name: &str,
+        compression: &str,
+    ) -> Result<BtrfsFilesystem> {
+        let fs = self.get(name).await?;
+        let stored_value = match compression {
+            "" | "none" => None,
+            c if c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == ':') => Some(c.to_string()),
+            c => {
+                return Err(BtrfsError::InvalidInput(format!(
+                    "invalid compression '{c}'"
+                )));
+            }
+        };
+        if fs.mounted {
+            let opt = match &stored_value {
+                Some(c) => format!("remount,compress={c}"),
+                None => "remount,compress=no".to_string(),
+            };
+            let mnt = format!("{MOUNT_BASE}/{name}");
+            run_ok("mount", &["-o", &opt, &mnt])
+                .await
+                .map_err(BtrfsError::CommandFailed)?;
+        }
+        let _guard = STATE_LOCK.lock().await;
+        let mut state = load_state().await;
+        if let Some(stored) = state.filesystems.get_mut(name) {
+            stored.compression = stored_value;
+        }
+        save_state(&state).await?;
+        drop(_guard);
+        self.get(name).await
     }
 
     // ── subvolumes ──────────────────────────────────────────────
@@ -630,6 +764,33 @@ fn parse_usage(raw: &str) -> (u64, u64, u64) {
     (grab("Device size"), grab("Used"), grab("Free (estimated)"))
 }
 
+/// (status, bytes_scrubbed, error_summary) from `btrfs scrub status` output.
+fn parse_scrub_status(raw: &str) -> (String, u64, String) {
+    let line_value = |key: &str| -> Option<String> {
+        raw.lines().find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix(key)
+                .map(|rest| rest.trim_start_matches(':').trim().to_string())
+        })
+    };
+    let status = line_value("Status")
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| {
+            if raw.contains("no stats available") {
+                "never".to_string()
+            } else {
+                "unknown".to_string()
+            }
+        });
+    let bytes = line_value("Bytes scrubbed")
+        .and_then(|v| v.split_whitespace().next().map(str::to_string))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let errors = line_value("Error summary").unwrap_or_else(|| "unknown".to_string());
+    (status, bytes, errors)
+}
+
+/// (id, path) pairs from `btrfs subvolume list <mnt>` output lines like
 /// `ID 256 gen 12 top level 5 path data`.
 fn parse_subvolume_list(raw: &str) -> Vec<(u64, String)> {
     raw.lines()
@@ -672,6 +833,22 @@ mod tests {
                 (258, ".snapshots/data@daily".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn parses_scrub_status() {
+        let raw = "UUID:             0f0e-1\nScrub started:    Fri Jul 10 12:00:00 2026\nStatus:           finished\nDuration:         0:01:02\nBytes scrubbed:   1310720 (100.00%)\nError summary:    no errors found\n";
+        let (status, bytes, errors) = parse_scrub_status(raw);
+        assert_eq!(status, "finished");
+        assert_eq!(bytes, 1310720);
+        assert_eq!(errors, "no errors found");
+    }
+
+    #[test]
+    fn parses_scrub_status_never_run() {
+        let (status, bytes, _) = parse_scrub_status("scrub status: no stats available\n");
+        assert_eq!(status, "never");
+        assert_eq!(bytes, 0);
     }
 
     #[test]
