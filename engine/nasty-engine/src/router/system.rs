@@ -11,6 +11,59 @@ use super::*;
 use crate::AppState;
 use crate::auth::{Role, Session};
 
+#[derive(serde::Deserialize)]
+struct CustomRuleUpdateParams {
+    id: String,
+    #[serde(flatten)]
+    input: nasty_system::firewall::CustomRuleInput,
+}
+
+/// Warnings (never errors) for a custom rule that overlaps a Docker-published
+/// host port. Bridge apps publish past the firewall, so the rule is redundant
+/// — surfaced so the operator doesn't think the port was closed.
+pub(crate) fn docker_overlap_warnings(
+    rule: &nasty_system::firewall::CustomRule,
+    published: &[nasty_system::firewall::PublishedAppPort],
+) -> Vec<String> {
+    use nasty_system::firewall::Transport;
+    let proto = match rule.transport {
+        Transport::Tcp => "tcp",
+        Transport::Udp => "udp",
+    };
+    published
+        .iter()
+        .filter(|p| p.transport == proto && p.host_port >= rule.from && p.host_port <= rule.to)
+        .map(|p| {
+            format!(
+                "{}/{} is already reachable via app '{}' (bridge apps publish past the firewall)",
+                proto, p.host_port, p.app
+            )
+        })
+        .collect()
+}
+
+/// Gather the host ports currently published by Docker apps (mirrors
+/// `system.firewall.status`) so `custom.add`/`custom.update` can compute
+/// overlap warnings.
+async fn published_ports(state: &AppState) -> Vec<nasty_system::firewall::PublishedAppPort> {
+    match state.apps.list().await {
+        Ok(apps) => apps
+            .iter()
+            .flat_map(|app| {
+                app.ports
+                    .iter()
+                    .map(move |p| nasty_system::firewall::PublishedAppPort {
+                        app: app.name.clone(),
+                        host_port: p.host_port,
+                        container_port: p.container_port,
+                        transport: p.protocol.clone(),
+                    })
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 pub(super) async fn try_route(
     req: &Request,
     state: &AppState,
@@ -816,6 +869,42 @@ pub(super) async fn try_route(
                 Err(e) => err(req, e),
             }
         }
+        "system.firewall.custom.add" => {
+            match parse_params::<nasty_system::firewall::CustomRuleInput>(req) {
+                Ok(input) => match state.firewall.add_custom_rule(input).await {
+                    Ok(rule) => {
+                        let warnings =
+                            docker_overlap_warnings(&rule, &published_ports(state).await);
+                        ok(
+                            req,
+                            serde_json::json!({ "rule": rule, "warnings": warnings }),
+                        )
+                    }
+                    Err(e) => err(req, e),
+                },
+                Err(e) => err(req, e),
+            }
+        }
+        "system.firewall.custom.update" => match parse_params::<CustomRuleUpdateParams>(req) {
+            Ok(p) => match state.firewall.update_custom_rule(&p.id, p.input).await {
+                Ok(rule) => {
+                    let warnings = docker_overlap_warnings(&rule, &published_ports(state).await);
+                    ok(
+                        req,
+                        serde_json::json!({ "rule": rule, "warnings": warnings }),
+                    )
+                }
+                Err(e) => err(req, e),
+            },
+            Err(e) => err(req, e),
+        },
+        "system.firewall.custom.remove" => match require_str(req, "id") {
+            Ok(id) => match state.firewall.remove_custom_rule(id).await {
+                Ok(()) => ok(req, "ok"),
+                Err(e) => err(req, e),
+            },
+            Err(r) => r,
+        },
         _ => return None,
     })
 }
@@ -1043,5 +1132,70 @@ fn human_bytes(b: u64) -> String {
         format!("{b} B")
     } else {
         format!("{v:.1} {}", U[i])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::docker_overlap_warnings;
+    use nasty_system::firewall::{CustomRule, PublishedAppPort, Transport};
+
+    fn rule(from: u16, to: u16, transport: Transport) -> CustomRule {
+        CustomRule {
+            id: "id".into(),
+            label: "l".into(),
+            transport,
+            from,
+            to,
+            source: None,
+            iface: None,
+            enabled: true,
+        }
+    }
+
+    fn pub_port(host: u16, transport: &str, app: &str) -> PublishedAppPort {
+        PublishedAppPort {
+            app: app.into(),
+            host_port: host,
+            container_port: host,
+            transport: transport.into(),
+        }
+    }
+
+    #[test]
+    fn warns_on_tcp_overlap() {
+        let w = docker_overlap_warnings(
+            &rule(8080, 8080, Transport::Tcp),
+            &[pub_port(8080, "tcp", "nginx")],
+        );
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("nginx"), "got: {:?}", w);
+    }
+
+    #[test]
+    fn no_warn_on_transport_or_port_mismatch() {
+        assert!(
+            docker_overlap_warnings(
+                &rule(8080, 8080, Transport::Tcp),
+                &[pub_port(8080, "udp", "x")]
+            )
+            .is_empty()
+        );
+        assert!(
+            docker_overlap_warnings(
+                &rule(8080, 8080, Transport::Tcp),
+                &[pub_port(9090, "tcp", "x")]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn warns_for_each_app_in_range() {
+        let w = docker_overlap_warnings(
+            &rule(8000, 8100, Transport::Tcp),
+            &[pub_port(8080, "tcp", "a"), pub_port(8090, "tcp", "b")],
+        );
+        assert_eq!(w.len(), 2);
     }
 }
