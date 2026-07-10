@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 
 const MOUNT_BASE: &str = "/fs";
 const STATE_PATH: &str = "/var/lib/nasty/btrfs-state.json";
+/// Read-only snapshots live under this directory at the filesystem root.
+const SNAPSHOT_DIR: &str = ".snapshots";
 
 static STATE_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -70,6 +72,18 @@ pub struct CreateBtrfsRequest {
     pub raid: Option<String>,
     /// Compression mount option (e.g. `zstd`, `lzo`); omit for none.
     pub compression: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BtrfsSubvolume {
+    pub id: u64,
+    /// Path relative to the filesystem root (e.g. `data` or `media/tv`).
+    pub path: String,
+    /// Same as `path` — kept so mixed listings render uniformly with
+    /// bcachefs subvolumes (which are keyed by `name`).
+    pub name: String,
+    pub filesystem: String,
+    pub backend: String,
 }
 
 
@@ -273,6 +287,103 @@ impl BtrfsService {
         failures
     }
 
+    // ── subvolumes ──────────────────────────────────────────────
+
+    pub async fn subvolume_list(&self, name: &str) -> Result<Vec<BtrfsSubvolume>> {
+        let mnt = self.mounted_path(name).await?;
+        let raw = run_ok("btrfs", &["subvolume", "list", &mnt])
+            .await
+            .map_err(BtrfsError::CommandFailed)?;
+        Ok(parse_subvolume_list(&raw)
+            .into_iter()
+            .filter(|(_, p)| !p.starts_with(SNAPSHOT_DIR))
+            .map(|(id, path)| BtrfsSubvolume {
+                id,
+                name: path.clone(),
+                path,
+                filesystem: name.to_string(),
+                backend: "btrfs".to_string(),
+            })
+            .collect())
+    }
+
+    pub async fn subvolume_create(&self, name: &str, subvol: &str) -> Result<BtrfsSubvolume> {
+        validate_subpath(subvol)?;
+        let mnt = self.mounted_path(name).await?;
+        run_ok(
+            "btrfs",
+            &["subvolume", "create", &format!("{mnt}/{subvol}")],
+        )
+        .await
+        .map_err(BtrfsError::CommandFailed)?;
+        self.subvolume_list(name)
+            .await?
+            .into_iter()
+            .find(|s| s.path == subvol)
+            .ok_or_else(|| BtrfsError::CommandFailed("created subvolume not listed".into()))
+    }
+
+    pub async fn subvolume_delete(&self, name: &str, subvol: &str) -> Result<()> {
+        validate_subpath(subvol)?;
+        let mnt = self.mounted_path(name).await?;
+        run_ok(
+            "btrfs",
+            &["subvolume", "delete", &format!("{mnt}/{subvol}")],
+        )
+        .await
+        .map_err(BtrfsError::CommandFailed)?;
+        Ok(())
+    }
+
+    pub async fn subvolume_get(&self, name: &str, subvol: &str) -> Result<BtrfsSubvolume> {
+        self.subvolume_list(name)
+            .await?
+            .into_iter()
+            .find(|s| s.path == subvol)
+            .ok_or_else(|| {
+                BtrfsError::NotFound(format!("subvolume '{subvol}' on filesystem '{name}'"))
+            })
+    }
+
+    /// Subvolumes nested directly or transitively under `subvol`.
+    pub async fn subvolume_children(
+        &self,
+        name: &str,
+        subvol: &str,
+    ) -> Result<Vec<BtrfsSubvolume>> {
+        let prefix = format!("{subvol}/");
+        Ok(self
+            .subvolume_list(name)
+            .await?
+            .into_iter()
+            .filter(|s| s.path.starts_with(&prefix))
+            .collect())
+    }
+
+    /// Writable copy of a subvolume (btrfs snapshot without `-r`).
+    pub async fn subvolume_clone(
+        &self,
+        name: &str,
+        subvol: &str,
+        new_name: &str,
+    ) -> Result<BtrfsSubvolume> {
+        validate_subpath(subvol)?;
+        validate_subpath(new_name)?;
+        let mnt = self.mounted_path(name).await?;
+        run_ok(
+            "btrfs",
+            &[
+                "subvolume",
+                "snapshot",
+                &format!("{mnt}/{subvol}"),
+                &format!("{mnt}/{new_name}"),
+            ],
+        )
+        .await
+        .map_err(BtrfsError::CommandFailed)?;
+        self.subvolume_get(name, new_name).await
+    }
+
     // ── internals ───────────────────────────────────────────────
 
     async fn assemble(
@@ -315,6 +426,11 @@ impl BtrfsService {
         }
     }
 
+    async fn mounted_path(&self, name: &str) -> Result<String> {
+        let fs = self.get(name).await?;
+        fs.mount_point
+            .ok_or_else(|| BtrfsError::InvalidInput(format!("filesystem '{name}' is not mounted")))
+    }
 }
 
 /// Mount point → filesystem type, from /proc/mounts.
@@ -346,6 +462,26 @@ fn validate_name(name: &str) -> Result<()> {
     {
         return Err(BtrfsError::InvalidInput(format!(
             "invalid name '{name}' (alphanumeric, '-', '_' only)"
+        )));
+    }
+    Ok(())
+}
+
+/// Subvolume paths may nest but must stay inside the filesystem.
+fn validate_subpath(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.split('/').any(|seg| {
+            seg.is_empty()
+                || seg == "."
+                || seg == ".."
+                || !seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
+        })
+    {
+        return Err(BtrfsError::InvalidInput(format!(
+            "invalid subvolume path '{path}'"
         )));
     }
     Ok(())
@@ -386,6 +522,21 @@ fn parse_usage(raw: &str) -> (u64, u64, u64) {
     (grab("Device size"), grab("Used"), grab("Free (estimated)"))
 }
 
+/// `ID 256 gen 12 top level 5 path data`.
+fn parse_subvolume_list(raw: &str) -> Vec<(u64, String)> {
+    raw.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            if it.next()? != "ID" {
+                return None;
+            }
+            let id: u64 = it.next()?.parse().ok()?;
+            let path_idx = l.find(" path ")?;
+            Some((id, l[path_idx + 6..].to_string()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +554,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_subvolume_list() {
+        let raw = "ID 256 gen 12 top level 5 path data\nID 257 gen 14 top level 5 path media/tv\nID 258 gen 15 top level 5 path .snapshots/data@daily\n";
+        assert_eq!(
+            parse_subvolume_list(raw),
+            vec![
+                (256, "data".to_string()),
+                (257, "media/tv".to_string()),
+                (258, ".snapshots/data@daily".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn name_validation() {
         assert!(validate_name("tank-1_a").is_ok());
         assert!(validate_name("").is_err());
@@ -410,4 +574,13 @@ mod tests {
         assert!(validate_name("a b").is_err());
     }
 
+    #[test]
+    fn subpath_validation() {
+        assert!(validate_subpath("data").is_ok());
+        assert!(validate_subpath("media/tv").is_ok());
+        assert!(validate_subpath("data@daily").is_ok());
+        assert!(validate_subpath("/abs").is_err());
+        assert!(validate_subpath("a/../b").is_err());
+        assert!(validate_subpath("").is_err());
+    }
 }
