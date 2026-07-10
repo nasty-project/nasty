@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getClient } from '$lib/client';
-	import { withToast } from '$lib/toast.svelte';
-	import type { FirewallStatus, NetworkState, PublishedAppPort } from '$lib/types';
+	import { withToast, info } from '$lib/toast.svelte';
+	import type { FirewallStatus, NetworkState, PublishedAppPort, CustomRule } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 
 	const client = getClient();
@@ -12,6 +12,17 @@
 	let fwEditService: string | null = $state(null);
 	let fwEditSources = $state('');
 	let fwEditIfaces: string[] = $state([]);
+
+	// Custom port rules (#620)
+	let showAddCustom = $state(false);
+	let editCustomId: string | null = $state(null);
+	let cLabel = $state('');
+	let cTransport: 'tcp' | 'udp' = $state('tcp');
+	let cFrom = $state('');
+	let cTo = $state('');
+	let cSource = $state('');
+	let cIface = $state('');
+	let cEnabled = $state(true);
 
 	/** A published app port, or a collapsed contiguous 1:1 range of them. */
 	type AppPortRow = PublishedAppPort & { host_port_end?: number };
@@ -68,6 +79,85 @@
 		fwEditService = null;
 		fwEditSources = '';
 		fwEditIfaces = [];
+		await loadFirewall();
+	}
+
+	function resetCustomForm() {
+		showAddCustom = false;
+		editCustomId = null;
+		cLabel = '';
+		cTransport = 'tcp';
+		cFrom = '';
+		cTo = '';
+		cSource = '';
+		cIface = '';
+		cEnabled = true;
+	}
+
+	function startAddCustom() {
+		resetCustomForm();
+		showAddCustom = true;
+	}
+
+	function startEditCustom(r: CustomRule) {
+		editCustomId = r.id;
+		showAddCustom = true;
+		cLabel = r.label;
+		cTransport = r.transport;
+		cFrom = String(r.from);
+		cTo = r.to === r.from ? '' : String(r.to);
+		cSource = r.source ?? '';
+		cIface = r.iface ?? '';
+		cEnabled = r.enabled;
+	}
+
+	async function saveCustom() {
+		const from = parseInt(cFrom, 10);
+		const to = cTo.trim() ? parseInt(cTo, 10) : from;
+		const params: Record<string, unknown> = {
+			label: cLabel.trim(),
+			transport: cTransport,
+			from,
+			to,
+			enabled: cEnabled,
+		};
+		if (cSource.trim()) params.source = cSource.trim();
+		if (cIface.trim()) params.iface = cIface.trim();
+		if (editCustomId) params.id = editCustomId;
+
+		const method = editCustomId ? 'system.firewall.custom.update' : 'system.firewall.custom.add';
+		const res = await withToast(
+			() => client.call<{ rule: CustomRule; warnings: string[] }>(method, params),
+			editCustomId ? 'Custom rule updated' : 'Custom rule added'
+		);
+		if (!res) return;
+		for (const w of res.warnings ?? []) {
+			info(w);
+		}
+		resetCustomForm();
+		await loadFirewall();
+	}
+
+	async function toggleCustom(r: CustomRule) {
+		await withToast(
+			() =>
+				client.call('system.firewall.custom.update', {
+					id: r.id,
+					label: r.label,
+					transport: r.transport,
+					from: r.from,
+					to: r.to,
+					...(r.source ? { source: r.source } : {}),
+					...(r.iface ? { iface: r.iface } : {}),
+					enabled: !r.enabled,
+				}),
+			r.enabled ? 'Rule disabled' : 'Rule enabled'
+		);
+		await loadFirewall();
+	}
+
+	async function removeCustom(r: CustomRule) {
+		await withToast(() => client.call('system.firewall.custom.remove', { id: r.id }), 'Custom rule removed');
 		await loadFirewall();
 	}
 </script>
@@ -189,5 +279,118 @@
 				</div>
 			</section>
 		{/if}
+
+		<section class="mt-6 rounded-lg border border-border p-5">
+			<div class="flex items-center justify-between gap-4">
+				<div>
+					<h2 class="text-sm font-semibold">Custom port rules</h2>
+					<p class="mt-1 text-xs text-muted-foreground">
+						Open a port for something running directly on the host (e.g. a <code>network_mode: host</code> app).
+						Bridge-networked apps don't need a rule — their published ports (listed above, if any) already bypass
+						this firewall.
+					</p>
+				</div>
+				<Button size="xs" onclick={startAddCustom}>Add rule</Button>
+			</div>
+
+			{#if firewallStatus.custom_rules?.length}
+				<div class="mt-3 space-y-1">
+					{#each firewallStatus.custom_rules as r}
+						<div class="flex items-center gap-3 rounded px-3 py-2 text-sm {r.enabled ? '' : 'opacity-40'}">
+							<span class="h-2 w-2 rounded-full shrink-0 {r.enabled ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
+							<span class="font-medium w-32 truncate">{r.label}</span>
+							<span class="font-mono text-xs text-muted-foreground">
+								{r.from === r.to ? r.from : `${r.from}-${r.to}`}/{r.transport}
+							</span>
+							{#if r.source}
+								<span class="text-xs text-amber-400">{r.source}</span>
+							{/if}
+							{#if r.iface}
+								<span class="text-xs text-blue-400">{r.iface}</span>
+							{/if}
+							<div class="ml-auto flex items-center gap-2">
+								<Button size="xs" variant="secondary" onclick={() => toggleCustom(r)}>{r.enabled ? 'Disable' : 'Enable'}</Button>
+								<Button size="xs" variant="secondary" onclick={() => startEditCustom(r)}>Edit</Button>
+								<Button size="xs" variant="destructive" onclick={() => removeCustom(r)}>Delete</Button>
+							</div>
+						</div>
+					{/each}
+				</div>
+			{:else}
+				<p class="mt-3 text-xs text-muted-foreground">No custom rules.</p>
+			{/if}
+
+			{#if showAddCustom}
+				<div class="mt-3 rounded-lg border border-border bg-secondary/20 p-3 space-y-3">
+					<div class="text-xs font-medium">{editCustomId ? 'Edit rule' : 'New rule'}</div>
+
+					<div>
+						<div class="text-xs text-muted-foreground mb-1">Label</div>
+						<input
+							bind:value={cLabel}
+							placeholder="e.g. Plex host mode"
+							class="w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
+						/>
+					</div>
+
+					<div class="flex gap-2">
+						<div>
+							<div class="text-xs text-muted-foreground mb-1">Transport</div>
+							<select bind:value={cTransport} class="rounded-md border border-input bg-background px-2 py-1 text-sm h-[30px]">
+								<option value="tcp">TCP</option>
+								<option value="udp">UDP</option>
+							</select>
+						</div>
+						<div>
+							<div class="text-xs text-muted-foreground mb-1">Port</div>
+							<input
+								bind:value={cFrom}
+								placeholder="e.g. 32400"
+								class="w-24 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
+							/>
+						</div>
+						<div>
+							<div class="text-xs text-muted-foreground mb-1">to (optional, range)</div>
+							<input
+								bind:value={cTo}
+								placeholder="e.g. 32410"
+								class="w-24 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
+							/>
+						</div>
+					</div>
+
+					<div>
+						<div class="text-xs text-muted-foreground mb-1">Allowed source IP/CIDR (optional, empty = all)</div>
+						<input
+							bind:value={cSource}
+							placeholder="e.g. 192.168.1.0/24"
+							class="w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
+						/>
+					</div>
+
+					<div>
+						<div class="text-xs text-muted-foreground mb-1">Interface (optional, empty = any)</div>
+						{#if networkState}
+							<select bind:value={cIface} class="w-full rounded-md border border-input bg-background px-2 py-1 text-sm h-[30px]">
+								<option value="">Any interface</option>
+								{#each networkState.interfaces as iface}
+									<option value={iface.name}>{iface.name}</option>
+								{/each}
+							</select>
+						{/if}
+					</div>
+
+					<label class="flex items-center gap-1.5 text-xs">
+						<input type="checkbox" bind:checked={cEnabled} />
+						Enabled
+					</label>
+
+					<div class="flex gap-2">
+						<Button size="xs" onclick={saveCustom}>{editCustomId ? 'Save' : 'Add'}</Button>
+						<Button size="xs" variant="secondary" onclick={resetCustomForm}>Cancel</Button>
+					</div>
+				</div>
+			{/if}
+		</section>
 	{/if}
 </div>

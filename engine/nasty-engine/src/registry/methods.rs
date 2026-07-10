@@ -1753,6 +1753,42 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     })),
                     result: None,
                 },
+                Method {
+                    name: "system.firewall.custom.add",
+                    desc: "Open a user-managed TCP/UDP port or contiguous range on the host firewall (issue #620). Rejects ports a NASty service owns; returns { rule, warnings } where warnings flag overlap with a Docker-published port (allowed but redundant).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<
+                        nasty_system::firewall::CustomRuleInput,
+                    >(generator)),
+                    result: None,
+                },
+                Method {
+                    name: "system.firewall.custom.update",
+                    desc: "Update a custom firewall port rule by id (full replace of its fields, including the enable/disable toggle). Same validation and { rule, warnings } response as add.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(serde_json::json!({
+                        "type": "object",
+                        "required": ["id", "label", "transport", "from", "to", "enabled"],
+                        "properties": {
+                            "id": { "type": "string", "description": "Custom rule id." },
+                            "label": { "type": "string", "description": "Required human label." },
+                            "transport": { "type": "string", "enum": ["tcp", "udp"] },
+                            "from": { "type": "integer", "description": "Low port (1–65535)." },
+                            "to": { "type": "integer", "description": "High port; equals from for a single port." },
+                            "source": { "type": "string", "description": "Optional source IP/CIDR." },
+                            "iface": { "type": "string", "description": "Optional interface name." },
+                            "enabled": { "type": "boolean", "description": "Whether the rule is rendered into nft." }
+                        }
+                    })),
+                    result: None,
+                },
+                Method {
+                    name: "system.firewall.custom.remove",
+                    desc: "Remove a user-managed custom firewall port rule by id and rebuild the nftables ruleset.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("id", "Custom rule id.")),
+                    result: None,
+                },
             ],
         ),
         // ── System Update (release channel) ──────────────────────────────
