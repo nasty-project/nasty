@@ -837,6 +837,18 @@ async fn apply_nftables(state: &FirewallState, custom: &[CustomRule]) -> Result<
     Ok(())
 }
 
+/// nft source-address clause with the correct family: `ip6 saddr` for an
+/// IPv6 source, `ip saddr` for IPv4. `src` may be a bare address or CIDR;
+/// the family is decided by the address part. Defaults to `ip saddr` if the
+/// address part doesn't parse (renderer is downstream of validation).
+fn saddr_clause(src: &str) -> String {
+    let addr = src.split('/').next().unwrap_or(src);
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("ip6 saddr {src}"),
+        _ => format!("ip saddr {src}"),
+    }
+}
+
 /// Build the full `table inet nasty` ruleset text from the service rules and
 /// the custom rules. Pure — no I/O — so it can be unit-tested.
 pub fn render_ruleset(state: &FirewallState, custom: &[CustomRule]) -> String {
@@ -867,7 +879,7 @@ pub fn render_ruleset(state: &FirewallState, custom: &[CustomRule]) -> String {
                 conditions.push(format!("iifname \"{iface}\""));
             }
             if let Some(ref src) = port.source {
-                conditions.push(format!("ip saddr {src}"));
+                conditions.push(saddr_clause(src));
             }
             conditions.push(format!("{proto} dport {}", port.port));
             rules.push_str(&format!(
@@ -891,7 +903,7 @@ pub fn render_ruleset(state: &FirewallState, custom: &[CustomRule]) -> String {
             conditions.push(format!("iifname \"{iface}\""));
         }
         if let Some(ref src) = rule.source {
-            conditions.push(format!("ip saddr {src}"));
+            conditions.push(saddr_clause(src));
         }
         if rule.from == rule.to {
             conditions.push(format!("{proto} dport {}", rule.from));
@@ -1134,6 +1146,36 @@ mod tests {
                 "iifname \"eth0\" ip saddr 10.0.0.0/8 udp dport 8000-8010 accept # custom:id2"
             ),
             "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_uses_ip6_saddr_for_ipv6_custom_source() {
+        // Regression for the fail-open bug: `ip saddr <ipv6>` is a family
+        // mismatch that fails `nft -f` at load time. Because apply_nftables
+        // deletes `table inet nasty` before reloading, a failed load leaves
+        // the host with NO firewall table at all — policy-drop and every
+        // service rule gone, fail-open. The renderer must pick `ip6 saddr`
+        // for IPv6 sources.
+        let state = FirewallState::default();
+        let custom = vec![CustomRule {
+            id: "id4".into(),
+            label: "v6-restricted".into(),
+            transport: Transport::Tcp,
+            from: 51820,
+            to: 51820,
+            source: Some("2001:db8::/32".into()),
+            iface: None,
+            enabled: true,
+        }];
+        let out = render_ruleset(&state, &custom);
+        assert!(
+            out.contains("ip6 saddr 2001:db8::/32 tcp dport 51820 accept # custom:id4"),
+            "got:\n{out}"
+        );
+        assert!(
+            !out.contains("ip saddr 2001"),
+            "must not emit the IPv4 family clause for an IPv6 source; got:\n{out}"
         );
     }
 

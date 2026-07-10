@@ -1768,7 +1768,7 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Admin,
                     params: MethodParams::AdHoc(serde_json::json!({
                         "type": "object",
-                        "required": ["id", "label", "transport", "from", "to"],
+                        "required": ["id", "label", "transport", "from", "to", "enabled"],
                         "properties": {
                             "id": { "type": "string", "description": "Custom rule id." },
                             "label": { "type": "string", "description": "Required human label." },
