@@ -136,14 +136,116 @@ fn load_custom_rules() -> Vec<CustomRule> {
         .unwrap_or_default()
 }
 
-// Unused until a later task (#620) adds the API surface that mutates
-// custom rules (add/edit/delete/enable/disable) and persists them.
-#[allow(dead_code)]
 async fn save_custom_rules(rules: &[CustomRule]) -> Result<(), String> {
     let json = serde_json::to_string_pretty(rules).map_err(|e| format!("serialize: {e}"))?;
     tokio::fs::write(CUSTOM_PATH, json)
         .await
         .map_err(|e| format!("write {CUSTOM_PATH}: {e}"))
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Fields a client sends to create/update a custom rule (no `id` — the
+/// engine assigns it on create and preserves it on update).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CustomRuleInput {
+    pub label: String,
+    pub transport: Transport,
+    pub from: u16,
+    pub to: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Reject a bare IP or CIDR that isn't parseable, so nothing unsafe reaches
+/// the `ip saddr <...>` interpolation. Accepts "10.0.0.5", "10.0.0.0/8",
+/// "2001:db8::/32".
+fn valid_source(s: &str) -> bool {
+    use std::net::IpAddr;
+    let (addr, prefix) = match s.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (s, None),
+    };
+    let ip: IpAddr = match addr.parse() {
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    match prefix {
+        None => true,
+        Some(p) => match p.parse::<u8>() {
+            Ok(bits) => match ip {
+                IpAddr::V4(_) => bits <= 32,
+                IpAddr::V6(_) => bits <= 128,
+            },
+            Err(_) => false,
+        },
+    }
+}
+
+/// Interface names: Linux IFNAMSIZ is 16 (15 usable chars). Restrict to a
+/// safe charset so nothing breaks out of the `iifname "<...>"` string.
+fn valid_iface(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 15
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@'))
+}
+
+/// Validate a custom-rule input independent of current firewall state:
+/// range sanity, label hygiene, and source/iface sanitization.
+pub fn validate_custom_input(input: &CustomRuleInput) -> Result<(), String> {
+    if input.from == 0 {
+        return Err("port must be ≥ 1".into());
+    }
+    if input.from > input.to {
+        return Err("range start must be ≤ range end".into());
+    }
+    let label = input.label.trim();
+    if label.is_empty() {
+        return Err("label is required".into());
+    }
+    if label.len() > 64 {
+        return Err("label must be ≤ 64 characters".into());
+    }
+    if input.label.chars().any(|c| c.is_control()) {
+        return Err("label must not contain control characters".into());
+    }
+    if let Some(src) = &input.source
+        && !valid_source(src)
+    {
+        return Err(format!("invalid source (expected an IP or CIDR): {src}"));
+    }
+    if let Some(iface) = &input.iface
+        && !valid_iface(iface)
+    {
+        return Err(format!("invalid interface name: {iface}"));
+    }
+    Ok(())
+}
+
+/// If `[from,to]` (of `transport`) intersects any port a service rule owns,
+/// return that service's name. Covers active AND inactive service rules —
+/// a disabled service still owns its port.
+pub fn service_port_conflict(
+    state: &FirewallState,
+    transport: Transport,
+    from: u16,
+    to: u16,
+) -> Option<String> {
+    for rule in &state.rules {
+        for port in &rule.ports {
+            if port.transport == transport && port.port >= from && port.port <= to {
+                return Some(rule.service.clone());
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -493,6 +595,100 @@ impl FirewallService {
             info!("Firewall: updated ports for {}", proto.name());
         }
     }
+
+    /// Create a custom port rule. Validates input + service-port collision +
+    /// exact-duplicate, persists, and rebuilds the firewall. Returns the
+    /// created rule (with its assigned id). Duplicate/collision/validation
+    /// failures return an `Err` and change nothing.
+    pub async fn add_custom_rule(&self, input: CustomRuleInput) -> Result<CustomRule, String> {
+        validate_custom_input(&input)?;
+
+        let state = self.state.lock().await;
+        if let Some(owner) = service_port_conflict(&state, input.transport, input.from, input.to) {
+            return Err(format!(
+                "{}/{}-{} overlaps ports managed by {owner} — enable {owner} to open them",
+                transport_str(input.transport),
+                input.from,
+                input.to,
+            ));
+        }
+        let mut custom = self.custom.lock().await;
+        if custom.iter().any(|r| same_rule(r, &input)) {
+            return Err("an identical custom rule already exists".into());
+        }
+
+        let rule = CustomRule {
+            id: uuid::Uuid::new_v4().to_string(),
+            label: input.label.trim().to_string(),
+            transport: input.transport,
+            from: input.from,
+            to: input.to,
+            source: input.source.clone(),
+            iface: input.iface.clone(),
+            enabled: input.enabled,
+        };
+        custom.push(rule.clone());
+        save_custom_rules(&custom).await?;
+        apply_nftables(&state, &custom).await?;
+        info!("Firewall: added custom rule {} ({})", rule.id, rule.label);
+        Ok(rule)
+    }
+
+    /// Update an existing custom rule by id (full replace of the mutable
+    /// fields). Re-validates; the duplicate check ignores the rule itself.
+    pub async fn update_custom_rule(
+        &self,
+        id: &str,
+        input: CustomRuleInput,
+    ) -> Result<CustomRule, String> {
+        validate_custom_input(&input)?;
+
+        let state = self.state.lock().await;
+        if let Some(owner) = service_port_conflict(&state, input.transport, input.from, input.to) {
+            return Err(format!(
+                "{}/{}-{} overlaps ports managed by {owner} — enable {owner} to open them",
+                transport_str(input.transport),
+                input.from,
+                input.to,
+            ));
+        }
+        let mut custom = self.custom.lock().await;
+        if custom.iter().any(|r| r.id != id && same_rule(r, &input)) {
+            return Err("an identical custom rule already exists".into());
+        }
+        let Some(rule) = custom.iter_mut().find(|r| r.id == id) else {
+            return Err(format!("custom rule not found: {id}"));
+        };
+        rule.label = input.label.trim().to_string();
+        rule.transport = input.transport;
+        rule.from = input.from;
+        rule.to = input.to;
+        rule.source = input.source.clone();
+        rule.iface = input.iface.clone();
+        rule.enabled = input.enabled;
+        let updated = rule.clone();
+
+        save_custom_rules(&custom).await?;
+        apply_nftables(&state, &custom).await?;
+        info!("Firewall: updated custom rule {id}");
+        Ok(updated)
+    }
+
+    /// Remove a custom rule by id and rebuild the firewall. No-op error if the
+    /// id is unknown.
+    pub async fn remove_custom_rule(&self, id: &str) -> Result<(), String> {
+        let state = self.state.lock().await;
+        let mut custom = self.custom.lock().await;
+        let before = custom.len();
+        custom.retain(|r| r.id != id);
+        if custom.len() == before {
+            return Err(format!("custom rule not found: {id}"));
+        }
+        save_custom_rules(&custom).await?;
+        apply_nftables(&state, &custom).await?;
+        info!("Firewall: removed custom rule {id}");
+        Ok(())
+    }
 }
 
 /// Replace `service`'s port set in `state`, re-applying that service's
@@ -577,6 +773,23 @@ fn apply_restrictions(
         }
     }
     result
+}
+
+fn transport_str(t: Transport) -> &'static str {
+    match t {
+        Transport::Tcp => "tcp",
+        Transport::Udp => "udp",
+    }
+}
+
+/// True when an existing rule is an exact duplicate of the input
+/// (transport + range + source + iface). Label and enabled are ignored.
+fn same_rule(r: &CustomRule, input: &CustomRuleInput) -> bool {
+    r.transport == input.transport
+        && r.from == input.from
+        && r.to == input.to
+        && r.source == input.source
+        && r.iface == input.iface
 }
 
 // ── nftables application ───────────────────────────────────────
@@ -941,6 +1154,105 @@ mod tests {
         assert!(
             !out.contains("9999"),
             "disabled rule must not render; got:\n{out}"
+        );
+    }
+
+    // ── validate_custom_input / service_port_conflict (#620) ────────
+
+    fn input(from: u16, to: u16, transport: Transport) -> CustomRuleInput {
+        CustomRuleInput {
+            label: "test".into(),
+            transport,
+            from,
+            to,
+            source: None,
+            iface: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_range_and_input() {
+        // from > to
+        assert!(validate_custom_input(&input(100, 50, Transport::Tcp)).is_err());
+        // from == 0
+        assert!(validate_custom_input(&input(0, 10, Transport::Tcp)).is_err());
+        // empty label
+        let mut i = input(80, 80, Transport::Tcp);
+        i.label = "".into();
+        assert!(validate_custom_input(&i).is_err());
+        // control char in label
+        let mut i = input(80, 80, Transport::Tcp);
+        i.label = "a\nb".into();
+        assert!(validate_custom_input(&i).is_err());
+        // bad source
+        let mut i = input(80, 80, Transport::Tcp);
+        i.source = Some("1.2.3.4 accept".into());
+        assert!(validate_custom_input(&i).is_err());
+        // bad iface
+        let mut i = input(80, 80, Transport::Tcp);
+        i.iface = Some("eth0; drop".into());
+        assert!(validate_custom_input(&i).is_err());
+        // valid: single port, valid CIDR, valid iface
+        let mut i = input(8000, 8010, Transport::Udp);
+        i.source = Some("192.168.1.0/24".into());
+        i.iface = Some("tailscale0".into());
+        assert!(validate_custom_input(&i).is_ok());
+        // valid: bare IP source
+        let mut i = input(8000, 8000, Transport::Tcp);
+        i.source = Some("10.0.0.5".into());
+        assert!(validate_custom_input(&i).is_ok());
+    }
+
+    #[test]
+    fn service_conflict_detects_owned_ports() {
+        let mut state = FirewallState::default();
+        // SMB owns tcp/445 (active), a disabled service owns tcp/2049,
+        // transport matters.
+        state.rules.push(FirewallRule {
+            service: "smb".into(),
+            ports: vec![PortSpec {
+                port: 445,
+                transport: Transport::Tcp,
+                source: None,
+                iface: None,
+            }],
+            active: true,
+        });
+        state.rules.push(FirewallRule {
+            service: "nfs".into(),
+            ports: vec![PortSpec {
+                port: 2049,
+                transport: Transport::Tcp,
+                source: None,
+                iface: None,
+            }],
+            active: false, // disabled service still owns its port
+        });
+
+        assert_eq!(
+            service_port_conflict(&state, Transport::Tcp, 445, 445).as_deref(),
+            Some("smb")
+        );
+        // range spanning the port
+        assert_eq!(
+            service_port_conflict(&state, Transport::Tcp, 440, 450).as_deref(),
+            Some("smb")
+        );
+        // disabled service still conflicts
+        assert_eq!(
+            service_port_conflict(&state, Transport::Tcp, 2049, 2049).as_deref(),
+            Some("nfs")
+        );
+        // transport mismatch → no conflict
+        assert_eq!(
+            service_port_conflict(&state, Transport::Udp, 445, 445),
+            None
+        );
+        // free port → no conflict
+        assert_eq!(
+            service_port_conflict(&state, Transport::Tcp, 32400, 32400),
+            None
         );
     }
 }
