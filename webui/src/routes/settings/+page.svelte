@@ -16,6 +16,8 @@
 	import { confirm } from '$lib/confirm.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import { domain, domainRefresh, domainJoin, domainLeave } from '$lib/domain.svelte';
+	import { dc, dcRefresh, dcProvision } from '$lib/dc.svelte';
+	import DcPanel from '$lib/directory/DcPanel.svelte';
 	import type { Settings, SystemInfo, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NetIfStats, IpConfig, InterfaceConfig, VfConfig } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -197,6 +199,15 @@
 		await domainJoin();
 	}
 
+	// Directory (Active Directory) — host-a-new-domain form
+	let dcProvisionTried = $state(false);
+
+	async function dcProvisionGuarded() {
+		if (!dc.realm || !dc.adminPassword) { dcProvisionTried = true; return; }
+		dcProvisionTried = false;
+		await dcProvision();
+	}
+
 	async function domainLeaveConfirmed() {
 		await domainLeave(domainLeaveForce, domainLeaveUsername, domainLeavePassword);
 		domainLeaveOpen = false;
@@ -284,7 +295,7 @@
 			logFilter = liveLogFilter;
 			syncNetworkForm();
 		});
-		await domainRefresh();
+		await Promise.all([domainRefresh(), dcRefresh()]);
 	});
 
 	function syncNetworkForm() {
@@ -940,64 +951,11 @@
 			<section class="rounded-lg border border-border p-5">
 				<h2 class="mb-4 text-base font-semibold">Directory (Active Directory)</h2>
 
-				{#if domain.loading}
+				{#if domain.loading || dc.loading}
 					<p class="text-sm text-muted-foreground">Loading...</p>
-				{:else if !domain.status?.joined}
-					<div class="mb-3">
-						<label for="domain-realm" class="text-sm text-muted-foreground">Realm {#if !domain.realm && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
-						<input
-							id="domain-realm"
-							type="text"
-							bind:value={domain.realm}
-							placeholder="corp.example.com"
-							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.realm, domainJoinTried)}"
-						/>
-					</div>
-					<div class="mb-3">
-						<label for="domain-username" class="text-sm text-muted-foreground">Username {#if !domain.username && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
-						<input
-							id="domain-username"
-							type="text"
-							bind:value={domain.username}
-							placeholder="Administrator"
-							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.username, domainJoinTried)}"
-						/>
-					</div>
-					<div class="mb-3">
-						<label for="domain-password" class="text-sm text-muted-foreground">Password {#if !domain.password && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
-						<input
-							id="domain-password"
-							type="password"
-							bind:value={domain.password}
-							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.password, domainJoinTried)}"
-						/>
-					</div>
-
-					<button
-						type="button"
-						onclick={() => domainAdvanced = !domainAdvanced}
-						class="mb-3 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-					>
-						{#if domainAdvanced}<ChevronDown class="h-3 w-3" />{:else}<ChevronRight class="h-3 w-3" />{/if}
-						Advanced
-					</button>
-					{#if domainAdvanced}
-						<div class="mb-3">
-							<label for="domain-ou" class="text-sm text-muted-foreground">Organizational Unit</label>
-							<input
-								id="domain-ou"
-								type="text"
-								bind:value={domain.ou}
-								placeholder="OU=Servers,DC=corp,DC=example,DC=com"
-								class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-							/>
-						</div>
-					{/if}
-
-					<Button size="sm" onclick={domainJoinGuarded} disabled={domain.joining}>
-						{domain.joining ? 'Joining… (this contacts the domain controller)' : 'Join'}
-					</Button>
-				{:else}
+				{:else if dc.status?.hosting}
+					<DcPanel />
+				{:else if domain.status?.joined}
 					<div class="mb-3 flex items-center justify-between">
 						<span class="text-sm text-muted-foreground">Realm</span>
 						<span class="text-sm font-medium font-mono">{domain.status.realm ?? '—'}</span>
@@ -1065,6 +1023,104 @@
 							</div>
 						</div>
 					{/if}
+				{:else}
+					<h3 class="mb-3 text-sm font-semibold">Join an existing domain</h3>
+					<div class="mb-3">
+						<label for="domain-realm" class="text-sm text-muted-foreground">Realm {#if !domain.realm && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
+						<input
+							id="domain-realm"
+							type="text"
+							bind:value={domain.realm}
+							placeholder="corp.example.com"
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.realm, domainJoinTried)}"
+						/>
+					</div>
+					<div class="mb-3">
+						<label for="domain-username" class="text-sm text-muted-foreground">Username {#if !domain.username && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
+						<input
+							id="domain-username"
+							type="text"
+							bind:value={domain.username}
+							placeholder="Administrator"
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.username, domainJoinTried)}"
+						/>
+					</div>
+					<div class="mb-3">
+						<label for="domain-password" class="text-sm text-muted-foreground">Password {#if !domain.password && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
+						<input
+							id="domain-password"
+							type="password"
+							bind:value={domain.password}
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!domain.password, domainJoinTried)}"
+						/>
+					</div>
+
+					<button
+						type="button"
+						onclick={() => domainAdvanced = !domainAdvanced}
+						class="mb-3 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+					>
+						{#if domainAdvanced}<ChevronDown class="h-3 w-3" />{:else}<ChevronRight class="h-3 w-3" />{/if}
+						Advanced
+					</button>
+					{#if domainAdvanced}
+						<div class="mb-3">
+							<label for="domain-ou" class="text-sm text-muted-foreground">Organizational Unit</label>
+							<input
+								id="domain-ou"
+								type="text"
+								bind:value={domain.ou}
+								placeholder="OU=Servers,DC=corp,DC=example,DC=com"
+								class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+							/>
+						</div>
+					{/if}
+
+					<Button size="sm" onclick={domainJoinGuarded} disabled={domain.joining}>
+						{domain.joining ? 'Joining… (this contacts the domain controller)' : 'Join'}
+					</Button>
+
+					<div class="my-6 border-t border-border"></div>
+
+					<h3 class="mb-3 text-sm font-semibold">Host a new domain</h3>
+					<p class="mb-3 text-sm text-muted-foreground">
+						This NASty becomes the Active Directory domain controller — clients and other NASty boxes join the domain it hosts. One DC per domain; back it up from this panel. Clients should use this box as their DNS server. Advanced administration (OUs, GPOs) works with Windows RSAT.
+					</p>
+					<div class="mb-4 rounded border border-amber-700/40 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+						Provisioning replaces any local SMB users — the domain's directory becomes the source of authentication for shares on this box.
+					</div>
+					<div class="mb-3">
+						<label for="dc-realm" class="text-sm text-muted-foreground">Realm {#if !dc.realm && dcProvisionTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
+						<input
+							id="dc-realm"
+							type="text"
+							bind:value={dc.realm}
+							placeholder="ad.example.lan"
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!dc.realm, dcProvisionTried)}"
+						/>
+					</div>
+					<div class="mb-3">
+						<label for="dc-admin-password" class="text-sm text-muted-foreground">Administrator password {#if !dc.adminPassword && dcProvisionTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
+						<input
+							id="dc-admin-password"
+							type="password"
+							bind:value={dc.adminPassword}
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring {requiredFieldCls(!dc.adminPassword, dcProvisionTried)}"
+						/>
+					</div>
+					<div class="mb-3">
+						<label for="dc-dns-forwarder" class="text-sm text-muted-foreground">DNS forwarder</label>
+						<input
+							id="dc-dns-forwarder"
+							type="text"
+							bind:value={dc.dnsForwarder}
+							placeholder="auto — current upstream"
+							class="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+						/>
+					</div>
+					<Button size="sm" onclick={dcProvisionGuarded} disabled={dc.provisioning}>
+						{dc.provisioning ? 'Provisioning… (this can take a minute)' : 'Host domain'}
+					</Button>
 				{/if}
 			</section>
 

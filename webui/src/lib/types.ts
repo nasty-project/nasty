@@ -672,6 +672,22 @@ export interface DomainPrincipal {
 	name: string;
 }
 
+/** Returned by `dc.status` — Active Directory Domain Controller role (this
+ * box *hosts* a domain, as opposed to `DomainStatus`'s member mode). */
+export interface DcStatus {
+	hosting: boolean;
+	realm?: string | null;
+	workgroup?: string | null;
+	dns_forwarder?: string | null;
+	/** Whether samba-dc.service is active. Meaningful only when hosting. */
+	service_healthy: boolean;
+}
+
+/** One AD principal from `dc.user.list` / `dc.group.list` / `dc.computer.list`. */
+export interface DcPrincipal {
+	name: string;
+}
+
 export interface IscsiTarget {
 	id: string;
 	iqn: string;
@@ -1326,7 +1342,14 @@ export interface NetworkPendingTxn {
 
 export interface FirewallRule {
 	service: string;
-	ports: { port: number; transport: 'tcp' | 'udp'; source: string | null; iface: string | null }[];
+	ports: {
+		port: number;
+		/** End of a contiguous port range; absent = single port. */
+		to?: number | null;
+		transport: 'tcp' | 'udp';
+		source: string | null;
+		iface: string | null;
+	}[];
 	active: boolean;
 }
 

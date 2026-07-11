@@ -182,7 +182,7 @@
 							<span class="h-2 w-2 rounded-full shrink-0 {rule.active ? 'bg-green-400' : 'bg-muted-foreground'}"></span>
 							<span class="font-medium w-20">{rule.service}</span>
 							<span class="font-mono text-xs text-muted-foreground">
-								{#each [...new Set(rule.ports.map(p => `${p.port}/${p.transport}`))] as port}
+								{#each [...new Set(rule.ports.map(p => `${p.to != null ? `${p.port}-${p.to}` : p.port}/${p.transport}`))] as port}
 									{port}{' '}
 								{/each}
 							</span>
