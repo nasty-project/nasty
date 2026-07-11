@@ -16,12 +16,12 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 
 ## Star History
 
-<a href="https://www.star-history.com/#nasty-project/nasty&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=nasty-project/nasty&type=Date&theme=dark&legend=top-left" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=nasty-project/nasty&type=Date&legend=top-left" />
-    <img alt="NASty star history" src="https://api.star-history.com/svg?repos=nasty-project/nasty&type=Date&legend=top-left" />
-  </picture>
+<a href="https://www.star-history.com/">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nasty-project/nasty&type=date&theme=dark&legend=top-left&sealed_token=j8EcY6L-xSWlQVDgIXXbwrqWyYn6QFx2CJHl3VCTqF0JfudPfxG0GZzd6ScaGSp04ca98RzbcTU5AmPvKdN34tWMo-Ok7N7QxUabUCs4kgIJCZ4OWlJK22PwzmFZdnKhtmcnjaL2RBfcg0x7K-4uWtcqQHMFqlwE0cH5qZaYdL1EDNMr5cxwa2PyDVOS" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nasty-project/nasty&type=date&legend=top-left&sealed_token=j8EcY6L-xSWlQVDgIXXbwrqWyYn6QFx2CJHl3VCTqF0JfudPfxG0GZzd6ScaGSp04ca98RzbcTU5AmPvKdN34tWMo-Ok7N7QxUabUCs4kgIJCZ4OWlJK22PwzmFZdnKhtmcnjaL2RBfcg0x7K-4uWtcqQHMFqlwE0cH5qZaYdL1EDNMr5cxwa2PyDVOS" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nasty-project/nasty&type=date&legend=top-left&sealed_token=j8EcY6L-xSWlQVDgIXXbwrqWyYn6QFx2CJHl3VCTqF0JfudPfxG0GZzd6ScaGSp04ca98RzbcTU5AmPvKdN34tWMo-Ok7N7QxUabUCs4kgIJCZ4OWlJK22PwzmFZdnKhtmcnjaL2RBfcg0x7K-4uWtcqQHMFqlwE0cH5qZaYdL1EDNMr5cxwa2PyDVOS" />
+ </picture>
 </a>
 
 ## Features
