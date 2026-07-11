@@ -90,6 +90,11 @@ pub struct DcStatus {
     pub service_healthy: bool,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DcPrincipal {
+    pub name: String,
+}
+
 // ── Pure renders / helpers ─────────────────────────────────────
 
 /// resolved drop-in for DC mode: samba's SAMBA_INTERNAL DNS owns :53,
@@ -298,14 +303,6 @@ pub(crate) fn setpassword_args(user: &str) -> Vec<String> {
     with_conf(vec!["user".into(), "setpassword".into(), user.into()])
 }
 
-/// Argv shape only — `DcService::user_create` (Task 4) is the runtime
-/// caller; Task 3's lifecycle (provision/demote/status/backup/
-/// ensure_running) has no create-user step. Exercised today by
-/// `no_secret_ever_in_samba_tool_argv`. `cargo clippy --all-targets` also
-/// checks the plain `--lib` target (no `--cfg test`), where that's the
-/// only caller — hence still needs the explicit allow until Task 4 wires
-/// a non-test one.
-#[allow(dead_code)]
 pub(crate) fn user_create_args(
     name: &str,
     given_name: Option<&str>,
@@ -319,6 +316,44 @@ pub(crate) fn user_create_args(
         argv.push(format!("--surname={s}"));
     }
     with_conf(argv)
+}
+
+fn parse_principal_lines(raw: &str) -> Vec<DcPrincipal> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| DcPrincipal {
+            name: l.to_string(),
+        })
+        .collect()
+}
+
+pub(crate) fn list_args(kind: &str) -> Vec<String> {
+    with_conf(vec![kind.into(), "list".into()])
+}
+
+pub(crate) fn user_delete_args(name: &str) -> Vec<String> {
+    with_conf(vec!["user".into(), "delete".into(), name.into()])
+}
+
+pub(crate) fn user_enable_args(name: &str) -> Vec<String> {
+    with_conf(vec!["user".into(), "enable".into(), name.into()])
+}
+
+pub(crate) fn user_disable_args(name: &str) -> Vec<String> {
+    with_conf(vec!["user".into(), "disable".into(), name.into()])
+}
+
+pub(crate) fn group_add_args(name: &str) -> Vec<String> {
+    with_conf(vec!["group".into(), "add".into(), name.into()])
+}
+
+pub(crate) fn group_delete_args(name: &str) -> Vec<String> {
+    with_conf(vec!["group".into(), "delete".into(), name.into()])
+}
+
+pub(crate) fn group_members_args(op: &str, group: &str, member: &str) -> Vec<String> {
+    with_conf(vec!["group".into(), op.into(), group.into(), member.into()])
 }
 
 // ── Service ────────────────────────────────────────────────────
@@ -580,6 +615,105 @@ impl DcService {
             warn!("dc: failed to start samba-dc at boot restore: {e}");
         }
         true
+    }
+
+    // ── Domain principal management (all samba-tool; passwords via stdin) ──
+
+    async fn require_hosting(&self) -> Result<(), DcError> {
+        if Self::load_config().await.is_none() {
+            return Err(DcError::NotHosting);
+        }
+        Ok(())
+    }
+
+    pub async fn user_list(&self) -> Result<Vec<DcPrincipal>, DcError> {
+        self.require_hosting().await?;
+        Ok(parse_principal_lines(
+            &samba_tool(&list_args("user")).await?,
+        ))
+    }
+
+    pub async fn user_create(
+        &self,
+        name: &str,
+        password: &str,
+        given_name: Option<&str>,
+        surname: Option<&str>,
+    ) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        // `samba-tool user create` prompts "New Password:" + "Retype
+        // Password:" — both fed over stdin (never argv).
+        samba_tool_stdin(
+            &user_create_args(name, given_name, surname),
+            &format!("{password}\n{password}"),
+        )
+        .await?;
+        info!("dc: created domain user {name}");
+        Ok(())
+    }
+
+    pub async fn user_delete(&self, name: &str) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        samba_tool(&user_delete_args(name)).await?;
+        info!("dc: deleted domain user {name}");
+        Ok(())
+    }
+
+    pub async fn user_set_password(&self, name: &str, password: &str) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        samba_tool_stdin(&setpassword_args(name), &format!("{password}\n{password}")).await?;
+        info!("dc: reset password for domain user {name}");
+        Ok(())
+    }
+
+    pub async fn user_enable(&self, name: &str) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        samba_tool(&user_enable_args(name)).await?;
+        Ok(())
+    }
+
+    pub async fn user_disable(&self, name: &str) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        samba_tool(&user_disable_args(name)).await?;
+        Ok(())
+    }
+
+    pub async fn group_list(&self) -> Result<Vec<DcPrincipal>, DcError> {
+        self.require_hosting().await?;
+        Ok(parse_principal_lines(
+            &samba_tool(&list_args("group")).await?,
+        ))
+    }
+
+    pub async fn group_create(&self, name: &str) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        samba_tool(&group_add_args(name)).await?;
+        Ok(())
+    }
+
+    pub async fn group_delete(&self, name: &str) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        samba_tool(&group_delete_args(name)).await?;
+        Ok(())
+    }
+
+    pub async fn group_add_member(&self, group: &str, member: &str) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        samba_tool(&group_members_args("addmembers", group, member)).await?;
+        Ok(())
+    }
+
+    pub async fn group_remove_member(&self, group: &str, member: &str) -> Result<(), DcError> {
+        self.require_hosting().await?;
+        samba_tool(&group_members_args("removemembers", group, member)).await?;
+        Ok(())
+    }
+
+    pub async fn computer_list(&self) -> Result<Vec<DcPrincipal>, DcError> {
+        self.require_hosting().await?;
+        Ok(parse_principal_lines(
+            &samba_tool(&list_args("computer")).await?,
+        ))
     }
 }
 
@@ -943,5 +1077,35 @@ mod tests {
             prov.windows(2)
                 .any(|w| w[0] == "--configfile" && w[1] == DC_CONF_PATH)
         );
+    }
+
+    #[test]
+    fn parse_principal_lines_skips_noise() {
+        let raw = "Administrator\nGuest\n\nalice\n  bob  \n";
+        let out = parse_principal_lines(raw);
+        let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Administrator", "Guest", "alice", "bob"]);
+    }
+
+    #[test]
+    fn management_argv_never_carries_secrets_and_pins_config() {
+        let secret = "Sup3r.Secret!";
+        for argv in [
+            user_delete_args("alice"),
+            user_enable_args("alice"),
+            user_disable_args("alice"),
+            group_add_args("staff"),
+            group_delete_args("staff"),
+            group_members_args("addmembers", "staff", "alice"),
+            list_args("user"),
+            list_args("group"),
+            list_args("computer"),
+        ] {
+            assert!(!argv.iter().any(|a| a.contains(secret)), "argv: {argv:?}");
+            assert!(
+                argv.windows(2)
+                    .any(|w| w[0] == "--configfile" && w[1] == DC_CONF_PATH)
+            );
+        }
     }
 }
