@@ -11,6 +11,7 @@
 //! provision uses a random throwaway password, the real Administrator
 //! password is set via `samba-tool user setpassword` over stdin.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
@@ -365,6 +366,32 @@ pub(crate) fn group_members_args(op: &str, group: &str, member: &str) -> Vec<Str
     with_conf(vec!["group".into(), op.into(), group.into(), member.into()])
 }
 
+// ── Resolved drop-in I/O (shared by DC mode + member-mode join) ────
+
+/// Directory both DC mode (this module) and member-mode join
+/// (`domain.rs`) write systemd-resolved runtime drop-ins into.
+const RESOLVED_DROPIN_DIR: &str = "/run/systemd/resolved.conf.d";
+
+/// Write a resolved drop-in readable by the sandboxed `systemd-resolve`
+/// user. The engine service's `UMask=0077` (nixos/modules/nasty.nix)
+/// makes a plain `create_dir_all`/`write` produce root-only modes;
+/// resolved then silently IGNORES the whole directory ("Failed to chase
+/// and open directory '/run/systemd/resolved.conf.d', ignoring:
+/// Permission denied") rather than just the one drop-in it can't read —
+/// CI's first live DC run proved it end to end: `DNSStubListener=no`
+/// never took effect, resolved's stub kept :53, and samba's internal DNS
+/// failed to bind. Used by both DC mode and member-mode join — the
+/// latter had the exact same latent bug, it just never surfaced because
+/// most boxes' `/run/systemd/resolved.conf.d` happened to pre-exist with
+/// sane permissions before NASty ever wrote to it.
+pub(crate) async fn write_resolved_dropin(path: &str, contents: &str) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(RESOLVED_DROPIN_DIR).await?;
+    tokio::fs::set_permissions(RESOLVED_DROPIN_DIR, std::fs::Permissions::from_mode(0o755)).await?;
+    tokio::fs::write(path, contents).await?;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).await?;
+    Ok(())
+}
+
 // ── Service ────────────────────────────────────────────────────
 
 pub struct DcService;
@@ -487,8 +514,7 @@ impl DcService {
             .await?;
 
             // Release :53 to samba, route the box's own lookups through it.
-            tokio::fs::create_dir_all("/run/systemd/resolved.conf.d").await?;
-            tokio::fs::write(DC_RESOLVED_DROPIN_PATH, render_dc_resolved_dropin()).await?;
+            write_resolved_dropin(DC_RESOLVED_DROPIN_PATH, &render_dc_resolved_dropin()).await?;
             run_cmd("systemctl", &["restart", "systemd-resolved"], &[]).await?;
 
             // samba-dc conflicts with smbd/nmbd/winbindd — systemd swaps
@@ -623,11 +649,10 @@ impl DcService {
             .await
             .unwrap_or_default();
         if current != dropin {
-            let _ = tokio::fs::create_dir_all("/run/systemd/resolved.conf.d").await;
-            if tokio::fs::write(DC_RESOLVED_DROPIN_PATH, dropin)
+            let wrote = write_resolved_dropin(DC_RESOLVED_DROPIN_PATH, &dropin)
                 .await
-                .is_ok()
-            {
+                .is_ok();
+            if wrote {
                 let _ = run_cmd("systemctl", &["restart", "systemd-resolved"], &[]).await;
             }
         }

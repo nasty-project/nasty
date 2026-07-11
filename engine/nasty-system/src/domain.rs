@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
+use crate::dc::write_resolved_dropin;
 use crate::protocol::systemctl;
 
 /// Errors returned by domain operations.
@@ -695,10 +696,9 @@ impl DomainService {
                 }
             }
             if !dc_ips.is_empty() {
-                tokio::fs::create_dir_all("/run/systemd/resolved.conf.d").await?;
-                tokio::fs::write(
+                write_resolved_dropin(
                     RESOLVED_DROPIN_PATH,
-                    render_resolved_dropin(&cfg.realm, &dc_ips),
+                    &render_resolved_dropin(&cfg.realm, &dc_ips),
                 )
                 .await?;
                 let _ = systemctl("restart", "systemd-resolved.service").await;
