@@ -119,6 +119,15 @@ pub fn nasty_global_additions(dns_forwarder: &str) -> String {
     )
 }
 
+/// Sanity check that samba-tool's provision actually wrote its generated
+/// configuration back to the --configfile path (rather than leaving the
+/// empty file we seeded for lp.load()). A provisioned config always
+/// carries a [global] section with the realm.
+fn looks_provisioned(conf: &str) -> bool {
+    let lower = conf.to_lowercase();
+    lower.contains("[global]") && lower.contains("realm")
+}
+
 /// Remove every existing `dns forwarder = ...` line (samba-tool provision
 /// writes one pointing at resolv.conf's value — typically the resolved stub
 /// we've just disabled; smb.conf is last-value-wins, so a leftover line
@@ -439,6 +448,12 @@ impl DcService {
         let _ = tokio::fs::remove_dir_all("/var/lib/samba/sysvol").await;
         let _ = tokio::fs::remove_dir_all("/var/lib/samba/bind-dns").await;
 
+        // samba-tool with an explicit --configfile requires the file to
+        // EXIST at load time (lp.load() errors on a missing path — first
+        // live CI run proved it); provision then writes the generated
+        // config back to the same path. Hand it an empty one to load.
+        tokio::fs::write(DC_CONF_PATH, "").await?;
+
         // ── Provision (throwaway password on argv, rotated below) ──
         let throwaway = uuid::Uuid::new_v4().to_string();
         info!("dc: provisioning domain {realm} (workgroup {workgroup})");
@@ -452,6 +467,11 @@ impl DcService {
             // at the resolved stub we've just disabled) would silently win
             // over the operator's forwarder if it came after ours.
             let conf = tokio::fs::read_to_string(DC_CONF_PATH).await?;
+            if !looks_provisioned(&conf) {
+                return Err(DcError::CommandFailed(
+                    "samba-tool provision succeeded but did not write the expected configuration to smb.dc.conf".into(),
+                ));
+            }
             let conf = insert_into_global(
                 &strip_dns_forwarder_lines(&conf),
                 &nasty_global_additions(&dns_forwarder),
@@ -824,6 +844,22 @@ mod tests {
             1,
             "expected exactly one dns forwarder line, got:\n{out}"
         );
+    }
+
+    // ── looks_provisioned ─────────────────────────────────────
+    #[test]
+    fn looks_provisioned_accepts_generated_config() {
+        // Same provision-shaped fixture used above to model samba-tool's
+        // generated smb.dc.conf.
+        let conf = "# Global parameters\n[global]\n\tdns forwarder = 127.0.0.53\n\trealm = AD.EXAMPLE.COM\n\n[sysvol]\n\tpath = /var/lib/samba/sysvol\n\n[netlogon]\n\tpath = /var/lib/samba/sysvol/ad.example.com/scripts\n";
+        assert!(looks_provisioned(conf));
+    }
+
+    #[test]
+    fn looks_provisioned_rejects_empty_seed_file() {
+        // The empty file we seed for samba-tool's lp.load() before
+        // provision runs — must not be mistaken for a provisioned config.
+        assert!(!looks_provisioned(""));
     }
 
     // ── resolved drop-in ──────────────────────────────────────
