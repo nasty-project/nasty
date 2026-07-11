@@ -48,6 +48,7 @@ use nasty_storage::subvolume::{
     Snapshot, Subvolume, UpdateSubvolumeRequest,
 };
 use nasty_system::alerts::{ActiveAlert, AlertRule, AlertRuleUpdate};
+use nasty_system::dc::{DcPrincipal, DcStatus, DemoteRequest, ProvisionRequest};
 use nasty_system::domain::{DomainPrincipal, DomainStatus, JoinDomainRequest, LeaveDomainRequest};
 use nasty_system::firewall::FirewallStatus;
 use nasty_system::firmware::{FirmwareConstraints, FirmwareDevice, FirmwareUpdateResult};
@@ -2333,6 +2334,168 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                         "Group name prefix to search for.",
                     )),
                     result: Some(gen_schema::<Vec<DomainPrincipal>>(generator)),
+                },
+            ],
+        ),
+        // ── Active Directory: Domain Controller ──────────────────────────
+        (
+            "Active Directory: Domain Controller",
+            vec![
+                Method {
+                    name: "dc.status",
+                    desc: "Report this box's Domain Controller role: hosting state, realm, workgroup, DNS forwarder, and samba-dc.service health.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<DcStatus>(generator)),
+                },
+                Method {
+                    name: "dc.provision",
+                    desc: "Provision a brand-new Active Directory domain on this box (Samba AD DC, internal DNS). Exactly one DC per domain; refuses when the box is domain-joined. The Administrator password is set over stdin and never logged. Returns { status, warnings }.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<ProvisionRequest>(generator)),
+                    result: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "status": gen_schema::<DcStatus>(generator),
+                            "warnings": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Operator-facing warnings surfaced during provisioning (e.g. externally-managed network config)."
+                            }
+                        },
+                        "required": ["status", "warnings"]
+                    })),
+                },
+                Method {
+                    name: "dc.demote",
+                    desc: "Demote the DC — DESTROYS the hosted domain (typed-realm confirmation required). Takes a final domain backup into /fs when a filesystem exists, then tears the role down.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<DemoteRequest>(generator)),
+                    result: None,
+                },
+                Method {
+                    name: "dc.backup",
+                    desc: "Run `samba-tool domain backup offline` into a /fs-jailed directory and return the tarball path. Ship it offsite with a backup profile.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one(
+                        "dest",
+                        "Backup target directory; must resolve under /fs and be empty or absent.",
+                    )),
+                    result: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Path to the written backup tarball."}
+                        },
+                        "required": ["path"]
+                    })),
+                },
+                Method {
+                    name: "dc.user.list",
+                    desc: "List domain users (Admin — enumerates the hosted directory).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<DcPrincipal>>(generator)),
+                },
+                Method {
+                    name: "dc.user.create",
+                    desc: "Create a domain user via `samba-tool user create`. The password is fed over stdin (prompt + confirmation) — never argv, never logged.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(serde_json::json!({
+                        "type": "object",
+                        "required": ["name", "password"],
+                        "properties": {
+                            "name": { "type": "string", "description": "Domain username (sAMAccountName)." },
+                            "password": { "type": "string", "description": "Initial password. Sent over stdin — never argv, never logged." },
+                            "given_name": { "type": "string", "description": "Optional given (first) name." },
+                            "surname": { "type": "string", "description": "Optional surname (last) name." }
+                        }
+                    })),
+                    result: None,
+                },
+                Method {
+                    name: "dc.user.delete",
+                    desc: "Delete a domain user via `samba-tool user delete`.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Domain username to delete.")),
+                    result: None,
+                },
+                Method {
+                    name: "dc.user.set_password",
+                    desc: "Reset a domain user's password via `samba-tool user setpassword`. Sent over stdin — never argv, never logged.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_two(
+                        "name",
+                        "Domain username.",
+                        "password",
+                        "New password. Sent over stdin — never argv, never logged.",
+                    )),
+                    result: None,
+                },
+                Method {
+                    name: "dc.user.enable",
+                    desc: "Enable a previously disabled domain user account via `samba-tool user enable`.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Domain username to enable.")),
+                    result: None,
+                },
+                Method {
+                    name: "dc.user.disable",
+                    desc: "Disable a domain user account via `samba-tool user disable` — the account remains but cannot authenticate.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Domain username to disable.")),
+                    result: None,
+                },
+                Method {
+                    name: "dc.group.list",
+                    desc: "List domain groups (Admin — enumerates the hosted directory).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<DcPrincipal>>(generator)),
+                },
+                Method {
+                    name: "dc.group.create",
+                    desc: "Create a domain security group via `samba-tool group add`.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Domain group name to create.")),
+                    result: None,
+                },
+                Method {
+                    name: "dc.group.delete",
+                    desc: "Delete a domain group via `samba-tool group delete`.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one("name", "Domain group name to delete.")),
+                    result: None,
+                },
+                Method {
+                    name: "dc.group.add_member",
+                    desc: "Add a member to a domain group via `samba-tool group addmembers`.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_two(
+                        "group",
+                        "Domain group name.",
+                        "member",
+                        "Username to add to the group.",
+                    )),
+                    result: None,
+                },
+                Method {
+                    name: "dc.group.remove_member",
+                    desc: "Remove a member from a domain group via `samba-tool group removemembers`.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_two(
+                        "group",
+                        "Domain group name.",
+                        "member",
+                        "Username to remove from the group.",
+                    )),
+                    result: None,
+                },
+                Method {
+                    name: "dc.computer.list",
+                    desc: "List joined computers (Admin — enumerates the hosted directory).",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<DcPrincipal>>(generator)),
                 },
             ],
         ),

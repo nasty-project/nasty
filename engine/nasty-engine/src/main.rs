@@ -80,6 +80,7 @@ pub struct AppState {
     pub guest_shares: guestshare::GuestShareService,
     pub smb: nasty_sharing::SmbService,
     pub domain: nasty_system::domain::DomainService,
+    pub dc: nasty_system::dc::DcService,
     pub iscsi: nasty_sharing::IscsiService,
     pub nvmeof: Arc<nasty_sharing::NvmeofService>,
     pub vms: nasty_vm::VmService,
@@ -224,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         guest_shares: guestshare::GuestShareService::new(),
         smb: nasty_sharing::SmbService::new(),
         domain: nasty_system::domain::DomainService::new(),
+        dc: nasty_system::dc::DcService::new(),
         iscsi: nasty_sharing::IscsiService::new(),
         nvmeof,
         vms: nasty_vm::VmService::new(),
@@ -246,6 +248,7 @@ async fn main() -> anyhow::Result<()> {
             "protocols.restore",
             "smb.scaffold_config",
             "domain.restore",
+            "dc.restore",
             "nvmeof.restore",
             "vms.restore",
             "apps.restore",
@@ -375,6 +378,23 @@ async fn main() -> anyhow::Result<()> {
             async move {
                 if state.domain.is_joined().await {
                     state.domain.ensure_winbindd().await;
+                }
+            }
+        })
+        .await;
+
+    // If this box hosts an AD domain, bring the DC back up: rewrite the
+    // /run resolved drop-in (tmpfs — empty after reboot), start samba-dc
+    // (Conflicts= swaps member-mode samba out), and open the DC firewall
+    // ports. Must run after the smb.nasty.conf reconcile above — the DC
+    // config includes it.
+    state
+        .boot_status
+        .run_phase("dc.restore", secs(30), {
+            let state = state.clone();
+            async move {
+                if state.dc.ensure_running().await {
+                    state.firewall.open_dc().await;
                 }
             }
         })

@@ -7,6 +7,7 @@ mod audit;
 mod auth;
 mod backup;
 mod bcachefs;
+mod dc;
 mod domain;
 mod fs;
 mod guestshare;
@@ -218,7 +219,17 @@ fn is_read_only(method: &str) -> bool {
     // (users/groups) out of the joined directory, so they are privileged
     // reads gated on Admin, not routine reads. Returning false here defers
     // enforcement to the role check (Admin only), matching the registry.
-    if matches!(method, "domain.user.list" | "domain.group.list") {
+    if matches!(
+        method,
+        "domain.user.list"
+            | "domain.group.list"
+            // Same trap for DC mode: these enumerate the hosted directory
+            // and are Admin-gated in the registry — the `.list` suffix must
+            // not slip them into the ReadOnly set.
+            | "dc.user.list"
+            | "dc.group.list"
+            | "dc.computer.list"
+    ) {
         return false;
     }
     method.ends_with(".list")
@@ -490,6 +501,7 @@ async fn route(req: &Request, state: &AppState, session: &Session) -> Response {
         "guestshare" => guestshare::try_route(req, state, session).await,
         "smb" => smb::try_route(req, state, session).await,
         "domain" => domain::try_route(req, state, session).await,
+        "dc" => dc::try_route(req, state, session).await,
         "service" => service::try_route(req, state, session).await,
         "system" => {
             // `system.alerts` lives in the alerts module; everything else
@@ -1389,6 +1401,10 @@ mod tests {
     fn domain_principal_search_is_not_read_only() {
         assert!(!is_read_only("domain.user.list"));
         assert!(!is_read_only("domain.group.list"));
+        assert!(!is_read_only("dc.user.list"));
+        assert!(!is_read_only("dc.group.list"));
+        assert!(!is_read_only("dc.computer.list"));
+        assert!(is_read_only("dc.status")); // status is a safe read
     }
 
     /// The .list / .get suffix matches that existed before this
