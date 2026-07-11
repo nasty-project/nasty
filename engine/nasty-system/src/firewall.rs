@@ -634,6 +634,8 @@ impl FirewallService {
                 webui_ports()
             } else if service == "rdma" {
                 rdma_ports()
+            } else if service == "dc" {
+                dc_ports()
             } else if let Some(proto) = Protocol::from_name(service) {
                 ports_for_protocol(proto)
             } else {
