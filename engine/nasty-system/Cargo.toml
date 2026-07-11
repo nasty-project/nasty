@@ -33,3 +33,4 @@ zbus.workspace = true
 # `test-util` enables tokio::time::pause/advance for transaction tests.
 # Not used at runtime, only in #[cfg(test)] code.
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

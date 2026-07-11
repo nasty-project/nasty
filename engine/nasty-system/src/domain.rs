@@ -321,7 +321,7 @@ fn command_error(program: &str, output: &std::process::Output) -> DomainError {
 /// Run a command, capturing stdout+stderr. Returns stdout on success;
 /// on non-zero exit (or a spawn failure) returns `CommandFailed` carrying
 /// both stdout and stderr (or the spawn error).
-async fn run_cmd(
+pub(crate) async fn run_cmd(
     program: &str,
     args: &[&str],
     envs: &[(&str, &str)],
@@ -342,7 +342,7 @@ async fn run_cmd(
 /// stdin — used to hand credentials to `net ads join`/`net ads leave`
 /// without ever putting the password in argv (visible via `/proc/*/cmdline`).
 /// Captures stdout+stderr the same way `run_cmd` does.
-async fn run_cmd_stdin(
+pub(crate) async fn run_cmd_stdin(
     program: &str,
     args: &[&str],
     envs: &[(&str, &str)],
