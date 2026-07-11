@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 use crate::domain::{run_cmd, run_cmd_stdin};
 
@@ -22,11 +23,9 @@ pub const DC_CONF_PATH: &str = "/etc/samba/smb.dc.conf";
 pub const DC_STATE_PATH: &str = "/var/lib/nasty/dc.json";
 pub const DC_RESOLVED_DROPIN_PATH: &str = "/run/systemd/resolved.conf.d/nasty-dc.conf";
 /// Root every domain-backup destination must resolve under.
-#[allow(dead_code)] // consumed by Task 3 lifecycle
 const FS_ROOT: &str = "/fs";
 /// NASty's own network config — consulted (read-only) by the static-IP
 /// precondition. Path mirrors `network.rs`'s private `JSON_PATH`.
-#[allow(dead_code)] // consumed by Task 3 lifecycle
 const NETWORKING_JSON_PATH: &str = "/var/lib/nasty/networking.json";
 
 #[derive(Debug, thiserror::Error)]
@@ -262,22 +261,13 @@ pub fn validate_backup_dest(dest: &Path, root: &Path) -> Result<PathBuf, DcError
 }
 
 // ── samba-tool argv builders (pure; unit-tested for argv hygiene) ──
-//
-// These are `pub(crate)` and called from `#[cfg(test)] mod tests` below
-// (so `cargo test` sees them as live), but Task 3 hasn't wired a
-// non-test caller yet. `cargo clippy --all-targets` also builds the
-// plain `--lib` target (no `--cfg test`), where the test module doesn't
-// exist and these are genuinely unreferenced — hence the explicit
-// allows, matching `samba_tool`/`samba_tool_stdin` below.
 
-#[allow(dead_code)] // consumed by Task 3 lifecycle
 fn with_conf(mut argv: Vec<String>) -> Vec<String> {
     argv.push("--configfile".into());
     argv.push(DC_CONF_PATH.into());
     argv
 }
 
-#[allow(dead_code)] // consumed by Task 3 lifecycle
 pub(crate) fn provision_args(realm: &str, workgroup: &str, throwaway_pass: &str) -> Vec<String> {
     with_conf(vec![
         "domain".into(),
@@ -290,12 +280,18 @@ pub(crate) fn provision_args(realm: &str, workgroup: &str, throwaway_pass: &str)
     ])
 }
 
-#[allow(dead_code)] // consumed by Task 3 lifecycle
 pub(crate) fn setpassword_args(user: &str) -> Vec<String> {
     with_conf(vec!["user".into(), "setpassword".into(), user.into()])
 }
 
-#[allow(dead_code)] // consumed by Task 3 lifecycle
+/// Argv shape only — `DcService::user_create` (Task 4) is the runtime
+/// caller; Task 3's lifecycle (provision/demote/status/backup/
+/// ensure_running) has no create-user step. Exercised today by
+/// `no_secret_ever_in_samba_tool_argv`. `cargo clippy --all-targets` also
+/// checks the plain `--lib` target (no `--cfg test`), where that's the
+/// only caller — hence still needs the explicit allow until Task 4 wires
+/// a non-test one.
+#[allow(dead_code)]
 pub(crate) fn user_create_args(
     name: &str,
     given_name: Option<&str>,
@@ -345,26 +341,283 @@ impl DcService {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Provision a brand-new AD domain on this box. Returns the status plus
+    /// operator-facing warnings (e.g. externally-managed network config).
+    ///
+    /// Sequence: preflight → samba-tool provision (throwaway --adminpass,
+    /// engine-owned smb.dc.conf) → insert NASty [global] additions → set the
+    /// real Administrator password via stdin → resolved drop-in (release
+    /// :53) → start samba-dc.service → persist dc.json. Any failure after
+    /// provision unwinds through the demote teardown (minus the backup).
+    pub async fn provision(
+        &self,
+        req: ProvisionRequest,
+    ) -> Result<(DcStatus, Vec<String>), DcError> {
+        // ── Preflight ──────────────────────────────────────────
+        if Self::load_config().await.is_some() {
+            return Err(DcError::AlreadyHosting);
+        }
+        if crate::domain::DomainService::load_config().await.is_some() {
+            return Err(DcError::Precondition(
+                "this box is joined to a domain as a member — leave the domain before hosting one"
+                    .into(),
+            ));
+        }
+        let realm = crate::domain::validate_realm(&req.realm)
+            .map_err(|e| DcError::Validation(e.to_string()))?;
+        let workgroup = crate::domain::derive_workgroup(&realm);
+
+        let mut warnings = Vec::new();
+        let net_cfg: Option<crate::network::NetworkConfig> =
+            tokio::fs::read_to_string(NETWORKING_JSON_PATH)
+                .await
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok());
+        match static_ip_check(net_cfg.as_ref()) {
+            StaticIpCheck::Pass => {}
+            StaticIpCheck::Warn(w) => warnings.push(w),
+            StaticIpCheck::Fail(msg) => return Err(DcError::Precondition(msg)),
+        }
+
+        let dns_forwarder = resolve_dns_forwarder(req.dns_forwarder.as_deref()).await?;
+
+        // A stale DC config would make samba-tool refuse to provision.
+        let _ = tokio::fs::remove_file(DC_CONF_PATH).await;
+
+        // ── Provision (throwaway password on argv, rotated below) ──
+        let throwaway = uuid::Uuid::new_v4().to_string();
+        info!("dc: provisioning domain {realm} (workgroup {workgroup})");
+        samba_tool(&provision_args(&realm, &workgroup, &throwaway)).await?;
+
+        // Everything past this point unwinds on failure.
+        let result: Result<(), DcError> = async {
+            // NASty [global] additions inside the generated config.
+            let conf = tokio::fs::read_to_string(DC_CONF_PATH).await?;
+            let conf = insert_into_global(&conf, &nasty_global_additions(&dns_forwarder));
+            tokio::fs::write(DC_CONF_PATH, conf).await?;
+
+            // Real Administrator password — over stdin, twice (prompt +
+            // confirmation). Never argv, never logged.
+            samba_tool_stdin(
+                &setpassword_args("Administrator"),
+                &format!("{}\n{}", req.admin_password, req.admin_password),
+            )
+            .await?;
+
+            // Release :53 to samba, route the box's own lookups through it.
+            tokio::fs::create_dir_all("/run/systemd/resolved.conf.d").await?;
+            tokio::fs::write(DC_RESOLVED_DROPIN_PATH, render_dc_resolved_dropin()).await?;
+            run_cmd("systemctl", &["restart", "systemd-resolved"], &[]).await?;
+
+            // samba-dc conflicts with smbd/nmbd/winbindd — systemd swaps
+            // them atomically.
+            run_cmd("systemctl", &["start", "samba-dc.service"], &[]).await?;
+
+            Self::save_config(&DcConfig {
+                realm: realm.clone(),
+                workgroup: workgroup.clone(),
+                dns_forwarder: dns_forwarder.clone(),
+            })
+            .await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            warn!("dc: provision failed after samba-tool provision — unwinding: {e}");
+            self.teardown().await;
+            return Err(e);
+        }
+
+        info!("dc: domain {realm} provisioned");
+        Ok((self.status().await, warnings))
+    }
+
+    /// Demote — DESTROYS the domain. Typed-realm confirmation; takes a
+    /// final backup parachute into /fs when a filesystem exists.
+    pub async fn demote(&self, req: DemoteRequest) -> Result<(), DcError> {
+        let cfg = Self::load_config().await.ok_or(DcError::NotHosting)?;
+        if req.realm_confirmation.trim() != cfg.realm {
+            return Err(DcError::Validation(format!(
+                "confirmation does not match the hosted realm ({})",
+                cfg.realm
+            )));
+        }
+        // Parachute: best-effort final backup into /fs.
+        match first_fs_dir().await {
+            Some(fs_dir) => {
+                let dest = format!(
+                    "{fs_dir}/dc-final-backup-{}",
+                    chrono::Utc::now().format("%Y%m%d-%H%M%S")
+                );
+                match self.backup(&dest).await {
+                    Ok(path) => info!("dc: final domain backup written to {path}"),
+                    Err(e) => warn!("dc: final backup failed (continuing demote): {e}"),
+                }
+            }
+            None => warn!("dc: no /fs filesystem mounted — demoting WITHOUT a final backup"),
+        }
+        info!("dc: demoting — destroying domain {}", cfg.realm);
+        self.teardown().await;
+        Ok(())
+    }
+
+    /// Shared teardown for demote and provision-unwind: stop the DC, remove
+    /// its config + domain state, restore resolved, clear dc.json. Every
+    /// step best-effort — teardown must never strand the box half-torn.
+    async fn teardown(&self) {
+        let _ = run_cmd("systemctl", &["stop", "samba-dc.service"], &[]).await;
+        let _ = tokio::fs::remove_file(DC_CONF_PATH).await;
+        // Domain databases + sysvol. Root-resident by design.
+        let _ = tokio::fs::remove_dir_all("/var/lib/samba/private").await;
+        let _ = tokio::fs::remove_dir_all("/var/lib/samba/sysvol").await;
+        let _ = tokio::fs::remove_dir_all("/var/lib/samba/bind-dns").await;
+        if tokio::fs::remove_file(DC_RESOLVED_DROPIN_PATH)
+            .await
+            .is_ok()
+        {
+            let _ = run_cmd("systemctl", &["restart", "systemd-resolved"], &[]).await;
+        }
+        let _ = Self::clear_config().await;
+    }
+
+    pub async fn status(&self) -> DcStatus {
+        match Self::load_config().await {
+            Some(cfg) => {
+                let healthy = run_cmd("systemctl", &["is-active", "samba-dc.service"], &[])
+                    .await
+                    .is_ok();
+                DcStatus {
+                    hosting: true,
+                    realm: Some(cfg.realm),
+                    workgroup: Some(cfg.workgroup),
+                    dns_forwarder: Some(cfg.dns_forwarder),
+                    service_healthy: healthy,
+                }
+            }
+            None => DcStatus {
+                hosting: false,
+                realm: None,
+                workgroup: None,
+                dns_forwarder: None,
+                service_healthy: false,
+            },
+        }
+    }
+
+    /// Domain backup: `samba-tool domain backup offline` into a /fs-jailed,
+    /// empty target dir. Returns the tarball path.
+    pub async fn backup(&self, dest: &str) -> Result<String, DcError> {
+        if Self::load_config().await.is_none() {
+            return Err(DcError::NotHosting);
+        }
+        let resolved = validate_backup_dest(Path::new(dest), Path::new(FS_ROOT))?;
+        tokio::fs::create_dir_all(&resolved).await?;
+        let target = resolved.to_string_lossy().to_string();
+        samba_tool(&with_conf(vec![
+            "domain".into(),
+            "backup".into(),
+            "offline".into(),
+            format!("--targetdir={target}"),
+        ]))
+        .await?;
+        find_backup_tarball(&resolved).ok_or_else(|| {
+            DcError::CommandFailed(
+                "samba-tool reported success but no backup tarball was found".into(),
+            )
+        })
+    }
+
+    /// Boot restore (`dc.restore` phase): when hosting, rewrite the /run
+    /// resolved drop-in (tmpfs — gone after reboot), restart resolved if it
+    /// changed, and start the DC. Returns whether the box hosts a domain so
+    /// the caller can open the firewall.
+    pub async fn ensure_running(&self) -> bool {
+        if Self::load_config().await.is_none() {
+            return false;
+        }
+        let dropin = render_dc_resolved_dropin();
+        let current = tokio::fs::read_to_string(DC_RESOLVED_DROPIN_PATH)
+            .await
+            .unwrap_or_default();
+        if current != dropin {
+            let _ = tokio::fs::create_dir_all("/run/systemd/resolved.conf.d").await;
+            if tokio::fs::write(DC_RESOLVED_DROPIN_PATH, dropin)
+                .await
+                .is_ok()
+            {
+                let _ = run_cmd("systemctl", &["restart", "systemd-resolved"], &[]).await;
+            }
+        }
+        if let Err(e) = run_cmd("systemctl", &["start", "samba-dc.service"], &[]).await {
+            warn!("dc: failed to start samba-dc at boot restore: {e}");
+        }
+        true
+    }
 }
 
 /// Run samba-tool with the given argv (already carrying --configfile).
-///
-/// Unused until Task 3 wires the provision/demote lifecycle on top of the
-/// argv builders above.
-#[allow(dead_code)] // consumed by Task 3 lifecycle
 async fn samba_tool(argv: &[String]) -> Result<String, DcError> {
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     Ok(run_cmd("samba-tool", &args, &[]).await?)
 }
 
 /// Run samba-tool feeding `stdin_input` (the only way secrets travel).
-///
-/// Unused until Task 3 wires the provision/demote lifecycle on top of the
-/// argv builders above.
-#[allow(dead_code)] // consumed by Task 3 lifecycle
 async fn samba_tool_stdin(argv: &[String], stdin_input: &str) -> Result<String, DcError> {
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     Ok(run_cmd_stdin("samba-tool", &args, &[], stdin_input).await?)
+}
+
+/// The upstream DNS forwarder: explicit wins; else the first global server
+/// from `resolvectl dns`; else an error asking the operator to supply one
+/// (once samba owns :53 there is no other upstream path).
+async fn resolve_dns_forwarder(explicit: Option<&str>) -> Result<String, DcError> {
+    if let Some(f) = explicit {
+        let f = f.trim();
+        if f.parse::<std::net::IpAddr>().is_err() {
+            return Err(DcError::Validation(format!(
+                "dns_forwarder must be an IP address, got: {f}"
+            )));
+        }
+        return Ok(f.to_string());
+    }
+    let out = run_cmd("resolvectl", &["dns"], &[])
+        .await
+        .unwrap_or_default();
+    for token in out.split_whitespace() {
+        if let Ok(ip) = token.parse::<std::net::IpAddr>()
+            && !ip.is_loopback()
+        {
+            return Ok(ip.to_string());
+        }
+    }
+    Err(DcError::Precondition(
+        "could not determine an upstream DNS forwarder — supply one in the provision form".into(),
+    ))
+}
+
+/// First mounted filesystem under /fs (for the demote parachute).
+async fn first_fs_dir() -> Option<String> {
+    let mut rd = tokio::fs::read_dir(FS_ROOT).await.ok()?;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            return Some(entry.path().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// The tarball samba-tool wrote into the backup target dir.
+fn find_backup_tarball(dir: &Path) -> Option<String> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".tar.bz2") {
+            return Some(entry.path().to_string_lossy().to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -600,6 +853,16 @@ mod tests {
         assert!(validate_backup_dest(&esc, root.path()).is_err());
         // reject: relative
         assert!(validate_backup_dest(std::path::Path::new("x/y"), root.path()).is_err());
+    }
+
+    // ── backup tarball discovery ──────────────────────────────
+    #[test]
+    fn find_backup_tarball_picks_the_tarball() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        std::fs::write(dir.path().join("samba-backup-2026-07-10.tar.bz2"), b"x").unwrap();
+        let found = find_backup_tarball(dir.path()).unwrap();
+        assert!(found.ends_with("samba-backup-2026-07-10.tar.bz2"));
     }
 
     // ── argv hygiene: THE invariant ───────────────────────────

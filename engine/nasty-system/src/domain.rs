@@ -595,6 +595,11 @@ impl DomainService {
         if Self::load_config().await.is_some() {
             return Err(DomainError::AlreadyJoined);
         }
+        if crate::dc::DcService::load_config().await.is_some() {
+            return Err(DomainError::Validation(
+                "this box hosts an Active Directory domain — demote it before joining another domain".into(),
+            ));
+        }
         let realm = validate_realm(&req.realm)?;
         let idmap_base = req.idmap_base.unwrap_or(DEFAULT_IDMAP_BASE);
         validate_idmap_base(idmap_base)?;
