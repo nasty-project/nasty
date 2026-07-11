@@ -52,11 +52,20 @@ let
     };
   };
 
-  # ADS member mode needs LDAP support; nixpkgs' default samba is built
-  # --without-ldap --without-ads. One binding so smbd, the CLI tools, and
-  # winbindd all come from the same build. This changes the samba binary
-  # on EVERY box (joined or not) — the appliance-smoke test gates it.
-  sambaAds = pkgs.samba.override { enableLDAP = true; };
+  # ADS member mode needs LDAP; the DC role (#20) needs the full domain-
+  # controller build. One superset build serves both roles — member boxes
+  # simply never run the DC bits; two parallel samba store paths would
+  # invite version skew. samba-tool's provision path imports python
+  # `cryptography` (samba.gkdi) — keep it on pythonPath (harmless when the
+  # pinned nixpkgs already carries it; required when it doesn't).
+  sambaAds =
+    (pkgs.samba.override {
+      enableLDAP = true;
+      enableDomainController = true;
+    }).overrideAttrs
+      (old: {
+        pythonPath = (old.pythonPath or [ ]) ++ [ pkgs.python3Packages.cryptography ];
+      });
 
   # ── Plymouth boot splash ────────────────────────────────────
   nasty-logo-png = pkgs.runCommand "nasty-logo.png" {
@@ -1819,6 +1828,35 @@ in {
     # to break that chain; the engine starts smbd/nmbd/wsdd via the protocol
     # toggle and winbindd only while joined to a domain.
     systemd.targets.samba.wantedBy = mkIf cfg.smb.enable (lib.mkForce []);
+
+    # ── AD Domain Controller role (#20) ──────────────────────────
+    # Present on every SMB-enabled box, disabled by default; the ENGINE
+    # starts it (dc.provision / the dc.restore boot phase) — per-box
+    # runtime opt-in, like every other role. Conflicts= makes systemd swap
+    # the member-mode daemons out atomically: starting samba-dc stops
+    # smbd/nmbd/winbindd, stopping it lets them return under their normal
+    # toggles. The AD DC `samba` daemon runs its own smbd internally
+    # (serving sysvol + the NASty shares via the include chain in
+    # /etc/samba/smb.dc.conf, which `dc.provision` generates — never the
+    # nix-managed smb.conf).
+    systemd.services.samba-dc = mkIf cfg.smb.enable {
+      description = "Samba Active Directory Domain Controller (NASty-managed)";
+      # Lesson from the ad-member CI DC: without network-online ordering
+      # the DC races the interface and provision-time DNS registration
+      # fails in ways that look like samba bugs.
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      conflicts = [ "samba-smbd.service" "samba-nmbd.service" "samba-winbindd.service" ];
+      serviceConfig = {
+        Type = "notify";
+        NotifyAccess = "all";
+        ExecStart = "${sambaAds}/bin/samba --foreground --no-process-group --configfile=/etc/samba/smb.dc.conf";
+        LimitNOFILE = 16384;
+        Restart = "on-failure";
+        RestartSec = "5s";
+      };
+      # NOT wantedBy multi-user.target: the engine owns the role.
+    };
 
     # ── SMB network discovery ──────────────────────────────────
     # NASty was invisible to file-manager network browsers — TrueNAS,
