@@ -135,10 +135,23 @@ pub fn insert_into_global(conf: &str, extra: &str) -> String {
     out
 }
 
-/// Static-IP precondition (spec-amended): Fail only when NASty's own
-/// network config manages interfaces and none is Static; Warn when NASty
-/// has no opinion (externally managed box / fresh VM); Pass when at least
-/// one managed interface is Static.
+/// Static-IP precondition (spec-amended). NASty fails this check only
+/// when it itself is managing this box's addressing dynamically — that's
+/// fixable by the operator on the Network page. When NASty has no L3
+/// opinion at all, the box is externally managed and we can only warn.
+///
+/// - **Pass**: any interface/bond/vlan/bridge has `ipv4` or `ipv6`
+///   `Static`.
+/// - **Fail**: no `Static` anywhere, but at least one `Dhcp`/`Slaac` —
+///   NASty itself is assigning a dynamic address.
+/// - **Warn**: no network config, or nothing but `Disabled`/`Inherit` —
+///   NASty has no opinion on this box's addressing (externally managed
+///   box / fresh VM). This covers the all-`Disabled` case, which used to
+///   Fail: a box NASty was never told to address isn't the same failure
+///   as one NASty is actively DHCP-addressing.
+///
+/// `macvlans` are excluded from all of the above: they're engine-managed
+/// app shims (#448), never the box's own address.
 #[derive(Debug)]
 pub enum StaticIpCheck {
     Pass,
@@ -146,28 +159,52 @@ pub enum StaticIpCheck {
     Fail(String),
 }
 
+/// Warn text shared by both "NASty has no L3 opinion" cases below (no
+/// persisted config at all, or one that exists but assigns nothing
+/// dynamically itself) — a single `const` so the two call sites can't
+/// drift apart.
+const STATIC_IP_EXTERNALLY_MANAGED_WARN: &str = "NASty does not manage this box's network config — make sure the DC's IP address is static (a DHCP-addressed DC breaks the domain when the lease changes)";
+
+/// True if any interface/bond/vlan/bridge has an `ipv4` or `ipv6` method
+/// matching `pred`. `macvlans` are deliberately excluded — they're
+/// engine-managed app shims (#448), never the box's own address.
+fn any_managed_ip_method(
+    cfg: &crate::network::NetworkConfig,
+    pred: impl Fn(&crate::network::IpMethod) -> bool,
+) -> bool {
+    cfg.interfaces
+        .iter()
+        .any(|i| pred(&i.ipv4.method) || pred(&i.ipv6.method))
+        || cfg
+            .bonds
+            .iter()
+            .any(|b| pred(&b.ipv4.method) || pred(&b.ipv6.method))
+        || cfg
+            .vlans
+            .iter()
+            .any(|v| pred(&v.ipv4.method) || pred(&v.ipv6.method))
+        || cfg
+            .bridges
+            .iter()
+            .any(|b| pred(&b.ipv4.method) || pred(&b.ipv6.method))
+}
+
 pub fn static_ip_check(cfg: Option<&crate::network::NetworkConfig>) -> StaticIpCheck {
+    use crate::network::IpMethod;
+
     let Some(cfg) = cfg else {
-        return StaticIpCheck::Warn(
-            "NASty does not manage this box's network config — make sure the DC's IP address is static (a DHCP-addressed DC breaks the domain when the lease changes)".into(),
-        );
+        return StaticIpCheck::Warn(STATIC_IP_EXTERNALLY_MANAGED_WARN.into());
     };
-    if cfg.interfaces.is_empty() {
-        return StaticIpCheck::Warn(
-            "NASty does not manage this box's network config — make sure the DC's IP address is static (a DHCP-addressed DC breaks the domain when the lease changes)".into(),
-        );
-    }
-    // NOTE: `InterfaceConfig` has no top-level `method` — it's per-family,
-    // at `ipv4.method` / `ipv6.method`. Either family being Static counts.
-    if cfg.interfaces.iter().any(|i| {
-        i.ipv4.method == crate::network::IpMethod::Static
-            || i.ipv6.method == crate::network::IpMethod::Static
-    }) {
+
+    if any_managed_ip_method(cfg, |m| matches!(m, IpMethod::Static)) {
         return StaticIpCheck::Pass;
     }
-    StaticIpCheck::Fail(
-        "a domain controller needs a static IP address, but every NASty-managed interface uses DHCP — set a static address on the Network page first".into(),
-    )
+    if any_managed_ip_method(cfg, |m| matches!(m, IpMethod::Dhcp | IpMethod::Slaac)) {
+        return StaticIpCheck::Fail(
+            "a domain controller needs a static IP address, but this box's NASty-managed addressing is dynamic (DHCP/SLAAC) — set a static address on the Network page first".into(),
+        );
+    }
+    StaticIpCheck::Warn(STATIC_IP_EXTERNALLY_MANAGED_WARN.into())
 }
 
 /// Jail a domain-backup destination under `/fs` (root parameterized for
@@ -392,28 +429,156 @@ mod tests {
         }
     }
 
+    /// Same shape as `iface`, but drives `ipv6.method` instead of
+    /// `ipv4.method` — needed for the "ipv4 disabled, ipv6 static" case
+    /// (either family counts, see `static_ip_check`).
+    fn iface_ipv6(name: &str, method: crate::network::IpMethod) -> crate::network::InterfaceConfig {
+        crate::network::InterfaceConfig {
+            name: name.to_string(),
+            enabled: true,
+            ipv4: crate::network::IpConfig::default(),
+            ipv6: crate::network::IpConfig {
+                method,
+                addresses: Vec::new(),
+                gateway: None,
+            },
+            mtu: None,
+            sriov_num_vfs: None,
+            vfs: Vec::new(),
+        }
+    }
+
+    /// Minimal `BondConfig` driving just `ipv4.method` — mirrors `iface`.
+    /// `mode` is irrelevant to the static-IP check; `ActiveBackup` is an
+    /// arbitrary valid value.
+    fn bond(name: &str, method: crate::network::IpMethod) -> crate::network::BondConfig {
+        crate::network::BondConfig {
+            name: name.to_string(),
+            members: Vec::new(),
+            mode: crate::network::BondMode::ActiveBackup,
+            ipv4: crate::network::IpConfig {
+                method,
+                addresses: Vec::new(),
+                gateway: None,
+            },
+            ipv6: crate::network::IpConfig::default(),
+            mtu: None,
+            inherit_member_mac: true,
+        }
+    }
+
+    /// Minimal `BridgeConfig` driving just `ipv4.method` — mirrors `iface`.
+    fn bridge(name: &str, method: crate::network::IpMethod) -> crate::network::BridgeConfig {
+        crate::network::BridgeConfig {
+            name: name.to_string(),
+            members: Vec::new(),
+            ipv4: crate::network::IpConfig {
+                method,
+                addresses: Vec::new(),
+                gateway: None,
+            },
+            ipv6: crate::network::IpConfig::default(),
+            mtu: None,
+            stp: false,
+            forward_delay_s: None,
+            inherit_member_mac: true,
+        }
+    }
+
     #[test]
     fn static_ip_check_matrix() {
         use crate::network::{IpMethod, NetworkConfig};
+
         // No config at all → externally managed → warn, not fail.
         assert!(matches!(static_ip_check(None), StaticIpCheck::Warn(_)));
-        // Empty config → same.
+
+        // Empty config (every Vec empty) → same.
         let empty = NetworkConfig::default();
         assert!(matches!(
             static_ip_check(Some(&empty)),
             StaticIpCheck::Warn(_)
         ));
-        // A static interface → pass.
-        let mut ok = NetworkConfig::default();
-        ok.interfaces.push(iface("eth0", IpMethod::Static));
-        assert!(matches!(static_ip_check(Some(&ok)), StaticIpCheck::Pass));
-        // Managed but all-DHCP → fail, message names the Network page.
-        let mut bad = NetworkConfig::default();
-        bad.interfaces.push(iface("eth0", IpMethod::Dhcp));
-        match static_ip_check(Some(&bad)) {
-            StaticIpCheck::Fail(msg) => assert!(msg.contains("Network"), "msg: {msg}"),
+
+        // Single interface, all-Disabled → NASty has no L3 opinion → warn,
+        // NOT fail. Changed behavior: the old predicate treated "managed
+        // but not Static" as Fail, which punished boxes NASty was never
+        // told to address at all.
+        let mut all_disabled = NetworkConfig::default();
+        all_disabled
+            .interfaces
+            .push(iface("eth0", IpMethod::Disabled));
+        assert!(matches!(
+            static_ip_check(Some(&all_disabled)),
+            StaticIpCheck::Warn(_)
+        ));
+
+        // ipv4 Dhcp → NASty itself assigns a dynamic address → fail,
+        // message points the operator at the Network page.
+        let mut dhcp = NetworkConfig::default();
+        dhcp.interfaces.push(iface("eth0", IpMethod::Dhcp));
+        match static_ip_check(Some(&dhcp)) {
+            StaticIpCheck::Fail(msg) => assert!(msg.contains("Network page"), "msg: {msg}"),
             other => panic!("expected Fail, got {other:?}"),
         }
+
+        // ipv4 Slaac → same dynamic-addressing fail.
+        let mut slaac = NetworkConfig::default();
+        slaac.interfaces.push(iface("eth0", IpMethod::Slaac));
+        assert!(matches!(
+            static_ip_check(Some(&slaac)),
+            StaticIpCheck::Fail(_)
+        ));
+
+        // ipv4 Disabled + ipv6 Static on the same interface → pass;
+        // either family counts.
+        let mut ipv6_static = NetworkConfig::default();
+        ipv6_static
+            .interfaces
+            .push(iface_ipv6("eth0", IpMethod::Static));
+        assert!(matches!(
+            static_ip_check(Some(&ipv6_static)),
+            StaticIpCheck::Pass
+        ));
+
+        // Static on a bridge only, no interfaces at all → pass; bridges
+        // are collected too, not just top-level interfaces.
+        let mut bridge_static = NetworkConfig::default();
+        bridge_static.bridges.push(bridge("br0", IpMethod::Static));
+        assert!(matches!(
+            static_ip_check(Some(&bridge_static)),
+            StaticIpCheck::Pass
+        ));
+
+        // Same, but with a Disabled interface also present → still pass.
+        let mut bridge_static_disabled_iface = NetworkConfig::default();
+        bridge_static_disabled_iface
+            .interfaces
+            .push(iface("eth0", IpMethod::Disabled));
+        bridge_static_disabled_iface
+            .bridges
+            .push(bridge("br0", IpMethod::Static));
+        assert!(matches!(
+            static_ip_check(Some(&bridge_static_disabled_iface)),
+            StaticIpCheck::Pass
+        ));
+
+        // Dhcp on a bond only → fail; bonds are collected too.
+        let mut bond_dhcp = NetworkConfig::default();
+        bond_dhcp.bonds.push(bond("bond0", IpMethod::Dhcp));
+        match static_ip_check(Some(&bond_dhcp)) {
+            StaticIpCheck::Fail(msg) => assert!(msg.contains("Network page"), "msg: {msg}"),
+            other => panic!("expected Fail, got {other:?}"),
+        }
+
+        // Inherit-only (nothing Static/Dhcp/Slaac anywhere) → warn, not
+        // fail — Inherit is NASty deferring to a member's L3, not NASty
+        // itself assigning a dynamic address.
+        let mut inherit_only = NetworkConfig::default();
+        inherit_only.bridges.push(bridge("br0", IpMethod::Inherit));
+        assert!(matches!(
+            static_ip_check(Some(&inherit_only)),
+            StaticIpCheck::Warn(_)
+        ));
     }
 
     // ── backup-dest jail ──────────────────────────────────────
@@ -465,5 +630,10 @@ mod tests {
         assert!(!prov.iter().any(|a| a.contains(secret)));
         assert!(prov.iter().any(|a| a == "--dns-backend=SAMBA_INTERNAL"));
         assert!(prov.iter().any(|a| a == "--server-role=dc"));
+        // ...and pins the DC config, same as every other samba-tool call.
+        assert!(
+            prov.windows(2)
+                .any(|w| w[0] == "--configfile" && w[1] == DC_CONF_PATH)
+        );
     }
 }
