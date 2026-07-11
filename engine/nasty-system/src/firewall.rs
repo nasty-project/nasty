@@ -358,16 +358,17 @@ pub fn rdma_ports() -> Vec<PortSpec> {
 }
 
 /// Ports for the Active Directory DC role (#20): DNS, Kerberos +
-/// kpasswd, RPC endpoint mapper, NetBIOS, LDAP(S), SMB, Global Catalog,
-/// and the dynamic RPC range. Deliberately no NTP — the box does not
-/// serve time to domain clients (documented limitation).
+/// kpasswd, RPC endpoint mapper, NetBIOS, LDAP (tcp) + CLDAP DC-locator
+/// ping (udp), LDAP(S), SMB, Global Catalog, and the dynamic RPC range.
+/// Deliberately no NTP — the box does not serve time to domain clients
+/// (documented limitation).
 pub fn dc_ports() -> Vec<PortSpec> {
     let mut ports = Vec::new();
-    for p in [53u16, 88, 464] {
+    for p in [53u16, 88, 389, 464] {
         ports.push(tcp(p));
         ports.push(udp(p));
     }
-    for p in [135u16, 139, 389, 445, 636, 3268, 3269] {
+    for p in [135u16, 139, 445, 636, 3268, 3269] {
         ports.push(tcp(p));
     }
     for p in [137u16, 138] {
@@ -1442,13 +1443,13 @@ mod tests {
                 .iter()
                 .any(|s| s.transport == t && s.port == p && s.to.is_none())
         };
-        for p in [53u16, 88, 464] {
+        for p in [53u16, 88, 389, 464] {
             assert!(
                 has(Transport::Tcp, p) && has(Transport::Udp, p),
                 "missing tcp+udp {p}"
             );
         }
-        for p in [135u16, 139, 389, 445, 636, 3268, 3269] {
+        for p in [135u16, 139, 445, 636, 3268, 3269] {
             assert!(has(Transport::Tcp, p), "missing tcp {p}");
         }
         for p in [137u16, 138] {
