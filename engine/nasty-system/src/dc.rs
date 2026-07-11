@@ -114,6 +114,20 @@ pub fn nasty_global_additions(dns_forwarder: &str) -> String {
     )
 }
 
+/// Remove every existing `dns forwarder = ...` line (samba-tool provision
+/// writes one pointing at resolv.conf's value — typically the resolved stub
+/// we've just disabled; smb.conf is last-value-wins, so a leftover line
+/// would override the operator's forwarder).
+fn strip_dns_forwarder_lines(conf: &str) -> String {
+    conf.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !(t.starts_with("dns forwarder") && t.contains('='))
+        })
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
 /// Insert `extra` immediately after the `[global]` section header. A blind
 /// append would land inside the last share section ([netlogon]) instead.
 pub fn insert_into_global(conf: &str, extra: &str) -> String {
@@ -382,8 +396,13 @@ impl DcService {
 
         let dns_forwarder = resolve_dns_forwarder(req.dns_forwarder.as_deref()).await?;
 
-        // A stale DC config would make samba-tool refuse to provision.
+        // A stale DC config or half-written domain databases (from an
+        // earlier failed provision) would make samba-tool refuse to run.
+        // Safe here: preflight already ruled out hosting AND member mode.
         let _ = tokio::fs::remove_file(DC_CONF_PATH).await;
+        let _ = tokio::fs::remove_dir_all("/var/lib/samba/private").await;
+        let _ = tokio::fs::remove_dir_all("/var/lib/samba/sysvol").await;
+        let _ = tokio::fs::remove_dir_all("/var/lib/samba/bind-dns").await;
 
         // ── Provision (throwaway password on argv, rotated below) ──
         let throwaway = uuid::Uuid::new_v4().to_string();
@@ -392,9 +411,16 @@ impl DcService {
 
         // Everything past this point unwinds on failure.
         let result: Result<(), DcError> = async {
-            // NASty [global] additions inside the generated config.
+            // NASty [global] additions inside the generated config. Strip
+            // samba-tool's own `dns forwarder` line first — smb.conf is
+            // last-value-wins within a section, so a leftover line (pointing
+            // at the resolved stub we've just disabled) would silently win
+            // over the operator's forwarder if it came after ours.
             let conf = tokio::fs::read_to_string(DC_CONF_PATH).await?;
-            let conf = insert_into_global(&conf, &nasty_global_additions(&dns_forwarder));
+            let conf = insert_into_global(
+                &strip_dns_forwarder_lines(&conf),
+                &nasty_global_additions(&dns_forwarder),
+            );
             tokio::fs::write(DC_CONF_PATH, conf).await?;
 
             // Real Administrator password — over stdin, twice (prompt +
@@ -645,6 +671,25 @@ mod tests {
         let extra = nasty_global_additions("192.168.1.1");
         assert!(extra.contains("include = /etc/samba/smb.nasty.conf"));
         assert!(extra.contains("dns forwarder = 192.168.1.1"));
+    }
+
+    #[test]
+    fn strip_dns_forwarder_lines_removes_samba_provisioned_forwarder() {
+        // provision-shaped config: samba-tool wrote its own `dns forwarder`
+        // line (pointing at resolv.conf's value — typically the resolved
+        // stub) into [global].
+        let conf = "# Global parameters\n[global]\n\tdns forwarder = 127.0.0.53\n\trealm = AD.EXAMPLE.COM\n\n[sysvol]\n\tpath = /var/lib/samba/sysvol\n\n[netlogon]\n\tpath = /var/lib/samba/sysvol/ad.example.com/scripts\n";
+        let out = insert_into_global(
+            &strip_dns_forwarder_lines(conf),
+            &nasty_global_additions("192.168.1.1"),
+        );
+        assert!(out.contains("dns forwarder = 192.168.1.1"), "got:\n{out}");
+        assert!(!out.contains("127.0.0.53"), "got:\n{out}");
+        assert_eq!(
+            out.matches("dns forwarder").count(),
+            1,
+            "expected exactly one dns forwarder line, got:\n{out}"
+        );
     }
 
     // ── resolved drop-in ──────────────────────────────────────
