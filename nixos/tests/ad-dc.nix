@@ -161,8 +161,10 @@ let
         # configured through NASty's own network.* RPC (networking.json
         # never gets written), so the precondition can't confirm a static
         # address and downgrades Fail to Warn (dc.rs::static_ip_check).
-        # Provision must still succeed with a non-empty warnings array.
+        # Provision must still succeed with a non-empty warnings array —
+        # assert both the shape and that the Warn branch actually fired.
         assert isinstance(prov["warnings"], list), prov
+        assert len(prov["warnings"]) >= 1, prov
 
         # ── Poll until samba-dc.service reports healthy ─────────────────
         healthy_status = None
@@ -382,7 +384,7 @@ pkgs.testers.runNixOSTest {
     # like ad-member's, publishes none).
     member.wait_for_open_port(445)
     dcbox.succeed(
-        "smbclient '//192.168.1.2/IPC$' -U 'NASTYDC\\alice%UserPass.123' -c 'exit'"
+        "smbclient '//192.168.1.2/IPC$' -U '${workgroup}\\alice%${alicePass}' -c 'exit'"
     )
   '';
 }

@@ -55,6 +55,23 @@ pub(super) async fn try_route(
             Ok(p) => match state.dc.demote(p).await {
                 Ok(()) => {
                     state.firewall.close_dc().await;
+                    // Teardown (inside dc.demote) stops samba-dc.service,
+                    // but nothing else restarts the member-mode SMB units
+                    // it had Conflicts=-swapped out — bring SMB back under
+                    // its own protocol toggle, matching the spec's promise
+                    // that shares resume without a reboot. dc.demote()
+                    // clears dc.json before returning Ok, so this doesn't
+                    // trip the enable() DC-hosting guard (#20). Best-effort:
+                    // demote itself already succeeded, so a restart
+                    // failure here is logged, not surfaced as an RPC error.
+                    if state
+                        .protocols
+                        .is_enabled(nasty_system::protocol::Protocol::Smb)
+                        .await
+                        && let Err(e) = state.protocols.enable("smb").await
+                    {
+                        tracing::warn!("dc.demote: failed to restart SMB after demote: {e}");
+                    }
                     ok(req, "ok")
                 }
                 Err(e) => err(req, e),

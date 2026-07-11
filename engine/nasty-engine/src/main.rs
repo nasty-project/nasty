@@ -384,18 +384,19 @@ async fn main() -> anyhow::Result<()> {
         .await;
 
     // If this box hosts an AD domain, bring the DC back up: rewrite the
-    // /run resolved drop-in (tmpfs — empty after reboot), start samba-dc
-    // (Conflicts= swaps member-mode samba out), and open the DC firewall
-    // ports. Must run after the smb.nasty.conf reconcile above — the DC
-    // config includes it.
+    // /run resolved drop-in (tmpfs — empty after reboot) and start
+    // samba-dc (Conflicts= swaps member-mode samba out). Must run after
+    // the smb.nasty.conf reconcile above — the DC config includes it.
+    // The DC firewall opens later, in firewall.init: at this point in
+    // boot `state.rules` holds nothing yet, so opening here would
+    // rebuild the nftables table before the base (webui/ssh) rules
+    // exist, locking management out until firewall.init runs.
     state
         .boot_status
         .run_phase("dc.restore", secs(30), {
             let state = state.clone();
             async move {
-                if state.dc.ensure_running().await {
-                    state.firewall.open_dc().await;
-                }
+                state.dc.ensure_running().await;
             }
         })
         .await;
@@ -605,6 +606,13 @@ async fn main() -> anyhow::Result<()> {
                 // protocol list; restore its firewall rule when enabled.
                 if nasty_system::rdma::enabled().await {
                     state.firewall.open_rdma().await;
+                }
+                // DC role (#20): open the AD service ports once the base rules exist.
+                // dc.restore (earlier) only restarts the service + DNS drop-in — opening
+                // the firewall there would rebuild the table before webui/ssh rules are
+                // in state, locking management out until this point.
+                if nasty_system::dc::DcService::load_config().await.is_some() {
+                    state.firewall.open_dc().await;
                 }
                 // iSCSI/NVMe-oF rules follow configured portal ports
                 // (#602); replace the static defaults with the real

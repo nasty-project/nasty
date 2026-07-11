@@ -311,6 +311,20 @@ impl ProtocolService {
     pub async fn enable(&self, name: &str) -> Result<ProtocolStatus, String> {
         let proto = Protocol::from_name(name).ok_or_else(|| format!("unknown protocol: {name}"))?;
 
+        // A hosted AD domain's samba-dc.service already serves SMB (shares
+        // included) through its own smbd, and Conflicts= swaps it out for
+        // member-mode smbd/nmbd/winbindd — enabling the standalone SMB
+        // toggle here would silently stop the DC. Demoting clears dc.json
+        // and lifts this guard (disable is intentionally left unguarded).
+        if proto == Protocol::Smb && crate::dc::DcService::load_config().await.is_some() {
+            return Err(
+                "this box hosts an Active Directory domain — its domain controller \
+                         serves SMB (shares included); demote it on the Settings → Directory \
+                         panel before enabling standalone SMB"
+                    .to_string(),
+            );
+        }
+
         let mut state = load_state().await;
         state.set(proto, true);
         save_state(&state).await?;
