@@ -77,9 +77,7 @@ jobs:
             .#checks.x86_64-linux.appliance-smoke \
             -L --print-build-logs
 
-      - name: AD VM tests (non-gating)
-        # Two two-node AD tests, kept non-gating for different reasons:
-        #
+      - name: AD member-join VM test (non-gating — known throwaway-DC defect)
         # ad-member provisions a throwaway Samba AD DC in a VM. Getting
         # that simulated DC fully initialized is essentially the phase-2
         # (NASty-as-DC) problem and currently fails at the DC's own LDAP
@@ -89,19 +87,27 @@ jobs:
         # discovery, winbind idmap, domain-user SMB auth with correct file
         # ownership, and leave all pass. Kept running (not gating) so it's
         # ready to re-promote once the throwaway DC is hardened in phase 2.
-        #
-        # ad-dc (#20) is new: NASty provisions a real domain via
-        # samba-dc.service + dc.provision, and a second NASty joins it
-        # with the same shipped member flow ad-member exercises. Non-
-        # gating on landing since this is its first live CI run and a
-        # brand-new two-VM AD test is exactly the kind of thing that finds
-        # a harness or readiness-signal issue the first time it runs for
-        # real (see nixos/tests/ad-dc.nix's header for the two named
-        # fallbacks). Promote to gating once it's green for a few runs.
         continue-on-error: true
         run: |
           nix build \
             .#checks.x86_64-linux.ad-member \
+            -L --print-build-logs
+
+      - name: AD DC VM test (non-gating while stabilizing)
+        # ad-dc (#20): NASty provisions a real domain via
+        # samba-dc.service + dc.provision, and a second NASty joins it
+        # with the same shipped member flow ad-member exercises. This is
+        # the test's first live CI run, and a brand-new two-VM AD test is
+        # exactly the kind of thing that finds a harness or
+        # readiness-signal issue the first time it runs for real (see
+        # nixos/tests/ad-dc.nix's header for the two named fallbacks).
+        # Non-gating until it has built up a green track record, then
+        # promote to gating. continue-on-error masks the step's
+        # conclusion in the GitHub UI, so its logs — not the checkmark —
+        # are the source of truth while it stabilizes.
+        continue-on-error: true
+        run: |
+          nix build \
             .#checks.x86_64-linux.ad-dc \
             -L --print-build-logs
 
