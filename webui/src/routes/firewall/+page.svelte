@@ -167,7 +167,7 @@
 	<p class="text-sm text-muted-foreground mt-0.5">Dynamic nftables firewall — ports open and close automatically with services.</p>
 </div>
 
-<div class="mt-6 max-w-2xl">
+<div class="mt-6 max-w-4xl">
 	{#if !firewallStatus}
 		<p class="text-muted-foreground">Loading...</p>
 	{:else}
@@ -345,16 +345,16 @@
 							<div class="text-xs text-muted-foreground mb-1">Port</div>
 							<input
 								bind:value={cFrom}
-								placeholder="e.g. 32400"
-								class="w-24 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
+								placeholder="32400"
+								class="w-28 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
 							/>
 						</div>
 						<div>
 							<div class="text-xs text-muted-foreground mb-1">to (optional, range)</div>
 							<input
 								bind:value={cTo}
-								placeholder="e.g. 32410"
-								class="w-24 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
+								placeholder="32410"
+								class="w-28 rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
 							/>
 						</div>
 					</div>
