@@ -29,12 +29,12 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 ### Storage
 - **bcachefs** — compression, checksumming, erasure coding, tiering, encryption, O(1) snapshots
 - **File sharing** — NFS and SMB with per-share ACLs
-- **Block storage** — iSCSI and NVMe-oF with dedicated targets per volume
+- **Block storage** — iSCSI and NVMe-oF with dedicated targets per volume, per-target portal management, and optional RDMA transports (iSER, NVMe-oF/RDMA, NFS-RDMA) for RoCE and InfiniBand NICs
 - **Subvolumes** — filesystem and block subvolumes with quotas, compression, and tiering per subvolume
 - **Snapshots** — instant, space-efficient point-in-time copies
 - **Encryption lifecycle** — lock and unlock encrypted filesystems from the WebUI, with a dependents preview that lists every app, VM, share, and backup that would break before you confirm. Optional **TPM2-sealed keys** auto-unlock on boot when the measured-boot state matches
 - **File browser** — browse, upload, edit, rename, copy, move, and bulk-manage files from the web UI
-- **Backups** — encrypted, deduplicated, incremental backups to local, S3, SFTP, REST, or Backblaze B2 with per-profile schedules and retention
+- **Backups** — encrypted, deduplicated, incremental backups to local, S3, SFTP, REST, or Backblaze B2 with per-profile schedules and retention — plus whole-snapshot restore, including disaster recovery onto a fresh box from an existing repository
 
 ### Monitoring & Alerts
 - **Dashboard** — CPU, memory, storage, temperature, frequency — with scrollable history charts (30-day retention)
@@ -44,9 +44,9 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **[nasty-top](https://github.com/nasty-project/nasty-top)** — standalone TUI for live per-device IO, latency, and tuning
 
 ### Apps & VMs
-- **Apps** — Docker containers and Compose stacks with image pull progress, container inspect, live per-app resource usage (CPU %, memory, network and disk I/O), and an `allow_unsafe` escape hatch for stacks that need privileged options
+- **Apps** — Docker containers and Compose stacks with image pull progress, container inspect, live per-app resource usage (CPU %, memory, network and disk I/O), and custom `.env` files for compose stacks, and an `allow_unsafe` escape hatch for stacks that need privileged options
 - **Virtual machines** — QEMU/KVM with VNC console, disk snapshots, USB passthrough (editable on existing VMs), bridge selection, and an inline disk-import wizard for qcow2 / raw / vmdk images
-- **Hardware passthrough** — IOMMU group view, USB device inventory, and vfio-pci toggles that survive reboots
+- **Hardware passthrough** — IOMMU group view, USB device inventory, vfio-pci toggles that survive reboots, and SR-IOV virtual-function management (per-VF VLAN, MAC, trust, spoof-check)
 - **Network bridges** — Linux bridges for attaching VMs (and apps) to L2 networks alongside the host
 
 ### System
@@ -57,6 +57,8 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 - **Let's Encrypt** — automatic TLS certificates via ACME (TLS-ALPN and DNS challenges)
 - **Tailscale** — built-in VPN with one-click setup
 - **Access control** — local user accounts with role-based permissions, API tokens, OIDC single sign-on, **WebAuthn / passkey** sign-in with admin-side credential reset, and an append-only audit log of every mutation, login attempt, and privileged-console open
+- **Active Directory** _(experimental)_ — join an existing domain as a member, or host your own: NASty as the domain controller with integrated DNS and Kerberos, WebUI user/group/computer management, domain backups, and RSAT compatibility for advanced administration
+- **Firewall** — engine-managed nftables, deny-by-default, with per-service source/interface restrictions and user-defined custom port rules for anything running outside NASty's service model
 - **UPS monitoring** — NUT integration for graceful shutdown on power loss (opt-in)
 - **Atomic updates** — NixOS-based, with one-click rollback to any previous generation
 - **Secure Boot** _(experimental)_ — per-box opt-in lanzaboote-enforcing boot chain with a guided enrollment wizard from the Hardware page

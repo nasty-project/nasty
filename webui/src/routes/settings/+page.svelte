@@ -964,7 +964,7 @@
 	<div class="max-w-2xl">
 		<!-- Directory (Active Directory) -->
 		<section class="rounded-lg border border-border p-5">
-			<h2 class="mb-4 text-base font-semibold">Directory (Active Directory)</h2>
+			<h2 class="mb-4 text-base font-semibold">Directory (Active Directory) <span class="ml-1 align-middle text-xs font-normal text-amber-400">experimental</span></h2>
 
 			{#if domain.loading || dc.loading}
 				<p class="text-sm text-muted-foreground">Loading...</p>

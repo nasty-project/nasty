@@ -54,6 +54,31 @@
 					detail: 'Like iSCSI but faster — uses the NVMe protocol natively over the network. Requires NVMe-oF support on both ends. Best for: high-performance workloads, low-latency requirements, modern infrastructure.',
 				},
 				{
+					term: 'RDMA',
+					summary: 'Remote Direct Memory Access — NICs move data between machines\' memory directly, bypassing most of the CPU and TCP overhead.',
+					detail: 'With RDMA-capable NICs on both ends, storage traffic skips the kernel\'s TCP path almost entirely: lower latency, higher throughput, less CPU burned per gigabyte. NASty supports RDMA transports for its block and file protocols — iSER (iSCSI), NVMe-oF over RDMA, and NFS-RDMA. It\'s a per-box opt-in on the Sharing page and needs an RDMA-capable NIC (RoCE or InfiniBand); everything keeps working over plain TCP without it.',
+				},
+				{
+					term: 'RoCE',
+					summary: 'RDMA over Converged Ethernet — RDMA running on ordinary Ethernet gear.',
+					detail: 'RoCEv2 encapsulates all RDMA traffic in UDP port 4791 — the "ports" you see for NVMe/RDMA (4420) or NFS-RDMA (20049) are RDMA connection-manager service IDs, not real IP ports. Practical consequence: firewall source restrictions on RoCE traffic can only filter at the 4791 level, not per service. Works over standard (ideally lossless-configured) Ethernet switches.',
+				},
+				{
+					term: 'InfiniBand',
+					summary: 'A dedicated high-speed fabric with native RDMA — an alternative to Ethernet, not something that runs on it.',
+					detail: 'InfiniBand is its own network technology with its own switches and cabling. Native InfiniBand traffic never traverses the IP firewall at all — no port rules needed or possible. IP-over-InfiniBand (IPoIB) provides a normal IP interface on the same fabric for everything else.',
+				},
+				{
+					term: 'iSER',
+					summary: 'iSCSI Extensions for RDMA — the iSCSI protocol with its data path moved onto RDMA.',
+					detail: 'Same iSCSI targets, LUNs, and ACLs you already configured — but data flows over the RDMA transport instead of TCP. Enable RDMA on the Sharing page and iSER portals become available alongside plain TCP ones. The initiator side needs iSER support too (Linux open-iscsi has it).',
+				},
+				{
+					term: 'iSCSI Portal',
+					summary: 'The address and port an iSCSI target listens on.',
+					detail: 'Each iSCSI target accepts connections through one or more portals (IP:port pairs). NASty lets you manage portals per target — bind a target to a specific interface or a custom port — and the firewall follows the configured portals automatically, so a portal on a non-default port is reachable without manual rules.',
+				},
+				{
 					term: 'Time Machine',
 					summary: 'Turn an SMB share into a macOS Time Machine backup destination.',
 					detail: 'Tick "Time Machine" when creating an SMB share to make it a backup target for macOS. NASty applies the Samba vfs_fruit options Time Machine needs and advertises the share over mDNS (_adisk) so it auto-appears in System Settings → Time Machine → Add Backup Disk — no manual mounting. A Time Machine share must be authenticated and writable (not guest, not read-only), so add the one user who will back up. Optionally cap its size, and point it at a quota\'d subvolume as a hard backstop. The share is pinned so Time Machine — not Docker/Samba — thins old backups.',
@@ -261,7 +286,7 @@
 				{
 					term: 'Firewall',
 					summary: 'A packet filter that controls which traffic reaches NASty and its services.',
-					detail: 'NASty uses nftables for firewall rules, managed from the Firewall page. Each service (NFS, SMB, SSH, etc.) lists its port and current rule — open to all, restricted to specific source IPs or networks, or closed. Rules apply to selected interfaces (LAN, VPN) independently. Published app ports also appear here for visibility. The firewall is deny-by-default: only explicitly opened traffic is accepted.',
+					detail: 'NASty uses nftables for firewall rules, managed from the Firewall page. Each service (NFS, SMB, SSH, etc.) lists its port and current rule — open to all, restricted to specific source IPs or networks, or closed. Rules apply to selected interfaces (LAN, VPN) independently. Published app ports also appear here for visibility. The firewall is deny-by-default: only explicitly opened traffic is accepted. For anything running outside NASty\'s service model — a network_mode: host app, or software you run on the box yourself — add a custom port rule: a single port or a range, with the same optional source and interface restrictions, persisted across reboots. Ports NASty\'s own services manage are refused (enable the service instead), and bridge-networked apps never need a rule — Docker publishes their ports past the firewall.',
 				},
 			],
 		},
@@ -336,6 +361,36 @@
 			],
 		},
 		{
+			title: 'Directory (Active Directory)',
+			entries: [
+				{
+					term: 'Active Directory (AD)',
+					summary: 'Centralized logins and groups for a whole network — one place where users, passwords, and machines live.',
+					detail: 'Instead of managing accounts on every box, machines join a domain and authenticate users against it. NASty speaks both sides: it can join an existing domain as a member (Settings → Directory → join), or host a domain itself as the domain controller — replacing a Windows Server or Synology Directory Server. Domain users and groups can then be used in share permissions. AD support is currently experimental — validated continuously in CI, still gathering real-world mileage.',
+				},
+				{
+					term: 'Domain Controller (DC)',
+					summary: 'The server that hosts an Active Directory domain — its user database, Kerberos, and DNS.',
+					detail: 'Host a new domain from Settings → Directory: pick a realm and an Administrator password, and this NASty becomes the DC with integrated DNS and Kerberos. Your shares keep working, served by the same box, and you manage domain users, groups, and joined computers from the WebUI. One DC per domain in this version — back the domain up from the same panel (the backup rides your normal backup profiles), and point your clients\' DNS at the NASty DC. Windows RSAT works against it for advanced administration (OUs, GPOs, policies). The DC role is experimental — treat domain backups as mandatory, not optional.',
+				},
+				{
+					term: 'Domain Join (Member Mode)',
+					summary: 'Attach NASty to an existing domain, so domain users can access its shares.',
+					detail: 'Joining makes NASty a member server: it authenticates SMB users against the domain\'s DC instead of local accounts, and domain users/groups become usable in share ACLs. You need domain-admin credentials once, for the join itself — they\'re used over a secure channel and never stored. A box is either a member or a DC, never both.',
+				},
+				{
+					term: 'Kerberos',
+					summary: 'The authentication protocol behind Active Directory — password-less tickets instead of sending passwords around.',
+					detail: 'Clients prove who they are to the domain once and receive time-limited tickets they present to services. Because tickets are time-stamped, clock skew between machines breaks logins — keep NTP working on everything in the domain. NASty configures Kerberos automatically on join or provision; you never edit krb5.conf by hand.',
+				},
+				{
+					term: 'Realm',
+					summary: 'The domain\'s name, written like DNS — e.g. ad.example.lan.',
+					detail: 'The realm is the identity of the whole domain: it names the Kerberos realm (uppercase, AD.EXAMPLE.LAN) and the DNS zone the domain controller serves. Pick something under a domain you control (or a .lan/.internal name) — it can\'t be changed later without rebuilding the domain.',
+				},
+			],
+		},
+		{
 			title: 'Backup',
 			entries: [
 				{
@@ -347,6 +402,11 @@
 					term: 'Retention',
 					summary: 'How many snapshots to keep, by age class.',
 					detail: 'A retention policy says e.g. "keep the last 7 snapshots, plus 7 daily, 4 weekly, 6 monthly." After every backup, snapshots that don\'t match any class are pruned. Tune this per profile based on how much history you want versus storage cost at the target.',
+				},
+				{
+					term: 'Restore',
+					summary: 'Bring data back from a backup — onto the same box, or a brand-new one.',
+					detail: 'Pick a snapshot from a backup profile and restore it to a folder on your storage. Restores merge: existing files are only replaced when you explicitly allow overwriting, and nothing else is deleted. Because backup repositories are self-contained, disaster recovery works the same way — on a fresh NASty, add a profile pointing at your existing repository (S3, SFTP, local, …), list its snapshots, and restore.',
 				},
 			],
 		},
@@ -372,6 +432,10 @@
 				{
 					term: 'I want to stream media (Plex, Jellyfin)',
 					summary: 'Use NFS or SMB — either works, NFS has less overhead.',
+				},
+				{
+					term: 'I want centralized logins for my machines',
+					summary: 'Use Active Directory — join an existing domain, or make NASty the domain controller (Settings → Directory).',
 				},
 				{
 					term: 'I want to back up my Mac with Time Machine',
