@@ -229,6 +229,13 @@ fn is_read_only(method: &str) -> bool {
             | "dc.user.list"
             | "dc.group.list"
             | "dc.computer.list"
+            // `auth.token.list` returns metadata for ALL API tokens
+            // (declared Admin, and `list_api_tokens` self-guards on
+            // Role::Admin). Its `.list` suffix would otherwise slip it
+            // into the universally-allowed read set — carve it out so
+            // the central gate agrees with the impl and the declared
+            // role, instead of relying on the inline check alone.
+            | "auth.token.list"
     ) {
         return false;
     }
@@ -266,7 +273,6 @@ fn is_read_only(method: &str) -> bool {
                 | "device.list"
                 | "auth.me"
                 | "auth.list_users"
-                | "auth.token.list"
                 | "fs.dependents"
                 | "fs.locked_dependents"
                 | "fs.usage"
@@ -283,6 +289,8 @@ fn is_read_only(method: &str) -> bool {
                 | "service.rest_server.config"
                 | "service.base_names.get"
                 | "system.update.version"
+                | "system.update.check"
+                | "backup.secrets_status"
                 | "system.update.status"
                 | "system.update.build_dir.get"
                 | "system.reboot_required"
@@ -1331,7 +1339,7 @@ pub(super) async fn read_bcachefs_error_count(uuid: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_operator_allowed, is_read_only};
+    use super::{is_operator_allowed, is_read_only, is_universally_allowed};
 
     /// Regression for the Filesystems-page refresh loop on .71:
     /// before this fix, `fs.tpm.status` was classified as a write
@@ -1448,6 +1456,57 @@ mod tests {
             missing.is_empty(),
             "methods registered as MethodRole::Operator but missing from \
              is_operator_allowed's allowlist: {missing:?}"
+        );
+    }
+
+    /// Full bidirectional guard: for EVERY registered method, the role the
+    /// central gate actually enforces must equal the role the registry
+    /// declares. `MethodRole` is only documentation/OpenAPI metadata — the
+    /// real gate is `is_universally_allowed` / `is_operator_allowed` (see
+    /// the `denied` match in the dispatcher). They drift silently: a `.list`
+    /// suffix can slip an Admin method into the read set (escalation), an
+    /// allowlist entry can outlive its declared role, and a status method
+    /// that doesn't end in `.status` can lock out the role that's supposed
+    /// to call it. This asserts the two agree in both directions for all
+    /// methods, so any future drift fails here instead of shipping.
+    ///
+    /// Methods whose *arm* adds its own inline role check (e.g.
+    /// `auth.token.list` self-guards on Admin) must still line the central
+    /// gate up with the declared role — defense in depth, not a substitute —
+    /// so they are carved into `is_read_only` rather than exempted here.
+    #[test]
+    fn declared_roles_match_effective_gate() {
+        use crate::registry::{MethodRole, build_full_registry};
+
+        // The minimum role the central gate actually lets through.
+        fn effective(method: &str) -> MethodRole {
+            if is_universally_allowed(method) {
+                MethodRole::Any
+            } else if is_operator_allowed(method) {
+                MethodRole::Operator
+            } else {
+                MethodRole::Admin
+            }
+        }
+
+        let (_g, groups) = build_full_registry();
+        let mut mismatches = Vec::new();
+        for (_, methods) in &groups {
+            for m in methods {
+                let eff = effective(m.name);
+                if eff != m.role {
+                    mismatches.push(format!(
+                        "{} declared {:?} but the gate enforces {:?}",
+                        m.name, m.role, eff
+                    ));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "registry role declarations diverge from the enforced gate \
+             (fix the declaration or the allowlist/read-set so they agree):\n{}",
+            mismatches.join("\n")
         );
     }
 }
