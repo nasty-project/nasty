@@ -961,7 +961,7 @@
 
 {:else if activeTab === 'directory'}
 
-	<div class="max-w-2xl">
+	<div class="max-w-5xl">
 		<!-- Directory (Active Directory) -->
 		<section class="rounded-lg border border-border p-5">
 			<h2 class="mb-4 text-base font-semibold">Directory (Active Directory) <span class="ml-1 align-middle text-xs font-normal text-amber-400">experimental</span></h2>
@@ -1039,6 +1039,8 @@
 					</div>
 				{/if}
 			{:else}
+				<div class="grid grid-cols-1 gap-8 lg:grid-cols-2">
+				<div>
 				<h3 class="mb-3 text-sm font-semibold">Join an existing domain</h3>
 				<div class="mb-3">
 					<label for="domain-realm" class="text-sm text-muted-foreground">Realm {#if !domain.realm && domainJoinTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</label>
@@ -1095,8 +1097,8 @@
 					{domain.joining ? 'Joining… (this contacts the domain controller)' : 'Join'}
 				</Button>
 
-				<div class="my-6 border-t border-border"></div>
-
+				</div>
+				<div class="lg:border-l lg:border-border lg:pl-8">
 				<h3 class="mb-3 text-sm font-semibold">Host a new domain</h3>
 				<p class="mb-3 text-sm text-muted-foreground">
 					This NASty becomes the Active Directory domain controller — clients and other NASty boxes join the domain it hosts. One DC per domain; back it up from this panel. Clients should use this box as their DNS server. Advanced administration (OUs, GPOs) works with Windows RSAT.
@@ -1136,6 +1138,8 @@
 				<Button size="sm" onclick={dcProvisionGuarded} disabled={dc.provisioning}>
 					{dc.provisioning ? 'Provisioning… (this can take a minute)' : 'Host domain'}
 				</Button>
+				</div>
+				</div>
 			{/if}
 		</section>
 	</div>
