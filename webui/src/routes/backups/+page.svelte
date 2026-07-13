@@ -724,7 +724,6 @@
 
 <div class="space-y-4">
 	<div>
-		<h1 class="text-2xl font-bold">Backups</h1>
 		<p class="text-sm text-muted-foreground mt-0.5">Deduplicating, encrypted backups with retention policies.</p>
 	</div>
 

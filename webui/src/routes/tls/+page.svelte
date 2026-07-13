@@ -217,7 +217,6 @@
 </script>
 
 <div>
-	<h1 class="text-2xl font-bold">TLS Certificate</h1>
 	<p class="text-sm text-muted-foreground mt-0.5">Manage HTTPS certificates for the NASty web interface.</p>
 </div>
 

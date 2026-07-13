@@ -19,7 +19,6 @@
 </script>
 
 <div>
-	<h1 class="text-2xl font-bold">VPN</h1>
 	<p class="text-sm text-muted-foreground mt-0.5">Secure remote access via Tailscale.</p>
 </div>
 

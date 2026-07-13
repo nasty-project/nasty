@@ -163,7 +163,6 @@
 </script>
 
 <div>
-	<h1 class="text-2xl font-bold">Firewall</h1>
 	<p class="text-sm text-muted-foreground mt-0.5">Dynamic nftables firewall — ports open and close automatically with services.</p>
 </div>
 

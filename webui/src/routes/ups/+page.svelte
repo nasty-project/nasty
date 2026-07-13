@@ -137,7 +137,6 @@
 </script>
 
 <div>
-	<h1 class="text-2xl font-bold">UPS</h1>
 	<p class="text-sm text-muted-foreground mt-0.5">Uninterruptible power supply monitoring and shutdown policy via NUT.</p>
 </div>
 

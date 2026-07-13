@@ -109,7 +109,6 @@
 <svelte:head><title>Ingress · NASty</title></svelte:head>
 
 <div class="mb-4">
-	<h1 class="text-2xl font-semibold">Ingress</h1>
 	<p class="mt-1 text-sm text-muted-foreground">
 		Every route Caddy is currently serving — both engine-managed app ingresses and the
 		Caddyfile-baked WebUI / API / WebSocket routes. Read-only here; edit engine-app rows
