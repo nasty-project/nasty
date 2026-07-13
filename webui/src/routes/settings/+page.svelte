@@ -15,6 +15,7 @@
 	} from '$lib/network';
 	import { confirm } from '$lib/confirm.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
+	import { uiPrefs } from '$lib/uiPrefs.svelte';
 	import { domain, domainRefresh, domainJoin, domainLeave } from '$lib/domain.svelte';
 	import { dc, dcRefresh, dcProvision } from '$lib/dc.svelte';
 	import DcPanel from '$lib/directory/DcPanel.svelte';
@@ -951,6 +952,20 @@
 				<Button size="sm" onclick={sendTelemetry} disabled={sendingTelemetry || !settings.telemetry_enabled}>
 					{sendingTelemetry ? 'Sending…' : 'Send Now'}
 				</Button>
+			</section>
+
+			<!-- Appearance -->
+			<section class="rounded-lg border border-border p-5">
+				<h2 class="mb-2 text-base font-semibold">Appearance</h2>
+				<label class="flex items-center gap-2 text-sm">
+					<input
+						type="checkbox"
+						checked={!uiPrefs.logoHidden}
+						onchange={(e) => uiPrefs.setLogoHidden(!(e.currentTarget as HTMLInputElement).checked)}
+					/>
+					Show the NASty logo in the sidebar
+				</label>
+				<p class="mt-1 text-xs text-muted-foreground">Hiding the logo frees vertical space for the menu. You can also hide it from the small icon next to the logo.</p>
 			</section>
 
 
