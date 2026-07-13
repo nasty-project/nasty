@@ -288,6 +288,10 @@
 	// (xz/gz/bz2) are accepted around any disk format — the engine
 	// decompresses to a sibling tmp file before running qemu-img.
 	const IMPORTABLE_BASE_EXTS = ['.qcow2', '.img', '.raw', '.vdi', '.vmdk'];
+	// Human hint derived from the same list, so the dialog copy can't drift
+	// from what the uploader/importer actually accept.
+	const IMPORT_FORMATS_HINT = IMPORTABLE_BASE_EXTS.map((e) => e.slice(1)).join(', ')
+		+ ' — optionally .xz/.gz/.bz2 compressed';
 	const IMPORTABLE_COMPRESSION = ['', '.xz', '.gz', '.bz2'];
 	const IMPORTABLE_EXTS = IMPORTABLE_BASE_EXTS.flatMap((b) =>
 		IMPORTABLE_COMPRESSION.map((c) => `${b}${c}`),
@@ -2032,6 +2036,9 @@
 							/>
 						{/if}
 					</div>
+					<p class="mt-1 text-xs text-muted-foreground">
+						Accepts {IMPORT_FORMATS_HINT}. ISO images boot directly — no import needed.
+					</p>
 					{#if noImagesSubvolume && filesystems.length > 0}
 						<div class="mt-1 rounded border border-dashed border-muted-foreground/30 p-3 text-xs text-muted-foreground">
 							<p class="mb-2">No image storage found. Create a <span class="font-mono">vms/images</span> subvolume to upload to:</p>
@@ -2045,7 +2052,7 @@
 						</div>
 					{:else if importableImages.length === 0}
 						<p class="mt-1 text-xs text-muted-foreground">
-							No disk images uploaded yet — supported: qcow2 / img / raw / vdi / vmdk, optionally .xz / .gz / .bz2. Use "Upload new…" above to add one.
+							No disk images uploaded yet — use "Upload new…" above to add one.
 						</p>
 					{:else}
 						<select

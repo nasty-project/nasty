@@ -45,7 +45,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 
 ### Apps & VMs
 - **Apps** — Docker containers and Compose stacks with image pull progress, container inspect, live per-app resource usage (CPU %, memory, network and disk I/O), and custom `.env` files for compose stacks, and an `allow_unsafe` escape hatch for stacks that need privileged options
-- **Virtual machines** — QEMU/KVM with VNC console, disk snapshots, USB passthrough (editable on existing VMs), bridge selection, and an inline disk-import wizard for qcow2 / raw / vmdk images
+- **Virtual machines** — QEMU/KVM with VNC console, disk snapshots, USB passthrough (editable on existing VMs), bridge selection, and an inline disk-import wizard for qcow2, raw, img, vdi, and vmdk images (optionally .xz/.gz/.bz2 compressed)
 - **Hardware passthrough** — IOMMU group view, USB device inventory, vfio-pci toggles that survive reboots, and SR-IOV virtual-function management (per-VF VLAN, MAC, trust, spoof-check)
 - **Network bridges** — Linux bridges for attaching VMs (and apps) to L2 networks alongside the host
 
