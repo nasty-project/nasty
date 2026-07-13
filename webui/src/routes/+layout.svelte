@@ -15,6 +15,7 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import logoLight from '$lib/assets/nasty.svg';
 	import logoDark from '$lib/assets/nasty-white.svg';
+	import { uiPrefs } from '$lib/uiPrefs.svelte';
 	import '../app.css';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -63,6 +64,7 @@
 		ScrollText,
 		Search,
 		AlertTriangle,
+		EyeOff,
 	} from '@lucide/svelte';
 	import { goto } from '$app/navigation';
 	import { refreshState } from '$lib/refresh.svelte';
@@ -969,11 +971,22 @@
 						<PanelLeftOpen size={18} />
 					</button>
 				</div>
+			{:else if uiPrefs.logoHidden}
+				<!-- Logo hidden (restore via Settings → Appearance). Slim bar keeps
+				     the collapse toggle reachable and reclaims the logo's height. -->
+				<div class="shrink-0 border-b border-border px-2 py-1.5 flex justify-end">
+					<button onclick={toggleSidebar} class="text-muted-foreground/50 hover:text-foreground transition-colors" title="Collapse sidebar">
+						<PanelLeftClose size={15} />
+					</button>
+				</div>
 			{:else}
 				<div class="shrink-0 border-b border-border px-4 py-4 relative">
 					<a href="https://github.com/nasty-project" target="_blank" rel="noopener noreferrer">
 					<img src={theme.isDark ? logoDark : logoLight} alt="NASty" class="h-40" />
 				</a>
+					<button onclick={() => uiPrefs.setLogoHidden(true)} class="absolute top-2 right-7 text-muted-foreground/50 hover:text-foreground transition-colors" title="Hide logo (restore in Settings → Appearance)">
+						<EyeOff size={15} />
+					</button>
 					<button onclick={toggleSidebar} class="absolute top-2 right-2 text-muted-foreground/50 hover:text-foreground transition-colors" title="Collapse sidebar">
 						<PanelLeftClose size={15} />
 					</button>
