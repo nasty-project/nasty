@@ -273,7 +273,6 @@
 
 <div class="mb-4 flex items-center justify-between">
 	<div>
-		<h1 class="text-2xl font-semibold">Hardware</h1>
 		<p class="text-sm text-muted-foreground">
 			Hardware overview and IOMMU groupings. Devices in the same IOMMU group must be passed through
 			together.

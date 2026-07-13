@@ -246,8 +246,6 @@
 	}
 </script>
 
-<h1 class="mb-4 text-2xl font-bold">Dashboard</h1>
-
 {#if alerts.length > 0}
 	<div class="mb-4 flex flex-col gap-2">
 		{#each alerts as alert}

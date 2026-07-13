@@ -139,7 +139,6 @@
 </script>
 
 <div>
-	<h1 class="text-2xl font-bold">Logs</h1>
 	<p class="text-sm text-muted-foreground mt-0.5">View and stream systemd journal logs for NASty services.</p>
 </div>
 

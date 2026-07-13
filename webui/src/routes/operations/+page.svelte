@@ -104,15 +104,12 @@
 </script>
 
 <div class="mx-auto max-w-4xl p-6">
-	<div class="mb-1 flex items-center gap-2">
-		<h1 class="text-2xl font-semibold">Operations</h1>
+	<p class="mb-6 flex items-center gap-2 text-muted-foreground">
+		<span>Live array operations across your pools — cancel a scrub or evacuation, pause or resume
+		background reconcile and copy-GC.</span>
 		{#if loading}
 			<RefreshCw class="h-4 w-4 animate-spin text-muted-foreground" />
 		{/if}
-	</div>
-	<p class="mb-6 text-muted-foreground">
-		Live array operations across your pools — cancel a scrub or evacuation, pause or resume
-		background reconcile and copy-GC.
 	</p>
 
 	{#if !loading && operations.length === 0}

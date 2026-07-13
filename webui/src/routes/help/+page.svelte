@@ -462,7 +462,6 @@
 
 <div class="space-y-6">
 	<div>
-		<h1 class="text-2xl font-bold">Help & Glossary</h1>
 		<p class="text-sm text-muted-foreground mt-0.5">Storage terms, protocols, and guidance for getting started with NASty.</p>
 	</div>
 
