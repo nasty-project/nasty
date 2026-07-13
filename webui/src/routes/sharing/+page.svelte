@@ -507,8 +507,13 @@
 	</Card>
 {/if}
 
-<!-- RDMA transports (per-box opt-in) — hidden when the engine predates the RPC -->
-{#if rdma.status}
+<!-- RDMA transports (per-box opt-in). Only shown when there's actually
+     something to do: a capable device is present (to enable), or it's
+     already enabled (to disable). On a box with no RDMA hardware the whole
+     section is noise — including a dead-end "load a soft-RoCE device" hint
+     with no button — so it's hidden entirely. Loading rxe makes a device
+     appear in /sys/class/infiniband, at which point this returns. -->
+{#if rdma.status && (rdma.status.capable || rdma.status.enabled)}
 	<div class="mb-4 rounded-lg border border-border p-4">
 		<div class="flex items-center gap-3">
 			<div class="flex-1">
