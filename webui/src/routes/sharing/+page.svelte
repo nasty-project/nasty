@@ -507,47 +507,6 @@
 	</Card>
 {/if}
 
-<!-- RDMA transports (per-box opt-in). Only shown when there's actually
-     something to do: a capable device is present (to enable), or it's
-     already enabled (to disable). On a box with no RDMA hardware the whole
-     section is noise — including a dead-end "load a soft-RoCE device" hint
-     with no button — so it's hidden entirely. Loading rxe makes a device
-     appear in /sys/class/infiniband, at which point this returns. -->
-{#if rdma.status && (rdma.status.capable || rdma.status.enabled)}
-	<div class="mb-4 rounded-lg border border-border p-4">
-		<div class="flex items-center gap-3">
-			<div class="flex-1">
-				<div class="flex items-center gap-2">
-					<span class="text-sm font-semibold">RDMA transports</span>
-					{#each rdma.status.devices as d (d.name)}
-						<Badge variant="outline" class="text-[0.65rem]">{d.name} · {d.link_layer}{d.netdevs.length ? ` · ${d.netdevs.join(', ')}` : ''}</Badge>
-					{/each}
-					{#if rdma.status.enabled && rdma.status.nfs_rdma_active}
-						<Badge variant="secondary" class="text-[0.65rem]">NFS listener active</Badge>
-					{/if}
-				</div>
-				<p class="mt-1 text-xs text-muted-foreground">
-					{#if !rdma.status.capable}
-						{rdma.status.blocker}
-					{:else if rdma.status.enabled}
-						iSER portals, NFS-over-RDMA (mount with <code class="font-mono">-o rdma,port=20049,vers=4.2</code>) and NVMe-oF RDMA ports are available.
-					{:else}
-						RDMA-capable hardware detected. Enable to offer iSER, NFS-over-RDMA and NVMe-oF RDMA transports on this box.
-					{/if}
-				</p>
-			</div>
-			<Button
-				size="sm"
-				variant={rdma.status.enabled ? 'secondary' : 'default'}
-				disabled={!rdma.status.capable}
-				onclick={() => rdmaSet(!rdma.status!.enabled)}
-			>
-				{rdma.status.enabled ? 'Disable' : 'Enable'}
-			</Button>
-		</div>
-	</div>
-{/if}
-
 <!-- Tab bar with inline status -->
 <div class="mb-6 flex items-center border-b border-border">
 	{#each TABS as tab}
@@ -604,4 +563,45 @@
 {:else if activeTab === 'guest'}
 	<GuestSharesPanel />
 
+{/if}
+
+<!-- RDMA transports (per-box opt-in). Only shown when there's actually
+     something to do: a capable device is present (to enable), or it's
+     already enabled (to disable). On a box with no RDMA hardware the whole
+     section is noise — including a dead-end "load a soft-RoCE device" hint
+     with no button — so it's hidden entirely. Loading rxe makes a device
+     appear in /sys/class/infiniband, at which point this returns. -->
+{#if rdma.status && (rdma.status.capable || rdma.status.enabled)}
+	<div class="mt-6 rounded-lg border border-border p-4">
+		<div class="flex items-center gap-3">
+			<div class="flex-1">
+				<div class="flex items-center gap-2">
+					<span class="text-sm font-semibold">RDMA transports</span>
+					{#each rdma.status.devices as d (d.name)}
+						<Badge variant="outline" class="text-[0.65rem]">{d.name} · {d.link_layer}{d.netdevs.length ? ` · ${d.netdevs.join(', ')}` : ''}</Badge>
+					{/each}
+					{#if rdma.status.enabled && rdma.status.nfs_rdma_active}
+						<Badge variant="secondary" class="text-[0.65rem]">NFS listener active</Badge>
+					{/if}
+				</div>
+				<p class="mt-1 text-xs text-muted-foreground">
+					{#if !rdma.status.capable}
+						{rdma.status.blocker}
+					{:else if rdma.status.enabled}
+						iSER portals, NFS-over-RDMA (mount with <code class="font-mono">-o rdma,port=20049,vers=4.2</code>) and NVMe-oF RDMA ports are available.
+					{:else}
+						RDMA-capable hardware detected. Enable to offer iSER, NFS-over-RDMA and NVMe-oF RDMA transports on this box.
+					{/if}
+				</p>
+			</div>
+			<Button
+				size="sm"
+				variant={rdma.status.enabled ? 'secondary' : 'default'}
+				disabled={!rdma.status.capable}
+				onclick={() => rdmaSet(!rdma.status!.enabled)}
+			>
+				{rdma.status.enabled ? 'Disable' : 'Enable'}
+			</Button>
+		</div>
+	</div>
 {/if}
