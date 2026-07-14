@@ -132,8 +132,13 @@
 			{#each operations as op (opKey(op))}
 				<Card>
 					<CardContent class="flex items-center gap-4 py-3">
-						<div class="w-24 shrink-0">
-							<span class="text-sm font-semibold">{kindLabel(op.kind)}</span>
+						<div class="w-28 shrink-0">
+							<div class="text-sm font-semibold">{kindLabel(op.kind)}</div>
+							{#if op.fs}
+								<div class="truncate font-mono text-xs text-muted-foreground" title={op.fs}>
+									{op.fs}
+								</div>
+							{/if}
 						</div>
 						<div class="min-w-0 flex-1">
 							<div class="truncate text-sm">{op.detail}</div>

@@ -1023,7 +1023,7 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
         for dev in &fs.devices {
             if dev.state.as_deref() == Some("evacuating") {
                 let short = dev.path.rsplit('/').next().unwrap_or(&dev.path);
-                let mut detail = format!("Evacuating {short} from {}", fs.name);
+                let mut detail = format!("Draining {short}");
                 if let Some((_, m)) = moved("evacuate").filter(|&(_, m)| m > 0) {
                     detail += &format!(" — {} drained", human_bytes(m));
                 }
@@ -1046,11 +1046,11 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
         if let Ok(scrub) = state.filesystems.scrub_status(&fs.name).await {
             if scrub.running {
                 let mut detail = match scrub.progress_percent {
-                    Some(p) => format!("Scrub {} — {p:.0}%", fs.name),
-                    None => format!("Scrub {}", fs.name),
+                    Some(p) => format!("{p:.0}%"),
+                    None => "Scanning".to_string(),
                 };
                 if let Some((seen, _)) = moved("scrub").filter(|&(s, _)| s > 0) {
-                    detail += &format!(" ({} scanned)", human_bytes(seen));
+                    detail += &format!(" — {} scanned", human_bytes(seen));
                 }
                 ops.push(nasty_system::Operation {
                     kind: "scrub".into(),
@@ -1068,7 +1068,7 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
                     target: None,
                     state: "idle".into(),
                     progress_percent: None,
-                    detail: scrub_idle_detail(&fs.name, &scrub),
+                    detail: scrub_idle_detail(&scrub),
                     control: "start".into(),
                 });
             }
@@ -1079,19 +1079,11 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
             let bytes = moved("reconcile").map(|(_, m)| m).unwrap_or(0);
             let active = bytes > 0 || nasty_system::alerts::parse_reconcile_sample(&rec.raw).active;
             let (st, ctrl, mut detail) = if !rec.enabled {
-                (
-                    "paused",
-                    "resume",
-                    format!("Reconcile paused on {}", fs.name),
-                )
+                ("paused", "resume", "Paused".to_string())
             } else if active {
-                (
-                    "active",
-                    "pause",
-                    format!("Reconcile running on {}", fs.name),
-                )
+                ("active", "pause", "Running".to_string())
             } else {
-                ("idle", "pause", format!("Reconcile enabled on {}", fs.name))
+                ("idle", "pause", "Enabled".to_string())
             };
             if bytes > 0 {
                 detail += &format!(" — {} moved", human_bytes(bytes));
@@ -1111,11 +1103,11 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
         if let Ok(Some(enabled)) = state.filesystems.copygc_status(&fs.name).await {
             let bytes = moved("copygc").map(|(_, m)| m).unwrap_or(0);
             let (st, ctrl, mut detail) = if !enabled {
-                ("paused", "resume", format!("Copygc paused on {}", fs.name))
+                ("paused", "resume", "Paused".to_string())
             } else if bytes > 0 {
-                ("active", "pause", format!("Copygc running on {}", fs.name))
+                ("active", "pause", "Running".to_string())
             } else {
-                ("idle", "pause", format!("Copygc enabled on {}", fs.name))
+                ("idle", "pause", "Enabled".to_string())
             };
             if bytes > 0 {
                 detail += &format!(" — {} moved", human_bytes(bytes));
@@ -1137,17 +1129,19 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
     ops
 }
 
-/// Detail line for an idle (not-running) scrub row, summarizing the most
-/// recent completed run when the engine has it.
-fn scrub_idle_detail(fs: &str, s: &nasty_storage::filesystem::ScrubStatus) -> String {
+/// Status phrase for an idle (not-running) scrub row, summarizing the most
+/// recent completed run when the engine has it. The pool name is carried by
+/// the row's label column, so this is a bare phrase with no "Scrub <fs> —"
+/// prefix.
+fn scrub_idle_detail(s: &nasty_storage::filesystem::ScrubStatus) -> String {
     use nasty_storage::filesystem::ScrubOutcome;
     match (s.last_run_at, s.last_outcome) {
-        (None, _) => format!("Scrub {fs} — never run"),
-        (Some(_), Some(ScrubOutcome::Ok)) => format!("Scrub {fs} — last run clean"),
-        (Some(_), Some(ScrubOutcome::Errors)) => format!("Scrub {fs} — last run found errors"),
-        (Some(_), Some(ScrubOutcome::Failed)) => format!("Scrub {fs} — last run failed"),
-        (Some(_), Some(ScrubOutcome::Cancelled)) => format!("Scrub {fs} — last run cancelled"),
-        (Some(_), None) => format!("Scrub {fs} — idle"),
+        (None, _) => "Never run".into(),
+        (Some(_), Some(ScrubOutcome::Ok)) => "Last run clean".into(),
+        (Some(_), Some(ScrubOutcome::Errors)) => "Last run found errors".into(),
+        (Some(_), Some(ScrubOutcome::Failed)) => "Last run failed".into(),
+        (Some(_), Some(ScrubOutcome::Cancelled)) => "Last run cancelled".into(),
+        (Some(_), None) => "Idle".into(),
     }
 }
 
@@ -1267,38 +1261,28 @@ mod operations_tests {
 
     #[test]
     fn scrub_idle_detail_never_run() {
-        assert_eq!(
-            scrub_idle_detail("tank", &status(None, None)),
-            "Scrub tank — never run"
-        );
+        // The pool name is shown by the row's label column now, so the detail
+        // is a bare status phrase with no "Scrub <fs> —" prefix.
+        assert_eq!(scrub_idle_detail(&status(None, None)), "Never run");
     }
 
     #[test]
     fn scrub_idle_detail_summarizes_last_outcome() {
         assert_eq!(
-            scrub_idle_detail("tank", &status(Some(1_700_000_000), Some(ScrubOutcome::Ok))),
-            "Scrub tank — last run clean"
+            scrub_idle_detail(&status(Some(1_700_000_000), Some(ScrubOutcome::Ok))),
+            "Last run clean"
         );
         assert_eq!(
-            scrub_idle_detail(
-                "tank",
-                &status(Some(1_700_000_000), Some(ScrubOutcome::Errors))
-            ),
-            "Scrub tank — last run found errors"
+            scrub_idle_detail(&status(Some(1_700_000_000), Some(ScrubOutcome::Errors))),
+            "Last run found errors"
         );
         assert_eq!(
-            scrub_idle_detail(
-                "tank",
-                &status(Some(1_700_000_000), Some(ScrubOutcome::Failed))
-            ),
-            "Scrub tank — last run failed"
+            scrub_idle_detail(&status(Some(1_700_000_000), Some(ScrubOutcome::Failed))),
+            "Last run failed"
         );
         assert_eq!(
-            scrub_idle_detail(
-                "tank",
-                &status(Some(1_700_000_000), Some(ScrubOutcome::Cancelled))
-            ),
-            "Scrub tank — last run cancelled"
+            scrub_idle_detail(&status(Some(1_700_000_000), Some(ScrubOutcome::Cancelled))),
+            "Last run cancelled"
         );
     }
 
@@ -1306,8 +1290,8 @@ mod operations_tests {
     fn scrub_idle_detail_ran_but_no_outcome() {
         // last_run_at present but outcome missing (older state) → plain idle.
         assert_eq!(
-            scrub_idle_detail("tank", &status(Some(1_700_000_000), None)),
-            "Scrub tank — idle"
+            scrub_idle_detail(&status(Some(1_700_000_000), None)),
+            "Idle"
         );
     }
 
