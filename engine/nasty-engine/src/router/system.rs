@@ -993,14 +993,17 @@ async fn build_system_status(state: &AppState) -> nasty_system::SystemStatus {
 }
 
 /// Gather the controllable data operations across all mounted filesystems
-/// for the Operations panel (#553): running scrubs and evacuations (Cancel),
-/// plus the pausable background jobs reconcile and copygc (Pause/Resume),
-/// shown even when idle so they can be toggled.
+/// for the Operations panel (#553): scrub (Cancel when running, Start when
+/// idle) and evacuate (Cancel per draining device, or a single idle
+/// acknowledgement row when nothing is draining), plus the pausable
+/// background jobs reconcile and copygc (Pause/Resume), shown even when
+/// idle so they can be toggled.
 async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
     let mut ops: Vec<nasty_system::Operation> = Vec::new();
     let Ok(filesystems) = state.filesystems.list().await else {
         return ops;
     };
+    let mut any_evacuating = false;
     for fs in &filesystems {
         if !fs.mounted {
             continue;
@@ -1033,30 +1036,42 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
                     detail,
                     control: "cancel".into(),
                 });
+                any_evacuating = true;
             }
         }
-        // Running scrub. Percent stays from the CLI (bcachefs computes it
+        // Scrub — always shown, running or idle, so the operator can start
+        // one from here. Percent stays from the CLI (bcachefs computes it
         // with the replication denominator); moving_ctxts adds a reliable
         // live "scanned" figure on top.
-        if let Ok(scrub) = state.filesystems.scrub_status(&fs.name).await
-            && scrub.running
-        {
-            let mut detail = match scrub.progress_percent {
-                Some(p) => format!("Scrub {} — {p:.0}%", fs.name),
-                None => format!("Scrub {}", fs.name),
-            };
-            if let Some((seen, _)) = moved("scrub").filter(|&(s, _)| s > 0) {
-                detail += &format!(" ({} scanned)", human_bytes(seen));
+        if let Ok(scrub) = state.filesystems.scrub_status(&fs.name).await {
+            if scrub.running {
+                let mut detail = match scrub.progress_percent {
+                    Some(p) => format!("Scrub {} — {p:.0}%", fs.name),
+                    None => format!("Scrub {}", fs.name),
+                };
+                if let Some((seen, _)) = moved("scrub").filter(|&(s, _)| s > 0) {
+                    detail += &format!(" ({} scanned)", human_bytes(seen));
+                }
+                ops.push(nasty_system::Operation {
+                    kind: "scrub".into(),
+                    fs: fs.name.clone(),
+                    target: None,
+                    state: "running".into(),
+                    progress_percent: scrub.progress_percent,
+                    detail,
+                    control: "cancel".into(),
+                });
+            } else {
+                ops.push(nasty_system::Operation {
+                    kind: "scrub".into(),
+                    fs: fs.name.clone(),
+                    target: None,
+                    state: "idle".into(),
+                    progress_percent: None,
+                    detail: scrub_idle_detail(&fs.name, &scrub),
+                    control: "start".into(),
+                });
             }
-            ops.push(nasty_system::Operation {
-                kind: "scrub".into(),
-                fs: fs.name.clone(),
-                target: None,
-                state: "running".into(),
-                progress_percent: scrub.progress_percent,
-                detail,
-                control: "cancel".into(),
-            });
         }
         // Reconcile — pausable background rebalance. moving_ctxts confirms
         // whether it's actually moving data right now.
@@ -1116,7 +1131,39 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
             });
         }
     }
+    if !any_evacuating {
+        ops.push(evacuate_idle_row());
+    }
     ops
+}
+
+/// Detail line for an idle (not-running) scrub row, summarizing the most
+/// recent completed run when the engine has it.
+fn scrub_idle_detail(fs: &str, s: &nasty_storage::filesystem::ScrubStatus) -> String {
+    use nasty_storage::filesystem::ScrubOutcome;
+    match (s.last_run_at, s.last_outcome) {
+        (None, _) => format!("Scrub {fs} — never run"),
+        (Some(_), Some(ScrubOutcome::Ok)) => format!("Scrub {fs} — last run clean"),
+        (Some(_), Some(ScrubOutcome::Errors)) => format!("Scrub {fs} — last run found errors"),
+        (Some(_), Some(ScrubOutcome::Failed)) => format!("Scrub {fs} — last run failed"),
+        (Some(_), Some(ScrubOutcome::Cancelled)) => format!("Scrub {fs} — last run cancelled"),
+        (Some(_), None) => format!("Scrub {fs} — idle"),
+    }
+}
+
+/// The single informational row shown when no device is evacuating, so the
+/// evacuate operation type is acknowledged rather than silently absent.
+/// Evacuations are started from the Disks device-removal flow.
+fn evacuate_idle_row() -> nasty_system::Operation {
+    nasty_system::Operation {
+        kind: "evacuate".into(),
+        fs: String::new(),
+        target: None,
+        state: "idle".into(),
+        progress_percent: None,
+        detail: "No evacuation in progress".into(),
+        control: "none".into(),
+    }
 }
 
 /// Compact binary byte formatter for operation detail strings.
@@ -1197,5 +1244,80 @@ mod tests {
             &[pub_port(8080, "tcp", "a"), pub_port(8090, "tcp", "b")],
         );
         assert_eq!(w.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod operations_tests {
+    use super::{evacuate_idle_row, scrub_idle_detail};
+    use nasty_storage::filesystem::{ScrubOutcome, ScrubStatus};
+
+    fn status(last_run_at: Option<i64>, last_outcome: Option<ScrubOutcome>) -> ScrubStatus {
+        ScrubStatus {
+            running: false,
+            started_at: None,
+            progress_percent: None,
+            last_run_at,
+            last_duration_secs: None,
+            last_outcome,
+            last_output: None,
+            raw: String::new(),
+        }
+    }
+
+    #[test]
+    fn scrub_idle_detail_never_run() {
+        assert_eq!(
+            scrub_idle_detail("tank", &status(None, None)),
+            "Scrub tank — never run"
+        );
+    }
+
+    #[test]
+    fn scrub_idle_detail_summarizes_last_outcome() {
+        assert_eq!(
+            scrub_idle_detail("tank", &status(Some(1_700_000_000), Some(ScrubOutcome::Ok))),
+            "Scrub tank — last run clean"
+        );
+        assert_eq!(
+            scrub_idle_detail(
+                "tank",
+                &status(Some(1_700_000_000), Some(ScrubOutcome::Errors))
+            ),
+            "Scrub tank — last run found errors"
+        );
+        assert_eq!(
+            scrub_idle_detail(
+                "tank",
+                &status(Some(1_700_000_000), Some(ScrubOutcome::Failed))
+            ),
+            "Scrub tank — last run failed"
+        );
+        assert_eq!(
+            scrub_idle_detail(
+                "tank",
+                &status(Some(1_700_000_000), Some(ScrubOutcome::Cancelled))
+            ),
+            "Scrub tank — last run cancelled"
+        );
+    }
+
+    #[test]
+    fn scrub_idle_detail_ran_but_no_outcome() {
+        // last_run_at present but outcome missing (older state) → plain idle.
+        assert_eq!(
+            scrub_idle_detail("tank", &status(Some(1_700_000_000), None)),
+            "Scrub tank — idle"
+        );
+    }
+
+    #[test]
+    fn evacuate_idle_row_shape() {
+        let r = evacuate_idle_row();
+        assert_eq!(r.kind, "evacuate");
+        assert_eq!(r.state, "idle");
+        assert_eq!(r.control, "none");
+        assert!(r.target.is_none());
+        assert_eq!(r.detail, "No evacuation in progress");
     }
 }
