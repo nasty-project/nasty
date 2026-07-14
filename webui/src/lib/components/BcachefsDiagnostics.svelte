@@ -63,8 +63,6 @@
 	let scrubFull: ScrubStatus | null = $state(null);
 	let reconcileOutput = $state('');
 	let reconcileLoading = $state(false);
-	let reconcileEnabled = $state(true);
-	let reconcileToggling = $state(false);
 	let reconcileAutoRefresh = $state(false);
 	let reconcileIntervalId: ReturnType<typeof setInterval> | null = null;
 
@@ -213,18 +211,6 @@
 		return m ? `${h}h${m}m` : `${h}h`;
 	}
 
-	async function startScrub() {
-		if (!selectedFs) return;
-		try {
-			await getClient().call('fs.scrub.start', { name: selectedFs });
-			scrubRunning = true;
-			await refreshScrub();
-			startScrubPolling();
-		} catch (e) {
-			showError(e instanceof Error ? e.message : String(e));
-		}
-	}
-
 	// ── Reconcile tab ──────────────────────────────────────────
 
 	async function refreshReconcile() {
@@ -233,7 +219,6 @@
 		try {
 			const result = await getClient().call<{ raw: string; enabled: boolean }>('fs.reconcile.status', { name: selectedFs });
 			reconcileOutput = result.raw || 'No reconcile data available.';
-			reconcileEnabled = result.enabled;
 		} catch (e) {
 			reconcileOutput = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -254,21 +239,6 @@
 	function toggleReconcileAutoRefresh() {
 		reconcileAutoRefresh = !reconcileAutoRefresh;
 		if (reconcileAutoRefresh) startReconcileAutoRefresh(); else stopReconcileAutoRefresh();
-	}
-
-	async function toggleReconcile() {
-		if (!selectedFs) return;
-		reconcileToggling = true;
-		try {
-			const method = reconcileEnabled ? 'fs.reconcile.disable' : 'fs.reconcile.enable';
-			await getClient().call(method, { name: selectedFs });
-			reconcileEnabled = !reconcileEnabled;
-			await refreshReconcile();
-		} catch (e) {
-			reconcileOutput = e instanceof Error ? e.message : String(e);
-		} finally {
-			reconcileToggling = false;
-		}
 	}
 
 	// ── Top tab ──────────────────────────────────────────────
@@ -465,25 +435,12 @@
 					<RefreshCw size={12} class={scrubLoading ? 'animate-spin' : ''} />
 					Refresh
 				</button>
-				<button
-					onclick={startScrub}
-					disabled={!selectedFs || scrubRunning}
-					class="rounded px-3 py-1 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-				>
-					{scrubRunning ? 'Running...' : 'Start Scrub'}
-				</button>
 			</div>
+			<p class="text-xs text-muted-foreground">Run scrubs from the <a href="/operations" class="underline">Operations</a> page.</p>
 
 		<!-- reconcile tab controls -->
 		{:else if activeTab === 'reconcile'}
 			<div class="ml-auto flex items-center gap-2 pb-1">
-				<button
-					onclick={toggleReconcile}
-					disabled={!selectedFs || reconcileToggling}
-					class="rounded px-3 py-1 text-xs {reconcileEnabled ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'bg-destructive text-destructive-foreground hover:bg-destructive/90'} disabled:opacity-50"
-				>
-					{reconcileToggling ? '...' : reconcileEnabled ? 'Enabled' : 'Disabled'}
-				</button>
 				<button
 					onclick={refreshReconcile}
 					disabled={!selectedFs || reconcileLoading}
@@ -501,6 +458,7 @@
 					{reconcileAutoRefresh ? 'Live (3s)' : 'Live'}
 				</button>
 			</div>
+			<p class="text-xs text-muted-foreground">Pause or resume reconcile from the <a href="/operations" class="underline">Operations</a> page.</p>
 
 		<!-- top tab controls -->
 		{:else if activeTab === 'top'}
