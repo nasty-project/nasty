@@ -28,7 +28,7 @@
     # nixpkgs.follows: keeps lanzaboote's nixpkgs aligned with
     # nasty's, so cachix-substituted artifacts match by content
     # hash and we don't ship a second nixpkgs in the closure.
-    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
+    lanzaboote.url = "github:nix-community/lanzaboote/v1.1.0";
     lanzaboote.inputs.nixpkgs.follows = "nixpkgs";
   };
 
