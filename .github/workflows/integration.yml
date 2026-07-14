@@ -77,26 +77,10 @@ jobs:
             .#checks.x86_64-linux.appliance-smoke \
             -L --print-build-logs
 
-      - name: AD member-join VM test (non-gating — known throwaway-DC defect)
-        # ad-member provisions a throwaway Samba AD DC in a VM. Getting
-        # that simulated DC fully initialized is essentially the phase-2
-        # (NASty-as-DC) problem and currently fails at the DC's own LDAP
-        # layer ("Operations error") — a fake-DC defect, not the
-        # member-join engine. The engine is validated end-to-end against a
-        # REAL AD DC (Synology Directory Server): join, trust, workgroup
-        # discovery, winbind idmap, domain-user SMB auth with correct file
-        # ownership, and leave all pass. Kept running (not gating) so it's
-        # ready to re-promote once the throwaway DC is hardened in phase 2.
-        continue-on-error: true
-        run: |
-          nix build \
-            .#checks.x86_64-linux.ad-member \
-            -L --print-build-logs
-
       - name: AD DC VM test (non-gating while stabilizing)
         # ad-dc (#20): NASty provisions a real domain via
         # samba-dc.service + dc.provision, and a second NASty joins it
-        # with the same shipped member flow ad-member exercises. This is
+        # with the shipped member-join flow. This is
         # the test's first live CI run, and a brand-new two-VM AD test is
         # exactly the kind of thing that finds a harness or
         # readiness-signal issue the first time it runs for real (see

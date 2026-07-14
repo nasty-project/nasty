@@ -423,9 +423,6 @@
       appliance-smoke = import ./nixos/tests/appliance-smoke.nix {
         inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
       };
-      ad-member = import ./nixos/tests/ad-member.nix {
-        inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
-      };
       ad-dc = import ./nixos/tests/ad-dc.nix {
         inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
       };
