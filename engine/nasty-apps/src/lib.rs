@@ -2319,17 +2319,17 @@ impl AppsService {
                     }
                 }
             };
-            let attached_apps = if managed {
-                docker
-                    .inspect_network(&name, None::<InspectNetworkOptions>)
-                    .await
-                    .ok()
-                    .and_then(|ni| ni.containers)
-                    .map(|c| c.into_values().filter_map(|e| e.name).collect())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            // Computed for every network, managed or external, so the UI can
+            // disable "Remove" while containers are still attached. The engine's
+            // network_remove refuses an in-use network regardless, but the count
+            // lets the button reflect that up front.
+            let attached_apps = docker
+                .inspect_network(&name, None::<InspectNetworkOptions>)
+                .await
+                .ok()
+                .and_then(|ni| ni.containers)
+                .map(|c| c.into_values().filter_map(|e| e.name).collect())
+                .unwrap_or_default();
             seen.insert(name);
             out.push(NetworkSummary {
                 spec,
