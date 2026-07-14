@@ -436,7 +436,6 @@
 					Refresh
 				</button>
 			</div>
-			<p class="text-xs text-muted-foreground">Run scrubs from the <a href="/operations" class="underline">Operations</a> page.</p>
 
 		<!-- reconcile tab controls -->
 		{:else if activeTab === 'reconcile'}
@@ -458,7 +457,6 @@
 					{reconcileAutoRefresh ? 'Live (3s)' : 'Live'}
 				</button>
 			</div>
-			<p class="text-xs text-muted-foreground">Pause or resume reconcile from the <a href="/operations" class="underline">Operations</a> page.</p>
 
 		<!-- top tab controls -->
 		{:else if activeTab === 'top'}
@@ -484,6 +482,11 @@
 	</div>
 
 	<p class="text-xs text-muted-foreground">{TAB_META[activeTab].description}</p>
+	{#if activeTab === 'scrub'}
+		<p class="text-xs text-muted-foreground">Run scrubs from the <a href="/operations" class="underline">Operations</a> page.</p>
+	{:else if activeTab === 'reconcile'}
+		<p class="text-xs text-muted-foreground">Pause or resume reconcile from the <a href="/operations" class="underline">Operations</a> page.</p>
+	{/if}
 
 	<!-- ═══ Usage output ═══ -->
 	{#if activeTab === 'usage'}
@@ -566,7 +569,7 @@
 			{:else if scrubOutput === '' && scrubLoading}
 				<p class="p-6 text-sm text-muted-foreground">Loading...</p>
 			{:else if scrubOutput === ''}
-				<p class="p-6 text-sm text-muted-foreground">No scrub data available. Start a scrub to verify checksums.</p>
+				<p class="p-6 text-sm text-muted-foreground">No scrub data available yet — run a scrub from the Operations page to verify checksums.</p>
 			{:else}
 				<div class="p-4">
 					{#if scrubRunning}

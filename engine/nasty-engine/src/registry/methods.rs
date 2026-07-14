@@ -228,7 +228,7 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                 },
                 Method {
                     name: "system.operations.list",
-                    desc: "List controllable data operations across mounted filesystems for the Operations panel (#553): running scrubs/evacuations (cancellable) and the pausable background jobs reconcile and copygc, each with the action the UI can take.",
+                    desc: "List controllable data operations across mounted filesystems for the Operations panel (#553): per-pool scrubs (start when idle, cancel when running), device evacuations (cancel while draining, with an idle acknowledgement when none run), and the pausable background jobs reconcile and copygc, each with the action the UI can take.",
                     role: MethodRole::Any,
                     params: MethodParams::None,
                     result: Some(gen_schema::<Vec<Operation>>(generator)),
