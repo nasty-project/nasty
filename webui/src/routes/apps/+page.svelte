@@ -488,9 +488,20 @@
 		}
 	}
 
-	async function removeNetwork(name: string) {
+	async function removeNetwork(n: NetworkSummary) {
+		// External networks weren't created by NASty (left behind by an app that
+		// brings its own, or made outside NASty), so confirm before removing one.
+		// Managed networks keep the existing one-click behaviour.
+		if (
+			!n.managed &&
+			!(await confirm(
+				`Remove external network "${n.name}"?`,
+				"NASty didn't create this network. Removing it only affects Docker networking; anything still attached would lose connectivity.",
+			))
+		)
+			return;
 		const r = await withToast(
-			() => client.call('apps.networks.remove', { name }),
+			() => client.call('apps.networks.remove', { name: n.name }),
 			'Network removed',
 		);
 		if (r !== undefined) await loadAppNetworks();
@@ -2444,11 +2455,14 @@
 							<td class="p-2 font-mono">{n.subnet ?? '—'}</td>
 							<td class="p-2">{n.attached_apps.length > 0 ? n.attached_apps.join(', ') : '—'}</td>
 							<td class="p-2 text-right">
-								{#if n.managed}
-									<Button size="xs" variant="ghost" disabled={n.attached_apps.length > 0} title={n.attached_apps.length > 0 ? 'Detach all apps first' : 'Remove network'} onclick={() => removeNetwork(n.name)}>Remove</Button>
-								{:else}
-									<span class="text-xs text-muted-foreground" title="Not created by NASty">external</span>
-								{/if}
+								<div class="flex items-center justify-end gap-2">
+									{#if !n.managed}
+										<span class="text-xs text-muted-foreground" title="Not created by NASty">external</span>
+									{/if}
+									{#if n.name !== 'bridge'}
+										<Button size="xs" variant="ghost" disabled={n.attached_apps.length > 0} title={n.attached_apps.length > 0 ? 'Detach all apps first' : 'Remove network'} onclick={() => removeNetwork(n)}>Remove</Button>
+									{/if}
+								</div>
 							</td>
 						</tr>
 					{/each}
