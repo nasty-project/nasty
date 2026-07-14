@@ -73,7 +73,9 @@
 		busy = key;
 		const method =
 			op.kind === 'scrub'
-				? 'fs.scrub.cancel'
+				? op.control === 'start'
+					? 'fs.scrub.start'
+					: 'fs.scrub.cancel'
 				: op.kind === 'evacuate'
 					? 'fs.device.evacuate.cancel'
 					: op.kind === 'reconcile'
@@ -87,7 +89,13 @@
 			op.kind === 'evacuate' ? { filesystem: op.fs, device: op.target } : { name: op.fs };
 
 		const verb =
-			op.control === 'cancel' ? 'cancelled' : op.control === 'resume' ? 'resumed' : 'paused';
+			op.control === 'start'
+				? 'started'
+				: op.control === 'cancel'
+					? 'cancelled'
+					: op.control === 'resume'
+						? 'resumed'
+						: 'paused';
 		const ok = await withToast(
 			() => client.call(method, params),
 			`${kindLabel(op.kind)} on ${op.fs} ${verb}`
@@ -98,15 +106,15 @@
 
 	function actionLabel(op: Operation): string {
 		return (
-			{ cancel: 'Cancel', pause: 'Pause', resume: 'Resume' }[op.control] ?? ''
+			{ start: 'Start', cancel: 'Cancel', pause: 'Pause', resume: 'Resume' }[op.control] ?? ''
 		);
 	}
 </script>
 
 <div class="mx-auto max-w-4xl p-6">
 	<p class="mb-6 flex items-center gap-2 text-muted-foreground">
-		<span>Live array operations across your pools — cancel a scrub or evacuation, pause or resume
-		background reconcile and copy-GC.</span>
+		<span>Live array operations across your pools — start or cancel a scrub, pause or resume
+		background reconcile and copy-GC, and watch evacuations in progress.</span>
 		{#if loading}
 			<RefreshCw class="h-4 w-4 animate-spin text-muted-foreground" />
 		{/if}
@@ -141,7 +149,7 @@
 						</div>
 						{#if op.control !== 'none'}
 							<Button
-								variant={op.control === 'cancel' ? 'destructive' : 'outline'}
+								variant={op.control === 'cancel' ? 'destructive' : op.control === 'start' ? 'default' : 'outline'}
 								size="sm"
 								disabled={busy === opKey(op)}
 								onclick={() => act(op)}

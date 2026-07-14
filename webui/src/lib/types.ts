@@ -93,7 +93,7 @@ export interface Operation {
 	state: string; // "running" | "active" | "idle" | "paused"
 	progress_percent?: number | null;
 	detail: string;
-	control: string; // "cancel" | "pause" | "resume" | "none"
+	control: string; // "start" | "cancel" | "pause" | "resume" | "none"
 }
 
 /** One IOMMU group with its constituent PCI devices, returned by

@@ -174,8 +174,8 @@ pub struct Operation {
     pub progress_percent: Option<f32>,
     /// Short operator-facing line, e.g. "Evacuating sdc" or "Scrub 42%".
     pub detail: String,
-    /// Action the UI offers: "cancel" (scrub/evacuate) | "pause" |
-    /// "resume" (reconcile/copygc) | "none".
+    /// Action the UI offers: "start" (idle scrub) | "cancel"
+    /// (scrub/evacuate) | "pause" | "resume" (reconcile/copygc) | "none".
     pub control: String,
 }
 
