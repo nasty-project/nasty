@@ -28,7 +28,7 @@
     # nixpkgs.follows: keeps lanzaboote's nixpkgs aligned with
     # nasty's, so cachix-substituted artifacts match by content
     # hash and we don't ship a second nixpkgs in the closure.
-    lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
+    lanzaboote.url = "github:nix-community/lanzaboote/v1.1.0";
     lanzaboote.inputs.nixpkgs.follows = "nixpkgs";
   };
 
@@ -156,7 +156,7 @@
       pname = "nasty-webui";
       version = nasty-version;
       src = ./webui;
-      npmDepsHash = "sha256-Y+lqlVPgFmOnlSysXCpSMkt2BywIjFF1mO8xDQznrjM=";
+      npmDepsHash = "sha256-TJa5HTd8PRWodgiNQ7N0uRkZ30HBOROFnOwj7HggWfE=";
       npmFlags = [ "--legacy-peer-deps" ];
       buildPhase = ''
         npm run prepare
