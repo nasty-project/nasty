@@ -128,6 +128,11 @@ pub const DOMAIN_SMB_CONF_PATH: &str = "/etc/samba/nasty-domain.conf";
 /// Path to the Kerberos configuration.
 pub const KRB5_CONF_PATH: &str = "/etc/samba/nasty-krb5.conf";
 
+/// System machine keytab that `net ads join` writes — samba's default location
+/// under `kerberos method = secrets and keytab` (we set no `dedicated keytab
+/// file`). Removed on leave so it doesn't outlive the membership.
+pub const SYSTEM_KRB5_KEYTAB_PATH: &str = "/etc/krb5.keytab";
+
 /// Render the `[global]`-scope Samba configuration block for Active Directory.
 ///
 /// Produces configuration suitable for `/etc/samba/nasty-domain.conf`.
@@ -463,6 +468,9 @@ async fn unwind_join_artifacts(leave_ad: Option<(&str, &str)>) {
     }
     let _ = tokio::fs::write(DOMAIN_SMB_CONF_PATH, "").await;
     let _ = tokio::fs::write(KRB5_CONF_PATH, "").await;
+    // A partial join may already have written the machine keytab; drop it so a
+    // failed join doesn't orphan it (see leave() for why an orphan matters).
+    let _ = tokio::fs::remove_file(SYSTEM_KRB5_KEYTAB_PATH).await;
     if tokio::fs::remove_file(RESOLVED_DROPIN_PATH).await.is_ok() {
         let _ = systemctl("restart", "systemd-resolved.service").await;
     }
@@ -830,6 +838,14 @@ impl DomainService {
         }
         tokio::fs::write(DOMAIN_SMB_CONF_PATH, "").await?;
         tokio::fs::write(KRB5_CONF_PATH, "").await?;
+        // Remove the machine keytab `net ads join` wrote. Left behind it orphans
+        // a keytab holding only HOST/ (machine) principals — which flips
+        // `rpc-svcgssd` on (it is gated purely on
+        // `ConditionPathExists=/etc/krb5.keytab` and is `PartOf` nfs-server) and
+        // then fails every activation looking for an `nfs/` principal that was
+        // never there, turning `switch-to-configuration` into exit 4 and
+        // blocking upgrades on any box that serves NFS.
+        let _ = tokio::fs::remove_file(SYSTEM_KRB5_KEYTAB_PATH).await;
         let _ = tokio::fs::remove_file(RESOLVED_DROPIN_PATH).await;
         let _ = systemctl("restart", "systemd-resolved.service").await;
         let _ = systemctl("stop", "samba-winbindd.service").await;
