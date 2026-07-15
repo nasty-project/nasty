@@ -24,7 +24,7 @@
 		"@types/node": "^25.6.1",
 		"bits-ui": "^2.18.0",
 		"clsx": "^2.1.1",
-		"layerchart": "2.0.0-next.46",
+		"layerchart": "^2.0.1",
 		"svelte": "^5.56.4",
 		"svelte-check": "^4.7.1",
 		"tailwind-merge": "^3.5.0",
