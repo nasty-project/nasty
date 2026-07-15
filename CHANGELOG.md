@@ -1,5 +1,247 @@
 # Changelog
 
+## v0.0.14 — 2026-07-15
+
+> **This is the enterprise identity, fast-fabric & recovery release** — the
+> largest to date. NASty learns **Active Directory** from both ends: join an
+> existing domain as a member, or **become the domain controller** yourself,
+> with integrated DNS, Kerberos and WebUI user/group/computer management.
+> Backups gain their missing half — **whole-snapshot restore**, including
+> disaster recovery onto a bare box. An **engine-managed firewall** replaces
+> ad-hoc rules with deny-by-default nftables plus custom port rules; **RDMA over
+> RoCE and InfiniBand** brings zero-copy iSER, NVMe-oF/RDMA and NFS-RDMA to the
+> sharing stack; and **SR-IOV + hardware passthrough** gain per-device and
+> per-VF control. Round it out with the **Operations control center**, iSCSI
+> portal management, compose `.env` files, on-demand folder sizes, Linux 6.18.38
+> + bcachefs 1.38.8, and a broad sweep of fixes and dependency refreshes.
+
+### Headline changes
+
+- **Active Directory — member *and* domain controller (#20; #627, #638).** Join an
+  existing AD domain as a **member** (`security = ADS`, winbind, RID idmap, with
+  a credentials-over-stdin join/leave ceremony), *or* have NASty **host its own
+  domain as the controller** — `samba-tool` provisioning with integrated
+  SAMBA_INTERNAL DNS and Kerberos, WebUI **user / group / computer** management,
+  on-box **domain backups**, and **RSAT** compatibility for advanced
+  administration. Single-DC, state on the root filesystem; marked **experimental**.
+  Closes the oldest open issue in the tracker.
+
+- **Backup restore + disaster recovery (#626; #635).** The other half of backups:
+  restore a **whole snapshot** back under `/fs`, including **DR onto a fresh box**
+  from an existing repository — point a new install at the repo, pick a snapshot,
+  and pull it back. Restores run through the same encrypted/deduplicated engine as
+  backups.
+
+- **Engine-managed firewall (#620; #637).** Deny-by-default **nftables** managed by
+  the engine, with per-service source/interface restrictions **and user-defined
+  custom port rules** for anything running outside NASty's service model
+  (IPv4 + IPv6, TCP/UDP, port ranges).
+
+- **RDMA over RoCE & InfiniBand (#611, #616).** Optional **zero-copy transports** —
+  **iSER**, **NVMe-oF/RDMA** and **NFS-RDMA** — for RoCE and InfiniBand NICs, wired
+  into the sharing stack with an InfiniBand foundation underneath. RDMA controls
+  surface only when a capable device is present.
+
+- **SR-IOV & hardware passthrough (#603, #612, #614, #618).** IOMMU-group view,
+  `vfio-pci` toggles that **survive reboots**, per-device passthrough, and **SR-IOV
+  virtual-function management** — VF count plus per-VF **VLAN, MAC, trust and
+  spoof-check**.
+
+- **Operations control center (#649, #650).** The **Operations** page becomes the
+  single place to see and drive every bcachefs array operation across pools —
+  scrub (start/cancel), evacuation, and pausable reconcile/copy-GC — each row
+  labeled with its pool; the duplicate controls were removed from the Filesystems
+  diagnostics panel.
+
+### Active Directory
+
+- Member join/leave with realm validation, NetBIOS workgroup derivation, and idmap
+  range allocation that can't collide with local accounts; join proceeds with a
+  warning when DNS routing to the DC isn't in place (#627).
+- Domain-controller provisioning, demote, status and backup; DC user/group/computer
+  management; a `dns forwarder` that survives samba's last-value-wins config; and a
+  guard so enabling the SMB protocol can't fight a hosted DC (#638).
+- AD leave/unjoin now removes the machine keytab (`/etc/krb5.keytab`) it created —
+  a leftover keytab otherwise tripped `rpc-svcgssd` into failing every system
+  activation and blocking upgrades on NFS boxes (#658). **See Upgrading.**
+
+### Storage, block & fabrics
+
+- **iSCSI portal management (#617):** per-target portal add/remove and listen-address
+  control.
+- **NVMe-oF:** wait for port addresses to come up before restoring targets, so a
+  reboot doesn't race the transport into an unusable state (#630).
+- **RDMA transports** across iSER / NVMe-oF-RDMA / NFS-RDMA, gated on device presence
+  (#616; UI hides the section when no RDMA device exists, #645).
+- **bcachefs 1.38.8** (#621) + **Linux 6.18.38** (#633); multi-device mount-source and
+  quota resolution fixed for 1.38.8's by-uuid mount behaviour (#623); reconcile
+  converge/rebalance profile handling improved (#615); disk-chip state refresh fixes
+  (#624).
+
+### Backups & recovery
+
+- Whole-snapshot restore to `/fs` and disaster recovery onto a fresh box from an
+  existing repository (#635).
+
+### Apps & Docker
+
+- **Compose `.env` files (#629; #632):** ship a managed `.env` alongside a compose
+  stack, with the operator's env preserved across engine re-renders.
+- **Remove external Docker networks from the UI (#651; #652):** a leftover network an
+  app brought with it (or one made outside NASty) can now be cleaned up from
+  Apps → Networks — behind a confirm, disabled while containers are attached, with
+  Docker's built-in `bridge` left untouchable.
+
+### Files
+
+- **On-demand folder sizes (#654; #659):** a per-folder "Calculate size" action totals
+  a directory tree (apparent size) without walking it on every listing.
+
+### Networking & security
+
+- Engine-managed firewall with custom port rules (#637).
+- Network config preserves settings for interfaces that are temporarily absent, rather
+  than dropping them (#610).
+- **Authorization audit (#641):** every API method's declared role reconciled with the
+  effective gate, with a bidirectional guard test so the two can't silently drift.
+
+### Secure Boot
+
+- **lanzaboote v1.1.0 (#655):** Secure Boot boot-chain bumped and **validated live on
+  real OVMF + TPM2 hardware** (enroll → boot under enforcing SB). PCR-7-bound TPM2
+  auto-unlock is unaffected. **See Upgrading.**
+
+### WebUI polish
+
+- Operations control center + per-row pool labels (#649, #650); RDMA section hidden
+  when absent and moved to the bottom of Sharing (#645); Directory page shows Join and
+  Host side by side (#643); Firewall page and its port inputs widened (#640); optional
+  **hide-the-sidebar-logo** toggle for more menu space (#646); duplicate per-page
+  titles removed (#647); disk-import dialog lists supported image formats (#644).
+
+### Fixes
+
+- vfio-pci rebind on device detach (#603); domain-join DNS-routing warning (#627);
+  multi-device mount source (#623); disk-chip refresh (#624).
+
+### Dependencies & platform
+
+- Linux 6.18.38, bcachefs 1.38.8, lanzaboote v1.1.0, weekly nixpkgs bumps (#633, #642).
+- **WebUI:** off the layerchart prerelease onto stable 2.0.1 (tooltip API migrated to
+  layerchart v2) (#656); `@types/node` 26 (#657); routine in-range npm bumps (#653).
+- **Engine:** crossbeam-epoch (#622), diskwatch (#608).
+
+### Docs
+
+- README + built-in Glossary catch up with RDMA/RoCE/InfiniBand, Active Directory
+  (experimental), backup restore, the firewall and SR-IOV (#639); new glossary entries
+  for Evacuate, Fsck, Copy GC, Ingress and Firewall (#619).
+
+### Upgrading
+
+- **Boxes that previously joined then left AD, and serve NFS:** an older engine left a
+  stray `/etc/krb5.keytab` behind on leave, which makes `rpc-svcgssd` fail every system
+  activation (exit 4) and blocks the upgrade. Remove it once — `rm /etc/krb5.keytab` —
+  then update. New leaves clean it up automatically (#658).
+- **Secure Boot users:** the `lanzaboote` v1.1.0 stub (`lzbt`) builds from source on
+  first enrollment/rebuild if it isn't in the binary cache (~30 min on modest
+  hardware). Prime `nasty.cachix.org` with it before rolling out to avoid that compile.
+
+## v0.0.13 — 2026-07-02
+
+> **This is the operations-visibility & virtualization release.** NASty gets a
+> live **Operations panel** — watch scrubs, device evacuations, reconcile and
+> copy-GC as they happen, with cancel/pause driven by real bcachefs byte
+> counters rather than guesses. Running NASty as a VM gets first-class:
+> **always-on QEMU guest tools** plus an opt-in VMware/Hyper-V toggle, manual
+> disk-type override, and honest VM-start feedback. Data-protection grows
+> **subvolume rollback** and **restore-files-from-a-snapshot**, the apps stack
+> gains host networking and much smoother port handling, and a broad run of
+> device-ordering, networking and notification fixes lands underneath.
+
+### Headline changes
+
+- **Operations panel (#553; #540, #556, #562).** A live view of in-flight bcachefs
+  array operations — **scrub**, **device evacuation**, **reconcile** and
+  **copy-GC** — with **cancel** for scrub/evacuate and **pause/resume** for the
+  background jobs. Progress comes from real `moving_ctxts` byte counters, so what
+  you see reflects actual data movement, not an estimate. (Grew into the full
+  cross-pool control center in v0.0.14.)
+
+- **VM guest tools (#534; #550, #551).** An always-on **QEMU guest agent** so a
+  NASty guest reports its IP/hostname to the hypervisor and shuts down cleanly,
+  plus a per-box toggle for heavier **VMware open-vm-tools / Hyper-V** integration
+  when you need it.
+
+- **Subvolume rollback + snapshot file restore (#576, #577).** Roll a subvolume
+  back to one of its snapshots, or reach into a snapshot and **restore individual
+  files and folders** without a full rollback.
+
+- **Smoother app networking & ports (#565, #568, #569, #570).** Attach apps to the
+  **host network**, **paste port ranges** (with automatic collapse of contiguous
+  ports), publish only the ports you actually configured, and have the firewall
+  open published app ports automatically.
+
+### Virtual machines
+
+- Always-on QEMU guest agent + opt-in VMware/Hyper-V guest tools (#534, #550, #551).
+- Manual **disk-type override** for VM environments where rotational/SSD detection
+  is unreliable (#552, #555).
+- VM start now **fails loudly** instead of reporting a phantom success (#581, #584);
+  disk and network editing UI for existing VMs (#585); block-disk **loop devices
+  resolved from their stable backing file** so a remap can't point a VM at the wrong
+  device (#592, #593).
+
+### Storage & devices
+
+- **Guided force-remove** when a safe device removal is refused — the UI explains why
+  and offers the override rather than dead-ending (#554).
+- **Deterministic filesystem + device ordering** so tables stop reordering
+  themselves between refreshes (#554, #561).
+- Scrub progress surfaced from `moving_ctxts` (#562).
+
+### Data protection
+
+- Subvolume rollback to a snapshot (#577); restore files/folders out of a snapshot
+  (#576).
+
+### Apps & Docker
+
+- Host networking (#568); paste + collapse port ranges (#569, #566); publish only
+  configured ports (#570); firewall opens published app ports (#565); app-form fixes
+  (#567); networks section moved below the app list (#572); manifest splice on edit
+  (#573).
+
+### Networking
+
+- Bridge MTU emitted under `802-3-ethernet` rather than `bridge.mtu`, so
+  NetworkManager actually applies it (#580, #583).
+- Ingress persists its chosen port across restarts (#582); TLS/ingress host
+  visibility improvements (#564).
+
+### Notifications
+
+- SMTP notifications work against a **no-auth relay** (blank username/password), for
+  internal mail gateways (#559, #560).
+
+### WebUI
+
+- Opt-in **Common** navigation menu, a theme toggle in the profile menu, and an
+  icon-only power control (#588, #589).
+
+### Installer & platform
+
+- Rewrite the stock NixOS **hardware-config header** that referenced a file the
+  appliance doesn't ship, so a from-scratch install evaluates cleanly (#575, #587).
+- `diskwatch` CLI (#596); Caddy plugins content-hash fix (#600).
+
+### Dependencies & security
+
+- `anyhow` bump for **RUSTSEC-2026-0190** (#590); `quick-xml` DoS advisories reviewed
+  and ignored with rationale (#598); stale license set corrected for the k8s/lego
+  path (#595); curated nixpkgs list / nginx fix (#594); WebUI dependency refresh
+  (#563); routine nixpkgs auto-bumps (#557, #597).
+
 ## v0.0.12 — 2026-06-21
 
 > **This is the sharing & visibility release.** NASty learns to hand files out
