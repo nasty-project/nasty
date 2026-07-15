@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput, Share2, Check, RotateCcw } from '@lucide/svelte';
+	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput, Share2, Check, RotateCcw, Calculator, Loader2 } from '@lucide/svelte';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import PathPicker from '$lib/components/PathPicker.svelte';
 	import { getClient } from '$lib/client';
@@ -202,7 +202,10 @@
 	// current directory — clears automatically on browse() since
 	// `selected` is reset whenever currentPath changes.
 	let selected: Set<string> = $state(new Set());
-	$effect(() => { void currentPath; selected = new Set(); });
+	// On-demand recursive folder sizes (the Calculate-size action), keyed by
+	// entry.name within the current directory. Cleared on navigate.
+	let folderSizes: Record<string, number | 'loading' | 'error'> = $state({});
+	$effect(() => { void currentPath; selected = new Set(); folderSizes = {}; });
 
 	// Copy / Move picker. `pickerMode` controls which API the chosen
 	// destination is fed into; `pickerTargets` is the list of entries
@@ -415,6 +418,25 @@
 	function formatDate(epoch: number): string {
 		if (!epoch) return '—';
 		return new Date(epoch * 1000).toLocaleString();
+	}
+
+	// Total a folder's apparent size on demand (server walks it with `du`).
+	async function calcFolderSize(entry: FileEntry) {
+		const path = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+		folderSizes = { ...folderSizes, [entry.name]: 'loading' };
+		try {
+			const res = await fetch(`/api/files/size?path=${encodeURIComponent(path)}`);
+			const data = await res.json();
+			if (res.ok && typeof data.size === 'number') {
+				folderSizes = { ...folderSizes, [entry.name]: data.size };
+			} else {
+				folderSizes = { ...folderSizes, [entry.name]: 'error' };
+				toastError(data.error || 'Could not total the folder');
+			}
+		} catch {
+			folderSizes = { ...folderSizes, [entry.name]: 'error' };
+			toastError('Could not total the folder');
+		}
 	}
 
 	const breadcrumbs = $derived.by(() => {
@@ -755,11 +777,30 @@
 							</button>
 						{/if}
 					</td>
-					<td class="p-3 text-right text-muted-foreground tabular-nums">{entry.is_dir ? '—' : formatSize(entry.size)}</td>
+					<td class="p-3 text-right text-muted-foreground tabular-nums">
+						{#if !entry.is_dir}
+							{formatSize(entry.size)}
+						{:else if typeof folderSizes[entry.name] === 'number'}
+							{formatSize(folderSizes[entry.name] as number)}
+						{:else if folderSizes[entry.name] === 'loading'}
+							<Loader2 size={14} class="inline animate-spin" />
+						{:else}
+							—
+						{/if}
+					</td>
 					<td class="p-3 text-right text-muted-foreground text-xs tabular-nums">{formatDate(entry.modified)}</td>
 					{#if !isRoot}
 						<td class="p-3 text-right">
 							<div class="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100">
+								{#if entry.is_dir}
+									<button
+										class="text-muted-foreground/40 hover:text-foreground transition-colors"
+										onclick={() => calcFolderSize(entry)}
+										disabled={folderSizes[entry.name] === 'loading'}
+										title="Calculate size">
+										<Calculator size={14} />
+									</button>
+								{/if}
 								{#if !entry.is_dir}
 									<a
 										href={contentUrl(entry)}

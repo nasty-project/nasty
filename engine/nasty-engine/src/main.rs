@@ -771,6 +771,7 @@ async fn main() -> anyhow::Result<()> {
             post(upload_vm_image_handler).layer(DefaultBodyLimit::max(10_737_418_240)),
         )
         .route("/api/files/browse", get(files_browse_handler))
+        .route("/api/files/size", get(files_size_handler))
         .route("/api/files", delete(files_delete_handler))
         .route(
             "/api/files/upload",
@@ -1313,6 +1314,106 @@ fn safe_path(requested: &str) -> Result<std::path::PathBuf, StatusCode> {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(canonical)
+}
+
+/// Total the apparent size of a directory tree. GET /api/files/size?path=first/sub
+///
+/// On-demand only (the browse listing never totals folders — that would make
+/// every listing walk the whole tree). Bounded by a timeout so a pathological
+/// directory returns "too large to total" instead of hanging the request.
+async fn files_size_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let token = match token_from_headers(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Missing token"})),
+            )
+                .into_response();
+        }
+    };
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    if state.auth.validate(&token, client_ip).await.is_err() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid token"})),
+        )
+            .into_response();
+    }
+
+    let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let dir = match safe_path(req_path) {
+        Ok(p) => p,
+        Err(status) => {
+            return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
+        }
+    };
+    match tokio::fs::metadata(&dir).await {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Not a directory"})),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Not found"})),
+            )
+                .into_response();
+        }
+    }
+
+    // Apparent (logical) recursive size via `du -sb`, so it matches the per-file
+    // sizes the browser already shows. `du` doesn't follow symlinks, `safe_path`
+    // confined `dir` to FILES_ROOT, and `--` guards the canonical path from being
+    // read as an option. Timeout-bounded so a huge tree can't wedge the request.
+    let du = tokio::process::Command::new("du")
+        .arg("-sb")
+        .arg("--")
+        .arg(dir.as_os_str())
+        .output();
+    let stdout = match tokio::time::timeout(std::time::Duration::from_secs(60), du).await {
+        Ok(Ok(o)) if o.status.success() => o.stdout,
+        Ok(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Could not total the directory"})),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(serde_json::json!({
+                    "error": "Directory is too large to total quickly (timed out)"
+                })),
+            )
+                .into_response();
+        }
+    };
+    // `du -sb` prints "<bytes>\t<path>"; take the leading integer.
+    match String::from_utf8_lossy(&stdout)
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(bytes) => (StatusCode::OK, Json(serde_json::json!({ "size": bytes }))).into_response(),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Could not read the directory size"})),
+        )
+            .into_response(),
+    }
 }
 
 /// List directory contents. GET /api/files/browse?path=/first
