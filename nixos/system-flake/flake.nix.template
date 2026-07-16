@@ -140,7 +140,18 @@
           # lanzaboote auto-enroll knobs. Absent on every fresh
           # install (the wizard hasn't run); `pathExists` keeps
           # the import optional so eval doesn't fail.
-          ++ nixpkgs.lib.optional (builtins.pathExists ./secure-boot.nix) ./secure-boot.nix;
+          ++ nixpkgs.lib.optional (builtins.pathExists ./secure-boot.nix) ./secure-boot.nix
+          # Operator's own NixOS config — hand-edited at /etc/nixos/custom.nix by
+          # advanced users who want settings the WebUI doesn't expose. NASty never
+          # writes or re-renders this file; only the generated flake.nix is
+          # re-rendered on upgrade, so anything here survives reboots AND upgrades.
+          # Use `lib.mkForce`/`lib.mkOverride` where a NASty module already sets a
+          # value; module import order alone does not change definition priority.
+          # Optional via `pathExists` — absent on a fresh install. A broken
+          # custom.nix fails the rebuild, but safely: the running generation stays
+          # active and the update wrapper restores the previous lock — fix it and
+          # rebuild.
+          ++ nixpkgs.lib.optional (builtins.pathExists ./custom.nix) ./custom.nix;
         };
     in {
       # Content-hash placeholder substituted at render time by

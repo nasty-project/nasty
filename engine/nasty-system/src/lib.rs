@@ -152,6 +152,19 @@ pub struct ActiveOperation {
     pub detail: String,
 }
 
+/// The operator's own NixOS overlay at `/etc/nixos/custom.nix`, surfaced
+/// read-only in the WebUI. NASty never writes this file — advanced operators
+/// edit it from the terminal, and it survives reboots and upgrades.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CustomConfig {
+    /// Absolute path of the overlay file.
+    pub path: String,
+    /// Whether the file currently exists.
+    pub exists: bool,
+    /// File contents (empty when absent).
+    pub content: String,
+}
+
 /// A controllable data operation for the Operations panel (#553). Unlike
 /// [`ActiveOperation`] (band-only, active jobs), this carries the action the
 /// UI can take, and includes pausable background jobs even when idle so they
