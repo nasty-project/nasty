@@ -213,20 +213,20 @@ async fn handle_import(
     // Admin-only: this writes to a block device and runs a long-lived
     // qemu-img process — the same risk profile as compose deploys.
     let session = match state.auth.validate(&token, &client_ip).await {
-        Ok(s) if s.role == crate::auth::Role::Admin => s,
         Ok(s) => {
-            crate::auth::audit(
-                "vm_disk_import_denied",
-                &s.username,
-                &client_ip,
-                &format!("role={:?}", s.role),
-            );
-            send_text(
-                &mut socket,
-                ImportMessage::error("forbidden: admin role required"),
-            )
-            .await;
-            return;
+            if let Err(reason) =
+                crate::auth::authorize_session(&s, crate::auth::EndpointAccess::RootEquivalent)
+            {
+                crate::auth::audit(
+                    "vm_disk_import_denied",
+                    &s.username,
+                    &client_ip,
+                    &format!("reason={reason:?}"),
+                );
+                send_text(&mut socket, ImportMessage::error(reason.message())).await;
+                return;
+            }
+            s
         }
         Err(_) => {
             send_text(&mut socket, ImportMessage::error("invalid token")).await;

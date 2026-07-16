@@ -98,6 +98,71 @@ pub struct Session {
     pub client_ip: Option<String>,
 }
 
+/// Authorization policy for engine endpoints that do not pass through the
+/// central JSON-RPC dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointAccess {
+    /// Any authenticated role. Filesystem/owner scope is enforced separately
+    /// by handlers that operate on scoped resources.
+    Read,
+    /// Operator or Admin. Resource scope is enforced by the handler.
+    Mutation,
+    /// Operator or Admin, but only with an unscoped session.
+    UnscopedMutation,
+    /// Admin only, with no filesystem or owner scope.
+    RootEquivalent,
+    /// Session-management operations that remain available while a password
+    /// change is required, such as checking the current session or logout.
+    SelfService,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessDenied {
+    PasswordChangeRequired,
+    InsufficientRole,
+    ScopedCredential,
+}
+
+impl AccessDenied {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::PasswordChangeRequired => "Password change required",
+            Self::InsufficientRole => "Permission denied",
+            Self::ScopedCredential => "Scoped credentials cannot access this endpoint",
+        }
+    }
+}
+
+/// Apply the authorization rules shared by direct HTTP and specialized
+/// WebSocket endpoints. Resource-specific filesystem/owner checks remain in
+/// the relevant handler after this coarse endpoint gate.
+pub fn authorize_session(session: &Session, access: EndpointAccess) -> Result<(), AccessDenied> {
+    if session.must_change_password && access != EndpointAccess::SelfService {
+        return Err(AccessDenied::PasswordChangeRequired);
+    }
+
+    let role_allowed = match access {
+        EndpointAccess::Read | EndpointAccess::SelfService => true,
+        EndpointAccess::Mutation | EndpointAccess::UnscopedMutation => {
+            matches!(session.role, Role::Admin | Role::Operator)
+        }
+        EndpointAccess::RootEquivalent => session.role == Role::Admin,
+    };
+    if !role_allowed {
+        return Err(AccessDenied::InsufficientRole);
+    }
+
+    if matches!(
+        access,
+        EndpointAccess::UnscopedMutation | EndpointAccess::RootEquivalent
+    ) && (session.filesystem.is_some() || session.owner.is_some())
+    {
+        return Err(AccessDenied::ScopedCredential);
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApiToken {
     pub id: String,
@@ -1419,6 +1484,99 @@ mod tests {
             oidc_subject: None,
             oidc_issuer: None,
             webauthn_credentials: Vec::new(),
+        }
+    }
+
+    fn session(role: Role) -> Session {
+        Session {
+            token: "token".to_string(),
+            username: "test".to_string(),
+            role,
+            filesystem: None,
+            owner: None,
+            created_at: 0,
+            must_change_password: false,
+            client_ip: None,
+        }
+    }
+
+    #[test]
+    fn endpoint_access_role_matrix() {
+        let admin = session(Role::Admin);
+        let operator = session(Role::Operator);
+        let read_only = session(Role::ReadOnly);
+
+        for access in [EndpointAccess::Read, EndpointAccess::SelfService] {
+            assert_eq!(authorize_session(&admin, access), Ok(()));
+            assert_eq!(authorize_session(&operator, access), Ok(()));
+            assert_eq!(authorize_session(&read_only, access), Ok(()));
+        }
+
+        assert_eq!(authorize_session(&admin, EndpointAccess::Mutation), Ok(()));
+        assert_eq!(
+            authorize_session(&operator, EndpointAccess::Mutation),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_session(&read_only, EndpointAccess::Mutation),
+            Err(AccessDenied::InsufficientRole)
+        );
+
+        assert_eq!(
+            authorize_session(&admin, EndpointAccess::RootEquivalent),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_session(&operator, EndpointAccess::RootEquivalent),
+            Err(AccessDenied::InsufficientRole)
+        );
+    }
+
+    #[test]
+    fn forced_password_change_only_allows_self_service() {
+        let mut admin = session(Role::Admin);
+        admin.must_change_password = true;
+
+        assert_eq!(
+            authorize_session(&admin, EndpointAccess::SelfService),
+            Ok(())
+        );
+        for access in [
+            EndpointAccess::Read,
+            EndpointAccess::Mutation,
+            EndpointAccess::UnscopedMutation,
+            EndpointAccess::RootEquivalent,
+        ] {
+            assert_eq!(
+                authorize_session(&admin, access),
+                Err(AccessDenied::PasswordChangeRequired)
+            );
+        }
+    }
+
+    #[test]
+    fn root_and_interactive_access_reject_scoped_credentials() {
+        for scoped in [
+            Session {
+                filesystem: Some("pool".to_string()),
+                ..session(Role::Admin)
+            },
+            Session {
+                owner: Some("automation".to_string()),
+                ..session(Role::Operator)
+            },
+        ] {
+            assert_eq!(authorize_session(&scoped, EndpointAccess::Read), Ok(()));
+            assert_eq!(
+                authorize_session(&scoped, EndpointAccess::UnscopedMutation),
+                Err(AccessDenied::ScopedCredential)
+            );
+            if scoped.role == Role::Admin {
+                assert_eq!(
+                    authorize_session(&scoped, EndpointAccess::RootEquivalent),
+                    Err(AccessDenied::ScopedCredential)
+                );
+            }
         }
     }
 

@@ -36,7 +36,7 @@ mod terminal;
 mod vm_console;
 mod vm_disk_import;
 
-use auth::{AuthService, Session};
+use auth::{AuthService, EndpointAccess, Session};
 use router::handle_rpc_request;
 
 /// Handle for dynamically reloading the tracing filter at runtime.
@@ -1027,44 +1027,21 @@ async fn upload_vm_image_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::RootEquivalent,
+        "upload.vm_image",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
+    };
+    let session = authenticated.session;
+    let client_ip = authenticated.client_ip;
 
     info!("VM image upload request from {}", client_ip);
-
-    // Authenticate — accepts the session cookie or a Bearer token.
-    let token = match token_from_headers(&headers) {
-        Some(t) => t,
-        None => {
-            info!(
-                "VM image upload rejected: missing auth token (from {})",
-                client_ip
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "Missing authorization token" })),
-            )
-                .into_response();
-        }
-    };
-
-    let session = match state.auth.validate(&token, &client_ip).await {
-        Ok(s) => s,
-        Err(e) => {
-            info!(
-                "VM image upload rejected: invalid token (from {})",
-                client_ip
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": format!("Invalid token: {}", e) })),
-            )
-                .into_response();
-        }
-    };
 
     // Get or create the images subvolume. If list() fails (corrupt state,
     // permissions) we fall back to an empty set so the upload returns a
@@ -1268,6 +1245,13 @@ async fn upload_vm_image_handler(
         elapsed.as_secs_f64(),
         rate_mibs
     );
+    auth::audit(
+        "upload.vm_image",
+        &session.username,
+        &client_ip,
+        &format!("filesystem={fs_name} name={file_name} bytes={total_bytes}"),
+    );
+    let _ = state.events.send("vm.images".to_string());
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1316,6 +1300,101 @@ fn safe_path(requested: &str) -> Result<std::path::PathBuf, StatusCode> {
     Ok(canonical)
 }
 
+/// Whether a canonical path under `/fs` is visible to this session. Owner-
+/// scoped API tokens are deliberately denied direct file access: ownership is
+/// attached to subvolumes, while this API also exposes arbitrary directories
+/// and snapshots and cannot yet prove ownership for every path safely.
+fn file_path_in_scope(session: &Session, path: &std::path::Path) -> bool {
+    if session.owner.is_some() {
+        return false;
+    }
+    let Some(filesystem) = session.filesystem.as_deref() else {
+        return true;
+    };
+    let Ok(relative) = path.strip_prefix(FILES_ROOT) else {
+        return false;
+    };
+    relative
+        .components()
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        == Some(filesystem)
+}
+
+/// Check the requested path before touching the filesystem so a scoped token
+/// cannot use 403/404 differences to probe sibling filesystems. Parent
+/// traversal is rejected here even when it would eventually resolve back into
+/// the allowed filesystem.
+fn requested_path_in_filesystem_scope(requested: &str, filesystem: &str) -> bool {
+    let clean = requested.replace('\\', "/");
+    let mut components = std::path::Path::new(clean.trim_start_matches('/')).components();
+    matches!(
+        components.next(),
+        Some(std::path::Component::Normal(name))
+            if name == std::ffi::OsStr::new(filesystem)
+    ) && components.all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+/// Canonicalize a file-browser path and enforce the session's scope. A request
+/// for the browser root made with a filesystem-scoped token lands directly on
+/// that filesystem, avoiding disclosure of sibling filesystem names.
+fn safe_path_for_session(
+    requested: &str,
+    session: &Session,
+) -> Result<std::path::PathBuf, StatusCode> {
+    if session.owner.is_some() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let scoped_root;
+    let requested = if requested.trim_matches('/').is_empty() {
+        if let Some(filesystem) = session.filesystem.as_deref() {
+            scoped_root = filesystem.to_string();
+            scoped_root.as_str()
+        } else {
+            requested
+        }
+    } else {
+        requested
+    };
+    if let Some(filesystem) = session.filesystem.as_deref()
+        && !requested_path_in_filesystem_scope(requested, filesystem)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let path = match safe_path(requested) {
+        Ok(path) => path,
+        // Returning the same response for missing and out-of-scope paths keeps
+        // an in-scope symlink from becoming a sibling-filesystem existence
+        // oracle. Unscoped browser sessions retain the normal 404 behavior.
+        Err(_) if session.filesystem.is_some() => return Err(StatusCode::FORBIDDEN),
+        Err(status) => return Err(status),
+    };
+    if !file_path_in_scope(session, &path) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(path)
+}
+
+fn safe_path_for_request(
+    requested: &str,
+    authenticated: &AuthenticatedRequest,
+    endpoint: &str,
+) -> Result<std::path::PathBuf, StatusCode> {
+    let result = safe_path_for_session(requested, &authenticated.session);
+    if result == Err(StatusCode::FORBIDDEN) {
+        auth::audit(
+            "permission_denied",
+            &authenticated.session.username,
+            &authenticated.client_ip,
+            &format!("endpoint={endpoint} reason=ResourceScope"),
+        );
+    }
+    result
+}
+
 /// Total the apparent size of a directory tree. GET /api/files/size?path=first/sub
 ///
 /// On-demand only (the browse listing never totals folders — that would make
@@ -1326,30 +1405,14 @@ async fn files_size_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let token = match token_from_headers(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Missing token"})),
-            )
-                .into_response();
-        }
-    };
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
-    if state.auth.validate(&token, client_ip).await.is_err() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid token"})),
-        )
-            .into_response();
-    }
+    let authenticated =
+        match validate_bearer(&headers, &state.auth, EndpointAccess::Read, "files.size").await {
+            Ok(authenticated) => authenticated,
+            Err(e) => return e.into_response(),
+        };
 
     let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let dir = match safe_path(req_path) {
+    let dir = match safe_path_for_request(req_path, &authenticated, "files.size") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -1422,31 +1485,14 @@ async fn files_browse_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    // Auth check — accepts session cookie or Bearer token.
-    let token = match token_from_headers(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Missing token"})),
-            )
-                .into_response();
-        }
-    };
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
-    if state.auth.validate(&token, client_ip).await.is_err() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid token"})),
-        )
-            .into_response();
-    }
+    let authenticated =
+        match validate_bearer(&headers, &state.auth, EndpointAccess::Read, "files.browse").await {
+            Ok(authenticated) => authenticated,
+            Err(e) => return e.into_response(),
+        };
 
     let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let dir = match safe_path(req_path) {
+    let dir = match safe_path_for_request(req_path, &authenticated, "files.browse") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -1532,7 +1578,6 @@ async fn files_browse_handler(
         .into_response()
 }
 
-/// Validate bearer token from request headers. Returns client_ip on success.
 /// Name of the httpOnly session cookie set by /api/login and /api/auth/oidc/callback.
 const SESSION_COOKIE: &str = "nasty_session";
 
@@ -1574,10 +1619,21 @@ fn parse_session_cookie(header: &str) -> Option<String> {
     None
 }
 
+struct AuthenticatedRequest {
+    session: Session,
+    client_ip: String,
+}
+
+type HttpAuthError = (StatusCode, Json<serde_json::Value>);
+
+/// Authenticate and authorize a direct HTTP endpoint. Unlike the old helper,
+/// this returns the complete session so handlers can enforce resource scope.
 async fn validate_bearer(
     headers: &axum::http::HeaderMap,
     auth: &AuthService,
-) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    access: EndpointAccess,
+    endpoint: &str,
+) -> Result<AuthenticatedRequest, HttpAuthError> {
     let token = match token_from_headers(headers) {
         Some(t) => t,
         None => {
@@ -1592,13 +1648,25 @@ async fn validate_bearer(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string();
-    if auth.validate(&token, &client_ip).await.is_err() {
-        return Err((
+    let session = auth.validate(&token, &client_ip).await.map_err(|_| {
+        (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "Invalid token"})),
+        )
+    })?;
+    if let Err(reason) = auth::authorize_session(&session, access) {
+        auth::audit(
+            "permission_denied",
+            &session.username,
+            &client_ip,
+            &format!("endpoint={endpoint} reason={reason:?}"),
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": reason.message()})),
         ));
     }
-    Ok(client_ip)
+    Ok(AuthenticatedRequest { session, client_ip })
 }
 
 /// Lightweight auth check.  GET /api/auth/check
@@ -1607,7 +1675,14 @@ async fn auth_check_handler(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match validate_bearer(&headers, &state.auth).await {
+    match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::SelfService,
+        "auth.check",
+    )
+    .await
+    {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => e.into_response(),
     }
@@ -1619,9 +1694,17 @@ async fn files_delete_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err(e) = validate_bearer(&headers, &state.auth).await {
-        return e.into_response();
-    }
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::Mutation,
+        "files.delete",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
+    };
 
     let req_path = match params.get("path") {
         Some(p) if !p.is_empty() => p.as_str(),
@@ -1634,7 +1717,7 @@ async fn files_delete_handler(
         }
     };
 
-    let target = match safe_path(req_path) {
+    let target = match safe_path_for_request(req_path, &authenticated, "files.delete") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -1672,6 +1755,13 @@ async fn files_delete_handler(
     match result {
         Ok(()) => {
             info!("Deleted {}", target.display());
+            auth::audit(
+                "files.delete",
+                &authenticated.session.username,
+                &authenticated.client_ip,
+                &format!("path={}", target.display()),
+            );
+            let _ = state.events.send("files".to_string());
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Err(e) => (
@@ -1689,12 +1779,20 @@ async fn files_upload_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Err(e) = validate_bearer(&headers, &state.auth).await {
-        return e.into_response();
-    }
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::Mutation,
+        "files.upload",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
+    };
 
     let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let dir = match safe_path(req_path) {
+    let dir = match safe_path_for_request(req_path, &authenticated, "files.upload") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -1743,8 +1841,12 @@ async fn files_upload_handler(
     }
 
     let dest = dir.join(&file_name);
+    let temp = dir.join(format!(
+        ".{file_name}.nasty-upload-{}",
+        uuid::Uuid::new_v4()
+    ));
 
-    let mut file = match tokio::fs::File::create(&dest).await {
+    let mut file = match tokio::fs::File::create(&temp).await {
         Ok(f) => f,
         Err(e) => {
             return (
@@ -1763,7 +1865,7 @@ async fn files_upload_handler(
             Ok(Some(chunk)) => {
                 total += chunk.len() as u64;
                 if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await {
-                    let _ = tokio::fs::remove_file(&dest).await;
+                    let _ = tokio::fs::remove_file(&temp).await;
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({"error": e.to_string()})),
@@ -1773,7 +1875,7 @@ async fn files_upload_handler(
             }
             Ok(None) => break,
             Err(e) => {
-                let _ = tokio::fs::remove_file(&dest).await;
+                let _ = tokio::fs::remove_file(&temp).await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": e.to_string()})),
@@ -1784,10 +1886,19 @@ async fn files_upload_handler(
     }
 
     if let Err(e) = file.sync_all().await {
-        let _ = tokio::fs::remove_file(&dest).await;
+        let _ = tokio::fs::remove_file(&temp).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    drop(file);
+    if let Err(e) = tokio::fs::rename(&temp, &dest).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to finalize upload: {e}")})),
         )
             .into_response();
     }
@@ -1798,6 +1909,13 @@ async fn files_upload_handler(
         "Uploaded {} ({} bytes, {:.1} MB/s)",
         file_name, total, speed_mb
     );
+    auth::audit(
+        "files.upload",
+        &authenticated.session.username,
+        &authenticated.client_ip,
+        &format!("path={} bytes={total}", dest.display()),
+    );
+    let _ = state.events.send("files".to_string());
 
     (
         StatusCode::OK,
@@ -1816,9 +1934,17 @@ async fn files_mkdir_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err(e) = validate_bearer(&headers, &state.auth).await {
-        return e.into_response();
-    }
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::Mutation,
+        "files.mkdir",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
+    };
 
     let req_path = match params.get("path") {
         Some(p) if !p.is_empty() => p.as_str(),
@@ -1831,20 +1957,31 @@ async fn files_mkdir_handler(
         }
     };
 
-    // Validate parent is under /fs
-    let parent = match req_path.rsplit_once('/') {
-        Some((p, _)) => p,
-        None => "",
-    };
-    if safe_path(if parent.is_empty() { "" } else { parent }).is_err() && !parent.is_empty() {
+    let clean = req_path.replace("\\", "/");
+    let trimmed = clean.trim_start_matches('/');
+    let Some((parent_req, leaf)) = trimmed.rsplit_once('/') else {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Invalid path"})),
+            Json(
+                serde_json::json!({"error": "Path must include a filesystem and parent directory"}),
+            ),
+        )
+            .into_response();
+    };
+    if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains('/') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid directory name"})),
         )
             .into_response();
     }
-
-    let full = std::path::Path::new(FILES_ROOT).join(req_path.trim_start_matches('/'));
+    let parent = match safe_path_for_request(parent_req, &authenticated, "files.mkdir") {
+        Ok(parent) => parent,
+        Err(status) => {
+            return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
+        }
+    };
+    let full = parent.join(leaf);
 
     // Protect block subvolume directories
     if is_inside_block_subvolume(&full) || is_inside_block_subvolume(full.parent().unwrap_or(&full))
@@ -1888,6 +2025,13 @@ async fn files_mkdir_handler(
                 }
             }
 
+            auth::audit(
+                "files.mkdir",
+                &authenticated.session.username,
+                &authenticated.client_ip,
+                &format!("path={}", full.display()),
+            );
+            let _ = state.events.send("files".to_string());
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Err(e) => (
@@ -1929,12 +2073,20 @@ async fn files_rename_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RenameRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = validate_bearer(&headers, &state.auth).await {
-        return e.into_response();
-    }
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::Mutation,
+        "files.rename",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
+    };
 
     // Source must already exist and resolve under /fs.
-    let from = match safe_path(&req.from) {
+    let from = match safe_path_for_request(&req.from, &authenticated, "files.rename") {
         Ok(p) => p,
         Err(status) => {
             return (
@@ -1986,7 +2138,7 @@ async fn files_rename_handler(
         )
             .into_response();
     }
-    let parent = match safe_path(parent_req) {
+    let parent = match safe_path_for_request(parent_req, &authenticated, "files.rename") {
         Ok(p) => p,
         Err(status) => {
             return (
@@ -2029,6 +2181,13 @@ async fn files_rename_handler(
     match tokio::fs::rename(&from, &to).await {
         Ok(()) => {
             info!("Renamed {} -> {}", from.display(), to.display());
+            auth::audit(
+                "files.rename",
+                &authenticated.session.username,
+                &authenticated.client_ip,
+                &format!("from={} to={}", from.display(), to.display()),
+            );
+            let _ = state.events.send("files".to_string());
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         // EXDEV (18) — cross-device rename. Reachable when source and
@@ -2068,11 +2227,19 @@ async fn files_copy_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RenameRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = validate_bearer(&headers, &state.auth).await {
-        return e.into_response();
-    }
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::Mutation,
+        "files.copy",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
+    };
 
-    let from = match safe_path(&req.from) {
+    let from = match safe_path_for_request(&req.from, &authenticated, "files.copy") {
         Ok(p) => p,
         Err(status) => {
             return (
@@ -2117,7 +2284,7 @@ async fn files_copy_handler(
         )
             .into_response();
     }
-    let parent = match safe_path(parent_req) {
+    let parent = match safe_path_for_request(parent_req, &authenticated, "files.copy") {
         Ok(p) => p,
         Err(status) => {
             return (
@@ -2190,13 +2357,30 @@ async fn files_copy_handler(
     match result {
         Ok(()) => {
             info!("Copied {} -> {}", from.display(), to.display());
+            auth::audit(
+                "files.copy",
+                &authenticated.session.username,
+                &authenticated.client_ip,
+                &format!("from={} to={}", from.display(), to.display()),
+            );
+            let _ = state.events.send("files".to_string());
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => {
+            auth::audit(
+                "files.copy_failed",
+                &authenticated.session.username,
+                &authenticated.client_ip,
+                &format!("from={} to={} error={e}", from.display(), to.display()),
+            );
+            // Directory copies can fail after creating part of the destination.
+            let _ = state.events.send("files".to_string());
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -2396,9 +2580,17 @@ async fn files_restore_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RestoreRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = validate_bearer(&headers, &state.auth).await {
-        return e.into_response();
-    }
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::Mutation,
+        "files.restore",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
+    };
     if req.items.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -2410,7 +2602,7 @@ async fn files_restore_handler(
     let mut restored = 0u32;
     for item in &req.items {
         // Source: the snapshot path. safe_path canonicalises + jails to /fs.
-        let src = match safe_path(item) {
+        let src = match safe_path_for_request(item, &authenticated, "files.restore") {
             Ok(p) => p,
             Err(status) => {
                 return (
@@ -2450,7 +2642,11 @@ async fn files_restore_handler(
         // The live parent must exist; canonicalising it also blocks symlink
         // escapes. If it's gone, the live subvolume/folder was deleted.
         let parent_rel = dest_parent.strip_prefix(FILES_ROOT).unwrap_or(dest_parent);
-        let parent_canon = match safe_path(&parent_rel.to_string_lossy()) {
+        let parent_canon = match safe_path_for_request(
+            &parent_rel.to_string_lossy(),
+            &authenticated,
+            "files.restore",
+        ) {
             Ok(p) => p,
             Err(_) => {
                 return (
@@ -2494,6 +2690,18 @@ async fn files_restore_handler(
             restore_leaf(&src, &final_dest, &src_meta).await
         };
         if let Err(e) = result {
+            auth::audit(
+                "files.restore_failed",
+                &authenticated.session.username,
+                &authenticated.client_ip,
+                &format!(
+                    "from={} to={} error={e}",
+                    src.display(),
+                    final_dest.display()
+                ),
+            );
+            // Recursive restore can fail after changing part of an item.
+            let _ = state.events.send("files".to_string());
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e})),
@@ -2502,6 +2710,15 @@ async fn files_restore_handler(
         }
         info!("Restored {} -> {}", src.display(), final_dest.display());
         restored += 1;
+        auth::audit(
+            "files.restore",
+            &authenticated.session.username,
+            &authenticated.client_ip,
+            &format!("from={} to={}", src.display(), final_dest.display()),
+        );
+        // A later item can fail, so publish each completed mutation rather
+        // than waiting for the entire batch to succeed.
+        let _ = state.events.send("files".to_string());
     }
 
     (
@@ -2523,27 +2740,17 @@ async fn files_content_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let token = match token_from_headers(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Missing token"})),
-            )
-                .into_response();
-        }
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::Read,
+        "files.content.get",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
     };
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
-    if state.auth.validate(&token, client_ip).await.is_err() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid token"})),
-        )
-            .into_response();
-    }
 
     let req_path = match params.get("path") {
         Some(p) if !p.is_empty() => p.as_str(),
@@ -2556,7 +2763,7 @@ async fn files_content_handler(
         }
     };
 
-    let target = match safe_path(req_path) {
+    let target = match safe_path_for_request(req_path, &authenticated, "files.content.get") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -2684,9 +2891,17 @@ async fn files_content_put_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    if let Err(e) = validate_bearer(&headers, &state.auth).await {
-        return e.into_response();
-    }
+    let authenticated = match validate_bearer(
+        &headers,
+        &state.auth,
+        EndpointAccess::Mutation,
+        "files.content.put",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(e) => return e.into_response(),
+    };
 
     let req_path = match params.get("path") {
         Some(p) if !p.is_empty() => p.as_str(),
@@ -2699,7 +2914,7 @@ async fn files_content_put_handler(
         }
     };
 
-    let target = match safe_path(req_path) {
+    let target = match safe_path_for_request(req_path, &authenticated, "files.content.put") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -2764,6 +2979,13 @@ async fn files_content_put_handler(
             .into_response();
     }
     info!("Edited {} ({} bytes)", target.display(), body.len());
+    auth::audit(
+        "files.content.put",
+        &authenticated.session.username,
+        &authenticated.client_ip,
+        &format!("path={} bytes={}", target.display(), body.len()),
+    );
+    let _ = state.events.send("files".to_string());
     (
         StatusCode::OK,
         Json(serde_json::json!({"ok": true, "bytes": body.len()})),
@@ -3895,7 +4117,82 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
 
 #[cfg(test)]
 mod restore_tests {
-    use super::derive_restore_dest;
+    use super::{derive_restore_dest, file_path_in_scope, requested_path_in_filesystem_scope};
+    use crate::auth::{Role, Session};
+
+    fn session(filesystem: Option<&str>, owner: Option<&str>) -> Session {
+        Session {
+            token: "token".to_string(),
+            username: "test".to_string(),
+            role: Role::Operator,
+            filesystem: filesystem.map(str::to_string),
+            owner: owner.map(str::to_string),
+            created_at: 0,
+            must_change_password: false,
+            client_ip: None,
+        }
+    }
+
+    #[test]
+    fn file_paths_respect_filesystem_scope() {
+        let unscoped = session(None, None);
+        assert!(file_path_in_scope(
+            &unscoped,
+            std::path::Path::new("/fs/one/private/file")
+        ));
+
+        let scoped = session(Some("one"), None);
+        assert!(file_path_in_scope(
+            &scoped,
+            std::path::Path::new("/fs/one/private/file")
+        ));
+        assert!(file_path_in_scope(
+            &scoped,
+            std::path::Path::new("/fs/one/private@snap/file")
+        ));
+        assert!(!file_path_in_scope(
+            &scoped,
+            std::path::Path::new("/fs/two/private/file")
+        ));
+        assert!(!file_path_in_scope(&scoped, std::path::Path::new("/fs")));
+    }
+
+    #[test]
+    fn owner_scoped_tokens_cannot_use_direct_file_api() {
+        let scoped = session(Some("one"), Some("automation"));
+        assert!(!file_path_in_scope(
+            &scoped,
+            std::path::Path::new("/fs/one/private/file")
+        ));
+    }
+
+    #[test]
+    fn scoped_requests_reject_sibling_and_parent_traversal_before_lookup() {
+        assert!(requested_path_in_filesystem_scope(
+            "one/private/file",
+            "one"
+        ));
+        assert!(requested_path_in_filesystem_scope(
+            "/one/private/file",
+            "one"
+        ));
+        assert!(!requested_path_in_filesystem_scope(
+            "two/private/file",
+            "one"
+        ));
+        assert!(!requested_path_in_filesystem_scope(
+            "one/../two/file",
+            "one"
+        ));
+        assert!(!requested_path_in_filesystem_scope(
+            "two/../one/file",
+            "one"
+        ));
+        assert!(!requested_path_in_filesystem_scope(
+            "one\\..\\two\\file",
+            "one"
+        ));
+    }
 
     #[test]
     fn derives_live_path_from_snapshot() {

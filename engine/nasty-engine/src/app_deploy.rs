@@ -184,28 +184,36 @@ async fn handle_deploy(
     // Authenticate — admin only. Compose deploys can mount host paths and run
     // privileged containers, so this is effectively root-equivalent.
     let session = match state.auth.validate(&token, &client_ip).await {
-        Ok(s) if s.role == crate::auth::Role::Admin => s,
         Ok(s) => {
-            crate::auth::audit(
-                "app_deploy_denied",
-                &s.username,
-                &client_ip,
-                &format!("role={:?}", s.role),
-            );
-            report_error(
-                &mut socket,
-                &req.name,
-                "auth",
-                "forbidden: admin role required",
-            )
-            .await;
-            return;
+            if let Err(reason) =
+                crate::auth::authorize_session(&s, crate::auth::EndpointAccess::RootEquivalent)
+            {
+                crate::auth::audit(
+                    "app_deploy_denied",
+                    &s.username,
+                    &client_ip,
+                    &format!("reason={reason:?}"),
+                );
+                report_error(&mut socket, &req.name, "auth", reason.message()).await;
+                return;
+            }
+            s
         }
         Err(_) => {
             report_error(&mut socket, &req.name, "auth", "invalid token").await;
             return;
         }
     };
+
+    crate::auth::audit(
+        "app_deploy_requested",
+        &session.username,
+        &client_ip,
+        &format!(
+            "app={} kind={} allow_unsafe={}",
+            req.name, req.kind, req.allow_unsafe
+        ),
+    );
 
     info!(
         "Deploy stream started for '{}' (kind: {})",
