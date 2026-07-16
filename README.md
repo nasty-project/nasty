@@ -52,6 +52,7 @@ NASty is a NAS operating system built on NixOS and bcachefs. It turns commodity 
 ### System
 - **Web UI** — manage filesystems, subvolumes, snapshots, shares, disks, services, and more
 - **Web terminal** — built-in shell with command cheatsheets and diagnostic tools
+- **Custom NixOS config** — advanced users can drop settings the WebUI doesn't expose into `/etc/nixos/custom.nix`; NASty never overwrites it, so they persist across reboots and upgrades
 - **Glossary** — built-in help page with storage terms, protocol guidance, and FAQ
 - **Networking** — NetworkManager-based with confirm-or-rollback: edits stage, apply, and auto-revert if you don't confirm in time, so a typo can't lock you out over SSH
 - **Let's Encrypt** — automatic TLS certificates via ACME (TLS-ALPN and DNS challenges)

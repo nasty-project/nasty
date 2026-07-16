@@ -234,6 +234,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     result: Some(gen_schema::<Vec<Operation>>(generator)),
                 },
                 Method {
+                    name: "system.custom_config.get",
+                    desc: "Read /etc/nixos/custom.nix — the operator's own NixOS overlay (advanced, edited from the terminal). Returns whether the file exists and its contents for a read-only WebUI view; NASty never writes this file, so anything in it survives upgrades.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<nasty_system::CustomConfig>(generator)),
+                },
+                Method {
                     name: "system.stats",
                     desc: "Return current CPU, memory, network interface, and disk I/O statistics.",
                     role: MethodRole::Any,

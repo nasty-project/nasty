@@ -322,8 +322,8 @@ in
 
       # nixos-generate-config writes a 3-line header telling the user to edit
       # /etc/nixos/configuration.nix — a file the NASty appliance has no copy of
-      # (the system config lives in the `nasty` flake input; the only local
-      # hand-editable file is /etc/nixos/flake.nix). Left as-is it sends
+      # (the system config lives in the `nasty` flake input; local overrides
+      # belong in /etc/nixos/custom.nix). Left as-is it sends
       # NixOS-literate operators chasing a missing file (issue #575). Replace it
       # with a header that describes the actual flake-based layout.
       if head -n1 /tmp/hw-config/hardware-configuration.nix | grep -q 'Do not modify this file'; then
@@ -338,8 +338,9 @@ in
             '#     (github:nasty-project/nasty), imported by /etc/nixos/flake.nix.' \
             '#   * Network, TLS, shares, apps and the upstream ref are managed by the' \
             '#     NASty engine / WebUI — not by hand-editing .nix files.' \
-            '#   * To track a different nasty/bcachefs ref or add overlays, edit the' \
-            '#     wrapper flake /etc/nixos/flake.nix (also in the WebUI Upstream section).'
+            '#   * Put extra NixOS options, packages, and units in /etc/nixos/custom.nix.' \
+            '#     NASty imports that file when present and never overwrites it.' \
+            '#   * To track a different nasty/bcachefs ref, use the WebUI Upstream section.'
           tail -n +4 /tmp/hw-config/hardware-configuration.nix
         } > /tmp/hw-config/hardware-configuration.nix.nasty \
           && mv /tmp/hw-config/hardware-configuration.nix.nasty /tmp/hw-config/hardware-configuration.nix

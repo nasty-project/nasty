@@ -88,6 +88,10 @@ pub(super) async fn try_route(
             ok(req, status)
         }
         "system.operations.list" => ok(req, build_operations(state).await),
+        "system.custom_config.get" => match custom_config_get().await {
+            Ok(config) => ok(req, config),
+            Err(e) => err(req, format!("read /etc/nixos/custom.nix: {e}")),
+        },
         "system.hardware.iommu" => ok(req, nasty_system::hardware::iommu_groups().await),
         "system.hardware.summary" => ok(req, nasty_system::hardware::system_summary().await),
         "system.secure_boot.readiness" => ok(req, nasty_system::secure_boot::readiness().await),
@@ -990,6 +994,25 @@ async fn build_system_status(state: &AppState) -> nasty_system::SystemStatus {
         top_warning,
         operations,
     )
+}
+
+/// Read `/etc/nixos/custom.nix` for the read-only WebUI view. A missing file is
+/// the normal "not created yet" state; other I/O failures remain visible.
+async fn custom_config_get() -> std::io::Result<nasty_system::CustomConfig> {
+    const PATH: &str = "/etc/nixos/custom.nix";
+    match tokio::fs::read_to_string(PATH).await {
+        Ok(content) => Ok(nasty_system::CustomConfig {
+            path: PATH.to_string(),
+            exists: true,
+            content,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(nasty_system::CustomConfig {
+            path: PATH.to_string(),
+            exists: false,
+            content: String::new(),
+        }),
+        Err(e) => Err(e),
+    }
 }
 
 /// Gather the controllable data operations across all mounted filesystems

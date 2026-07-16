@@ -236,6 +236,11 @@ fn is_read_only(method: &str) -> bool {
             // the central gate agrees with the impl and the declared
             // role, instead of relying on the inline check alone.
             | "auth.token.list"
+            // `system.custom_config.get` returns the raw contents of the
+            // operator's `/etc/nixos/custom.nix` — system-level NixOS config that
+            // can hold sensitive settings. Its `.get` suffix would otherwise slip
+            // it into the universally-allowed read set; keep it Admin-only.
+            | "system.custom_config.get"
     ) {
         return false;
     }
@@ -1413,6 +1418,12 @@ mod tests {
         assert!(!is_read_only("dc.group.list"));
         assert!(!is_read_only("dc.computer.list"));
         assert!(is_read_only("dc.status")); // status is a safe read
+    }
+
+    #[test]
+    fn custom_config_contents_are_admin_only() {
+        assert!(!is_read_only("system.custom_config.get"));
+        assert!(!is_operator_allowed("system.custom_config.get"));
     }
 
     /// The .list / .get suffix matches that existed before this

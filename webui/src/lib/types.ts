@@ -45,6 +45,12 @@ export interface WebauthnRegisterStart {
 	creation_options: unknown;
 }
 
+export interface CustomConfig {
+	path: string;
+	exists: boolean;
+	content: string;
+}
+
 export interface SystemInfo {
 	hostname: string;
 	version: string;

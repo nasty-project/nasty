@@ -19,7 +19,7 @@
 	import { domain, domainRefresh, domainJoin, domainLeave } from '$lib/domain.svelte';
 	import { dc, dcRefresh, dcProvision } from '$lib/dc.svelte';
 	import DcPanel from '$lib/directory/DcPanel.svelte';
-	import type { Settings, SystemInfo, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NetIfStats, IpConfig, InterfaceConfig, VfConfig } from '$lib/types';
+	import type { Settings, SystemInfo, CustomConfig, NetworkState, NetworkConfig, LiveInterface, TuningConfig, NetIfStats, IpConfig, InterfaceConfig, VfConfig } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import BridgeCreator from '$lib/components/BridgeCreator.svelte';
@@ -90,6 +90,10 @@
 
 	// Network
 	let networkState: NetworkState | null = $state(null);
+	// Read-only view of /etc/nixos/custom.nix (advanced operator overlay).
+	let customConfig: CustomConfig | null = $state(null);
+	let customConfigLoaded = $state(false);
+	let customConfigError = $state(false);
 	const network = $derived.by((): NetworkConfig | null => {
 		return networkState?.config ?? null;
 	});
@@ -294,6 +298,13 @@
 			]);
 			hostnameInput = settings.hostname ?? info.hostname;
 			logFilter = liveLogFilter;
+			try {
+				customConfig = await client.call<CustomConfig>('system.custom_config.get');
+			} catch {
+				customConfigError = true;
+			} finally {
+				customConfigLoaded = true;
+			}
 			syncNetworkForm();
 		});
 		await Promise.all([domainRefresh(), dcRefresh()]);
@@ -887,6 +898,42 @@
 						<Button size="sm" onclick={saveTimezone} disabled={saving}>
 							{saving ? 'Saving…' : 'Apply'}
 						</Button>
+					</div>
+				</section>
+
+				<!-- Custom configuration -->
+				<section class="rounded-lg border border-border p-5">
+					<h2 class="mb-2 text-base font-semibold">Custom configuration <span class="ml-1 align-middle text-xs font-normal text-muted-foreground">advanced</span></h2>
+					<p class="mb-4 text-sm text-muted-foreground">
+						Settings the WebUI doesn't expose go in
+						<code class="rounded bg-muted px-1 py-0.5 text-xs">/etc/nixos/custom.nix</code> — any NixOS
+						options, extra packages, or systemd units. NASty never overwrites this file, so it survives
+						reboots and upgrades. Edit it from the terminal, then run
+						<code class="break-all rounded bg-muted px-1 py-0.5 text-xs">nixos-rebuild switch --flake /etc/nixos#nasty</code>.
+						A broken file fails the rebuild safely; use
+						<code class="rounded bg-muted px-1 py-0.5 text-xs">lib.mkForce</code> when overriding a value NASty already sets.
+					</p>
+					{#if !customConfigLoaded}
+						<p class="text-xs text-muted-foreground">Loading custom configuration...</p>
+					{:else if customConfigError}
+						<p class="text-xs text-muted-foreground italic">
+							The custom configuration could not be read. Only administrators can view it; check the engine log if you are already an administrator.
+						</p>
+					{:else if customConfig?.exists}
+						<pre class="max-h-80 overflow-auto rounded-md border border-border bg-secondary/20 p-3 font-mono text-xs whitespace-pre">{customConfig.content}</pre>
+					{:else}
+						<p class="text-xs text-muted-foreground italic">
+							Not created yet — <code class="rounded bg-muted px-1 py-0.5">custom.nix</code> doesn't exist.
+							Create it from a terminal to add custom config.
+						</p>
+					{/if}
+					<div class="mt-3">
+						<a
+							href={`/terminal?cmd=${encodeURIComponent('cd /etc/nixos')}`}
+							class="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+						>
+							Open a terminal in /etc/nixos
+						</a>
 					</div>
 				</section>
 

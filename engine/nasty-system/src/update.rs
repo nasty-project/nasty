@@ -3452,6 +3452,38 @@ outputs = { nixpkgs, nasty, ... }: {
         assert_eq!(rendered, rendered2);
     }
 
+    #[tokio::test]
+    async fn bootstrap_imports_and_preserves_existing_custom_config() {
+        let dir = tempfile::tempdir().expect("temporary system-flake directory");
+        let dest_dir = dir.path().to_str().expect("UTF-8 temporary path");
+        let custom_path = dir.path().join("custom.nix");
+        let custom = "{ pkgs, ... }: { environment.systemPackages = [ pkgs.hello ]; }\n";
+        tokio::fs::write(&custom_path, custom)
+            .await
+            .expect("write operator custom config");
+
+        super::bootstrap_system_flake_from_template(
+            super::EMBEDDED_WRAPPER_TEMPLATE,
+            dest_dir,
+            "0.0.14",
+            "x86_64-linux",
+        )
+        .await
+        .expect("bootstrap wrapper flake");
+
+        let preserved = tokio::fs::read_to_string(&custom_path)
+            .await
+            .expect("read preserved custom config");
+        assert_eq!(preserved, custom);
+
+        let wrapper = tokio::fs::read_to_string(dir.path().join("flake.nix"))
+            .await
+            .expect("read rendered wrapper");
+        assert!(wrapper.contains("builtins.pathExists ./custom.nix"));
+        assert!(wrapper.contains("nixpkgs.lib.optional"));
+        assert!(wrapper.contains("./custom.nix;"));
+    }
+
     #[test]
     fn bootstrap_wrapper_inherits_canonical_bcachefs_ref() {
         // A fresh install must pin the bcachefs-tools the running system
