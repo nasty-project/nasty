@@ -105,8 +105,21 @@ async fn proxy_unix_socket(
     };
 
     // Admin or Operator — VM console is interactive root inside the guest.
+    // Scoped API tokens are excluded until VMs have a resource ownership model.
     match state.auth.validate(&token, &client_ip).await {
-        Ok(s) if s.role == crate::auth::Role::Admin || s.role == crate::auth::Role::Operator => {
+        Ok(s) => {
+            if let Err(reason) =
+                crate::auth::authorize_session(&s, crate::auth::EndpointAccess::UnscopedMutation)
+            {
+                crate::auth::audit(
+                    "vm_console_denied",
+                    &s.username,
+                    &client_ip,
+                    &format!("reason={reason:?} vm={vm_id}"),
+                );
+                let _ = ws.send(Message::Text(reason.message().into())).await;
+                return;
+            }
             // Console is interactive root in the guest — record opens
             // so the audit log can show who attached to which VM and
             // when, not just rejected attempts.
@@ -116,16 +129,6 @@ async fn proxy_unix_socket(
                 &client_ip,
                 &format!("vm={vm_id} type={console_type}"),
             );
-        }
-        Ok(s) => {
-            crate::auth::audit(
-                "vm_console_denied",
-                &s.username,
-                &client_ip,
-                &format!("role={:?} vm={}", s.role, vm_id),
-            );
-            let _ = ws.send(Message::Text("forbidden".into())).await;
-            return;
         }
         Err(_) => {
             let _ = ws.send(Message::Text("unauthorized".into())).await;

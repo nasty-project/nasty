@@ -272,7 +272,29 @@ async fn wait_for_terminal_auth(
     };
 
     match state.auth.validate(&token, client_ip).await {
-        Ok(session) if session.role == crate::auth::Role::Admin => {
+        Ok(session) => {
+            if let Err(reason) = crate::auth::authorize_session(
+                &session,
+                crate::auth::EndpointAccess::RootEquivalent,
+            ) {
+                warn!(
+                    "Terminal access denied for '{}': {reason:?}",
+                    session.username
+                );
+                crate::auth::audit(
+                    "terminal_denied",
+                    &session.username,
+                    client_ip,
+                    &format!("reason={reason:?}"),
+                );
+                let _ = socket
+                    .send(Message::Text(
+                        format!("{{\"error\":\"{}\"}}", reason.message()).into(),
+                    ))
+                    .await;
+                let _ = socket.send(Message::Close(None)).await;
+                return None;
+            }
             // Opening an interactive root shell on the host is the
             // single highest-stakes admin action — record every open,
             // not just denials, so the audit trail can answer "who had
@@ -296,25 +318,6 @@ async fn wait_for_terminal_auth(
                 rows: auth.rows,
                 cmd: auth.cmd,
             })
-        }
-        Ok(session) => {
-            warn!(
-                "Terminal access denied for '{}': role={:?}",
-                session.username, session.role
-            );
-            crate::auth::audit(
-                "terminal_denied",
-                &session.username,
-                client_ip,
-                &format!("role={:?}", session.role),
-            );
-            let _ = socket
-                .send(Message::Text(
-                    r#"{"error":"forbidden: admin role required"}"#.into(),
-                ))
-                .await;
-            let _ = socket.send(Message::Close(None)).await;
-            None
         }
         Err(_) => {
             let _ = socket
