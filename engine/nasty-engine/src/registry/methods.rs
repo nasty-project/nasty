@@ -1741,7 +1741,7 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
             vec![
                 Method {
                     name: "system.firewall.status",
-                    desc: "Return the current firewall rules, per-service source/interface restrictions, and the host ports Docker-managed apps publish (read-only — these bypass the nftables firewall and are listed for visibility only).",
+                    desc: "Return the current firewall rules, per-service source/interface restrictions, and Docker-managed app ports allowed by the forward policy.",
                     role: MethodRole::Any,
                     params: MethodParams::None,
                     result: Some(gen_schema::<FirewallStatus>(generator)),

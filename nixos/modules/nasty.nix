@@ -5,6 +5,28 @@ let
   inherit (lib) mkEnableOption mkOption mkIf types;
   nastySystemFlakeSnapshot = args.nastySystemFlakeSnapshot or null;
 
+  # Boot-time fail-closed policy. The engine atomically replaces this table
+  # with its complete dynamic rules before restoring network-facing services.
+  nastyFirewallBaselineText = ''
+    destroy table inet nasty
+    table inet nasty {
+      chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+        ct state invalid drop
+        iif lo accept
+        ip protocol icmp accept
+        ip6 nexthdr icmpv6 accept
+        udp dport 546 accept
+      }
+      chain forward {
+        type filter hook forward priority -10; policy accept;
+        ct direction original ct status dnat drop
+      }
+    }
+  '';
+  nastyFirewallBaseline = pkgs.writeText "nasty-firewall-baseline.nft" nastyFirewallBaselineText;
+
   # Secure Boot integration is opt-in per box. The wrapper flake at
   # /etc/nixos/flake.nix passes the lanzaboote input through as a
   # specialArg when it has the input declared; pre-#324-era wrappers
@@ -1500,7 +1522,9 @@ in {
     systemd.services.nasty-metrics = {
       description = "NASty Metrics Collector";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      after = [ "network.target" "nftables.service" ];
+      requires = [ "nftables.service" ];
+      partOf = [ "nftables.service" ];
 
       path = with pkgs; [
         smartmontools         # smartctl for disk health
@@ -1589,8 +1613,11 @@ in {
       # (vs `requires`) means a broken Caddy doesn't block the engine
       # from running — the admin-API client has retry/backoff and
       # logs a warn! if it can't reach :2019.
-      after = [ "network.target" "nasty-metrics.service" "caddy.service" ];
+      after = [ "network.target" "nftables.service" "nasty-metrics.service" "caddy.service" ];
+      requires = [ "nftables.service" ];
+      partOf = [ "nftables.service" ];
       wants = [ "nasty-metrics.service" "caddy.service" ];
+      restartTriggers = [ nastyFirewallBaseline ];
 
       path = with pkgs; [
         bashInteractive  # bash for terminal
@@ -2395,8 +2422,12 @@ in {
     # challenge) from this EnvironmentFile. The `-` prefix means
     # "ignore if missing" so the unit still starts on a fresh box
     # before the engine has written anything.
-    systemd.services.caddy.serviceConfig.EnvironmentFile =
-      mkIf (cfg.webui.package != null) "-/var/lib/nasty/caddy/acme.env";
+    systemd.services.caddy = mkIf (cfg.webui.package != null) {
+      after = [ "nftables.service" ];
+      requires = [ "nftables.service" ];
+      partOf = [ "nftables.service" ];
+      serviceConfig.EnvironmentFile = "-/var/lib/nasty/caddy/acme.env";
+    };
 
     # ── Journald ───────────────────────────────────────────────
     services.journald.extraConfig = ''
@@ -2440,10 +2471,30 @@ in {
     };
 
     # ── Firewall ───────────────────────────────────────────────
-    # Disable NixOS's static iptables firewall — the engine manages
-    # nftables rules dynamically via `table inet nasty`.
+    # Disable NixOS's static iptables firewall. nftables installs a
+    # default-drop baseline before the engine starts; the engine replaces the
+    # same table transactionally after validating its complete dynamic policy.
     networking.firewall.enable = false;
     networking.nftables.enable = true;
+    # Never flush unrelated Docker/CNI tables when loading our baseline.
+    networking.nftables.flushRuleset = lib.mkForce false;
+    networking.nftables.ruleset = nastyFirewallBaselineText;
+    # Loading the static baseline without restarting the engine would discard
+    # its dynamic state. Disable direct reloads and make NixOS activation use a
+    # restart; PartOf then restarts each listener and the engine after the
+    # baseline is back in place.
+    systemd.services.nftables.reloadIfChanged = lib.mkForce false;
+    systemd.services.nftables.serviceConfig.ExecReload = lib.mkForce "";
+    systemd.services.sshd = {
+      after = [ "nftables.service" ];
+      requires = [ "nftables.service" ];
+      partOf = [ "nftables.service" ];
+    };
+    systemd.services.avahi-daemon = {
+      after = [ "nftables.service" ];
+      requires = [ "nftables.service" ];
+      partOf = [ "nftables.service" ];
+    };
 
     # ── Networking backend (NetworkManager) ───────────────────
     # As of v0.0.7 NASty manages the host network via NetworkManager

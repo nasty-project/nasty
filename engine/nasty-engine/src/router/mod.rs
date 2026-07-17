@@ -2,7 +2,7 @@ use nasty_common::{ErrorCode, Request, Response};
 use tracing::debug;
 
 mod alerts;
-mod apps;
+pub(crate) mod apps;
 mod audit;
 mod auth;
 mod backup;

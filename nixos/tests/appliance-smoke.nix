@@ -190,6 +190,14 @@ let
                 "protocol": "tcp",
             }],
         })
+        call(ws, "system.firewall.custom.add", 4, {
+            "label": "restricted external forward",
+            "transport": "tcp",
+            "from": 18082,
+            "to": 18082,
+            "source": "192.168.1.0/24",
+            "enabled": True,
+        })
     finally:
         ws.close()
   '';
@@ -219,6 +227,10 @@ in
 
 pkgs.testers.runNixOSTest {
   name = "appliance-smoke";
+
+  nodes.client = { pkgs, ... }: {
+    environment.systemPackages = [ pkgs.curl ];
+  };
 
   nodes.machine = { lib, ... }: {
     imports = [
@@ -260,6 +272,7 @@ pkgs.testers.runNixOSTest {
     # VM-test infrastructure since clock sync is irrelevant inside a
     # transient test VM.
     services.timesyncd.enable = lib.mkForce false;
+    services.avahi.enable = true;
 
     # The rpc-smoke script needs websocket-client at runtime in the guest.
     environment.systemPackages = [ pythonWithWs ];
@@ -272,7 +285,60 @@ pkgs.testers.runNixOSTest {
     import shlex
 
     machine.start()
+    client.start()
+
+    # nftables must establish a default-drop baseline independently of the
+    # engine. Restart nftables as separate stop/start operations so PartOf stops
+    # the engine without restarting it; inspect the baseline, then start the
+    # engine and verify it installs its dynamic management rules before ready.
+    machine.wait_for_unit("nftables.service")
+    machine.succeed("systemctl stop nftables.service")
+    machine.succeed("systemctl start nftables.service")
+    baseline = machine.succeed("nft list table inet nasty")
+    assert "policy drop" in baseline, f"missing fail-closed baseline: {baseline}"
+    assert "ct direction original ct status dnat drop" in baseline, (
+        f"baseline does not block DNAT forwarding: {baseline}"
+    )
+    assert "dport 443" not in baseline, f"baseline unexpectedly exposes WebUI: {baseline}"
+    machine.succeed(
+        "systemctl start nasty-engine.service sshd.service avahi-daemon.service"
+    )
     machine.wait_for_unit("nasty-engine.service")
+    machine.wait_for_unit("sshd.service")
+    machine.wait_for_unit("avahi-daemon.service")
+
+    dynamic_firewall = machine.succeed("nft list table inet nasty")
+    assert "tcp dport 443 accept" in dynamic_firewall, (
+        f"engine did not install dynamic WebUI policy: {dynamic_firewall}"
+    )
+    machine.fail("systemctl reload nftables.service")
+    after_rejected_reload = machine.succeed("nft list table inet nasty")
+    assert "tcp dport 443 accept" in after_rejected_reload, (
+        f"rejected nftables reload discarded dynamic policy: {after_rejected_reload}"
+    )
+    machine.succeed("systemctl restart nftables.service")
+    for unit in [
+        "nasty-engine.service",
+        "nasty-metrics.service",
+        "caddy.service",
+        "sshd.service",
+        "avahi-daemon.service",
+    ]:
+        machine.wait_for_unit(unit)
+    after_restart = machine.succeed("nft list table inet nasty")
+    assert "tcp dport 443 accept" in after_restart, (
+        f"nftables restart did not restore dynamic policy: {after_restart}"
+    )
+
+    # A valid batch whose final command references a missing chain must fail as
+    # a whole. The named sentinel in the old table proves the leading destroy
+    # command was rolled back by nft's netlink transaction.
+    machine.succeed("nft add counter inet nasty transaction_sentinel")
+    machine.fail(
+        "printf 'destroy table inet nasty\\nadd table inet nasty\\n"
+        "add rule inet nasty missing_chain counter\\n' | nft --file -"
+    )
+    machine.succeed("nft list counter inet nasty transaction_sentinel")
 
     # ── /health (no auth) ───────────────────────────────────────────
     # Hit the engine directly on its loopback port to skip TLS / Caddy.
@@ -405,5 +471,19 @@ pkgs.testers.runNixOSTest {
         f"path-strip regression — /apps/smoke/index.html didn't reach "
         f"the container's /index.html: {subpath!r}"
     )
+
+    forward_policy = machine.succeed("nft list table inet nasty")
+    assert "ct original proto-dst 18080 accept" in forward_policy, (
+        f"managed app port missing from Docker forward policy: {forward_policy}"
+    )
+    client.wait_until_succeeds("curl -fsS --max-time 2 http://machine:18080/")
+    machine.succeed(
+        "docker run -d --name unmanaged-smoke -p 18081:80 nasty-smoke-app:test"
+    )
+    client.fail("curl -fsS --max-time 2 http://machine:18081/")
+    machine.succeed(
+        "docker run -d --name restricted-smoke -p 18082:80 nasty-smoke-app:test"
+    )
+    client.wait_until_succeeds("curl -fsS --max-time 2 http://machine:18082/")
   '';
 }

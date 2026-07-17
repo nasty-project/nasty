@@ -228,6 +228,15 @@ async fn handle_deploy(
             report_error(&mut socket, &req.name, "dispatch", "unknown deploy kind").await;
         }
     }
+    if let Err(e) = crate::router::apps::sync_published_firewall_ports(&state).await {
+        crate::auth::audit(
+            "app_firewall_sync_failed",
+            &session.username,
+            &client_ip,
+            &format!("app={} error={e}", req.name),
+        );
+        warn!("deploy '{}': firewall reconciliation failed: {e}", req.name);
+    }
 }
 
 async fn deploy_simple(
@@ -339,6 +348,10 @@ async fn deploy_simple(
         Ok(app) => {
             if chose_subdomain {
                 tokio::spawn(nasty_system::settings::reapply_tls_from_disk());
+            }
+            if let Err(e) = crate::router::apps::sync_published_firewall_ports(state).await {
+                report_error(socket, &req.name, "firewall", &e).await;
+                return;
             }
             let _ = socket
                 .send(Message::Text(
@@ -622,6 +635,10 @@ async fn deploy_compose(
         }
     }
 
+    if let Err(e) = crate::router::apps::sync_published_firewall_ports(state).await {
+        report_error(socket, &req.name, "firewall", &e).await;
+        return;
+    }
     let action = if is_update { "updated" } else { "deployed" };
     let _ = socket
         .send(Message::Text(
@@ -746,6 +763,10 @@ async fn deploy_pull(socket: &mut WebSocket, state: &AppState, req: &DeployReque
         }
     }
 
+    if let Err(e) = crate::router::apps::sync_published_firewall_ports(state).await {
+        report_error(socket, &req.name, "firewall", &e).await;
+        return;
+    }
     let _ = socket
         .send(Message::Text(
             DeployMessage::log(&format!("Image update complete for '{}'", req.name)).into(),

@@ -21,21 +21,26 @@ pub(super) async fn try_route(
     // (#602). Resync after any mutation that can change them; gate
     // refusals and errors return early above or carry `error`, so only
     // real changes pay the recompute.
-    if resp.error.is_none()
-        && matches!(
-            req.method.as_str(),
-            "share.iscsi.create"
-                | "share.iscsi.delete"
-                | "share.iscsi.add_portal"
-                | "share.iscsi.remove_portal"
-                | "share.iscsi.set_portals"
-                | "share.nvmeof.create"
-                | "share.nvmeof.delete"
-                | "share.nvmeof.add_port"
-                | "share.nvmeof.remove_port"
-        )
-    {
-        sync_portal_firewall_ports(state).await;
+    let changes_portals = matches!(
+        req.method.as_str(),
+        "share.iscsi.create"
+            | "share.iscsi.delete"
+            | "share.iscsi.add_portal"
+            | "share.iscsi.remove_portal"
+            | "share.iscsi.set_portals"
+            | "share.nvmeof.create"
+            | "share.nvmeof.delete"
+            | "share.nvmeof.add_port"
+            | "share.nvmeof.remove_port"
+    );
+    if changes_portals && let Err(e) = sync_portal_firewall_ports(state).await {
+        if resp.error.is_none() {
+            return Some(err(
+                req,
+                format!("share changed but firewall port synchronization failed: {e}"),
+            ));
+        }
+        tracing::warn!("portal firewall reconciliation after failed request also failed: {e}");
     }
     Some(resp)
 }
@@ -46,9 +51,16 @@ pub(super) async fn try_route(
 /// `create` will bind. NVMe-oF RDMA listeners are excluded — RoCE
 /// rides udp/4791 under the separate `rdma` rule, and native IB never
 /// traverses netfilter.
-pub(crate) async fn sync_portal_firewall_ports(state: &AppState) {
+pub(crate) async fn portal_firewall_ports(
+    state: &AppState,
+) -> Result<
+    (
+        Vec<nasty_system::firewall::PortSpec>,
+        Vec<nasty_system::firewall::PortSpec>,
+    ),
+    String,
+> {
     use nasty_system::firewall::{PortSpec, Transport};
-    use nasty_system::protocol::Protocol;
     use std::collections::BTreeSet;
 
     let tcp = |port: u16| PortSpec {
@@ -60,40 +72,49 @@ pub(crate) async fn sync_portal_firewall_ports(state: &AppState) {
     };
 
     let mut iscsi_ports: BTreeSet<u16> = BTreeSet::new();
-    if let Ok(targets) = state.iscsi.list().await {
-        iscsi_ports.extend(
-            targets
-                .iter()
-                .flat_map(|t| t.portals.iter().map(|p| p.port)),
-        );
-    }
+    let targets = state
+        .iscsi
+        .list()
+        .await
+        .map_err(|e| format!("list iSCSI targets: {e}"))?;
+    iscsi_ports.extend(
+        targets
+            .iter()
+            .flat_map(|target| target.portals.iter().map(|portal| portal.port)),
+    );
     if iscsi_ports.is_empty() {
         iscsi_ports.insert(3260);
     }
-    state
-        .firewall
-        .set_service_ports(Protocol::Iscsi, iscsi_ports.into_iter().map(tcp).collect())
-        .await;
 
     let mut nvmeof_ports: BTreeSet<u16> = BTreeSet::new();
-    if let Ok(subsystems) = state.nvmeof.list().await {
-        nvmeof_ports.extend(subsystems.iter().flat_map(|s| {
-            s.ports
-                .iter()
-                .filter(|p| p.transport == "tcp")
-                .filter_map(|p| p.service_id.parse::<u16>().ok())
-        }));
-    }
+    let subsystems = state
+        .nvmeof
+        .list()
+        .await
+        .map_err(|e| format!("list NVMe-oF subsystems: {e}"))?;
+    nvmeof_ports.extend(subsystems.iter().flat_map(|subsystem| {
+        subsystem
+            .ports
+            .iter()
+            .filter(|port| port.transport == "tcp")
+            .filter_map(|port| port.service_id.parse::<u16>().ok())
+    }));
     if nvmeof_ports.is_empty() {
         nvmeof_ports.insert(4420);
     }
+    Ok((
+        iscsi_ports.into_iter().map(tcp).collect(),
+        nvmeof_ports.into_iter().map(tcp).collect(),
+    ))
+}
+
+pub(crate) async fn sync_portal_firewall_ports(state: &AppState) -> Result<(), String> {
+    let _sync = state.portal_firewall_sync.lock().await;
+    let (iscsi_ports, nvmeof_ports) = portal_firewall_ports(state).await?;
     state
         .firewall
-        .set_service_ports(
-            Protocol::Nvmeof,
-            nvmeof_ports.into_iter().map(tcp).collect(),
-        )
-        .await;
+        .set_portal_ports(iscsi_ports, nvmeof_ports)
+        .await
 }
 
 async fn route_inner(req: &Request, state: &AppState, session: &Session) -> Option<Response> {
@@ -410,27 +431,21 @@ async fn route_inner(req: &Request, state: &AppState, session: &Session) -> Opti
                                 let ts = state.tailscale.get().await;
                                 if ts.connected
                                     && let Some(ref ip) = ts.ip
+                                    && let Err(e) = state
+                                        .nvmeof
+                                        .add_port(nasty_sharing::nvmeof::AddPortRequest {
+                                            subsystem_id: v.id.clone(),
+                                            transport: Some("tcp".to_string()),
+                                            addr: Some(ip.clone()),
+                                            service_id: Some(4420),
+                                            addr_family: Some("ipv4".to_string()),
+                                        })
+                                        .await
                                 {
-                                    let nvmeof = state.nvmeof.clone();
-                                    let id = v.id.clone();
-                                    let ip = ip.clone();
-                                    let nqn_for_log = v.nqn.clone();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = nvmeof
-                                            .add_port(nasty_sharing::nvmeof::AddPortRequest {
-                                                subsystem_id: id,
-                                                transport: Some("tcp".to_string()),
-                                                addr: Some(ip.clone()),
-                                                service_id: Some(4420),
-                                                addr_family: Some("ipv4".to_string()),
-                                            })
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                "auto-add Tailscale port for '{nqn_for_log}' on {ip} failed: {e}"
-                                            );
-                                        }
-                                    });
+                                    tracing::warn!(
+                                        "auto-add Tailscale port for '{}' on {ip} failed: {e}",
+                                        v.nqn
+                                    );
                                 }
                             }
                             ok(req, v)

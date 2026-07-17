@@ -23,7 +23,8 @@ supported way to open a port that isn't tied to a NASty service.
 - Arbitrary port *sets* / lists in one rule (`{80, 443, 8000-8010}`). A rule
   is one port or one contiguous range; several disjoint ranges are several
   rules.
-- Outbound/egress or forward-chain rules. This is the `input` chain only.
+- Outbound/egress rules. Custom rules apply to host input and matching inbound
+  DNAT traffic in the forward hook.
 - Protocols other than TCP/UDP.
 
 ## Where it matters (and where it doesn't)
@@ -31,11 +32,13 @@ supported way to open a port that isn't tied to a NASty service.
 - **`network_mode: host` apps** and anything an operator runs directly on the
   host outside NASty's service model — their ports bind on the host and land
   on the default-deny `input` chain, with no UI path to open them today.
-- **Bridge-networked apps do NOT need this.** Docker DNATs published ports in
-  `prerouting` straight to the container, bypassing the `inet nasty` input
-  chain — the Firewall page already lists those read-only. The UI copy must
-  say so, or first-time users add redundant rules for apps that were reachable
-  all along (that is effectively what happened in #591).
+- **NASty-managed bridge apps do NOT need this.** Their persisted host ports
+  are rendered into the forward allowlist automatically. Other inbound DNAT is
+  dropped unless a custom rule explicitly permits the original host port.
+- The appliance firewall owns all original-direction inbound DNAT by original
+  destination port. NASty-managed app ports are allowed automatically; DNAT
+  created by another container or virtualization manager needs an explicit
+  custom rule. Reply traffic and non-DNAT forwarding remain untouched.
 
 ## Principle: the engine owns the ruleset
 
@@ -67,9 +70,9 @@ never use.
 ## Persistence
 
 A new `/var/lib/nasty/firewall-custom.json` holding the `Vec<CustomRule>`,
-loaded at engine init and held in `FirewallService` in a mutex alongside the
-existing `restrictions` mutex, saved on every mutation. Same load/save shape
-as the existing `firewall-restrictions.json`. No secrets in the file.
+loaded at engine init and held in the serialized `FirewallService` config,
+staged and atomically renamed on every successful live-policy mutation. No
+secrets are stored in the file.
 
 ## Validation (on add / update)
 
@@ -87,26 +90,21 @@ as the existing `firewall-restrictions.json`. No secrets in the file.
    source + iface as an existing rule. Overlapping (non-identical) custom
    ranges are allowed — they are additive and harmless.
 4. **Docker-published overlap → allow + warn.** If the range intersects a host
-   port a Docker app publishes, the rule is still created, but the response
-   carries a warning ("port already reachable via `<app>`; bridge apps publish
-   past the firewall"). Because the firewall module is deliberately
-   Docker-agnostic — only the router joins `apps.list` for published ports —
-   this warning is computed at the router layer, the same place `status()`
-   already attaches `published_app_ports`. It never blocks.
+   port already allowed for a NASty app, the rule is still created but the
+   response explains that it is redundant.
 
 ## Engine surface
 
-`FirewallService` gains a `custom` mutex beside `state`/`restrictions` and
-three methods:
+`FirewallService` exposes three custom-rule methods through the same candidate
+state transaction used for service and forward rules:
 
 - `add_custom_rule(input) -> Result<CustomRule, String>` — generate the UUID,
-  run validations 1–3, push to the store, save JSON, re-apply nft, return the
-  created rule.
+  run validations 1–3, validate/apply nft, persist, then commit in-memory state.
 - `update_custom_rule(id, input) -> Result<CustomRule, String>` — find by id,
-  re-validate (the duplicate check excludes the rule itself), replace, save,
-  apply. The row toggle is an `update` with `enabled` flipped — there is no
-  separate toggle method.
-- `remove_custom_rule(id) -> Result<(), String>` — drop by id, save, apply.
+  re-validate (the duplicate check excludes the rule itself), then commit the
+  candidate transaction. The row toggle is an `update` with `enabled` flipped.
+- `remove_custom_rule(id) -> Result<(), String>` — drop by id and commit the
+  candidate transaction.
 
 RPC arms in `engine/nasty-engine/src/router/system.rs`, registered in
 `registry/methods.rs`:
@@ -125,42 +123,40 @@ accepted by the Admin branch of the authorization gate and are not listed in
 `MethodRole::Operator` methods) does not apply to them.
 
 The `add`/`update` arms compute the Docker-overlap warning at the router layer
-(fetching published ports exactly as `system.firewall.status` does) and attach
-it to the response; the firewall module never learns about Docker.
+(fetching published ports from the app service) and attach it to the response.
+The router also synchronizes those ports into `FirewallConfig` for forward-rule
+rendering.
 
 ## Rendering
 
-`apply_nftables` takes a new `custom: &[CustomRule]` parameter and, after the
-service-rule loop, emits one line per **enabled** rule, reusing the same
-condition builder as service ports:
+The renderer receives one complete `FirewallConfig` snapshot and, after the
+service-rule loop, emits one line per **enabled** custom rule:
 
 ```
 [iifname "<iface>"] [ip saddr <cidr>] <tcp|udp> dport <from>[-<to>] accept # custom:<label>
 ```
 
 A single port (`from == to`) renders as a bare `dport <from>`; a range renders
-as `dport <from>-<to>` (nft supports ranges natively, so a range stays one
-rule / one line). The signature change touches the existing callers
-(`set_service_ports`, the restrict path, `open_rdma`/`close_rdma`) — each
-passes the service's current custom slice. Lock acquisition order is fixed as
-**state → restrictions → custom** everywhere to avoid deadlock.
+as `dport <from>-<to>`. All firewall inputs share one serialized config mutex,
+so a candidate cannot mix snapshots from concurrent mutations. The exact same
+atomic table-replacement batch is passed to `nft --check` and then `nft -f`.
 
 ## Status
 
 `FirewallStatus` gains `custom_rules: Vec<CustomRule>`, filled by `status()`.
-The `system.firewall.status` arm is otherwise unchanged (it still joins the
-read-only `published_app_ports`).
+It also reports the published app ports held in the same committed config.
 
 ## Error handling
 
 - **Validation failure** (range, collision, duplicate) → method error
   (`InvalidParams`) with the pointed message; nothing is persisted, and the UI
   shows it inline.
-- **nft apply failure after a successful persist** → mirror the existing
-  module convention (`restrict` / `set_service_ports` already persist-then-
-  apply and surface the apply error). The rule stays in JSON and takes effect
-  on the next successful apply or reboot; there is no bespoke rollback —
-  consistency with the existing code beats a one-off transaction.
+- **nft validation/application failure** → discard the staged JSON and preserve
+  live, persisted, and in-memory state.
+- **Persistence failure after live apply** → submit the previous rules as a
+  compensating transaction. If that rollback also fails, emit a critical error
+  and retain the candidate in memory so status still reflects the live kernel;
+  persisted state remains unchanged and the RPC reports failure.
 - **Interface disappearance needs no special handling.** The renderer emits
   `iifname "<iface>"` (a per-packet string match), not `iif <index>`.
   `iifname` tolerates an absent interface: the rule simply matches no traffic
@@ -204,6 +200,6 @@ read-only `published_app_ports`).
 ## Follow-ups (not v1)
 
 - Arbitrary port sets / multiple disjoint ranges per rule.
-- Egress / forward-chain rules.
+- Egress rules and non-DNAT forwarding policy.
 - A "clone from published app port" shortcut for the rare host-mode app that
   genuinely needs a matching rule.

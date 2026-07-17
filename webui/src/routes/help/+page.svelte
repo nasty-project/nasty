@@ -286,7 +286,7 @@
 				{
 					term: 'Firewall',
 					summary: 'A packet filter that controls which traffic reaches NASty and its services.',
-					detail: 'NASty uses nftables for firewall rules, managed from the Firewall page. Each service (NFS, SMB, SSH, etc.) lists its port and current rule — open to all, restricted to specific source IPs or networks, or closed. Rules apply to selected interfaces (LAN, VPN) independently. Published app ports also appear here for visibility. The firewall is deny-by-default: only explicitly opened traffic is accepted. For anything running outside NASty\'s service model — a network_mode: host app, or software you run on the box yourself — add a custom port rule: a single port or a range, with the same optional source and interface restrictions, persisted across reboots. Ports NASty\'s own services manage are refused (enable the service instead), and bridge-networked apps never need a rule — Docker publishes their ports past the firewall.',
+					detail: 'NASty uses nftables for firewall rules, managed from the Firewall page. Each service (NFS, SMB, SSH, etc.) lists its port and current rule — open to all, restricted to specific source IPs or networks, or closed. Rules apply to selected interfaces (LAN, VPN) independently. Published NASty app ports are allowed automatically; other inbound port forwards are blocked. For a network_mode: host app, independently managed container, virtualized service, or software you run directly on the box, add a custom port rule with optional source and interface restrictions.',
 				},
 			],
 		},

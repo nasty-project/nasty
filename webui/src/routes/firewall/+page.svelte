@@ -256,10 +256,8 @@
 			<section class="mt-6 rounded-lg border border-border p-5">
 				<h2 class="text-sm font-semibold">App ports (published by Docker)</h2>
 				<p class="mt-1 text-xs text-muted-foreground">
-					These host ports are opened directly by Docker for your apps and bypass this firewall —
-					Docker forwards them straight to the container, so the rules above don't apply.
-					Their only gate is your upstream/cloud firewall. Shown here so you can see everything
-					that's reachable on this box in one place.
+					These host ports are forwarded by Docker and explicitly allowed by NASty's forward policy.
+					Other inbound port forwards are blocked unless you add a matching custom rule.
 				</p>
 				<div class="mt-3 space-y-1">
 					{#each collapsedAppPorts as p}
@@ -285,8 +283,8 @@
 					<h2 class="text-sm font-semibold">Custom port rules</h2>
 					<p class="mt-1 text-xs text-muted-foreground">
 						Open a port for something running directly on the host (e.g. a <code>network_mode: host</code> app).
-						Bridge-networked apps don't need a rule — their published ports (listed above, if any) already bypass
-						this firewall.
+						Bridge-networked NASty apps don't need a rule — their published ports are allowed automatically.
+						Use a custom rule for an independently managed container.
 					</p>
 				</div>
 				<Button size="xs" onclick={startAddCustom}>Add rule</Button>

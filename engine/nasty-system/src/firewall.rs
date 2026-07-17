@@ -7,6 +7,9 @@ use crate::protocol::Protocol;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
@@ -26,18 +29,14 @@ pub struct FirewallRestrictions {
 }
 
 impl FirewallRestrictions {
-    pub fn load() -> Self {
-        std::fs::read_to_string(RESTRICTIONS_PATH)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
-
-    pub async fn save(&self) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
-        tokio::fs::write(RESTRICTIONS_PATH, json)
-            .await
-            .map_err(|e| format!("write {RESTRICTIONS_PATH}: {e}"))
+    fn load(path: &Path) -> Result<Self, String> {
+        match std::fs::read_to_string(path) {
+            Ok(json) => {
+                serde_json::from_str(&json).map_err(|e| format!("parse {}: {e}", path.display()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("read {}: {e}", path.display())),
+        }
     }
 
     /// Drop every reference to interfaces in `removed` from this
@@ -133,18 +132,14 @@ const CUSTOM_PATH: &str = "/var/lib/nasty/firewall-custom.json";
 
 /// Load persisted custom rules; empty on missing/corrupt file (same
 /// tolerance as `FirewallRestrictions::load`).
-fn load_custom_rules() -> Vec<CustomRule> {
-    std::fs::read_to_string(CUSTOM_PATH)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-async fn save_custom_rules(rules: &[CustomRule]) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(rules).map_err(|e| format!("serialize: {e}"))?;
-    tokio::fs::write(CUSTOM_PATH, json)
-        .await
-        .map_err(|e| format!("write {CUSTOM_PATH}: {e}"))
+fn load_custom_rules(path: &Path) -> Result<Vec<CustomRule>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(json) => {
+            serde_json::from_str(&json).map_err(|e| format!("parse {}: {e}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
 }
 
 fn default_true() -> bool {
@@ -261,14 +256,9 @@ pub struct FirewallStatus {
     pub restrictions: HashMap<String, Vec<String>>,
     /// Per-service interface restrictions.
     pub interface_restrictions: HashMap<String, Vec<String>>,
-    /// Ports that Docker-managed apps publish on the host. These are NOT
-    /// governed by this firewall — Docker DNATs published ports in
-    /// `prerouting` straight to the container, so they bypass the `inet
-    /// nasty` input chain entirely. Listed here for visibility only, so an
-    /// operator sees the full "what's open on this box" picture in one
-    /// place; their only real gate is the upstream/cloud firewall. The
-    /// engine layer fills this from `apps.list`; the firewall module
-    /// itself has no knowledge of Docker.
+    /// Ports that Docker-managed apps publish on the host. The firewall's
+    /// early forward hook permits these explicitly by original DNAT port and
+    /// drops other original-direction inbound DNAT traffic.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub published_app_ports: Vec<PublishedAppPort>,
     /// User-managed custom port rules (issue #620). Rendered into the
@@ -280,7 +270,7 @@ pub struct FirewallStatus {
 /// One host port published by a Docker-managed app. Read-only; surfaced
 /// on the firewall page alongside the service rules. See
 /// [`FirewallStatus::published_app_ports`].
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PublishedAppPort {
     /// App that published the port.
     pub app: String,
@@ -380,10 +370,23 @@ pub fn dc_ports() -> Vec<PortSpec> {
 
 // ── Firewall service ───────────────────────────────────────────
 
+#[derive(Clone, Default)]
+struct FirewallConfig {
+    state: FirewallState,
+    restrictions: FirewallRestrictions,
+    custom: Vec<CustomRule>,
+    published: Vec<PublishedAppPort>,
+}
+
+struct FirewallPaths {
+    restrictions: PathBuf,
+    custom: PathBuf,
+}
+
 pub struct FirewallService {
-    state: tokio::sync::Mutex<FirewallState>,
-    restrictions: tokio::sync::Mutex<FirewallRestrictions>,
-    custom: tokio::sync::Mutex<Vec<CustomRule>>,
+    config: tokio::sync::Mutex<FirewallConfig>,
+    paths: FirewallPaths,
+    nft_program: PathBuf,
 }
 
 impl Default for FirewallService {
@@ -395,296 +398,470 @@ impl Default for FirewallService {
 impl FirewallService {
     pub fn new() -> Self {
         Self {
-            state: tokio::sync::Mutex::new(FirewallState::default()),
-            restrictions: tokio::sync::Mutex::new(FirewallRestrictions::default()),
-            custom: tokio::sync::Mutex::new(Vec::new()),
+            config: tokio::sync::Mutex::new(FirewallConfig::default()),
+            paths: FirewallPaths {
+                restrictions: PathBuf::from(RESTRICTIONS_PATH),
+                custom: PathBuf::from(CUSTOM_PATH),
+            },
+            nft_program: PathBuf::from("nft"),
         }
     }
 
-    /// Initialize firewall with current protocol states.
-    /// Called at engine startup after protocol restore.
-    pub async fn init(&self, enabled_protocols: &[(Protocol, bool)]) {
-        let mut state = self.state.lock().await;
-        let mut restrictions = self.restrictions.lock().await;
-        *restrictions = FirewallRestrictions::load();
-        let mut custom = self.custom.lock().await;
-        *custom = load_custom_rules();
+    async fn commit_candidate(
+        &self,
+        current: &mut FirewallConfig,
+        candidate: FirewallConfig,
+        staged: Option<StagedJson>,
+    ) -> Result<(), String> {
+        if let Err(e) = apply_nftables_with(
+            &self.nft_program,
+            &candidate.state,
+            &candidate.custom,
+            &candidate.published,
+        )
+        .await
+        {
+            if let Some(staged) = staged {
+                staged.discard().await;
+            }
+            return Err(e);
+        }
 
-        // WebUI is always open
-        let webui_sources = restrictions
+        if let Some(staged) = staged
+            && let Err(persist_error) = staged.commit().await
+        {
+            let rollback = apply_nftables_with(
+                &self.nft_program,
+                &current.state,
+                &current.custom,
+                &current.published,
+            )
+            .await;
+            if let Err(rollback_error) = rollback {
+                error!(
+                    "CRITICAL: firewall persistence failed and live-rule rollback also failed: \
+                     persist={persist_error}; rollback={rollback_error}"
+                );
+                // The candidate is still live in the kernel. Keep status and
+                // subsequent transactions aligned with reality even though
+                // disk remains stale; the returned error forces the caller to
+                // surface the degraded persistence state.
+                *current = candidate;
+                return Err(format!(
+                    "persist firewall state: {persist_error}; live rollback also failed: \
+                     {rollback_error}; in-memory state reflects the live candidate"
+                ));
+            }
+            return Err(format!(
+                "persist firewall state: {persist_error}; previous live rules restored"
+            ));
+        }
+
+        *current = candidate;
+        Ok(())
+    }
+
+    async fn set_rule_active(
+        &self,
+        service: &str,
+        base_ports: Vec<PortSpec>,
+        active: bool,
+    ) -> Result<(), String> {
+        if base_ports.is_empty() {
+            return Ok(());
+        }
+        let mut current = self.config.lock().await;
+        let mut candidate = current.clone();
+        if let Some(rule) = candidate
+            .state
+            .rules
+            .iter_mut()
+            .find(|rule| rule.service == service)
+        {
+            if rule.active == active {
+                return Ok(());
+            }
+            rule.active = active;
+        } else {
+            let sources = candidate
+                .restrictions
+                .services
+                .get(service)
+                .cloned()
+                .unwrap_or_default();
+            let ifaces = candidate
+                .restrictions
+                .interfaces
+                .get(service)
+                .cloned()
+                .unwrap_or_default();
+            candidate.state.rules.push(FirewallRule {
+                service: service.to_string(),
+                ports: apply_restrictions(base_ports, &sources, &ifaces),
+                active,
+            });
+        }
+        self.commit_candidate(&mut current, candidate, None).await
+    }
+
+    /// Initialize the complete firewall policy in one transaction before any
+    /// engine-managed network-facing services are restored.
+    pub async fn init(
+        &self,
+        enabled_protocols: &[(Protocol, bool)],
+        rdma_enabled: bool,
+        dc_enabled: bool,
+        iscsi_ports: Vec<PortSpec>,
+        nvmeof_ports: Vec<PortSpec>,
+        published: Vec<PublishedAppPort>,
+    ) -> Result<(), String> {
+        let mut current = self.config.lock().await;
+        let restrictions = FirewallRestrictions::load(&self.paths.restrictions)?;
+        let custom = load_custom_rules(&self.paths.custom)?;
+        let mut candidate = FirewallConfig {
+            state: FirewallState::default(),
+            restrictions,
+            custom,
+            published,
+        };
+
+        let webui_sources = candidate
+            .restrictions
             .services
             .get("webui")
             .cloned()
             .unwrap_or_default();
-        let webui_ifaces = restrictions
+        let webui_ifaces = candidate
+            .restrictions
             .interfaces
             .get("webui")
             .cloned()
             .unwrap_or_default();
-        state.rules.push(FirewallRule {
+        candidate.state.rules.push(FirewallRule {
             service: "webui".to_string(),
             ports: apply_restrictions(webui_ports(), &webui_sources, &webui_ifaces),
             active: true,
         });
 
-        // Add rules for each protocol
         for (proto, enabled) in enabled_protocols {
-            let mut ports = ports_for_protocol(*proto);
+            let ports = ports_for_protocol(*proto);
             if ports.is_empty() {
                 continue;
             }
-            let sources = restrictions
+            let sources = candidate
+                .restrictions
                 .services
                 .get(proto.name())
                 .cloned()
                 .unwrap_or_default();
-            let ifaces = restrictions
+            let ifaces = candidate
+                .restrictions
                 .interfaces
                 .get(proto.name())
                 .cloned()
                 .unwrap_or_default();
-            ports = apply_restrictions(ports, &sources, &ifaces);
-            state.rules.push(FirewallRule {
+            candidate.state.rules.push(FirewallRule {
                 service: proto.name().to_string(),
-                ports,
+                ports: apply_restrictions(ports, &sources, &ifaces),
                 active: *enabled,
             });
         }
 
-        if let Err(e) = apply_nftables(&state, &custom).await {
-            error!("Failed to apply initial firewall rules: {e}");
-        } else {
-            info!("Firewall initialized with {} rules", state.rules.len());
-        }
-    }
-
-    /// Open ports for a protocol (called when a service is enabled).
-    pub async fn open(&self, proto: Protocol) {
-        let mut state = self.state.lock().await;
-        let name = proto.name();
-        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == name) {
-            if rule.active {
-                return; // already open
-            }
-            rule.active = true;
-        } else {
-            let ports = ports_for_protocol(proto);
-            if ports.is_empty() {
-                return;
-            }
-            state.rules.push(FirewallRule {
-                service: name.to_string(),
-                ports,
-                active: true,
-            });
-        }
-        let custom = self.custom.lock().await;
-        if let Err(e) = apply_nftables(&state, &custom).await {
-            error!("Failed to open firewall for {name}: {e}");
-        } else {
-            info!("Firewall: opened ports for {name}");
-        }
-    }
-
-    /// Close ports for a protocol (called when a service is disabled).
-    pub async fn close(&self, proto: Protocol) {
-        let mut state = self.state.lock().await;
-        let name = proto.name();
-        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == name) {
-            if !rule.active {
-                return; // already closed
-            }
-            rule.active = false;
-        }
-        let custom = self.custom.lock().await;
-        if let Err(e) = apply_nftables(&state, &custom).await {
-            error!("Failed to close firewall for {name}: {e}");
-        } else {
-            info!("Firewall: closed ports for {name}");
-        }
-    }
-
-    /// Open the named RDMA transport rule (per-box opt-in, #602).
-    pub async fn open_rdma(&self) {
-        let mut state = self.state.lock().await;
-        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "rdma") {
-            if rule.active {
-                return;
-            }
-            rule.active = true;
-        } else {
-            state.rules.push(FirewallRule {
+        if rdma_enabled {
+            let sources = candidate
+                .restrictions
+                .services
+                .get("rdma")
+                .cloned()
+                .unwrap_or_default();
+            let ifaces = candidate
+                .restrictions
+                .interfaces
+                .get("rdma")
+                .cloned()
+                .unwrap_or_default();
+            candidate.state.rules.push(FirewallRule {
                 service: "rdma".to_string(),
-                ports: rdma_ports(),
+                ports: apply_restrictions(rdma_ports(), &sources, &ifaces),
                 active: true,
             });
         }
-        let custom = self.custom.lock().await;
-        if let Err(e) = apply_nftables(&state, &custom).await {
-            error!("Failed to open firewall for rdma: {e}");
-        } else {
-            info!("Firewall: opened ports for rdma");
-        }
-    }
-
-    /// Close the named RDMA transport rule.
-    pub async fn close_rdma(&self) {
-        let mut state = self.state.lock().await;
-        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "rdma") {
-            if !rule.active {
-                return;
-            }
-            rule.active = false;
-        }
-        let custom = self.custom.lock().await;
-        if let Err(e) = apply_nftables(&state, &custom).await {
-            error!("Failed to close firewall for rdma: {e}");
-        } else {
-            info!("Firewall: closed ports for rdma");
-        }
-    }
-
-    /// Open the named Active Directory DC rule (#20, per-box opt-in).
-    pub async fn open_dc(&self) {
-        let mut state = self.state.lock().await;
-        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "dc") {
-            if rule.active {
-                return;
-            }
-            rule.active = true;
-        } else {
-            state.rules.push(FirewallRule {
+        if dc_enabled {
+            let sources = candidate
+                .restrictions
+                .services
+                .get("dc")
+                .cloned()
+                .unwrap_or_default();
+            let ifaces = candidate
+                .restrictions
+                .interfaces
+                .get("dc")
+                .cloned()
+                .unwrap_or_default();
+            candidate.state.rules.push(FirewallRule {
                 service: "dc".to_string(),
-                ports: dc_ports(),
+                ports: apply_restrictions(dc_ports(), &sources, &ifaces),
                 active: true,
             });
         }
-        let custom = self.custom.lock().await;
-        if let Err(e) = apply_nftables(&state, &custom).await {
-            error!("Failed to open firewall for dc: {e}");
-        } else {
-            info!("Firewall: opened ports for dc");
-        }
+        replace_rule_ports(
+            &mut candidate.state,
+            &candidate.restrictions,
+            Protocol::Iscsi.name(),
+            iscsi_ports,
+        );
+        replace_rule_ports(
+            &mut candidate.state,
+            &candidate.restrictions,
+            Protocol::Nvmeof.name(),
+            nvmeof_ports,
+        );
+
+        let rule_count = candidate.state.rules.len();
+        self.commit_candidate(&mut current, candidate, None).await?;
+        info!("Firewall initialized with {rule_count} rules");
+        Ok(())
     }
 
-    /// Close the named Active Directory DC rule.
-    pub async fn close_dc(&self) {
-        let mut state = self.state.lock().await;
-        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == "dc") {
-            if !rule.active {
-                return;
+    /// Reconcile protocol rules after service restoration, which may disable a
+    /// persisted protocol whose daemon failed to start.
+    pub async fn set_protocol_states(
+        &self,
+        enabled_protocols: &[(Protocol, bool)],
+    ) -> Result<(), String> {
+        let mut current = self.config.lock().await;
+        let mut candidate = current.clone();
+        let mut changed = false;
+        for (proto, enabled) in enabled_protocols {
+            if let Some(rule) = candidate
+                .state
+                .rules
+                .iter_mut()
+                .find(|rule| rule.service == proto.name())
+                && rule.active != *enabled
+            {
+                rule.active = *enabled;
+                changed = true;
             }
-            rule.active = false;
         }
-        let custom = self.custom.lock().await;
-        if let Err(e) = apply_nftables(&state, &custom).await {
-            error!("Failed to close firewall for dc: {e}");
-        } else {
-            info!("Firewall: closed ports for dc");
+        if !changed {
+            return Ok(());
         }
+        self.commit_candidate(&mut current, candidate, None).await
     }
 
-    /// Get current firewall status including restrictions.
+    /// Replace the Docker DNAT allowlist rendered into the early forward hook.
+    pub async fn set_published_app_ports(
+        &self,
+        mut published: Vec<PublishedAppPort>,
+    ) -> Result<(), String> {
+        published.sort_by(|a, b| {
+            a.transport
+                .cmp(&b.transport)
+                .then_with(|| a.host_port.cmp(&b.host_port))
+                .then_with(|| a.app.cmp(&b.app))
+        });
+        published.dedup_by(|a, b| {
+            a.transport == b.transport && a.host_port == b.host_port && a.app == b.app
+        });
+        let mut current = self.config.lock().await;
+        if current.published == published {
+            return Ok(());
+        }
+        let mut candidate = current.clone();
+        candidate.published = published;
+        self.commit_candidate(&mut current, candidate, None).await
+    }
+
+    pub async fn open(&self, proto: Protocol) -> Result<(), String> {
+        let name = proto.name();
+        self.set_rule_active(name, ports_for_protocol(proto), true)
+            .await?;
+        info!("Firewall: opened ports for {name}");
+        Ok(())
+    }
+
+    pub async fn close(&self, proto: Protocol) -> Result<(), String> {
+        let name = proto.name();
+        self.set_rule_active(name, ports_for_protocol(proto), false)
+            .await?;
+        info!("Firewall: closed ports for {name}");
+        Ok(())
+    }
+
+    pub async fn open_rdma(&self) -> Result<(), String> {
+        self.set_rule_active("rdma", rdma_ports(), true).await?;
+        info!("Firewall: opened ports for rdma");
+        Ok(())
+    }
+
+    pub async fn close_rdma(&self) -> Result<(), String> {
+        self.set_rule_active("rdma", rdma_ports(), false).await?;
+        info!("Firewall: closed ports for rdma");
+        Ok(())
+    }
+
+    pub async fn open_dc(&self) -> Result<(), String> {
+        self.set_rule_active("dc", dc_ports(), true).await?;
+        info!("Firewall: opened ports for dc");
+        Ok(())
+    }
+
+    pub async fn close_dc(&self) -> Result<(), String> {
+        self.set_rule_active("dc", dc_ports(), false).await?;
+        info!("Firewall: closed ports for dc");
+        Ok(())
+    }
+
     pub async fn status(&self) -> FirewallStatus {
-        let state = self.state.lock().await;
-        let restrictions = self.restrictions.lock().await;
-        let custom = self.custom.lock().await;
+        let config = self.config.lock().await;
         FirewallStatus {
             active: true,
-            rules: state.rules.clone(),
-            restrictions: restrictions.services.clone(),
-            interface_restrictions: restrictions.interfaces.clone(),
-            // Populated by the engine layer (router) which has the apps
-            // handle; the firewall module has no Docker knowledge.
-            published_app_ports: Vec::new(),
-            custom_rules: custom.clone(),
+            rules: config.state.rules.clone(),
+            restrictions: config.restrictions.services.clone(),
+            interface_restrictions: config.restrictions.interfaces.clone(),
+            published_app_ports: config.published.clone(),
+            custom_rules: config.custom.clone(),
         }
     }
 
-    /// Set source IP and/or interface restrictions for a service and rebuild firewall.
     pub async fn set_restriction(
         &self,
         service: &str,
         sources: Vec<String>,
         ifaces: Vec<String>,
     ) -> Result<(), String> {
-        // Update persisted restrictions
-        {
-            let mut restrictions = self.restrictions.lock().await;
-            if sources.is_empty() {
-                restrictions.services.remove(service);
-            } else {
-                restrictions
-                    .services
-                    .insert(service.to_string(), sources.clone());
+        for source in &sources {
+            if !valid_source(source) {
+                return Err(format!("invalid source (expected an IP or CIDR): {source}"));
             }
-            if ifaces.is_empty() {
-                restrictions.interfaces.remove(service);
-            } else {
-                restrictions
-                    .interfaces
-                    .insert(service.to_string(), ifaces.clone());
-            }
-            restrictions.save().await?;
         }
+        for iface in &ifaces {
+            if !valid_iface(iface) {
+                return Err(format!("invalid interface name: {iface}"));
+            }
+        }
+        let default_ports = if service == "webui" {
+            webui_ports()
+        } else if service == "rdma" {
+            rdma_ports()
+        } else if service == "dc" {
+            dc_ports()
+        } else if let Some(proto) = Protocol::from_name(service) {
+            ports_for_protocol(proto)
+        } else {
+            return Err(format!("unknown service: {service}"));
+        };
 
-        // Update rules in state
-        let mut state = self.state.lock().await;
-        if let Some(rule) = state.rules.iter_mut().find(|r| r.service == service) {
-            let base_ports = if service == "webui" {
-                webui_ports()
-            } else if service == "rdma" {
-                rdma_ports()
-            } else if service == "dc" {
-                dc_ports()
-            } else if let Some(proto) = Protocol::from_name(service) {
-                ports_for_protocol(proto)
-            } else {
-                return Err(format!("unknown service: {service}"));
-            };
+        let mut current = self.config.lock().await;
+        let base_ports = current
+            .state
+            .rules
+            .iter()
+            .find(|rule| rule.service == service)
+            .map(|rule| {
+                let mut ports = Vec::new();
+                for mut port in rule.ports.iter().cloned() {
+                    port.source = None;
+                    port.iface = None;
+                    if !ports.contains(&port) {
+                        ports.push(port);
+                    }
+                }
+                ports
+            })
+            .unwrap_or(default_ports);
+        let mut candidate = current.clone();
+        if sources.is_empty() {
+            candidate.restrictions.services.remove(service);
+        } else {
+            candidate
+                .restrictions
+                .services
+                .insert(service.to_string(), sources.clone());
+        }
+        if ifaces.is_empty() {
+            candidate.restrictions.interfaces.remove(service);
+        } else {
+            candidate
+                .restrictions
+                .interfaces
+                .insert(service.to_string(), ifaces.clone());
+        }
+        if let Some(rule) = candidate
+            .state
+            .rules
+            .iter_mut()
+            .find(|rule| rule.service == service)
+        {
             rule.ports = apply_restrictions(base_ports, &sources, &ifaces);
         }
 
-        let custom = self.custom.lock().await;
-        apply_nftables(&state, &custom).await?;
+        let staged = StagedJson::stage(&self.paths.restrictions, &candidate.restrictions).await?;
+        self.commit_candidate(&mut current, candidate, Some(staged))
+            .await?;
         info!("Firewall: updated restrictions for {service}");
         Ok(())
     }
 
-    /// Get restrictions for a specific service.
     pub async fn get_restrictions(&self) -> HashMap<String, Vec<String>> {
-        self.restrictions.lock().await.services.clone()
+        self.config.lock().await.restrictions.services.clone()
     }
 
-    /// Point a service's firewall rule at a new port set. iSCSI and
-    /// NVMe-oF listen on operator-chosen portal ports, so their rules
-    /// follow the configured portals instead of the protocol default
-    /// (#602: a portal on a custom port was silently unreachable).
-    /// Preserves the rule's open/closed state; no-op (and no nft
-    /// apply) when the effective set is unchanged.
-    pub async fn set_service_ports(&self, proto: Protocol, ports: Vec<PortSpec>) {
-        let mut state = self.state.lock().await;
-        let restrictions = self.restrictions.lock().await;
-        if !replace_rule_ports(&mut state, &restrictions, proto.name(), ports) {
-            return;
+    pub async fn set_service_ports(
+        &self,
+        proto: Protocol,
+        ports: Vec<PortSpec>,
+    ) -> Result<(), String> {
+        let mut current = self.config.lock().await;
+        let mut candidate = current.clone();
+        if !replace_rule_ports(
+            &mut candidate.state,
+            &candidate.restrictions,
+            proto.name(),
+            ports,
+        ) {
+            return Ok(());
         }
-        let custom = self.custom.lock().await;
-        if let Err(e) = apply_nftables(&state, &custom).await {
-            error!("Failed to update firewall ports for {}: {e}", proto.name());
-        } else {
-            info!("Firewall: updated ports for {}", proto.name());
-        }
+        self.commit_candidate(&mut current, candidate, None).await?;
+        info!("Firewall: updated ports for {}", proto.name());
+        Ok(())
     }
 
-    /// Create a custom port rule. Validates input + service-port collision +
-    /// exact-duplicate, persists, and rebuilds the firewall. Returns the
-    /// created rule (with its assigned id). Duplicate/collision/validation
-    /// failures return an `Err` and change nothing.
+    pub async fn set_portal_ports(
+        &self,
+        iscsi_ports: Vec<PortSpec>,
+        nvmeof_ports: Vec<PortSpec>,
+    ) -> Result<(), String> {
+        let mut current = self.config.lock().await;
+        let mut candidate = current.clone();
+        let iscsi_changed = replace_rule_ports(
+            &mut candidate.state,
+            &candidate.restrictions,
+            Protocol::Iscsi.name(),
+            iscsi_ports,
+        );
+        let nvmeof_changed = replace_rule_ports(
+            &mut candidate.state,
+            &candidate.restrictions,
+            Protocol::Nvmeof.name(),
+            nvmeof_ports,
+        );
+        if !iscsi_changed && !nvmeof_changed {
+            return Ok(());
+        }
+        self.commit_candidate(&mut current, candidate, None).await?;
+        info!("Firewall: updated iSCSI and NVMe-oF portal ports");
+        Ok(())
+    }
+
     pub async fn add_custom_rule(&self, input: CustomRuleInput) -> Result<CustomRule, String> {
         validate_custom_input(&input)?;
-
-        let state = self.state.lock().await;
-        if let Some(owner) = service_port_conflict(&state, input.transport, input.from, input.to) {
+        let mut current = self.config.lock().await;
+        if let Some(owner) =
+            service_port_conflict(&current.state, input.transport, input.from, input.to)
+        {
             return Err(format!(
                 "{}/{}-{} overlaps ports managed by {owner} — enable {owner} to open them",
                 transport_str(input.transport),
@@ -692,8 +869,7 @@ impl FirewallService {
                 input.to,
             ));
         }
-        let mut custom = self.custom.lock().await;
-        if custom.iter().any(|r| same_rule(r, &input)) {
+        if current.custom.iter().any(|rule| same_rule(rule, &input)) {
             return Err("an identical custom rule already exists".into());
         }
 
@@ -707,24 +883,25 @@ impl FirewallService {
             iface: input.iface.clone(),
             enabled: input.enabled,
         };
-        custom.push(rule.clone());
-        save_custom_rules(&custom).await?;
-        apply_nftables(&state, &custom).await?;
+        let mut candidate = current.clone();
+        candidate.custom.push(rule.clone());
+        let staged = StagedJson::stage(&self.paths.custom, &candidate.custom).await?;
+        self.commit_candidate(&mut current, candidate, Some(staged))
+            .await?;
         info!("Firewall: added custom rule {} ({})", rule.id, rule.label);
         Ok(rule)
     }
 
-    /// Update an existing custom rule by id (full replace of the mutable
-    /// fields). Re-validates; the duplicate check ignores the rule itself.
     pub async fn update_custom_rule(
         &self,
         id: &str,
         input: CustomRuleInput,
     ) -> Result<CustomRule, String> {
         validate_custom_input(&input)?;
-
-        let state = self.state.lock().await;
-        if let Some(owner) = service_port_conflict(&state, input.transport, input.from, input.to) {
+        let mut current = self.config.lock().await;
+        if let Some(owner) =
+            service_port_conflict(&current.state, input.transport, input.from, input.to)
+        {
             return Err(format!(
                 "{}/{}-{} overlaps ports managed by {owner} — enable {owner} to open them",
                 transport_str(input.transport),
@@ -732,11 +909,16 @@ impl FirewallService {
                 input.to,
             ));
         }
-        let mut custom = self.custom.lock().await;
-        if custom.iter().any(|r| r.id != id && same_rule(r, &input)) {
+        if current
+            .custom
+            .iter()
+            .any(|rule| rule.id != id && same_rule(rule, &input))
+        {
             return Err("an identical custom rule already exists".into());
         }
-        let Some(rule) = custom.iter_mut().find(|r| r.id == id) else {
+
+        let mut candidate = current.clone();
+        let Some(rule) = candidate.custom.iter_mut().find(|rule| rule.id == id) else {
             return Err(format!("custom rule not found: {id}"));
         };
         rule.label = input.label.trim().to_string();
@@ -747,25 +929,24 @@ impl FirewallService {
         rule.iface = input.iface.clone();
         rule.enabled = input.enabled;
         let updated = rule.clone();
-
-        save_custom_rules(&custom).await?;
-        apply_nftables(&state, &custom).await?;
+        let staged = StagedJson::stage(&self.paths.custom, &candidate.custom).await?;
+        self.commit_candidate(&mut current, candidate, Some(staged))
+            .await?;
         info!("Firewall: updated custom rule {id}");
         Ok(updated)
     }
 
-    /// Remove a custom rule by id and rebuild the firewall. No-op error if the
-    /// id is unknown.
     pub async fn remove_custom_rule(&self, id: &str) -> Result<(), String> {
-        let state = self.state.lock().await;
-        let mut custom = self.custom.lock().await;
-        let before = custom.len();
-        custom.retain(|r| r.id != id);
-        if custom.len() == before {
+        let mut current = self.config.lock().await;
+        let mut candidate = current.clone();
+        let before = candidate.custom.len();
+        candidate.custom.retain(|rule| rule.id != id);
+        if candidate.custom.len() == before {
             return Err(format!("custom rule not found: {id}"));
         }
-        save_custom_rules(&custom).await?;
-        apply_nftables(&state, &custom).await?;
+        let staged = StagedJson::stage(&self.paths.custom, &candidate.custom).await?;
+        self.commit_candidate(&mut current, candidate, Some(staged))
+            .await?;
         info!("Firewall: removed custom rule {id}");
         Ok(())
     }
@@ -875,49 +1056,167 @@ fn same_rule(r: &CustomRule, input: &CustomRuleInput) -> bool {
         && r.iface == input.iface
 }
 
-// ── nftables application ───────────────────────────────────────
+struct StagedJson {
+    temp: PathBuf,
+    destination: PathBuf,
+    finished: bool,
+}
 
-/// Generate and apply the full nftables ruleset atomically.
-async fn apply_nftables(state: &FirewallState, custom: &[CustomRule]) -> Result<(), String> {
-    let rules = render_ruleset(state, custom);
+impl StagedJson {
+    async fn stage<T: Serialize>(destination: &Path, value: &T) -> Result<Self, String> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| format!("{} has no parent directory", destination.display()))?;
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid state path: {}", destination.display()))?;
+        let temp = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+        let json = serde_json::to_vec_pretty(value).map_err(|e| format!("serialize: {e}"))?;
 
-    // Apply atomically: flush + load
-    let flush = Command::new("nft")
-        .args(["delete", "table", "inet", "nasty"])
-        .output()
-        .await;
-    // Ignore flush errors (table may not exist yet)
-    if let Ok(o) = &flush
-        && !o.status.success()
-    {
-        let stderr = String::from_utf8_lossy(&o.stderr);
-        if !stderr.contains("No such file") && !stderr.contains("does not exist") {
-            warn!("nft delete table warning: {stderr}");
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp)
+            .await
+            .map_err(|e| format!("create {}: {e}", temp.display()))?;
+        if let Err(e) = file.write_all(&json).await {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(format!("write {}: {e}", temp.display()));
+        }
+        if let Err(e) = file.sync_all().await {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(format!("sync {}: {e}", temp.display()));
+        }
+        drop(file);
+
+        Ok(Self {
+            temp,
+            destination: destination.to_path_buf(),
+            finished: false,
+        })
+    }
+
+    async fn commit(mut self) -> Result<(), String> {
+        tokio::fs::rename(&self.temp, &self.destination)
+            .await
+            .map_err(|e| {
+                format!(
+                    "rename {} to {}: {e}",
+                    self.temp.display(),
+                    self.destination.display()
+                )
+            })?;
+        self.finished = true;
+        if let Some(parent) = self.destination.parent() {
+            match tokio::fs::File::open(parent).await {
+                Ok(directory) => {
+                    if let Err(e) = directory.sync_all().await {
+                        warn!("sync firewall state directory {}: {e}", parent.display());
+                    }
+                }
+                Err(e) => warn!(
+                    "open firewall state directory {} for sync: {e}",
+                    parent.display()
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    async fn discard(mut self) {
+        let _ = tokio::fs::remove_file(&self.temp).await;
+        self.finished = true;
+    }
+}
+
+impl Drop for StagedJson {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = std::fs::remove_file(&self.temp);
         }
     }
+}
 
-    // Apply the ruleset by writing it to a temp file and pointing nft at it.
-    // An earlier version tried `nft -f -` with piped stdin but never wrote to
-    // the pipe, so nft hung waiting for EOF until the spawn went out of scope.
-    let tmp = "/tmp/nasty-firewall.nft";
-    tokio::fs::write(tmp, &rules)
+// ── nftables application ───────────────────────────────────────
+
+/// Validate the exact replacement batch, then submit it once. nft sends each
+/// file as one netlink transaction, so a failure leaves the current table
+/// untouched instead of exposing the host between delete and reload commands.
+async fn apply_nftables_with(
+    nft_program: &Path,
+    state: &FirewallState,
+    custom: &[CustomRule],
+    published: &[PublishedAppPort],
+) -> Result<(), String> {
+    let transaction = render_transaction(state, custom, published);
+    run_nft(
+        nft_program,
+        &["--check", "--file", "-"],
+        &transaction,
+        "validation",
+    )
+    .await?;
+    run_nft(nft_program, &["--file", "-"], &transaction, "apply").await
+}
+
+async fn run_nft(
+    nft_program: &Path,
+    args: &[&str],
+    transaction: &str,
+    stage: &str,
+) -> Result<(), String> {
+    let mut command = Command::new(nft_program);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("spawn nft {stage}: {e}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("open nft {stage} stdin"))?;
+    let transaction = transaction.as_bytes().to_vec();
+    let writer_stage = stage.to_string();
+    let writer = tokio::spawn(async move {
+        stdin
+            .write_all(&transaction)
+            .await
+            .map_err(|e| format!("write nft {writer_stage} stdin: {e}"))
+    });
+    let (write_result, output_result) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+            tokio::join!(writer, child.wait_with_output())
+        })
         .await
-        .map_err(|e| format!("write {tmp}: {e}"))?;
-
-    let output = Command::new("nft")
-        .args(["-f", tmp])
-        .output()
-        .await
-        .map_err(|e| format!("nft -f: {e}"))?;
-
-    let _ = tokio::fs::remove_file(tmp).await;
-
+        .map_err(|_| format!("nft {stage} timed out"))?;
+    write_result.map_err(|e| format!("join nft {stage} stdin writer: {e}"))??;
+    let output = output_result.map_err(|e| format!("wait for nft {stage}: {e}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("nft apply failed: {stderr}"));
+        return Err(format!(
+            "nft {stage} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
-
     Ok(())
+}
+
+fn render_transaction(
+    state: &FirewallState,
+    custom: &[CustomRule],
+    published: &[PublishedAppPort],
+) -> String {
+    let mut transaction = String::from("destroy table inet nasty\n");
+    transaction.push_str(&render_ruleset_with_published(state, custom, published));
+    transaction
 }
 
 /// nft source-address clause with the correct family: `ip6 saddr` for an
@@ -935,6 +1234,14 @@ fn saddr_clause(src: &str) -> String {
 /// Build the full `table inet nasty` ruleset text from the service rules and
 /// the custom rules. Pure — no I/O — so it can be unit-tested.
 pub fn render_ruleset(state: &FirewallState, custom: &[CustomRule]) -> String {
+    render_ruleset_with_published(state, custom, &[])
+}
+
+fn render_ruleset_with_published(
+    state: &FirewallState,
+    custom: &[CustomRule],
+    published: &[PublishedAppPort],
+) -> String {
     let mut rules = String::new();
     rules.push_str("table inet nasty {\n");
     rules.push_str("    chain input {\n");
@@ -1004,6 +1311,55 @@ pub fn render_ruleset(state: &FirewallState, custom: &[CustomRule]) -> String {
     }
 
     rules.push_str("    }\n");
+    rules.push_str("    chain forward {\n");
+    rules.push_str("        type filter hook forward priority -10; policy accept;\n");
+    rules.push_str("        # Explicitly allowed Docker-published host ports\n");
+    for port in published {
+        let proto = if port.transport.eq_ignore_ascii_case("tcp") {
+            "tcp"
+        } else if port.transport.eq_ignore_ascii_case("udp") {
+            "udp"
+        } else {
+            continue;
+        };
+        rules.push_str(&format!(
+            "        ct direction original ct status dnat meta l4proto {proto} ct original proto-dst {} accept # app-published\n",
+            port.host_port
+        ));
+    }
+    // Custom host-port rules also authorize matching inbound DNAT traffic.
+    for rule in custom {
+        if !rule.enabled {
+            continue;
+        }
+        let proto = match rule.transport {
+            Transport::Tcp => "tcp",
+            Transport::Udp => "udp",
+        };
+        let mut conditions = vec![
+            "ct direction original".to_string(),
+            "ct status dnat".to_string(),
+        ];
+        if let Some(ref iface) = rule.iface {
+            conditions.push(format!("iifname \"{iface}\""));
+        }
+        if let Some(ref src) = rule.source {
+            conditions.push(saddr_clause(src));
+        }
+        conditions.push(format!("meta l4proto {proto}"));
+        if rule.from == rule.to {
+            conditions.push(format!("ct original proto-dst {}", rule.from));
+        } else {
+            conditions.push(format!("ct original proto-dst {}-{}", rule.from, rule.to));
+        }
+        rules.push_str(&format!(
+            "        {} accept # custom:{}\n",
+            conditions.join(" "),
+            rule.id
+        ));
+    }
+    rules.push_str("        ct direction original ct status dnat drop\n");
+    rules.push_str("    }\n");
     rules.push_str("}\n");
     rules
 }
@@ -1011,6 +1367,28 @@ pub fn render_ruleset(state: &FirewallState, custom: &[CustomRule]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn mock_nft(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("mock-nft");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn test_service(dir: &Path, nft_program: PathBuf, config: FirewallConfig) -> FirewallService {
+        FirewallService {
+            config: tokio::sync::Mutex::new(config),
+            paths: FirewallPaths {
+                restrictions: dir.join("restrictions.json"),
+                custom: dir.join("custom.json"),
+            },
+            nft_program,
+        }
+    }
 
     #[test]
     fn smb_opens_serving_and_wsdd_discovery_ports() {
@@ -1170,6 +1548,107 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn setting_restriction_preserves_custom_portal_ports() {
+        let dir = tempfile::tempdir().unwrap();
+        let nft = mock_nft(dir.path(), "cat >/dev/null\nexit 0");
+        let config = FirewallConfig {
+            state: state_with_rule("iscsi", vec![tcp(3261)], true),
+            ..FirewallConfig::default()
+        };
+        let service = test_service(dir.path(), nft, config);
+
+        service
+            .set_restriction(
+                "iscsi",
+                vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        service
+            .set_restriction(
+                "iscsi",
+                vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let rule = service
+            .status()
+            .await
+            .rules
+            .into_iter()
+            .find(|rule| rule.service == "iscsi")
+            .unwrap();
+        assert_eq!(rule.ports.len(), 2, "re-saving must not multiply ports");
+        assert!(rule.ports.iter().all(|port| port.port == 3261));
+        assert_eq!(rule.ports[0].source.as_deref(), Some("10.0.0.0/8"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn portal_ports_commit_in_one_firewall_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let invocations = dir.path().join("invocations");
+        let nft = mock_nft(
+            dir.path(),
+            &format!("cat >> \"{}\"\nexit 0", invocations.display()),
+        );
+        let config = FirewallConfig {
+            state: FirewallState {
+                rules: vec![
+                    FirewallRule {
+                        service: "iscsi".into(),
+                        ports: vec![tcp(3260)],
+                        active: true,
+                    },
+                    FirewallRule {
+                        service: "nvmeof".into(),
+                        ports: vec![tcp(4420)],
+                        active: true,
+                    },
+                ],
+            },
+            ..FirewallConfig::default()
+        };
+        let service = test_service(dir.path(), nft, config);
+
+        service
+            .set_portal_ports(vec![tcp(3261)], vec![tcp(4421)])
+            .await
+            .unwrap();
+
+        let status = service.status().await;
+        assert_eq!(
+            status
+                .rules
+                .iter()
+                .find(|rule| rule.service == "iscsi")
+                .unwrap()
+                .ports[0]
+                .port,
+            3261
+        );
+        assert_eq!(
+            status
+                .rules
+                .iter()
+                .find(|rule| rule.service == "nvmeof")
+                .unwrap()
+                .ports[0]
+                .port,
+            4421
+        );
+        // One check and one apply, both carrying the complete two-service batch.
+        let recorded = std::fs::read_to_string(invocations).unwrap();
+        assert_eq!(recorded.matches("destroy table inet nasty").count(), 2);
+        assert_eq!(recorded.matches("3261").count(), 2);
+        assert_eq!(recorded.matches("4421").count(), 2);
+    }
+
     #[test]
     fn replace_rule_ports_creates_inactive_rule_for_unknown_service() {
         // A resync can land before the service was ever opened; the
@@ -1211,6 +1690,272 @@ mod tests {
             out.contains("tcp dport 32400 accept # custom:id1"),
             "got:\n{out}"
         );
+    }
+
+    #[test]
+    fn transaction_destroys_and_replaces_table_in_one_batch() {
+        let transaction = render_transaction(&FirewallState::default(), &[], &[]);
+        assert!(transaction.starts_with("destroy table inet nasty\n"));
+        assert_eq!(transaction.matches("destroy table inet nasty").count(), 1);
+        assert_eq!(transaction.matches("table inet nasty {").count(), 1);
+        assert!(!transaction.contains("delete table"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_failure_preserves_in_memory_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = FirewallConfig {
+            state: state_with_rule("ssh", vec![tcp(22)], false),
+            ..Default::default()
+        };
+        let service = test_service(dir.path(), dir.path().join("missing-nft-program"), config);
+
+        assert!(service.open(Protocol::Ssh).await.is_err());
+        let status = service.status().await;
+        assert!(!status.rules[0].active);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn validation_failure_preserves_in_memory_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let nft = mock_nft(
+            dir.path(),
+            "cat >/dev/null\necho validation rejected >&2\nexit 1",
+        );
+        let config = FirewallConfig {
+            state: state_with_rule("ssh", vec![tcp(22)], false),
+            ..Default::default()
+        };
+        let service = test_service(dir.path(), nft, config);
+
+        let error = service.open(Protocol::Ssh).await.unwrap_err();
+        assert!(error.contains("validation rejected"));
+        assert!(!service.status().await.rules[0].active);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_failure_preserves_in_memory_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let nft = mock_nft(
+            dir.path(),
+            "cat >/dev/null\nif [ \"$1\" = \"--check\" ]; then exit 0; fi\necho apply rejected >&2\nexit 1",
+        );
+        let config = FirewallConfig {
+            state: state_with_rule("ssh", vec![tcp(22)], false),
+            ..Default::default()
+        };
+        let service = test_service(dir.path(), nft, config);
+
+        let error = service.open(Protocol::Ssh).await.unwrap_err();
+        assert!(error.contains("apply rejected"));
+        assert!(!service.status().await.rules[0].active);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_and_apply_receive_the_identical_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("transactions");
+        let nft = mock_nft(
+            dir.path(),
+            &format!(
+                "cat >> \"{}\"\nprintf '\\n---transaction---\\n' >> \"{}\"\nexit 0",
+                log.display(),
+                log.display()
+            ),
+        );
+
+        apply_nftables_with(&nft, &state_with_rule("ssh", vec![tcp(22)], true), &[], &[])
+            .await
+            .unwrap();
+        let recorded = std::fs::read_to_string(log).unwrap();
+        let transactions: Vec<&str> = recorded
+            .split("---transaction---")
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        assert_eq!(transactions.len(), 2);
+        assert_eq!(transactions[0], transactions[1]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn corrupt_persisted_state_aborts_initialization_without_applying() {
+        let dir = tempfile::tempdir().unwrap();
+        let invocations = dir.path().join("invocations");
+        let nft = mock_nft(
+            dir.path(),
+            &format!(
+                "cat >/dev/null\nprintf x >> \"{}\"\nexit 0",
+                invocations.display()
+            ),
+        );
+        std::fs::write(dir.path().join("restrictions.json"), "{not-json").unwrap();
+        let config = FirewallConfig {
+            state: state_with_rule("ssh", vec![tcp(22)], false),
+            ..Default::default()
+        };
+        let service = test_service(dir.path(), nft, config);
+
+        let error = service
+            .init(&[], false, false, vec![tcp(3260)], vec![tcp(4420)], vec![])
+            .await
+            .unwrap_err();
+        assert!(error.contains("parse"));
+        assert!(!invocations.exists());
+        assert!(!service.status().await.rules[0].active);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initialization_applies_special_and_portal_rules_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let invocations = dir.path().join("invocations");
+        let nft = mock_nft(
+            dir.path(),
+            &format!(
+                "cat >/dev/null\nprintf x >> \"{}\"\nexit 0",
+                invocations.display()
+            ),
+        );
+        let service = test_service(dir.path(), nft, FirewallConfig::default());
+
+        service
+            .init(
+                &[(Protocol::Iscsi, true), (Protocol::Nvmeof, true)],
+                true,
+                true,
+                vec![tcp(3261)],
+                vec![tcp(4421)],
+                vec![PublishedAppPort {
+                    app: "media".into(),
+                    host_port: 32400,
+                    container_port: 32400,
+                    transport: "tcp".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let status = service.status().await;
+        assert!(status.rules.iter().any(|rule| rule.service == "rdma"));
+        assert!(status.rules.iter().any(|rule| rule.service == "dc"));
+        assert_eq!(status.published_app_ports.len(), 1);
+        assert_eq!(
+            status
+                .rules
+                .iter()
+                .find(|rule| rule.service == "iscsi")
+                .unwrap()
+                .ports[0]
+                .port,
+            3261
+        );
+        assert_eq!(
+            status
+                .rules
+                .iter()
+                .find(|rule| rule.service == "nvmeof")
+                .unwrap()
+                .ports[0]
+                .port,
+            4421
+        );
+        assert_eq!(std::fs::read_to_string(invocations).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn forward_policy_allows_managed_and_custom_dnat_then_drops_the_rest() {
+        let custom = vec![CustomRule {
+            id: "external".into(),
+            label: "external container".into(),
+            transport: Transport::Udp,
+            from: 9000,
+            to: 9010,
+            source: Some("10.0.0.0/8".into()),
+            iface: Some("eth0".into()),
+            enabled: true,
+        }];
+        let published = vec![PublishedAppPort {
+            app: "media".into(),
+            host_port: 32400,
+            container_port: 32400,
+            transport: "tcp".into(),
+        }];
+        let rules = render_ruleset_with_published(&FirewallState::default(), &custom, &published);
+        assert!(rules.contains(
+            "ct direction original ct status dnat meta l4proto tcp ct original proto-dst 32400 accept # app-published"
+        ));
+        assert!(rules.contains(
+            "ct direction original ct status dnat iifname \"eth0\" ip saddr 10.0.0.0/8 meta l4proto udp ct original proto-dst 9000-9010 accept # custom:external"
+        ));
+        assert!(rules.contains("ct direction original ct status dnat drop"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persistence_failure_restores_live_and_in_memory_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let invocations = dir.path().join("invocations");
+        let nft = mock_nft(
+            dir.path(),
+            &format!(
+                "cat >> \"{}\"\nprintf '\\n---transaction---\\n' >> \"{}\"\nexit 0",
+                invocations.display(),
+                invocations.display()
+            ),
+        );
+        // Renaming the staged JSON over a directory fails after candidate rules
+        // were applied, forcing the compensating old-rules transaction.
+        std::fs::create_dir(dir.path().join("custom.json")).unwrap();
+        let service = test_service(dir.path(), nft, FirewallConfig::default());
+
+        let error = service
+            .add_custom_rule(input(9000, 9000, Transport::Tcp))
+            .await
+            .unwrap_err();
+        assert!(error.contains("previous live rules restored"));
+        assert!(service.status().await.custom_rules.is_empty());
+        let recorded = std::fs::read_to_string(invocations).unwrap();
+        let transactions: Vec<&str> = recorded
+            .split("---transaction---")
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        assert_eq!(transactions.len(), 4);
+        assert!(transactions[0].contains("9000"));
+        assert!(transactions[1].contains("9000"));
+        assert!(!transactions[2].contains("9000"));
+        assert!(!transactions[3].contains("9000"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rollback_failure_tracks_the_candidate_that_remains_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = dir.path().join("count");
+        let nft = mock_nft(
+            dir.path(),
+            &format!(
+                "cat >/dev/null\nn=$(/bin/cat \"{}\" 2>/dev/null || printf 0)\n\
+                 n=$((n + 1))\nprintf '%s' \"$n\" > \"{}\"\n\
+                 if [ \"$n\" -ge 3 ]; then exit 1; fi\nexit 0",
+                count.display(),
+                count.display()
+            ),
+        );
+        std::fs::create_dir(dir.path().join("custom.json")).unwrap();
+        let service = test_service(dir.path(), nft, FirewallConfig::default());
+
+        let error = service
+            .add_custom_rule(input(9000, 9000, Transport::Tcp))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("in-memory state reflects the live candidate"));
+        assert_eq!(service.status().await.custom_rules.len(), 1);
     }
 
     #[test]
