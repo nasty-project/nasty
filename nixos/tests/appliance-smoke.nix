@@ -195,7 +195,7 @@ let
             "transport": "tcp",
             "from": 18082,
             "to": 18082,
-            "source": "192.168.1.0/24",
+            "source": "192.0.2.0/24",
             "enabled": True,
         })
     finally:
@@ -227,10 +227,6 @@ in
 
 pkgs.testers.runNixOSTest {
   name = "appliance-smoke";
-
-  nodes.client = { pkgs, ... }: {
-    environment.systemPackages = [ pkgs.curl ];
-  };
 
   nodes.machine = { lib, ... }: {
     imports = [
@@ -286,7 +282,6 @@ pkgs.testers.runNixOSTest {
     import shlex
 
     machine.start()
-    client.start()
 
     # nftables must establish a default-drop baseline independently of the
     # engine. Restart nftables as separate stop/start operations so PartOf stops
@@ -477,14 +472,30 @@ pkgs.testers.runNixOSTest {
     assert "ct original proto-dst 18080 accept" in forward_policy, (
         f"managed app port missing from Docker forward policy: {forward_policy}"
     )
-    client.wait_until_succeeds("curl -fsS --max-time 2 http://machine:18080/")
+    # Exercise Docker DNAT from a non-loopback ingress without relying on the
+    # VM test LAN, which NetworkManager may reconfigure during engine startup.
+    machine.succeed("ip netns add fwclient")
+    machine.succeed("ip link add fw-host type veth peer name fw-client")
+    machine.succeed("ip addr add 192.0.2.1/24 dev fw-host")
+    machine.succeed("ip link set fw-host up")
+    machine.succeed("ip link set fw-client netns fwclient")
+    machine.succeed("ip netns exec fwclient ip link set lo up")
+    machine.succeed("ip netns exec fwclient ip addr add 192.0.2.2/24 dev fw-client")
+    machine.succeed("ip netns exec fwclient ip link set fw-client up")
+    machine.wait_until_succeeds(
+        "ip netns exec fwclient curl -fsS --max-time 2 http://192.0.2.1:18080/"
+    )
     machine.succeed(
         "docker run -d --name unmanaged-smoke -p 18081:80 nasty-smoke-app:test"
     )
-    client.fail("curl -fsS --max-time 2 http://machine:18081/")
+    machine.fail(
+        "ip netns exec fwclient curl -fsS --max-time 2 http://192.0.2.1:18081/"
+    )
     machine.succeed(
         "docker run -d --name restricted-smoke -p 18082:80 nasty-smoke-app:test"
     )
-    client.wait_until_succeeds("curl -fsS --max-time 2 http://machine:18082/")
+    machine.wait_until_succeeds(
+        "ip netns exec fwclient curl -fsS --max-time 2 http://192.0.2.1:18082/"
+    )
   '';
 }
