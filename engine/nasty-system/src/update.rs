@@ -349,7 +349,9 @@ install_pair() {
 
 rollback_transaction() {
     local rc="$1"
+    local detach_activation="$2"
     local rollback_ok=true
+    local detached_started=false
     trap - ERR TERM INT HUP
     set +e
     echo "==> Update transaction failed (exit $rc); restoring the previous system..."
@@ -366,17 +368,54 @@ rollback_transaction() {
     if $PROFILE_MUTATED; then
         nix-env --profile "$SYSTEM_PROFILE" --switch-generation "$OLD_GENERATION" \
             || rollback_ok=false
-        NIXOS_INSTALL_BOOTLOADER=0 "$OLD_SYSTEM/bin/switch-to-configuration" switch \
-            || rollback_ok=false
+        if $detach_activation; then
+            if $rollback_ok; then
+                SIGNAL_ROLLBACK="$WORK_DIR/signal-rollback.sh"
+                cat > "$SIGNAL_ROLLBACK" <<'SIGNAL_ROLLBACK_EOF'
+#!/bin/bash
+set -euo pipefail
+export PATH="/run/current-system/sw/bin:$PATH"
+NIXOS_INSTALL_BOOTLOADER=0 "$OLD_SYSTEM/bin/switch-to-configuration" switch
+rm -f "$MARKER"
+rm -rf "$WORK_DIR"
+rm -f -- "$UPDATE_SCRIPT"
+SIGNAL_ROLLBACK_EOF
+                chmod 0700 "$SIGNAL_ROLLBACK" || rollback_ok=false
+                ROLLBACK_UNIT="nasty-update-rollback-${OLD_GENERATION}-${RANDOM}"
+                if $rollback_ok && systemd-run \
+                    --unit "$ROLLBACK_UNIT" \
+                    --no-block \
+                    --description "NASty interrupted update rollback" \
+                    --property=Type=oneshot \
+                    --property=StandardOutput=journal \
+                    --property=StandardError=journal \
+                    --setenv "PATH=$PATH" \
+                    --setenv "OLD_SYSTEM=$OLD_SYSTEM" \
+                    --setenv "MARKER=$MARKER" \
+                    --setenv "WORK_DIR=$WORK_DIR" \
+                    --setenv "UPDATE_SCRIPT=$0" \
+                    -- bash "$SIGNAL_ROLLBACK"; then
+                    detached_started=true
+                else
+                    rollback_ok=false
+                fi
+            fi
+        else
+            NIXOS_INSTALL_BOOTLOADER=0 "$OLD_SYSTEM/bin/switch-to-configuration" switch \
+                || rollback_ok=false
+        fi
     fi
-    if $MARKER_SET && $rollback_ok; then
+    if $MARKER_SET && $rollback_ok && ! $detached_started; then
         rm -f "$MARKER" || rollback_ok=false
     fi
     rm -f "$LIVE_DIR/.flake.nix.nasty-new" "$LIVE_DIR/.flake.lock.nasty-new"
     echo "--- journalctl -u nixos-rebuild-switch-to-configuration -n 60 ---"
     journalctl -u nixos-rebuild-switch-to-configuration --no-pager -n 60 || true
     echo "--- end journal dump ---"
-    if $rollback_ok; then
+    if $detached_started; then
+        echo "==> Previous-generation activation continues in $ROLLBACK_UNIT.service"
+@BD_CLEANUP@
+    elif $rollback_ok; then
         cleanup
     else
         echo "==> CRITICAL: automatic rollback failed."
@@ -388,10 +427,10 @@ rollback_transaction() {
     fi
     exit "$rc"
 }
-trap 'rollback_transaction $?' ERR
-trap 'rollback_transaction 143' TERM
-trap 'rollback_transaction 130' INT
-trap 'rollback_transaction 129' HUP
+trap 'rollback_transaction $? false' ERR
+trap 'rollback_transaction 143 true' TERM
+trap 'rollback_transaction 130 true' INT
+trap 'rollback_transaction 129 true' HUP
 
 install -d -m 0700 "$STAGE" "$BACKUP"
 # Snapshot the original pair before the staged copy is changed.
@@ -3971,8 +4010,10 @@ proc /proc proc rw 0 0\n\
             "nix-env --profile \"$SYSTEM_PROFILE\" --switch-generation \"$OLD_GENERATION\""
         ));
         assert!(script.contains("\"$OLD_SYSTEM/bin/switch-to-configuration\" switch"));
-        assert!(script.contains("trap 'rollback_transaction 143' TERM"));
-        assert!(script.contains("if $MARKER_SET && $rollback_ok; then"));
+        assert!(script.contains("trap 'rollback_transaction 143 true' TERM"));
+        assert!(script.contains("NASty interrupted update rollback"));
+        assert!(script.contains("Previous-generation activation continues in $ROLLBACK_UNIT"));
+        assert!(script.contains("if $MARKER_SET && $rollback_ok && ! $detached_started; then"));
         assert!(script.contains("Recovery remains suppressed; backups are in $BACKUP"));
     }
 
