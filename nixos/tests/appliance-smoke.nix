@@ -272,6 +272,7 @@ pkgs.testers.runNixOSTest {
     # VM-test infrastructure since clock sync is irrelevant inside a
     # transient test VM.
     services.timesyncd.enable = lib.mkForce false;
+    services.openssh.enable = true;
     services.avahi.enable = true;
 
     # The rpc-smoke script needs websocket-client at runtime in the guest.

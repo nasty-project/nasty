@@ -2485,12 +2485,12 @@ in {
     # baseline is back in place.
     systemd.services.nftables.reloadIfChanged = lib.mkForce false;
     systemd.services.nftables.serviceConfig.ExecReload = lib.mkForce "";
-    systemd.services.sshd = {
+    systemd.services.sshd = mkIf config.services.openssh.enable {
       after = [ "nftables.service" ];
       requires = [ "nftables.service" ];
       partOf = [ "nftables.service" ];
     };
-    systemd.services.avahi-daemon = {
+    systemd.services.avahi-daemon = mkIf config.services.avahi.enable {
       after = [ "nftables.service" ];
       requires = [ "nftables.service" ];
       partOf = [ "nftables.service" ];
