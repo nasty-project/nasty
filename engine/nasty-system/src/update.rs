@@ -22,8 +22,6 @@ const UPDATE_BUILD_DIR_PATH: &str = "/var/lib/nasty/update-build-dir";
 /// Fallback version path — baked in by NixOS at build time (may be a local SHA).
 const VERSION_PATH_FALLBACK: &str = "/etc/nasty-version";
 const UPDATE_UNIT: &str = "nasty-update";
-const LOCAL_FLAKE_TARGET: &str = "/etc/nixos#nasty";
-const LOCAL_REPO: &str = "/etc/nixos";
 const NIXOS_FLAKE_DIR: &str = "/etc/nixos";
 /// Per-box opt-in Secure Boot overlay written by the SB enrollment
 /// ceremony (see `secure_boot_enrollment`). Its on-disk presence is
@@ -33,6 +31,7 @@ const NIXOS_FLAKE_DIR: &str = "/etc/nixos";
 /// lanzaboote during a re-render when the overlay is present.
 const SECURE_BOOT_OVERLAY_PATH: &str = "/etc/nixos/secure-boot.nix";
 const UPDATE_WEBUI_CHANGED: &str = "/var/lib/nasty/update-webui-changed";
+const UPDATE_TRANSACTION_MARKER: &str = "/run/nasty-wrapper-update-in-progress";
 const RELEASE_CHANNEL_PATH: &str = "/var/lib/nasty/release-channel";
 const DEFAULT_NASTY_OWNER: &str = "nasty-project";
 const DEFAULT_NASTY_REPO: &str = "nasty";
@@ -262,12 +261,12 @@ struct BuildDirFragments {
     /// perms Nix demands (it refuses world-writable build-dirs).
     /// Empty when no spillover is configured.
     setup: String,
-    /// Inline env prefix for the `nixos-rebuild` line, including the
+    /// Inline env prefix for the candidate `nix build` line, including the
     /// trailing space — e.g. `"NIX_REMOTE=local "`. Empty otherwise.
     /// Needed because client-side `--option build-dir` is only honored
     /// in single-user mode; the daemon ignores it.
     env_prefix: String,
-    /// CLI suffix for the `nixos-rebuild` line, including the leading
+    /// CLI suffix for the candidate `nix build` line, including the leading
     /// space — e.g. `" --option build-dir /fs/first/.nasty-nix-build"`.
     opt_suffix: String,
     /// Cleanup block run after the rebuild (regardless of outcome) to
@@ -298,6 +297,266 @@ fn build_dir_fragments(stored: Option<&str>) -> BuildDirFragments {
             }
         }
     }
+}
+
+/// Render the detached update unit's transaction. The live wrapper pair is
+/// only changed after the staged flake has produced a verified system closure.
+/// Any later failure restores both files and reactivates the previous closure.
+fn render_wrapper_transaction_script(
+    candidate_flake: &str,
+    update_steps: &str,
+    success_steps: &str,
+    bd: &BuildDirFragments,
+) -> String {
+    let candidate = base64::engine::general_purpose::STANDARD.encode(candidate_flake);
+    r#"#!/bin/bash
+set -Eeuo pipefail
+export PATH="/run/current-system/sw/bin:$PATH"
+
+LIVE_DIR="/etc/nixos"
+SYSTEM_PROFILE="/nix/var/nix/profiles/system"
+MARKER="@MARKER@"
+WORK_DIR=$(mktemp -d /var/lib/nasty/update.XXXXXX)
+STAGE="$WORK_DIR/stage"
+BACKUP="$WORK_DIR/backup"
+RESULT_LINK="$WORK_DIR/result"
+OLD_SYSTEM=$(readlink -f /run/current-system)
+PROFILE_SYSTEM=$(readlink -f "$SYSTEM_PROFILE")
+test "$PROFILE_SYSTEM" = "$OLD_SYSTEM"
+OLD_GENERATION=$(nix-env --profile "$SYSTEM_PROFILE" --list-generations | awk '$NF == "(current)" { print $1 }')
+test -n "$OLD_GENERATION"
+LIVE_MUTATED=false
+PROFILE_MUTATED=false
+MARKER_SET=false
+
+_proxy_conf() {
+    readlink -f /run/current-system/etc/caddy/Caddyfile 2>/dev/null || true
+}
+
+cleanup() {
+@BD_CLEANUP@
+    rm -rf "$WORK_DIR"
+    rm -f -- "$0"
+}
+
+install_pair() {
+    local src="$1"
+    install -m 0644 -T "$src/flake.nix" "$LIVE_DIR/.flake.nix.nasty-new"
+    install -m 0644 -T "$src/flake.lock" "$LIVE_DIR/.flake.lock.nasty-new"
+    mv -fT "$LIVE_DIR/.flake.nix.nasty-new" "$LIVE_DIR/flake.nix"
+    mv -fT "$LIVE_DIR/.flake.lock.nasty-new" "$LIVE_DIR/flake.lock"
+}
+
+rollback_transaction() {
+    local rc="$1"
+    local rollback_ok=true
+    trap - ERR TERM INT HUP
+    set +e
+    echo "==> Update transaction failed (exit $rc); restoring the previous system..."
+    if $PROFILE_MUTATED && ! $MARKER_SET; then
+        if install -m 0600 /dev/null "$MARKER"; then
+            MARKER_SET=true
+        else
+            rollback_ok=false
+        fi
+    fi
+    if $LIVE_MUTATED; then
+        install_pair "$BACKUP" || rollback_ok=false
+    fi
+    if $PROFILE_MUTATED; then
+        nix-env --profile "$SYSTEM_PROFILE" --switch-generation "$OLD_GENERATION" \
+            || rollback_ok=false
+        NIXOS_INSTALL_BOOTLOADER=0 "$OLD_SYSTEM/bin/switch-to-configuration" switch \
+            || rollback_ok=false
+    fi
+    if $MARKER_SET && $rollback_ok; then
+        rm -f "$MARKER" || rollback_ok=false
+    fi
+    rm -f "$LIVE_DIR/.flake.nix.nasty-new" "$LIVE_DIR/.flake.lock.nasty-new"
+    echo "--- journalctl -u nixos-rebuild-switch-to-configuration -n 60 ---"
+    journalctl -u nixos-rebuild-switch-to-configuration --no-pager -n 60 || true
+    echo "--- end journal dump ---"
+    if $rollback_ok; then
+        cleanup
+    else
+        echo "==> CRITICAL: automatic rollback failed."
+        echo "==> Recovery remains suppressed; backups are in $BACKUP"
+@BD_CLEANUP@
+    fi
+    if [ "$rc" -eq 0 ]; then
+        rc=1
+    fi
+    exit "$rc"
+}
+trap 'rollback_transaction $?' ERR
+trap 'rollback_transaction 143' TERM
+trap 'rollback_transaction 130' INT
+trap 'rollback_transaction 129' HUP
+
+install -d -m 0700 "$STAGE" "$BACKUP"
+# Snapshot the original pair before the staged copy is changed.
+install -m 0600 -T "$LIVE_DIR/flake.nix" "$BACKUP/flake.nix"
+install -m 0600 -T "$LIVE_DIR/flake.lock" "$BACKUP/flake.lock"
+cp -a "$LIVE_DIR/." "$STAGE/"
+install -m 0644 -T "$BACKUP/flake.nix" "$STAGE/flake.nix"
+install -m 0644 -T "$BACKUP/flake.lock" "$STAGE/flake.lock"
+printf '%s' '@CANDIDATE@' | base64 -d > "$STAGE/flake.nix"
+
+_PROXY_CONF_BEFORE=$(_proxy_conf)
+WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || true)
+echo "false" > @WEBUI_CHANGED@
+
+@BD_SETUP@
+echo "==> Updating staged system flake..."
+cd "$STAGE"
+@UPDATE_STEPS@
+
+echo "==> Building staged system..."
+@BD_ENV@nix build "$STAGE#nixosConfigurations.nasty.config.system.build.toplevel" --out-link "$RESULT_LINK"@BD_OPT@
+RESULT=$(readlink -f "$RESULT_LINK")
+test -x "$RESULT/bin/switch-to-configuration"
+cmp -s "$STAGE/flake.nix" "$RESULT/etc/nasty-system-flake/flake.nix"
+cmp -s "$STAGE/flake.lock" "$RESULT/etc/nasty-system-flake/flake.lock"
+EXPECTED_COMMIT=$(jq -r '.nodes["nasty"].locked.rev // empty' "$STAGE/flake.lock")
+if [ -n "$EXPECTED_COMMIT" ]; then
+    EXPECTED_COMMIT="${EXPECTED_COMMIT:0:7}"
+    test "${#EXPECTED_COMMIT}" -eq 7
+fi
+if [ -e "$RESULT/etc/nasty/update-health" ]; then
+    source "$RESULT/etc/nasty/update-health"
+else
+    # Compatibility for deliberate downgrades to generations predating the
+    # generated health-target file.
+    ENGINE_HEALTH_URL="http://127.0.0.1:2137/health"
+    CADDY_REQUIRED=false
+    CADDY_HEALTH_URL=""
+    if [ -e "$RESULT/etc/caddy/Caddyfile" ]; then
+        CADDY_PORT=$(grep -oE 'nasty\.local, :[0-9]+' "$RESULT/etc/caddy/Caddyfile" \
+            | head -1 | cut -d: -f2)
+        test -n "$CADDY_PORT"
+        CADDY_REQUIRED=true
+        CADDY_HEALTH_URL="https://127.0.0.1:$CADDY_PORT/health"
+    fi
+fi
+
+# Suppress generation recovery until activation has passed health checks.
+install -m 0600 /dev/null "$MARKER"
+MARKER_SET=true
+LIVE_MUTATED=true
+install_pair "$STAGE"
+PROFILE_MUTATED=true
+nix-env --profile "$SYSTEM_PROFILE" --set "$RESULT"
+echo "==> Activating verified system closure..."
+NIXOS_INSTALL_BOOTLOADER=0 "$RESULT/bin/switch-to-configuration" switch
+
+if [ -n "$EXPECTED_COMMIT" ]; then
+    echo "==> Waiting for the engine and Caddy to serve commit $EXPECTED_COMMIT..."
+else
+    echo "==> Waiting for the engine and Caddy to become healthy..."
+fi
+HEALTHY=false
+for _ in $(seq 1 60); do
+    ENGINE_HEALTH=$(curl -fsS "$ENGINE_HEALTH_URL" 2>/dev/null || true)
+    CADDY_HEALTH=""
+    CADDY_OK=true
+    if $CADDY_REQUIRED; then
+        CADDY_HEALTH=$(curl -kfsS "$CADDY_HEALTH_URL" 2>/dev/null || true)
+        if ! systemctl is-active --quiet caddy.service \
+            || ! jq -e --arg commit "$EXPECTED_COMMIT" '.status == "ok" and ($commit == "" or .commit == $commit)' <<<"$CADDY_HEALTH" >/dev/null 2>&1; then
+            CADDY_OK=false
+        fi
+    fi
+    if systemctl is-active --quiet nasty-engine.service \
+        && jq -e --arg commit "$EXPECTED_COMMIT" '.status == "ok" and ($commit == "" or .commit == $commit)' <<<"$ENGINE_HEALTH" >/dev/null 2>&1 \
+        && $CADDY_OK; then
+        HEALTHY=true
+        break
+    fi
+    sleep 2
+done
+$HEALTHY
+
+rm -f "$MARKER"
+MARKER_SET=false
+systemctl restart recover-generation-flake.service
+cmp -s "$STAGE/flake.nix" "$LIVE_DIR/flake.nix"
+cmp -s "$STAGE/flake.lock" "$LIVE_DIR/flake.lock"
+
+_PROXY_CONF_AFTER=$(_proxy_conf)
+WEBUI_AFTER=$([ -n "$_PROXY_CONF_AFTER" ] && grep 'nasty-webui' "$_PROXY_CONF_AFTER" 2>/dev/null | head -1 || true)
+if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
+    echo "true" > @WEBUI_CHANGED@
+fi
+
+@SUCCESS_STEPS@
+trap - ERR TERM INT HUP
+cleanup
+echo "==> Update complete!"
+"#
+    .replace("@MARKER@", UPDATE_TRANSACTION_MARKER)
+    .replace("@CANDIDATE@", &candidate)
+    .replace("@WEBUI_CHANGED@", UPDATE_WEBUI_CHANGED)
+    .replace("@BD_SETUP@", &bd.setup)
+    .replace("@BD_ENV@", &bd.env_prefix)
+    .replace("@BD_OPT@", &bd.opt_suffix)
+    .replace("@BD_CLEANUP@", &bd.cleanup)
+    .replace("@UPDATE_STEPS@", update_steps)
+    .replace("@SUCCESS_STEPS@", success_steps)
+}
+
+async fn start_update_transaction(
+    description: &str,
+    script: &str,
+    nix_config: Option<&str>,
+) -> Result<(), UpdateError> {
+    let script_path = format!("/var/lib/nasty/update-{}.sh", uuid::Uuid::new_v4());
+    tokio::fs::write(&script_path, script)
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("write {script_path}: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(e) =
+            tokio::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o600)).await
+        {
+            let _ = tokio::fs::remove_file(&script_path).await;
+            return Err(UpdateError::CommandFailed(format!(
+                "chmod {script_path}: {e}"
+            )));
+        }
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut cmd = tokio::process::Command::new("systemd-run");
+    cmd.args([
+        "--unit",
+        UPDATE_UNIT,
+        "--no-block",
+        "--description",
+        description,
+        "--property=Type=oneshot",
+        "--property=StandardOutput=journal",
+        "--property=StandardError=journal",
+        "--setenv",
+        &format!("PATH={path}"),
+    ]);
+    if let Some(config) = nix_config.filter(|config| !config.is_empty()) {
+        cmd.args(["--setenv", &format!("NIX_CONFIG={config}")]);
+    }
+    let output = match cmd.args(["--", "bash", &script_path]).output().await {
+        Ok(output) => output,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&script_path).await;
+            return Err(UpdateError::CommandFailed(format!("systemd-run: {e}")));
+        }
+    };
+    if !output.status.success() {
+        let _ = tokio::fs::remove_file(&script_path).await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(UpdateError::CommandFailed(format!(
+            "failed to start update transaction: {stderr}"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -589,24 +848,12 @@ impl UpdateService {
         })
     }
 
-    /// Rewrite `/etc/nixos/flake.nix` in place if it's not in the
-    /// canonical 0.0.9 shape (`nixpkgs.follows = "nasty/nixpkgs"` and
-    /// `bcachefs-tools.url = "github:.../<tag>"`). Handles every
-    /// historical starting state:
+    /// Prepare the wrapper content used by an update transaction. If the live
+    /// wrapper is not in the canonical shape, migrate the staged candidate
+    /// without touching `/etc/nixos`.
     ///
-    /// - Pre-#304 wrappers (own `.url` for both): nixpkgs converted to
-    ///   follows; bcachefs-tools.url preserved with the operator's
-    ///   existing ref.
-    /// - Post-#308 wrappers (`.follows` for both): nixpkgs stays
-    ///   follows; bcachefs-tools rewritten back to `.url`, ref
-    ///   resolved from the current flake.lock's `original.ref` on
-    ///   the followed node.
-    /// - Already-canonical wrappers: no-op, returns Ok(false) without
-    ///   touching disk.
-    ///
-    /// Returns `Ok(true)` if a write happened, `Ok(false)` if no
-    /// migration was needed.
-    pub async fn maybe_migrate_wrapper_shape(&self) -> Result<bool, UpdateError> {
+    /// Returns the candidate content and whether migration changed it.
+    async fn wrapper_flake_candidate(&self) -> Result<(String, bool), UpdateError> {
         let path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
         let current = tokio::fs::read_to_string(&path)
             .await
@@ -615,21 +862,24 @@ impl UpdateService {
             .await
             .unwrap_or(false);
         if wrapper_is_canonical_shape(&current, overlay_present) {
-            return Ok(false);
+            return Ok((current, false));
         }
-        let local_system = detect_local_system().await?;
-        let migrated =
-            migrate_wrapper_to_canonical_shape(&current, &local_system, overlay_present).await?;
-        tokio::fs::write(&path, &migrated)
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("write {path}: {e}")))?;
-        info!(
-            "Migrated wrapper-flake at {path} to canonical 0.0.9 shape \
-             (nixpkgs follows nasty for cachix coverage; bcachefs-tools \
-             pinned independently so the operator can stick with a \
-             known-good rev across nasty bumps)"
-        );
-        Ok(true)
+        let migration = match detect_local_system().await {
+            Ok(local_system) => {
+                migrate_wrapper_to_canonical_shape(&current, &local_system, overlay_present).await
+            }
+            Err(e) => Err(e),
+        };
+        match migration {
+            Ok(migrated) => {
+                info!("Prepared canonical wrapper-flake migration for the next update transaction");
+                Ok((migrated, true))
+            }
+            Err(e) => {
+                warn!(target: "nasty::update", "wrapper migration skipped: {e}");
+                Ok((current, false))
+            }
+        }
     }
 
     pub async fn upgrade_tagged_release(&self) -> Result<(), UpdateError> {
@@ -638,25 +888,9 @@ impl UpdateService {
             return Err(UpdateError::AlreadyRunning);
         }
 
-        // Belt-and-suspenders to the rebootstrap path further down:
-        // if the wrapper is in legacy (own-url) shape, migrate it to
-        // the follows shape before anything else. The existing
-        // rebootstrap path also detects this case via content-hash
-        // drift between the local wrapper and the upstream template
-        // — but only AFTER the "already at latest tag" early-exit
-        // below. Running the migration up front means a user pinned
-        // at the latest tag can still get reshaped even when there's
-        // no version bump to apply. No-op when already in follows
-        // shape.
-        if let Err(e) = self.maybe_migrate_wrapper_shape().await {
-            warn!(
-                target: "nasty::update",
-                "wrapper migration to follows shape skipped: {e}"
-            );
-        }
-
+        let (current_flake, wrapper_migrated) = self.wrapper_flake_candidate().await?;
         let release_status = self.version_tagged_release_status().await?;
-        if release_status.current_is_latest_standard_url {
+        if release_status.current_is_latest_standard_url && !wrapper_migrated {
             return Err(UpdateError::CommandFailed(
                 "system already tracks the newest official tagged NASty release".to_string(),
             ));
@@ -672,10 +906,6 @@ impl UpdateService {
             &release_status.latest_tag,
         )
         .await?;
-        let current_flake_path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
-        let current_flake = tokio::fs::read_to_string(&current_flake_path)
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("read {current_flake_path}: {e}")))?;
         // Pin the bcachefs-tools rev that the target release was tested
         // with — overriding whatever the operator had pinned locally.
         // Release = atomic bundle of (nasty, bcachefs-tools); switching
@@ -719,106 +949,16 @@ impl UpdateService {
         nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
         nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
-        let flake_temp_path = "/tmp/nasty-upgrade-flake.nix";
-        tokio::fs::write(flake_temp_path, &next_flake)
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("write {flake_temp_path}: {e}")))?;
-
-        let local_flake = local_flake();
         let bd = build_dir_fragments(read_update_build_dir().await.as_deref());
-        let script = format!(
-            r#"#!/bin/bash
-set -euo pipefail
-export PATH="/run/current-system/sw/bin:$PATH"
-_proxy_conf() {{
-    # Resolve the active Caddyfile via the etc-symlink the Caddy
-    # NixOS module sets up.  Each generation has its own /etc/caddy/
-    # tree, so the resolved path doubles as a generation identity —
-    # comparing it before/after a rebuild tells us whether the WebUI
-    # closure (or anything else in the Caddyfile) changed.
-    readlink -f /run/current-system/etc/caddy/Caddyfile 2>/dev/null || true
-}}
-_PROXY_CONF_BEFORE=$(_proxy_conf)
-WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
-echo "false" > {UPDATE_WEBUI_CHANGED}
-
-{bd_setup}
-echo "==> Updating local system flake..."
-cd {NIXOS_FLAKE_DIR}
-cp {flake_temp_path} flake.nix
-# Only refresh the `nasty` input by default. Operators who want a
-# kernel / system bump pin nixpkgs and bcachefs-tools explicitly
-# via the Version page (system.version.switch RPC) — the upgrade
-# flow is NASty-only so a small release tag doesn't drag the whole
-# distro along with it.
-nix flake update nasty
-
-echo "==> Rebuilding system..."
-_RC=0
-{bd_env}NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}{bd_opt} || _RC=$?
-{bd_cleanup}
-if [ "$_RC" -ne 0 ]; then
-    echo
-    echo "==> nixos-rebuild switch failed (exit $_RC)."
-    echo "==> Below is the tail of the switch-to-configuration journal — it"
-    echo "    usually carries the real error (systemd-boot tracebacks, failed"
-    echo "    service starts, ENOSPC on /boot, etc):"
-    echo "--- journalctl -u nixos-rebuild-switch-to-configuration -n 60 ---"
-    journalctl -u nixos-rebuild-switch-to-configuration --no-pager -n 60 || true
-    echo "--- end journal dump ---"
-    exit "$_RC"
-fi
-
-_PROXY_CONF_AFTER=$(_proxy_conf)
-WEBUI_AFTER=$([ -n "$_PROXY_CONF_AFTER" ] && grep 'nasty-webui' "$_PROXY_CONF_AFTER" 2>/dev/null | head -1 || echo "")
-if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
-    echo "true" > {UPDATE_WEBUI_CHANGED}
-fi
-
-echo "{latest_tag}" > {VERSION_PATH}
-echo "==> Update complete!"
-"#,
-            latest_tag = release_status.latest_tag,
-            bd_setup = bd.setup,
-            bd_env = bd.env_prefix,
-            bd_opt = bd.opt_suffix,
-            bd_cleanup = bd.cleanup,
+        let script = render_wrapper_transaction_script(
+            &next_flake,
+            // Only refresh nasty here; a tagged NASty release must not
+            // silently turn into a whole-distribution update.
+            "nix flake update nasty",
+            &format!("echo \"{}\" > {VERSION_PATH}", release_status.latest_tag),
+            &bd,
         );
-
-        let script_path = "/tmp/nasty-upgrade-tagged-release.sh";
-        tokio::fs::write(script_path, &script).await.map_err(|e| {
-            UpdateError::CommandFailed(format!(
-                "failed to write tagged release upgrade script: {e}"
-            ))
-        })?;
-
-        let path = std::env::var("PATH").unwrap_or_default();
-        let output = tokio::process::Command::new("systemd-run")
-            .args([
-                "--unit",
-                UPDATE_UNIT,
-                "--no-block",
-                "--description",
-                "NASty tagged release upgrade",
-                "--property=Type=oneshot",
-                "--property=StandardOutput=journal",
-                "--property=StandardError=journal",
-                "--setenv",
-                &format!("PATH={path}"),
-                "--",
-                "bash",
-                script_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("systemd-run: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(UpdateError::CommandFailed(format!(
-                "failed to start tagged release upgrade: {stderr}"
-            )));
-        }
+        start_update_transaction("NASty tagged release upgrade", &script, None).await?;
 
         info!(
             "Tagged release upgrade started: {} -> {}",
@@ -1035,21 +1175,7 @@ echo "==> Update complete!"
         nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
         nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
-        // Opportunistically migrate legacy-shape wrappers (own
-        // nixpkgs.url + bcachefs-tools.url) to the follows shape
-        // (#304) BEFORE running the upgrade. After this the
-        // wrapper's single `nix flake update nasty` step also
-        // resolves the followed inputs, putting the resolved
-        // closure back in cachix range and ending the per-bump
-        // 92-Rust-crate recompile that drifted boxes had been
-        // hitting. No-op when the wrapper is already in follows
-        // shape, so safe to call every time.
-        if let Err(e) = self.maybe_migrate_wrapper_shape().await {
-            warn!(
-                target: "nasty::update",
-                "wrapper migration to follows shape skipped: {e}"
-            );
-        }
+        let (candidate_flake, _) = self.wrapper_flake_candidate().await?;
 
         // Build the update script:
         // 1. Update the local wrapper flake inputs (channel-specific:
@@ -1112,150 +1238,28 @@ echo "==> Update complete!"
             ),
         };
 
-        let local_flake = local_flake();
         let bd = build_dir_fragments(read_update_build_dir().await.as_deref());
-        let script = format!(
-            r#"#!/bin/bash
-set -euo pipefail
-export PATH="/run/current-system/sw/bin:$PATH"
-# Capture the active Caddyfile store path before rebuild so we can
-# detect whether the WebUI closure changed.  After nixos-rebuild
-# switch the /run/current-system symlink updates atomically before
-# we read the AFTER value, so the BEFORE/AFTER comparison always
-# spans old vs new closure.
-_proxy_conf() {{
-    # Resolve the active Caddyfile via the etc-symlink the Caddy
-    # NixOS module sets up.  Each generation has its own /etc/caddy/
-    # tree, so the resolved path doubles as a generation identity —
-    # comparing it before/after a rebuild tells us whether the WebUI
-    # closure (or anything else in the Caddyfile) changed.
-    readlink -f /run/current-system/etc/caddy/Caddyfile 2>/dev/null || true
-}}
-_PROXY_CONF_BEFORE=$(_proxy_conf)
-WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
-{bd_setup}
-echo "==> Updating local system flake..."
-cd {LOCAL_REPO}
-{update_step}
-
-# Generation cleanup is handled by nix.gc (systemd timer) in the NixOS config.
-# No custom GC logic needed here — just rebuild.
-
-echo "==> Rebuilding system..."
-_RC=0
-{bd_env}NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}{bd_opt} || _RC=$?
-{bd_cleanup}
-if [ "$_RC" -ne 0 ]; then
-    echo
-    echo "==> nixos-rebuild switch failed (exit $_RC)."
-    echo "==> Below is the tail of the switch-to-configuration journal — it"
-    echo "    usually carries the real error (systemd-boot tracebacks, failed"
-    echo "    service starts, ENOSPC on /boot, etc):"
-    echo "--- journalctl -u nixos-rebuild-switch-to-configuration -n 60 ---"
-    journalctl -u nixos-rebuild-switch-to-configuration --no-pager -n 60 || true
-    echo "--- end journal dump ---"
-    exit "$_RC"
-fi
-
-# Detect if the webui store path changed so the frontend knows whether to prompt a reload.
-# /run/current-system now points to the newly activated closure.
-_PROXY_CONF_AFTER=$(_proxy_conf)
-WEBUI_AFTER=$([ -n "$_PROXY_CONF_AFTER" ] && grep 'nasty-webui' "$_PROXY_CONF_AFTER" 2>/dev/null | head -1 || echo "")
-if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
-    echo "true" > {UPDATE_WEBUI_CHANGED}
-else
-    echo "false" > {UPDATE_WEBUI_CHANGED}
-fi
-
-# Write the active nasty input version to the writable version path.
-{installed_version_expr}
-
-echo "==> Update complete!"
-"#,
-            bd_setup = bd.setup,
-            bd_env = bd.env_prefix,
-            bd_opt = bd.opt_suffix,
-            bd_cleanup = bd.cleanup,
+        let script = render_wrapper_transaction_script(
+            &candidate_flake,
+            &update_step,
+            &installed_version_expr,
+            &bd,
         );
-
-        // Write script to a temp file
-        let script_path = "/tmp/nasty-update.sh";
-        tokio::fs::write(script_path, &script).await.map_err(|e| {
-            UpdateError::CommandFailed(format!("failed to write update script: {e}"))
-        })?;
-
-        // Launch as a transient systemd service
-        // This avoids the engine's ProtectSystem restrictions
-        let mut cmd = tokio::process::Command::new("systemd-run");
-        cmd.args([
-            "--unit",
-            UPDATE_UNIT,
-            "--no-block",
-            "--description",
-            "NASty system update",
-            "--property=Type=oneshot",
-            "--property=StandardOutput=journal",
-            "--property=StandardError=journal",
-        ]);
-
-        // Pass engine's PATH so the script can find git, nixos-rebuild, etc.
-        let path = std::env::var("PATH").unwrap_or_default();
-        cmd.args(["--setenv", &format!("PATH={path}")]);
-
-        if !token_env.is_empty() {
-            cmd.args(["--setenv", &format!("NIX_CONFIG={token_env}")]);
-        }
-
-        cmd.args(["--", "bash", script_path]);
-
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("systemd-run: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(UpdateError::CommandFailed(format!(
-                "failed to start update: {stderr}"
-            )));
-        }
+        start_update_transaction("NASty system update", &script, Some(&token_env)).await?;
 
         info!("System update started");
         Ok(())
     }
 
-    /// Update selected flake inputs on the installed system and rebuild if the
-    /// lock file changed.
+    /// Update selected flake inputs and activate the verified staged result.
     pub async fn version_switch(&self, req: VersionSwitchRequest) -> Result<(), UpdateError> {
         let update_status = self.status().await;
         if update_status.state == "running" {
             return Err(UpdateError::AlreadyRunning);
         }
 
-        // Migrate the wrapper to the canonical 0.0.9 shape before
-        // anything else — the input-presence checks below (and
-        // rewrite_flake_input_urls deeper in the call chain) demand
-        // `.url` declarations for both editable inputs. Without this
-        // upfront migration a post-#308 follows-shape wrapper (no
-        // `bcachefs-tools.url`) would error "missing bcachefs-tools.url"
-        // on the very first WebUI dev-build click — the same
-        // self-update strand that #312 set out to fix for nixpkgs but
-        // missed for bcachefs-tools. apply() and upgrade_tagged_release()
-        // already do this migration up-front; doing it here too closes
-        // the third edge of the triangle.
-        //
-        // Best-effort: failure logged as warn, doesn't abort the
-        // request. If the wrapper can't be migrated (fork URL, parse
-        // failure, etc.) the operator gets a clearer error from the
-        // input-presence check below.
-        if let Err(e) = self.maybe_migrate_wrapper_shape().await {
-            warn!(
-                target: "nasty::update",
-                "wrapper migration to canonical shape skipped during version_switch: {e}"
-            );
-        }
-
-        let current_urls = read_flake_input_urls().await?;
+        let (current_flake, _) = self.wrapper_flake_candidate().await?;
+        let current_urls = flake_input_urls(&current_flake)?;
         let mut seen = HashSet::new();
         let mut requested = HashMap::new();
         for input in req.inputs {
@@ -1327,10 +1331,6 @@ echo "==> Update complete!"
         nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
         nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
 
-        let flake_path = format!("{NIXOS_FLAKE_DIR}/flake.nix");
-        let current_flake = tokio::fs::read_to_string(&flake_path)
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("read {flake_path}: {e}")))?;
         let requested_nasty_url = requested
             .get("nasty")
             .map(|input| input.url.clone())
@@ -1405,114 +1405,23 @@ echo "==> Update complete!"
                 rewrite_flake_input_urls(&current_flake, &flake_replacements)?
             }
         };
-        let flake_temp_path = "/tmp/nasty-version-flake.nix";
-        tokio::fs::write(flake_temp_path, &rewritten_flake)
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("write {flake_temp_path}: {e}")))?;
-
         let update_steps = updates
             .iter()
             .map(|name| format!("nix flake update {name}"))
             .collect::<Vec<_>>()
             .join("\n");
 
-        let local_flake = local_flake();
         let bd = build_dir_fragments(read_update_build_dir().await.as_deref());
-        let script = format!(
-            r#"#!/bin/bash
-set -euo pipefail
-export PATH="/run/current-system/sw/bin:$PATH"
-_proxy_conf() {{
-    # Resolve the active Caddyfile via the etc-symlink the Caddy
-    # NixOS module sets up.  Each generation has its own /etc/caddy/
-    # tree, so the resolved path doubles as a generation identity —
-    # comparing it before/after a rebuild tells us whether the WebUI
-    # closure (or anything else in the Caddyfile) changed.
-    readlink -f /run/current-system/etc/caddy/Caddyfile 2>/dev/null || true
-}}
-_PROXY_CONF_BEFORE=$(_proxy_conf)
-WEBUI_BEFORE=$([ -n "$_PROXY_CONF_BEFORE" ] && grep 'nasty-webui' "$_PROXY_CONF_BEFORE" 2>/dev/null | head -1 || echo "")
-echo "false" > {UPDATE_WEBUI_CHANGED}
-
-{bd_setup}
-echo "==> Updating local system flake..."
-cd {NIXOS_FLAKE_DIR}
-LOCK_BEFORE=$(sha256sum flake.lock 2>/dev/null | awk '{{print $1}}' || true)
-cp {flake_temp_path} flake.nix
-{update_steps}
-LOCK_AFTER=$(sha256sum flake.lock 2>/dev/null | awk '{{print $1}}' || true)
-
-if [ "$LOCK_BEFORE" != "$LOCK_AFTER" ]; then
-    echo "==> Rebuilding system..."
-    cp flake.lock flake.lock.pre-rebuild
-    if {bd_env}NIXOS_INSTALL_BOOTLOADER=0 nixos-rebuild switch --flake {local_flake}{bd_opt}; then
-        rm -f flake.lock.pre-rebuild
-        {bd_cleanup}
-    else
-        RC=$?
-        {bd_cleanup}
-        echo "==> Rebuild failed (exit $RC). Restoring previous flake.lock so update can be retried."
-        cp flake.lock.pre-rebuild flake.lock
-        rm -f flake.lock.pre-rebuild
-        echo
-        echo "==> Below is the tail of the switch-to-configuration journal — it"
-        echo "    usually carries the real error (systemd-boot tracebacks, failed"
-        echo "    service starts, ENOSPC on /boot, etc):"
-        echo "--- journalctl -u nixos-rebuild-switch-to-configuration -n 60 ---"
-        journalctl -u nixos-rebuild-switch-to-configuration --no-pager -n 60 || true
-        echo "--- end journal dump ---"
-        exit "$RC"
-    fi
-    _PROXY_CONF_AFTER=$(_proxy_conf)
-    WEBUI_AFTER=$([ -n "$_PROXY_CONF_AFTER" ] && grep 'nasty-webui' "$_PROXY_CONF_AFTER" 2>/dev/null | head -1 || echo "")
-    if [ -n "$WEBUI_BEFORE" ] && [ "$WEBUI_BEFORE" != "$WEBUI_AFTER" ]; then
-        echo "true" > {UPDATE_WEBUI_CHANGED}
-    fi
-    NASTY_REV=$(jq -r '.nodes["nasty"].locked.rev // empty' flake.lock 2>/dev/null || true)
-    [ -n "$NASTY_REV" ] && echo "${{NASTY_REV:0:7}}" > {VERSION_PATH}
-else
-    echo "==> No flake.lock changes detected; skipping rebuild."
-fi
-echo "==> Update complete!"
-"#,
-            bd_setup = bd.setup,
-            bd_env = bd.env_prefix,
-            bd_opt = bd.opt_suffix,
-            bd_cleanup = bd.cleanup,
+        let script = render_wrapper_transaction_script(
+            &rewritten_flake,
+            &update_steps,
+            &format!(
+                "NASTY_REV=$(jq -r '.nodes[\"nasty\"].locked.rev // empty' flake.lock 2>/dev/null || true)\n\
+                 [ -n \"$NASTY_REV\" ] && echo \"${{NASTY_REV:0:7}}\" > {VERSION_PATH}"
+            ),
+            &bd,
         );
-
-        let script_path = "/tmp/nasty-version-switch.sh";
-        tokio::fs::write(script_path, &script).await.map_err(|e| {
-            UpdateError::CommandFailed(format!("failed to write version switch script: {e}"))
-        })?;
-
-        let path = std::env::var("PATH").unwrap_or_default();
-        let output = tokio::process::Command::new("systemd-run")
-            .args([
-                "--unit",
-                UPDATE_UNIT,
-                "--no-block",
-                "--description",
-                "NASty version switch",
-                "--property=Type=oneshot",
-                "--property=StandardOutput=journal",
-                "--property=StandardError=journal",
-                "--setenv",
-                &format!("PATH={path}"),
-                "--",
-                "bash",
-                script_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| UpdateError::CommandFailed(format!("systemd-run: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(UpdateError::CommandFailed(format!(
-                "failed to start version switch: {stderr}"
-            )));
-        }
+        start_update_transaction("NASty version switch", &script, None).await?;
 
         info!("Version switch started for inputs: {}", updates.join(", "));
         Ok(())
@@ -2812,11 +2721,6 @@ async fn read_github_token() -> Option<String> {
     None
 }
 
-/// Build the full flake reference for nixos-rebuild.
-fn local_flake() -> &'static str {
-    LOCAL_FLAKE_TARGET
-}
-
 pub async fn read_flake_lock_bcachefs_pub() -> (Option<String>, Option<String>) {
     read_flake_lock_bcachefs().await
 }
@@ -3059,7 +2963,11 @@ async fn read_flake_input_urls() -> Result<HashMap<String, String>, UpdateError>
     let content = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("read {path}: {e}")))?;
-    let urls = parse_flake_input_urls(&content)?;
+    flake_input_urls(&content)
+}
+
+fn flake_input_urls(content: &str) -> Result<HashMap<String, String>, UpdateError> {
+    let urls = parse_flake_input_urls(content)?;
     // `nasty.url` is the one input the wrapper *must* own — it's what
     // pins the release the operator is tracking. Other inputs may be
     // declared as `<input>.follows = "nasty/<input>"` (no `.url`),
@@ -4011,6 +3919,102 @@ proc /proc proc rw 0 0\n\
                 .contains("--option build-dir \"/fs/first/.nasty-nix-build\"")
         );
         assert!(bd.cleanup.contains("rm -rf"));
+    }
+
+    fn rendered_transaction() -> String {
+        super::render_wrapper_transaction_script(
+            "{ inputs.nasty.url = \"github:nasty-project/nasty/main\"; }\n",
+            "nix flake update nasty",
+            "echo success",
+            &super::build_dir_fragments(None),
+        )
+    }
+
+    #[test]
+    fn wrapper_transaction_keeps_live_pair_unchanged_until_update_and_build_succeed() {
+        let script = rendered_transaction();
+        let update = script.find("nix flake update nasty").unwrap();
+        let build = script
+            .find("nix build \"$STAGE#nixosConfigurations")
+            .unwrap();
+        let mutation_boundary = script.find("LIVE_MUTATED=true").unwrap();
+        let live_install = script.find("install_pair \"$STAGE\"").unwrap();
+
+        assert!(update < build);
+        assert!(build < mutation_boundary);
+        assert!(mutation_boundary < live_install);
+        assert!(
+            script.contains(
+                "cmp -s \"$STAGE/flake.nix\" \"$RESULT/etc/nasty-system-flake/flake.nix\""
+            )
+        );
+        assert!(script.contains(
+            "cmp -s \"$STAGE/flake.lock\" \"$RESULT/etc/nasty-system-flake/flake.lock\""
+        ));
+    }
+
+    #[test]
+    fn wrapper_transaction_restores_pair_and_generation_after_activation_failure() {
+        let script = rendered_transaction();
+        let backup_nix = script.find("\"$BACKUP/flake.nix\"").unwrap();
+        let backup_lock = script.find("\"$BACKUP/flake.lock\"").unwrap();
+        let profile_mutation = script.find("PROFILE_MUTATED=true").unwrap();
+        let activation = script
+            .find("\"$RESULT/bin/switch-to-configuration\" switch")
+            .unwrap();
+
+        assert!(backup_nix < profile_mutation);
+        assert!(backup_lock < profile_mutation);
+        assert!(profile_mutation < activation);
+        assert!(script.contains("if $LIVE_MUTATED; then\n        install_pair \"$BACKUP\""));
+        assert!(script.contains(
+            "nix-env --profile \"$SYSTEM_PROFILE\" --switch-generation \"$OLD_GENERATION\""
+        ));
+        assert!(script.contains("\"$OLD_SYSTEM/bin/switch-to-configuration\" switch"));
+        assert!(script.contains("trap 'rollback_transaction 143' TERM"));
+        assert!(script.contains("if $MARKER_SET && $rollback_ok; then"));
+        assert!(script.contains("Recovery remains suppressed; backups are in $BACKUP"));
+    }
+
+    #[test]
+    fn wrapper_transaction_requires_both_health_paths_at_expected_commit() {
+        let script = rendered_transaction();
+        let activation = script
+            .find("\"$RESULT/bin/switch-to-configuration\" switch")
+            .unwrap();
+        let engine_health = script.find("curl -fsS \"$ENGINE_HEALTH_URL\"").unwrap();
+        let caddy_health = script.find("curl -kfsS \"$CADDY_HEALTH_URL\"").unwrap();
+        let recovery_commit = script
+            .find("systemctl restart recover-generation-flake.service")
+            .unwrap();
+
+        assert!(activation < engine_health);
+        assert!(activation < caddy_health);
+        assert!(engine_health < recovery_commit);
+        assert!(caddy_health < recovery_commit);
+        assert_eq!(script.matches(".commit == $commit").count(), 2);
+        assert!(script.contains("source \"$RESULT/etc/nasty/update-health\""));
+        assert!(script.contains("if $CADDY_REQUIRED; then"));
+        assert!(script.contains(super::UPDATE_TRANSACTION_MARKER));
+    }
+
+    #[test]
+    fn wrapper_transaction_is_valid_bash() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("bash")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("bash is available in the test environment");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(rendered_transaction().as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
     }
 
     // ── booted-generation comparison ───────────────────────────────

@@ -383,6 +383,17 @@ in {
       source = nastySystemFlakeSnapshot;
     };
 
+    # The detached update transaction reads health targets from the candidate
+    # closure, so custom ports and headless installations are verified using
+    # the configuration they just built rather than hard-coded defaults.
+    environment.etc."nasty/update-health".text = ''
+      # nasty-engine currently binds its internal API to 2137; cfg.engine.port
+      # configures Caddy's upstream and is retained for compatibility.
+      ENGINE_HEALTH_URL="http://127.0.0.1:2137/health"
+      CADDY_REQUIRED=${if cfg.webui.package != null then "true" else "false"}
+      CADDY_HEALTH_URL="https://127.0.0.1:${toString cfg.webui.port}/health"
+    '';
+
     systemd.services.recover-generation-flake = mkIf (nastySystemFlakeSnapshot != null) {
       description = "Recover /etc/nixos flake files from the active system generation";
       wantedBy = [ "multi-user.target" ];
@@ -397,26 +408,28 @@ in {
         ExecStart = pkgs.writeShellScript "recover-generation-flake" ''
           set -euo pipefail
 
+          # An update transaction activates a candidate generation before it
+          # knows whether the engine and proxy are healthy. Leave the original
+          # wrapper pair alone until that transaction commits or rolls back.
+          if [ -e /run/nasty-wrapper-update-in-progress ]; then
+            exit 0
+          fi
+
           ${pkgs.coreutils}/bin/install -d -m 0755 /etc/nixos
 
-          sync_file() {
-            local name="$1"
-            local src="/etc/nasty-system-flake/$name"
-            local dst="/etc/nixos/$name"
+          if [ ! -e /etc/nasty-system-flake/flake.nix ] || [ ! -e /etc/nasty-system-flake/flake.lock ]; then
+            exit 0
+          fi
+          if [ -e /etc/nixos/flake.nix ] && [ -e /etc/nixos/flake.lock ] \
+            && ${pkgs.diffutils}/bin/cmp -s /etc/nasty-system-flake/flake.nix /etc/nixos/flake.nix \
+            && ${pkgs.diffutils}/bin/cmp -s /etc/nasty-system-flake/flake.lock /etc/nixos/flake.lock; then
+            exit 0
+          fi
 
-            if [ ! -e "$src" ]; then
-              return 0
-            fi
-
-            if [ -e "$dst" ] && ${pkgs.diffutils}/bin/cmp -s "$src" "$dst"; then
-              return 0
-            fi
-
-            ${pkgs.coreutils}/bin/install -m 0644 -T "$src" "$dst"
-          }
-
-          sync_file flake.nix
-          sync_file flake.lock
+          ${pkgs.coreutils}/bin/install -m 0644 -T /etc/nasty-system-flake/flake.nix /etc/nixos/.flake.nix.nasty-recover
+          ${pkgs.coreutils}/bin/install -m 0644 -T /etc/nasty-system-flake/flake.lock /etc/nixos/.flake.lock.nasty-recover
+          ${pkgs.coreutils}/bin/mv -fT /etc/nixos/.flake.nix.nasty-recover /etc/nixos/flake.nix
+          ${pkgs.coreutils}/bin/mv -fT /etc/nixos/.flake.lock.nasty-recover /etc/nixos/flake.lock
         '';
       };
     };
