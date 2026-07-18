@@ -11,12 +11,47 @@ use super::*;
 use crate::AppState;
 use crate::auth::{Role, Session};
 
+pub(crate) async fn published_firewall_ports(
+    state: &AppState,
+) -> Result<Vec<nasty_system::firewall::PublishedAppPort>, String> {
+    let apps = state
+        .apps
+        .list()
+        .await
+        .map_err(|e| format!("list apps for firewall: {e}"))?;
+    let mut published: Vec<nasty_system::firewall::PublishedAppPort> = apps
+        .iter()
+        .flat_map(|app| {
+            app.ports
+                .iter()
+                .map(move |port| nasty_system::firewall::PublishedAppPort {
+                    app: app.name.clone(),
+                    host_port: port.host_port,
+                    container_port: port.container_port,
+                    transport: port.protocol.to_ascii_lowercase(),
+                })
+        })
+        .collect();
+    published.sort_by(|a, b| {
+        a.host_port
+            .cmp(&b.host_port)
+            .then_with(|| a.app.cmp(&b.app))
+    });
+    Ok(published)
+}
+
+pub(crate) async fn sync_published_firewall_ports(state: &AppState) -> Result<(), String> {
+    let _sync = state.app_firewall_sync.lock().await;
+    let published = published_firewall_ports(state).await?;
+    state.firewall.set_published_app_ports(published).await
+}
+
 pub(super) async fn try_route(
     req: &Request,
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
-    Some(match req.method.as_str() {
+    let response = match req.method.as_str() {
         "apps.status" => ok(req, state.apps.status().await),
         "apps.enable" => {
             let p: nasty_apps::EnableAppsRequest = parse_params(req).unwrap_or_default();
@@ -426,5 +461,28 @@ pub(super) async fn try_route(
             Err(r) => r,
         },
         _ => return None,
-    })
+    };
+    let changes_published_ports = matches!(
+        req.method.as_str(),
+        "apps.enable"
+            | "apps.disable"
+            | "apps.install"
+            | "apps.update"
+            | "apps.remove"
+            | "apps.pull"
+            | "apps.compose.install"
+            | "apps.compose.update"
+            | "apps.compose.remove"
+            | "apps.compose.set_startup"
+    );
+    if changes_published_ports && let Err(e) = sync_published_firewall_ports(state).await {
+        if response.error.is_none() {
+            return Some(err(
+                req,
+                format!("app state changed but firewall synchronization failed: {e}"),
+            ));
+        }
+        tracing::warn!("app firewall reconciliation after failed request also failed: {e}");
+    }
+    Some(response)
 }

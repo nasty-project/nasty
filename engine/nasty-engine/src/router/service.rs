@@ -19,24 +19,49 @@ pub(super) async fn try_route(
     Some(match req.method.as_str() {
         "service.protocol.list" => ok(req, state.protocols.list().await),
         "service.protocol.enable" => match require_str(req, "name") {
-            Ok(name) => match state.protocols.enable(name).await {
-                Ok(v) => {
-                    if let Some(proto) = nasty_system::protocol::Protocol::from_name(name) {
-                        state.firewall.open(proto).await;
+            Ok(name) => {
+                if let Some(proto) = nasty_system::protocol::Protocol::from_name(name) {
+                    match state.firewall.open(proto).await {
+                        Err(e) => err(req, format!("firewall update failed: {e}")),
+                        Ok(()) => match state.protocols.enable(name).await {
+                            Ok(v) => ok(req, v),
+                            Err(service_error) => {
+                                let rollback = state.firewall.close(proto).await;
+                                match rollback {
+                                    Ok(()) => err(req, service_error),
+                                    Err(firewall_error) => err(
+                                        req,
+                                        format!(
+                                            "{service_error}; firewall rollback also failed: {firewall_error}"
+                                        ),
+                                    ),
+                                }
+                            }
+                        },
                     }
-                    ok(req, v)
+                } else {
+                    match state.protocols.enable(name).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
                 }
-                Err(e) => err(req, e),
-            },
+            }
             Err(r) => r,
         },
         "service.protocol.disable" => match require_str(req, "name") {
             Ok(name) => match state.protocols.disable(name).await {
                 Ok(v) => {
                     if let Some(proto) = nasty_system::protocol::Protocol::from_name(name) {
-                        state.firewall.close(proto).await;
+                        match state.firewall.close(proto).await {
+                            Ok(()) => ok(req, v),
+                            Err(e) => err(
+                                req,
+                                format!("protocol disabled but firewall update failed: {e}"),
+                            ),
+                        }
+                    } else {
+                        ok(req, v)
                     }
-                    ok(req, v)
                 }
                 Err(e) => err(req, e),
             },

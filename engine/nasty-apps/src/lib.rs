@@ -2658,17 +2658,12 @@ impl AppsService {
         if let Ok(apps) = self.list().await {
             for app in &apps {
                 if app.status == "running"
-                    && let Ok(docker) = self.docker()
+                    && let Err(e) = self.stop(&app.name).await
                 {
-                    let _ = docker
-                        .stop_container(
-                            &container_name(&app.name),
-                            Some(StopContainerOptions {
-                                t: Some(10),
-                                signal: None,
-                            }),
-                        )
-                        .await;
+                    warn!(
+                        "failed to stop app '{}' while disabling apps: {e}",
+                        app.name
+                    );
                 }
             }
         }
@@ -3635,9 +3630,16 @@ impl AppsService {
             });
         }
 
-        // Discover compose apps from the compose directory
-        if let Ok(mut entries) = tokio::fs::read_dir(COMPOSE_DIR).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
+        // Discover compose apps from the compose directory. Once Docker is
+        // live, inventory errors must fail the whole snapshot; returning a
+        // partial list would make the firewall silently drop omitted ports.
+        let mut entries = match tokio::fs::read_dir(COMPOSE_DIR).await {
+            Ok(entries) => Some(entries),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(AppsError::Io(e)),
+        };
+        if let Some(entries) = entries.as_mut() {
+            while let Some(entry) = entries.next_entry().await.map_err(AppsError::Io)? {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if seen_names.contains(&name) {
                     continue;
@@ -3660,8 +3662,7 @@ impl AppsService {
                         filters: Some(pf),
                         ..Default::default()
                     }))
-                    .await
-                    .unwrap_or_default();
+                    .await?;
 
                 // Collect all containers, ports, and derive overall status
                 let mut containers = Vec::new();
@@ -3703,8 +3704,7 @@ impl AppsService {
                     });
                 }
 
-                all_ports.sort_by_key(|p| p.host_port);
-                all_ports.dedup_by_key(|p| p.host_port);
+                sort_and_dedup_ports(&mut all_ports);
 
                 let overall_status = if compose_containers.is_empty() {
                     "stopped".to_string()
@@ -4981,9 +4981,9 @@ impl AppsService {
 
     // ── Restore on boot ─────────────────────────────────────
 
-    pub async fn restore(&self) {
+    pub async fn restore(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<()>> {
         if !self.is_enabled() {
-            return;
+            return None;
         }
         // Heal the stable /appdata symlink (#436). Pre-feature installs
         // have no appdata_path yet — set it up on the apps storage
@@ -5037,12 +5037,12 @@ impl AppsService {
                  Not starting Docker to avoid a crash loop; unlock/mount the filesystem, then \
                  re-enable apps or reboot."
             );
-            return;
+            return None;
         }
         info!("Apps runtime enabled — ensuring Docker is running");
         if let Err(e) = run_cmd("systemctl", &["start", DOCKER_SERVICE]).await {
             error!("Failed to start Docker: {e}");
-            return;
+            return None;
         }
 
         // Bring up compose apps. NASty-managed stacks (#437) start in a
@@ -5076,6 +5076,7 @@ impl AppsService {
             // delays must never risk timing it out. Ordering is preserved
             // within the task; a stack that fails to come up is logged and
             // the sequence continues (stack 1 broken must not block 2..n).
+            let (updates, receiver) = tokio::sync::mpsc::unbounded_channel();
             tokio::spawn(async move {
                 for (name, cfg) in managed {
                     info!("Starting managed stack '{name}' (order {})", cfg.order);
@@ -5089,6 +5090,7 @@ impl AppsService {
                             cfg.order
                         );
                     }
+                    let _ = updates.send(());
                     if cfg.delay_secs > 0 {
                         info!(
                             "Settling {}s after '{name}' before the next stack",
@@ -5100,6 +5102,9 @@ impl AppsService {
                 }
                 info!("Managed compose startup sequence complete");
             });
+            Some(receiver)
+        } else {
+            None
         }
     }
 
@@ -5747,9 +5752,17 @@ fn extract_ports(c: &bollard::models::ContainerSummary) -> Vec<MappedPort> {
             }
         }
     }
-    ports.sort_by_key(|p| p.host_port);
-    ports.dedup_by_key(|p| p.host_port);
+    sort_and_dedup_ports(&mut ports);
     ports
+}
+
+fn sort_and_dedup_ports(ports: &mut Vec<MappedPort>) {
+    ports.sort_by(|a, b| {
+        a.host_port
+            .cmp(&b.host_port)
+            .then_with(|| a.protocol.cmp(&b.protocol))
+    });
+    ports.dedup_by(|a, b| a.host_port == b.host_port && a.protocol == b.protocol);
 }
 
 fn container_status_str(c: &bollard::models::ContainerSummary) -> String {
@@ -7707,7 +7720,7 @@ services:
 
     // ── resolve_ingress_port ──
 
-    use super::{MappedPort, resolve_ingress_port};
+    use super::{MappedPort, resolve_ingress_port, sort_and_dedup_ports};
 
     fn port(host: u16, proto: &str) -> MappedPort {
         MappedPort {
@@ -7740,6 +7753,21 @@ services:
         // dial a dead port; fall back to the first TCP port.
         let ports = vec![port(2300, "tcp"), port(8080, "tcp")];
         assert_eq!(resolve_ingress_port(Some(9999), &ports), Some(2300));
+    }
+
+    #[test]
+    fn mapped_ports_preserve_tcp_and_udp_on_the_same_host_port() {
+        let mut ports = vec![port(53, "udp"), port(53, "tcp"), port(53, "udp")];
+        sort_and_dedup_ports(&mut ports);
+        assert_eq!(ports.len(), 2);
+        assert_eq!(
+            (ports[0].host_port, ports[0].protocol.as_str()),
+            (53, "tcp")
+        );
+        assert_eq!(
+            (ports[1].host_port, ports[1].protocol.as_str()),
+            (53, "udp")
+        );
     }
 }
 

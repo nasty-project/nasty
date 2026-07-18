@@ -41,11 +41,18 @@ pub(super) async fn try_route(
             Ok(p) => match state.dc.provision(p).await {
                 Ok((status, warnings)) => {
                     // DC ports open only after a successful provision.
-                    state.firewall.open_dc().await;
-                    ok(
-                        req,
-                        serde_json::json!({ "status": status, "warnings": warnings }),
-                    )
+                    match state.firewall.open_dc().await {
+                        Ok(()) => ok(
+                            req,
+                            serde_json::json!({ "status": status, "warnings": warnings }),
+                        ),
+                        Err(e) => err(
+                            req,
+                            format!(
+                                "domain controller provisioned but firewall update failed: {e}"
+                            ),
+                        ),
+                    }
                 }
                 Err(e) => err(req, e),
             },
@@ -54,7 +61,7 @@ pub(super) async fn try_route(
         "dc.demote" => match parse_params::<nasty_system::dc::DemoteRequest>(req) {
             Ok(p) => match state.dc.demote(p).await {
                 Ok(()) => {
-                    state.firewall.close_dc().await;
+                    let firewall_result = state.firewall.close_dc().await;
                     // Teardown (inside dc.demote) stops samba-dc.service,
                     // but nothing else restarts the member-mode SMB units
                     // it had Conflicts=-swapped out — bring SMB back under
@@ -72,7 +79,13 @@ pub(super) async fn try_route(
                     {
                         tracing::warn!("dc.demote: failed to restart SMB after demote: {e}");
                     }
-                    ok(req, "ok")
+                    match firewall_result {
+                        Ok(()) => ok(req, "ok"),
+                        Err(e) => err(
+                            req,
+                            format!("domain controller demoted but firewall update failed: {e}"),
+                        ),
+                    }
                 }
                 Err(e) => err(req, e),
             },

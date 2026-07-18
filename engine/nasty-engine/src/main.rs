@@ -85,6 +85,8 @@ pub struct AppState {
     pub nvmeof: Arc<nasty_sharing::NvmeofService>,
     pub vms: nasty_vm::VmService,
     pub apps: nasty_apps::AppsService,
+    pub app_firewall_sync: tokio::sync::Mutex<()>,
+    pub portal_firewall_sync: tokio::sync::Mutex<()>,
     pub backups: nasty_backup::BackupService,
     pub firmware: nasty_system::firmware::FirmwareService,
     /// Cached alerts result (timestamp, json value). Avoids re-evaluating
@@ -230,6 +232,8 @@ async fn main() -> anyhow::Result<()> {
         nvmeof,
         vms: nasty_vm::VmService::new(),
         apps: nasty_apps::AppsService::new(),
+        app_firewall_sync: tokio::sync::Mutex::new(()),
+        portal_firewall_sync: tokio::sync::Mutex::new(()),
         backups: nasty_backup::BackupService::new(),
         firmware: nasty_system::firmware::FirmwareService::new(),
         alerts_cache: tokio::sync::Mutex::new(None),
@@ -245,6 +249,9 @@ async fn main() -> anyhow::Result<()> {
             "subvolumes.restore_block_devices",
             "nvmeof.remap_device_paths",
             "iscsi.remap_device_paths",
+            "network.restore_pending_revert",
+            "network.reconcile_orphans",
+            "firewall.init",
             "protocols.restore",
             "smb.scaffold_config",
             "domain.restore",
@@ -253,8 +260,6 @@ async fn main() -> anyhow::Result<()> {
             "vms.restore",
             "apps.restore",
             "tailscale.restore",
-            "network.restore_pending_revert",
-            "network.reconcile_orphans",
             "subvolumes.reconcile_project_ids",
             "apps.reconcile_app_routes",
             "apps.reconcile_networks",
@@ -263,7 +268,6 @@ async fn main() -> anyhow::Result<()> {
             "oidc.migrate_secrets",
             "iscsi.migrate_secrets",
             "notifications.migrate_secrets",
-            "firewall.init",
             "nvmeof.ensure_tailscale_ports",
             "caches.warm",
         ]),
@@ -336,6 +340,70 @@ async fn main() -> anyhow::Result<()> {
             )
             .await;
     }
+
+    // Settle any interrupted network transaction and remove orphaned profiles
+    // before rendering interface-restricted firewall rules.
+    state
+        .boot_status
+        .run_phase(
+            "network.restore_pending_revert",
+            secs(60), // file check is instant; revert path runs nmcli
+            state.network.restore_pending_revert(),
+        )
+        .await;
+    state
+        .boot_status
+        .run_phase(
+            "network.reconcile_orphans",
+            secs(30), // a handful of NM connection deletes at most
+            state.network.reconcile_orphans(),
+        )
+        .await;
+
+    // Install the complete dynamic policy before restoring any listener,
+    // VM, app, or VPN. The declarative NixOS baseline remains default-drop
+    // until this transaction succeeds; failure is fatal so systemd retries
+    // instead of exposing services behind an incomplete firewall.
+    let firewall_result = state
+        .boot_status
+        .run_phase("firewall.init", secs(15), {
+            let state = state.clone();
+            async move {
+                use nasty_system::protocol::Protocol;
+                let result = async {
+                    let mut proto_states = Vec::new();
+                    for proto in Protocol::ALL {
+                        proto_states.push((*proto, state.protocols.is_enabled(*proto).await));
+                    }
+                    let rdma_enabled = nasty_system::rdma::enabled().await;
+                    let dc_enabled = nasty_system::dc::DcService::load_config().await.is_some();
+                    let (iscsi_ports, nvmeof_ports) =
+                        router::share::portal_firewall_ports(&state).await?;
+                    let published = router::apps::published_firewall_ports(&state).await?;
+                    state
+                        .firewall
+                        .init(
+                            &proto_states,
+                            rdma_enabled,
+                            dc_enabled,
+                            iscsi_ports,
+                            nvmeof_ports,
+                            published,
+                        )
+                        .await?;
+                    Ok::<(), String>(())
+                }
+                .await;
+                Some(result)
+            }
+        })
+        .await;
+    match firewall_result {
+        Some(Ok(())) => {}
+        Some(Err(e)) => return Err(anyhow::anyhow!("firewall initialization failed: {e}")),
+        None => return Err(anyhow::anyhow!("firewall initialization timed out")),
+    }
+
     state
         .boot_status
         .run_phase(
@@ -344,6 +412,21 @@ async fn main() -> anyhow::Result<()> {
             state.protocols.restore(),
         )
         .await;
+    // Protocol restore disables persisted entries whose daemons fail to start.
+    // Close those rules as one follow-up transaction before restoring anything
+    // else that could independently bring a listener back.
+    {
+        use nasty_system::protocol::Protocol;
+        let mut actual_states = Vec::new();
+        for proto in Protocol::ALL {
+            actual_states.push((*proto, state.protocols.is_enabled(*proto).await));
+        }
+        state
+            .firewall
+            .set_protocol_states(&actual_states)
+            .await
+            .map_err(|e| anyhow::anyhow!("firewall protocol reconciliation failed: {e}"))?;
+    }
 
     // Rebuild the smb.nasty.conf include chain before anything AD-related
     // runs. tmpfiles ships that file empty and only a share mutation ever
@@ -387,10 +470,8 @@ async fn main() -> anyhow::Result<()> {
     // /run resolved drop-in (tmpfs — empty after reboot) and start
     // samba-dc (Conflicts= swaps member-mode samba out). Must run after
     // the smb.nasty.conf reconcile above — the DC config includes it.
-    // The DC firewall opens later, in firewall.init: at this point in
-    // boot `state.rules` holds nothing yet, so opening here would
-    // rebuild the nftables table before the base (webui/ssh) rules
-    // exist, locking management out until firewall.init runs.
+    // The DC firewall was installed before service restoration above, so the
+    // listener never starts ahead of its rule.
     state
         .boot_status
         .run_phase("dc.restore", secs(30), {
@@ -424,7 +505,7 @@ async fn main() -> anyhow::Result<()> {
             state.vms.restore(),
         )
         .await;
-    state
+    let mut app_restore_updates = state
         .boot_status
         .run_phase(
             "apps.restore",
@@ -432,44 +513,25 @@ async fn main() -> anyhow::Result<()> {
             state.apps.restore(),
         )
         .await;
+    router::apps::sync_published_firewall_ports(&state)
+        .await
+        .map_err(|e| anyhow::anyhow!("app firewall reconciliation failed after restore: {e}"))?;
+    if let Some(mut updates) = app_restore_updates.take() {
+        let state = state.clone();
+        tokio::spawn(async move {
+            while updates.recv().await.is_some() {
+                if let Err(e) = router::apps::sync_published_firewall_ports(&state).await {
+                    error!("managed app startup firewall reconciliation failed: {e}");
+                }
+            }
+        });
+    }
     state
         .boot_status
         .run_phase(
             "tailscale.restore",
             secs(60), // network round-trip to login.tailscale.com
             state.tailscale.restore(),
-        )
-        .await;
-
-    // If the engine was killed mid-apply (or restarted before the user
-    // confirmed a risky network change), restore the prior config from
-    // /var/lib/nasty/networking.json.pending-revert. No-op if the file
-    // doesn't exist. Runs before the HTTP server starts accepting calls
-    // so a confirm can't race the rollback.
-    state
-        .boot_status
-        .run_phase(
-            "network.restore_pending_revert",
-            secs(60), // file check is instant; revert path runs nmcli
-            state.network.restore_pending_revert(),
-        )
-        .await;
-
-    // Idempotent sweep: drop networking.json `interfaces[]` entries
-    // that no longer correspond to any live device or virtual
-    // master, and the matching `nasty-*` NM connection profiles.
-    // Happens automatically on every boot — needed because the
-    // kernel can rename devices across reboots (Mellanox multi-port
-    // adapters: `enp6s0f0` → `enp6s0f0np0`), and because the
-    // engine's apply path doesn't garbage-collect dead profiles
-    // otherwise.  Runs before firewall.init so the firewall mirrors
-    // the cleaned-on-disk state.
-    state
-        .boot_status
-        .run_phase(
-            "network.reconcile_orphans",
-            secs(30), // a handful of NM connection deletes at most
-            state.network.reconcile_orphans(),
         )
         .await;
 
@@ -588,39 +650,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async {
         nasty_system::settings::reapply_tls_from_disk().await;
     });
-
-    // Initialize firewall based on current protocol states
-    state
-        .boot_status
-        .run_phase("firewall.init", secs(15), {
-            let state = state.clone();
-            async move {
-                use nasty_system::protocol::Protocol;
-                let mut proto_states = Vec::new();
-                for p in Protocol::ALL {
-                    let enabled = state.protocols.is_enabled(*p).await;
-                    proto_states.push((*p, enabled));
-                }
-                state.firewall.init(&proto_states).await;
-                // RDMA transports are a per-box opt-in orthogonal to the
-                // protocol list; restore its firewall rule when enabled.
-                if nasty_system::rdma::enabled().await {
-                    state.firewall.open_rdma().await;
-                }
-                // DC role (#20): open the AD service ports once the base rules exist.
-                // dc.restore (earlier) only restarts the service + DNS drop-in — opening
-                // the firewall there would rebuild the table before webui/ssh rules are
-                // in state, locking management out until this point.
-                if nasty_system::dc::DcService::load_config().await.is_some() {
-                    state.firewall.open_dc().await;
-                }
-                // iSCSI/NVMe-oF rules follow configured portal ports
-                // (#602); replace the static defaults with the real
-                // port sets from restored targets.
-                router::share::sync_portal_firewall_ports(&state).await;
-            }
-        })
-        .await;
 
     // Sync NVMe-oF ports with Tailscale IP (if Tailscale reconnected on boot)
     state

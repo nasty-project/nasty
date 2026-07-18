@@ -18,9 +18,8 @@ struct CustomRuleUpdateParams {
     input: nasty_system::firewall::CustomRuleInput,
 }
 
-/// Warnings (never errors) for a custom rule that overlaps a Docker-published
-/// host port. Bridge apps publish past the firewall, so the rule is redundant
-/// — surfaced so the operator doesn't think the port was closed.
+/// Warnings (never errors) for a custom rule that overlaps an app port already
+/// allowed by the generated Docker forward policy.
 pub(crate) fn docker_overlap_warnings(
     rule: &nasty_system::firewall::CustomRule,
     published: &[nasty_system::firewall::PublishedAppPort],
@@ -35,7 +34,7 @@ pub(crate) fn docker_overlap_warnings(
         .filter(|p| p.transport == proto && p.host_port >= rule.from && p.host_port <= rule.to)
         .map(|p| {
             format!(
-                "{}/{} is already reachable via app '{}' (bridge apps publish past the firewall)",
+                "{}/{} is already allowed for app '{}' by the Docker forward policy",
                 proto, p.host_port, p.app
             )
         })
@@ -56,7 +55,7 @@ async fn published_ports(state: &AppState) -> Vec<nasty_system::firewall::Publis
                         app: app.name.clone(),
                         host_port: p.host_port,
                         container_port: p.container_port,
-                        transport: p.protocol.clone(),
+                        transport: p.protocol.to_ascii_lowercase(),
                     })
             })
             .collect(),
@@ -179,12 +178,18 @@ pub(super) async fn try_route(
                 }
                 match nasty_system::rdma::set_enabled(p.enabled).await {
                     Ok(status) => {
-                        if p.enabled {
-                            state.firewall.open_rdma().await;
+                        let firewall_result = if p.enabled {
+                            state.firewall.open_rdma().await
                         } else {
-                            state.firewall.close_rdma().await;
+                            state.firewall.close_rdma().await
+                        };
+                        match firewall_result {
+                            Ok(()) => ok(req, status),
+                            Err(e) => err(
+                                req,
+                                format!("RDMA setting changed but firewall update failed: {e}"),
+                            ),
                         }
-                        ok(req, status)
                     }
                     Err(e) => err(req, e),
                 }
@@ -817,36 +822,7 @@ pub(super) async fn try_route(
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),
         },
-        "system.firewall.status" => {
-            // Enrich the service-rule view with the host ports Docker apps
-            // publish. These bypass the nftables firewall (DNAT in
-            // prerouting), so the firewall module can't see them — but
-            // surfacing them here gives the operator a complete
-            // "what's listening on this box" picture in one place.
-            let mut status = state.firewall.status().await;
-            if let Ok(apps) = state.apps.list().await {
-                let mut published: Vec<nasty_system::firewall::PublishedAppPort> = apps
-                    .iter()
-                    .flat_map(|app| {
-                        app.ports
-                            .iter()
-                            .map(move |p| nasty_system::firewall::PublishedAppPort {
-                                app: app.name.clone(),
-                                host_port: p.host_port,
-                                container_port: p.container_port,
-                                transport: p.protocol.clone(),
-                            })
-                    })
-                    .collect();
-                published.sort_by(|a, b| {
-                    a.host_port
-                        .cmp(&b.host_port)
-                        .then_with(|| a.app.cmp(&b.app))
-                });
-                status.published_app_ports = published;
-            }
-            ok(req, status)
-        }
+        "system.firewall.status" => ok(req, state.firewall.status().await),
         "system.firewall.restrict" => {
             let service = match require_str(req, "service") {
                 Ok(s) => s.to_string(),
