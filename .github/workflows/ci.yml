@@ -112,14 +112,17 @@ jobs:
     #    operator's box. follows closes that hole — the wrapper's
     #    resolved closure is byte-identical to what CI built against.
     #
-    # 2. `bcachefs-tools.url = "..."` (an actual ref, NOT a follows).
+    # 2. `bcachefs-tools.url = "..."` remains operator-owned, while
+    #    `nasty.inputs.bcachefs-tools.follows = "bcachefs-tools"` wires that
+    #    pin into the package and DKMS module exported by nasty.
     #    Nothing in nasty's binary closure links bcachefs-tools; it's
     #    used purely as a runtime CLI + kernel module. Pinning it
     #    independently gives the operator a real escape hatch when an
     #    upstream bcachefs-tools rev regresses on their hardware —
     #    they can stay on a known-good version across nasty bumps.
-    #    Following nasty here removes that capability for no cachix
-    #    win, since nasty's binaries don't depend on it.
+    #    Making the top-level input follow nasty would remove that capability.
+    #    The nested follows goes the other direction: nasty consumes the
+    #    wrapper pin, so the Version page controls what is installed.
     #
     # The bcachefs-tools URL is hardcoded with a real ref (e.g.
     # "v1.38.3") rather than a `@BCACHEFS_TOOLS_REF@` placeholder.
@@ -132,7 +135,7 @@ jobs:
     # a clean wrapper. Per-operator bcachefs-tools customization
     # happens via a post-render `rewrite_flake_input_urls` pass on
     # the caller side (see update.rs).
-    name: Installer template canonical shape (nixpkgs follows, bcachefs.url)
+    name: Installer template canonical shape and effective bcachefs pin
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -155,12 +158,12 @@ jobs:
 
       - name: Assert template pins bcachefs-tools with its own .url (hardcoded ref, no placeholder)
         run: |
-          if grep -qE 'bcachefs-tools\.follows\s*=' nixos/system-flake/flake.nix.template; then
-            echo "::error::installer template declares bcachefs-tools.follows — should pin its own .url so operators can independently override"
+          if grep -qE '^\s*bcachefs-tools\.follows\s*=' nixos/system-flake/flake.nix.template; then
+            echo "::error::installer template declares top-level bcachefs-tools.follows — should pin its own .url so operators can independently override"
             echo "Template should declare:"
             echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/<vX.Y.Z>\";"
             echo "instead of:"
-            grep -nE 'bcachefs-tools\.follows' nixos/system-flake/flake.nix.template
+            grep -nE '^\s*bcachefs-tools\.follows' nixos/system-flake/flake.nix.template
             exit 1
           fi
           if grep -qE 'bcachefs-tools\.url\s*=\s*"[^"]*@[A-Z_]+@' nixos/system-flake/flake.nix.template; then
@@ -177,7 +180,18 @@ jobs:
             echo "  bcachefs-tools.url = \"github:koverstreet/bcachefs-tools/v1.38.3\";"
             exit 1
           fi
+          if ! grep -qE '^\s*nasty\.inputs\.bcachefs-tools\.follows\s*=\s*"bcachefs-tools";' nixos/system-flake/flake.nix.template; then
+            echo "::error::nasty's nested bcachefs-tools input must follow the operator-owned wrapper input"
+            echo "Template must declare:"
+            echo '  nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";'
+            exit 1
+          fi
+          if ! grep -qE '^\s*bcachefs-tools\.inputs\.nixpkgs\.follows\s*=\s*"nixpkgs";' nixos/system-flake/flake.nix.template; then
+            echo "::error::wrapper bcachefs-tools must share the wrapper's nixpkgs input"
+            exit 1
+          fi
           echo "Installer template correctly pins bcachefs-tools.url with a hardcoded semver tag."
+          echo "nasty correctly consumes the operator-owned bcachefs-tools pin."
 
   installer-lock-shape:
     # The dynamic counterpart to `installer-flake-template` above.
@@ -260,4 +274,122 @@ jobs:
             exit 1
           fi
 
+          jq -e '
+            . as $lock
+            | .root as $root
+            | $lock.nodes[$root].inputs.nasty as $nasty
+            | $lock.nodes[$root].inputs["bcachefs-tools"] as $bcachefs
+            | ($lock.nodes[$nasty].inputs["bcachefs-tools"] == ["bcachefs-tools"])
+              and ($lock.nodes[$bcachefs].inputs.nixpkgs == ["nixpkgs"])
+              and
+              ([
+                $lock.nodes[]
+                | select(
+                    .locked.owner? == "koverstreet"
+                    and .locked.repo? == "bcachefs-tools"
+                  )
+              ] | length == 1)
+          ' flake.lock >/dev/null
+          echo "Wrapper and nasty resolve one shared bcachefs-tools source node."
+
           echo "Wrapper-lock shape is stable across two consecutive nix flake lock passes."
+
+      - name: Prove wrapper pin changes userspace and DKMS derivations
+        run: |
+          set -euo pipefail
+          ROOT=$(mktemp -d)
+
+          make_source() {
+            local destination="$1"
+            local version="$2"
+            mkdir -p "$destination"
+            cat > "$destination/flake.nix" <<'FLAKE'
+          {
+            inputs.nixpkgs.url = "github:NixOS/nixpkgs";
+            outputs = { self, nixpkgs }: { };
+          }
+          FLAKE
+            cat > "$destination/Cargo.toml" <<EOF
+          [package]
+          name = "bcachefs-tools"
+          version = "$version"
+          EOF
+            cat > "$destination/Cargo.lock" <<EOF
+          version = 4
+
+          [[package]]
+          name = "bcachefs-tools"
+          version = "$version"
+          EOF
+          }
+
+          render_wrapper() {
+            local destination="$1"
+            local source="$2"
+            mkdir -p "$destination"
+            sed -e 's|"github:nasty-project/nasty/@NASTY_VERSION@"|"path:'"$GITHUB_WORKSPACE"'"|' \
+                -e 's|bcachefs-tools.url = "github:koverstreet/bcachefs-tools/[^"]*";|bcachefs-tools.url = "path:'"$source"'";|' \
+                -e 's|@LOCAL_SYSTEM@|x86_64-linux|g' \
+                -e 's|@WRAPPER_FLAKE_VERSION@|ci-bcachefs-pin|g' \
+                nixos/system-flake/flake.nix.template > "$destination/flake.nix"
+            cat > "$destination/hardware-configuration.nix" <<'STUB'
+          { ... }: { }
+          STUB
+            cat > "$destination/networking.nix" <<'STUB'
+          { ... }: { }
+          STUB
+            (cd "$destination" && nix flake lock)
+          }
+
+          evaluate_wrapper() {
+            local wrapper="$1"
+            nix eval --json "$wrapper#nixosConfigurations.nasty.config" \
+              --apply '
+                config:
+                let
+                  package = config.boot.bcachefs.package;
+                  module = config.boot.bcachefs.modulePackage;
+                in {
+                  package = {
+                    inherit (package) pname version drvPath;
+                    src = toString package.src;
+                    dkms = toString package.dkms;
+                  };
+                  module = {
+                    inherit (module) name drvPath;
+                    src = toString module.src;
+                  };
+                  moduleUsesPackageDkms = toString module.src == toString package.dkms;
+                  moduleInExtraModulePackages = builtins.any
+                    (candidate: candidate.drvPath == module.drvPath)
+                    config.boot.extraModulePackages;
+                }
+              ' > "$wrapper/eval.json"
+          }
+
+          make_source "$ROOT/source-a" "1.38.801"
+          make_source "$ROOT/source-b" "1.38.802"
+          render_wrapper "$ROOT/wrapper-a" "$ROOT/source-a"
+          render_wrapper "$ROOT/wrapper-b" "$ROOT/source-b"
+          evaluate_wrapper "$ROOT/wrapper-a"
+          evaluate_wrapper "$ROOT/wrapper-b"
+
+          jq -e '
+            .package.version == "1.38.801"
+            and .moduleUsesPackageDkms
+            and .moduleInExtraModulePackages
+          ' "$ROOT/wrapper-a/eval.json" >/dev/null
+          jq -e '
+            .package.version == "1.38.802"
+            and .moduleUsesPackageDkms
+            and .moduleInExtraModulePackages
+          ' "$ROOT/wrapper-b/eval.json" >/dev/null
+          jq -s -e '
+            .[0].package.src != .[1].package.src
+            and .[0].package.drvPath != .[1].package.drvPath
+            and .[0].package.dkms != .[1].package.dkms
+            and .[0].module.src != .[1].module.src
+            and .[0].module.drvPath != .[1].module.drvPath
+          ' "$ROOT/wrapper-a/eval.json" "$ROOT/wrapper-b/eval.json" >/dev/null
+
+          echo "Changing only the wrapper pin changes the installed userspace and DKMS derivations."
