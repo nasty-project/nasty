@@ -2076,7 +2076,9 @@ fn render_system_flake_template_with_ref(
 
 /// Whether the wrapper is in the canonical 0.0.9 shape:
 /// `nixpkgs.follows = "nasty/nixpkgs"` (no `.url`) AND
-/// `bcachefs-tools.url = "..."` (no `.follows`) AND lanzaboote's
+/// `bcachefs-tools.url = "..."` (no top-level `.follows`) AND
+/// `bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs"` AND
+/// `nasty.inputs.bcachefs-tools.follows = "bcachefs-tools"` AND lanzaboote's
 /// presence matches the SB overlay's presence (declared iff
 /// `secure-boot.nix` exists on disk, since lanzaboote is engine-
 /// injected per-box at enrollment).
@@ -2103,6 +2105,18 @@ fn wrapper_is_canonical_shape(content: &str, overlay_present: bool) -> bool {
     if !urls.contains_key("bcachefs-tools") {
         return false;
     }
+    // The system consumes nasty.packages.<system>.bcachefs-tools, so nasty's
+    // nested source must follow the operator-owned wrapper pin.
+    if !has_flake_string_attr(
+        content,
+        "nasty.inputs.bcachefs-tools.follows",
+        "bcachefs-tools",
+    ) {
+        return false;
+    }
+    if !has_flake_string_attr(content, "bcachefs-tools.inputs.nixpkgs.follows", "nixpkgs") {
+        return false;
+    }
     // Lanzaboote must be present iff the SB overlay is on disk.
     // Drift in either direction (overlay without input, or input
     // without overlay) is non-canonical and needs reconciliation
@@ -2112,6 +2126,37 @@ fn wrapper_is_canonical_shape(content: &str, overlay_present: bool) -> bool {
         return false;
     }
     true
+}
+
+fn has_flake_string_attr(content: &str, attr: &str, expected: &str) -> bool {
+    let parsed = rnix::Root::parse(content);
+    if !parsed.errors().is_empty() {
+        return false;
+    }
+
+    parsed
+        .tree()
+        .syntax()
+        .descendants()
+        .filter_map(ast::AttrpathValue::cast)
+        .any(|node| {
+            let Some(attrpath) = node.attrpath() else {
+                return false;
+            };
+            let normalized = attrpath
+                .syntax()
+                .text()
+                .to_string()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>();
+            if normalized != attr {
+                return false;
+            }
+            node.value()
+                .and_then(|value| unquote_nix_string(&value.syntax().text().to_string()))
+                .is_some_and(|value| value == expected)
+        })
 }
 
 /// Re-render the wrapper-flake into the canonical 0.0.9 shape by
@@ -3565,14 +3610,16 @@ outputs = { nixpkgs, nasty, ... }: {
 
     #[test]
     fn wrapper_is_canonical_shape_accepts_canonical() {
-        // The 0.0.9 canonical shape: nasty.url, nixpkgs.follows,
-        // bcachefs-tools.url. nixpkgs must NOT have a .url; bcachefs
-        // MUST have one. No SB overlay on disk → no lanzaboote.
+        // The canonical shape: nasty.url, nixpkgs.follows, an operator-owned
+        // bcachefs-tools.url, and nasty's nested bcachefs input following it.
+        // No SB overlay on disk means no lanzaboote.
         let canonical = r#"{
   inputs = {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
 }"#;
         assert!(super::wrapper_is_canonical_shape(canonical, false));
@@ -3587,6 +3634,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
     lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
     lanzaboote.inputs.nixpkgs.follows = "nasty/nixpkgs";
   };
@@ -3604,6 +3653,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
     lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
   };
 }"#;
@@ -3619,6 +3670,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
 }"#;
         assert!(!super::wrapper_is_canonical_shape(drift, true));
@@ -3636,6 +3689,18 @@ outputs = { nixpkgs, nasty, ... }: {
   };
 }"#;
         assert!(!super::wrapper_is_canonical_shape(legacy, false));
+    }
+
+    #[test]
+    fn wrapper_is_canonical_shape_rejects_ineffective_bcachefs_pin() {
+        let old_shape = r#"{
+  inputs = {
+    nasty.url = "github:nasty-project/nasty/v0.0.14";
+    nixpkgs.follows = "nasty/nixpkgs";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.8";
+  };
+}"#;
+        assert!(!super::wrapper_is_canonical_shape(old_shape, false));
     }
 
     #[test]
@@ -3672,6 +3737,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
 }"#;
         let out = super::inject_lanzaboote_input(wrapper).expect("inject");
@@ -3689,6 +3756,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
     lanzaboote.url = "github:nix-community/lanzaboote/v1.0.0";
     lanzaboote.inputs.nixpkgs.follows = "nasty/nixpkgs";
   };
@@ -3707,6 +3776,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
 }"#;
         assert_eq!(super::strip_lanzaboote_input(wrapper), wrapper);
@@ -3719,6 +3790,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
 }"#;
         let injected = super::inject_lanzaboote_input(wrapper).expect("inject");
@@ -3736,6 +3809,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
 }"#;
         assert!(!super::wrapper_is_canonical_shape(pre, true));
@@ -3781,6 +3856,8 @@ outputs = { nixpkgs, nasty, ... }: {
         );
         // Follows is in place for nixpkgs:
         assert!(migrated.contains(r#"nixpkgs.follows = "nasty/nixpkgs""#));
+        assert!(migrated.contains(r#"nasty.inputs.bcachefs-tools.follows = "bcachefs-tools""#));
+        assert!(migrated.contains(r#"bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs""#));
     }
 
     #[tokio::test]
@@ -3790,6 +3867,8 @@ outputs = { nixpkgs, nasty, ... }: {
     nasty.url = "github:nasty-project/nasty/v0.0.9";
     nixpkgs.follows = "nasty/nixpkgs";
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.3";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
   };
 }"#;
         let out = super::migrate_wrapper_to_canonical_shape(canonical, "x86_64-linux", false)

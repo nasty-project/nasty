@@ -22,11 +22,11 @@
     #
     # bcachefs-tools doesn't have the same problem: nasty's binary
     # closure doesn't link it, it's used purely as a runtime CLI +
-    # kernel module. The cost of the operator pinning a different
-    # bcachefs-tools rev is rebuilding bcachefs-tools itself + the
-    # kernel module — real, but a fair trade for the ability to
-    # stick with a known-good version when an upstream rev regresses
-    # on their hardware.
+    # kernel module. The wrapper owns the URL, while nasty's nested
+    # input follows that operator-owned pin. The cost of selecting a
+    # different rev is rebuilding bcachefs-tools itself + the kernel
+    # module — real, but a fair trade for the ability to stick with a
+    # known-good version when an upstream rev regresses on hardware.
     nasty.url = "github:nasty-project/nasty/@NASTY_VERSION@";
     nixpkgs.follows = "nasty/nixpkgs";
     # bcachefs-tools defaults to the same rev nasty's CI is tested
@@ -68,6 +68,12 @@
     # if that embedded flake.nix can't be parsed; keep it sane (matching
     # the repo-root flake.nix) so even that fallback is correct.
     bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.38.8";
+    bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
+    # `nasty.packages.<system>.bcachefs-tools` is the package wired into
+    # boot.bcachefs.package below. Override nasty's nested source with the
+    # wrapper pin so changing the Version page actually changes both the
+    # userspace tools and DKMS module that the appliance installs.
+    nasty.inputs.bcachefs-tools.follows = "bcachefs-tools";
 
     # NOTE: lanzaboote is intentionally NOT declared as a top-level
     # input here. Secure Boot is per-box opt-in: when the operator
