@@ -795,12 +795,12 @@ in {
         diskwatchSrc = pkgs.fetchFromGitHub {
           owner = "matthart1983";
           repo = "diskwatch";
-          rev = "v0.1.2";
-          hash = "sha256-8tQXcbY/sguw42vE0p5Q8/psmwfYQihWcSIsApI4OmE=";
+          rev = "v0.1.3";
+          hash = "sha256-CGt9954nwgVMcNJg6QjRLjhN8N9rQ6+bRuCzqQAUXGc=";
         };
       in pkgs.rustPlatform.buildRustPackage {
         pname = "diskwatch";
-        version = "0.1.2";
+        version = "0.1.3";
         src = diskwatchSrc;
         cargoLock.lockFile = "${diskwatchSrc}/Cargo.lock";
         meta.mainProgram = "diskwatch";
