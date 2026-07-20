@@ -767,12 +767,12 @@ in {
         nastyTopSrc = pkgs.fetchFromGitHub {
           owner = "nasty-project";
           repo = "nasty-top";
-          rev = "v0.0.8";
-          hash = "sha256-IIWxrlTQg5bVCZTO1qaAlV5acN5sPnblaQXBVmmSdWQ=";
+          rev = "v0.0.9";
+          hash = "sha256-Qm2e1pk7cgcIPxL60A2bmYPbaniQGvuOEc/8OpWpXYQ=";
         };
       in pkgs.rustPlatform.buildRustPackage {
         pname = "nasty-top";
-        version = "0.0.8";
+        version = "0.0.9";
         src = nastyTopSrc;
         # Vendor via Cargo.lock instead of a separate cargoHash so a
         # `cargo update` in nasty-top doesn't silently break this build.
