@@ -781,7 +781,7 @@
 						{#if !entry.is_dir}
 							{formatSize(entry.size)}
 						{:else if typeof folderSizes[entry.name] === 'number'}
-							{formatSize(folderSizes[entry.name] as number)}
+							{folderSizes[entry.name] === 0 ? 'Empty' : formatSize(folderSizes[entry.name] as number)}
 						{:else if folderSizes[entry.name] === 'loading'}
 							<Loader2 size={14} class="inline animate-spin" />
 						{:else}
