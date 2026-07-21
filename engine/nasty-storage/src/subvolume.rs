@@ -54,6 +54,8 @@ pub enum SubvolumeError {
     InvalidName(String),
     #[error("invalid volsize: {0}")]
     InvalidVolsize(String),
+    #[error("cannot shrink subvolume from {current} to {requested} bytes")]
+    ShrinkNotSupported { current: u64, requested: u64 },
     #[error("could not delete child subvolume(s): {0}")]
     ChildrenStuck(String),
     #[error("could not detach loop device {device}: {reason}")]
@@ -138,6 +140,30 @@ fn validate_volsize_bytes(bytes: u64) -> Result<(), SubvolumeError> {
         )));
     }
     Ok(())
+}
+
+fn validate_grow_only(current: u64, requested: u64) -> Result<(), SubvolumeError> {
+    if requested < current {
+        return Err(SubvolumeError::ShrinkNotSupported { current, requested });
+    }
+    Ok(())
+}
+
+fn quota_kib_from_bytes(bytes: u64) -> u64 {
+    bytes.div_ceil(1024)
+}
+
+fn quota_bytes_from_request(bytes: u64) -> u64 {
+    quota_kib_from_bytes(bytes) * 1024
+}
+
+fn filesystem_capacity_bound(
+    quota_bytes: Option<u64>,
+    recorded_bytes: Option<u64>,
+    used_bytes: Option<u64>,
+) -> Option<u64> {
+    let declared_capacity = [quota_bytes, recorded_bytes].into_iter().flatten().max()?;
+    Some(declared_capacity.max(used_bytes.unwrap_or(0)))
 }
 
 /// `losetup -d` returns one of a small set of "device wasn't attached
@@ -909,6 +935,13 @@ impl SubvolumeService {
         if let Some(bytes) = req.volsize_bytes {
             validate_volsize_bytes(bytes)?;
         }
+        let effective_volsize_bytes = req.volsize_bytes.map(|bytes| {
+            if req.subvolume_type == SubvolumeType::Filesystem {
+                quota_bytes_from_request(bytes)
+            } else {
+                bytes
+            }
+        });
 
         // Ensure parent directories exist for nested subvolumes (e.g. "projects/web")
         if let Some(parent) = Path::new(&subvol_path).parent()
@@ -1000,13 +1033,13 @@ impl SubvolumeService {
         // — repquota still reports usage, it just won't enforce.
         if req.subvolume_type == SubvolumeType::Filesystem {
             let projid = project_id_for(&req.filesystem, &req.name);
-            let limit = req.volsize_bytes.unwrap_or(0);
+            let limit = effective_volsize_bytes.unwrap_or(0);
             set_project_quota(&mount_point, &subvol_path, projid, limit).await;
         }
 
         // For block subvolumes: create sparse file and attach loop device
         if req.subvolume_type == SubvolumeType::Block {
-            let volsize = req.volsize_bytes.unwrap();
+            let volsize = effective_volsize_bytes.unwrap();
             let img_path = format!("{subvol_path}/{BLOCK_FILE_NAME}");
 
             info!(
@@ -1058,7 +1091,7 @@ impl SubvolumeService {
         write_meta_xattrs(
             &subvol_path,
             &req.subvolume_type,
-            req.volsize_bytes,
+            effective_volsize_bytes,
             req.compression.as_deref(),
             req.comments.as_deref(),
             owner.as_deref(),
@@ -1231,9 +1264,15 @@ impl SubvolumeService {
         validate_volsize_bytes(req.volsize_bytes)?;
         let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
-        match subvol.subvolume_type {
+        let effective_volsize_bytes = match subvol.subvolume_type {
             SubvolumeType::Block => {
                 let img_path = format!("{}/{}", subvol.path, BLOCK_FILE_NAME);
+                let current_size = std::fs::metadata(&img_path)
+                    .map_err(|e| {
+                        SubvolumeError::CommandFailed(format!("stat block image {img_path}: {e}"))
+                    })?
+                    .len();
+                validate_grow_only(current_size, req.volsize_bytes)?;
                 info!(
                     "Resizing block subvolume '{}' to {} bytes",
                     req.name, req.volsize_bytes
@@ -1255,41 +1294,39 @@ impl SubvolumeService {
                         .await
                         .map_err(SubvolumeError::CommandFailed)?;
                 }
+                req.volsize_bytes
             }
             SubvolumeType::Filesystem => {
+                let requested_bytes = quota_bytes_from_request(req.volsize_bytes);
+                let current_bound = filesystem_capacity_bound(
+                    subvol.quota_bytes,
+                    subvol.volsize_bytes,
+                    subvol.used_bytes,
+                )
+                .ok_or_else(|| {
+                    SubvolumeError::InvalidVolsize(
+                        "current filesystem capacity is unavailable; refusing resize".to_string(),
+                    )
+                })?;
+                validate_grow_only(current_bound, requested_bytes)?;
                 info!(
                     "Resizing filesystem subvolume '{}' quota to {} bytes",
-                    req.name, req.volsize_bytes
+                    req.name, requested_bytes
                 );
                 let mount_point = self.fs_mount_point(&req.filesystem).await?;
                 let projid = project_id_for(&req.filesystem, &req.name);
                 let proj_name = format!("nasty-{projid}");
-                let bytes_str = req.volsize_bytes.to_string();
-                if let Err(e) = cmd::run_ok(
-                    "setquota",
-                    &[
-                        "-P",
-                        &proj_name,
-                        &bytes_str,
-                        &bytes_str,
-                        "0",
-                        "0",
-                        &mount_point,
-                    ],
-                )
-                .await
-                {
-                    warn!("setquota failed for project {proj_name} on {mount_point}: {e}");
-                }
+                set_project_quota_limit(&mount_point, &proj_name, requested_bytes).await?;
+                requested_bytes
             }
-        }
+        };
 
         // Update volsize xattr
         let path = subvol_path(&self.fs_mount_point(&req.filesystem).await?, &req.name);
         xattr::set(
             &path,
             XATTR_NASTY_VOLSIZE,
-            req.volsize_bytes.to_string().as_bytes(),
+            effective_volsize_bytes.to_string().as_bytes(),
         )
         .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr volsize: {e}")))?;
 
@@ -1959,26 +1996,41 @@ async fn set_project_quota(mount_point: &str, dir_path: &str, projid: u32, bytes
         }
     }
 
-    // setquota -P <name> <soft> <hard> <isoft> <ihard> <mountpoint>
-    // soft == hard (no grace period), no inode limits.
-    //
-    // setquota's block-limit arguments are in 1 KiB blocks, not bytes —
-    // passing bytes directly stored every quota 1024× larger than
-    // intended (e.g. a 5 GiB PVC ended up as 5 TiB on disk).  The read
-    // side already converts KiB→bytes (`hard_kb * 1024` in
-    // query_project_usages), so the round-trip was internally
-    // consistent but consistently wrong.  Integer-divide here: typical
-    // PVC sizes are exact Gi multiples and align cleanly to KiB.
-    let kib_str = (bytes / 1024).to_string();
-    match cmd::run_ok(
-        "setquota",
-        &["-P", &proj_name, &kib_str, &kib_str, "0", "0", mount_point],
-    )
-    .await
-    {
+    match set_project_quota_limit(mount_point, &proj_name, bytes).await {
         Ok(_) => info!("set quota {bytes} bytes for project {proj_name} on {mount_point}"),
         Err(e) => warn!("setquota failed for project {proj_name} on {mount_point}: {e}"),
     }
+}
+
+/// Apply a project quota limit, propagating failures to callers that need
+/// resize metadata to stay consistent with the live quota.
+async fn set_project_quota_limit(
+    mount_point: &str,
+    project_name: &str,
+    bytes: u64,
+) -> Result<(), SubvolumeError> {
+    // setquota's block limits are 1 KiB units. Round up so an unaligned
+    // byte request never receives less capacity than requested.
+    let kib_str = quota_kib_from_bytes(bytes).to_string();
+    cmd::run_ok(
+        "setquota",
+        &[
+            "-P",
+            project_name,
+            &kib_str,
+            &kib_str,
+            "0",
+            "0",
+            mount_point,
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| {
+        SubvolumeError::CommandFailed(format!(
+            "setquota failed for project {project_name} on {mount_point}: {e}"
+        ))
+    })
 }
 
 /// Write a `name:id` entry to /etc/projid if not already present.
@@ -2445,6 +2497,41 @@ mod tests {
         // worst case (Operator-role caller trying to ENOSPC the filesystem).
         assert!(validate_volsize_bytes(MAX_VOLSIZE_BYTES + 1).is_err());
         assert!(validate_volsize_bytes(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn quota_bytes_are_converted_to_kib_without_underallocating() {
+        assert_eq!(
+            quota_kib_from_bytes(5 * 1024 * 1024 * 1024),
+            5 * 1024 * 1024
+        );
+        assert_eq!(quota_kib_from_bytes(1025), 2);
+        assert_eq!(quota_kib_from_bytes(0), 0);
+        assert_eq!(quota_bytes_from_request(1025), 2048);
+    }
+
+    #[test]
+    fn resize_target_must_not_shrink_current_capacity() {
+        assert!(validate_grow_only(10, 10).is_ok());
+        assert!(validate_grow_only(10, 11).is_ok());
+        assert!(matches!(
+            validate_grow_only(10, 9),
+            Err(SubvolumeError::ShrinkNotSupported {
+                current: 10,
+                requested: 9
+            })
+        ));
+    }
+
+    #[test]
+    fn filesystem_capacity_uses_the_largest_known_bound() {
+        assert_eq!(
+            filesystem_capacity_bound(Some(10), Some(8), Some(7)),
+            Some(10)
+        );
+        assert_eq!(filesystem_capacity_bound(None, Some(10), Some(7)), Some(10));
+        assert_eq!(filesystem_capacity_bound(None, None, Some(7)), None);
+        assert_eq!(filesystem_capacity_bound(None, None, None), None);
     }
 
     #[test]
