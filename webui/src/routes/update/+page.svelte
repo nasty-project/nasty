@@ -23,6 +23,11 @@
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
+	import {
+		reachedUpdatePhase,
+		shouldShowUpdateStatus,
+		versionUpdatePhases
+	} from '$lib/update-progress';
 
 	type Tab = 'version' | 'generations' | 'firmware';
 	type VersionRow = {
@@ -111,12 +116,7 @@
 	// tooltip so the wording stays consistent across surfaces.
 	let firmwareConstraints: FirmwareConstraints | null = $state(null);
 
-	const phases = [
-		{ label: 'Fetch', marker: '==> Updating local system flake' },
-		{ label: 'Build', marker: '==> Rebuilding' },
-		{ label: 'Activate', marker: 'activating the configuration' },
-		{ label: 'Done', marker: '==> Update complete!' }
-	];
+	const phases = versionUpdatePhases;
 
 	const genPhases = [
 		{ label: 'Switch', marker: '==> Switching to generation' },
@@ -125,21 +125,11 @@
 	];
 
 	const currentPhase = $derived.by(() => {
-		const log = status?.log ?? '';
-		let reached = -1;
-		for (let i = 0; i < phases.length; i++) {
-			if (log.includes(phases[i].marker)) reached = i;
-		}
-		return reached;
+		return reachedUpdatePhase(status?.log ?? '', phases);
 	});
 
 	const genCurrentPhase = $derived.by(() => {
-		const log = status?.log ?? '';
-		let reached = -1;
-		for (let i = 0; i < genPhases.length; i++) {
-			if (log.includes(genPhases[i].marker)) reached = i;
-		}
-		return reached;
+		return reachedUpdatePhase(status?.log ?? '', genPhases);
 	});
 
 	const versionDirty = $derived.by(() =>
@@ -178,9 +168,7 @@
 	);
 
 	const versionStatusVisible = $derived.by(() => {
-		if (!status || status.state === 'idle') return false;
-		const log = status.log ?? '';
-		return currentPhase >= 0 || log.includes('No flake.lock changes detected');
+		return shouldShowUpdateStatus(status?.state ?? null);
 	});
 
 	const generationStatusVisible = $derived.by(() => {
