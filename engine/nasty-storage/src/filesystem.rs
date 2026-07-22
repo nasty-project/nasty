@@ -795,6 +795,48 @@ type ScrubStateMap = Arc<Mutex<HashMap<String, ScrubStatus>>>;
 type MountStateMap = Arc<Mutex<HashMap<String, MountFailure>>>;
 type FsckStateMap = Arc<Mutex<HashMap<String, FsckStatus>>>;
 
+fn loop_devices_backed_by(output: &str, mount_point: &str) -> Vec<String> {
+    let prefix = format!("{}/", mount_point.trim_end_matches('/'));
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let device = fields.next()?;
+            let backing_file = fields.next()?;
+            backing_file
+                .starts_with(&prefix)
+                .then(|| device.to_string())
+        })
+        .collect()
+}
+
+async fn detach_filesystem_loop_devices(mount_point: &str) -> Result<(), FilesystemError> {
+    let output = cmd::run_ok(
+        "losetup",
+        &[
+            "--list",
+            "--noheadings",
+            "--output",
+            "NAME,BACK-FILE",
+            "--raw",
+        ],
+    )
+    .await
+    .map_err(FilesystemError::CommandFailed)?;
+
+    for device in loop_devices_backed_by(&output, mount_point) {
+        info!("Detaching filesystem-backed loop device {device} before unmount");
+        cmd::run_ok("losetup", &["-d", &device])
+            .await
+            .map_err(|e| {
+                FilesystemError::CommandFailed(format!(
+                    "failed to detach {device} before unmounting {mount_point}: {e}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct FilesystemService {
     list_cache: ListCache,
@@ -1631,6 +1673,7 @@ impl FilesystemService {
         if fs.mounted
             && let Some(ref mp) = fs.mount_point
         {
+            detach_filesystem_loop_devices(mp).await?;
             info!("Unmounting filesystem '{}' from {}", req.name, mp);
             cmd::run_ok("umount", &[mp.as_str()])
                 .await
@@ -5708,6 +5751,22 @@ fn find_fs_name_by_devices(_devices: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loop_device_filter_matches_only_mount_descendants() {
+        let output = "/dev/loop1 /fs/first/vol-a/vol.img\n\
+                      /dev/loop2 /fs/second/vol-b/vol.img\n\
+                      /dev/loop3 /fs/firstish/vol-c/vol.img\n\
+                      /dev/loop4 /fs/first/nested/vol.img\n";
+        assert_eq!(
+            loop_devices_backed_by(output, "/fs/first"),
+            vec!["/dev/loop1", "/dev/loop4"]
+        );
+        assert_eq!(
+            loop_devices_backed_by(output, "/fs/first/"),
+            vec!["/dev/loop1", "/dev/loop4"]
+        );
+    }
 
     // ── show-super classification (encryption probe) ──────────────
 
