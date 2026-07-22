@@ -1646,8 +1646,7 @@ impl SubvolumeService {
                 );
                 let mount_point = self.fs_mount_point(&req.filesystem).await?;
                 let projid = project_id_for(&req.filesystem, &req.name);
-                let proj_name = format!("nasty-{projid}");
-                set_project_quota_limit(&mount_point, &proj_name, requested_bytes).await?;
+                set_project_quota_limit(&mount_point, projid, requested_bytes).await?;
                 requested_bytes
             }
         };
@@ -2363,64 +2362,99 @@ fn project_id_for(filesystem: &str, name: &str) -> u32 {
     v.max(1)
 }
 
+fn project_id_needs_update(current: Option<u32>, expected: u32) -> bool {
+    current != Some(expected)
+}
+
 /// Assign a bcachefs project ID to a subvolume directory and set its quota limit.
 ///
 /// Uses `setproject` (from Kent Overstreet's linuxquota fork) to assign the
-/// project ID, then `setquota` to set the hard block limit. Both tools must be
-/// present on the system (provided via nixos/modules/linuxquota.nix).
+/// project ID, then direct `quotactl` to set the hard block limit.
 ///
 /// Best-effort: logs a warning on failure rather than returning an error, since
-/// quota enforcement requires `prjquota` mount option. Volume creation must not
-/// fail if quota tools are unavailable.
+/// quota enforcement requires the `prjquota` mount option. Volume creation must
+/// not fail if quota support is unavailable.
 async fn set_project_quota(mount_point: &str, dir_path: &str, projid: u32, bytes: u64) {
     // Register the project name in /etc/projid so that standard quota tools
     // (repquota, edquota) can display human-readable names.
     let proj_name = format!("nasty-{projid}");
     register_project(&proj_name, projid);
 
-    // setproject -c -P <name> <path>
-    // -c: create the project in /etc/projid if not present (idempotent)
-    match cmd::run_ok("setproject", &["-c", "-P", &proj_name, dir_path]).await {
-        Ok(_) => info!("set project {proj_name} (id={projid}) on {dir_path}"),
+    match current_project_id(dir_path) {
+        Ok(current) if !project_id_needs_update(current, projid) => {
+            info!("project {proj_name} (id={projid}) already set on {dir_path}");
+        }
+        Ok(_) => {
+            if let Err(e) = cmd::run_ok("setproject", &["-c", "-P", &proj_name, dir_path]).await {
+                warn!("setproject failed on {dir_path}: {e}");
+                return;
+            }
+            info!("set project {proj_name} (id={projid}) on {dir_path}");
+        }
         Err(e) => {
-            warn!("setproject failed on {dir_path}: {e}");
+            // Reapplying an unchanged project ID can trip a bcachefs quota
+            // assertion. If we cannot prove the current value, do not risk
+            // issuing the mutating ioctl.
+            warn!("could not read project ID on {dir_path}; skipping setproject: {e}");
             return;
         }
     }
 
-    match set_project_quota_limit(mount_point, &proj_name, bytes).await {
+    match set_project_quota_limit(mount_point, projid, bytes).await {
         Ok(_) => info!("set quota {bytes} bytes for project {proj_name} on {mount_point}"),
         Err(e) => warn!("setquota failed for project {proj_name} on {mount_point}: {e}"),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn current_project_id(path: &str) -> std::io::Result<Option<u32>> {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct Fsxattr {
+        fsx_xflags: u32,
+        fsx_extsize: u32,
+        fsx_nextents: u32,
+        fsx_projid: u32,
+        fsx_cowextsize: u32,
+        fsx_pad: [u8; 8],
+    }
+
+    const FS_IOC_FSGETXATTR: libc::c_ulong = 0x801c_581f;
+    let file = std::fs::File::open(path)?;
+    let mut attr = Fsxattr::default();
+    let rc = unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FSGETXATTR, &mut attr) };
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Some(attr.fsx_projid))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_project_id(_path: &str) -> std::io::Result<Option<u32>> {
+    Ok(None)
 }
 
 /// Apply a project quota limit, propagating failures to callers that need
 /// resize metadata to stay consistent with the live quota.
 async fn set_project_quota_limit(
     mount_point: &str,
-    project_name: &str,
+    projid: u32,
     bytes: u64,
 ) -> Result<(), SubvolumeError> {
-    // setquota's block limits are 1 KiB units. Round up so an unaligned
-    // byte request never receives less capacity than requested.
-    let kib_str = quota_kib_from_bytes(bytes).to_string();
-    cmd::run_ok(
-        "setquota",
-        &[
-            "-P",
-            project_name,
-            &kib_str,
-            &kib_str,
-            "0",
-            "0",
-            mount_point,
-        ],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|e| {
+    use std::os::unix::fs::MetadataExt;
+
+    let dev = tokio::fs::metadata(mount_point).await?.dev();
+    let device =
+        block_device_for_dev(std::path::Path::new("/sys/dev/block"), dev).ok_or_else(|| {
+            SubvolumeError::CommandFailed(format!(
+                "no block device found for {mount_point} (dev_t {dev})"
+            ))
+        })?;
+    write_project_quota_limit(&device, projid, quota_kib_from_bytes(bytes)).map_err(|e| {
         SubvolumeError::CommandFailed(format!(
-            "setquota failed for project {project_name} on {mount_point}: {e}"
+            "quotactl failed for project nasty-{projid} on {mount_point} ({device}): {e}"
         ))
     })
 }
@@ -2494,6 +2528,74 @@ pub(crate) struct ProjectQuotaInfo {
     pub hard_bytes: u64,
 }
 
+/// Generic Linux quota payload from `linux/quota.h`.
+#[cfg(any(target_os = "linux", test))]
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct IfDqblk {
+    dqb_bhardlimit: u64,
+    dqb_bsoftlimit: u64,
+    dqb_curspace: u64,
+    dqb_ihardlimit: u64,
+    dqb_isoftlimit: u64,
+    dqb_curinodes: u64,
+    dqb_btime: u64,
+    dqb_itime: u64,
+    dqb_valid: u32,
+}
+
+#[cfg(target_os = "linux")]
+const Q_SETQUOTA: libc::c_int = 0x800008;
+#[cfg(target_os = "linux")]
+const PRJQUOTA: libc::c_int = 2;
+#[cfg(any(target_os = "linux", test))]
+const QIF_BLIMITS: u32 = 1;
+
+#[cfg(any(target_os = "linux", test))]
+fn project_quota_limit(blocks: u64) -> IfDqblk {
+    IfDqblk {
+        dqb_bhardlimit: blocks,
+        dqb_bsoftlimit: blocks,
+        dqb_valid: QIF_BLIMITS,
+        ..Default::default()
+    }
+}
+
+/// Set a project quota directly on the block device that owns the mount.
+///
+/// quota-tools selects the `/proc/mounts` source for `quotactl`. bcachefs
+/// reports a by-UUID source for multi-device filesystems, which the kernel
+/// rejects with ENODEV. Resolving the mountpoint's `dev_t` avoids that broken
+/// source selection, matching the direct read path below.
+#[cfg(target_os = "linux")]
+fn write_project_quota_limit(device: &str, projid: u32, blocks: u64) -> std::io::Result<()> {
+    let cdev = std::ffi::CString::new(device)
+        .map_err(|_| std::io::Error::other("device path contains NUL"))?;
+    let cmd = (Q_SETQUOTA << 8) | PRJQUOTA;
+    let mut quota = project_quota_limit(blocks);
+    let rc = unsafe {
+        libc::quotactl(
+            cmd,
+            cdev.as_ptr(),
+            projid as libc::c_int,
+            &mut quota as *mut IfDqblk as *mut libc::c_char,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_project_quota_limit(_device: &str, _projid: u32, _blocks: u64) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "project quotas are only supported on Linux",
+    ))
+}
+
 /// Split a Linux `dev_t` into (major, minor) — glibc's bit layout:
 /// 12-bit major at bits 8–19 (high part at 32+), 8-bit minor low with
 /// the high part at bits 20+.
@@ -2538,7 +2640,7 @@ fn project_quota_info(curspace_bytes: u64, bhardlimit_blocks: u64) -> ProjectQuo
 /// mountpoint's st_dev, so the kernel lookup always succeeds.
 #[cfg(target_os = "linux")]
 fn read_project_quotas(device: &str) -> std::io::Result<HashMap<u32, ProjectQuotaInfo>> {
-    // struct if_nextdqblk from linux/quota.h.
+    // struct if_nextdqblk extends IfDqblk with the returned project ID.
     #[repr(C)]
     #[derive(Default, Clone, Copy)]
     struct IfNextDqblk {
@@ -2554,7 +2656,6 @@ fn read_project_quotas(device: &str) -> std::io::Result<HashMap<u32, ProjectQuot
         dqb_id: u32,
     }
     const Q_GETNEXTQUOTA: libc::c_int = 0x800009;
-    const PRJQUOTA: libc::c_int = 2;
     let cmd = (Q_GETNEXTQUOTA << 8) | PRJQUOTA;
 
     let cdev = std::ffi::CString::new(device)
@@ -2808,6 +2909,24 @@ mod tests {
         assert_eq!(info.hard_bytes, 1_048_576_000 * 1024);
         // 0 = "no limit", preserved as 0 (existing convention).
         assert_eq!(project_quota_info(42, 0).hard_bytes, 0);
+    }
+
+    #[test]
+    fn project_quota_limit_sets_only_block_limits() {
+        let quota = project_quota_limit(1024);
+        assert_eq!(quota.dqb_bsoftlimit, 1024);
+        assert_eq!(quota.dqb_bhardlimit, 1024);
+        assert_eq!(quota.dqb_valid, QIF_BLIMITS);
+        assert_eq!(quota.dqb_curspace, 0);
+        assert_eq!(quota.dqb_ihardlimit, 0);
+    }
+
+    #[test]
+    fn matching_project_id_does_not_need_kernel_update() {
+        assert!(!project_id_needs_update(Some(42), 42));
+        assert!(project_id_needs_update(Some(0), 42));
+        assert!(project_id_needs_update(Some(7), 42));
+        assert!(project_id_needs_update(None, 42));
     }
 
     #[test]
