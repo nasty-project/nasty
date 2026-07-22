@@ -41,16 +41,22 @@ impl SnapshotService {
         &self,
         req: DeleteSnapshotRequest,
         owner_filter: Option<&str>,
+        allow_orphan_cleanup: bool,
     ) -> Result<(), SubvolumeError> {
-        self.subvolumes.delete_snapshot(req, owner_filter).await
+        self.subvolumes
+            .delete_snapshot(req, owner_filter, allow_orphan_cleanup)
+            .await
     }
 
     pub async fn clone_snapshot(
         &self,
         req: CloneSnapshotRequest,
         owner_filter: Option<&str>,
+        allow_admin_override: bool,
     ) -> Result<Subvolume, SubvolumeError> {
-        self.subvolumes.clone_snapshot(req, owner_filter).await
+        self.subvolumes
+            .clone_snapshot(req, owner_filter, allow_admin_override)
+            .await
     }
 }
 

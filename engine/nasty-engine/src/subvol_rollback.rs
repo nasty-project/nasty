@@ -36,6 +36,7 @@ pub async fn rollback_with_dependents(
     state: &AppState,
     req: RollbackSnapshotRequest,
     owner_filter: Option<&str>,
+    allow_admin_override: bool,
 ) -> Result<RollbackResult, String> {
     validate_existing_snapshot_name(&req.subvolume, &req.snapshot).map_err(|e| e.to_string())?;
     let sv = state
@@ -110,7 +111,7 @@ pub async fn rollback_with_dependents(
     // ── Swap ──
     let result = state
         .subvolumes
-        .rollback(req, owner_filter)
+        .rollback(req, owner_filter, allow_admin_override)
         .await
         .map_err(|e| e.to_string());
 

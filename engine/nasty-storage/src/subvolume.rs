@@ -194,6 +194,47 @@ pub fn validate_existing_snapshot_name(
     Ok(())
 }
 
+fn require_owner(actual: Option<&str>, required: Option<&str>) -> Result<(), SubvolumeError> {
+    if let Some(required) = required
+        && actual != Some(required)
+    {
+        return Err(SubvolumeError::AccessDenied);
+    }
+    Ok(())
+}
+
+fn authorize_snapshot_provenance(
+    snapshot_owner: Option<&str>,
+    parent_owner: Option<&str>,
+    owner_filter: Option<&str>,
+    allow_admin_override: bool,
+) -> Result<(), SubvolumeError> {
+    if allow_admin_override {
+        return Ok(());
+    }
+    require_owner(parent_owner, owner_filter)?;
+    require_owner(snapshot_owner, owner_filter)?;
+    if snapshot_owner != parent_owner {
+        return Err(SubvolumeError::AccessDenied);
+    }
+    Ok(())
+}
+
+fn authorize_snapshot_delete(
+    orphaned: bool,
+    snapshot_exists: bool,
+    allow_orphan_cleanup: bool,
+    snapshot_name: &str,
+) -> Result<(), SubvolumeError> {
+    if orphaned && !allow_orphan_cleanup {
+        return Err(SubvolumeError::AccessDenied);
+    }
+    if !snapshot_exists {
+        return Err(SubvolumeError::NotFound(snapshot_name.to_string()));
+    }
+    Ok(())
+}
+
 fn validate_volsize_bytes(bytes: u64) -> Result<(), SubvolumeError> {
     if bytes == 0 {
         return Err(SubvolumeError::InvalidVolsize(
@@ -805,6 +846,21 @@ impl SubvolumeService {
         lock.lock_owned().await
     }
 
+    async fn lock_destinations(
+        &self,
+        filesystem: &str,
+        names: &[&str],
+    ) -> Vec<OwnedMutexGuard<()>> {
+        let mut names = names.to_vec();
+        names.sort_unstable();
+        names.dedup();
+        let mut guards = Vec::with_capacity(names.len());
+        for name in names {
+            guards.push(self.lock_destination(filesystem, name).await);
+        }
+        guards
+    }
+
     /// Re-attach loop devices for block subvolumes after filesystems are mounted.
     /// Returns a map of subvolume_name → current loop device path so callers
     /// can patch NVMe-oF / iSCSI state files before those services start.
@@ -1024,7 +1080,15 @@ impl SubvolumeService {
                 .snapshot_flags
                 .iter()
                 .filter(|(p, _)| {
-                    p.starts_with(&snap_prefix) && !p[snap_prefix.len()..].contains('/')
+                    if !p.starts_with(&snap_prefix) || p[snap_prefix.len()..].contains('/') {
+                        return false;
+                    }
+                    if let Some(owner) = owner_filter {
+                        let snap_name = &p[snap_prefix.len()..];
+                        let path = snap_path(&mount_point, name, snap_name);
+                        return read_meta_xattrs(Path::new(&path)).owner.as_deref() == Some(owner);
+                    }
+                    true
                 })
                 .map(|(p, &read_only)| {
                     let snap_name = p[snap_prefix.len()..].to_string();
@@ -1133,15 +1197,14 @@ impl SubvolumeService {
         name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        let subvolumes = self.list(fs_name, owner_filter).await?;
-        subvolumes
+        let subvolume = self
+            .list(fs_name, None)
+            .await?
             .into_iter()
             .find(|s| s.name == name)
-            .ok_or_else(|| {
-                // Distinguish "not found" from "exists but not yours"
-                // We return NotFound in both cases to avoid leaking existence
-                SubvolumeError::NotFound(name.to_string())
-            })
+            .ok_or_else(|| SubvolumeError::NotFound(name.to_string()))?;
+        require_owner(subvolume.owner.as_deref(), owner_filter)?;
+        Ok(subvolume)
     }
 
     /// Create a new subvolume.
@@ -1812,6 +1875,15 @@ impl SubvolumeService {
         owner_filter: Option<&str>,
     ) -> Result<Snapshot, SubvolumeError> {
         validate_snapshot_name(&req.subvolume, &req.name)?;
+        let _source_guard = self.lock_destination(&req.filesystem, &req.subvolume).await;
+        self.create_snapshot_locked(req, owner_filter).await
+    }
+
+    async fn create_snapshot_locked(
+        &self,
+        req: CreateSnapshotRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<Snapshot, SubvolumeError> {
         // Verify ownership of the parent subvolume
         self.get(&req.filesystem, &req.subvolume, owner_filter)
             .await?;
@@ -1873,23 +1945,39 @@ impl SubvolumeService {
         &self,
         req: DeleteSnapshotRequest,
         owner_filter: Option<&str>,
+        allow_orphan_cleanup: bool,
     ) -> Result<(), SubvolumeError> {
         validate_existing_snapshot_name(&req.subvolume, &req.name)?;
-        // Verify ownership if the parent subvolume still exists.
-        // The parent may have been deleted (DR scenario) — orphaned snapshots
-        // should still be deletable.
-        if let Ok(_parent) = self
+        let _source_guard = self.lock_destination(&req.filesystem, &req.subvolume).await;
+        let parent = match self
             .get(&req.filesystem, &req.subvolume, owner_filter)
             .await
         {
-            // Parent exists and ownership verified
+            Ok(parent) => Some(parent),
+            Err(SubvolumeError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+        let orphaned = parent.is_none();
+        if orphaned && !allow_orphan_cleanup {
+            return Err(SubvolumeError::AccessDenied);
         }
 
         let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.name);
-
-        if !Path::new(&snap_path).exists() {
-            return Err(SubvolumeError::NotFound(req.name.clone()));
+        authorize_snapshot_delete(
+            orphaned,
+            Path::new(&snap_path).exists(),
+            allow_orphan_cleanup,
+            &req.name,
+        )?;
+        let snapshot_meta = read_meta_xattrs(Path::new(&snap_path));
+        if let Some(parent) = parent.as_ref() {
+            authorize_snapshot_provenance(
+                snapshot_meta.owner.as_deref(),
+                parent.owner.as_deref(),
+                owner_filter,
+                allow_orphan_cleanup,
+            )?;
         }
 
         info!(
@@ -1952,7 +2040,7 @@ impl SubvolumeService {
 
         // Get owned subvolume names if filter is active
         let owned: Option<std::collections::HashSet<String>> = if owner_filter.is_some() {
-            let owned_subvols = self.list(fs_name, owner_filter).await.unwrap_or_default();
+            let owned_subvols = self.list(fs_name, owner_filter).await?;
             Some(owned_subvols.into_iter().map(|s| s.name).collect())
         } else {
             None
@@ -1975,12 +2063,18 @@ impl SubvolumeService {
             {
                 continue;
             }
+            let snapshot_path = snap_path(&mount_point, &subvol_name, &snap_name);
+            if let Some(owner) = owner_filter
+                && read_meta_xattrs(Path::new(&snapshot_path)).owner.as_deref() != Some(owner)
+            {
+                continue;
+            }
             let parent = info.snapshot_parents.get(&rel_path).cloned();
             all_snapshots.push(Snapshot {
                 name: snap_name.clone(),
                 subvolume: subvol_name.clone(),
                 filesystem: fs_name.to_string(),
-                path: snap_path(&mount_point, &subvol_name, &snap_name),
+                path: snapshot_path,
                 read_only,
                 parent,
                 block_device: None,
@@ -1996,10 +2090,22 @@ impl SubvolumeService {
         &self,
         req: CloneSnapshotRequest,
         owner_filter: Option<&str>,
+        allow_admin_override: bool,
     ) -> Result<Subvolume, SubvolumeError> {
         validate_existing_snapshot_name(&req.subvolume, &req.snapshot)?;
         validate_subvolume_name(&req.new_name)?;
-        let _destination_guard = self.lock_destination(&req.filesystem, &req.new_name).await;
+        let _guards = self
+            .lock_destinations(&req.filesystem, &[&req.subvolume, &req.new_name])
+            .await;
+        let parent = match self
+            .get(&req.filesystem, &req.subvolume, owner_filter)
+            .await
+        {
+            Ok(parent) => Some(parent),
+            Err(SubvolumeError::NotFound(_)) if allow_admin_override => None,
+            Err(SubvolumeError::NotFound(_)) => return Err(SubvolumeError::AccessDenied),
+            Err(error) => return Err(error),
+        };
 
         let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.snapshot);
@@ -2011,9 +2117,21 @@ impl SubvolumeService {
                 req.subvolume, req.snapshot
             )));
         }
+        let snapshot_meta = read_meta_xattrs(Path::new(&snap_path));
+        if let Some(parent) = parent.as_ref() {
+            authorize_snapshot_provenance(
+                snapshot_meta.owner.as_deref(),
+                parent.owner.as_deref(),
+                owner_filter,
+                allow_admin_override,
+            )?;
+        }
         let source_identity = path_identity(&snap_path)?;
         let clone_source = format!("snapshot:{source_identity}");
         if Path::new(&new_subvol_path).exists() {
+            let existing = self
+                .get(&req.filesystem, &req.new_name, owner_filter)
+                .await?;
             let recorded_source = xattr::get(&new_subvol_path, XATTR_NASTY_CLONE_SOURCE)
                 .ok()
                 .flatten()
@@ -2028,7 +2146,7 @@ impl SubvolumeService {
                 "Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)",
                 req.new_name, req.filesystem
             );
-            return self.get(&req.filesystem, &req.new_name, None).await;
+            return Ok(existing);
         }
 
         info!(
@@ -2053,7 +2171,7 @@ impl SubvolumeService {
             ))
         })?;
 
-        self.get(&req.filesystem, &req.new_name, None).await
+        self.get(&req.filesystem, &req.new_name, owner_filter).await
     }
 
     /// Roll a filesystem subvolume back to a snapshot's state. Assumes the
@@ -2071,6 +2189,7 @@ impl SubvolumeService {
         &self,
         req: RollbackSnapshotRequest,
         owner_filter: Option<&str>,
+        allow_admin_override: bool,
     ) -> Result<RollbackResult, SubvolumeError> {
         validate_existing_snapshot_name(&req.subvolume, &req.snapshot)?;
         let _destination_guard = self.lock_destination(&req.filesystem, &req.subvolume).await;
@@ -2095,6 +2214,13 @@ impl SubvolumeService {
                 req.subvolume, req.snapshot
             )));
         }
+        let snapshot_meta = read_meta_xattrs(Path::new(&snap_path));
+        authorize_snapshot_provenance(
+            snapshot_meta.owner.as_deref(),
+            subvol.owner.as_deref(),
+            owner_filter,
+            allow_admin_override,
+        )?;
         let children = find_child_subvolumes(&mount_point, &req.subvolume).await;
         if !children.is_empty() {
             return Err(SubvolumeError::CommandFailed(format!(
@@ -2113,7 +2239,7 @@ impl SubvolumeService {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         );
-        self.create_snapshot(
+        self.create_snapshot_locked(
             CreateSnapshotRequest {
                 filesystem: req.filesystem.clone(),
                 subvolume: req.subvolume.clone(),
@@ -2897,7 +3023,9 @@ async fn materialize_subvol_from_snapshot(
 
     let snap_meta = read_meta_xattrs(Path::new(snap_path));
     if let Some(owner) = owner_filter {
-        let _ = xattr::set(dest_path, XATTR_NASTY_OWNER, owner.as_bytes());
+        xattr::set(dest_path, XATTR_NASTY_OWNER, owner.as_bytes()).map_err(|error| {
+            SubvolumeError::CommandFailed(format!("set owner on {dest_path}: {error}"))
+        })?;
     }
 
     if snap_meta.subvolume_type == SubvolumeType::Block {
@@ -3098,6 +3226,62 @@ mod tests {
     }
 
     #[test]
+    fn owner_check_distinguishes_foreign_from_unscoped_access() {
+        assert!(require_owner(Some("token-a"), None).is_ok());
+        assert!(require_owner(Some("token-a"), Some("token-a")).is_ok());
+        assert!(matches!(
+            require_owner(Some("token-b"), Some("token-a")),
+            Err(SubvolumeError::AccessDenied)
+        ));
+        assert!(matches!(
+            require_owner(None, Some("token-a")),
+            Err(SubvolumeError::AccessDenied)
+        ));
+    }
+
+    #[test]
+    fn snapshot_provenance_must_match_the_authorized_parent() {
+        assert!(
+            authorize_snapshot_provenance(
+                Some("token-a"),
+                Some("token-a"),
+                Some("token-a"),
+                false,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            authorize_snapshot_provenance(Some("token-b"), Some("token-a"), Some("token-a"), false,),
+            Err(SubvolumeError::AccessDenied)
+        ));
+        assert!(matches!(
+            authorize_snapshot_provenance(Some("token-b"), Some("token-a"), None, false),
+            Err(SubvolumeError::AccessDenied)
+        ));
+        assert!(
+            authorize_snapshot_provenance(Some("token-b"), Some("token-a"), None, true).is_ok()
+        );
+    }
+
+    #[test]
+    fn orphan_snapshot_cleanup_requires_explicit_authority() {
+        assert!(authorize_snapshot_delete(false, true, false, "snap").is_ok());
+        assert!(matches!(
+            authorize_snapshot_delete(true, true, false, "snap"),
+            Err(SubvolumeError::AccessDenied)
+        ));
+        assert!(authorize_snapshot_delete(true, true, true, "snap").is_ok());
+        assert!(matches!(
+            authorize_snapshot_delete(true, false, false, "snap"),
+            Err(SubvolumeError::AccessDenied)
+        ));
+        assert!(matches!(
+            authorize_snapshot_delete(true, false, true, "snap"),
+            Err(SubvolumeError::NotFound(name)) if name == "snap"
+        ));
+    }
+
+    #[test]
     fn validate_volsize_bytes_accepts_sensible_sizes() {
         assert!(validate_volsize_bytes(1024).is_ok());
         assert!(validate_volsize_bytes(1024 * 1024 * 1024).is_ok()); // 1 GiB
@@ -3221,6 +3405,7 @@ mod tests {
                     name: "../escape".to_string(),
                 },
                 None,
+                false,
             )
             .await;
         assert!(matches!(delete, Err(SubvolumeError::InvalidName(_))));
@@ -3234,6 +3419,7 @@ mod tests {
                     new_name: "clone".to_string(),
                 },
                 None,
+                false,
             )
             .await;
         assert!(matches!(clone, Err(SubvolumeError::InvalidName(_))));
@@ -3246,6 +3432,7 @@ mod tests {
                     snapshot: "safe".to_string(),
                 },
                 None,
+                false,
             )
             .await;
         assert!(matches!(rollback, Err(SubvolumeError::InvalidName(_))));
