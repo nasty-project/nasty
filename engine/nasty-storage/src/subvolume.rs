@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::{Arc, Weak};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::{info, warn};
 
 use crate::cmd;
@@ -31,6 +33,10 @@ const XATTR_NASTY_COMPRESSION: &str = "user.nasty.compression";
 const XATTR_NASTY_COMMENT: &str = "user.nasty.comment";
 const XATTR_NASTY_OWNER: &str = "user.nasty.owner";
 const XATTR_NASTY_DIRECT_IO: &str = "user.nasty.direct_io";
+const XATTR_NASTY_BLOCK_FILESYSTEM: &str = "trusted.nasty.block_filesystem";
+const XATTR_NASTY_BLOCK_FILESYSTEM_UUID: &str = "trusted.nasty.block_filesystem_uuid";
+const XATTR_NASTY_PROVISIONING_STATE: &str = "trusted.nasty.provisioning_state";
+const XATTR_NASTY_CLONE_SOURCE: &str = "trusted.nasty.clone_source";
 
 /// Logical key prefix that maps to the reserved nasty.* xattrs.
 /// Excluded from the user-visible `properties` map.
@@ -50,6 +56,12 @@ pub enum SubvolumeError {
     AccessDenied,
     #[error("volsize is required for block subvolumes")]
     VolsizeRequired,
+    #[error("block_filesystem is only valid for block subvolumes")]
+    BlockFilesystemRequiresBlock,
+    #[error("property key is reserved for internal metadata: {0}")]
+    ReservedProperty(String),
+    #[error("existing subvolume is incompatible with the create request: {0}")]
+    ExistingIncompatible(String),
     #[error("invalid name: {0}")]
     InvalidName(String),
     #[error("invalid volsize: {0}")]
@@ -177,11 +189,99 @@ fn is_already_detached(err: &str) -> bool {
     lower.contains("no such device") || lower.contains("not in use")
 }
 
+async fn initialize_block_filesystem(
+    loop_device: &str,
+    filesystem: BlockFilesystem,
+) -> Result<String, SubvolumeError> {
+    let program = filesystem.mkfs_program();
+    info!(
+        "Initializing fresh block device {loop_device} with {}",
+        filesystem.as_str()
+    );
+    cmd::run_ok(program, &[loop_device])
+        .await
+        .map_err(SubvolumeError::CommandFailed)?;
+
+    cmd::run_ok("blockdev", &["--flushbufs", loop_device])
+        .await
+        .map_err(SubvolumeError::CommandFailed)?;
+
+    let detected = cmd::run_ok("blkid", &["-p", "-s", "TYPE", "-o", "value", loop_device])
+        .await
+        .map_err(SubvolumeError::CommandFailed)?;
+    if detected.trim() != filesystem.as_str() {
+        return Err(SubvolumeError::CommandFailed(format!(
+            "filesystem verification failed for {loop_device}: expected {}, detected {:?}",
+            filesystem.as_str(),
+            detected.trim()
+        )));
+    }
+
+    let uuid = cmd::run_ok("blkid", &["-p", "-s", "UUID", "-o", "value", loop_device])
+        .await
+        .map_err(SubvolumeError::CommandFailed)?;
+    let uuid = uuid.trim();
+    if uuid.is_empty() {
+        return Err(SubvolumeError::CommandFailed(format!(
+            "filesystem verification returned no UUID for {loop_device}"
+        )));
+    }
+    Ok(uuid.to_string())
+}
+
+async fn quarantine_failed_create(subvol_path: &str, loop_device: Option<&str>) {
+    if let Some(device) = loop_device
+        && let Err(error) = cmd::run_ok("losetup", &["-d", device]).await
+        && !is_already_detached(&error)
+    {
+        warn!("Failed to detach {device} while cleaning up failed block creation: {error}");
+        return;
+    }
+    warn!(
+        "Leaving failed create at {subvol_path} quarantined for operator recovery; automatic pathname-based deletion is unsafe"
+    );
+}
+
+fn path_identity(path: &str) -> Result<String, SubvolumeError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        SubvolumeError::CommandFailed(format!("read identity for {path}: {error}"))
+    })?;
+    Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SubvolumeType {
     Filesystem,
     Block,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockFilesystem {
+    Ext3,
+    Ext4,
+    Xfs,
+}
+
+impl BlockFilesystem {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ext3 => "ext3",
+            Self::Ext4 => "ext4",
+            Self::Xfs => "xfs",
+        }
+    }
+
+    fn mkfs_program(self) -> &'static str {
+        match self {
+            Self::Ext3 => "mkfs.ext3",
+            Self::Ext4 => "mkfs.ext4",
+            Self::Xfs => "mkfs.xfs",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -214,6 +314,12 @@ pub struct Subvolume {
     pub volsize_bytes: Option<u64>,
     /// Loop device path currently attached to the backing image (block subvolumes only).
     pub block_device: Option<String>,
+    /// Filesystem initialized inside the block image by the backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_filesystem: Option<BlockFilesystem>,
+    /// UUID reported after backend filesystem initialization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_filesystem_uuid: Option<String>,
     /// Names of snapshots belonging to this subvolume.
     pub snapshots: Vec<String>,
     /// Token name that created this subvolume; None for subvolumes created by human users.
@@ -232,6 +338,10 @@ pub struct Subvolume {
     /// Only includes options that differ from the filesystem default.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub bcachefs_options: HashMap<String, String>,
+    /// True only when this response came from the create operation that
+    /// successfully created the underlying bcachefs subvolume.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub created: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -262,6 +372,8 @@ struct SubvolumeMeta {
     comments: Option<String>,
     owner: Option<String>,
     direct_io: bool,
+    block_filesystem: Option<BlockFilesystem>,
+    block_filesystem_uuid: Option<String>,
 }
 
 /// All xattr data for a subvolume — both internal metadata and user-visible properties.
@@ -277,6 +389,13 @@ struct SubvolumeAttrs {
 /// Splits results into internal metadata (`user.nasty.*`) and user-visible properties
 /// (`user.nasty-csi:*` etc), avoiding duplicate enumeration.
 const BCACHEFS_EFFECTIVE_NS: &str = "bcachefs_effective.";
+
+fn read_string_xattr(path: &Path, key: &str) -> Option<String> {
+    xattr::get(path, key)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
 
 fn read_all_xattrs(path: &Path) -> SubvolumeAttrs {
     let mut meta_raw: HashMap<String, String> = HashMap::new();
@@ -329,6 +448,15 @@ fn read_all_xattrs(path: &Path) -> SubvolumeAttrs {
                 .get("nasty.direct_io")
                 .map(|s| s == "true")
                 .unwrap_or(false),
+            block_filesystem: read_string_xattr(path, XATTR_NASTY_BLOCK_FILESYSTEM).and_then(
+                |value| match value.as_str() {
+                    "ext3" => Some(BlockFilesystem::Ext3),
+                    "ext4" => Some(BlockFilesystem::Ext4),
+                    "xfs" => Some(BlockFilesystem::Xfs),
+                    _ => None,
+                },
+            ),
+            block_filesystem_uuid: read_string_xattr(path, XATTR_NASTY_BLOCK_FILESYSTEM_UUID),
         },
         properties,
         bcachefs_options,
@@ -338,12 +466,7 @@ fn read_all_xattrs(path: &Path) -> SubvolumeAttrs {
 /// Read only NASty-internal metadata from the reserved `user.nasty.*` xattrs.
 /// Used by code paths that don't need user-visible properties.
 fn read_meta_xattrs(path: &Path) -> SubvolumeMeta {
-    let get = |key: &str| -> Option<String> {
-        xattr::get(path, key)
-            .ok()
-            .flatten()
-            .and_then(|b| String::from_utf8(b).ok())
-    };
+    let get = |key: &str| read_string_xattr(path, key);
 
     let subvolume_type = match get(XATTR_NASTY_TYPE).as_deref() {
         Some("block") => SubvolumeType::Block,
@@ -364,45 +487,67 @@ fn read_meta_xattrs(path: &Path) -> SubvolumeMeta {
         comments: get(XATTR_NASTY_COMMENT),
         owner: get(XATTR_NASTY_OWNER),
         direct_io: get(XATTR_NASTY_DIRECT_IO).as_deref() == Some("true"),
+        block_filesystem: get(XATTR_NASTY_BLOCK_FILESYSTEM).and_then(|value| {
+            match value.as_str() {
+                "ext3" => Some(BlockFilesystem::Ext3),
+                "ext4" => Some(BlockFilesystem::Ext4),
+                "xfs" => Some(BlockFilesystem::Xfs),
+                _ => None,
+            }
+        }),
+        block_filesystem_uuid: get(XATTR_NASTY_BLOCK_FILESYSTEM_UUID),
     }
 }
 
-/// Write NASty-internal metadata as reserved `user.nasty.*` xattrs.
-fn write_meta_xattrs(
-    path: &str,
-    subvolume_type: &SubvolumeType,
+struct MetaXattrs<'a> {
+    subvolume_type: &'a SubvolumeType,
     volsize_bytes: Option<u64>,
-    compression: Option<&str>,
-    comments: Option<&str>,
-    owner: Option<&str>,
+    compression: Option<&'a str>,
+    comments: Option<&'a str>,
+    owner: Option<&'a str>,
     direct_io: bool,
-) -> Result<(), SubvolumeError> {
-    let type_str = match subvolume_type {
+    block_filesystem: Option<BlockFilesystem>,
+    block_filesystem_uuid: Option<&'a str>,
+}
+
+/// Write NASty-internal metadata as reserved `user.nasty.*` xattrs.
+fn write_meta_xattrs(path: &str, meta: MetaXattrs<'_>) -> Result<(), SubvolumeError> {
+    let type_str = match meta.subvolume_type {
         SubvolumeType::Filesystem => "filesystem",
         SubvolumeType::Block => "block",
     };
     xattr::set(path, XATTR_NASTY_TYPE, type_str.as_bytes())
         .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr type: {e}")))?;
 
-    if let Some(v) = volsize_bytes {
+    if let Some(v) = meta.volsize_bytes {
         xattr::set(path, XATTR_NASTY_VOLSIZE, v.to_string().as_bytes())
             .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr volsize: {e}")))?;
     }
-    if let Some(c) = compression {
+    if let Some(c) = meta.compression {
         xattr::set(path, XATTR_NASTY_COMPRESSION, c.as_bytes())
             .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr compression: {e}")))?;
     }
-    if let Some(c) = comments {
+    if let Some(c) = meta.comments {
         xattr::set(path, XATTR_NASTY_COMMENT, c.as_bytes())
             .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr comment: {e}")))?;
     }
-    if let Some(o) = owner {
+    if let Some(o) = meta.owner {
         xattr::set(path, XATTR_NASTY_OWNER, o.as_bytes())
             .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr owner: {e}")))?;
     }
-    if direct_io {
+    if meta.direct_io {
         xattr::set(path, XATTR_NASTY_DIRECT_IO, b"true")
             .map_err(|e| SubvolumeError::CommandFailed(format!("setxattr direct_io: {e}")))?;
+    }
+    if let Some(fs) = meta.block_filesystem {
+        xattr::set(path, XATTR_NASTY_BLOCK_FILESYSTEM, fs.as_str().as_bytes()).map_err(|e| {
+            SubvolumeError::CommandFailed(format!("setxattr block filesystem: {e}"))
+        })?;
+    }
+    if let Some(uuid) = meta.block_filesystem_uuid {
+        xattr::set(path, XATTR_NASTY_BLOCK_FILESYSTEM_UUID, uuid.as_bytes()).map_err(|e| {
+            SubvolumeError::CommandFailed(format!("setxattr block filesystem UUID: {e}"))
+        })?;
     }
     Ok(())
 }
@@ -435,6 +580,9 @@ pub struct CreateSubvolumeRequest {
     pub metadata_target: Option<String>,
     /// Number of data replicas for this subvolume (overrides filesystem default).
     pub data_replicas: Option<u32>,
+    /// Initialize this filesystem inside a newly-created block image. Ignored
+    /// for an existing destination; existing data is never reformatted.
+    pub block_filesystem: Option<BlockFilesystem>,
 }
 
 fn default_type() -> SubvolumeType {
@@ -576,11 +724,31 @@ pub struct FindByPropertyRequest {
 
 pub struct SubvolumeService {
     filesystems: FilesystemService,
+    destination_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
 impl SubvolumeService {
     pub fn new(filesystems: FilesystemService) -> Self {
-        Self { filesystems }
+        Self {
+            filesystems,
+            destination_locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn lock_destination(&self, filesystem: &str, name: &str) -> OwnedMutexGuard<()> {
+        let key = format!("{filesystem}\0{name}");
+        let lock = {
+            let mut locks = self.destination_locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     /// Re-attach loop devices for block subvolumes after filesystems are mounted.
@@ -777,6 +945,14 @@ impl SubvolumeService {
         }) {
             let path_str = subvol_path(&mount_point, name);
             let path = Path::new(&path_str);
+            if xattr::get(path, XATTR_NASTY_PROVISIONING_STATE)
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(b"creating")
+            {
+                continue;
+            }
 
             // Single-pass xattr read: meta + properties in one list+get sweep
             let attrs = read_all_xattrs(path);
@@ -846,12 +1022,15 @@ impl SubvolumeService {
                 comments: attrs.meta.comments,
                 volsize_bytes: attrs.meta.volsize_bytes,
                 block_device,
+                block_filesystem: attrs.meta.block_filesystem,
+                block_filesystem_uuid: attrs.meta.block_filesystem_uuid,
                 snapshots: snapshots.iter().map(|s| s.name.clone()).collect(),
                 owner: attrs.meta.owner,
                 properties: attrs.properties,
                 parent,
                 direct_io: attrs.meta.direct_io,
                 bcachefs_options: attrs.bcachefs_options,
+                created: false,
             });
         }
 
@@ -918,19 +1097,16 @@ impl SubvolumeService {
     ) -> Result<Subvolume, SubvolumeError> {
         validate_subvolume_name(&req.name)?;
 
-        let mount_point = self.fs_mount_point(&req.filesystem).await?;
-        let subvol_path = subvol_path(&mount_point, &req.name);
-
-        if Path::new(&subvol_path).exists() {
-            info!(
-                "Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)",
-                req.name, req.filesystem
-            );
-            return self.get(&req.filesystem, &req.name, None).await;
-        }
-
         if req.subvolume_type == SubvolumeType::Block && req.volsize_bytes.is_none() {
             return Err(SubvolumeError::VolsizeRequired);
+        }
+        if req.subvolume_type == SubvolumeType::Block && req.name.contains('/') {
+            return Err(SubvolumeError::InvalidName(
+                "nested block subvolumes are not supported".to_string(),
+            ));
+        }
+        if req.subvolume_type != SubvolumeType::Block && req.block_filesystem.is_some() {
+            return Err(SubvolumeError::BlockFilesystemRequiresBlock);
         }
         if let Some(bytes) = req.volsize_bytes {
             validate_volsize_bytes(bytes)?;
@@ -943,6 +1119,71 @@ impl SubvolumeService {
             }
         });
 
+        let _destination_guard = self.lock_destination(&req.filesystem, &req.name).await;
+
+        let mount_point = self.fs_mount_point(&req.filesystem).await?;
+        let subvol_path = subvol_path(&mount_point, &req.name);
+
+        if Path::new(&subvol_path).exists() {
+            info!(
+                "Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)",
+                req.name, req.filesystem
+            );
+            if xattr::get(&subvol_path, XATTR_NASTY_PROVISIONING_STATE)
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(b"creating")
+            {
+                return Err(SubvolumeError::ExistingIncompatible(
+                    "a previous create was interrupted before provisioning completed".to_string(),
+                ));
+            }
+            let existing = self.get(&req.filesystem, &req.name, None).await?;
+            if existing.subvolume_type != req.subvolume_type {
+                return Err(SubvolumeError::ExistingIncompatible(format!(
+                    "requested {:?}, existing {:?}",
+                    req.subvolume_type, existing.subvolume_type
+                )));
+            }
+            if let Some(expected) = effective_volsize_bytes
+                && existing.volsize_bytes != Some(expected)
+            {
+                return Err(SubvolumeError::ExistingIncompatible(format!(
+                    "requested capacity {expected}, existing capacity {:?}",
+                    existing.volsize_bytes
+                )));
+            }
+            if let Some(expected) = req.block_filesystem
+                && (existing.block_filesystem != Some(expected)
+                    || existing
+                        .block_filesystem_uuid
+                        .as_deref()
+                        .unwrap_or("")
+                        .is_empty())
+            {
+                return Err(SubvolumeError::ExistingIncompatible(format!(
+                    "requested initialized {}, existing type={:?}, uuid_present={}",
+                    expected.as_str(),
+                    existing.block_filesystem,
+                    existing
+                        .block_filesystem_uuid
+                        .as_deref()
+                        .is_some_and(|uuid| !uuid.is_empty())
+                )));
+            }
+            if existing.subvolume_type == SubvolumeType::Filesystem {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(&subvol_path, std::fs::Permissions::from_mode(0o777))
+                    .await
+                    .map_err(|error| {
+                        SubvolumeError::CommandFailed(format!(
+                            "chmod 0777 {subvol_path} during idempotent create: {error}"
+                        ))
+                    })?;
+            }
+            return Ok(existing);
+        }
         // Ensure parent directories exist for nested subvolumes (e.g. "projects/web")
         if let Some(parent) = Path::new(&subvol_path).parent()
             && !parent.exists()
@@ -959,24 +1200,30 @@ impl SubvolumeService {
             .await
             .map_err(SubvolumeError::CommandFailed)?;
 
-        // New subvolumes must be writable through the sharing layer:
-        // Samba forces writes through a fixed identity (`nobody` on
-        // guest shares, the first valid user otherwise) and NFS through
-        // squashed uids — access control lives in the protocol layer,
-        // not POSIX bits, the same philosophy as the share-root chmod
-        // in nasty-sharing::smb. Without this, a subvolume created
-        // after the share stays root:0755 and every write into it is
-        // denied until the operator chmods it by hand (#482).
+        // Do not expose a writable destination while its backing image and
+        // initialization metadata are incomplete. create_new below also
+        // refuses a raced path or symlink instead of following it.
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(e) =
-                tokio::fs::set_permissions(&subvol_path, std::fs::Permissions::from_mode(0o777))
+            if let Err(error) =
+                tokio::fs::set_permissions(&subvol_path, std::fs::Permissions::from_mode(0o700))
                     .await
             {
-                warn!(
-                    "chmod 0777 {subvol_path} failed: {e} — SMB/NFS writes into the new subvolume may be denied"
-                );
+                if req.subvolume_type == SubvolumeType::Block {
+                    quarantine_failed_create(&subvol_path, None).await;
+                }
+                return Err(SubvolumeError::CommandFailed(format!(
+                    "chmod 0700 {subvol_path}: {error}"
+                )));
             }
+        }
+        if let Err(error) = xattr::set(&subvol_path, XATTR_NASTY_PROVISIONING_STATE, b"creating") {
+            if req.subvolume_type == SubvolumeType::Block {
+                quarantine_failed_create(&subvol_path, None).await;
+            }
+            return Err(SubvolumeError::CommandFailed(format!(
+                "set provisioning state on {subvol_path}: {error}"
+            )));
         }
 
         // Set compression if specified
@@ -1037,7 +1284,11 @@ impl SubvolumeService {
             set_project_quota(&mount_point, &subvol_path, projid, limit).await;
         }
 
-        // For block subvolumes: create sparse file and attach loop device
+        let mut loop_device: Option<String> = None;
+        let mut block_filesystem_uuid: Option<String> = None;
+
+        // For block subvolumes: create sparse file, attach it, and optionally
+        // initialize the inner filesystem while freshness is authoritative.
         if req.subvolume_type == SubvolumeType::Block {
             let volsize = effective_volsize_bytes.unwrap();
             let img_path = format!("{subvol_path}/{BLOCK_FILE_NAME}");
@@ -1046,9 +1297,30 @@ impl SubvolumeService {
                 "Creating block subvolume '{}' with size {} bytes",
                 req.name, volsize
             );
-            cmd::run_ok("truncate", &["-s", &volsize.to_string(), &img_path])
+            let image = match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&img_path)
                 .await
-                .map_err(SubvolumeError::CommandFailed)?;
+            {
+                Ok(image) => image,
+                Err(error) => {
+                    quarantine_failed_create(&subvol_path, None).await;
+                    return Err(SubvolumeError::CommandFailed(format!(
+                        "create block image {img_path}: {error}"
+                    )));
+                }
+            };
+            if let Err(error) = image.set_len(volsize).await {
+                drop(image);
+                quarantine_failed_create(&subvol_path, None).await;
+                return Err(SubvolumeError::CommandFailed(format!(
+                    "resize block image {img_path}: {error}"
+                )));
+            }
+            drop(image);
 
             // Set nocow on the sparse image — writes go in-place, reducing I/O stall
             // duration during bcachefs snapshots. Snapshots still work (COW is forced
@@ -1082,23 +1354,78 @@ impl SubvolumeService {
                 losetup_args.push("--direct-io=on");
             }
             losetup_args.push(&img_path);
-            cmd::run_ok("losetup", &losetup_args)
-                .await
-                .map_err(SubvolumeError::CommandFailed)?;
+            let attached = match cmd::run_ok("losetup", &losetup_args).await {
+                Ok(device) if !device.trim().is_empty() => device.trim().to_string(),
+                Ok(_) => {
+                    quarantine_failed_create(&subvol_path, None).await;
+                    return Err(SubvolumeError::CommandFailed(
+                        "losetup returned an empty loop device path".to_string(),
+                    ));
+                }
+                Err(error) => {
+                    quarantine_failed_create(&subvol_path, None).await;
+                    return Err(SubvolumeError::CommandFailed(error));
+                }
+            };
+            loop_device = Some(attached.clone());
+
+            if let Some(filesystem) = req.block_filesystem {
+                match initialize_block_filesystem(&attached, filesystem).await {
+                    Ok(uuid) => block_filesystem_uuid = Some(uuid),
+                    Err(error) => {
+                        quarantine_failed_create(&subvol_path, Some(&attached)).await;
+                        return Err(error);
+                    }
+                }
+            }
         }
 
         // Save metadata as xattrs on the subvolume directory
-        write_meta_xattrs(
+        if let Err(error) = write_meta_xattrs(
             &subvol_path,
-            &req.subvolume_type,
-            effective_volsize_bytes,
-            req.compression.as_deref(),
-            req.comments.as_deref(),
-            owner.as_deref(),
-            req.direct_io.unwrap_or(false),
-        )?;
+            MetaXattrs {
+                subvolume_type: &req.subvolume_type,
+                volsize_bytes: effective_volsize_bytes,
+                compression: req.compression.as_deref(),
+                comments: req.comments.as_deref(),
+                owner: owner.as_deref(),
+                direct_io: req.direct_io.unwrap_or(false),
+                block_filesystem: req.block_filesystem,
+                block_filesystem_uuid: block_filesystem_uuid.as_deref(),
+            },
+        ) {
+            if req.subvolume_type == SubvolumeType::Block {
+                quarantine_failed_create(&subvol_path, loop_device.as_deref()).await;
+            }
+            return Err(error);
+        }
+        if let Err(error) = xattr::set(&subvol_path, XATTR_NASTY_PROVISIONING_STATE, b"ready") {
+            if req.subvolume_type == SubvolumeType::Block {
+                quarantine_failed_create(&subvol_path, loop_device.as_deref()).await;
+            }
+            return Err(SubvolumeError::CommandFailed(format!(
+                "mark provisioning complete on {subvol_path}: {error}"
+            )));
+        }
 
-        self.get(&req.filesystem, &req.name, None).await
+        // Filesystem subvolumes become writable through NFS/SMB after all
+        // metadata is complete. Block subvolume directories remain 0700 so a
+        // share user cannot replace vol.img behind an attached loop device.
+        if req.subvolume_type == SubvolumeType::Filesystem {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                tokio::fs::set_permissions(&subvol_path, std::fs::Permissions::from_mode(0o777))
+                    .await
+            {
+                warn!(
+                    "chmod 0777 {subvol_path} failed: {e} — SMB/NFS writes into the new subvolume may be denied"
+                );
+            }
+        }
+
+        let mut subvolume = self.get(&req.filesystem, &req.name, None).await?;
+        subvolume.created = true;
+        Ok(subvolume)
     }
 
     /// List child subvolumes nested under a given parent.
@@ -1118,6 +1445,7 @@ impl SubvolumeService {
         req: DeleteSubvolumeRequest,
         owner_filter: Option<&str>,
     ) -> Result<(), SubvolumeError> {
+        let _destination_guard = self.lock_destination(&req.filesystem, &req.name).await;
         let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         // For block subvolumes: detach loop device first. A failure here
@@ -1210,6 +1538,7 @@ impl SubvolumeService {
         name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
+        let _destination_guard = self.lock_destination(fs_name, name).await;
         let subvol = self.get(fs_name, name, owner_filter).await?;
         if subvol.subvolume_type != SubvolumeType::Block {
             return Err(SubvolumeError::CommandFailed(
@@ -1242,6 +1571,7 @@ impl SubvolumeService {
         name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
+        let _destination_guard = self.lock_destination(fs_name, name).await;
         let subvol = self.get(fs_name, name, owner_filter).await?;
         if let Some(ref loop_dev) = subvol.block_device {
             info!("Detaching loop device {} for '{}'", loop_dev, name);
@@ -1262,6 +1592,7 @@ impl SubvolumeService {
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
         validate_volsize_bytes(req.volsize_bytes)?;
+        let _destination_guard = self.lock_destination(&req.filesystem, &req.name).await;
         let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         let effective_volsize_bytes = match subvol.subvolume_type {
@@ -1609,11 +1940,8 @@ impl SubvolumeService {
         req: CloneSnapshotRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        if req.new_name.contains('@') {
-            return Err(SubvolumeError::CommandFailed(
-                "subvolume name may not contain '@'".to_string(),
-            ));
-        }
+        validate_subvolume_name(&req.new_name)?;
+        let _destination_guard = self.lock_destination(&req.filesystem, &req.new_name).await;
 
         let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.snapshot);
@@ -1625,7 +1953,19 @@ impl SubvolumeService {
                 req.subvolume, req.snapshot
             )));
         }
+        let source_identity = path_identity(&snap_path)?;
+        let clone_source = format!("snapshot:{source_identity}");
         if Path::new(&new_subvol_path).exists() {
+            let recorded_source = xattr::get(&new_subvol_path, XATTR_NASTY_CLONE_SOURCE)
+                .ok()
+                .flatten()
+                .and_then(|value| String::from_utf8(value).ok());
+            if recorded_source.as_deref() != Some(clone_source.as_str()) {
+                return Err(SubvolumeError::ExistingIncompatible(format!(
+                    "clone destination {} has source {:?}, requested {}",
+                    req.new_name, recorded_source, clone_source
+                )));
+            }
             info!(
                 "Subvolume '{}' already exists in filesystem '{}', returning existing (idempotent)",
                 req.new_name, req.filesystem
@@ -1638,6 +1978,22 @@ impl SubvolumeService {
             req.filesystem, req.subvolume, req.snapshot, req.new_name
         );
         materialize_subvol_from_snapshot(&snap_path, &new_subvol_path, owner_filter).await?;
+        if path_identity(&snap_path)? != source_identity {
+            return Err(SubvolumeError::CommandFailed(format!(
+                "snapshot source changed while cloning into {}",
+                req.new_name
+            )));
+        }
+        xattr::set(
+            &new_subvol_path,
+            XATTR_NASTY_CLONE_SOURCE,
+            clone_source.as_bytes(),
+        )
+        .map_err(|error| {
+            SubvolumeError::CommandFailed(format!(
+                "record clone source on {new_subvol_path}: {error}"
+            ))
+        })?;
 
         self.get(&req.filesystem, &req.new_name, None).await
     }
@@ -1658,6 +2014,7 @@ impl SubvolumeService {
         req: RollbackSnapshotRequest,
         owner_filter: Option<&str>,
     ) -> Result<RollbackResult, SubvolumeError> {
+        let _destination_guard = self.lock_destination(&req.filesystem, &req.subvolume).await;
         let subvol = self
             .get(&req.filesystem, &req.subvolume, owner_filter)
             .await?;
@@ -1762,11 +2119,8 @@ impl SubvolumeService {
         req: CloneSubvolumeRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
-        if req.new_name.contains('@') {
-            return Err(SubvolumeError::CommandFailed(
-                "subvolume name may not contain '@'".to_string(),
-            ));
-        }
+        validate_subvolume_name(&req.new_name)?;
+        let _destination_guard = self.lock_destination(&req.filesystem, &req.new_name).await;
 
         let parent = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
@@ -1777,8 +2131,20 @@ impl SubvolumeService {
         if !Path::new(&source_path).exists() {
             return Err(SubvolumeError::NotFound(req.name.clone()));
         }
+        let source_identity = path_identity(&source_path)?;
+        let clone_source = format!("subvolume:{source_identity}");
         if Path::new(&new_subvol_path).exists() {
-            return Err(SubvolumeError::AlreadyExists(req.new_name.clone()));
+            let recorded_source = xattr::get(&new_subvol_path, XATTR_NASTY_CLONE_SOURCE)
+                .ok()
+                .flatten()
+                .and_then(|value| String::from_utf8(value).ok());
+            if recorded_source.as_deref() != Some(clone_source.as_str()) {
+                return Err(SubvolumeError::ExistingIncompatible(format!(
+                    "clone destination {} has source {:?}, requested {}",
+                    req.new_name, recorded_source, clone_source
+                )));
+            }
+            return self.get(&req.filesystem, &req.new_name, None).await;
         }
 
         // For block subvolumes, flush pending I/O before cloning
@@ -1802,16 +2168,36 @@ impl SubvolumeService {
         )
         .await
         .map_err(SubvolumeError::CommandFailed)?;
+        if path_identity(&source_path)? != source_identity {
+            return Err(SubvolumeError::CommandFailed(format!(
+                "subvolume source changed while cloning into {}",
+                req.new_name
+            )));
+        }
 
         write_meta_xattrs(
             &new_subvol_path,
-            &parent.subvolume_type,
-            parent.volsize_bytes,
-            parent.compression.as_deref(),
-            None,
-            owner_filter,
-            parent.direct_io,
+            MetaXattrs {
+                subvolume_type: &parent.subvolume_type,
+                volsize_bytes: parent.volsize_bytes,
+                compression: parent.compression.as_deref(),
+                comments: None,
+                owner: owner_filter,
+                direct_io: parent.direct_io,
+                block_filesystem: parent.block_filesystem,
+                block_filesystem_uuid: parent.block_filesystem_uuid.as_deref(),
+            },
         )?;
+        xattr::set(
+            &new_subvol_path,
+            XATTR_NASTY_CLONE_SOURCE,
+            clone_source.as_bytes(),
+        )
+        .map_err(|error| {
+            SubvolumeError::CommandFailed(format!(
+                "record clone source on {new_subvol_path}: {error}"
+            ))
+        })?;
 
         // For block subvolumes, attach a loop device to the clone's sparse image
         // so it's immediately usable as an independent block device.
@@ -1845,6 +2231,9 @@ impl SubvolumeService {
         let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         for (key, value) in &req.properties {
+            if key.starts_with(NASTY_KEY_PREFIX) {
+                return Err(SubvolumeError::ReservedProperty(key.clone()));
+            }
             let xattr_name = format!("{XATTR_NS}{key}");
             xattr::set(&subvol.path, &xattr_name, value.as_bytes()).map_err(|e| {
                 SubvolumeError::CommandFailed(format!("setxattr {xattr_name}: {e}"))
@@ -1863,6 +2252,9 @@ impl SubvolumeService {
         let subvol = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
         for key in &req.keys {
+            if key.starts_with(NASTY_KEY_PREFIX) {
+                return Err(SubvolumeError::ReservedProperty(key.clone()));
+            }
             let xattr_name = format!("{XATTR_NS}{key}");
             match xattr::remove(&subvol.path, &xattr_name) {
                 Ok(()) => {}
@@ -2497,6 +2889,82 @@ mod tests {
         // worst case (Operator-role caller trying to ENOSPC the filesystem).
         assert!(validate_volsize_bytes(MAX_VOLSIZE_BYTES + 1).is_err());
         assert!(validate_volsize_bytes(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn block_filesystem_request_accepts_supported_types() {
+        for (value, expected) in [
+            ("ext3", BlockFilesystem::Ext3),
+            ("ext4", BlockFilesystem::Ext4),
+            ("xfs", BlockFilesystem::Xfs),
+        ] {
+            let request: CreateSubvolumeRequest = serde_json::from_value(serde_json::json!({
+                "filesystem": "tank",
+                "name": "pvc",
+                "subvolume_type": "block",
+                "volsize_bytes": 1073741824_u64,
+                "block_filesystem": value,
+            }))
+            .unwrap();
+            assert_eq!(request.block_filesystem, Some(expected));
+            assert_eq!(expected.mkfs_program(), format!("mkfs.{value}"));
+        }
+    }
+
+    #[test]
+    fn block_filesystem_request_rejects_unknown_type() {
+        let result = serde_json::from_value::<CreateSubvolumeRequest>(serde_json::json!({
+            "filesystem": "tank",
+            "name": "pvc",
+            "subvolume_type": "block",
+            "volsize_bytes": 1073741824_u64,
+            "block_filesystem": "btrfs",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn destination_lock_serializes_the_same_subvolume() {
+        let service = Arc::new(SubvolumeService::new(FilesystemService::new()));
+        let first = service.lock_destination("tank", "pvc").await;
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            service.lock_destination("tank", "pvc"),
+        )
+        .await;
+        assert!(blocked.is_err());
+
+        let other = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            service.lock_destination("tank", "other"),
+        )
+        .await;
+        assert!(other.is_ok());
+
+        drop(first);
+        let acquired = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            service.lock_destination("tank", "pvc"),
+        )
+        .await;
+        assert!(acquired.is_ok());
+    }
+
+    #[tokio::test]
+    async fn block_create_rejects_nested_destination_before_storage_access() {
+        let request: CreateSubvolumeRequest = serde_json::from_value(serde_json::json!({
+            "filesystem": "tank",
+            "name": "shared/pvc",
+            "subvolume_type": "block",
+            "volsize_bytes": 1073741824_u64,
+            "block_filesystem": "ext4",
+        }))
+        .unwrap();
+        let service = SubvolumeService::new(FilesystemService::new());
+
+        let error = service.create(request, None).await.unwrap_err();
+        assert!(matches!(error, SubvolumeError::InvalidName(_)));
     }
 
     #[test]

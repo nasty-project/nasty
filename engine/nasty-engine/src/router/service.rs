@@ -170,6 +170,7 @@ pub(super) async fn try_route(
                     promote_target: None,
                     metadata_target: None,
                     data_replicas: None,
+                    block_filesystem: None,
                 };
                 if let Err(e) = state.subvolumes.create(create_req, None).await {
                     // Without this log, the path write below succeeds

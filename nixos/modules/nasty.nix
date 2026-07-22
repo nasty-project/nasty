@@ -1635,6 +1635,8 @@ in {
       path = with pkgs; [
         bashInteractive  # bash for terminal
         util-linux       # lsblk, blkid, wipefs, mount, umount
+        e2fsprogs        # mkfs.ext3, mkfs.ext4
+        xfsprogs         # mkfs.xfs
         gptfdisk         # sgdisk (free space detection, partition creation)
         parted           # partprobe (re-read partition table)
         nasty-bcachefs-tools  # bcachefs
