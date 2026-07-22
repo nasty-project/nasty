@@ -94,7 +94,7 @@ const MAX_VOLSIZE_BYTES: u64 = 256 * 1024 * 1024 * 1024 * 1024; // 256 TiB
 /// (bcachefs uses `@` as the snapshot separator — colliding here
 /// corrupts snapshot lookups) or control characters (would smuggle
 /// newlines into log lines and config files downstream).
-fn validate_subvolume_name(name: &str) -> Result<(), SubvolumeError> {
+pub fn validate_subvolume_name(name: &str) -> Result<(), SubvolumeError> {
     if name.is_empty() {
         return Err(SubvolumeError::InvalidName("name is empty".to_string()));
     }
@@ -136,6 +136,60 @@ fn validate_subvolume_name(name: &str) -> Result<(), SubvolumeError> {
                 "name must not contain control characters".to_string(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Snapshot names are always one component appended to the source subvolume's
+/// final component as `<subvolume>@<snapshot>`.
+pub fn validate_snapshot_name(subvolume: &str, snapshot: &str) -> Result<(), SubvolumeError> {
+    validate_existing_snapshot_name(subvolume, snapshot)?;
+    if snapshot.len() > 200 {
+        return Err(SubvolumeError::InvalidName(
+            "snapshot name exceeds 200 bytes".to_string(),
+        ));
+    }
+    if snapshot.starts_with('.') {
+        return Err(SubvolumeError::InvalidName(
+            "snapshot name must not start with '.'".to_string(),
+        ));
+    }
+    if snapshot.contains('@') {
+        return Err(SubvolumeError::InvalidName(
+            "snapshot name must not contain '@'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a snapshot that may predate strict creation rules. Lifecycle
+/// operations still require a confined component but must not strand safe
+/// names that older releases allowed, such as `.before` or `before@upgrade`.
+pub fn validate_existing_snapshot_name(
+    subvolume: &str,
+    snapshot: &str,
+) -> Result<(), SubvolumeError> {
+    validate_subvolume_name(subvolume)?;
+    if snapshot.is_empty() {
+        return Err(SubvolumeError::InvalidName(
+            "snapshot name is empty".to_string(),
+        ));
+    }
+    if snapshot.contains('/') {
+        return Err(SubvolumeError::InvalidName(
+            "snapshot name must be one path component".to_string(),
+        ));
+    }
+    if snapshot.chars().any(char::is_control) {
+        return Err(SubvolumeError::InvalidName(
+            "snapshot name must not contain control characters".to_string(),
+        ));
+    }
+    let source_component = subvolume.rsplit('/').next().unwrap_or(subvolume);
+    if source_component.len() + 1 + snapshot.len() > 255 {
+        return Err(SubvolumeError::InvalidName(
+            "combined subvolume@snapshot name exceeds 255 bytes".to_string(),
+        ));
     }
     Ok(())
 }
@@ -969,7 +1023,9 @@ impl SubvolumeService {
             let snapshots: Vec<Snapshot> = info
                 .snapshot_flags
                 .iter()
-                .filter(|(p, _)| p.starts_with(&snap_prefix) && !p.contains('/'))
+                .filter(|(p, _)| {
+                    p.starts_with(&snap_prefix) && !p[snap_prefix.len()..].contains('/')
+                })
                 .map(|(p, &read_only)| {
                     let snap_name = p[snap_prefix.len()..].to_string();
                     let parent = info.snapshot_parents.get(p).cloned();
@@ -1755,6 +1811,7 @@ impl SubvolumeService {
         req: CreateSnapshotRequest,
         owner_filter: Option<&str>,
     ) -> Result<Snapshot, SubvolumeError> {
+        validate_snapshot_name(&req.subvolume, &req.name)?;
         // Verify ownership of the parent subvolume
         self.get(&req.filesystem, &req.subvolume, owner_filter)
             .await?;
@@ -1817,6 +1874,7 @@ impl SubvolumeService {
         req: DeleteSnapshotRequest,
         owner_filter: Option<&str>,
     ) -> Result<(), SubvolumeError> {
+        validate_existing_snapshot_name(&req.subvolume, &req.name)?;
         // Verify ownership if the parent subvolume still exists.
         // The parent may have been deleted (DR scenario) — orphaned snapshots
         // should still be deletable.
@@ -1851,6 +1909,7 @@ impl SubvolumeService {
         fs_name: &str,
         subvol_name: &str,
     ) -> Result<Vec<Snapshot>, SubvolumeError> {
+        validate_subvolume_name(subvol_name)?;
         let mount_point = self.fs_mount_point(fs_name).await?;
         let subvol_path = subvol_path(&mount_point, subvol_name);
 
@@ -1863,7 +1922,7 @@ impl SubvolumeService {
         let snapshots = info
             .snapshot_flags
             .into_iter()
-            .filter(|(p, _)| p.starts_with(&snap_prefix) && !p.contains('/'))
+            .filter(|(p, _)| p.starts_with(&snap_prefix) && !p[snap_prefix.len()..].contains('/'))
             .map(|(p, read_only)| {
                 let snap_name = p[snap_prefix.len()..].to_string();
                 Snapshot {
@@ -1903,15 +1962,14 @@ impl SubvolumeService {
 
         let mut all_snapshots = Vec::new();
         for (rel_path, read_only) in info.snapshot_flags {
-            // Snapshots live directly at filesystem root: "subvol@snap" (no '/')
-            if rel_path.contains('/') {
-                continue;
-            }
             let Some(at_pos) = rel_path.find('@') else {
                 continue;
             };
             let subvol_name = rel_path[..at_pos].to_string();
             let snap_name = rel_path[at_pos + 1..].to_string();
+            if subvol_name.is_empty() || snap_name.is_empty() || snap_name.contains('/') {
+                continue;
+            }
             if let Some(ref set) = owned
                 && !set.contains(&subvol_name)
             {
@@ -1939,6 +1997,7 @@ impl SubvolumeService {
         req: CloneSnapshotRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
+        validate_existing_snapshot_name(&req.subvolume, &req.snapshot)?;
         validate_subvolume_name(&req.new_name)?;
         let _destination_guard = self.lock_destination(&req.filesystem, &req.new_name).await;
 
@@ -2013,6 +2072,7 @@ impl SubvolumeService {
         req: RollbackSnapshotRequest,
         owner_filter: Option<&str>,
     ) -> Result<RollbackResult, SubvolumeError> {
+        validate_existing_snapshot_name(&req.subvolume, &req.snapshot)?;
         let _destination_guard = self.lock_destination(&req.filesystem, &req.subvolume).await;
         let subvol = self
             .get(&req.filesystem, &req.subvolume, owner_filter)
@@ -2118,6 +2178,7 @@ impl SubvolumeService {
         req: CloneSubvolumeRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
+        validate_subvolume_name(&req.name)?;
         validate_subvolume_name(&req.new_name)?;
         let _destination_guard = self.lock_destination(&req.filesystem, &req.new_name).await;
 
@@ -2988,6 +3049,55 @@ mod tests {
     }
 
     #[test]
+    fn validate_snapshot_name_accepts_one_component_for_nested_subvolume() {
+        assert!(validate_snapshot_name("projects/web", "before-upgrade").is_ok());
+        assert!(validate_snapshot_name("projects/web", "snap_2026.07.22").is_ok());
+    }
+
+    #[test]
+    fn validate_snapshot_name_rejects_path_and_separator_injection() {
+        for name in [
+            "",
+            ".hidden",
+            "..",
+            "../etc",
+            "/absolute",
+            "nested/snap",
+            "other@snap",
+            "line\nbreak",
+        ] {
+            assert!(
+                validate_snapshot_name("projects/web", name).is_err(),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_name_enforces_filesystem_component_limit() {
+        assert!(validate_snapshot_name(&"s".repeat(200), &"x".repeat(54)).is_ok());
+        assert!(validate_snapshot_name(&"s".repeat(200), &"x".repeat(55)).is_err());
+        assert!(validate_snapshot_name("nested/source", &"x".repeat(200)).is_ok());
+        assert!(validate_snapshot_name("nested/source", &"x".repeat(201)).is_err());
+    }
+
+    #[test]
+    fn existing_snapshot_name_keeps_safe_legacy_names_manageable() {
+        for name in [".before", "before@upgrade", &"x".repeat(248)] {
+            assert!(
+                validate_existing_snapshot_name("source", name).is_ok(),
+                "{name:?}"
+            );
+        }
+        for name in ["", "../escape", "nested/snapshot", "line\nbreak"] {
+            assert!(
+                validate_existing_snapshot_name("source", name).is_err(),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_volsize_bytes_accepts_sensible_sizes() {
         assert!(validate_volsize_bytes(1024).is_ok());
         assert!(validate_volsize_bytes(1024 * 1024 * 1024).is_ok()); // 1 GiB
@@ -3084,6 +3194,61 @@ mod tests {
 
         let error = service.create(request, None).await.unwrap_err();
         assert!(matches!(error, SubvolumeError::InvalidName(_)));
+    }
+
+    #[tokio::test]
+    async fn snapshot_mutations_reject_invalid_names_before_storage_access() {
+        let service = SubvolumeService::new(FilesystemService::new());
+
+        let create = service
+            .create_snapshot(
+                CreateSnapshotRequest {
+                    filesystem: "missing".to_string(),
+                    subvolume: "safe".to_string(),
+                    name: "../../escape".to_string(),
+                    read_only: Some(true),
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(create, Err(SubvolumeError::InvalidName(_))));
+
+        let delete = service
+            .delete_snapshot(
+                DeleteSnapshotRequest {
+                    filesystem: "missing".to_string(),
+                    subvolume: "safe".to_string(),
+                    name: "../escape".to_string(),
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(delete, Err(SubvolumeError::InvalidName(_))));
+
+        let clone = service
+            .clone_snapshot(
+                CloneSnapshotRequest {
+                    filesystem: "missing".to_string(),
+                    subvolume: "safe".to_string(),
+                    snapshot: "nested/snapshot".to_string(),
+                    new_name: "clone".to_string(),
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(clone, Err(SubvolumeError::InvalidName(_))));
+
+        let rollback = service
+            .rollback(
+                RollbackSnapshotRequest {
+                    filesystem: "missing".to_string(),
+                    subvolume: "../escape".to_string(),
+                    snapshot: "safe".to_string(),
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(rollback, Err(SubvolumeError::InvalidName(_))));
     }
 
     #[test]

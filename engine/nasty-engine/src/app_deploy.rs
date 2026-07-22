@@ -173,6 +173,11 @@ async fn handle_deploy(
         _ => return,
     };
 
+    if let Err(e) = nasty_apps::validate_app_name(&req.name) {
+        report_error(&mut socket, "<invalid>", "validate", &e.to_string()).await;
+        return;
+    }
+
     let token = match pre_auth_token.or_else(|| req.token.clone()) {
         Some(t) => t,
         None => {
@@ -246,6 +251,10 @@ async fn deploy_simple(
     session: &crate::auth::Session,
     client_ip: &str,
 ) {
+    if let Err(e) = nasty_apps::validate_new_app_name(&req.name) {
+        report_error(socket, &req.name, "validate", &e.to_string()).await;
+        return;
+    }
     let image = match &req.image {
         Some(img) => img.clone(),
         None => {
@@ -277,6 +286,10 @@ async fn deploy_simple(
     // Top-level flag wins over anything embedded in install_params, so the
     // privileged-deploy decision is plainly visible in the deploy request.
     params.allow_unsafe = req.allow_unsafe;
+    if let Err(e) = nasty_apps::validate_new_app_request(&params) {
+        report_error(socket, &req.name, "validate", &e.to_string()).await;
+        return;
+    }
     if let Some(ref s) = params.subdomain
         && let Some(reason) =
             crate::ingress_conflict::find_subdomain_conflict(state, &params.name, s).await
@@ -421,6 +434,20 @@ async fn deploy_compose(
 
     // Check if already exists (for new installs)
     let is_update = std::path::Path::new(&compose_path).exists();
+    if std::path::Path::new(&compose_dir).exists() && !is_update {
+        report_error(
+            socket,
+            &req.name,
+            "validate",
+            "app state directory already exists without a compose file",
+        )
+        .await;
+        return;
+    }
+    if !is_update && let Err(e) = nasty_apps::validate_new_app_name(&req.name) {
+        report_error(socket, &req.name, "validate", &e.to_string()).await;
+        return;
+    }
 
     // Write compose file
     if let Err(e) = tokio::fs::create_dir_all(&compose_dir).await {

@@ -946,6 +946,11 @@ pub(super) async fn vm_snapshot(
         return Err("no block subvolumes found for this VM".to_string());
     }
 
+    for disk in &disks {
+        nasty_storage::subvolume::validate_snapshot_name(&disk.subvolume, &req.name)
+            .map_err(|e| e.to_string())?;
+    }
+
     // VM should ideally be stopped or paused for consistent snapshots
     if vm_status.running {
         // Send sync to guest via QMP if possible (best-effort)
@@ -998,10 +1003,19 @@ pub(super) async fn vm_clone(
 
     let disks = resolve_vm_disks(state, &vm_status.config).await;
 
+    let clone_names = disks
+        .iter()
+        .map(|disk| {
+            let name = format!("{}-{}", disk.subvolume, req.new_name);
+            nasty_storage::subvolume::validate_subvolume_name(&name)
+                .map(|()| name)
+                .map_err(|e| e.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     // Clone each block subvolume
     let mut new_disks = Vec::new();
-    for disk in &disks {
-        let clone_name = format!("{}-{}", disk.subvolume, req.new_name);
+    for (disk, clone_name) in disks.iter().zip(clone_names) {
         let clone_req = nasty_storage::subvolume::CloneSubvolumeRequest {
             filesystem: disk.filesystem.clone(),
             name: disk.subvolume.clone(),

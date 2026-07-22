@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use nasty_sharing::nfs::UpdateNfsShareRequest;
 use nasty_sharing::smb::UpdateSmbShareRequest;
-use nasty_storage::subvolume::{RollbackResult, RollbackSnapshotRequest, SubvolumeType};
+use nasty_storage::subvolume::{
+    RollbackResult, RollbackSnapshotRequest, SubvolumeType, validate_existing_snapshot_name,
+};
 use tracing::{info, warn};
 
 use crate::AppState;
@@ -35,6 +37,7 @@ pub async fn rollback_with_dependents(
     req: RollbackSnapshotRequest,
     owner_filter: Option<&str>,
 ) -> Result<RollbackResult, String> {
+    validate_existing_snapshot_name(&req.subvolume, &req.snapshot).map_err(|e| e.to_string())?;
     let sv = state
         .subvolumes
         .get(&req.filesystem, &req.subvolume, owner_filter)

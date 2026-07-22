@@ -87,6 +87,8 @@ pub enum AppsError {
     ForbiddenBind(String),
     #[error("invalid network: {0}")]
     InvalidNetwork(String),
+    #[error("invalid app name: {0}")]
+    InvalidName(String),
 }
 
 impl AppsError {
@@ -102,8 +104,80 @@ impl AppsError {
             Self::Io(_) => -33008,
             Self::ForbiddenBind(_) => -33009,
             Self::InvalidNetwork(_) => -33010,
+            Self::InvalidName(_) => -33011,
         }
     }
+}
+
+fn invalid_name(msg: impl Into<String>) -> AppsError {
+    AppsError::InvalidName(msg.into())
+}
+
+/// Validate an app name that may already exist on disk. Older releases allowed
+/// dots, so lifecycle operations retain that safe single-component grammar.
+pub fn validate_app_name(name: &str) -> Result<(), AppsError> {
+    let mut chars = name.chars();
+    if name.is_empty() || name.len() > 250 {
+        return Err(invalid_name("name must be 1-250 bytes"));
+    }
+    if !chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(invalid_name(
+            "existing app names must be a single component of [A-Za-z0-9._-] starting with a letter or number",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate names for new apps. This grammar is stable across filesystem,
+/// Docker, Compose, Caddy route, and URL path identifiers.
+pub fn validate_new_app_name(name: &str) -> Result<(), AppsError> {
+    let mut bytes = name.bytes();
+    if name.is_empty() || name.len() > 63 {
+        return Err(invalid_name("name must be 1-63 bytes"));
+    }
+    if !bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        || !bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
+    {
+        return Err(invalid_name(
+            "new app names must match [a-z0-9][a-z0-9_-]{0,62}",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_volume_name(name: &str) -> Result<(), AppsError> {
+    if name.is_empty() || name.len() > 255 {
+        return Err(invalid_name("volume name must be 1-255 bytes"));
+    }
+    if matches!(name, "." | "..") || name.contains('/') || name.chars().any(char::is_control) {
+        return Err(invalid_name(
+            "volume name must be one normal path component without control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_auto_volume_names(req: &InstallAppRequest) -> Result<(), AppsError> {
+    for volume in &req.volumes {
+        if volume.host_path.is_empty() {
+            validate_volume_name(&volume.name)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_new_app_request(req: &InstallAppRequest) -> Result<(), AppsError> {
+    validate_new_app_name(&req.name)?;
+    validate_auto_volume_names(req)
+}
+
+fn validate_existing_app_request(req: &InstallAppRequest) -> Result<(), AppsError> {
+    validate_app_name(&req.name)?;
+    validate_auto_volume_names(req)
 }
 
 // ── Managed Docker networks ─────────────────────────────────────
@@ -1847,7 +1921,7 @@ pub struct SubPathRecipe {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InstallAppRequest {
-    /// App name. Must be DNS-safe.
+    /// App name matching `[a-z0-9][a-z0-9_-]{0,62}`.
     pub name: String,
     /// Container image (e.g. "lscr.io/linuxserver/plex:latest").
     pub image: String,
@@ -1943,7 +2017,7 @@ pub struct AppVolume {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InstallComposeRequest {
-    /// App name (used as compose project name).
+    /// App name matching `[a-z0-9][a-z0-9_-]{0,62}` (used as compose project name).
     pub name: String,
     /// Contents of docker-compose.yml.
     pub compose_file: String,
@@ -2853,6 +2927,19 @@ impl AppsService {
     // ── Simple app management ───────────────────────────────
 
     pub async fn install(&self, req: InstallAppRequest) -> Result<App, AppsError> {
+        self.install_inner(req, true).await
+    }
+
+    async fn install_inner(
+        &self,
+        req: InstallAppRequest,
+        require_new_name: bool,
+    ) -> Result<App, AppsError> {
+        if require_new_name {
+            validate_new_app_request(&req)?;
+        } else {
+            validate_existing_app_request(&req)?;
+        }
         self.require_ready().await?;
 
         let cname = container_name(&req.name);
@@ -3231,6 +3318,7 @@ impl AppsService {
     }
 
     pub async fn update(&self, req: InstallAppRequest) -> Result<App, AppsError> {
+        validate_existing_app_request(&req)?;
         self.require_ready().await?;
 
         let cname = container_name(&req.name);
@@ -3263,10 +3351,11 @@ impl AppsService {
             .await;
 
         // Reinstall with new config
-        self.install(req).await
+        self.install_inner(req, false).await
     }
 
     pub async fn remove(&self, name: &str) -> Result<(), AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         let cname = container_name(name);
@@ -3456,6 +3545,10 @@ impl AppsService {
             let name = entry.file_name().to_string_lossy().to_string();
 
             if path.is_dir() {
+                if let Err(e) = validate_app_name(&name) {
+                    warn!("apps: ignoring unsafe compose directory name '{name}': {e}");
+                    continue;
+                }
                 // Compose app: directory with docker-compose.yml
                 let compose_path = path.join("docker-compose.yml");
                 if compose_path.exists() {
@@ -3536,7 +3629,12 @@ impl AppsService {
                     .get("allow_unsafe")
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
-                if !app_name.is_empty() {
+                if let Err(e) = validate_app_name(&app_name) {
+                    warn!(
+                        "apps: ignoring unsafe app name in manifest {}: {e}",
+                        path.display()
+                    );
+                } else {
                     let proxy_disabled_reason = manifest
                         .get("proxy_disabled_reason")
                         .and_then(|s| s.as_str())
@@ -3585,7 +3683,11 @@ impl AppsService {
                 .cloned()
                 .unwrap_or_default();
 
-            if app_name.is_empty() || seen_names.contains(&app_name) {
+            if let Err(e) = validate_app_name(&app_name) {
+                warn!("apps: ignoring unsafe app name from Docker label '{app_name}': {e}");
+                continue;
+            }
+            if seen_names.contains(&app_name) {
                 continue;
             }
             seen_names.insert(app_name.clone());
@@ -3642,6 +3744,10 @@ impl AppsService {
             while let Some(entry) = entries.next_entry().await.map_err(AppsError::Io)? {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if seen_names.contains(&name) {
+                    continue;
+                }
+                if let Err(e) = validate_app_name(&name) {
+                    warn!("apps: ignoring unsafe compose directory name '{name}': {e}");
                     continue;
                 }
                 let compose_path = entry.path().join("docker-compose.yml");
@@ -3743,6 +3849,7 @@ impl AppsService {
     }
 
     pub async fn inspect(&self, name: &str) -> Result<serde_json::Value, AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
         let cname = container_name(name);
         let info = self
@@ -3755,6 +3862,7 @@ impl AppsService {
     }
 
     pub async fn get(&self, name: &str) -> Result<App, AppsError> {
+        validate_app_name(name)?;
         let apps = self.list().await?;
         apps.into_iter()
             .find(|a| a.name == name)
@@ -3762,6 +3870,7 @@ impl AppsService {
     }
 
     pub async fn get_config(&self, name: &str) -> Result<AppConfig, AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         let cname = container_name(name);
@@ -3944,6 +4053,7 @@ impl AppsService {
     }
 
     pub async fn logs(&self, name: &str, tail: Option<u32>) -> Result<String, AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         let cname = container_name(name);
@@ -4007,6 +4117,7 @@ impl AppsService {
     // ── Stop / Start ────────────────────────────────────────
 
     pub async fn stop(&self, name: &str) -> Result<(), AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         // Check if it's a compose app
@@ -4049,6 +4160,7 @@ impl AppsService {
     }
 
     pub async fn start(&self, name: &str) -> Result<(), AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         // Check if it's a compose app
@@ -4090,12 +4202,13 @@ impl AppsService {
     // ── Compose app management ──────────────────────────────
 
     pub async fn compose_install(&self, req: InstallComposeRequest) -> Result<App, AppsError> {
+        validate_new_app_name(&req.name)?;
         self.require_ready().await?;
 
         let project_dir = format!("{}/{}", COMPOSE_DIR, req.name);
 
         // Check if already exists
-        if Path::new(&project_dir).join("docker-compose.yml").exists() {
+        if Path::new(&project_dir).exists() {
             return Err(AppsError::AppAlreadyExists(req.name));
         }
 
@@ -4214,6 +4327,7 @@ impl AppsService {
     }
 
     pub async fn compose_update(&self, req: InstallComposeRequest) -> Result<App, AppsError> {
+        validate_app_name(&req.name)?;
         self.require_ready().await?;
 
         let project_dir = format!("{}/{}", COMPOSE_DIR, req.name);
@@ -4294,6 +4408,7 @@ impl AppsService {
         order: u32,
         delay_secs: u32,
     ) -> Result<(), AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
         let project_dir = format!("{}/{}", COMPOSE_DIR, name);
         if !Path::new(&project_dir).join("docker-compose.yml").exists() {
@@ -4357,6 +4472,10 @@ impl AppsService {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
+                if let Err(e) = validate_app_name(&name) {
+                    warn!("apps: ignoring unsafe compose directory name '{name}': {e}");
+                    continue;
+                }
                 let cfg = load_startup_config(&name).await;
                 out.push(ComposeStartupEntry {
                     name,
@@ -4371,6 +4490,7 @@ impl AppsService {
     }
 
     pub async fn compose_remove(&self, name: &str) -> Result<(), AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         let project_dir = format!("{}/{}", COMPOSE_DIR, name);
@@ -4423,6 +4543,7 @@ impl AppsService {
     }
 
     pub async fn compose_get(&self, name: &str) -> Result<ComposeContent, AppsError> {
+        validate_app_name(name)?;
         let dir = format!("{}/{}", COMPOSE_DIR, name);
         let compose_file = tokio::fs::read_to_string(format!("{dir}/docker-compose.yml"))
             .await
@@ -4440,6 +4561,7 @@ impl AppsService {
     }
 
     pub async fn compose_logs(&self, name: &str, tail: Option<u32>) -> Result<String, AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         let project_dir = format!("{}/{}", COMPOSE_DIR, name);
@@ -4590,6 +4712,7 @@ impl AppsService {
     }
 
     pub async fn ingress_set(&self, req: SetIngressRequest) -> Result<AppIngress, AppsError> {
+        validate_app_name(&req.name)?;
         // Treat "" as None — the WebUI submits an empty string when
         // the operator clears the field rather than omitting it.
         let subdomain = req
@@ -4669,6 +4792,7 @@ impl AppsService {
     }
 
     pub async fn ingress_remove(&self, name: &str) -> Result<(), AppsError> {
+        validate_app_name(name)?;
         // Check existence first so the API contract (404 on
         // unknown) stays the same — caddy's DELETE is idempotent
         // by design (404 → Ok).
@@ -5058,6 +5182,10 @@ impl AppsService {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
+                if let Err(e) = validate_app_name(&name) {
+                    warn!("apps: refusing to restore unsafe compose directory name '{name}': {e}");
+                    continue;
+                }
                 let cfg = load_startup_config(&name).await;
                 if cfg.managed {
                     managed.push((name, cfg));
@@ -5240,6 +5368,7 @@ impl AppsService {
     // ── Restart ──────────────────────────────────────────────
 
     pub async fn restart(&self, name: &str) -> Result<(), AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
@@ -5283,6 +5412,7 @@ impl AppsService {
     // ── Pull (update image) ─────────────────────────────────
 
     pub async fn pull(&self, name: &str) -> Result<App, AppsError> {
+        validate_app_name(name)?;
         self.require_ready().await?;
 
         let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
@@ -5389,7 +5519,7 @@ impl AppsService {
                 network: config.network,
                 static_ip: config.static_ip,
             };
-            return self.install(req).await;
+            return self.install_inner(req, false).await;
         }
 
         self.get(name).await
@@ -5541,6 +5671,7 @@ impl AppsService {
     /// Return the docker exec command string for a given app.
     /// The WebUI can use this to pre-fill the Terminal page.
     pub async fn exec_command(&self, name: &str) -> Result<String, AppsError> {
+        validate_app_name(name)?;
         let compose_file = format!("{}/{}/docker-compose.yml", COMPOSE_DIR, name);
         let container = if Path::new(&compose_file).exists() {
             // Look up the first running container in the compose project
@@ -6550,10 +6681,87 @@ async fn fetch_manifest_json(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppVolume, StartupConfig, compose_file_args, docker_data_root_status, extract_user_env,
-        render_env_file, render_startup_override, validate_simple_volumes,
+        AppVolume, InstallAppRequest, StartupConfig, compose_file_args, docker_data_root_status,
+        extract_user_env, render_env_file, render_startup_override, validate_app_name,
+        validate_new_app_name, validate_new_app_request, validate_simple_volumes,
+        validate_volume_name,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn new_app_name_accepts_conservative_grammar() {
+        for name in ["a", "app-1", "app_1", &"x".repeat(63)] {
+            assert!(validate_new_app_name(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn new_app_name_rejects_unsafe_or_noncanonical_names() {
+        for name in [
+            "",
+            "App",
+            "old.app",
+            "-app",
+            "_app",
+            "../app",
+            "app/name",
+            "app\nname",
+            "app name",
+            "app!",
+            &"x".repeat(64),
+        ] {
+            assert!(validate_new_app_name(name).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn existing_app_name_keeps_safe_legacy_names_manageable() {
+        for name in ["old.app", "Legacy-App_1", &"x".repeat(250)] {
+            assert!(validate_app_name(name).is_ok(), "{name}");
+        }
+        for name in [
+            ".hidden",
+            "../app",
+            "app/name",
+            "app\nname",
+            &"x".repeat(251),
+        ] {
+            assert!(validate_app_name(name).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn generated_volume_name_must_be_one_component() {
+        for name in ["config", "media files", ".cache"] {
+            assert!(validate_volume_name(name).is_ok(), "{name}");
+        }
+        for name in ["", ".", "..", "../data", "data/cache", "line\nbreak"] {
+            assert!(validate_volume_name(name).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn new_app_request_rejects_generated_volume_traversal() {
+        let request = InstallAppRequest {
+            name: "safe-app".to_string(),
+            image: "example/image:latest".to_string(),
+            ports: Vec::new(),
+            env: Vec::new(),
+            volumes: vec![AppVolume {
+                name: "../escape".to_string(),
+                mount_path: "/data".to_string(),
+                host_path: String::new(),
+            }],
+            cpu_limit: None,
+            memory_limit: None,
+            allow_unsafe: false,
+            subdomain: None,
+            network: None,
+            static_ip: None,
+        };
+
+        assert!(validate_new_app_request(&request).is_err());
+    }
 
     #[test]
     fn env_file_project_name_only_when_no_user_env() {

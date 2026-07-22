@@ -653,10 +653,15 @@
 	 * the page silently stale until the user reloads. Lighter cadence
 	 * than the 2s stats poll: list cardinality changes are rare. */
 	let listPoll: ReturnType<typeof setInterval> | null = null;
-	const APP_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+	const APP_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+	const EXISTING_APP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,249}$/;
 
 	function isValidAppName(name: string): boolean {
-		return name.length > 0 && name.length <= 53 && APP_NAME_RE.test(name);
+		return APP_NAME_RE.test(name);
+	}
+
+	function isValidExistingAppName(name: string): boolean {
+		return EXISTING_APP_NAME_RE.test(name);
 	}
 
 	async function inspectImage() {
@@ -1205,7 +1210,7 @@
 		if (!await waitForDocker()) return;
 		const appName = newName.toLowerCase();
 		if (!isValidAppName(appName)) {
-			await withToast(async () => { throw new Error('Invalid app name: use lowercase letters, numbers, hyphens, and dots (max 53 chars)'); }, '');
+			await withToast(async () => { throw new Error('Invalid app name: use lowercase letters, numbers, hyphens, and underscores (max 63 chars)'); }, '');
 			return;
 		}
 		const params: Record<string, unknown> = {
@@ -1526,8 +1531,8 @@
 		if (!composeName || !composeContent.trim()) { composeTried = true; return; }
 		composeTried = false;
 		if (!await waitForDocker()) return;
-		const name = composeName.toLowerCase();
-		if (!isValidAppName(name)) {
+		const name = editingCompose ? composeName : composeName.toLowerCase();
+		if (!(editingCompose ? isValidExistingAppName(name) : isValidAppName(name))) {
 			await withToast(async () => { throw new Error('Invalid app name'); }, '');
 			return;
 		}
@@ -1978,15 +1983,15 @@
 				     check stays always-on (user just typed something wrong,
 				     they want to know immediately). -->
 				{@const appNameMissing = !editingApp && !newName && installTried}
-				{@const appNameInvalid = !!newName && !isValidAppName(newName)}
+				{@const appNameInvalid = !!newName && !(editingApp ? isValidExistingAppName(newName) : isValidAppName(newName))}
 				{@const imageMissing = !editingApp && !newImage && installTried}
 				<div class="mb-4">
 					<Label for="app-name">App Name {#if appNameMissing}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
 					<Input id="app-name" value={newName} oninput={(e) => { newName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="whoami" class="mt-1 {requiredFieldCls(appNameMissing || appNameInvalid)}" disabled={!!editingApp} />
 					{#if appNameInvalid}
-						<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, dots. Max 53 chars.</span>
+						<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, or underscores. Max 63 chars.</span>
 					{:else}
-						<span class="mt-1 block text-xs text-muted-foreground">Must be DNS-safe (lowercase, no spaces).</span>
+						<span class="mt-1 block text-xs text-muted-foreground">Lowercase letters, numbers, hyphens, and underscores.</span>
 					{/if}
 				</div>
 				<div class="mb-4">
@@ -2214,7 +2219,7 @@
 				     clean. composeNameInvalid stays always-on because that's
 				     "you typed something invalid", not "you forgot a field". -->
 				{@const composeNameMissing = !editingCompose && !composeName && composeTried}
-				{@const composeNameInvalid = !!composeName && !isValidAppName(composeName)}
+				{@const composeNameInvalid = !!composeName && !(editingCompose ? isValidExistingAppName(composeName) : isValidAppName(composeName))}
 				{@const composeContentMissing = !composeContent.trim() && composeTried}
 				<!-- Compose form: two columns at lg+ — form on the left, warnings + ingress picker on the right. -->
 				<div class="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
@@ -2223,7 +2228,7 @@
 							<Label for="compose-name">App Name {#if composeNameMissing}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
 							<Input id="compose-name" value={composeName} oninput={(e) => { composeName = (e.currentTarget as HTMLInputElement).value.toLowerCase(); }} placeholder="my-stack" class="mt-1 {requiredFieldCls(composeNameMissing || composeNameInvalid)}" disabled={!!editingCompose} />
 							{#if composeNameInvalid}
-								<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, dots. Max 53 chars.</span>
+								<span class="mt-1 block text-xs text-red-500">Must be lowercase letters, numbers, hyphens, or underscores. Max 63 chars.</span>
 							{/if}
 						</div>
 						<div class="mb-4">
