@@ -72,6 +72,13 @@ const EMBEDDED_NASTY_FLAKE: &str = include_str!("../../../flake.nix");
 
 const GITHUB_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
+}
+
 // ── Release channels ────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -89,18 +96,17 @@ impl ReleaseChannel {
     /// Git ref to track for this channel.
     pub fn git_ref(&self) -> &'static str {
         match self {
-            Self::Mild => "main",  // uses v* tags on main
+            Self::Mild => "main",  // uses published GitHub releases
             Self::Spicy => "main", // uses s* tags on main
             Self::Nasty => "main", // HEAD of main
         }
     }
 
-    /// Tag glob pattern for tag-based channels.
+    /// Tag glob pattern for channels that intentionally expose raw tags.
     pub fn tag_pattern(&self) -> Option<&'static str> {
         match self {
-            Self::Mild => Some("v*"),
             Self::Spicy => Some("s*"),
-            Self::Nasty => None, // no tags, always HEAD
+            Self::Mild | Self::Nasty => None,
         }
     }
 
@@ -1085,8 +1091,8 @@ impl UpdateService {
         let channel = read_channel().await;
         let nasty_input = read_nasty_input_source().await;
 
-        // Mild/Spicy: find latest matching tag (v* or s*) on the configured repo.
-        // Nasty: track the wrapper flake's configured branch/ref.
+        // Mild follows only published stable GitHub releases. Spicy follows s*
+        // tags, while Nasty tracks the wrapper flake's configured branch/ref.
         //
         // We collect every failure into `lookup_error` so the UI can
         // surface *why* the check came back empty instead of just
@@ -1098,13 +1104,12 @@ impl UpdateService {
         let mut lookup_error: Option<String> = None;
         let latest = match channel {
             ReleaseChannel::Mild | ReleaseChannel::Spicy => {
-                let pattern = channel.tag_pattern().unwrap(); // "v*" or "s*"
                 let token = read_github_token().await;
-                match check_latest_tag(
+                match check_latest_channel_release(
+                    channel,
                     token.as_deref(),
                     &nasty_input.owner,
                     &nasty_input.repo,
-                    pattern,
                 )
                 .await
                 {
@@ -1237,12 +1242,11 @@ impl UpdateService {
 
         let (update_step, installed_version_expr) = match channel {
             ReleaseChannel::Mild | ReleaseChannel::Spicy => {
-                let pattern = channel.tag_pattern().unwrap();
-                let latest_tag = check_latest_tag(
+                let latest_tag = check_latest_channel_release(
+                    channel,
                     token.as_deref(),
                     &nasty_input.owner,
                     &nasty_input.repo,
-                    pattern,
                 )
                 .await?;
                 (
@@ -1888,25 +1892,37 @@ async fn check_latest_tag(
     )))
 }
 
+async fn check_latest_channel_release(
+    channel: ReleaseChannel,
+    token: Option<&str>,
+    owner: &str,
+    repo: &str,
+) -> Result<String, UpdateError> {
+    match channel {
+        ReleaseChannel::Mild => check_latest_stable_release(token, owner, repo).await,
+        ReleaseChannel::Spicy => {
+            check_latest_tag(
+                token,
+                owner,
+                repo,
+                channel.tag_pattern().expect("Spicy has a tag pattern"),
+            )
+            .await
+        }
+        ReleaseChannel::Nasty => Err(UpdateError::CommandFailed(
+            "Nasty channel tracks a branch, not a release".into(),
+        )),
+    }
+}
+
 async fn latest_official_nasty_release_tag() -> Result<String, UpdateError> {
     let token = read_github_token().await;
     let latest_tag = tokio::time::timeout(
         GITHUB_FETCH_TIMEOUT,
-        check_latest_tag(
-            token.as_deref(),
-            DEFAULT_NASTY_OWNER,
-            DEFAULT_NASTY_REPO,
-            "v*",
-        ),
+        check_latest_stable_release(token.as_deref(), DEFAULT_NASTY_OWNER, DEFAULT_NASTY_REPO),
     )
     .await
-    .map_err(|_| UpdateError::CommandFailed("timed out fetching latest tagged release".into()))??;
-
-    if parse_release_tag_version(&latest_tag).is_none() {
-        return Err(UpdateError::CommandFailed(format!(
-            "latest official tagged release is not a semantic vX.Y.Z tag: {latest_tag}"
-        )));
-    }
+    .map_err(|_| UpdateError::CommandFailed("timed out fetching latest stable release".into()))??;
 
     Ok(latest_tag)
 }
@@ -2641,6 +2657,54 @@ fn github_http_client() -> Result<reqwest::Client, UpdateError> {
         .map_err(|e| UpdateError::CommandFailed(format!("failed to build GitHub HTTP client: {e}")))
 }
 
+fn published_stable_release_tag(release: GitHubRelease) -> Result<String, UpdateError> {
+    if release.draft || release.prerelease {
+        return Err(UpdateError::CommandFailed(format!(
+            "GitHub returned unpublished release {} from the stable-release endpoint",
+            release.tag_name
+        )));
+    }
+    if parse_release_tag_version(&release.tag_name).is_none() {
+        return Err(UpdateError::CommandFailed(format!(
+            "latest published release is not a semantic vX.Y.Z tag: {}",
+            release.tag_name
+        )));
+    }
+    Ok(release.tag_name)
+}
+
+/// Find the latest published, non-draft, non-prerelease GitHub release.
+async fn check_latest_stable_release(
+    token: Option<&str>,
+    owner: &str,
+    repo: &str,
+) -> Result<String, UpdateError> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    let mut req = github_http_client()?
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "nasty-engine");
+    if let Some(token) = token.filter(|t| !t.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| UpdateError::CommandFailed(format!("GitHub API request failed: {e}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(UpdateError::CommandFailed(format!(
+            "GitHub latest stable release request failed with HTTP {status}"
+        )));
+    }
+    let release: GitHubRelease = response.json().await.map_err(|e| {
+        UpdateError::CommandFailed(format!("failed to parse GitHub release response: {e}"))
+    })?;
+    published_stable_release_tag(release)
+}
+
 /// Check latest commit on a branch via GitHub API.
 async fn check_via_github_api_branch(
     owner: &str,
@@ -3236,8 +3300,9 @@ async fn read_flake_lock_bcachefs() -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_booted_generation, map_systemd_state, normalize_git_tag_ref, parse_flake_input_urls,
-        parse_official_nasty_ref, parse_release_tag_version, read_wrapper_flake_version,
+        GitHubRelease, ReleaseChannel, is_booted_generation, map_systemd_state,
+        normalize_git_tag_ref, parse_flake_input_urls, parse_official_nasty_ref,
+        parse_release_tag_version, published_stable_release_tag, read_wrapper_flake_version,
         rewrite_flake_input_urls, should_rebootstrap_wrapper_flake, unquote_nix_string,
         wrapper_flake_content_hash,
     };
@@ -3292,6 +3357,50 @@ mod tests {
         assert_eq!(parse_release_tag_version("v1.2.3"), Some((1, 2, 3)));
         assert_eq!(parse_release_tag_version("v1.2"), None);
         assert_eq!(parse_release_tag_version("main"), None);
+    }
+
+    #[test]
+    fn accepts_only_published_stable_semver_releases() {
+        let stable = GitHubRelease {
+            tag_name: "v1.2.3".to_string(),
+            draft: false,
+            prerelease: false,
+        };
+        assert_eq!(
+            published_stable_release_tag(stable).expect("published stable release"),
+            "v1.2.3"
+        );
+
+        for release in [
+            GitHubRelease {
+                tag_name: "v1.2.4".to_string(),
+                draft: true,
+                prerelease: false,
+            },
+            GitHubRelease {
+                tag_name: "v1.2.4".to_string(),
+                draft: false,
+                prerelease: true,
+            },
+            GitHubRelease {
+                tag_name: "release-candidate".to_string(),
+                draft: false,
+                prerelease: false,
+            },
+        ] {
+            assert!(published_stable_release_tag(release).is_err());
+        }
+    }
+
+    #[test]
+    fn mild_channel_does_not_expose_raw_tags() {
+        assert_eq!(ReleaseChannel::Mild.tag_pattern(), None);
+        assert_eq!(ReleaseChannel::Spicy.tag_pattern(), Some("s*"));
+        assert!(
+            ReleaseChannel::Mild
+                .github_api_url()
+                .ends_with("/releases/latest")
+        );
     }
 
     #[test]
