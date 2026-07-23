@@ -72,7 +72,14 @@ pub(super) async fn try_route(
             Err(r) => r,
         },
         "vm.snapshot" => match parse_params::<nasty_vm::SnapshotVmRequest>(req) {
-            Ok(p) => match vm_snapshot(state, &p).await {
+            Ok(p) => match vm_snapshot(
+                state,
+                &p,
+                session.filesystem.as_deref(),
+                session.owner.as_deref(),
+            )
+            .await
+            {
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
             },

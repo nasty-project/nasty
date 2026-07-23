@@ -938,6 +938,8 @@ pub(super) async fn resolve_vm_disks(
 pub(super) async fn vm_snapshot(
     state: &AppState,
     req: &nasty_vm::SnapshotVmRequest,
+    filesystem_filter: Option<&str>,
+    owner_filter: Option<&str>,
 ) -> Result<Vec<nasty_vm::VmDiskSubvolume>, String> {
     let vm_status = state.vms.get(&req.id).await.map_err(|e| e.to_string())?;
     let disks = resolve_vm_disks(state, &vm_status.config).await;
@@ -947,6 +949,14 @@ pub(super) async fn vm_snapshot(
     }
 
     for disk in &disks {
+        if filesystem_filter.is_some_and(|filesystem| filesystem != disk.filesystem) {
+            return Err("access denied".to_string());
+        }
+        state
+            .subvolumes
+            .get(&disk.filesystem, &disk.subvolume, owner_filter)
+            .await
+            .map_err(|e| e.to_string())?;
         nasty_storage::subvolume::validate_snapshot_name(&disk.subvolume, &req.name)
             .map_err(|e| e.to_string())?;
     }
@@ -969,12 +979,16 @@ pub(super) async fn vm_snapshot(
             name: req.name.clone(),
             read_only: Some(true),
         };
-        state.snapshots.create(snap_req, None).await.map_err(|e| {
-            format!(
-                "failed to snapshot {}/{}: {e}",
-                disk.filesystem, disk.subvolume
-            )
-        })?;
+        state
+            .snapshots
+            .create(snap_req, owner_filter)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to snapshot {}/{}: {e}",
+                    disk.filesystem, disk.subvolume
+                )
+            })?;
     }
 
     // Thaw if we froze
