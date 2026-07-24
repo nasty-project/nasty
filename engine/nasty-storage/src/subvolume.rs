@@ -457,6 +457,9 @@ pub struct Snapshot {
     /// Loop device path if this snapshot's vol.img is currently attached (block snapshots only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_device: Option<String>,
+    /// Authoritative bcachefs subvolume creation time as Unix epoch seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
 }
 
 /// In-memory metadata read from xattrs on the subvolume directory.
@@ -1101,6 +1104,7 @@ impl SubvolumeService {
                         read_only,
                         parent,
                         block_device: None,
+                        created_at: info.snapshot_created_at.get(p).copied(),
                     }
                 })
                 .collect();
@@ -1928,6 +1932,13 @@ impl SubvolumeService {
         .await
         .map_err(SubvolumeError::CommandFailed)?;
 
+        let relative_snapshot_path = format!("{}@{}", req.subvolume, req.name);
+        let created_at = bcachefs_list_all(&mount_point)
+            .await
+            .snapshot_created_at
+            .get(&relative_snapshot_path)
+            .copied();
+
         Ok(Snapshot {
             name: req.name,
             subvolume: req.subvolume.clone(),
@@ -1936,6 +1947,7 @@ impl SubvolumeService {
             read_only: true,
             parent: Some(req.subvolume),
             block_device: None,
+            created_at,
         })
     }
 
@@ -2009,7 +2021,7 @@ impl SubvolumeService {
         let snap_prefix = format!("{subvol_name}@");
         let snapshots = info
             .snapshot_flags
-            .into_iter()
+            .iter()
             .filter(|(p, _)| p.starts_with(&snap_prefix) && !p[snap_prefix.len()..].contains('/'))
             .map(|(p, read_only)| {
                 let snap_name = p[snap_prefix.len()..].to_string();
@@ -2018,9 +2030,10 @@ impl SubvolumeService {
                     name: snap_name,
                     subvolume: subvol_name.to_string(),
                     filesystem: fs_name.to_string(),
-                    read_only,
+                    read_only: *read_only,
                     parent: Some(subvol_name.to_string()),
                     block_device: None,
+                    created_at: info.snapshot_created_at.get(p).copied(),
                 }
             })
             .collect();
@@ -2049,7 +2062,7 @@ impl SubvolumeService {
         let info = bcachefs_list_all(&mount_point).await;
 
         let mut all_snapshots = Vec::new();
-        for (rel_path, read_only) in info.snapshot_flags {
+        for (rel_path, read_only) in &info.snapshot_flags {
             let Some(at_pos) = rel_path.find('@') else {
                 continue;
             };
@@ -2069,15 +2082,16 @@ impl SubvolumeService {
             {
                 continue;
             }
-            let parent = info.snapshot_parents.get(&rel_path).cloned();
+            let parent = info.snapshot_parents.get(rel_path).cloned();
             all_snapshots.push(Snapshot {
                 name: snap_name.clone(),
                 subvolume: subvol_name.clone(),
                 filesystem: fs_name.to_string(),
                 path: snapshot_path,
-                read_only,
+                read_only: *read_only,
                 parent,
                 block_device: None,
+                created_at: info.snapshot_created_at.get(rel_path).copied(),
             });
         }
 
@@ -2486,32 +2500,40 @@ struct BcachefsInfo {
     snapshot_flags: std::collections::HashMap<String, bool>,
     /// Relative path of each snapshot → parent path (from bcachefs snapshot_parent).
     snapshot_parents: std::collections::HashMap<String, String>,
+    /// Relative path of each snapshot → bcachefs creation time.
+    snapshot_created_at: std::collections::HashMap<String, i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct BcachefsListEntry {
+    path: String,
+    #[serde(default)]
+    flags: Option<String>,
+    snapshot_parent: Option<String>,
+    #[serde(default)]
+    otime_unix: Option<i64>,
 }
 
 /// Run `bcachefs subvolume list --snapshots --json <mount_point>` once and
 /// return both the subvolume paths and per-snapshot read_only flags.
 /// On any error returns empty collections so callers degrade gracefully.
 async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        path: String,
-        #[serde(default)]
-        flags: Option<String>,
-        snapshot_parent: Option<String>,
-    }
-
     let output = cmd::run_ok(
         "bcachefs",
         &["subvolume", "list", "--snapshots", "--json", mount_point],
     )
     .await
     .unwrap_or_default();
+    parse_bcachefs_list(&output)
+}
 
-    let entries: Vec<Entry> = serde_json::from_str(&output).unwrap_or_default();
+fn parse_bcachefs_list(output: &str) -> BcachefsInfo {
+    let entries: Vec<BcachefsListEntry> = serde_json::from_str(output).unwrap_or_default();
 
     let mut subvol_paths = std::collections::HashSet::new();
     let mut snapshot_flags = std::collections::HashMap::new();
     let mut snapshot_parents = std::collections::HashMap::new();
+    let mut snapshot_created_at = std::collections::HashMap::new();
 
     for entry in entries {
         let is_ro = entry.flags.as_deref() == Some("ro");
@@ -2519,6 +2541,9 @@ async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
             if is_ro {
                 // Read-only snapshot
                 snapshot_flags.insert(entry.path.clone(), true);
+                if let Some(created_at) = entry.otime_unix {
+                    snapshot_created_at.insert(entry.path.clone(), created_at);
+                }
             } else {
                 // Writable clone — treat as regular subvolume
                 subvol_paths.insert(entry.path.clone());
@@ -2536,6 +2561,7 @@ async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
         subvol_paths,
         snapshot_flags,
         snapshot_parents,
+        snapshot_created_at,
     }
 }
 
@@ -3048,6 +3074,49 @@ async fn materialize_subvol_from_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bcachefs_snapshot_creation_time_is_preserved() {
+        let info = parse_bcachefs_list(
+            r#"[
+                {"path":"volume","flags":null,"snapshot_parent":null,"otime_unix":1700000000},
+                {"path":"volume@snap","flags":"ro","snapshot_parent":"/volume","otime_unix":1700000123}
+            ]"#,
+        );
+        assert_eq!(
+            info.snapshot_created_at.get("volume@snap"),
+            Some(&1_700_000_123)
+        );
+        assert_eq!(
+            info.snapshot_parents.get("volume@snap").map(String::as_str),
+            Some("volume")
+        );
+        assert_eq!(info.snapshot_flags.get("volume@snap"), Some(&true));
+    }
+
+    #[test]
+    fn bcachefs_snapshot_creation_time_is_optional() {
+        let info = parse_bcachefs_list(
+            r#"[{"path":"volume@snap","flags":"ro","snapshot_parent":"/volume"}]"#,
+        );
+        assert!(!info.snapshot_created_at.contains_key("volume@snap"));
+    }
+
+    #[test]
+    fn snapshot_omits_missing_creation_time() {
+        let snapshot = Snapshot {
+            name: "snap".into(),
+            subvolume: "volume".into(),
+            filesystem: "pool".into(),
+            path: "/pool/volume@snap".into(),
+            read_only: true,
+            parent: Some("volume".into()),
+            block_device: None,
+            created_at: None,
+        };
+        let value = serde_json::to_value(snapshot).expect("serialize snapshot");
+        assert!(value.get("created_at").is_none());
+    }
 
     // ── project quota via quotactl (bcachefs ≥ 1.38.8, #623) ──────
     //
