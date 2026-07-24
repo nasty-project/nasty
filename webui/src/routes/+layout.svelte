@@ -22,11 +22,13 @@
 	import {
 		activeNavigationGroup,
 		currentNavigationItem,
+		isNavGroup,
 		NAVIGATION_CONTEXT,
 		navigationForMode,
 		resolveNavigation,
 		searchNavigation,
 		type NavEntry,
+		type NavGroup,
 		type NavMode
 	} from '$lib/navigation';
 	import '../app.css';
@@ -711,6 +713,10 @@
 	}
 
 	const activeGroup = $derived(activeNavigationGroup($page.url.pathname, nav));
+	const launcherGroup = $derived.by((): NavGroup | null => {
+		const entry = nav.find((candidate) => candidate.id === activeGroup);
+		return entry && isNavGroup(entry) ? entry : null;
+	});
 
 	// ── Sidebar search ──────────────────────────────
 	let sidebarSearch = $state('');
@@ -948,7 +954,7 @@
 
 			<!-- Nav — scrollable -->
 			{#if uiPrefs.menuStyle === 'launcher'}
-				<LauncherSidebarNav collapsed={sidebarCollapsed} active={$page.url.pathname === '/menu'} />
+				<LauncherSidebarNav collapsed={sidebarCollapsed} active={$page.url.pathname === '/menu'} group={launcherGroup} />
 			{:else if uiPrefs.menuStyle === 'icons'}
 				<IconSidebarNav
 					entries={renderNav}

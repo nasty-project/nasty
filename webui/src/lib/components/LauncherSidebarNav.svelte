@@ -1,16 +1,17 @@
 <script lang="ts">
-	import { LAUNCHER_NAV_ITEM } from '$lib/navigation';
+	import { LAUNCHER_NAV_ITEM, type NavGroup } from '$lib/navigation';
 
 	interface Props {
 		collapsed: boolean;
 		active: boolean;
+		group: NavGroup | null;
 	}
 
-	let { collapsed, active }: Props = $props();
+	let { collapsed, active, group }: Props = $props();
 	const Icon = LAUNCHER_NAV_ITEM.icon;
 </script>
 
-<nav class="flex-1 px-2 py-3" aria-label="Primary navigation">
+<nav class="flex-1 space-y-2 px-2 py-3" aria-label="Primary navigation">
 	<a
 		href={LAUNCHER_NAV_ITEM.href}
 		aria-current={active ? 'page' : undefined}
@@ -32,4 +33,25 @@
 			</span>
 		{/if}
 	</a>
+
+	{#if group}
+		{@const GroupIcon = group.icon}
+		<a
+			href={`/menu?group=${encodeURIComponent(group.id)}`}
+			title={collapsed ? `Open ${group.label} category` : undefined}
+			aria-label={collapsed ? `Open ${group.label} category` : undefined}
+			class="flex items-center rounded-lg border border-blue-500/35 bg-blue-500/5 text-foreground no-underline transition-colors hover:border-blue-400/60 hover:bg-blue-500/10
+				{collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2.5'}"
+		>
+			<span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-400">
+				<GroupIcon size={18} />
+			</span>
+			{#if !collapsed}
+				<span class="min-w-0">
+					<span class="block truncate text-sm font-semibold">{group.label}</span>
+					<span class="mt-0.5 block text-[0.65rem] leading-tight text-muted-foreground">Return to category</span>
+				</span>
+			{/if}
+		</a>
+	{/if}
 </nav>
