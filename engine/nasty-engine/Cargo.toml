@@ -46,6 +46,7 @@ http = "1"
 # nothing for the Nix derivation to learn about.
 include_dir = "0.7"
 url = "2"
+libc.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 # WebAuthn third login backend (issue #289). 0.5 is the current
 # stable line; `prf` feature is intentionally NOT enabled here —

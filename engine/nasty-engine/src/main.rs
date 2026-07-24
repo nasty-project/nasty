@@ -201,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let state = Arc::new(AppState {
-        auth: AuthService::new().await,
+        auth: AuthService::new().await?,
         oidc: auth_oidc::OidcHolder::default(),
         webauthn,
         events: event_tx,

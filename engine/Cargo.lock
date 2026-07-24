@@ -2944,6 +2944,7 @@ dependencies = [
  "futures-util",
  "http",
  "include_dir",
+ "libc",
  "nasty-apps",
  "nasty-backup",
  "nasty-common",
