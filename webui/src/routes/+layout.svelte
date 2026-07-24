@@ -9,6 +9,8 @@
 	import ConfirmDangerousDialog from '$lib/components/ConfirmDangerousDialog.svelte';
 	import UnlockFsDialog from '$lib/components/UnlockFsDialog.svelte';
 	import ReconnectSpinner from '$lib/components/ReconnectSpinner.svelte';
+	import ClassicSidebarNav from '$lib/components/ClassicSidebarNav.svelte';
+	import IconSidebarNav from '$lib/components/IconSidebarNav.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { AuthResult } from '$lib/rpc';
 	import type { BootStatus, BootPhase, SystemStatus } from '$lib/types';
@@ -16,24 +18,22 @@
 	import logoLight from '$lib/assets/nasty.svg';
 	import logoDark from '$lib/assets/nasty-white.svg';
 	import { uiPrefs } from '$lib/uiPrefs.svelte';
+	import {
+		activeNavigationGroup,
+		currentNavigationItem,
+		navigationForMode,
+		resolveNavigation,
+		searchNavigation,
+		type NavEntry,
+		type NavMode
+	} from '$lib/navigation';
 	import '../app.css';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import {
-		LayoutDashboard,
-		Database,
-		Layers,
-		Activity,
-		Share2,
-		HardDrive,
-		Archive,
-		Bell,
 		Settings,
 		RefreshCw,
-		Terminal,
-		ShieldCheck,
-		Network,
 		Power,
 		RotateCcw,
 		PowerOff,
@@ -44,24 +44,10 @@
 		PanelLeftClose,
 		PanelLeftOpen,
 		Bug,
-		Monitor,
-		Box,
-		FolderOpen,
 		CircleHelp,
 		ExternalLink,
 		MessageCircle,
 		Code2,
-		ChevronRight,
-		Shield,
-		Flame,
-		Lock,
-		Zap,
-		Globe,
-		Cpu,
-		CircuitBoard,
-		Server,
-		Wrench,
-		ScrollText,
 		Search,
 		AlertTriangle,
 		EyeOff,
@@ -677,163 +663,58 @@
 		try { await getClient().call('system.shutdown'); } catch { /* expected — engine dies */ }
 	}
 
-	type NavItem = { href: string; label: string; icon: any };
-	type NavGroup = { label: string; icon: any; children: NavItem[] };
-	type NavEntry = NavItem | NavGroup;
-	function isGroup(e: NavEntry): e is NavGroup { return 'children' in e; }
-
-	const nav = $derived.by((): NavEntry[] => {
-		const computeChildren: NavItem[] = [{ href: '/apps', label: 'Apps', icon: Box }];
-		if (sysInfo?.kvm_available) {
-			computeChildren.unshift({ href: '/vms', label: 'VMs', icon: Monitor });
-		}
-		return [
-			{ href: '/', label: 'Dashboard', icon: LayoutDashboard },
-			{ label: 'Storage', icon: Database, children: [
-				{ href: '/filesystems', label: 'Filesystems', icon: Database },
-				{ href: '/subvolumes', label: 'Subvolumes', icon: Layers },
-				{ href: '/disks',      label: 'Disks',       icon: HardDrive },
-				{ href: '/operations', label: 'Operations',  icon: Activity },
-				{ href: '/files',      label: 'Files',       icon: FolderOpen },
-			]},
-			{ href: '/sharing', label: 'Sharing', icon: Share2 },
-			{ label: 'Protection', icon: Shield, children: [
-				{ href: '/backups',  label: 'Backups',  icon: Archive },
-				{ href: '/alerts',   label: 'Alerts',   icon: Bell },
-				{ href: '/firewall', label: 'Firewall', icon: Flame },
-				{ href: '/tls',      label: 'TLS',      icon: Lock },
-				{ href: '/ingress',  label: 'Ingress',  icon: Network },
-				{ href: '/vpn',      label: 'VPN',      icon: Globe },
-			]},
-			{ label: 'Compute', icon: Cpu, children: computeChildren },
-			{ href: '/terminal', label: 'Terminal', icon: Terminal },
-			{ label: 'System', icon: Wrench, children: [
-				{ href: '/services', label: 'Services',       icon: Server },
-				{ href: '/hardware', label: 'Hardware',       icon: CircuitBoard },
-				{ href: '/logs',     label: 'Logs',           icon: ScrollText },
-				{ href: '/update',   label: 'Update',         icon: RefreshCw },
-				{ href: '/users',    label: 'Access Control', icon: ShieldCheck },
-				{ href: '/settings', label: 'Settings',       icon: Settings },
-			]},
-		];
-	});
-
-	// Flatten all nav items for matching
-	const allNavItems = $derived.by((): NavItem[] => {
-		const items: NavItem[] = [];
-		for (const entry of nav) {
-			if (isGroup(entry)) items.push(...entry.children);
-			else items.push(entry);
-		}
-		return items;
-	});
+	const nav = $derived.by((): NavEntry[] => resolveNavigation({ kvmAvailable: sysInfo?.kvm_available === true }));
 
 	// ── Nav mode (#588): opt-in "Common" short menu vs the full grouped tree ──
 	const NAV_MODE_KEY = 'nasty:nav_mode';
-	let navMode: 'full' | 'common' = $state(
+	let navMode: NavMode = $state(
 		typeof localStorage !== 'undefined' && localStorage.getItem(NAV_MODE_KEY) === 'common'
 			? 'common'
 			: 'full'
 	);
-	function setNavMode(m: 'full' | 'common') {
+	function setNavMode(m: NavMode) {
 		navMode = m;
 		if (typeof localStorage !== 'undefined') localStorage.setItem(NAV_MODE_KEY, m);
 	}
 
-	// Curated flat short-list of the most-used pages for "Common" mode. Anything
-	// off this list is still reachable via the search box or by flipping to Full.
-	const commonNav = $derived.by((): NavItem[] => {
-		const items: NavItem[] = [
-			{ href: '/', label: 'Dashboard', icon: LayoutDashboard },
-			{ href: '/filesystems', label: 'Filesystems', icon: Database },
-			{ href: '/subvolumes', label: 'Subvolumes', icon: Layers },
-			{ href: '/disks', label: 'Disks', icon: HardDrive },
-			{ href: '/files', label: 'Files', icon: FolderOpen },
-			{ href: '/apps', label: 'Apps', icon: Box },
-		];
-		if (sysInfo?.kvm_available) items.push({ href: '/vms', label: 'VMs', icon: Monitor });
-		items.push({ href: '/backups', label: 'Backups', icon: Archive });
-		items.push({ href: '/logs', label: 'Logs', icon: ScrollText });
-		return items;
-	});
-
-	// Derive current nav entry from path
-	const currentNav = $derived.by(() => {
-		const path = $page.url.pathname;
-		return [...allNavItems].sort((a, b) => b.href.length - a.href.length)
-			.find(n => path === n.href || (n.href !== '/' && path.startsWith(n.href))) ?? allNavItems[0];
-	});
+	const currentNav = $derived(currentNavigationItem($page.url.pathname, nav));
 
 	// Track which groups are expanded — auto-expand based on active route
 	const SIDEBAR_GROUPS_KEY = 'nasty:sidebar_groups';
-	let expandedGroups: Record<string, boolean> = $state(
-		typeof localStorage !== 'undefined'
-			? JSON.parse(localStorage.getItem(SIDEBAR_GROUPS_KEY) || '{}')
-			: {}
-	);
+	function loadExpandedGroups(): Record<string, boolean> {
+		if (typeof localStorage === 'undefined') return {};
+		try {
+			const stored = JSON.parse(localStorage.getItem(SIDEBAR_GROUPS_KEY) || '{}') as Record<string, boolean>;
+			return {
+				...stored,
+				storage: stored.storage ?? stored.Storage ?? false,
+				protection: stored.protection ?? stored.Protection ?? false,
+				compute: stored.compute ?? stored.Compute ?? false,
+				system: stored.system ?? stored.System ?? false
+			};
+		} catch {
+			return {};
+		}
+	}
+	let expandedGroups: Record<string, boolean> = $state(loadExpandedGroups());
 
-	function toggleGroup(label: string) {
-		expandedGroups[label] = !expandedGroups[label];
-		localStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify(expandedGroups));
+	function toggleGroup(id: string) {
+		expandedGroups[id] = !expandedGroups[id];
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify(expandedGroups));
+		}
 	}
 
-	// Auto-expand the group containing the active route
-	const activeGroup = $derived.by((): string | null => {
-		const path = $page.url.pathname;
-		for (const entry of nav) {
-			if (isGroup(entry) && entry.children.some(c => path === c.href || (c.href !== '/' && path.startsWith(c.href)))) {
-				return entry.label;
-			}
-		}
-		return null;
-	});
+	const activeGroup = $derived(activeNavigationGroup($page.url.pathname, nav));
 
 	// ── Sidebar search ──────────────────────────────
-	interface SearchEntry { href: string; label: string; keywords: string[] }
-	const searchIndex: SearchEntry[] = [
-		{ href: '/', label: 'Dashboard', keywords: ['dashboard', 'overview', 'stats', 'cpu', 'memory', 'load', 'charts', 'home'] },
-		{ href: '/filesystems', label: 'Filesystems', keywords: ['filesystem', 'pool', 'bcachefs', 'format', 'mount', 'unmount', 'create', 'encryption', 'replicas', 'erasure', 'tiering', 'compression', 'scrub', 'fsck', 'check', 'repair', 'balance', 'rebuild', 'defrag', 'add disk', 'remove disk', 'tpm', 'tpm2', 'seal', 'unlock', 'key', 'quota'] },
-		{ href: '/subvolumes', label: 'Subvolumes', keywords: ['subvolume', 'snapshot', 'quota', 'block device', 'dataset', 'clone', 'send', 'receive', 'replication', 'volume', 'zvol', 'lun', 'namespace'] },
-		{ href: '/disks', label: 'Disks', keywords: ['disk', 'drive', 'smart', 'health', 'temperature', 'ssd', 'hdd', 'sas', 'nvme', 'topology', 'device', 'wipe', 'format', 'partition', 'serial', 'model', 'firmware', 'pcie', 'endurance', 'wear', 'scan'] },
-		{ href: '/files', label: 'Files', keywords: ['file', 'browser', 'folder', 'directory', 'upload', 'download', 'rename', 'move', 'copy', 'permissions'] },
-		{ href: '/sharing', label: 'Sharing', keywords: ['share', 'nfs', 'smb', 'samba', 'cifs', 'iscsi', 'nvmeof', 'nvme-of', 'export', 'target', 'lun', 'acl', 'chap', 'portal', 'subsystem', 'nqn', 'iqn', 'client', 'username'] },
-		{ href: '/backups', label: 'Backups', keywords: ['backup', 'restore', 'rustic', 'restic', 'snapshot', 'retention', 'schedule', 'offsite', 'encrypt', 'cron', 's3', 'b2', 'sftp', 'rest', 'repository', 'repo', 'init', 'prune', 'check', 'cacert', 'ca cert', 'password'] },
-		{ href: '/alerts', label: 'Alerts', keywords: ['alert', 'notification', 'warning', 'critical', 'rule', 'threshold', 'monitor', 'webhook', 'email', 'telegram', 'discord', 'notify', 'severity', 'acknowledge', 'resolve'] },
-		{ href: '/firewall', label: 'Firewall', keywords: ['firewall', 'port', 'nftables', 'restrict', 'ip', 'interface', 'security', 'network', 'rule', 'block', 'allow', 'tcp', 'udp'] },
-		{ href: '/tls', label: 'TLS', keywords: ['tls', 'ssl', 'certificate', 'cert', 'https', 'encrypt', 'letsencrypt', 'acme', 'dns', 'cloudflare', 'domain', 'ca', 'caddy', 'internal', 'self-signed', 'selfsigned', 'staging', 'renew', 'root'] },
-		{ href: '/ingress', label: 'Ingress', keywords: ['ingress', 'reverse', 'proxy', 'route', 'caddy', 'subdomain', 'host', 'path', 'apps', 'domain', 'https', 'redirect'] },
-		{ href: '/vpn', label: 'VPN', keywords: ['vpn', 'tailscale', 'remote', 'access', 'tunnel', 'wireguard', 'connect', 'auth key', 'exit node', 'subnet', 'peer'] },
-		{ href: '/vms', label: 'VMs', keywords: ['vm', 'virtual', 'machine', 'qemu', 'kvm', 'cpu', 'vnc', 'passthrough', 'iso', 'cdrom', 'disk', 'memory', 'ram', 'boot', 'uefi', 'ovmf', 'spice', 'bridge', 'console'] },
-		{ href: '/apps', label: 'Apps', keywords: ['app', 'docker', 'container', 'compose', 'install', 'image', 'port', 'volume', 'env', 'pull', 'logs', 'restart', 'stop', 'start'] },
-		{ href: '/terminal', label: 'Terminal', keywords: ['terminal', 'shell', 'ssh', 'console', 'command', 'bash', 'web', 'tty'] },
-		{ href: '/services', label: 'Services', keywords: ['service', 'protocol', 'nfs', 'smb', 'iscsi', 'smart', 'avahi', 'mdns', 'enable', 'disable', 'rest server', 'backup server', 'receiver', 'htpasswd', 'docker', 'container', 'runtime', 'ups', 'nut', 'battery', 'power', 'shutdown', 'uninterruptible'] },
-		{ href: '/hardware', label: 'Hardware', keywords: ['hardware', 'pci', 'iommu', 'group', 'passthrough', 'vfio', 'gpu', 'device', 'driver', 'lspci', 'tpm', 'tpm2', 'secure boot', 'secureboot', 'cpu', 'memory', 'ram', 'dmi', 'bios', 'firmware', 'motherboard', 'mainboard', 'usb', 'nic'] },
-		{ href: '/logs', label: 'Logs', keywords: ['log', 'journal', 'systemd', 'debug', 'error', 'follow', 'stream', 'filter', 'level', 'tail', 'kernel', 'dmesg'] },
-		{ href: '/update', label: 'Update', keywords: ['update', 'upgrade', 'version', 'release', 'nixos', 'rebuild', 'generation', 'nasty', 'nixpkgs', 'bcachefs', 'flake', 'lock', 'rollback', 'pin'] },
-		{ href: '/users', label: 'Access Control', keywords: ['user', 'password', 'role', 'admin', 'group', 'permission', 'token', 'api', 'access', 'auth', 'login', 'security key', 'webauthn', 'passkey', 'yubikey', 'touch id', 'windows hello', 'authenticator', 'fido', '2fa', 'mfa', 'sso', 'oidc', 'single sign-on', 'provider'] },
-		{ href: '/settings', label: 'Settings', keywords: ['setting', 'hostname', 'timezone', 'clock', 'directory', 'active directory', 'domain', 'ad', 'network', 'ip', 'dhcp', 'dns', 'bond', 'vlan', 'bridge', 'static', 'gateway', 'route', 'mtu', 'notification', 'email', 'smtp', 'telegram', 'webhook', 'tuning', 'nfs threads', 'metrics', 'prometheus', 'telemetry', 'log level', 'theme', 'dark', 'light', 'appearance', 'custom nix', 'custom.nix', 'nixos', 'package', 'systemd'] },
-	];
-
 	let sidebarSearch = $state('');
-	const searchMatches = $derived.by((): Set<string> => {
-		const q = sidebarSearch.trim().toLowerCase();
-		if (!q) return new Set();
-		return new Set(
-			searchIndex
-				.filter(e => e.label.toLowerCase().includes(q) || e.keywords.some(k => k.includes(q)))
-				.map(e => e.href)
-		);
-	});
+	const searchMatches = $derived(searchNavigation(nav, sidebarSearch));
 	const isSearching = $derived(sidebarSearch.trim().length > 0);
 
 	// While searching, render the full grouped tree so search can reach every page;
 	// otherwise honor the chosen nav mode (Full grouped tree vs Common short-list).
-	const displayNav = $derived(navMode === 'common' ? commonNav : nav);
-	const renderNav = $derived<NavEntry[]>(isSearching ? nav : displayNav);
-
-	function isGroupExpanded(label: string): boolean {
-		return expandedGroups[label] || activeGroup === label;
-	}
+	const renderNav = $derived<NavEntry[]>(isSearching ? nav : navigationForMode(nav, navMode));
 </script>
 
 <svelte:head>
@@ -963,7 +844,7 @@
 {:else}
 	<div class="relative flex h-screen overflow-hidden">
 		<!-- Sidebar -->
-		<aside class="flex {sidebarCollapsed ? 'w-[52px]' : 'w-[200px]'} shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200">
+		<aside class="flex {sidebarCollapsed ? (uiPrefs.menuStyle === 'icons' ? 'w-[72px]' : 'w-[52px]') : 'w-[200px]'} shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200">
 			<!-- Logo / collapse toggle -->
 			{#if sidebarCollapsed}
 				<div class="shrink-0 border-b border-border flex items-center justify-center py-3">
@@ -1061,95 +942,31 @@
 			{/if}
 
 			<!-- Nav — scrollable -->
-			<nav class="flex-1 overflow-y-auto py-2">
-				{#each renderNav as entry}
-					{#if isGroup(entry)}
-						{@const GroupIcon = entry.icon}
-						{@const expanded = isGroupExpanded(entry.label)}
-						{@const groupActive = activeGroup === entry.label}
-						{@const matchingChildren = isSearching ? entry.children.filter(c => searchMatches.has(c.href)) : entry.children}
-						{#if matchingChildren.length === 0 && isSearching}
-							<!-- Group has no matching children during search — hide entirely -->
-						{:else if sidebarCollapsed}
-							{#each matchingChildren as child}
-								{@const ChildIcon = child.icon}
-								{@const active = currentNav.href === child.href}
-								<a
-									href={child.href}
-									title={child.label}
-									class="relative mx-2 flex items-center justify-center rounded-md py-2 text-sm no-underline transition-all border-2
-										{active
-											? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
-											: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
-								>
-									<ChildIcon size={15} class="shrink-0" />
-								</a>
-							{/each}
-						{:else if isSearching}
-							<!-- During search: show matching children flat, no group header -->
-							{#each matchingChildren as child}
-								{@const ChildIcon = child.icon}
-								{@const active = currentNav.href === child.href}
-								<a
-									href={child.href}
-									onclick={() => { sidebarSearch = ''; }}
-									class="relative mx-2 flex items-center gap-2.5 rounded-md py-2 pl-4 pr-4 text-sm no-underline transition-all border-2
-										{active
-											? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
-											: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
-								>
-									<ChildIcon size={14} class="shrink-0" />
-									{child.label}
-								</a>
-							{/each}
-						{:else}
-							<button
-								onclick={() => toggleGroup(entry.label)}
-								class="mx-2 flex w-[calc(100%-1rem)] items-center gap-2.5 rounded-md py-2 pl-4 pr-3 text-sm transition-colors
-									{groupActive ? 'text-foreground font-medium' : 'text-muted-foreground hover:text-foreground'}"
-							>
-								<GroupIcon size={15} class="shrink-0" />
-								{entry.label}
-								<ChevronRight size={13} class="ml-auto shrink-0 transition-transform duration-200 {expanded ? 'rotate-90' : ''}" />
-							</button>
-							{#if expanded}
-								{#each entry.children as child}
-									{@const ChildIcon = child.icon}
-									{@const active = currentNav.href === child.href}
-									<a
-										href={child.href}
-										class="relative mx-2 flex items-center gap-2.5 rounded-md py-1.5 pl-8 pr-4 text-sm no-underline transition-all border-2
-											{active
-												? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
-												: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
-									>
-										<ChildIcon size={14} class="shrink-0" />
-										{child.label}
-									</a>
-								{/each}
-							{/if}
-						{/if}
-					{:else}
-						{#if !isSearching || searchMatches.has(entry.href)}
-						{@const Icon = entry.icon}
-						{@const active = currentNav.href === entry.href}
-						<a
-							href={entry.href}
-							onclick={() => { if (isSearching) sidebarSearch = ''; }}
-							title={sidebarCollapsed ? entry.label : undefined}
-							class="relative mx-2 flex items-center rounded-md py-2 text-sm no-underline transition-all border-2
-								{sidebarCollapsed ? 'justify-center px-0' : 'gap-2.5 pl-4 pr-4'}
-								{active
-									? 'text-foreground font-medium border-blue-500/50 shadow-[0_0_8px_rgba(96,165,250,0.25)]'
-									: 'text-muted-foreground border-transparent hover:text-foreground hover:border-blue-400/50 hover:shadow-[0_0_10px_rgba(96,165,250,0.25)]'}"
-						>
-							<Icon size={15} class="shrink-0" />
-							{#if !sidebarCollapsed}{entry.label}{/if}
-						</a>
-						{/if}
-					{/if}
-				{/each}
-			</nav>
+			{#if uiPrefs.menuStyle === 'icons'}
+				<IconSidebarNav
+					entries={renderNav}
+					fullEntries={nav}
+					mode={navMode}
+					currentHref={currentNav.href}
+					activeGroupId={activeGroup}
+					collapsed={sidebarCollapsed}
+					{isSearching}
+					{searchMatches}
+					onNavigate={() => { sidebarSearch = ''; }}
+				/>
+			{:else}
+				<ClassicSidebarNav
+					entries={renderNav}
+					currentHref={currentNav.href}
+					activeGroupId={activeGroup}
+					{expandedGroups}
+					collapsed={sidebarCollapsed}
+					{isSearching}
+					{searchMatches}
+					onToggleGroup={toggleGroup}
+					onNavigate={() => { sidebarSearch = ''; }}
+				/>
+			{/if}
 
 			{#if !sidebarCollapsed}
 				<!-- Clock — centered above the footer separator -->
