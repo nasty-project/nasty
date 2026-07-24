@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use argon2::password_hash::SaltString;
@@ -272,38 +273,18 @@ pub struct AuthService {
 }
 
 impl AuthService {
-    pub async fn new() -> Self {
-        let state = load_state().await;
+    pub async fn new() -> Result<Self, AuthError> {
+        let state = initialize_state(Path::new(STATE_PATH), Some(0)).await?;
         let mut rl = load_rate_limit().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         rl.prune(now);
-        let svc = Self {
+        Ok(Self {
             state: Arc::new(RwLock::new(state)),
             rate_limit: Arc::new(RwLock::new(rl)),
-        };
-
-        // If no users exist, create default admin
-        if !svc.state.read().await.initialized {
-            let mut st = svc.state.write().await;
-            let hash = hash_password("admin").expect("failed to hash default password");
-            st.users.push(User {
-                username: "admin".to_string(),
-                password_hash: Some(hash),
-                role: Role::Admin,
-                must_change_password: true,
-                oidc_subject: None,
-                oidc_issuer: None,
-                webauthn_credentials: Vec::new(),
-            });
-            st.initialized = true;
-            save_state(&st).await.ok();
-            info!("Created default admin user (password: admin) — change this immediately!");
-        }
-
-        svc
+        })
     }
 
     /// Authenticate with username/password, returns a session token
@@ -377,7 +358,8 @@ impl AuthService {
             }
         }
 
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
 
         let user = state
             .users
@@ -439,7 +421,7 @@ impl AuthService {
             .retain(|s| now - s.created_at <= SESSION_TTL_SECS);
 
         state.sessions.push(session);
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
 
         audit("login_success", username, client_ip, "");
         info!("User '{}' logged in", username);
@@ -482,7 +464,10 @@ impl AuthService {
             }
         };
 
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
+        let mut provisioned_username = None;
+        let mut prior_role = None;
 
         let mut existing_idx = state.users.iter().position(|u| {
             u.oidc_subject.as_deref() == Some(&identity.subject)
@@ -513,26 +498,13 @@ impl AuthService {
                 webauthn_credentials: Vec::new(),
             });
             existing_idx = Some(state.users.len() - 1);
-            audit(
-                "oidc_user_provisioned",
-                &username,
-                client_ip,
-                &format!(
-                    "issuer={} sub={} role={:?}",
-                    identity.issuer, identity.subject, role
-                ),
-            );
+            provisioned_username = Some(username);
         }
 
         let idx = existing_idx.expect("user index resolved above");
         let user = &mut state.users[idx];
         if user.role != role {
-            audit(
-                "oidc_role_updated_on_login",
-                &user.username,
-                client_ip,
-                &format!("from={:?} to={:?}", user.role, role),
-            );
+            prior_role = Some(user.role.clone());
             user.role = role.clone();
         }
 
@@ -553,8 +525,27 @@ impl AuthService {
             .sessions
             .retain(|s| now - s.created_at <= SESSION_TTL_SECS);
         state.sessions.push(session);
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
 
+        if let Some(provisioned_username) = provisioned_username {
+            audit(
+                "oidc_user_provisioned",
+                &provisioned_username,
+                client_ip,
+                &format!(
+                    "issuer={} sub={} role={:?}",
+                    identity.issuer, identity.subject, role
+                ),
+            );
+        }
+        if let Some(prior_role) = prior_role {
+            audit(
+                "oidc_role_updated_on_login",
+                &username,
+                client_ip,
+                &format!("from={prior_role:?} to={role:?}"),
+            );
+        }
         audit("oidc_login_success", &username, client_ip, "");
         info!("OIDC login succeeded for user '{}'", username);
         Ok(token)
@@ -574,9 +565,10 @@ impl AuthService {
             // Check TTL
             if now - session.created_at > SESSION_TTL_SECS {
                 drop(state);
-                let mut state = self.state.write().await;
+                let mut current = self.state.write().await;
+                let mut state = current.clone();
                 state.sessions.retain(|s| !ct_eq_str(&s.token, token));
-                save_state(&state).await.ok();
+                commit_state(&mut current, state).await.ok();
                 return Err(AuthError::TokenExpired);
             }
             // Verify client IP matches the one that created this session
@@ -661,7 +653,8 @@ impl AuthService {
             return Err(AuthError::Forbidden);
         }
 
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         if state.api_tokens.iter().any(|t| t.name == name) {
             return Err(AuthError::UserExists); // reuse: token name already taken
         }
@@ -688,7 +681,7 @@ impl AuthService {
         };
 
         state.api_tokens.push(stored);
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
 
         audit(
             "token_created",
@@ -738,13 +731,14 @@ impl AuthService {
             return Err(AuthError::Forbidden);
         }
 
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let len_before = state.api_tokens.len();
         state.api_tokens.retain(|t| t.id != id);
         if state.api_tokens.len() == len_before {
             return Err(AuthError::UserNotFound);
         }
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
 
         audit(
             "token_deleted",
@@ -758,13 +752,14 @@ impl AuthService {
 
     /// Revoke a token (logout)
     pub async fn logout(&self, token: &str) -> Result<(), AuthError> {
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let len_before = state.sessions.len();
         state.sessions.retain(|s| s.token != token);
         if state.sessions.len() == len_before {
             return Err(AuthError::InvalidToken);
         }
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
         Ok(())
     }
 
@@ -783,7 +778,8 @@ impl AuthService {
             return Err(AuthError::WeakPassword);
         }
 
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let user = state
             .users
             .iter_mut()
@@ -798,7 +794,7 @@ impl AuthService {
             s.must_change_password = false;
         }
 
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
 
         audit(
             "password_changed",
@@ -826,10 +822,22 @@ impl AuthService {
             return Err(AuthError::WeakPassword);
         }
 
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         if state.users.iter().any(|u| u.username == username) {
             return Err(AuthError::UserExists);
         }
+
+        state.users.push(User {
+            username: username.to_string(),
+            password_hash: Some(hash_password(password)?),
+            role: role.clone(),
+            must_change_password: false,
+            oidc_subject: None,
+            oidc_issuer: None,
+            webauthn_credentials: Vec::new(),
+        });
+        commit_state(&mut current, state).await?;
 
         audit(
             "user_created",
@@ -837,17 +845,6 @@ impl AuthService {
             session.client_ip.as_deref().unwrap_or(""),
             &format!("target={username}, role={role:?}"),
         );
-        state.users.push(User {
-            username: username.to_string(),
-            password_hash: Some(hash_password(password)?),
-            role,
-            must_change_password: false,
-            oidc_subject: None,
-            oidc_issuer: None,
-            webauthn_credentials: Vec::new(),
-        });
-        save_state(&state).await?;
-
         info!("Created user '{username}'");
         Ok(())
     }
@@ -861,7 +858,8 @@ impl AuthService {
             return Err(AuthError::Forbidden);
         }
 
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let len_before = state.users.len();
         state.users.retain(|u| u.username != username);
         if state.users.len() == len_before {
@@ -870,7 +868,7 @@ impl AuthService {
 
         // Also revoke all their sessions
         state.sessions.retain(|s| s.username != username);
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
 
         audit(
             "user_deleted",
@@ -993,14 +991,15 @@ impl AuthService {
         username: &str,
         credential: WebauthnCredential,
     ) -> Result<(), AuthError> {
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let user = state
             .users
             .iter_mut()
             .find(|u| u.username == username)
             .ok_or(AuthError::UserNotFound)?;
         user.webauthn_credentials.push(credential);
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
         Ok(())
     }
 
@@ -1013,7 +1012,8 @@ impl AuthService {
         username: &str,
         credential_id: &[u8],
     ) -> Result<(), AuthError> {
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let user = state
             .users
             .iter_mut()
@@ -1025,7 +1025,7 @@ impl AuthService {
         if user.webauthn_credentials.len() == before {
             return Err(AuthError::NotFound);
         }
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
         Ok(())
     }
 
@@ -1065,7 +1065,8 @@ impl AuthService {
         if actor.role != Role::Admin {
             return Err(AuthError::Forbidden);
         }
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let user = state
             .users
             .iter_mut()
@@ -1073,8 +1074,8 @@ impl AuthService {
             .ok_or(AuthError::UserNotFound)?;
         let removed = user.webauthn_credentials.len();
         user.webauthn_credentials.clear();
-        save_state(&state).await?;
-        drop(state);
+        commit_state(&mut current, state).await?;
+        drop(current);
         audit(
             "webauthn_reset_for_user",
             &actor.username,
@@ -1099,7 +1100,8 @@ impl AuthService {
         username: &str,
         auth_result: &webauthn_rs::prelude::AuthenticationResult,
     ) -> Result<(), AuthError> {
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let user = state
             .users
             .iter_mut()
@@ -1117,7 +1119,7 @@ impl AuthService {
         // "credential is identical, skip the disk write" that's
         // hard to verify.
         cred.passkey.update_credential(auth_result);
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
         Ok(())
     }
 
@@ -1183,7 +1185,8 @@ impl AuthService {
             }
         }
 
-        let mut state = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
         let user = state
             .users
             .iter()
@@ -1211,7 +1214,7 @@ impl AuthService {
             .sessions
             .retain(|s| now - s.created_at <= SESSION_TTL_SECS);
         state.sessions.push(session);
-        save_state(&state).await?;
+        commit_state(&mut current, state).await?;
 
         // Webauthn success clears the per-username failure bucket
         // (mirrors the password path); per-IP failures stay so a
@@ -1272,6 +1275,25 @@ pub enum AuthError {
     WeakPassword,
     #[error("password hash error: {0}")]
     HashError(String),
+    #[error("auth state at {path} is corrupt: {source}")]
+    StateCorrupt {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("auth state at {0} exists but is not initialized")]
+    StateUninitialized(PathBuf),
+    #[error("unsafe auth state at {path}: {reason}")]
+    StateUnsafe { path: PathBuf, reason: String },
+    #[error("failed to {operation} auth state at {path}: {source}")]
+    StateIo {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to serialize auth state: {0}")]
+    StateSerialize(serde_json::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -1437,17 +1459,289 @@ fn generate_id() -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-async fn load_state() -> AuthState {
-    nasty_common::load_singleton_or_recover(STATE_PATH).await
+async fn initialize_state(
+    path: &Path,
+    expected_owner: Option<u32>,
+) -> Result<AuthState, AuthError> {
+    if let Some(state) = load_state_from(path, expected_owner).await? {
+        if !state.initialized {
+            return Err(AuthError::StateUninitialized(path.to_path_buf()));
+        }
+        return Ok(state);
+    }
+
+    let state = AuthState {
+        users: vec![User {
+            username: "admin".to_string(),
+            password_hash: Some(hash_password("admin")?),
+            role: Role::Admin,
+            must_change_password: true,
+            oidc_subject: None,
+            oidc_issuer: None,
+            webauthn_credentials: Vec::new(),
+        }],
+        initialized: true,
+        ..AuthState::default()
+    };
+    create_state_to(path, &state).await?;
+    info!("Created default admin user (password: admin) — change this immediately!");
+    Ok(state)
 }
 
-async fn save_state(state: &AuthState) -> Result<(), AuthError> {
-    use std::os::unix::fs::PermissionsExt;
-    tokio::fs::create_dir_all(STATE_DIR).await?;
-    let json = serde_json::to_string_pretty(state).unwrap();
-    tokio::fs::write(STATE_PATH, json).await?;
-    tokio::fs::set_permissions(STATE_PATH, std::fs::Permissions::from_mode(0o600)).await?;
-    Ok(())
+async fn load_state_from(
+    path: &Path,
+    expected_owner: Option<u32>,
+) -> Result<Option<AuthState>, AuthError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use tokio::io::AsyncReadExt;
+
+    let mut options = tokio::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    let mut file = match options.open(path).await {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) if source.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(AuthError::StateUnsafe {
+                path: path.to_path_buf(),
+                reason: "refusing to follow an auth state symlink".to_string(),
+            });
+        }
+        Err(source) => {
+            return Err(AuthError::StateIo {
+                operation: "open without following symlinks",
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let metadata = file.metadata().await.map_err(|source| AuthError::StateIo {
+        operation: "inspect",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(AuthError::StateUnsafe {
+            path: path.to_path_buf(),
+            reason: "expected a regular file, not a symlink or special file".to_string(),
+        });
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(AuthError::StateUnsafe {
+            path: path.to_path_buf(),
+            reason: format!("permissions {mode:o} expose authentication secrets"),
+        });
+    }
+    if let Some(expected_owner) = expected_owner
+        && metadata.uid() != expected_owner
+    {
+        return Err(AuthError::StateUnsafe {
+            path: path.to_path_buf(),
+            reason: format!(
+                "owner UID {} does not match expected UID {expected_owner}",
+                metadata.uid()
+            ),
+        });
+    }
+
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .await
+        .map_err(|source| AuthError::StateIo {
+            operation: "read",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    serde_json::from_str(&content)
+        .map(Some)
+        .map_err(|source| AuthError::StateCorrupt {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+async fn commit_state(current: &mut AuthState, next: AuthState) -> Result<(), AuthError> {
+    commit_state_to(Path::new(STATE_PATH), current, next).await
+}
+
+async fn commit_state_to(
+    path: &Path,
+    current: &mut AuthState,
+    next: AuthState,
+) -> Result<(), AuthError> {
+    let result = persist_state_to(path, &next, true).await;
+    finish_state_commit(current, next, result)
+}
+
+#[cfg(test)]
+async fn save_state_to(path: &Path, state: &AuthState) -> Result<(), AuthError> {
+    persist_state_to(path, state, true)
+        .await
+        .map_err(|failure| failure.source)
+}
+
+async fn create_state_to(path: &Path, state: &AuthState) -> Result<(), AuthError> {
+    persist_state_to(path, state, false)
+        .await
+        .map_err(|failure| failure.source)
+}
+
+fn finish_state_commit(
+    current: &mut AuthState,
+    next: AuthState,
+    result: Result<(), StatePersistFailure>,
+) -> Result<(), AuthError> {
+    match result {
+        Ok(()) => {
+            *current = next;
+            Ok(())
+        }
+        Err(failure) => {
+            if failure.committed {
+                *current = next;
+                audit(
+                    "auth_state_committed_with_durability_error",
+                    "system",
+                    "local",
+                    &failure.source.to_string(),
+                );
+                tracing::error!(
+                    "Auth state changed but its directory sync failed: {}",
+                    failure.source
+                );
+            }
+            Err(failure.source)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StatePersistFailure {
+    source: AuthError,
+    committed: bool,
+}
+
+async fn persist_state_to(
+    path: &Path,
+    state: &AuthState,
+    replace: bool,
+) -> Result<(), StatePersistFailure> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AuthError::StateIo {
+            operation: "resolve parent for",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "state path has no parent",
+            ),
+        })
+        .map_err(|source| StatePersistFailure {
+            source,
+            committed: false,
+        })?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("auth.json");
+    let temp = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+    save_state_with_temp(path, &temp, state, replace).await
+}
+
+async fn save_state_with_temp(
+    path: &Path,
+    temp: &Path,
+    state: &AuthState,
+    replace: bool,
+) -> Result<(), StatePersistFailure> {
+    use tokio::io::AsyncWriteExt;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| AuthError::StateIo {
+            operation: "resolve parent for",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "state path has no parent",
+            ),
+        })
+        .map_err(|source| StatePersistFailure {
+            source,
+            committed: false,
+        })?;
+    let json = serde_json::to_vec_pretty(state)
+        .map_err(AuthError::StateSerialize)
+        .map_err(|source| StatePersistFailure {
+            source,
+            committed: false,
+        })?;
+
+    let mut committed = false;
+    let result = async {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let mut file = options
+            .open(temp)
+            .await
+            .map_err(|source| AuthError::StateIo {
+                operation: "create temporary file for",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        file.write_all(&json)
+            .await
+            .map_err(|source| AuthError::StateIo {
+                operation: "write temporary file for",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        file.sync_all().await.map_err(|source| AuthError::StateIo {
+            operation: "sync temporary file for",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        drop(file);
+
+        if replace {
+            std::fs::rename(temp, path).map_err(|source| AuthError::StateIo {
+                operation: "replace",
+                path: path.to_path_buf(),
+                source,
+            })?;
+            committed = true;
+        } else {
+            std::fs::hard_link(temp, path).map_err(|source| AuthError::StateIo {
+                operation: "create",
+                path: path.to_path_buf(),
+                source,
+            })?;
+            committed = true;
+            std::fs::remove_file(temp).map_err(|source| AuthError::StateIo {
+                operation: "remove temporary file for",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+        let directory = std::fs::File::open(parent).map_err(|source| AuthError::StateIo {
+            operation: "open parent directory for",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        directory.sync_all().map_err(|source| AuthError::StateIo {
+            operation: "sync parent directory for",
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+    .await;
+
+    if result.is_err() && !committed {
+        let _ = std::fs::remove_file(temp);
+    }
+    result.map_err(|source| StatePersistFailure { source, committed })
 }
 
 async fn load_rate_limit() -> RateLimitState {
@@ -1475,6 +1769,29 @@ fn is_only_admin(users: &[User], username: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn test_owner(path: &Path) -> u32 {
+        use std::os::unix::fs::MetadataExt;
+
+        std::fs::metadata(path).expect("path metadata").uid()
+    }
+
+    async fn write_secure(path: &Path, content: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+
+        tokio::fs::write(path, content).await.expect("write state");
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .expect("secure state permissions");
+    }
+
+    fn initialized_state() -> AuthState {
+        AuthState {
+            users: vec![user("alice", Role::Admin)],
+            initialized: true,
+            ..AuthState::default()
+        }
+    }
+
     fn user(name: &str, role: Role) -> User {
         User {
             username: name.to_string(),
@@ -1498,6 +1815,267 @@ mod tests {
             must_change_password: false,
             client_ip: None,
         }
+    }
+
+    #[tokio::test]
+    async fn missing_auth_state_bootstraps_and_persists() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        let owner = test_owner(dir.path());
+        let state = initialize_state(&path, Some(owner))
+            .await
+            .expect("initialize state");
+
+        assert!(state.initialized);
+        assert_eq!(state.users.len(), 1);
+        assert_eq!(state.users[0].username, "admin");
+        assert!(state.users[0].must_change_password);
+
+        let persisted = load_state_from(&path, Some(owner))
+            .await
+            .expect("load persisted state")
+            .expect("state should exist");
+        assert!(persisted.initialized);
+        assert_eq!(persisted.users[0].username, "admin");
+        let mode = tokio::fs::metadata(&path)
+            .await
+            .expect("state metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn valid_existing_auth_state_loads_without_bootstrap() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        let state = initialized_state();
+        write_secure(
+            &path,
+            &serde_json::to_vec_pretty(&state).expect("serialize state"),
+        )
+        .await;
+
+        let loaded = initialize_state(&path, Some(test_owner(dir.path())))
+            .await
+            .expect("initialize state");
+        assert_eq!(loaded.users.len(), 1);
+        assert_eq!(loaded.users[0].username, "alice");
+    }
+
+    #[tokio::test]
+    async fn corrupt_existing_auth_state_fails_without_replacement() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        let corrupt = b"{not valid json";
+        write_secure(&path, corrupt).await;
+
+        let err = initialize_state(&path, Some(test_owner(dir.path())))
+            .await
+            .expect_err("corrupt state must fail");
+        assert!(matches!(err, AuthError::StateCorrupt { .. }));
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read corrupt state"),
+            corrupt
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_existing_auth_state_fails_without_replacement() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        tokio::fs::create_dir(&path)
+            .await
+            .expect("create unreadable state path");
+
+        let err = initialize_state(&path, Some(test_owner(dir.path())))
+            .await
+            .expect_err("unreadable state must fail");
+        assert!(matches!(err, AuthError::StateUnsafe { .. }));
+        assert!(
+            tokio::fs::metadata(&path)
+                .await
+                .expect("state metadata")
+                .is_dir()
+        );
+    }
+
+    #[tokio::test]
+    async fn fifo_auth_state_is_rejected_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        let c_path = CString::new(path.as_os_str().as_bytes()).expect("FIFO path");
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "create FIFO: {}", std::io::Error::last_os_error());
+
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            initialize_state(&path, Some(test_owner(dir.path()))),
+        )
+        .await
+        .expect("FIFO validation must not block")
+        .expect_err("FIFO state must fail");
+        assert!(matches!(err, AuthError::StateUnsafe { .. }));
+    }
+
+    #[tokio::test]
+    async fn existing_uninitialized_auth_state_does_not_bootstrap() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        let state = AuthState::default();
+        save_state_to(&path, &state).await.expect("write state");
+        let before = tokio::fs::read(&path).await.expect("read state");
+
+        let err = initialize_state(&path, Some(test_owner(dir.path())))
+            .await
+            .expect_err("existing uninitialized state must fail");
+        assert!(matches!(err, AuthError::StateUninitialized(_)));
+        assert_eq!(tokio::fs::read(&path).await.expect("read state"), before);
+    }
+
+    #[tokio::test]
+    async fn failed_atomic_write_preserves_existing_auth_state() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        save_state_to(&path, &initialized_state())
+            .await
+            .expect("write initial state");
+        let before = tokio::fs::read(&path).await.expect("read initial state");
+
+        let temp_collision = dir.path().join("occupied.tmp");
+        tokio::fs::create_dir(&temp_collision)
+            .await
+            .expect("create temp collision");
+        let mut replacement = initialized_state();
+        replacement.users.push(user("bob", Role::Operator));
+        save_state_with_temp(&path, &temp_collision, &replacement, true)
+            .await
+            .expect_err("staging failure must be returned");
+
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read preserved state"),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_does_not_commit_in_memory_auth_state() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let blocked_parent = dir.path().join("not-a-directory");
+        tokio::fs::write(&blocked_parent, b"occupied")
+            .await
+            .expect("create blocked parent");
+        let path = blocked_parent.join("auth.json");
+        let mut current = initialized_state();
+        let mut next = current.clone();
+        next.users.push(user("bob", Role::Operator));
+
+        commit_state_to(&path, &mut current, next)
+            .await
+            .expect_err("persistence failure must be returned");
+        assert_eq!(current.users.len(), 1);
+        assert_eq!(current.users[0].username, "alice");
+    }
+
+    #[test]
+    fn post_commit_sync_failure_keeps_memory_aligned_with_disk_state() {
+        let mut current = initialized_state();
+        let mut next = current.clone();
+        next.users.push(user("bob", Role::Operator));
+        let failure = StatePersistFailure {
+            source: AuthError::StateIo {
+                operation: "sync parent directory for",
+                path: PathBuf::from("auth.json"),
+                source: std::io::Error::other("injected sync failure"),
+            },
+            committed: true,
+        };
+
+        finish_state_commit(&mut current, next, Err(failure))
+            .expect_err("durability failure must be returned");
+        assert_eq!(current.users.len(), 2);
+        assert_eq!(current.users[1].username, "bob");
+    }
+
+    #[tokio::test]
+    async fn dangling_auth_state_symlink_does_not_trigger_bootstrap() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &path)
+            .expect("create dangling symlink");
+
+        let err = initialize_state(&path, Some(test_owner(dir.path())))
+            .await
+            .expect_err("symlinked state must fail");
+        assert!(matches!(err, AuthError::StateUnsafe { .. }));
+        assert!(
+            tokio::fs::symlink_metadata(&path)
+                .await
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[tokio::test]
+    async fn permissive_auth_state_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&initialized_state()).expect("serialize state"),
+        )
+        .await
+        .expect("write state");
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .await
+            .expect("set permissive permissions");
+
+        let err = initialize_state(&path, Some(test_owner(dir.path())))
+            .await
+            .expect_err("permissive state must fail");
+        assert!(matches!(err, AuthError::StateUnsafe { .. }));
+    }
+
+    #[tokio::test]
+    async fn unexpected_auth_state_owner_is_rejected() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        save_state_to(&path, &initialized_state())
+            .await
+            .expect("write state");
+
+        let err = initialize_state(&path, Some(test_owner(dir.path()).wrapping_add(1)))
+            .await
+            .expect_err("unexpected owner must fail");
+        assert!(matches!(err, AuthError::StateUnsafe { .. }));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_does_not_replace_concurrently_created_state() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("auth.json");
+        save_state_to(&path, &initialized_state())
+            .await
+            .expect("write existing state");
+        let before = tokio::fs::read(&path).await.expect("read existing state");
+        let temp = dir.path().join("bootstrap.tmp");
+
+        save_state_with_temp(&path, &temp, &AuthState::default(), false)
+            .await
+            .expect_err("bootstrap must not replace existing state");
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read preserved state"),
+            before
+        );
     }
 
     #[test]
