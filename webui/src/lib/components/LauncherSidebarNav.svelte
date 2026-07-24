@@ -15,8 +15,8 @@
 	<a
 		href={LAUNCHER_NAV_ITEM.href}
 		aria-current={active ? 'page' : undefined}
-		title={collapsed ? 'Open launcher' : undefined}
-		aria-label={collapsed ? 'Open launcher' : undefined}
+		title={collapsed ? 'Start' : undefined}
+		aria-label={collapsed ? 'Start' : undefined}
 		class="flex items-center rounded-lg border-2 no-underline transition-all
 			{collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-3'}
 			{active
@@ -28,7 +28,7 @@
 		</span>
 		{#if !collapsed}
 			<span class="min-w-0">
-				<span class="block text-sm font-semibold">Open Launcher</span>
+				<span class="block text-sm font-semibold">Start</span>
 				<span class="mt-0.5 block text-[0.65rem] leading-tight text-muted-foreground">Browse categories and pages</span>
 			</span>
 		{/if}
