@@ -20,6 +20,7 @@ mod auth;
 mod auth_oidc;
 mod auth_webauthn;
 mod boot_status;
+mod file_boundary;
 mod fs_dependents;
 mod fs_lock;
 mod guestshare;
@@ -3424,31 +3425,22 @@ async fn public_share_download_handler(
     }
 
     let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let Some(target) = guestshare::GuestShareService::resolve_download(&share, rel) else {
+    // Opening first ensures invalid paths do not consume download quota. The
+    // service bounds descriptors for the full lifetime of each stream.
+    let Some(opened) = state.guest_shares.open_download(&share, rel).await else {
         return share_not_available();
     };
 
-    // Count + enforce the cap before opening the stream. A failure here means
-    // the share went inactive (e.g. hit its cap) between lookup and now.
-    if state
+    let opened = match state
         .guest_shares
-        .register_download(&share.id, now)
+        .register_opened_download(&share.id, now_unix_i64(), opened)
         .await
-        .is_err()
     {
-        return share_not_available();
-    }
-
-    let file = match tokio::fs::File::open(&target).await {
-        Ok(f) => f,
+        Ok(opened) => opened,
         Err(_) => return share_not_available(),
     };
-    let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-    let name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .to_string();
+
+    let (file, name, size) = opened.into_parts();
 
     crate::auth::audit(
         "guest_share_download",

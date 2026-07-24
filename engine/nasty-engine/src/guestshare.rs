@@ -17,6 +17,7 @@
 //! [`create`]: GuestShareService::create
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -45,6 +46,8 @@ const UNLOCK_REQUEST_MAX: usize = 30;
 const UNLOCK_REQUEST_WINDOW_SECS: i64 = 60;
 const UNLOCK_MAX_TRACKED_IPS: usize = 4096;
 const MAX_CONCURRENT_PASSWORD_CHECKS: usize = 4;
+/// Bound descriptors held by guest downloads, including slow clients.
+const MAX_CONCURRENT_DOWNLOADS: usize = 32;
 
 #[derive(Debug, Error)]
 pub enum GuestShareError {
@@ -239,35 +242,36 @@ fn public_meta(share: &GuestShare) -> PublicShareMeta {
     }
 }
 
-/// Resolve a guest-supplied relative path to a concrete file inside one of
-/// the share's roots. Returns `None` unless the canonicalized target is a
-/// regular file that stays within a root — the download-time analog of the
-/// create-time `/fs` guard, blocking `..`/symlink escape out of the share.
-///
-/// `rel` is relative to the share (empty = a single-file share's own file),
-/// so absolute server paths never cross the wire.
-fn resolve_within(share: &GuestShare, rel: &str) -> Option<PathBuf> {
-    if rel
-        .chars()
-        .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\'))
-    {
-        return None;
-    }
-    for root in &share.paths {
-        let root = Path::new(root);
-        let candidate = if rel.is_empty() {
-            root.to_path_buf()
-        } else {
-            root.join(rel.trim_start_matches('/'))
+pub struct OpenedGuestFile {
+    file: File,
+    name: String,
+    size: u64,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl OpenedGuestFile {
+    pub fn into_parts(self) -> (GuestDownloadReader, String, u64) {
+        let reader = GuestDownloadReader {
+            file: tokio::fs::File::from_std(self.file),
+            _permit: self.permit,
         };
-        let Ok(canonical) = std::fs::canonicalize(&candidate) else {
-            continue;
-        };
-        if canonical.starts_with(root) && canonical.is_file() {
-            return Some(canonical);
-        }
+        (reader, self.name, self.size)
     }
-    None
+}
+
+pub struct GuestDownloadReader {
+    file: tokio::fs::File,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl tokio::io::AsyncRead for GuestDownloadReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.file).poll_read(cx, buf)
+    }
 }
 
 /// Write a ZIP of every `root` into `writer`, entries named relative to each
@@ -348,6 +352,14 @@ fn canonicalize_under(root: &Path, requested: &str) -> Result<String, GuestShare
         .map_err(|_| GuestShareError::PathNotFound(requested.to_string()))?;
     if !canonical.starts_with(root) {
         return Err(GuestShareError::PathNotInFilesystem(requested.to_string()));
+    }
+    if canonical == root {
+        return Err(GuestShareError::InvalidPath(requested.to_string()));
+    }
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|_| GuestShareError::PathNotFound(requested.to_string()))?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(GuestShareError::InvalidPath(requested.to_string()));
     }
     Ok(canonical.to_string_lossy().into_owned())
 }
@@ -453,10 +465,12 @@ pub struct GuestShareService {
     unlock_requests: StdMutex<BoundedRateLimiter>,
     /// Serializes every record load-modify-save operation. Using separate
     /// locks for counters and revocation would let stale writers resurrect a share.
-    state_lock: tokio::sync::Mutex<()>,
+    state_lock: Arc<tokio::sync::Mutex<()>>,
     /// Argon2 is intentionally expensive. Keep verification off async worker
     /// threads and cap global concurrency to prevent unlock CPU exhaustion.
     password_checks: Arc<tokio::sync::Semaphore>,
+    /// Bounds guest descriptors for their full streaming lifetime.
+    active_downloads: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for GuestShareService {
@@ -478,13 +492,32 @@ impl GuestShareService {
             grants: StdMutex::new(HashMap::new()),
             unlock_failures: StdMutex::new(BoundedRateLimiter::default()),
             unlock_requests: StdMutex::new(BoundedRateLimiter::default()),
-            state_lock: tokio::sync::Mutex::new(()),
+            state_lock: Arc::new(tokio::sync::Mutex::new(())),
             password_checks: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_CHECKS)),
+            active_downloads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
         }
     }
 
     fn state_dir(&self) -> StateDir {
         StateDir::new(self.dir.clone())
+    }
+
+    /// Keep the lock inside an independently owned task so cancellation of an
+    /// HTTP request cannot release it while Tokio filesystem work continues.
+    async fn mutate_state<T, F, Fut>(&self, operation: F) -> Result<T, GuestShareError>
+    where
+        T: Send + 'static,
+        F: FnOnce(StateDir) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, GuestShareError>> + Send + 'static,
+    {
+        let state_lock = Arc::clone(&self.state_lock);
+        let state_dir = self.state_dir();
+        tokio::spawn(async move {
+            let _guard = state_lock.lock().await;
+            operation(state_dir).await
+        })
+        .await
+        .map_err(|error| GuestShareError::Io(std::io::Error::other(error)))?
     }
 
     /// List every share (including revoked ones). Never includes a
@@ -540,10 +573,12 @@ impl GuestShareService {
             note: req.note,
         };
 
-        {
-            let _guard = self.state_lock.lock().await;
-            self.state_dir().save(&share.id, &share).await?;
-        }
+        let saved_share = share.clone();
+        self.mutate_state(move |state_dir| async move {
+            state_dir.save(&saved_share.id, &saved_share).await?;
+            Ok(())
+        })
+        .await?;
         let info = GuestShareInfo::from(&share);
         Ok(CreateGuestShareResult { share: info, token })
     }
@@ -551,13 +586,19 @@ impl GuestShareService {
     /// Revoke a share. The record is kept (marked `revoked`) so history and
     /// audit survive — only the public surface stops honoring it.
     pub async fn revoke(&self, id: &str) -> Result<GuestShare, GuestShareError> {
-        let _guard = self.state_lock.lock().await;
-        let mut share = self.get(id).await?;
-        if !share.revoked {
-            share.revoked = true;
-            self.state_dir().save(&share.id, &share).await?;
-        }
-        Ok(share)
+        let id = id.to_string();
+        self.mutate_state(move |state_dir| async move {
+            let mut share = state_dir
+                .load::<GuestShare>(&id)
+                .await
+                .ok_or_else(|| GuestShareError::NotFound(id.clone()))?;
+            if !share.revoked {
+                share.revoked = true;
+                state_dir.save(&share.id, &share).await?;
+            }
+            Ok(share)
+        })
+        .await
     }
 
     /// Soft-remove a share: hide it from the default management list while
@@ -565,16 +606,22 @@ impl GuestShareService {
     /// can be removed — the UI revokes first, so a live link is never
     /// silently dropped. Idempotent.
     pub async fn remove(&self, id: &str) -> Result<(), GuestShareError> {
-        let _guard = self.state_lock.lock().await;
-        let mut share = self.get(id).await?;
-        if !share.revoked {
-            return Err(GuestShareError::NotRevoked(id.to_string()));
-        }
-        if !share.hidden {
-            share.hidden = true;
-            self.state_dir().save(&share.id, &share).await?;
-        }
-        Ok(())
+        let id = id.to_string();
+        self.mutate_state(move |state_dir| async move {
+            let mut share = state_dir
+                .load::<GuestShare>(&id)
+                .await
+                .ok_or_else(|| GuestShareError::NotFound(id.clone()))?;
+            if !share.revoked {
+                return Err(GuestShareError::NotRevoked(id));
+            }
+            if !share.hidden {
+                share.hidden = true;
+                state_dir.save(&share.id, &share).await?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     // ── Public access surface ───────────────────────────────────────────
@@ -598,10 +645,49 @@ impl GuestShareService {
         public_meta(share)
     }
 
-    /// Resolve a guest's relative path to a real file inside a share root,
-    /// or `None` if it escapes / isn't a file.
-    pub fn resolve_download(share: &GuestShare, rel: &str) -> Option<PathBuf> {
-        resolve_within(share, rel)
+    /// Open a guest file beneath one of the share roots. The returned
+    /// descriptor is the object that was authorized; callers never reopen a
+    /// validated pathname.
+    pub async fn open_download(&self, share: &GuestShare, rel: &str) -> Option<OpenedGuestFile> {
+        if rel
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\'))
+        {
+            return None;
+        }
+        let permit = self.active_downloads.clone().try_acquire_owned().ok()?;
+        let files_root = self.fs_root.clone();
+        let roots = share.paths.clone();
+        let relative = PathBuf::from(rel);
+        tokio::task::spawn_blocking(move || {
+            for root in roots {
+                let root = PathBuf::from(root);
+                let Ok(file) =
+                    crate::file_boundary::open_regular_beneath(&files_root, &root, &relative)
+                else {
+                    continue;
+                };
+                let size = file.metadata().ok()?.len();
+                let name = if relative.as_os_str().is_empty() {
+                    root.file_name()
+                } else {
+                    relative.file_name()
+                }
+                .and_then(|name| name.to_str())
+                .unwrap_or("file")
+                .to_string();
+                return Some(OpenedGuestFile {
+                    file,
+                    name,
+                    size,
+                    permit,
+                });
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Whether `share` is password-protected.
@@ -639,13 +725,44 @@ impl GuestShareService {
     pub async fn record_view(&self, id: &str) {
         // Never queue public view writes ahead of revoke. At most one disk
         // mutation is delayed by a view; contended increments are dropped.
-        let Ok(_guard) = self.state_lock.try_lock() else {
+        let Ok(guard) = Arc::clone(&self.state_lock).try_lock_owned() else {
             return;
         };
-        if let Some(mut s) = self.state_dir().load::<GuestShare>(id).await {
-            s.views = s.views.saturating_add(1);
-            let _ = self.state_dir().save(id, &s).await;
-        }
+        let state_dir = self.state_dir();
+        let id = id.to_string();
+        let _ = tokio::spawn(async move {
+            let _guard = guard;
+            if let Some(mut share) = state_dir.load::<GuestShare>(&id).await {
+                share.views = share.views.saturating_add(1);
+                let _ = state_dir.save(&id, &share).await;
+            }
+        })
+        .await;
+    }
+
+    async fn register_download_holding<T>(
+        &self,
+        id: &str,
+        now: i64,
+        held: T,
+    ) -> Result<T, GuestShareError>
+    where
+        T: Send + 'static,
+    {
+        let id = id.to_string();
+        self.mutate_state(move |state_dir| async move {
+            let mut share = state_dir
+                .load::<GuestShare>(&id)
+                .await
+                .ok_or_else(|| GuestShareError::NotFound(id.clone()))?;
+            if !is_accessible(&share, now) {
+                return Err(GuestShareError::NotFound(id));
+            }
+            share.downloads = share.downloads.saturating_add(1);
+            state_dir.save(&share.id, &share).await?;
+            Ok(held)
+        })
+        .await
     }
 
     /// Count a download, enforcing `max_downloads`. Serialized with every
@@ -653,14 +770,19 @@ impl GuestShareService {
     /// Returns `Err(NotFound)` if the share went inactive between lookup and
     /// here — the handler maps that to the same generic "not available".
     pub async fn register_download(&self, id: &str, now: i64) -> Result<(), GuestShareError> {
-        let _guard = self.state_lock.lock().await;
-        let mut s = self.get(id).await?;
-        if !is_accessible(&s, now) {
-            return Err(GuestShareError::NotFound(id.to_string()));
-        }
-        s.downloads = s.downloads.saturating_add(1);
-        self.state_dir().save(id, &s).await?;
-        Ok(())
+        self.register_download_holding(id, now, ()).await
+    }
+
+    /// Register a single-file download while retaining its descriptor slot.
+    /// If the request is cancelled, the detached state mutation remains
+    /// bounded by the same semaphore as active streams.
+    pub async fn register_opened_download(
+        &self,
+        id: &str,
+        now: i64,
+        opened: OpenedGuestFile,
+    ) -> Result<OpenedGuestFile, GuestShareError> {
+        self.register_download_holding(id, now, opened).await
     }
 
     /// Stream a ZIP of all the share's roots into a pipe, returning the read
@@ -806,6 +928,12 @@ mod tests {
         // Inside the root: accepted, returns a canonical path under root.
         let got = canonicalize_under(&root, inside.to_str().unwrap()).unwrap();
         assert!(Path::new(&got).starts_with(&root));
+
+        // Sharing all of /fs would bypass the intended filesystem boundary.
+        assert!(matches!(
+            canonicalize_under(&root, root.to_str().unwrap()),
+            Err(GuestShareError::InvalidPath(_))
+        ));
 
         // `..`-escape that resolves outside the root (inside is root/share,
         // so ../.. lands at the tempdir root where `outside` lives): rejected.
@@ -1058,6 +1186,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_request_does_not_cancel_state_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, fs_root) = service(tmp.path());
+        let svc = Arc::new(svc);
+        let file = fs_root.join("cancel.txt");
+        std::fs::write(&file, b"content").unwrap();
+        let share = put_share(&svc, "cancel", |share| {
+            share.paths = vec![file.to_string_lossy().into_owned()];
+        })
+        .await;
+        let opened = svc.open_download(&share, "").await.unwrap();
+        assert_eq!(
+            svc.active_downloads.available_permits(),
+            MAX_CONCURRENT_DOWNLOADS - 1
+        );
+        let guard = svc.state_lock.lock().await;
+
+        let task = {
+            let svc = Arc::clone(&svc);
+            let id = share.id.clone();
+            tokio::spawn(async move { svc.register_opened_download(&id, 10, opened).await })
+        };
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(
+            svc.active_downloads.available_permits(),
+            MAX_CONCURRENT_DOWNLOADS - 1,
+            "cancelled admission must retain its descriptor slot"
+        );
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if svc.get(&share.id).await.unwrap().downloads == 1
+                    && svc.active_downloads.available_permits() == MAX_CONCURRENT_DOWNLOADS
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached state mutation should complete");
+    }
+
+    #[tokio::test]
     async fn concurrent_mutations_preserve_revocation_and_counters() {
         let tmp = tempfile::tempdir().unwrap();
         let (svc, _) = service(tmp.path());
@@ -1295,10 +1470,11 @@ mod tests {
         assert!(svc.verify_share_password(&open, "anything").await.unwrap());
     }
 
-    #[test]
-    fn resolve_download_stays_within_share_roots() {
+    #[tokio::test]
+    async fn open_download_stays_within_share_roots() {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let svc = GuestShareService::with_dirs(root.join("state"), root.clone());
         let dir = root.join("folder");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), b"hi").unwrap();
@@ -1314,20 +1490,54 @@ mod tests {
             ..bare("f")
         };
         // Relative file inside the shared folder (including a subdir): ok.
-        assert!(resolve_within(&folder_share, "a.txt").is_some());
-        assert!(resolve_within(&folder_share, "sub/b.txt").is_some());
+        assert!(svc.open_download(&folder_share, "a.txt").await.is_some());
+        assert!(
+            svc.open_download(&folder_share, "sub/b.txt")
+                .await
+                .is_some()
+        );
         // Escapes and non-files: rejected.
-        assert!(resolve_within(&folder_share, "../secret.txt").is_none());
-        assert!(resolve_within(&folder_share, "sub").is_none()); // a dir, not a file
-        assert!(resolve_within(&folder_share, "missing.txt").is_none());
-        assert!(resolve_within(&folder_share, "a\\b").is_none()); // backslash rejected
+        assert!(
+            svc.open_download(&folder_share, "../secret.txt")
+                .await
+                .is_none()
+        );
+        assert!(svc.open_download(&folder_share, "sub").await.is_none()); // a dir, not a file
+        assert!(
+            svc.open_download(&folder_share, "missing.txt")
+                .await
+                .is_none()
+        );
+        assert!(svc.open_download(&folder_share, "a\\b").await.is_none()); // backslash rejected
 
         // Single-file share: empty path resolves to the file itself.
         let file_share = GuestShare {
             paths: vec![single.to_string_lossy().into_owned()],
             ..bare("s")
         };
-        assert!(resolve_within(&file_share, "").is_some());
+        assert!(svc.open_download(&file_share, "").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn open_download_limits_active_descriptors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let svc = GuestShareService::with_dirs(root.join("state"), root.clone());
+        let file = root.join("file.txt");
+        std::fs::write(&file, b"content").unwrap();
+        let share = GuestShare {
+            paths: vec![file.to_string_lossy().into_owned()],
+            ..bare("limit")
+        };
+
+        let mut opened = Vec::new();
+        for _ in 0..MAX_CONCURRENT_DOWNLOADS {
+            opened.push(svc.open_download(&share, "").await.unwrap());
+        }
+        assert!(svc.open_download(&share, "").await.is_none());
+
+        opened.pop();
+        assert!(svc.open_download(&share, "").await.is_some());
     }
 
     #[test]
