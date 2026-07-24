@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { getContext, tick } from 'svelte';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { ChevronLeft, ChevronRight, Search } from '@lucide/svelte';
 	import {
 		flattenNavigation,
@@ -13,11 +15,11 @@
 
 	const navigationContext = getContext<NavigationContext>(NAVIGATION_CONTEXT);
 	let query = $state('');
-	let selectedGroupId = $state<string | null>(null);
 	let launcherElement = $state<HTMLElement>();
 	let backButton = $state<HTMLButtonElement>();
 
 	let entries = $derived(resolveNavigation(navigationContext));
+	let selectedGroupId = $derived($page.url.searchParams.get('group'));
 	let selectedGroup = $derived.by((): NavGroup | null => {
 		const match = entries.find((entry) => isNavGroup(entry) && entry.id === selectedGroupId);
 		return match && isNavGroup(match) ? match : null;
@@ -26,22 +28,16 @@
 	let searchItems = $derived(flattenNavigation(entries).filter((entry) => matches.has(entry.href)));
 	let isSearching = $derived(query.trim().length > 0);
 
-	$effect(() => {
-		if (selectedGroupId && !entries.some((entry) => isNavGroup(entry) && entry.id === selectedGroupId)) {
-			selectedGroupId = null;
-		}
-	});
-
 	async function openGroup(id: string) {
-		selectedGroupId = id;
 		query = '';
+		await goto(`/menu?group=${encodeURIComponent(id)}`, { keepFocus: true, noScroll: true });
 		await tick();
 		backButton?.focus();
 	}
 
 	async function closeGroup() {
 		const id = selectedGroupId;
-		selectedGroupId = null;
+		await goto('/menu', { keepFocus: true, noScroll: true });
 		await tick();
 		if (id) launcherElement?.querySelector<HTMLButtonElement>(`[data-launcher-group="${id}"]`)?.focus();
 	}
