@@ -8,18 +8,15 @@
 	import { Link2, Lock, Ban, Trash2 } from '@lucide/svelte';
 	import SortTh from '$lib/components/SortTh.svelte';
 
-	// Mirrors the engine's GuestShare (engine/nasty-engine/src/guestshare.rs).
-	// Note: only `token_hash` is stored, never the plaintext token — so a
-	// share's link cannot be reconstructed here. Links are shown once, at
-	// creation time, in the Files-page Share dialog.
+	// Redacted management view; capability hashes and absolute server paths
+	// never cross the RPC boundary.
 	interface GuestShare {
 		id: string;
-		token_hash: string;
-		paths: string[];
+		names: string[];
 		created_by: string;
 		created_at: number;
 		expires_at: number | null;
-		password_hash: string | null;
+		password_protected: boolean;
 		max_downloads: number | null;
 		downloads: number;
 		views: number;
@@ -29,6 +26,7 @@
 	}
 
 	let shares = $state<GuestShare[] | null>(null);
+	let loadError = $state<string | null>(null);
 	// Removed shares are kept (for audit/history) but hidden by default; the
 	// toggle reveals them without a refetch since list() returns them all.
 	let showRemoved = $state(false);
@@ -39,11 +37,6 @@
 	const removedCount = $derived(shares?.filter((s) => s.hidden).length ?? 0);
 
 	const nowSecs = () => Math.floor(Date.now() / 1000);
-
-	function basename(p: string): string {
-		const parts = p.split('/').filter(Boolean);
-		return parts.length ? parts[parts.length - 1] : p;
-	}
 
 	function fmtDate(secs: number | null): string {
 		if (!secs) return '—';
@@ -77,7 +70,7 @@
 	const sortedShares = $derived.by(() => {
 		if (!visibleShares) return [];
 		const sign = shareSortDir === 'asc' ? 1 : -1;
-		const sharedName = (s: GuestShare) => s.paths.map(basename).join(', ');
+		const sharedName = (s: GuestShare) => s.names.join(', ');
 		return [...visibleShares].sort((a, b) => {
 			let cmp = 0;
 			switch (shareSortKey) {
@@ -95,11 +88,17 @@
 	});
 
 	async function load() {
-		shares = (await getClient().call<GuestShare[]>('guestshare.list')) ?? [];
+		loadError = null;
+		try {
+			shares = (await getClient().call<GuestShare[]>('guestshare.list')) ?? [];
+		} catch (error) {
+			shares = [];
+			loadError = error instanceof Error ? error.message : 'Unable to load guest shares.';
+		}
 	}
 
 	async function revoke(s: GuestShare) {
-		const names = s.paths.map(basename).join(', ');
+		const names = s.names.join(', ');
 		if (!(await confirm(`Revoke share of "${names}"?`, 'The link will stop working immediately. This cannot be undone.'))) {
 			return;
 		}
@@ -110,7 +109,7 @@
 	// Remove only applies to already-revoked shares; the record is kept on
 	// disk (and in the audit log) but hidden from the default list.
 	async function remove(s: GuestShare) {
-		const names = s.paths.map(basename).join(', ');
+		const names = s.names.join(', ');
 		if (!(await confirm(`Remove "${names}" from the list?`, 'It stays in the audit log; the row is hidden until you toggle "Show removed".'))) {
 			return;
 		}
@@ -127,14 +126,16 @@
 	once, when it's created, and can't be retrieved here.
 </p>
 
-{#if removedCount > 0}
+{#if !loadError && removedCount > 0}
 		<label class="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
 			<input type="checkbox" bind:checked={showRemoved} class="h-4 w-4" />
 			Show removed ({removedCount})
 		</label>
 	{/if}
 
-	{#if shares === null}
+	{#if loadError}
+		<p class="text-sm text-destructive">{loadError}</p>
+	{:else if shares === null}
 		<p class="text-muted-foreground">Loading…</p>
 	{:else if visibleShares && visibleShares.length === 0}
 		<p class="text-muted-foreground">
@@ -160,8 +161,8 @@
 						<td class="p-3">
 							<div class="flex items-center gap-2">
 								<Link2 size={14} class="text-muted-foreground shrink-0" />
-								<span class="font-medium">{s.paths.map(basename).join(', ')}</span>
-								{#if s.password_hash}
+								<span class="font-medium">{s.names.join(', ')}</span>
+								{#if s.password_protected}
 									<Lock size={13} class="text-amber-500 shrink-0" />
 								{/if}
 							</div>

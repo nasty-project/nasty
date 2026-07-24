@@ -22,6 +22,7 @@ pub(super) async fn try_route(
             serde_json::json!({
                 "username": session.username,
                 "role": session.role,
+                "scoped": session.filesystem.is_some() || session.owner.is_some(),
             }),
         ),
         "auth.logout" => match state.auth.logout(&session.token).await {

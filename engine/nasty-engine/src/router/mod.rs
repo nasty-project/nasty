@@ -70,11 +70,10 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "share.nfs.create"
                 | "share.nfs.update"
                 | "share.nfs.delete"
-                // Guest file sharing (#474). Reads (`guestshare.list`/
-                // `.get`) are already covered by `is_read_only`; only the
-                // mutations need listing here. v1 is operator/admin-only
-                // because the engine reads shared files as root — see the
-                // #475 note in the issue.
+                // Guest-share management exposes capability metadata and
+                // root-backed actions, so every method is operator/admin-only.
+                | "guestshare.list"
+                | "guestshare.get"
                 | "guestshare.create"
                 | "guestshare.revoke"
                 | "guestshare.remove"
@@ -236,6 +235,10 @@ fn is_read_only(method: &str) -> bool {
             // the central gate agrees with the impl and the declared
             // role, instead of relying on the inline check alone.
             | "auth.token.list"
+            // Guest-share management is not a general authenticated read.
+            // The router also requires an unscoped Operator/Admin session.
+            | "guestshare.list"
+            | "guestshare.get"
             // `system.custom_config.get` returns the raw contents of the
             // operator's `/etc/nixos/custom.nix` — system-level NixOS config that
             // can hold sensitive settings. Its `.get` suffix would otherwise slip
@@ -1452,6 +1455,20 @@ mod tests {
     fn custom_config_contents_are_admin_only() {
         assert!(!is_read_only("system.custom_config.get"));
         assert!(!is_operator_allowed("system.custom_config.get"));
+    }
+
+    #[test]
+    fn guest_share_management_is_operator_only() {
+        for method in [
+            "guestshare.list",
+            "guestshare.get",
+            "guestshare.create",
+            "guestshare.revoke",
+            "guestshare.remove",
+        ] {
+            assert!(!is_read_only(method));
+            assert!(is_operator_allowed(method));
+        }
     }
 
     /// The .list / .get suffix matches that existed before this

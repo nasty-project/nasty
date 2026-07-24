@@ -142,6 +142,7 @@
 	let shareBusy = $state(false);
 	let shareUrl: string | null = $state(null);
 	let shareCopied = $state(false);
+	let canCreateGuestShares = $state(false);
 
 	function openShare(entry: FileEntry) {
 		shareTarget = entry;
@@ -344,6 +345,11 @@
 	onMount(() => {
 		const initial = new URLSearchParams(window.location.search).get('path');
 		browse(initial ? initial.replace(/^\/fs\/?/, '') : '');
+		getClient().call<{ role: string; scoped: boolean }>('auth.me')
+			.then((session) => {
+				canCreateGuestShares = !session.scoped && (session.role === 'admin' || session.role === 'operator');
+			})
+			.catch(() => { canCreateGuestShares = false; });
 	});
 
 	// True when the current path is inside a read-only snapshot, i.e. the
@@ -810,12 +816,14 @@
 										<Download size={14} />
 									</a>
 								{/if}
-								<button
-									class="text-muted-foreground/40 hover:text-foreground transition-colors"
-									onclick={() => openShare(entry)}
-									title="Create guest share link">
-									<Share2 size={14} />
-								</button>
+								{#if canCreateGuestShares}
+									<button
+										class="text-muted-foreground/40 hover:text-foreground transition-colors"
+										onclick={() => openShare(entry)}
+										title="Create guest share link">
+										<Share2 size={14} />
+									</button>
+								{/if}
 								<button
 									class="text-muted-foreground/40 hover:text-foreground transition-colors"
 									onclick={() => startRename(entry)}

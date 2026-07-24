@@ -6,9 +6,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Method, MethodParams, MethodRole, ad_hoc_one, ad_hoc_two, gen_schema};
-use crate::auth::{ApiToken, ApiTokenInfo, Role, Session, UserInfo};
+use crate::auth::{ApiToken, ApiTokenInfo, Role, UserInfo};
 use crate::fs_dependents::FsDependents;
-use crate::guestshare::{CreateGuestShareRequest, CreateGuestShareResult, GuestShare};
+use crate::guestshare::{CreateGuestShareRequest, CreateGuestShareResult, GuestShareInfo};
 use crate::subvolume_dependents::SubvolumeDependents;
 use nasty_apps::{
     App, AppConfig, AppIngress, AppStats, AppdataRelocateStatus, AppsStatus, CaddyRouteSummary,
@@ -118,6 +118,14 @@ pub struct WebauthnRegisterStartRequest {
     pub label: String,
 }
 
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct AuthMeResult {
+    username: String,
+    role: Role,
+    scoped: bool,
+}
+
 pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Vec<Method>)> {
     vec![
         (
@@ -125,10 +133,10 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
             vec![
                 Method {
                     name: "auth.me",
-                    desc: "Return the current session's username and role.",
+                    desc: "Return the current session's username, role, and whether its credential is resource-scoped.",
                     role: MethodRole::Any,
                     params: MethodParams::None,
-                    result: Some(gen_schema::<Session>(generator)),
+                    result: Some(gen_schema::<AuthMeResult>(generator)),
                 },
                 Method {
                     name: "auth.logout",
@@ -1078,16 +1086,16 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                 Method {
                     name: "guestshare.list",
                     desc: "List all guest file shares (including revoked ones). Never returns plaintext tokens.",
-                    role: MethodRole::Any,
+                    role: MethodRole::Operator,
                     params: MethodParams::None,
-                    result: Some(gen_schema::<Vec<GuestShare>>(generator)),
+                    result: Some(gen_schema::<Vec<GuestShareInfo>>(generator)),
                 },
                 Method {
                     name: "guestshare.get",
                     desc: "Fetch a single guest share by id.",
-                    role: MethodRole::Any,
+                    role: MethodRole::Operator,
                     params: MethodParams::AdHoc(ad_hoc_one("id", "Share id (UUID).")),
-                    result: Some(gen_schema::<GuestShare>(generator)),
+                    result: Some(gen_schema::<GuestShareInfo>(generator)),
                 },
                 Method {
                     name: "guestshare.create",
@@ -1101,7 +1109,7 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     desc: "Revoke a guest share. The record is kept (marked revoked) so history survives.",
                     role: MethodRole::Operator,
                     params: MethodParams::AdHoc(ad_hoc_one("id", "Share id (UUID) to revoke.")),
-                    result: Some(gen_schema::<GuestShare>(generator)),
+                    result: Some(gen_schema::<GuestShareInfo>(generator)),
                 },
                 Method {
                     name: "guestshare.remove",

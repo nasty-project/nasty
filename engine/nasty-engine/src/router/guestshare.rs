@@ -1,10 +1,6 @@
 //! RPC arms in the `guestshare.*` domain — operator-managed guest file
-//! shares (#474). The public, unauthenticated access surface lives
-//! elsewhere (a later PR); these methods are admin/operator-only CRUD.
-//!
-//! `guestshare.list` / `guestshare.get` are reads (auto-allowed by
-//! `is_read_only`); `guestshare.create` / `guestshare.revoke` are gated on
-//! `is_operator_allowed` in `super`.
+//! shares (#474). Every method is limited to unscoped Admin/Operator sessions;
+//! management responses are redacted separately from persisted records.
 
 #![allow(unused_imports, unused_variables)]
 
@@ -13,21 +9,36 @@ use serde::Deserialize;
 
 use super::*;
 use crate::AppState;
-use crate::auth::{Role, Session};
+use crate::auth::{EndpointAccess, Role, Session, authorize_session};
+use crate::guestshare::GuestShareInfo;
 
 pub(super) async fn try_route(
     req: &Request,
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
+    if let Err(denied) = authorize_session(session, EndpointAccess::UnscopedMutation) {
+        crate::auth::audit(
+            "permission_denied",
+            &session.username,
+            session.client_ip.as_deref().unwrap_or("unknown"),
+            &format!("method={} reason={}", req.method, denied.message()),
+        );
+        return Some(Response::error(
+            req.id.clone(),
+            ErrorCode::InternalError,
+            denied.message(),
+        ));
+    }
+
     Some(match req.method.as_str() {
         "guestshare.list" => match state.guest_shares.list().await {
-            Ok(v) => ok(req, v),
+            Ok(v) => ok(req, v.iter().map(GuestShareInfo::from).collect::<Vec<_>>()),
             Err(e) => err(req, e),
         },
         "guestshare.get" => match require_str(req, "id") {
             Ok(id) => match state.guest_shares.get(id).await {
-                Ok(v) => ok(req, v),
+                Ok(v) => ok(req, GuestShareInfo::from(&v)),
                 Err(e) => err(req, e),
             },
             Err(r) => r,
@@ -43,7 +54,7 @@ pub(super) async fn try_route(
             Ok(id) => match state.guest_shares.revoke(id).await {
                 Ok(v) => {
                     audit_share(session, "guest_share_revoked", id);
-                    ok(req, v)
+                    ok(req, GuestShareInfo::from(&v))
                 }
                 Err(e) => err(req, e),
             },

@@ -1,13 +1,9 @@
-//! Guest file sharing — share records + the authenticated CRUD that the
-//! public access surface (a later PR) will read.
+//! Guest file sharing records, authenticated management, and public access
+//! state.
 //!
 //! This module is the *spine* of #474: it persists a [`GuestShare`] per
 //! share and exposes [`GuestShareService`] for the operator-only
-//! `guestshare.*` RPCs. There is deliberately **no public/unauthenticated
-//! surface here** — no download endpoint, no password *verification*, no
-//! download/view counting. Those land in the next PR. The record already
-//! carries the fields they need (`downloads`, `views`, `max_downloads`,
-//! `expires_at`, `password_hash`) so that follow-up needs no migration.
+//! `guestshare.*` RPCs and unauthenticated share handlers.
 //!
 //! Security shape, mirroring the issue's design notes:
 //!   * The URL token IS the credential. Only its SHA-256 is stored, so a
@@ -22,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use nasty_common::{HasId, StateDir};
 use schemars::JsonSchema;
@@ -44,6 +40,11 @@ const GRANT_TTL_SECS: i64 = 3600;
 /// out, and the window those attempts are counted over.
 const UNLOCK_MAX_FAILURES: usize = 10;
 const UNLOCK_WINDOW_SECS: i64 = 15 * 60;
+const UNLOCK_MAX_TRACKED_KEYS: usize = 4096;
+const UNLOCK_REQUEST_MAX: usize = 30;
+const UNLOCK_REQUEST_WINDOW_SECS: i64 = 60;
+const UNLOCK_MAX_TRACKED_IPS: usize = 4096;
+const MAX_CONCURRENT_PASSWORD_CHECKS: usize = 4;
 
 #[derive(Debug, Error)]
 pub enum GuestShareError {
@@ -61,6 +62,8 @@ pub enum GuestShareError {
     InvalidPath(String),
     #[error("password hashing failed: {0}")]
     Hash(String),
+    #[error("password verification is busy")]
+    PasswordCheckBusy,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -86,12 +89,11 @@ pub struct GuestShare {
     /// Argon2 hash of the share password (same hasher as login). `None` =
     /// no password.
     pub password_hash: Option<String>,
-    /// Maximum number of downloads before the share stops working. `None` =
-    /// unlimited.
+    /// Maximum number of downloads before the share stops working. `None` = unlimited.
     pub max_downloads: Option<u32>,
-    /// Downloads served so far. Always 0 in this PR (no public surface yet).
+    /// Downloads served so far.
     pub downloads: u32,
-    /// Metadata views so far. Always 0 in this PR.
+    /// Metadata views so far.
     pub views: u32,
     /// Whether the share has been revoked. Revoked records are kept (not
     /// deleted) so history/audit survive.
@@ -131,10 +133,57 @@ pub struct CreateGuestShareRequest {
 /// **once** — it is never stored and never returned by `list`/`get`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CreateGuestShareResult {
-    pub share: GuestShare,
+    pub share: GuestShareInfo,
     /// Plaintext URL token. Show it to the operator now; it cannot be
     /// recovered later (only its hash is persisted).
     pub token: String,
+}
+
+/// Redacted management view. Persisted path and credential material never
+/// crosses the RPC boundary.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GuestShareInfo {
+    pub id: String,
+    pub names: Vec<String>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub password_protected: bool,
+    pub max_downloads: Option<u32>,
+    pub downloads: u32,
+    pub views: u32,
+    pub revoked: bool,
+    pub hidden: bool,
+    pub note: Option<String>,
+}
+
+impl From<&GuestShare> for GuestShareInfo {
+    fn from(share: &GuestShare) -> Self {
+        Self {
+            id: share.id.clone(),
+            names: share
+                .paths
+                .iter()
+                .map(|path| {
+                    Path::new(path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("file")
+                        .to_string()
+                })
+                .collect(),
+            created_by: share.created_by.clone(),
+            created_at: share.created_at,
+            expires_at: share.expires_at,
+            password_protected: share.password_hash.is_some(),
+            max_downloads: share.max_downloads,
+            downloads: share.downloads,
+            views: share.views,
+            revoked: share.revoked,
+            hidden: share.hidden,
+            note: share.note.clone(),
+        }
+    }
 }
 
 /// One entry shown to a guest on the public share page.
@@ -310,6 +359,81 @@ struct GrantEntry {
     expires_at: i64,
 }
 
+struct RateLimitEntry {
+    timestamps: Vec<i64>,
+}
+
+#[derive(Default)]
+struct BoundedRateLimiter {
+    entries: HashMap<String, RateLimitEntry>,
+    last_sweep_at: Option<i64>,
+}
+
+impl BoundedRateLimiter {
+    fn reserve(
+        &mut self,
+        key: String,
+        now: i64,
+        window_secs: i64,
+        max_attempts: usize,
+        max_keys: usize,
+    ) -> bool {
+        if self.last_sweep_at.is_some_and(|last| now < last) {
+            self.entries.clear();
+            self.last_sweep_at = Some(now);
+        }
+        if self
+            .last_sweep_at
+            .is_none_or(|last| now - last >= window_secs)
+        {
+            self.sweep_expired(now, window_secs);
+        }
+
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry
+                .timestamps
+                .retain(|&timestamp| now >= timestamp && now - timestamp < window_secs);
+            if entry.timestamps.len() >= max_attempts {
+                return false;
+            }
+            entry.timestamps.push(now);
+            return true;
+        }
+
+        if self.entries.len() >= max_keys {
+            // At capacity, sweep at most once per second. Repeated rejected
+            // traffic stays O(1), while expired entries are reclaimed quickly.
+            if self.last_sweep_at.is_none_or(|last| now - last >= 1) {
+                self.sweep_expired(now, window_secs);
+            }
+            if self.entries.len() >= max_keys {
+                return false;
+            }
+        }
+        self.entries.insert(
+            key,
+            RateLimitEntry {
+                timestamps: vec![now],
+            },
+        );
+        true
+    }
+
+    fn clear(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+
+    fn sweep_expired(&mut self, now: i64, window_secs: i64) {
+        self.entries.retain(|_, entry| {
+            entry
+                .timestamps
+                .last()
+                .is_some_and(|&last| now >= last && now - last < window_secs)
+        });
+        self.last_sweep_at = Some(now);
+    }
+}
+
 /// Operator-facing guest-share store + the ephemeral state the public
 /// access surface needs: password-unlock grants and an unlock rate-limiter.
 ///
@@ -322,12 +446,17 @@ pub struct GuestShareService {
     /// grant token -> what it unlocks. Opaque random tokens, exactly like
     /// the engine's session model.
     grants: StdMutex<HashMap<String, GrantEntry>>,
-    /// "ip|token" -> failed-unlock timestamps (Unix seconds), pruned to the
-    /// window on each touch.
-    unlock_failures: StdMutex<HashMap<String, Vec<i64>>>,
-    /// Serializes the load→increment→save of download counters so the
-    /// `max_downloads` cap can't be raced past under concurrent downloads.
-    download_lock: tokio::sync::Mutex<()>,
+    /// Bounded IP+token password-attempt windows.
+    unlock_failures: StdMutex<BoundedRateLimiter>,
+    /// Bounded IP request windows. This gate runs before token lookup so
+    /// random-token traffic cannot force unbounded state scans.
+    unlock_requests: StdMutex<BoundedRateLimiter>,
+    /// Serializes every record load-modify-save operation. Using separate
+    /// locks for counters and revocation would let stale writers resurrect a share.
+    state_lock: tokio::sync::Mutex<()>,
+    /// Argon2 is intentionally expensive. Keep verification off async worker
+    /// threads and cap global concurrency to prevent unlock CPU exhaustion.
+    password_checks: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for GuestShareService {
@@ -347,8 +476,10 @@ impl GuestShareService {
             dir,
             fs_root,
             grants: StdMutex::new(HashMap::new()),
-            unlock_failures: StdMutex::new(HashMap::new()),
-            download_lock: tokio::sync::Mutex::new(()),
+            unlock_failures: StdMutex::new(BoundedRateLimiter::default()),
+            unlock_requests: StdMutex::new(BoundedRateLimiter::default()),
+            state_lock: tokio::sync::Mutex::new(()),
+            password_checks: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_CHECKS)),
         }
     }
 
@@ -409,13 +540,18 @@ impl GuestShareService {
             note: req.note,
         };
 
-        self.state_dir().save(&share.id, &share).await?;
-        Ok(CreateGuestShareResult { share, token })
+        {
+            let _guard = self.state_lock.lock().await;
+            self.state_dir().save(&share.id, &share).await?;
+        }
+        let info = GuestShareInfo::from(&share);
+        Ok(CreateGuestShareResult { share: info, token })
     }
 
     /// Revoke a share. The record is kept (marked `revoked`) so history and
     /// audit survive — only the public surface stops honoring it.
     pub async fn revoke(&self, id: &str) -> Result<GuestShare, GuestShareError> {
+        let _guard = self.state_lock.lock().await;
         let mut share = self.get(id).await?;
         if !share.revoked {
             share.revoked = true;
@@ -429,6 +565,7 @@ impl GuestShareService {
     /// can be removed — the UI revokes first, so a live link is never
     /// silently dropped. Idempotent.
     pub async fn remove(&self, id: &str) -> Result<(), GuestShareError> {
+        let _guard = self.state_lock.lock().await;
         let mut share = self.get(id).await?;
         if !share.revoked {
             return Err(GuestShareError::NotRevoked(id.to_string()));
@@ -474,27 +611,49 @@ impl GuestShareService {
 
     /// Verify a guest-supplied password against the share. `true` when the
     /// share has no password (nothing to prove).
-    pub fn verify_share_password(share: &GuestShare, password: &str) -> bool {
-        match &share.password_hash {
-            Some(h) => crate::auth::verify_password(password, h).is_ok(),
-            None => true,
-        }
+    pub async fn verify_share_password(
+        &self,
+        share: &GuestShare,
+        password: &str,
+    ) -> Result<bool, GuestShareError> {
+        let Some(hash) = share.password_hash.clone() else {
+            return Ok(true);
+        };
+        let permit = self
+            .password_checks
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| GuestShareError::PasswordCheckBusy)?;
+        let password = password.to_string();
+        Ok(tokio::task::spawn_blocking(move || {
+            // The worker owns the permit so cancellation of the HTTP future
+            // cannot release capacity while Argon2 continues in the background.
+            let _permit = permit;
+            crate::auth::verify_password(&password, &hash).is_ok()
+        })
+        .await
+        .unwrap_or(false))
     }
 
     /// Count a metadata view. Best-effort; a lost increment is harmless.
     pub async fn record_view(&self, id: &str) {
+        // Never queue public view writes ahead of revoke. At most one disk
+        // mutation is delayed by a view; contended increments are dropped.
+        let Ok(_guard) = self.state_lock.try_lock() else {
+            return;
+        };
         if let Some(mut s) = self.state_dir().load::<GuestShare>(id).await {
             s.views = s.views.saturating_add(1);
             let _ = self.state_dir().save(id, &s).await;
         }
     }
 
-    /// Count a download, enforcing `max_downloads`. Serialized via
-    /// `download_lock` so concurrent downloads can't race past the cap.
+    /// Count a download, enforcing `max_downloads`. Serialized with every
+    /// other record mutation so counters cannot overwrite revocation.
     /// Returns `Err(NotFound)` if the share went inactive between lookup and
     /// here — the handler maps that to the same generic "not available".
     pub async fn register_download(&self, id: &str, now: i64) -> Result<(), GuestShareError> {
-        let _guard = self.download_lock.lock().await;
+        let _guard = self.state_lock.lock().await;
         let mut s = self.get(id).await?;
         if !is_accessible(&s, now) {
             return Err(GuestShareError::NotFound(id.to_string()));
@@ -567,29 +726,42 @@ impl GuestShareService {
 
     // ── Unlock rate-limiting (per IP+token sliding window) ──────────────
 
-    /// Whether unlock attempts for this (ip, token) are currently locked out.
-    pub fn unlock_locked(&self, ip: &str, token: &str, now: i64) -> bool {
-        let key = format!("{ip}|{token}");
-        let mut m = self.unlock_failures.lock().unwrap();
-        let v = m.entry(key).or_default();
-        v.retain(|&t| now - t < UNLOCK_WINDOW_SECS);
-        v.len() >= UNLOCK_MAX_FAILURES
+    /// Reserve one request before token lookup. Returns false when this IP is
+    /// over limit or the bounded tracker is saturated by other active IPs.
+    pub fn allow_unlock_request(&self, ip: &str, now: i64) -> bool {
+        let mut requests = self.unlock_requests.lock().unwrap();
+        requests.reserve(
+            ip.to_string(),
+            now,
+            UNLOCK_REQUEST_WINDOW_SECS,
+            UNLOCK_REQUEST_MAX,
+            UNLOCK_MAX_TRACKED_IPS,
+        )
     }
 
-    /// Record a failed unlock attempt for this (ip, token).
-    pub fn record_unlock_failure(&self, ip: &str, token: &str, now: i64) {
-        let key = format!("{ip}|{token}");
+    /// Atomically reserve one password verification for this IP and share
+    /// token. Successful verification clears the history; failures remain.
+    pub fn reserve_unlock_attempt(&self, ip: &str, token: &str, now: i64) -> bool {
+        let key = unlock_failure_key(ip, token);
         let mut m = self.unlock_failures.lock().unwrap();
-        let v = m.entry(key).or_default();
-        v.retain(|&t| now - t < UNLOCK_WINDOW_SECS);
-        v.push(now);
+        m.reserve(
+            key,
+            now,
+            UNLOCK_WINDOW_SECS,
+            UNLOCK_MAX_FAILURES,
+            UNLOCK_MAX_TRACKED_KEYS,
+        )
     }
 
     /// Clear the failure counter for this (ip, token) after a success.
     pub fn clear_unlock_failures(&self, ip: &str, token: &str) {
-        let key = format!("{ip}|{token}");
-        self.unlock_failures.lock().unwrap().remove(&key);
+        let key = unlock_failure_key(ip, token);
+        self.unlock_failures.lock().unwrap().clear(&key);
     }
+}
+
+fn unlock_failure_key(ip: &str, token: &str) -> String {
+    format!("{ip}|{}", sha256_hex(token))
 }
 
 #[cfg(test)]
@@ -685,12 +857,21 @@ mod tests {
 
         // The plaintext token is returned but never equals what's stored.
         assert!(!res.token.is_empty());
-        assert_eq!(res.share.token_hash, sha256_hex(&res.token));
-        assert_ne!(res.share.token_hash, res.token);
+        let stored = svc.get(&res.share.id).await.unwrap();
+        assert_eq!(stored.token_hash, sha256_hex(&res.token));
+        assert_ne!(stored.token_hash, res.token);
         assert_eq!(res.share.created_by, "alice");
-        assert!(res.share.password_hash.is_none());
+        assert!(!res.share.password_protected);
         assert_eq!(res.share.downloads, 0);
         assert!(!res.share.revoked);
+
+        // Management responses contain display names, not capability hashes,
+        // password hashes, or absolute server paths.
+        assert_eq!(res.share.names, vec!["docs"]);
+        let management_json = serde_json::to_string(&res.share).unwrap();
+        assert!(!management_json.contains("token_hash"));
+        assert!(!management_json.contains("password_hash"));
+        assert!(!management_json.contains(fs_root.to_str().unwrap()));
 
         // list shows it; the stored record carries the hash, not the token.
         let listed = svc.list().await.unwrap();
@@ -776,7 +957,13 @@ mod tests {
             .await
             .unwrap();
 
-        let hash = res.share.password_hash.expect("password should be hashed");
+        assert!(res.share.password_protected);
+        let hash = svc
+            .get(&res.share.id)
+            .await
+            .unwrap()
+            .password_hash
+            .expect("password should be hashed");
         assert!(crate::auth::verify_password("hunter2", &hash).is_ok());
         assert!(crate::auth::verify_password("wrong", &hash).is_err());
 
@@ -871,6 +1058,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_mutations_preserve_revocation_and_counters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, _) = service(tmp.path());
+        let svc = Arc::new(svc);
+        let share = put_share(&svc, "race", |s| s.max_downloads = Some(8)).await;
+
+        svc.record_view(&share.id).await;
+        svc.record_view(&share.id).await;
+
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let svc = Arc::clone(&svc);
+            let id = share.id.clone();
+            tasks.push(tokio::spawn(async move {
+                let _ = svc.register_download(&id, 10).await;
+            }));
+        }
+        let revoke = {
+            let svc = Arc::clone(&svc);
+            let id = share.id.clone();
+            tokio::spawn(async move {
+                svc.revoke(&id).await.unwrap();
+            })
+        };
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+        revoke.await.unwrap();
+
+        let stored = svc.get(&share.id).await.unwrap();
+        assert!(stored.revoked, "counter updates must not resurrect a share");
+        assert_eq!(stored.views, 2, "other mutations must preserve view counts");
+        assert!(stored.downloads <= 8, "download cap must not be exceeded");
+    }
+
+    #[tokio::test]
+    async fn record_view_does_not_queue_behind_security_mutations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, _) = service(tmp.path());
+        let share = put_share(&svc, "view-contention", |_| {}).await;
+
+        let guard = svc.state_lock.lock().await;
+        svc.record_view(&share.id).await;
+        drop(guard);
+        assert_eq!(svc.get(&share.id).await.unwrap().views, 0);
+
+        svc.record_view(&share.id).await;
+        assert_eq!(svc.get(&share.id).await.unwrap().views, 1);
+    }
+
+    #[tokio::test]
     async fn record_view_increments() {
         let tmp = tempfile::tempdir().unwrap();
         let (svc, _) = service(tmp.path());
@@ -895,20 +1134,43 @@ mod tests {
     }
 
     #[test]
-    fn unlock_rate_limit_locks_then_clears() {
+    fn unlock_rate_limit_reserves_atomically_then_clears() {
         let tmp = tempfile::tempdir().unwrap();
         let (svc, _) = service(tmp.path());
         let now = 1000;
 
-        assert!(!svc.unlock_locked("1.2.3.4", "tok", now));
         for _ in 0..UNLOCK_MAX_FAILURES {
-            svc.record_unlock_failure("1.2.3.4", "tok", now);
+            assert!(svc.reserve_unlock_attempt("1.2.3.4", "tok", now));
         }
-        assert!(svc.unlock_locked("1.2.3.4", "tok", now));
+        assert!(!svc.reserve_unlock_attempt("1.2.3.4", "tok", now));
         // A different IP is unaffected; a successful clear resets the counter.
-        assert!(!svc.unlock_locked("5.6.7.8", "tok", now));
+        assert!(svc.reserve_unlock_attempt("5.6.7.8", "tok", now));
         svc.clear_unlock_failures("1.2.3.4", "tok");
-        assert!(!svc.unlock_locked("1.2.3.4", "tok", now));
+        assert!(svc.reserve_unlock_attempt("1.2.3.4", "tok", now));
+    }
+
+    #[test]
+    fn concurrent_unlock_reservations_enforce_exact_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, _) = service(tmp.path());
+        let svc = Arc::new(svc);
+        let barrier = Arc::new(std::sync::Barrier::new(33));
+        let mut workers = Vec::new();
+
+        for _ in 0..32 {
+            let svc = Arc::clone(&svc);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                svc.reserve_unlock_attempt("192.0.2.1", "token", 1000)
+            }));
+        }
+        barrier.wait();
+        let admitted: usize = workers
+            .into_iter()
+            .map(|worker| usize::from(worker.join().unwrap()))
+            .sum();
+        assert_eq!(admitted, UNLOCK_MAX_FAILURES);
     }
 
     #[test]
@@ -918,14 +1180,77 @@ mod tests {
         // Failures older than the window don't count toward the lockout.
         let old = 1000;
         for _ in 0..UNLOCK_MAX_FAILURES {
-            svc.record_unlock_failure("1.2.3.4", "tok", old);
+            assert!(svc.reserve_unlock_attempt("1.2.3.4", "tok", old));
         }
         let later = old + UNLOCK_WINDOW_SECS + 1;
-        assert!(!svc.unlock_locked("1.2.3.4", "tok", later));
+        assert!(svc.reserve_unlock_attempt("1.2.3.4", "tok", later));
     }
 
     #[test]
-    fn verify_share_password_matches_and_open_when_unset() {
+    fn unlock_rate_limit_is_a_true_sliding_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, _) = service(tmp.path());
+        let start = 1000;
+
+        for offset in 0..UNLOCK_MAX_FAILURES {
+            assert!(svc.reserve_unlock_attempt("1.2.3.4", "tok", start + offset as i64));
+        }
+        let boundary = start + UNLOCK_WINDOW_SECS;
+        assert!(svc.reserve_unlock_attempt("1.2.3.4", "tok", boundary));
+        assert!(!svc.reserve_unlock_attempt("1.2.3.4", "tok", boundary));
+    }
+
+    #[test]
+    fn unlock_rate_limit_trackers_are_bounded_and_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, _) = service(tmp.path());
+
+        for i in 0..UNLOCK_MAX_TRACKED_IPS {
+            let ip = format!("192.0.2.{i}");
+            assert!(svc.allow_unlock_request(&ip, 1000));
+        }
+        assert!(!svc.allow_unlock_request("203.0.113.1", 1000));
+        assert_eq!(
+            svc.unlock_requests.lock().unwrap().entries.len(),
+            UNLOCK_MAX_TRACKED_IPS
+        );
+        assert!(svc.allow_unlock_request("203.0.113.1", 1000 + UNLOCK_REQUEST_WINDOW_SECS));
+        assert_eq!(svc.unlock_requests.lock().unwrap().entries.len(), 1);
+
+        for i in 0..UNLOCK_MAX_TRACKED_KEYS {
+            let ip = format!("198.51.100.{i}");
+            assert!(svc.reserve_unlock_attempt(&ip, "valid-token", 1000));
+        }
+        assert!(!svc.reserve_unlock_attempt("203.0.113.2", "valid-token", 1000));
+        assert_eq!(
+            svc.unlock_failures.lock().unwrap().entries.len(),
+            UNLOCK_MAX_TRACKED_KEYS
+        );
+        assert!(svc.reserve_unlock_attempt(
+            "203.0.113.2",
+            "valid-token",
+            1000 + UNLOCK_WINDOW_SECS
+        ));
+        assert_eq!(svc.unlock_failures.lock().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn unlock_request_limit_runs_before_password_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, _) = service(tmp.path());
+        let now = 1000;
+
+        for _ in 0..UNLOCK_REQUEST_MAX {
+            assert!(svc.allow_unlock_request("192.0.2.1", now));
+        }
+        assert!(!svc.allow_unlock_request("192.0.2.1", now));
+        assert!(svc.allow_unlock_request("192.0.2.1", now + UNLOCK_REQUEST_WINDOW_SECS + 1));
+    }
+
+    #[tokio::test]
+    async fn verify_share_password_matches_and_open_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, _) = service(tmp.path());
         let hash = crate::auth::hash_password("s3cret").unwrap();
         let protected = GuestShare {
             id: "p".into(),
@@ -943,18 +1268,31 @@ mod tests {
             note: None,
         };
         assert!(GuestShareService::needs_password(&protected));
-        assert!(GuestShareService::verify_share_password(
-            &protected, "s3cret"
+        assert!(
+            svc.verify_share_password(&protected, "s3cret")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !svc.verify_share_password(&protected, "wrong")
+                .await
+                .unwrap()
+        );
+
+        let permits: Vec<_> = (0..MAX_CONCURRENT_PASSWORD_CHECKS)
+            .map(|_| svc.password_checks.clone().try_acquire_owned().unwrap())
+            .collect();
+        assert!(matches!(
+            svc.verify_share_password(&protected, "s3cret").await,
+            Err(GuestShareError::PasswordCheckBusy)
         ));
-        assert!(!GuestShareService::verify_share_password(
-            &protected, "wrong"
-        ));
+        drop(permits);
 
         let mut open = protected;
         open.password_hash = None;
         assert!(!GuestShareService::needs_password(&open));
         // No password set => nothing to prove, any input "passes".
-        assert!(GuestShareService::verify_share_password(&open, "anything"));
+        assert!(svc.verify_share_password(&open, "anything").await.unwrap());
     }
 
     #[test]

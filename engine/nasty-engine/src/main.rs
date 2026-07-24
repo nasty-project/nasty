@@ -3326,7 +3326,7 @@ async fn public_share_unlock_handler(
     let now = now_unix_i64();
     let client_ip = share_client_ip(&headers);
 
-    if state.guest_shares.unlock_locked(&client_ip, &token, now) {
+    if !state.guest_shares.allow_unlock_request(&client_ip, now) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": "Too many attempts; try again later"})),
@@ -3338,7 +3338,34 @@ async fn public_share_unlock_handler(
         return share_not_available();
     };
 
-    if guestshare::GuestShareService::verify_share_password(&share, &body.password) {
+    if !state
+        .guest_shares
+        .reserve_unlock_attempt(&client_ip, &token, now)
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many attempts; try again later"})),
+        )
+            .into_response();
+    }
+
+    let password_matches = match state
+        .guest_shares
+        .verify_share_password(&share, &body.password)
+        .await
+    {
+        Ok(matches) => matches,
+        Err(guestshare::GuestShareError::PasswordCheckBusy) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "Too many attempts; try again later"})),
+            )
+                .into_response();
+        }
+        Err(_) => return share_not_available(),
+    };
+
+    if password_matches {
         state.guest_shares.clear_unlock_failures(&client_ip, &token);
         let grant = state.guest_shares.mint_grant(&share.id, now);
         crate::auth::audit(
@@ -3360,9 +3387,6 @@ async fn public_share_unlock_handler(
             .into_response();
     }
 
-    state
-        .guest_shares
-        .record_unlock_failure(&client_ip, &token, now);
     (
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({"error": "Incorrect password"})),
