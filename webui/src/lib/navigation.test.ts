@@ -5,6 +5,7 @@ import {
 	currentNavigationItem,
 	flattenNavigation,
 	isNavGroup,
+	LAUNCHER_NAV_ITEM,
 	resolveNavigation,
 	searchNavigation
 } from './navigation';
@@ -56,6 +57,7 @@ describe('navigation model', () => {
 		expect(currentNavigationItem('/subvolumes/details', entries).href).toBe('/subvolumes');
 		expect(activeNavigationGroup('/subvolumes/details', entries)).toBe('storage');
 		expect(activeNavigationGroup('/sharing', entries)).toBeNull();
+		expect(currentNavigationItem('/menu', entries)).toBe(LAUNCHER_NAV_ITEM);
 	});
 
 	test('search uses item keywords and group labels', () => {

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, setContext } from 'svelte';
 	import { page } from '$app/stores';
 	import { getClient, resetClient } from '$lib/client';
 	import { login as doLogin, logout as doLogout, loginWebauthn as doLoginWebauthn } from '$lib/auth';
@@ -11,6 +11,7 @@
 	import ReconnectSpinner from '$lib/components/ReconnectSpinner.svelte';
 	import ClassicSidebarNav from '$lib/components/ClassicSidebarNav.svelte';
 	import IconSidebarNav from '$lib/components/IconSidebarNav.svelte';
+	import LauncherSidebarNav from '$lib/components/LauncherSidebarNav.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { AuthResult } from '$lib/rpc';
 	import type { BootStatus, BootPhase, SystemStatus } from '$lib/types';
@@ -21,6 +22,7 @@
 	import {
 		activeNavigationGroup,
 		currentNavigationItem,
+		NAVIGATION_CONTEXT,
 		navigationForMode,
 		resolveNavigation,
 		searchNavigation,
@@ -284,6 +286,9 @@
 
 	// Version info (loaded once after connect)
 	let sysInfo: { hostname: string; version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_recommended_ref: string | null; bcachefs_is_custom: boolean; bcachefs_debug_checks: boolean; kvm_available: boolean; is_virtual: boolean } | null = $state(null);
+	setContext(NAVIGATION_CONTEXT, {
+		get kvmAvailable() { return sysInfo?.kvm_available === true; }
+	});
 	// bcachefs "update available": the pin differs from the version this
 	// NASty build ships, so a one-click sync is offered. Distinct from
 	// "reboot pending" (bcachefs_is_custom), which the restart banner owns.
@@ -909,7 +914,7 @@
 			{/if}
 
 			<!-- Search bar -->
-			{#if !sidebarCollapsed}
+			{#if !sidebarCollapsed && uiPrefs.menuStyle !== 'launcher'}
 				<div class="shrink-0 px-2 pt-2 relative">
 					<div class="relative">
 						<Search size={13} class="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50" />
@@ -924,7 +929,7 @@
 			{/if}
 
 			<!-- Nav mode toggle (#588): Common short-list vs Full grouped tree — hidden while searching -->
-			{#if !sidebarCollapsed && !isSearching}
+			{#if !sidebarCollapsed && !isSearching && uiPrefs.menuStyle !== 'launcher'}
 				<div class="shrink-0 px-2 pt-2">
 					<div class="flex rounded-md border border-border p-0.5 text-[0.7rem]">
 						<button
@@ -942,7 +947,9 @@
 			{/if}
 
 			<!-- Nav — scrollable -->
-			{#if uiPrefs.menuStyle === 'icons'}
+			{#if uiPrefs.menuStyle === 'launcher'}
+				<LauncherSidebarNav collapsed={sidebarCollapsed} active={$page.url.pathname === '/menu'} />
+			{:else if uiPrefs.menuStyle === 'icons'}
 				<IconSidebarNav
 					entries={renderNav}
 					fullEntries={nav}

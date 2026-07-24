@@ -9,6 +9,7 @@ import {
 	Flame,
 	FolderOpen,
 	Globe,
+	Grid3X3,
 	HardDrive,
 	Layers,
 	LayoutDashboard,
@@ -53,6 +54,8 @@ export type NavEntry = NavItem | NavGroup;
 export interface NavigationContext {
 	kvmAvailable: boolean;
 }
+
+export const NAVIGATION_CONTEXT = Symbol('navigation');
 
 const item = (
 	id: string,
@@ -120,6 +123,8 @@ const NAVIGATION: NavEntry[] = [
 	}
 ];
 
+export const LAUNCHER_NAV_ITEM = item('launcher', '/menu', 'Launcher', Grid3X3, ['launcher', 'menu', 'navigation', 'pages']);
+
 export function isNavGroup(entry: NavEntry): entry is NavGroup {
 	return entry.kind === 'group';
 }
@@ -154,6 +159,7 @@ export function pathMatches(path: string, href: string): boolean {
 }
 
 export function currentNavigationItem(path: string, entries: NavEntry[]): NavItem {
+	if (path === LAUNCHER_NAV_ITEM.href) return LAUNCHER_NAV_ITEM;
 	const items = flattenNavigation(entries);
 	return [...items].sort((a, b) => b.href.length - a.href.length)
 		.find((entry) => pathMatches(path, entry.href)) ?? items[0];

@@ -5,17 +5,14 @@ const LOGO_HIDDEN_KEY = 'nasty:sidebar_logo_hidden';
 const MENU_STYLE_KEY = 'nasty:menu_style';
 const ICON_GROUP_KEY = 'nasty:icon_nav_group';
 
-export type MenuStyle = 'classic' | 'icons';
+export type MenuStyle = 'classic' | 'icons' | 'launcher';
 
 function createUiPrefs() {
 	let logoHidden = $state<boolean>(
 		typeof localStorage !== 'undefined' && localStorage.getItem(LOGO_HIDDEN_KEY) === '1'
 	);
-	let menuStyle = $state<MenuStyle>(
-		typeof localStorage !== 'undefined' && localStorage.getItem(MENU_STYLE_KEY) === 'icons'
-			? 'icons'
-			: 'classic'
-	);
+	const storedMenuStyle = typeof localStorage !== 'undefined' ? localStorage.getItem(MENU_STYLE_KEY) : null;
+	let menuStyle = $state<MenuStyle>(storedMenuStyle === 'icons' || storedMenuStyle === 'launcher' ? storedMenuStyle : 'classic');
 	let iconGroupId = $state<string | null>(
 		typeof localStorage !== 'undefined' ? localStorage.getItem(ICON_GROUP_KEY) : null
 	);

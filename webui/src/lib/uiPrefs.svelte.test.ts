@@ -17,6 +17,10 @@ describe('uiPrefs', () => {
 		uiPrefs.setMenuStyle('classic');
 		expect(uiPrefs.menuStyle).toBe('classic');
 		expect(localStorage.getItem('nasty:menu_style')).toBe('classic');
+
+		uiPrefs.setMenuStyle('launcher');
+		expect(uiPrefs.menuStyle).toBe('launcher');
+		expect(localStorage.getItem('nasty:menu_style')).toBe('launcher');
 	});
 
 	test('keeps logo visibility behavior independent', () => {

@@ -1016,8 +1016,8 @@
 
 				<fieldset class="mt-5">
 					<legend class="text-sm font-medium">Navigation style</legend>
-					<p class="mt-1 text-xs text-muted-foreground">Choose how the same menu hierarchy is presented in the sidebar.</p>
-					<div class="mt-3 grid max-w-md grid-cols-2 gap-3">
+					<p class="mt-1 text-xs text-muted-foreground">Choose how the same menu hierarchy is presented.</p>
+					<div class="mt-3 grid max-w-2xl grid-cols-1 gap-3 sm:grid-cols-3">
 						<label class="cursor-pointer rounded-lg border p-3 transition-colors focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background {uiPrefs.menuStyle === 'classic' ? 'border-blue-500/60 bg-blue-500/10' : 'border-border hover:bg-accent/40'}">
 							<input
 								type="radio"
@@ -1041,6 +1041,18 @@
 							/>
 							<span class="block text-sm font-medium">Icons</span>
 							<span class="mt-1 block text-xs text-muted-foreground">Category and page tiles</span>
+						</label>
+						<label class="cursor-pointer rounded-lg border p-3 transition-colors focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background {uiPrefs.menuStyle === 'launcher' ? 'border-blue-500/60 bg-blue-500/10' : 'border-border hover:bg-accent/40'}">
+							<input
+								type="radio"
+								name="navigation-style"
+								value="launcher"
+								checked={uiPrefs.menuStyle === 'launcher'}
+								onchange={() => uiPrefs.setMenuStyle('launcher')}
+								class="sr-only"
+							/>
+							<span class="block text-sm font-medium">Launcher</span>
+							<span class="mt-1 block text-xs text-muted-foreground">Central category workspace</span>
 						</label>
 					</div>
 				</fieldset>
