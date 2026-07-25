@@ -98,6 +98,9 @@ export interface Operation {
 	target?: string | null;
 	state: string; // "running" | "active" | "idle" | "paused"
 	progress_percent?: number | null;
+	last_run_at?: number | null;
+	last_duration_secs?: number | null;
+	last_outcome?: 'ok' | 'errors' | 'failed' | 'cancelled' | null;
 	detail: string;
 	control: string; // "start" | "cancel" | "pause" | "resume" | "none"
 }

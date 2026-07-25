@@ -185,6 +185,15 @@ pub struct Operation {
     /// Progress 0–100 when known (scrub); `None` otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress_percent: Option<f32>,
+    /// Unix seconds when the most recent scrub completed; scrub rows only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<i64>,
+    /// Duration of the most recent scrub in seconds; scrub rows only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_duration_secs: Option<u64>,
+    /// "ok" | "errors" | "failed" | "cancelled"; scrub rows only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_outcome: Option<String>,
     /// Short operator-facing line, e.g. "Evacuating sdc" or "Scrub 42%".
     pub detail: String,
     /// Action the UI offers: "start" (idle scrub) | "cancel"

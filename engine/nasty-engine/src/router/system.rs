@@ -1052,6 +1052,9 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
                     target: Some(dev.path.clone()),
                     state: "running".into(),
                     progress_percent: None,
+                    last_run_at: None,
+                    last_duration_secs: None,
+                    last_outcome: None,
                     detail,
                     control: "cancel".into(),
                 });
@@ -1077,6 +1080,12 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
                     target: None,
                     state: "running".into(),
                     progress_percent: scrub.progress_percent,
+                    last_run_at: scrub.last_run_at,
+                    last_duration_secs: scrub.last_duration_secs,
+                    last_outcome: scrub
+                        .last_outcome
+                        .map(scrub_outcome_name)
+                        .map(str::to_string),
                     detail,
                     control: "cancel".into(),
                 });
@@ -1087,6 +1096,12 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
                     target: None,
                     state: "idle".into(),
                     progress_percent: None,
+                    last_run_at: scrub.last_run_at,
+                    last_duration_secs: scrub.last_duration_secs,
+                    last_outcome: scrub
+                        .last_outcome
+                        .map(scrub_outcome_name)
+                        .map(str::to_string),
                     detail: scrub_idle_detail(&scrub),
                     control: "start".into(),
                 });
@@ -1113,6 +1128,9 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
                 target: None,
                 state: st.into(),
                 progress_percent: None,
+                last_run_at: None,
+                last_duration_secs: None,
+                last_outcome: None,
                 detail,
                 control: ctrl.into(),
             });
@@ -1137,6 +1155,9 @@ async fn build_operations(state: &AppState) -> Vec<nasty_system::Operation> {
                 target: None,
                 state: st.into(),
                 progress_percent: None,
+                last_run_at: None,
+                last_duration_secs: None,
+                last_outcome: None,
                 detail,
                 control: ctrl.into(),
             });
@@ -1164,6 +1185,16 @@ fn scrub_idle_detail(s: &nasty_storage::filesystem::ScrubStatus) -> String {
     }
 }
 
+fn scrub_outcome_name(outcome: nasty_storage::filesystem::ScrubOutcome) -> &'static str {
+    use nasty_storage::filesystem::ScrubOutcome;
+    match outcome {
+        ScrubOutcome::Ok => "ok",
+        ScrubOutcome::Errors => "errors",
+        ScrubOutcome::Failed => "failed",
+        ScrubOutcome::Cancelled => "cancelled",
+    }
+}
+
 /// The single informational row shown when no device is evacuating, so the
 /// evacuate operation type is acknowledged rather than silently absent.
 /// Evacuations are started from the Disks device-removal flow.
@@ -1174,6 +1205,9 @@ fn evacuate_idle_row() -> nasty_system::Operation {
         target: None,
         state: "idle".into(),
         progress_percent: None,
+        last_run_at: None,
+        last_duration_secs: None,
+        last_outcome: None,
         detail: "No evacuation in progress".into(),
         control: "none".into(),
     }

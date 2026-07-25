@@ -4,6 +4,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import type { Operation } from '$lib/types';
+	import { operationDetail } from '$lib/operations';
 	import { Button } from '$lib/components/ui/button';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { RefreshCw } from '@lucide/svelte';
@@ -141,7 +142,12 @@
 							{/if}
 						</div>
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-sm">{op.detail}</div>
+							<div
+								class="truncate text-sm"
+								title={op.kind === 'scrub' && op.state !== 'running' && op.last_run_at != null
+									? new Date(op.last_run_at * 1000).toLocaleString()
+									: undefined}
+							>{operationDetail(op)}</div>
 							<div class="text-xs {stateClass(op.state)}">{op.state}</div>
 							{#if op.progress_percent != null}
 								<div class="mt-1 h-1.5 w-full overflow-hidden rounded bg-muted">
