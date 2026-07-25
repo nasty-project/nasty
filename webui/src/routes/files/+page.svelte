@@ -7,7 +7,8 @@
 	import SortTh from '$lib/components/SortTh.svelte';
 	import PathPicker from '$lib/components/PathPicker.svelte';
 	import { getClient } from '$lib/client';
-	import { withToast, error as toastError } from '$lib/toast.svelte';
+	import { normalizeShareDownloadLimit } from '$lib/public-share';
+	import { withToast, error as toastError, success as toastSuccess } from '$lib/toast.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 
 	interface FileEntry {
@@ -137,9 +138,10 @@
 	let shareTarget: FileEntry | null = $state(null);
 	let shareExpiry = $state('7'); // days; '0' = never
 	let sharePassword = $state('');
-	let shareMaxDownloads = $state('');
+	let shareMaxDownloads = $state<number | undefined>(undefined);
 	let shareNote = $state('');
 	let shareBusy = $state(false);
+	let shareError = $state('');
 	let shareUrl: string | null = $state(null);
 	let shareCopied = $state(false);
 	let canCreateGuestShares = $state(false);
@@ -148,39 +150,47 @@
 		shareTarget = entry;
 		shareExpiry = '7';
 		sharePassword = '';
-		shareMaxDownloads = '';
+		shareMaxDownloads = undefined;
 		shareNote = '';
+		shareError = '';
 		shareUrl = null;
 		shareCopied = false;
 	}
 
 	async function createShare() {
 		if (!shareTarget) return;
+		shareError = '';
 		const rel = currentPath ? `${currentPath}/${shareTarget.name}` : shareTarget.name;
 		// The engine takes absolute paths under /fs; the browser works in
 		// /fs-relative paths, so re-add the prefix here.
 		const abs = `/fs/${rel}`;
 		const days = parseInt(shareExpiry, 10);
 		const expires_at = days > 0 ? Math.floor(Date.now() / 1000) + days * 86400 : null;
-		const maxDl = shareMaxDownloads.trim() ? parseInt(shareMaxDownloads, 10) : null;
-		if (maxDl != null && (!Number.isFinite(maxDl) || maxDl < 1)) {
-			toastError('Download limit must be a positive number');
+		let maxDl: number | null;
+		try {
+			maxDl = normalizeShareDownloadLimit(shareMaxDownloads);
+		} catch (error) {
+			shareError = error instanceof Error ? error.message : 'Invalid download limit';
+			toastError(shareError);
 			return;
 		}
 		shareBusy = true;
-		const res = await withToast(
-			() =>
-				getClient().call<{ share: unknown; token: string }>('guestshare.create', {
-					paths: [abs],
-					expires_at,
-					password: sharePassword ? sharePassword : null,
-					max_downloads: maxDl,
-					note: shareNote.trim() ? shareNote.trim() : null
-				}),
-			'Share link created'
-		);
-		shareBusy = false;
-		if (res) shareUrl = `${location.origin}/share/${res.token}`;
+		try {
+			const res = await getClient().call<{ share: unknown; token: string }>('guestshare.create', {
+				paths: [abs],
+				expires_at,
+				password: sharePassword ? sharePassword : null,
+				max_downloads: maxDl,
+				note: shareNote.trim() ? shareNote.trim() : null
+			});
+			shareUrl = `${location.origin}/share/${res.token}`;
+			toastSuccess('Share link created');
+		} catch (error) {
+			shareError = error instanceof Error ? error.message : 'Could not create the share link';
+			toastError(shareError);
+		} finally {
+			shareBusy = false;
+		}
 	}
 
 	async function copyShareUrl() {
@@ -977,6 +987,9 @@
 							placeholder="For your reference"
 							class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" />
 					</div>
+					{#if shareError}
+						<p class="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">{shareError}</p>
+					{/if}
 
 					<div class="flex justify-end gap-2">
 						<Button variant="secondary" onclick={() => (shareTarget = null)} disabled={shareBusy}>Cancel</Button>

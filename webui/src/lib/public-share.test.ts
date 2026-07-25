@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
 	joinSharePath,
+	normalizeShareDownloadLimit,
 	parentSharePath,
 	shareBreadcrumbs,
 	shareBrowseUrl,
@@ -9,6 +10,13 @@ import {
 } from './public-share';
 
 describe('public share navigation', () => {
+	test('normalizes numeric download limits from number inputs', () => {
+		expect(normalizeShareDownloadLimit(undefined)).toBeNull();
+		expect(normalizeShareDownloadLimit(5)).toBe(5);
+		expect(() => normalizeShareDownloadLimit(0)).toThrow('positive whole number');
+		expect(() => normalizeShareDownloadLimit(2.5)).toThrow('positive whole number');
+	});
+
 	test('joins paths and walks to parents', () => {
 		expect(joinSharePath('', 'Photos')).toBe('Photos');
 		expect(joinSharePath('Photos/2026', 'July')).toBe('Photos/2026/July');

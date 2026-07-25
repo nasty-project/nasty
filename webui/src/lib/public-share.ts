@@ -29,6 +29,14 @@ export interface ShareBreadcrumb {
 	path: string;
 }
 
+export function normalizeShareDownloadLimit(value: number | undefined): number | null {
+	if (value === undefined) return null;
+	if (!Number.isSafeInteger(value) || value < 1) {
+		throw new Error('Download limit must be a positive whole number');
+	}
+	return value;
+}
+
 export function joinSharePath(path: string, name: string): string {
 	return path ? `${path}/${name}` : name;
 }
