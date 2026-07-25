@@ -11,6 +11,7 @@
 //!   - The chosen subdomain matches another engine-app's subdomain.
 //!   - The chosen subdomain matches NASty's own WebUI hostname
 //!     (would intercept the management interface).
+//!   - The chosen subdomain matches the dedicated files portal hostname.
 //!
 //! Path-prefix conflicts are not modelled here: `/apps/<name>/*` paths
 //! are derived from app names, names are DNS-safe and unique, and the
@@ -18,7 +19,81 @@
 //! prefixes. There's no realistic path collision an operator can
 //! produce through the install form.
 
+use std::sync::LazyLock;
+
 use crate::AppState;
+
+static HOSTNAME_RESERVATIONS: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Serialize the check-and-commit sections for app host routes and the files
+/// portal hostname. Caddy otherwise accepts both and lets route order decide.
+pub async fn lock_hostname_reservations() -> tokio::sync::MutexGuard<'static, ()> {
+    HOSTNAME_RESERVATIONS.lock().await
+}
+
+fn reserved_hostname_conflict(
+    settings: &nasty_system::settings::Settings,
+    hostname: &str,
+) -> Option<String> {
+    if let Some(tls_domain) = settings.tls_domain.as_deref()
+        && tls_domain.eq_ignore_ascii_case(hostname)
+    {
+        return Some(format!(
+            "'{hostname}' is the NASty WebUI hostname — using it for an app would shadow the management interface"
+        ));
+    }
+    if let Some(files_domain) = settings.files_domain.as_deref()
+        && files_domain.eq_ignore_ascii_case(hostname)
+    {
+        return Some(format!(
+            "'{hostname}' is the files portal hostname — using it for an app would shadow the user portal"
+        ));
+    }
+    None
+}
+
+fn files_domain_app_conflict(
+    files_domain: &str,
+    ingresses: Result<&[nasty_apps::AppIngress], String>,
+) -> Result<Option<String>, String> {
+    let ingresses = ingresses?;
+    Ok(ingresses.iter().find_map(|ingress| {
+        ingress
+            .subdomain
+            .as_deref()
+            .filter(|host| host.eq_ignore_ascii_case(files_domain))
+            .map(|_| {
+                format!(
+                    "files portal domain '{files_domain}' is already used by app '{}'",
+                    ingress.name
+                )
+            })
+    }))
+}
+
+/// Reject a non-empty files portal hostname already claimed by an app route.
+/// An unavailable Caddy route snapshot is an error: settings updates fail
+/// closed rather than risking two host matchers for the same hostname.
+pub async fn ensure_files_domain_available(
+    state: &AppState,
+    files_domain: &str,
+) -> Result<(), String> {
+    let files_domain = files_domain.trim();
+    if files_domain.is_empty() {
+        return Ok(());
+    }
+    nasty_system::settings::validate_files_domain(files_domain)?;
+    let ingresses = state
+        .apps
+        .ingress_list()
+        .await
+        .map_err(|e| format!("cannot verify app hostname reservations: {e}"))?;
+    if let Some(reason) = files_domain_app_conflict(files_domain, Ok(&ingresses))? {
+        return Err(reason);
+    }
+    Ok(())
+}
 
 /// Returns a human-readable reason when `subdomain` would conflict with
 /// an existing engine-app ingress or the NASty WebUI hostname. Returns
@@ -37,17 +112,13 @@ pub async fn find_subdomain_conflict(
         return None;
     }
 
-    // WebUI hostname clash. The TLS settings always carry the FQDN the
-    // WebUI is served at; an app subdomain matching it would shadow the
-    // management interface (Caddy serves the most recent matching
-    // route — in this case the app's, not the WebUI's).
+    // Reserved NASty hostname clash. Caddy serves the most recent matching
+    // route, so an app could otherwise shadow either the management UI or
+    // the files portal. The portal hostname only selects presentation and
+    // routing; Role User authorization in the server remains the boundary.
     let settings = state.settings.get().await;
-    if let Some(tls_domain) = settings.tls_domain.as_deref()
-        && tls_domain.eq_ignore_ascii_case(subdomain)
-    {
-        return Some(format!(
-            "'{subdomain}' is the NASty WebUI hostname — using it for an app would shadow the management interface"
-        ));
+    if let Some(reason) = reserved_hostname_conflict(&settings, subdomain) {
+        return Some(reason);
     }
 
     // Another app's subdomain. We pull the current ingress list rather
@@ -70,4 +141,49 @@ pub async fn find_subdomain_conflict(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{files_domain_app_conflict, reserved_hostname_conflict};
+    use nasty_apps::AppIngress;
+    use nasty_system::settings::Settings;
+
+    fn ingress(name: &str, subdomain: Option<&str>) -> AppIngress {
+        AppIngress {
+            name: name.into(),
+            host_port: 8080,
+            path: format!("/apps/{name}/"),
+            subdomain: subdomain.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn app_hostname_rejects_configured_files_domain_case_insensitively() {
+        let settings = Settings {
+            files_domain: Some("Files.Example.com".into()),
+            ..Settings::default()
+        };
+        let reason = reserved_hostname_conflict(&settings, "files.example.com").unwrap();
+        assert!(reason.contains("files portal hostname"));
+    }
+
+    #[test]
+    fn files_domain_rejects_existing_app_hostname_case_insensitively() {
+        let ingresses = [
+            ingress("path-only", None),
+            ingress("jellyfin", Some("MEDIA.EXAMPLE.COM")),
+        ];
+        let reason = files_domain_app_conflict("media.example.com", Ok(&ingresses))
+            .unwrap()
+            .unwrap();
+        assert!(reason.contains("jellyfin"));
+    }
+
+    #[test]
+    fn files_domain_check_fails_closed_without_route_metadata() {
+        let result =
+            files_domain_app_conflict("files.example.com", Err("Caddy unavailable".into()));
+        assert_eq!(result.unwrap_err(), "Caddy unavailable");
+    }
 }

@@ -22,6 +22,7 @@ pub(super) async fn try_route(
             serde_json::json!({
                 "username": session.username,
                 "role": session.role,
+                "file_principal": session.file_principal,
                 "scoped": session.filesystem.is_some() || session.owner.is_some(),
             }),
         ),
@@ -53,11 +54,19 @@ pub(super) async fn try_route(
                 username: String,
                 password: String,
                 role: Role,
+                file_principal: Option<String>,
             }
             match parse_params::<P>(req) {
                 Ok(p) => match state
                     .auth
-                    .create_user(session, &p.username, &p.password, p.role)
+                    .create_user(
+                        session,
+                        &p.username,
+                        &p.password,
+                        p.role,
+                        p.file_principal,
+                        &state.smb,
+                    )
                     .await
                 {
                     Ok(()) => ok(req, "ok"),

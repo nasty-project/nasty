@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { NastyClient } from './rpc';
+import { isReconnectAuthError, NastyClient } from './rpc';
 
 // ── Mock WebSocket ──────────────────────────────────────────────────
 // Tests drive the lifecycle synchronously: construct, then call open(),
@@ -82,6 +82,12 @@ afterEach(() => {
 // ── Auth handshake ──────────────────────────────────────────────────
 
 describe('auth handshake', () => {
+	test('matches the server invalid-session reconnect error case-insensitively', () => {
+		expect(isReconnectAuthError(new Error('invalid session'))).toBe(true);
+		expect(isReconnectAuthError(new Error('INVALID SESSION'))).toBe(true);
+		expect(isReconnectAuthError(new Error('WebSocket connection failed'))).toBe(false);
+	});
+
 	test('connect resolves with AuthResult on success', async () => {
 		const client = new NastyClient('ws://localhost/api');
 		const promise = client.connect();

@@ -20,6 +20,10 @@ pub struct User {
     #[serde(default)]
     pub password_hash: Option<String>,
     pub role: Role,
+    /// SMB/local or domain principal used by the read-only file portal.
+    /// Absent on management users and on records persisted before issue #475.
+    #[serde(default)]
+    pub file_principal: Option<String>,
     /// When true, the user must change their password before accessing anything else.
     #[serde(default)]
     pub must_change_password: bool,
@@ -73,6 +77,9 @@ pub enum Role {
     /// Can create/delete/attach subvolumes and snapshots, read filesystems.
     /// Cannot destroy filesystems, manage users, or touch system settings.
     Operator,
+    /// Deny-by-default standard user with access only to explicitly allowed
+    /// self-service RPCs and the SMB-backed file portal.
+    User,
 }
 
 /// Login sessions expire after this many seconds.
@@ -83,6 +90,9 @@ pub struct Session {
     pub token: String,
     pub username: String,
     pub role: Role,
+    /// Principal bound to an interactive standard-user session.
+    #[serde(default)]
+    pub file_principal: Option<String>,
     /// For API tokens: restricts filesystem visibility to a single filesystem.
     #[serde(default)]
     pub filesystem: Option<String>,
@@ -103,8 +113,8 @@ pub struct Session {
 /// central JSON-RPC dispatcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointAccess {
-    /// Any authenticated role. Filesystem/owner scope is enforced separately
-    /// by handlers that operate on scoped resources.
+    /// Any authenticated management role. Filesystem/owner scope is enforced
+    /// separately by handlers that operate on scoped resources.
     Read,
     /// Operator or Admin. Resource scope is enforced by the handler.
     Mutation,
@@ -115,6 +125,8 @@ pub enum EndpointAccess {
     /// Session-management operations that remain available while a password
     /// change is required, such as checking the current session or logout.
     SelfService,
+    /// Interactive, unscoped standard-user session with a bound principal.
+    PortalFiles,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +134,8 @@ pub enum AccessDenied {
     PasswordChangeRequired,
     InsufficientRole,
     ScopedCredential,
+    MissingFilePrincipal,
+    InteractiveSessionRequired,
 }
 
 impl AccessDenied {
@@ -130,6 +144,8 @@ impl AccessDenied {
             Self::PasswordChangeRequired => "Password change required",
             Self::InsufficientRole => "Permission denied",
             Self::ScopedCredential => "Scoped credentials cannot access this endpoint",
+            Self::MissingFilePrincipal => "A file principal is required",
+            Self::InteractiveSessionRequired => "An interactive session is required",
         }
     }
 }
@@ -143,11 +159,13 @@ pub fn authorize_session(session: &Session, access: EndpointAccess) -> Result<()
     }
 
     let role_allowed = match access {
-        EndpointAccess::Read | EndpointAccess::SelfService => true,
+        EndpointAccess::Read => session.role != Role::User,
+        EndpointAccess::SelfService => true,
         EndpointAccess::Mutation | EndpointAccess::UnscopedMutation => {
             matches!(session.role, Role::Admin | Role::Operator)
         }
         EndpointAccess::RootEquivalent => session.role == Role::Admin,
+        EndpointAccess::PortalFiles => session.role == Role::User,
     };
     if !role_allowed {
         return Err(AccessDenied::InsufficientRole);
@@ -155,10 +173,21 @@ pub fn authorize_session(session: &Session, access: EndpointAccess) -> Result<()
 
     if matches!(
         access,
-        EndpointAccess::UnscopedMutation | EndpointAccess::RootEquivalent
+        EndpointAccess::UnscopedMutation
+            | EndpointAccess::RootEquivalent
+            | EndpointAccess::PortalFiles
     ) && (session.filesystem.is_some() || session.owner.is_some())
     {
         return Err(AccessDenied::ScopedCredential);
+    }
+
+    if access == EndpointAccess::PortalFiles {
+        if session.client_ip.is_none() {
+            return Err(AccessDenied::InteractiveSessionRequired);
+        }
+        if session.file_principal.as_deref().is_none_or(str::is_empty) {
+            return Err(AccessDenied::MissingFilePrincipal);
+        }
     }
 
     Ok(())
@@ -408,6 +437,9 @@ impl AuthService {
             token: token.clone(),
             username: user.username.clone(),
             role: user.role.clone(),
+            file_principal: (user.role == Role::User)
+                .then(|| user.file_principal.clone())
+                .flatten(),
             filesystem: None,
             owner: None,
             created_at: now,
@@ -474,6 +506,24 @@ impl AuthService {
                 && u.oidc_issuer.as_deref() == Some(&identity.issuer)
         });
 
+        if role == Role::User {
+            let safely_bound = existing_idx
+                .and_then(|idx| state.users[idx].file_principal.as_deref())
+                .is_some_and(|principal| !principal.is_empty());
+            if !safely_bound {
+                audit(
+                    "oidc_login_denied_unbound_user",
+                    identity
+                        .preferred_username
+                        .as_deref()
+                        .unwrap_or(&identity.subject),
+                    client_ip,
+                    "standard User role requires a pre-provisioned file principal",
+                );
+                return Err(AuthError::Forbidden);
+            }
+        }
+
         if existing_idx.is_none() {
             if !auto_provision {
                 audit(
@@ -492,6 +542,7 @@ impl AuthService {
                 username: username.clone(),
                 password_hash: None,
                 role: role.clone(),
+                file_principal: None,
                 must_change_password: false,
                 oidc_subject: Some(identity.subject.clone()),
                 oidc_issuer: Some(identity.issuer.clone()),
@@ -503,17 +554,27 @@ impl AuthService {
 
         let idx = existing_idx.expect("user index resolved above");
         let user = &mut state.users[idx];
-        if user.role != role {
+        let role_changed = user.role != role;
+        if role_changed {
             prior_role = Some(user.role.clone());
             user.role = role.clone();
+            if role != Role::User {
+                user.file_principal = None;
+            }
         }
 
         let username = user.username.clone();
+        if role_changed {
+            revoke_user_sessions(&mut state.sessions, &username);
+        }
         let token = generate_token();
         let session = Session {
             token: token.clone(),
             username: username.clone(),
             role: role.clone(),
+            file_principal: (role == Role::User)
+                .then(|| user.file_principal.clone())
+                .flatten(),
             filesystem: None,
             owner: None,
             created_at: now,
@@ -627,6 +688,7 @@ impl AuthService {
             token: token.to_string(),
             username: t.name.clone(),
             role: t.role.clone(),
+            file_principal: None,
             filesystem: t.filesystem.clone(),
             owner: if t.role == Role::Operator {
                 Some(t.name.clone())
@@ -652,10 +714,15 @@ impl AuthService {
         if session.role != Role::Admin {
             return Err(AuthError::Forbidden);
         }
+        if role == Role::User {
+            return Err(AuthError::Forbidden);
+        }
 
         let mut current = self.state.write().await;
         let mut state = current.clone();
-        if state.api_tokens.iter().any(|t| t.name == name) {
+        if state.api_tokens.iter().any(|t| t.name == name)
+            || state.users.iter().any(|user| user.username == name)
+        {
             return Err(AuthError::UserExists); // reuse: token name already taken
         }
 
@@ -770,6 +837,12 @@ impl AuthService {
         username: &str,
         new_password: &str,
     ) -> Result<(), AuthError> {
+        // API-token display names historically shared the same namespace as
+        // WebUI usernames. Never let a bearer token become a self-service
+        // password credential, including for persisted legacy collisions.
+        if session.client_ip.is_none() {
+            return Err(AuthError::Forbidden);
+        }
         if session.role != Role::Admin && session.username != username {
             return Err(AuthError::Forbidden);
         }
@@ -789,10 +862,12 @@ impl AuthService {
         user.password_hash = Some(hash_password(new_password)?);
         user.must_change_password = false;
 
-        // Also clear the flag on any active sessions for this user
-        for s in state.sessions.iter_mut().filter(|s| s.username == username) {
-            s.must_change_password = false;
-        }
+        revoke_sessions_after_password_change(
+            &mut state.sessions,
+            username,
+            &session.username,
+            &session.token,
+        );
 
         commit_state(&mut current, state).await?;
 
@@ -813,6 +888,8 @@ impl AuthService {
         username: &str,
         password: &str,
         role: Role,
+        file_principal: Option<String>,
+        smb: &nasty_sharing::smb::SmbService,
     ) -> Result<(), AuthError> {
         if session.role != Role::Admin {
             return Err(AuthError::Forbidden);
@@ -822,9 +899,18 @@ impl AuthService {
             return Err(AuthError::WeakPassword);
         }
 
+        let file_principal = validate_file_principal_binding(&role, file_principal.as_deref())?;
+        if let Some(principal) = file_principal.as_deref() {
+            smb.principal_authorization(principal)
+                .await
+                .map_err(|error| AuthError::InvalidFilePrincipal(error.to_string()))?;
+        }
+
         let mut current = self.state.write().await;
         let mut state = current.clone();
-        if state.users.iter().any(|u| u.username == username) {
+        if state.users.iter().any(|u| u.username == username)
+            || state.api_tokens.iter().any(|token| token.name == username)
+        {
             return Err(AuthError::UserExists);
         }
 
@@ -832,6 +918,7 @@ impl AuthService {
             username: username.to_string(),
             password_hash: Some(hash_password(password)?),
             role: role.clone(),
+            file_principal,
             must_change_password: false,
             oidc_subject: None,
             oidc_issuer: None,
@@ -889,6 +976,9 @@ impl AuthService {
             .map(|u| UserInfo {
                 username: u.username.clone(),
                 role: u.role.clone(),
+                file_principal: (u.role == Role::User)
+                    .then(|| u.file_principal.clone())
+                    .flatten(),
                 webauthn_credential_count: u.webauthn_credentials.len(),
             })
             .collect()
@@ -1198,6 +1288,9 @@ impl AuthService {
             token: token.clone(),
             username: user.username.clone(),
             role: user.role.clone(),
+            file_principal: (user.role == Role::User)
+                .then(|| user.file_principal.clone())
+                .flatten(),
             filesystem: None,
             owner: None,
             created_at: now,
@@ -1244,6 +1337,8 @@ impl AuthService {
 pub struct UserInfo {
     pub username: String,
     pub role: Role,
+    #[serde(default)]
+    pub file_principal: Option<String>,
     /// How many WebAuthn credentials are registered to this user.
     /// Drives the admin "Reset security keys" affordance on the
     /// /users page — admins only see the button on rows where
@@ -1251,6 +1346,41 @@ pub struct UserInfo {
     /// on every row.
     #[serde(default)]
     pub webauthn_credential_count: usize,
+}
+
+/// Normalize and enforce the persisted role/principal invariant. Callers that
+/// create a standard user must additionally resolve the returned principal
+/// through `SmbService` before committing the user.
+pub(crate) fn validate_file_principal_binding(
+    role: &Role,
+    file_principal: Option<&str>,
+) -> Result<Option<String>, AuthError> {
+    match role {
+        Role::User => {
+            let principal = file_principal
+                .map(str::trim)
+                .filter(|principal| !principal.is_empty())
+                .ok_or_else(|| {
+                    AuthError::InvalidFilePrincipal(
+                        "Role::User requires a non-empty file_principal".to_string(),
+                    )
+                })?;
+            if principal.len() > 256 || principal.chars().any(char::is_control) {
+                return Err(AuthError::InvalidFilePrincipal(
+                    "principal is too long or contains control characters".to_string(),
+                ));
+            }
+            Ok(Some(principal.to_string()))
+        }
+        Role::Admin | Role::Operator | Role::ReadOnly => {
+            if file_principal.is_some() {
+                return Err(AuthError::InvalidFilePrincipal(
+                    "file_principal is only valid for Role::User".to_string(),
+                ));
+            }
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1273,6 +1403,8 @@ pub enum AuthError {
     NotFound,
     #[error("password must be at least 8 characters")]
     WeakPassword,
+    #[error("invalid file principal: {0}")]
+    InvalidFilePrincipal(String),
     #[error("password hash error: {0}")]
     HashError(String),
     #[error("auth state at {path} is corrupt: {source}")]
@@ -1356,6 +1488,91 @@ pub async fn read_audit_log(limit: usize) -> Vec<serde_json::Value> {
     entries
 }
 
+const MAX_MY_ACTIVITY_ENTRIES: usize = 500;
+const MAX_MY_ACTIVITY_TAIL_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read only the authenticated user's structured audit entries. Filtering is
+/// performed before the caller-controlled limit so another user's activity
+/// cannot crowd the requested user's records out of the result.
+pub async fn read_audit_log_for_user(username: &str, limit: usize) -> Vec<serde_json::Value> {
+    let content = read_bounded_tail(Path::new(AUDIT_LOG_PATH), MAX_MY_ACTIVITY_TAIL_BYTES)
+        .await
+        .unwrap_or_default();
+    filter_audit_log_for_user(&String::from_utf8_lossy(&content), username, limit)
+}
+
+async fn read_bounded_tail(path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let length = file.metadata().await?.len();
+    let start = length.saturating_sub(max_bytes as u64);
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let mut content = Vec::with_capacity(max_bytes.min(length as usize));
+    file.take(max_bytes as u64)
+        .read_to_end(&mut content)
+        .await?;
+    if start > 0 {
+        match content.iter().position(|byte| *byte == b'\n') {
+            Some(end) => {
+                content.drain(..=end).count();
+            }
+            None => content.clear(),
+        }
+    }
+    Ok(content)
+}
+
+fn filter_audit_log_for_user(
+    content: &str,
+    username: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    content
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|entry| {
+            let user = entry.get("user")?.as_str()?;
+            if user != username {
+                return None;
+            }
+            Some(serde_json::json!({
+                "ts": entry.get("ts")?.as_u64()?,
+                "event": entry.get("event")?.as_str()?,
+                "user": user,
+                "ip": entry.get("ip")?.as_str()?,
+                "detail": entry.get("detail")?.as_str()?,
+            }))
+        })
+        .take(limit.min(MAX_MY_ACTIVITY_ENTRIES))
+        .collect()
+}
+
+fn revoke_sessions_after_password_change(
+    sessions: &mut Vec<Session>,
+    target_username: &str,
+    actor_username: &str,
+    current_token: &str,
+) {
+    let changing_own_password = target_username == actor_username;
+    sessions.retain(|session| {
+        session.username != target_username
+            || (changing_own_password && ct_eq_str(&session.token, current_token))
+    });
+    if changing_own_password
+        && let Some(current) = sessions
+            .iter_mut()
+            .find(|session| ct_eq_str(&session.token, current_token))
+    {
+        current.must_change_password = false;
+    }
+}
+
+fn revoke_user_sessions(sessions: &mut Vec<Session>, username: &str) {
+    sessions.retain(|session| session.username != username);
+}
+
 pub(crate) fn hash_password(password: &str) -> Result<String, AuthError> {
     // Generate 16 random bytes for salt, encode as base64ct for SaltString
     let mut salt_bytes = [0u8; 16];
@@ -1437,12 +1654,13 @@ fn pick_username(existing: &[User], identity: &crate::auth_oidc::OidcIdentity) -
     unreachable!()
 }
 
-/// Parse a role string from configuration. Accepts `admin`, `operator`, `readonly`.
+/// Parse a role string from configuration.
 pub fn parse_role_str(s: &str) -> Option<Role> {
     match s.trim().to_ascii_lowercase().as_str() {
         "admin" => Some(Role::Admin),
         "operator" => Some(Role::Operator),
         "readonly" | "read_only" | "read-only" => Some(Role::ReadOnly),
+        "user" => Some(Role::User),
         _ => None,
     }
 }
@@ -1475,6 +1693,7 @@ async fn initialize_state(
             username: "admin".to_string(),
             password_hash: Some(hash_password("admin")?),
             role: Role::Admin,
+            file_principal: None,
             must_change_password: true,
             oidc_subject: None,
             oidc_issuer: None,
@@ -1797,6 +2016,7 @@ mod tests {
             username: name.to_string(),
             password_hash: Some("hash".to_string()),
             role,
+            file_principal: None,
             must_change_password: false,
             oidc_subject: None,
             oidc_issuer: None,
@@ -1809,6 +2029,7 @@ mod tests {
             token: "token".to_string(),
             username: "test".to_string(),
             role,
+            file_principal: None,
             filesystem: None,
             owner: None,
             created_at: 0,
@@ -2083,12 +2304,21 @@ mod tests {
         let admin = session(Role::Admin);
         let operator = session(Role::Operator);
         let read_only = session(Role::ReadOnly);
+        let user = session(Role::User);
 
         for access in [EndpointAccess::Read, EndpointAccess::SelfService] {
             assert_eq!(authorize_session(&admin, access), Ok(()));
             assert_eq!(authorize_session(&operator, access), Ok(()));
             assert_eq!(authorize_session(&read_only, access), Ok(()));
         }
+        assert_eq!(
+            authorize_session(&user, EndpointAccess::Read),
+            Err(AccessDenied::InsufficientRole)
+        );
+        assert_eq!(
+            authorize_session(&user, EndpointAccess::SelfService),
+            Ok(())
+        );
 
         assert_eq!(authorize_session(&admin, EndpointAccess::Mutation), Ok(()));
         assert_eq!(
@@ -2111,6 +2341,34 @@ mod tests {
     }
 
     #[test]
+    fn portal_access_requires_bound_interactive_unscoped_user() {
+        let mut user = session(Role::User);
+        assert_eq!(
+            authorize_session(&user, EndpointAccess::PortalFiles),
+            Err(AccessDenied::InteractiveSessionRequired)
+        );
+        user.client_ip = Some("192.0.2.10".to_string());
+        assert_eq!(
+            authorize_session(&user, EndpointAccess::PortalFiles),
+            Err(AccessDenied::MissingFilePrincipal)
+        );
+        user.file_principal = Some("CORP\\alice".to_string());
+        assert_eq!(
+            authorize_session(&user, EndpointAccess::PortalFiles),
+            Ok(())
+        );
+        user.filesystem = Some("pool".to_string());
+        assert_eq!(
+            authorize_session(&user, EndpointAccess::PortalFiles),
+            Err(AccessDenied::ScopedCredential)
+        );
+        assert_eq!(
+            authorize_session(&session(Role::ReadOnly), EndpointAccess::PortalFiles),
+            Err(AccessDenied::InsufficientRole)
+        );
+    }
+
+    #[test]
     fn forced_password_change_only_allows_self_service() {
         let mut admin = session(Role::Admin);
         admin.must_change_password = true;
@@ -2124,6 +2382,7 @@ mod tests {
             EndpointAccess::Mutation,
             EndpointAccess::UnscopedMutation,
             EndpointAccess::RootEquivalent,
+            EndpointAccess::PortalFiles,
         ] {
             assert_eq!(
                 authorize_session(&admin, access),
@@ -2176,6 +2435,241 @@ mod tests {
     fn not_only_admin_when_user_isnt_admin() {
         let users = vec![user("alice", Role::Admin), user("bob", Role::Operator)];
         assert!(!is_only_admin(&users, "bob"));
+    }
+
+    #[test]
+    fn user_role_and_file_principal_are_backward_compatible_in_json() {
+        assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"user\"");
+        let old: User = serde_json::from_value(serde_json::json!({
+            "username": "reader",
+            "password_hash": null,
+            "role": "readonly"
+        }))
+        .unwrap();
+        assert_eq!(old.file_principal, None);
+        let old_session: Session = serde_json::from_value(serde_json::json!({
+            "token": "token",
+            "username": "reader",
+            "role": "readonly",
+            "created_at": 1
+        }))
+        .unwrap();
+        assert_eq!(old_session.file_principal, None);
+    }
+
+    #[test]
+    fn file_principal_binding_is_required_only_for_standard_users() {
+        assert!(validate_file_principal_binding(&Role::User, None).is_err());
+        assert!(validate_file_principal_binding(&Role::User, Some("  ")).is_err());
+        assert_eq!(
+            validate_file_principal_binding(&Role::User, Some(" CORP\\alice ")).unwrap(),
+            Some("CORP\\alice".to_string())
+        );
+        for role in [Role::Admin, Role::Operator, Role::ReadOnly] {
+            assert_eq!(validate_file_principal_binding(&role, None).unwrap(), None);
+            assert!(validate_file_principal_binding(&role, Some("alice")).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn api_token_creation_rejects_user_role() {
+        let service = AuthService {
+            state: Arc::new(RwLock::new(initialized_state())),
+            rate_limit: Arc::new(RwLock::new(RateLimitState::default())),
+        };
+        let error = service
+            .create_api_token(
+                &session(Role::Admin),
+                "portal-token",
+                Role::User,
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect_err("standard-user tokens must be rejected");
+        assert!(matches!(error, AuthError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn api_token_name_cannot_equal_a_webui_username() {
+        let service = AuthService {
+            state: Arc::new(RwLock::new(initialized_state())),
+            rate_limit: Arc::new(RwLock::new(RateLimitState::default())),
+        };
+        let error = service
+            .create_api_token(
+                &session(Role::Admin),
+                "alice",
+                Role::ReadOnly,
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect_err("token/user audit identities must not collide");
+        assert!(matches!(error, AuthError::UserExists));
+    }
+
+    #[tokio::test]
+    async fn webui_username_cannot_equal_an_api_token_name() {
+        let mut state = initialized_state();
+        state.api_tokens.push(ApiToken {
+            id: "id".into(),
+            name: "automation".into(),
+            token: "hash".into(),
+            role: Role::ReadOnly,
+            created_at: 1,
+            filesystem: None,
+            expires_at: None,
+            allowed_ips: Vec::new(),
+        });
+        let service = AuthService {
+            state: Arc::new(RwLock::new(state)),
+            rate_limit: Arc::new(RwLock::new(RateLimitState::default())),
+        };
+        let error = service
+            .create_user(
+                &session(Role::Admin),
+                "automation",
+                "password123",
+                Role::ReadOnly,
+                None,
+                &nasty_sharing::smb::SmbService::new(),
+            )
+            .await
+            .expect_err("user/token audit identities must not collide");
+        assert!(matches!(error, AuthError::UserExists));
+    }
+
+    #[test]
+    fn password_change_revokes_other_interactive_sessions_only() {
+        let mut current = session(Role::User);
+        current.username = "alice".into();
+        current.token = "current".into();
+        current.must_change_password = true;
+        let mut other = current.clone();
+        other.token = "other".into();
+        let mut bob = current.clone();
+        bob.username = "bob".into();
+        bob.token = "bob-token".into();
+        let mut sessions = vec![current, other, bob];
+
+        revoke_sessions_after_password_change(&mut sessions, "alice", "alice", "current");
+
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|session| session.token == "bob-token"));
+        let current = sessions
+            .iter()
+            .find(|session| session.token == "current")
+            .unwrap();
+        assert!(!current.must_change_password);
+    }
+
+    #[test]
+    fn admin_password_reset_revokes_target_without_changing_admin_session() {
+        let mut admin = session(Role::Admin);
+        admin.username = "admin".into();
+        admin.token = "admin-token".into();
+        admin.must_change_password = true;
+        let mut alice = session(Role::User);
+        alice.username = "alice".into();
+        alice.token = "alice-token".into();
+        let mut sessions = vec![admin, alice];
+
+        revoke_sessions_after_password_change(&mut sessions, "alice", "admin", "admin-token");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].username, "admin");
+        assert!(sessions[0].must_change_password);
+    }
+
+    #[tokio::test]
+    async fn api_tokens_cannot_change_webui_passwords() {
+        let service = AuthService {
+            state: Arc::new(RwLock::new(initialized_state())),
+            rate_limit: Arc::new(RwLock::new(RateLimitState::default())),
+        };
+        let mut token_session = session(Role::Admin);
+        token_session.username = "admin".into();
+        token_session.client_ip = None;
+
+        let error = service
+            .change_password(&token_session, "admin", "new-password")
+            .await
+            .expect_err("API tokens must not act as password credentials");
+        assert!(matches!(error, AuthError::Forbidden));
+    }
+
+    #[test]
+    fn role_change_revokes_every_existing_user_session() {
+        let mut alice = session(Role::Admin);
+        alice.username = "alice".into();
+        let mut second_alice = alice.clone();
+        second_alice.token = "second".into();
+        let bob = session(Role::Operator);
+        let mut sessions = vec![alice, second_alice, bob];
+
+        revoke_user_sessions(&mut sessions, "alice");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].username, "test");
+    }
+
+    #[tokio::test]
+    async fn oidc_auto_provisioning_fails_closed_for_unbound_user_role() {
+        let service = AuthService {
+            state: Arc::new(RwLock::new(initialized_state())),
+            rate_limit: Arc::new(RwLock::new(RateLimitState::default())),
+        };
+        let identity = crate::auth_oidc::OidcIdentity {
+            issuer: "https://id.example.test".to_string(),
+            subject: "subject-1".to_string(),
+            email: Some("portal@example.test".to_string()),
+            preferred_username: Some("portal".to_string()),
+            groups: vec!["users".to_string()],
+        };
+        let error = service
+            .login_or_provision_oidc(&identity, Some(Role::User), true, "192.0.2.1")
+            .await
+            .expect_err("OIDC must not auto-provision an unbound standard user");
+        assert!(matches!(error, AuthError::Forbidden));
+        assert_eq!(service.state.read().await.users.len(), 1);
+        assert_eq!(parse_role_str("user"), Some(Role::User));
+    }
+
+    #[test]
+    fn my_activity_filters_exact_user_before_limit() {
+        let content = [
+            serde_json::json!({"ts": 1, "event": "one", "user": "alice", "ip": "a", "detail": ""}),
+            serde_json::json!({"ts": 2, "event": "other", "user": "alice2", "ip": "b", "detail": ""}),
+            serde_json::json!({"ts": 3, "event": "two", "user": "alice", "ip": "a", "detail": ""}),
+            serde_json::json!({"ts": 4, "event": "latest-other", "user": "bob", "ip": "c", "detail": ""}),
+        ]
+        .into_iter()
+        .map(|entry| entry.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        let entries = filter_audit_log_for_user(&content, "alice", 2);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["event"], "two");
+        assert_eq!(entries[1]["event"], "one");
+        assert!(filter_audit_log_for_user(&content, "ali", 10).is_empty());
+    }
+
+    #[tokio::test]
+    async fn my_activity_tail_read_is_bounded_and_discards_partial_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        tokio::fs::write(&path, b"old-line\npartial-line\nnew-one\nnew-two\n")
+            .await
+            .unwrap();
+
+        let tail = read_bounded_tail(&path, 20).await.unwrap();
+
+        assert!(tail.len() <= 20);
+        assert_eq!(String::from_utf8(tail).unwrap(), "new-one\nnew-two\n");
     }
 
     #[test]

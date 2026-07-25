@@ -1,5 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
 
 use nasty_common::{HasId, StateDir};
 use schemars::JsonSchema;
@@ -31,6 +33,8 @@ pub enum SmbError {
     TimeMachineRequiresAuth,
     #[error("samba reload failed: {0}")]
     ReloadFailed(String),
+    #[error("principal lookup failed: {0}")]
+    PrincipalLookup(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -139,6 +143,13 @@ fn state_dir() -> StateDir {
 
 pub struct SmbService;
 
+/// Current NSS/winbind view of a portal user's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalAuthorization {
+    pub principal: String,
+    pub groups: Vec<String>,
+}
+
 impl Default for SmbService {
     fn default() -> Self {
         Self::new()
@@ -175,6 +186,23 @@ impl SmbService {
             .load::<SmbShare>(id)
             .await
             .ok_or_else(|| SmbError::NotFound(id.to_string()))
+    }
+
+    /// Resolve a local or domain principal and all of its current groups via
+    /// NSS/winbind. Commands receive the principal as a single argv value;
+    /// numeric GIDs are resolved separately so group names containing spaces
+    /// are never split on whitespace.
+    pub async fn principal_authorization(
+        &self,
+        principal: &str,
+    ) -> Result<PrincipalAuthorization, SmbError> {
+        validate_file_principal(principal)?;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            resolve_principal_authorization(principal),
+        )
+        .await
+        .map_err(|_| SmbError::PrincipalLookup("lookup timed out".to_string()))?
     }
 
     pub async fn create(&self, req: CreateSmbShareRequest) -> Result<SmbShare, SmbError> {
@@ -307,6 +335,195 @@ impl SmbService {
         info!("Deleted SMB share '{}'", req.id);
         Ok(())
     }
+}
+
+/// Pure portal policy. Samba principal names are ASCII case-insensitive, but
+/// matches remain exact so similarly named users and groups cannot collide.
+pub fn share_allows_principal(share: &SmbShare, principal: &str, groups: &[String]) -> bool {
+    // Raw directives are evaluated by Samba and can override path, valid
+    // users, invalid users, and access semantics. The portal cannot safely
+    // reproduce that effective policy, so any such share is portal-ineligible.
+    if !share.enabled
+        || share.guest_ok
+        || share.valid_users.is_empty()
+        || !share.extra_params.is_empty()
+    {
+        return false;
+    }
+
+    share.valid_users.iter().any(|allowed| {
+        if let Some(group) = allowed.strip_prefix('@') {
+            groups
+                .iter()
+                .any(|current| current.eq_ignore_ascii_case(group))
+        } else {
+            allowed.eq_ignore_ascii_case(principal)
+        }
+    })
+}
+
+fn validate_file_principal(principal: &str) -> Result<(), SmbError> {
+    if principal.is_empty() || principal.trim() != principal || principal.starts_with('@') {
+        return Err(SmbError::InvalidName(
+            "file principal must be a non-empty user principal".to_string(),
+        ));
+    }
+    validate_valid_users(&[principal.to_string()])
+}
+
+const MAX_NSS_OUTPUT: usize = 64 * 1024;
+const MAX_PRINCIPAL_GROUPS: usize = 128;
+
+struct BoundedOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn resolve_principal_authorization(
+    principal: &str,
+) -> Result<PrincipalAuthorization, SmbError> {
+    let output = run_bounded_command("id", &["-G", "--", principal]).await?;
+    if !output.status.success() {
+        return Err(SmbError::PrincipalLookup(format!(
+            "principal does not exist: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let gids = std::str::from_utf8(&output.stdout)
+        .map_err(|_| SmbError::PrincipalLookup("id returned non-UTF-8 output".to_string()))?;
+    let mut unique_gids = HashSet::new();
+    let gids: Vec<String> = gids
+        .split_whitespace()
+        .map(|gid| {
+            gid.parse::<u32>()
+                .map(|_| gid.to_string())
+                .map_err(|_| SmbError::PrincipalLookup("id returned an invalid GID".to_string()))
+        })
+        .collect::<Result<_, _>>()?;
+    let gids: Vec<String> = gids
+        .into_iter()
+        .filter(|gid| unique_gids.insert(gid.clone()))
+        .collect();
+    if gids.is_empty() || gids.len() > MAX_PRINCIPAL_GROUPS {
+        return Err(SmbError::PrincipalLookup(
+            "principal has no groups or exceeds the group limit".to_string(),
+        ));
+    }
+
+    let mut groups = Vec::with_capacity(gids.len());
+    for gid in gids {
+        let output = run_bounded_command("getent", &["group", &gid]).await?;
+        if !output.status.success() {
+            return Err(SmbError::PrincipalLookup(format!(
+                "could not resolve GID {gid}"
+            )));
+        }
+        let record = std::str::from_utf8(&output.stdout).map_err(|_| {
+            SmbError::PrincipalLookup("getent returned non-UTF-8 output".to_string())
+        })?;
+        let name = record
+            .lines()
+            .next()
+            .and_then(|line| line.split_once(':').map(|(name, _)| name))
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                SmbError::PrincipalLookup(format!(
+                    "getent returned an invalid record for GID {gid}"
+                ))
+            })?;
+        groups.push(name.to_string());
+    }
+
+    // Local portal principals must exist in both NSS and Samba's current
+    // passdb. Domain principals remain governed by the NSS/winbind lookup
+    // above because they are not local passdb entries.
+    if !principal.contains('\\') {
+        let output = run_bounded_command("pdbedit", &["--list", "--user", principal]).await?;
+        if !output.status.success() || !local_passdb_contains_principal(principal, &output.stdout) {
+            return Err(SmbError::PrincipalLookup(
+                "local principal is not present in Samba passdb".to_string(),
+            ));
+        }
+    }
+
+    Ok(PrincipalAuthorization {
+        principal: principal.to_string(),
+        groups,
+    })
+}
+
+fn local_passdb_contains_principal(principal: &str, output: &[u8]) -> bool {
+    let Ok(output) = std::str::from_utf8(output) else {
+        return false;
+    };
+    output.lines().any(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case(principal))
+    })
+}
+
+async fn run_bounded_command(program: &str, args: &[&str]) -> Result<BoundedOutput, SmbError> {
+    use tokio::io::AsyncReadExt;
+
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| SmbError::PrincipalLookup(format!("start {program}: {error}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| SmbError::PrincipalLookup(format!("capture {program} stdout")))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| SmbError::PrincipalLookup(format!("capture {program} stderr")))?;
+
+    let collect = async {
+        let read_stdout = async {
+            let mut bytes = Vec::new();
+            stdout
+                .take((MAX_NSS_OUTPUT + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .map(|_| bytes)
+        };
+        let read_stderr = async {
+            let mut bytes = Vec::new();
+            stderr
+                .take((MAX_NSS_OUTPUT + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .map(|_| bytes)
+        };
+        let (stdout, stderr, status) = tokio::join!(read_stdout, read_stderr, child.wait());
+        let stdout = stdout.map_err(|error| {
+            SmbError::PrincipalLookup(format!("read {program} stdout: {error}"))
+        })?;
+        let stderr = stderr.map_err(|error| {
+            SmbError::PrincipalLookup(format!("read {program} stderr: {error}"))
+        })?;
+        let status = status
+            .map_err(|error| SmbError::PrincipalLookup(format!("wait for {program}: {error}")))?;
+        if stdout.len() > MAX_NSS_OUTPUT || stderr.len() > MAX_NSS_OUTPUT {
+            return Err(SmbError::PrincipalLookup(format!(
+                "{program} output exceeded the limit"
+            )));
+        }
+        Ok(BoundedOutput {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+
+    tokio::time::timeout(Duration::from_secs(2), collect)
+        .await
+        .map_err(|_| SmbError::PrincipalLookup(format!("{program} timed out")))?
 }
 
 /// Strip characters that could inject new Samba config directives.
@@ -1182,6 +1399,91 @@ mod tests {
         );
         assert!(validate_valid_users(&["".into()]).is_err());
         assert!(validate_valid_users(&["THISNETBIOSNAMEISTOOLONG\\alice".into()]).is_err());
+    }
+
+    #[test]
+    fn portal_share_policy_matches_direct_users_exactly_and_case_insensitively() {
+        let mut share = minimal_share();
+        share.valid_users = vec!["CORP\\Alice".into()];
+
+        assert!(share_allows_principal(&share, "corp\\alice", &[]));
+        assert!(!share_allows_principal(&share, "CORP\\alice2", &[]));
+        assert!(!share_allows_principal(&share, "alice", &[]));
+    }
+
+    #[test]
+    fn portal_share_policy_matches_local_and_domain_groups_with_spaces() {
+        let mut share = minimal_share();
+        share.valid_users = vec!["@staff".into(), "@CORP\\Domain Users".into()];
+
+        assert!(share_allows_principal(&share, "alice", &["STAFF".into()]));
+        assert!(share_allows_principal(
+            &share,
+            "CORP\\alice",
+            &["corp\\domain users".into()]
+        ));
+        assert!(!share_allows_principal(
+            &share,
+            "CORP\\alice",
+            &["CORP\\Domain User".into()]
+        ));
+    }
+
+    #[test]
+    fn portal_share_policy_denies_disabled_guest_and_unrestricted_shares() {
+        let mut share = minimal_share();
+        share.valid_users = vec!["alice".into()];
+
+        share.enabled = false;
+        assert!(!share_allows_principal(&share, "alice", &[]));
+        share.enabled = true;
+        share.guest_ok = true;
+        assert!(!share_allows_principal(&share, "alice", &[]));
+        share.guest_ok = false;
+        share.valid_users.clear();
+        assert!(!share_allows_principal(&share, "alice", &[]));
+    }
+
+    #[test]
+    fn portal_share_policy_denies_all_raw_samba_parameters() {
+        let mut share = minimal_share();
+        share.valid_users = vec!["alice".into()];
+
+        for key in ["valid users", "invalid users", "path", "read only"] {
+            share.extra_params.clear();
+            share.extra_params.insert(key.into(), "override".into());
+            assert!(!share_allows_principal(&share, "alice", &[]));
+        }
+    }
+
+    #[test]
+    fn local_passdb_membership_requires_an_exact_principal_record() {
+        assert!(local_passdb_contains_principal(
+            "alice",
+            b"alice:1001:Alice Example\n"
+        ));
+        assert!(local_passdb_contains_principal(
+            "ALICE",
+            b"alice:1001:Alice Example\n"
+        ));
+        assert!(!local_passdb_contains_principal(
+            "alice",
+            b"alice2:1002:Alice Two\n"
+        ));
+        assert!(!local_passdb_contains_principal("alice", b"not-a-record\n"));
+        assert!(!local_passdb_contains_principal(
+            "alice",
+            b"bad\xffrecord\n"
+        ));
+    }
+
+    #[test]
+    fn file_principal_validation_accepts_users_but_not_groups_or_whitespace() {
+        assert!(validate_file_principal("alice").is_ok());
+        assert!(validate_file_principal("CORP\\Alice Smith").is_ok());
+        assert!(validate_file_principal("@staff").is_err());
+        assert!(validate_file_principal(" alice").is_err());
+        assert!(validate_file_principal("").is_err());
     }
 
     // ── render_share_conf ──────────────────────────────────────────

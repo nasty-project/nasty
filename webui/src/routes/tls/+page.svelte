@@ -10,6 +10,8 @@
 
 	let settings: Settings | null = $state(null);
 	let tlsDomain = $state('');
+	let filesDomain = $state('');
+	let configuredFilesDomain = $state('');
 	let tlsAcmeEmail = $state('');
 	let tlsAcmeEnabled = $state(false);
 	let acmeStatus: { state: string; message: string; domain?: string; expires?: string; issued?: string; issuer?: string; last_attempt?: string } | null = $state(null);
@@ -30,6 +32,25 @@
 	let tlsChanged = $state(false);
 	let editing = $state(false);
 	const certActive = $derived.by(() => Boolean(acmeStatus && acmeStatus.state === 'success' && tlsAcmeEnabled));
+	const configuredFilesPortalUrl = $derived(configuredFilesDomain ? `https://${configuredFilesDomain}/portal` : '');
+	const filesDomainError = $derived(validateOptionalFilesDomain(filesDomain, tlsDomain));
+
+	function validateOptionalFilesDomain(value: string, mainDomain: string): string | null {
+		const host = value.trim();
+		if (!host) return null;
+		if (!/^[\x00-\x7F]+$/.test(host)) return 'Use an ASCII hostname.';
+		if (host.length > 253) return 'Hostname must be 253 characters or fewer.';
+		if (!host.includes('.')) return 'Enter a fully-qualified hostname containing a dot.';
+		if (host.toLowerCase() === mainDomain.trim().toLowerCase()) return 'Use a hostname different from the main TLS domain.';
+		for (const label of host.split('.')) {
+			if (!label) return 'Hostname labels cannot be empty.';
+			if (label.length > 63) return 'Each hostname label must be 63 characters or fewer.';
+			if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label)) {
+				return 'Use only letters, numbers, and internal hyphens in each label.';
+			}
+		}
+		return null;
+	}
 
 	// DNS-01 plugins compiled into the Caddy binary shipped with NASty
 	// (see `pkgs.caddy.withPlugins` in nixos/modules/nasty.nix). Picking
@@ -50,6 +71,8 @@
 	onMount(async () => {
 		settings = await client.call<Settings>('system.settings.get');
 		tlsDomain = settings?.tls_domain ?? '';
+		filesDomain = settings?.files_domain ?? '';
+		configuredFilesDomain = filesDomain;
 		tlsAcmeEmail = settings?.tls_acme_email ?? '';
 		tlsAcmeEnabled = settings?.tls_acme_enabled ?? false;
 		tlsChallengeType = settings?.tls_challenge_type ?? 'tls-alpn';
@@ -188,6 +211,7 @@
 		const result = await withToast(
 			() => client.call<Settings>('system.settings.update', {
 				tls_domain: tlsDomain || null,
+				files_domain: tlsAcmeEnabled ? filesDomain.trim() : '',
 				tls_acme_email: tlsAcmeEmail || null,
 				tls_acme_enabled: tlsAcmeEnabled,
 				tls_challenge_type: tlsChallengeType,
@@ -205,6 +229,8 @@
 		);
 		if (result !== undefined) {
 			settings = result;
+			filesDomain = result.files_domain ?? '';
+			configuredFilesDomain = filesDomain;
 			tlsChanged = false;
 			editing = false;
 			tlsDnsCredentials = '';
@@ -218,6 +244,12 @@
 
 <div>
 	<p class="text-sm text-muted-foreground mt-0.5">Manage HTTPS certificates for the NASty web interface.</p>
+	{#if configuredFilesPortalUrl}
+		<p class="mt-1 text-sm">
+			Files portal:
+			<a class="font-mono text-primary hover:underline break-all" href={configuredFilesPortalUrl}>{configuredFilesPortalUrl}</a>
+		</p>
+	{/if}
 </div>
 
 <div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -268,7 +300,7 @@
 
 		{#if tlsAcmeEnabled}
 			<div class="mb-4">
-				<label for="tls-domain" class="mb-1 block text-xs text-muted-foreground">Domain Name</label>
+				<label for="tls-domain" class="mb-1 block text-xs text-muted-foreground">Main TLS domain</label>
 				<input
 					id="tls-domain"
 					type="text"
@@ -278,6 +310,29 @@
 					placeholder="nasty.example.com"
 				/>
 				<span class="mt-1 block text-xs text-muted-foreground">Must resolve to this machine's public IP.</span>
+			</div>
+
+			<div class="mb-4">
+				<label for="files-domain" class="mb-1 block text-xs text-muted-foreground">
+					Files portal domain <span class="font-normal">(optional)</span>
+				</label>
+				<input
+					id="files-domain"
+					type="text"
+					bind:value={filesDomain}
+					oninput={() => tlsChanged = true}
+					aria-invalid={filesDomainError ? 'true' : undefined}
+					class="w-full rounded-md border bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring {filesDomainError ? 'border-destructive' : 'border-input'}"
+					placeholder="files.example.com"
+				/>
+				{#if filesDomainError}
+					<span class="mt-1 block text-xs text-destructive">{filesDomainError}</span>
+				{:else}
+					<span class="mt-1 block text-xs text-muted-foreground">
+						Point this hostname's DNS to this box. Users sign in separately on this hostname;
+						session cookies are host-only and are not shared with app subdomains.
+					</span>
+				{/if}
 			</div>
 
 			<div class="mb-4">
@@ -434,7 +489,7 @@
 		{/if}
 
 		<div class="flex gap-2">
-			<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged}>
+			<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged || !!filesDomainError}>
 				{savingTls ? 'Saving…' : 'Save'}
 			</Button>
 			{#if tlsAcmeEnabled && acmeStatus?.state !== 'running'}

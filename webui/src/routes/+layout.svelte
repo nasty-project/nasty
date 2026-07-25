@@ -64,6 +64,7 @@
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import { theme } from '$lib/theme.svelte';
 	import { terminalStatus } from '$lib/terminalStatus.svelte';
+	import { isManagementRole, isStandardUser, redirectForRole } from '$lib/access';
 
 	let { children } = $props();
 	let connected = $state(false);
@@ -235,7 +236,7 @@
 		typeof localStorage !== 'undefined' && localStorage.getItem(SSH_DISMISSED_KEY) === '1'
 	);
 	async function checkSshStatus() {
-		if (!connected || sshPasswordAuthDismissed) return;
+		if (!connected || !isManagementRole(authInfo?.role) || sshPasswordAuthDismissed) return;
 		try {
 			const result = await getClient().call<{ password_auth: boolean; keys: string[] }>('system.ssh.status');
 			sshPasswordAuth = result.password_auth;
@@ -254,7 +255,7 @@
 		typeof localStorage !== 'undefined' && localStorage.getItem(BACKUP_DISMISSED_KEY) === '1'
 	);
 	async function checkConfigBackup() {
-		if (!connected || configBackupDismissed) return;
+		if (!connected || !isManagementRole(authInfo?.role) || configBackupDismissed) return;
 		try {
 			const profiles = await getClient().call<{ sources: string[] }[]>('backup.profile.list');
 			configBackupMissing = !profiles.some(p => p.sources.some(s => s.includes('/var/lib/nasty')));
@@ -289,7 +290,8 @@
 	// Version info (loaded once after connect)
 	let sysInfo: { hostname: string; version: string; kernel: string; bcachefs_version: string; bcachefs_commit: string | null; bcachefs_pinned_ref: string | null; bcachefs_recommended_ref: string | null; bcachefs_is_custom: boolean; bcachefs_debug_checks: boolean; kvm_available: boolean; is_virtual: boolean } | null = $state(null);
 	setContext(NAVIGATION_CONTEXT, {
-		get kvmAvailable() { return sysInfo?.kvm_available === true; }
+		get kvmAvailable() { return sysInfo?.kvm_available === true; },
+		get role() { return authInfo?.role; }
 	});
 	// bcachefs "update available": the pin differs from the version this
 	// NASty build ships, so a one-click sync is offered. Distinct from
@@ -332,7 +334,7 @@
 
 	$effect(() => {
 		const _r = sysInfoRefresh.count; // track refresh triggers
-		if (connected) {
+		if (connected && isManagementRole(authInfo?.role)) {
 			getClient().call('system.info').then((info: any) => { sysInfo = info; }).catch(() => {});
 			getClient().call('system.settings.get').then((s: any) => {
 				clock24h = s.clock_24h ?? true;
@@ -354,7 +356,7 @@
 	}
 
 	function checkRebootRequired() {
-		if (connected) {
+		if (connected && isManagementRole(authInfo?.role)) {
 			getClient().call<boolean>('system.reboot_required').then((v) => {
 				if (v) rebootState.set(); else rebootState.clear();
 			}).catch(() => {});
@@ -383,7 +385,7 @@
 			|| systemStatus.critical_count + systemStatus.warning_count > 0)
 	);
 	function refreshSystemStatus() {
-		if (!connected || document.hidden) return;
+		if (!connected || !isManagementRole(authInfo?.role) || document.hidden) return;
 		getClient().call<SystemStatus>('system.status')
 			.then((s) => { systemStatus = s; })
 			.catch(() => {});
@@ -402,7 +404,7 @@
 	// already been torn down. The txn is still alive server-side; this
 	// fetch puts the banner back so the user can confirm.
 	$effect(() => {
-		if (connected) loadPendingRollback();
+		if (connected && isManagementRole(authInfo?.role)) loadPendingRollback();
 	});
 
 	// Clock
@@ -430,6 +432,9 @@
 	// the page bare (no sidebar, no login gate) — it talks to the engine
 	// only through the unauthenticated /api/public/share/* endpoints.
 	const isPublicShare = $derived($page.url.pathname.startsWith('/share/'));
+	const isPortalRoute = $derived(
+		$page.url.pathname === '/portal' || $page.url.pathname.startsWith('/portal/')
+	);
 
 	onMount(() => {
 		if (isPublicShare) return;
@@ -529,10 +534,14 @@
 		try {
 			const client = getClient();
 			authInfo = await client.connect();
+			const destination = redirectForRole(authInfo.role, $page.url.pathname);
+			if (destination) await goto(destination, { replaceState: true });
 			connected = true;
 			showLogin = false;
-			checkSshStatus();
-			checkConfigBackup();
+			if (isManagementRole(authInfo.role)) {
+				checkSshStatus();
+				checkConfigBackup();
+			}
 			// Capture engine commit on first connect for reconnect version check
 			if (!initialCommit) {
 				try {
@@ -670,7 +679,17 @@
 		try { await getClient().call('system.shutdown'); } catch { /* expected — engine dies */ }
 	}
 
-	const nav = $derived.by((): NavEntry[] => resolveNavigation({ kvmAvailable: sysInfo?.kvm_available === true }));
+	const nav = $derived.by((): NavEntry[] => resolveNavigation({
+		kvmAvailable: sysInfo?.kvm_available === true,
+		role: authInfo?.role,
+	}));
+	const roleRedirect = $derived.by(() => {
+		const session = authInfo as AuthResult | null;
+		return session && !isPublicShare ? redirectForRole(session.role, $page.url.pathname) : null;
+	});
+	$effect(() => {
+		if (connected && roleRedirect) void goto(roleRedirect, { replaceState: true });
+	});
 
 	// ── Nav mode (#588): opt-in "Common" short menu vs the full grouped tree ──
 	const NAV_MODE_KEY = 'nasty:nav_mode';
@@ -851,6 +870,23 @@
 				<Button type="submit" class="w-full">Set password</Button>
 			</form>
 		</div>
+	</div>
+{:else if roleRedirect}
+	<div class="flex min-h-screen items-center justify-center bg-background text-sm text-muted-foreground">
+		Opening your workspace...
+	</div>
+{:else if isStandardUser(authInfo?.role) || (!authInfo && isPortalRoute)}
+	<div class="relative min-h-screen bg-background">
+		{#if connected}
+			{@render children()}
+		{:else}
+			<div class="flex min-h-screen items-center justify-center text-sm text-muted-foreground">Connecting...</div>
+		{/if}
+		{#if reconnecting}
+			<div class="fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
+				<ReconnectSpinner />
+			</div>
+		{/if}
 	</div>
 {:else}
 	<div class="relative flex h-screen overflow-hidden">

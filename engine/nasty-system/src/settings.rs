@@ -242,6 +242,11 @@ pub struct Settings {
     /// Domain name for Let's Encrypt TLS (e.g. "nasty.example.com"). Empty = self-signed.
     #[serde(default)]
     pub tls_domain: Option<String>,
+    /// Optional hostname presenting the Role User files portal. This is
+    /// routing/presentation only; server-side Role User authorization remains
+    /// the security boundary for every portal operation.
+    #[serde(default)]
+    pub files_domain: Option<String>,
     /// Email address for Let's Encrypt ACME notifications.
     #[serde(default)]
     pub tls_acme_email: Option<String>,
@@ -512,6 +517,7 @@ impl Default for Settings {
             clock_24h: default_clock_24h(),
             temp_unit: TempUnit::default(),
             tls_domain: None,
+            files_domain: None,
             tls_acme_email: None,
             tls_acme_enabled: false,
             tls_challenge_type: default_challenge_type(),
@@ -539,6 +545,8 @@ pub struct SettingsUpdate {
     pub temp_unit: Option<TempUnit>,
     /// Domain name for Let's Encrypt TLS (set to empty string to disable).
     pub tls_domain: Option<String>,
+    /// Optional files portal FQDN (set to empty string to clear).
+    pub files_domain: Option<String>,
     /// Email address for ACME notifications.
     pub tls_acme_email: Option<String>,
     /// Enable/disable Let's Encrypt.
@@ -655,7 +663,16 @@ impl SettingsService {
     }
 
     pub async fn update(&self, update: SettingsUpdate) -> Result<Settings, String> {
-        let mut settings = self.state.write().await;
+        let mut current = self.state.write().await;
+        let mut settings = current.clone();
+        // Validate and stage the coupled TLS fields before applying any
+        // external side effects such as timezone or hostname changes.
+        let mut tls_changed = apply_domain_updates(
+            &mut settings,
+            update.tls_domain.as_deref(),
+            update.files_domain.as_deref(),
+            update.tls_acme_enabled,
+        )?;
         if let Some(tz) = update.timezone {
             apply_timezone(&tz).await?;
             settings.timezone = tz;
@@ -678,18 +695,6 @@ impl SettingsService {
         if let Some(unit) = update.temp_unit {
             settings.temp_unit = unit;
         }
-        let mut tls_changed = false;
-        if let Some(domain) = update.tls_domain {
-            let domain = if domain.trim().is_empty() {
-                None
-            } else {
-                Some(domain.trim().to_string())
-            };
-            if settings.tls_domain != domain {
-                settings.tls_domain = domain;
-                tls_changed = true;
-            }
-        }
         if let Some(email) = update.tls_acme_email {
             let email = if email.trim().is_empty() {
                 None
@@ -700,12 +705,6 @@ impl SettingsService {
                 settings.tls_acme_email = email;
                 tls_changed = true;
             }
-        }
-        if let Some(enabled) = update.tls_acme_enabled
-            && settings.tls_acme_enabled != enabled
-        {
-            settings.tls_acme_enabled = enabled;
-            tls_changed = true;
         }
         if let Some(ct) = update.tls_challenge_type
             && settings.tls_challenge_type != ct
@@ -776,6 +775,7 @@ impl SettingsService {
         // empty, already encrypted, or the backend is unavailable).
         encrypt_dns_credentials_in_place(&mut settings).await;
         save(&settings).await.map_err(|e| e.to_string())?;
+        *current = settings.clone();
         if tls_changed {
             // Always re-apply on a TLS change — even when ACME is now
             // disabled, the automation policy must be cleared so Caddy
@@ -788,8 +788,118 @@ impl SettingsService {
                 }
             });
         }
-        Ok(settings.clone())
+        Ok(settings)
     }
+}
+
+/// Validate a non-empty files portal hostname as an ASCII FQDN suitable for a
+/// Caddy host matcher and ACME subject. Schemes, paths, ports, wildcards,
+/// whitespace, control characters, and non-ASCII names all fail the label
+/// character rules rather than being interpreted or normalized implicitly.
+pub fn validate_files_domain(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("files portal domain must not be empty".into());
+    }
+    if host.len() > 253 {
+        return Err(format!(
+            "files portal domain is too long ({} > 253 characters)",
+            host.len()
+        ));
+    }
+    if !host.is_ascii() {
+        return Err("files portal domain must contain ASCII characters only".into());
+    }
+    if !host.contains('.') {
+        return Err("files portal domain must be a fully-qualified hostname".into());
+    }
+    for label in host.split('.') {
+        if label.is_empty() {
+            return Err("files portal domain contains an empty label".into());
+        }
+        if label.len() > 63 {
+            return Err(format!(
+                "files portal domain label '{label}' is longer than 63 characters"
+            ));
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(format!(
+                "files portal domain label '{label}' may not start or end with '-'"
+            ));
+        }
+        if !label
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        {
+            return Err(format!(
+                "files portal domain label '{label}' contains invalid characters"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Apply the two hostname updates atomically after validating their effective
+/// values. Keeping this pure makes persisted-state compatibility and clear/set
+/// behavior testable without writing the singleton settings file.
+fn apply_domain_updates(
+    settings: &mut Settings,
+    tls_domain_update: Option<&str>,
+    files_domain_update: Option<&str>,
+    acme_enabled_update: Option<bool>,
+) -> Result<bool, String> {
+    let next_tls_domain = tls_domain_update.map(|domain| {
+        let domain = domain.trim();
+        if domain.is_empty() {
+            None
+        } else {
+            Some(domain.to_string())
+        }
+    });
+    let next_files_domain = match files_domain_update {
+        Some(domain) => {
+            let domain = domain.trim();
+            if domain.is_empty() {
+                Some(None)
+            } else {
+                validate_files_domain(domain)?;
+                Some(Some(domain.to_string()))
+            }
+        }
+        None => None,
+    };
+
+    let effective_tls_domain = next_tls_domain.as_ref().unwrap_or(&settings.tls_domain);
+    let effective_files_domain = next_files_domain.as_ref().unwrap_or(&settings.files_domain);
+    let effective_acme_enabled = acme_enabled_update.unwrap_or(settings.tls_acme_enabled);
+    if let (Some(files), Some(main)) = (effective_files_domain, effective_tls_domain)
+        && files.eq_ignore_ascii_case(main)
+    {
+        return Err("files portal domain must differ from the main TLS domain".into());
+    }
+    if effective_files_domain.is_some() && !effective_acme_enabled {
+        return Err("files portal domain requires ACME to be enabled".into());
+    }
+
+    let mut changed = false;
+    if let Some(domain) = next_tls_domain
+        && settings.tls_domain != domain
+    {
+        settings.tls_domain = domain;
+        changed = true;
+    }
+    if let Some(domain) = next_files_domain
+        && settings.files_domain != domain
+    {
+        settings.files_domain = domain;
+        changed = true;
+    }
+    if let Some(enabled) = acme_enabled_update
+        && settings.tls_acme_enabled != enabled
+    {
+        settings.tls_acme_enabled = enabled;
+        changed = true;
+    }
+    Ok(changed)
 }
 
 pub async fn list_timezones() -> Result<Vec<String>, String> {
@@ -898,8 +1008,8 @@ async fn save(settings: &Settings) -> Result<(), std::io::Error> {
 //      `CADDY_ACME_ENV_PATH` EnvironmentFile so Caddy can resolve
 //      `{env.X}` references in admin-pushed config.
 //   2. Push a `tls.automation.policies[]` block to Caddy's admin API
-//      describing every hostname we want a cert for (main domain +
-//      per-app subdomains). Caddy issues + renews + staples.
+//      describing every hostname we want a cert for (main domain + files
+//      portal domain + per-app subdomains). Caddy issues + renews + staples.
 //   3. Read back what Caddy ends up serving so the WebUI can show
 //      issuer / expiry / status.
 //
@@ -1039,9 +1149,9 @@ pub async fn apply_caddy_tls_with_apps(
         }
     }
 
-    // Build the desired policy set: main domain (when ACME enabled) +
-    // every app subdomain. Empty ⇒ Caddy clears automation and falls
-    // back to the static-cert :443 block.
+    // Build the desired policy set: main domain + files portal domain (when
+    // ACME is enabled) + every app subdomain. Empty ⇒ Caddy clears automation
+    // and falls back to the static-cert :443 block.
     let policies = build_policy_set(settings, app_subdomains);
     let issuer = nasty_apps::caddy::TlsIssuer {
         email: settings.tls_acme_email.clone(),
@@ -1215,25 +1325,23 @@ fn build_policy_set(
     if !settings.tls_acme_enabled {
         return Vec::new();
     }
-    let mut policies = Vec::new();
-    if let Some(domain) = settings.tls_domain.as_deref()
-        && !domain.trim().is_empty()
+    let mut policies: Vec<nasty_apps::caddy::TlsPolicy> = Vec::new();
+    for host in settings
+        .tls_domain
+        .iter()
+        .chain(settings.files_domain.iter())
+        .chain(app_subdomains.iter())
     {
-        policies.push(nasty_apps::caddy::TlsPolicy {
-            host: domain.trim().to_string(),
-        });
-    }
-    for sub in app_subdomains {
-        let sub = sub.trim();
-        if sub.is_empty() {
-            continue;
-        }
-        // Deduplicate against the main domain.
-        if policies.iter().any(|p| p.host == sub) {
+        let host = host.trim();
+        if host.is_empty()
+            || policies
+                .iter()
+                .any(|policy| policy.host.eq_ignore_ascii_case(host))
+        {
             continue;
         }
         policies.push(nasty_apps::caddy::TlsPolicy {
-            host: sub.to_string(),
+            host: host.to_string(),
         });
     }
     policies
@@ -1699,8 +1807,9 @@ async fn read_cert_info(cert_path: &str) -> CertInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        EncryptedBlob, OidcSettings, Settings, build_policy_set, caddy_acme_env, merge_host_lists,
-        redact_oidc_secret, resolve_dns_credentials, to_nix_string,
+        EncryptedBlob, OidcSettings, Settings, SettingsUpdate, apply_domain_updates,
+        build_policy_set, caddy_acme_env, merge_host_lists, redact_oidc_secret,
+        resolve_dns_credentials, to_nix_string, validate_files_domain,
     };
 
     fn fake_blob() -> EncryptedBlob {
@@ -1801,6 +1910,110 @@ mod tests {
     // ── build_policy_set ──
 
     #[test]
+    fn settings_deserializes_state_without_files_domain() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("files_domain");
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.files_domain, None);
+    }
+
+    #[test]
+    fn files_domain_defaults_to_none() {
+        assert_eq!(Settings::default().files_domain, None);
+        let update: SettingsUpdate = serde_json::from_str("{}").unwrap();
+        assert!(update.files_domain.is_none());
+    }
+
+    #[test]
+    fn files_domain_update_sets_and_clears_trimmed_value() {
+        let mut settings = Settings::default();
+        assert!(
+            apply_domain_updates(&mut settings, None, Some(" files.example.com "), Some(true))
+                .unwrap()
+        );
+        assert_eq!(settings.files_domain.as_deref(), Some("files.example.com"));
+        assert!(apply_domain_updates(&mut settings, None, Some("  "), None).unwrap());
+        assert_eq!(settings.files_domain, None);
+    }
+
+    #[test]
+    fn files_domain_update_rejects_invalid_or_redundant_host() {
+        let mut settings = Settings {
+            tls_domain: Some("nas.example.com".into()),
+            ..Settings::default()
+        };
+        assert!(
+            apply_domain_updates(
+                &mut settings,
+                None,
+                Some("https://files.example.com"),
+                Some(true)
+            )
+            .is_err()
+        );
+        assert!(
+            apply_domain_updates(&mut settings, None, Some("NAS.EXAMPLE.COM"), Some(true)).is_err()
+        );
+        assert_eq!(
+            settings.files_domain, None,
+            "failed updates must not mutate settings"
+        );
+
+        settings.files_domain = Some("files.example.com".into());
+        settings.tls_acme_enabled = true;
+        assert!(
+            apply_domain_updates(&mut settings, Some("FILES.EXAMPLE.COM"), None, None).is_err()
+        );
+        assert_eq!(settings.tls_domain.as_deref(), Some("nas.example.com"));
+    }
+
+    #[test]
+    fn files_domain_requires_acme_and_acme_cannot_be_disabled_while_retained() {
+        let mut settings = Settings::default();
+        assert!(
+            apply_domain_updates(&mut settings, None, Some("files.example.com"), None).is_err()
+        );
+        assert_eq!(settings.files_domain, None);
+        assert!(!settings.tls_acme_enabled);
+
+        apply_domain_updates(&mut settings, None, Some("files.example.com"), Some(true)).unwrap();
+        let before = settings.clone();
+        assert!(apply_domain_updates(&mut settings, None, None, Some(false)).is_err());
+        assert_eq!(settings.files_domain, before.files_domain);
+        assert_eq!(settings.tls_acme_enabled, before.tls_acme_enabled);
+
+        assert!(apply_domain_updates(&mut settings, None, Some(""), Some(false)).unwrap());
+        assert_eq!(settings.files_domain, None);
+        assert!(!settings.tls_acme_enabled);
+    }
+
+    #[test]
+    fn files_domain_validation_accepts_safe_fqdns_and_rejects_unsafe_values() {
+        assert!(validate_files_domain("files.example.com").is_ok());
+        assert!(validate_files_domain("files-2.eu.example.com").is_ok());
+        for invalid in [
+            "files",
+            "https://files.example.com",
+            "files.example.com/path",
+            "files.example.com:443",
+            "*.example.com",
+            "files example.com",
+            "files\n.example.com",
+            "fíles.example.com",
+            "-files.example.com",
+            "files-.example.com",
+            "files..example.com",
+        ] {
+            assert!(
+                validate_files_domain(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(validate_files_domain(&format!("{}.example.com", "a".repeat(64))).is_err());
+        assert!(validate_files_domain(&format!("{}.com", "a".repeat(250))).is_err());
+    }
+
+    #[test]
     fn policy_set_empty_when_acme_disabled() {
         // ACME off ⇒ no policies ⇒ engine PUTs an empty array ⇒ Caddy
         // stops renewing. Per-app subdomains are ignored in this state
@@ -1818,6 +2031,25 @@ mod tests {
         let policies = build_policy_set(&s, &[]);
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].host, "nas.example.com");
+    }
+
+    #[test]
+    fn policy_set_includes_files_domain() {
+        let mut s = acme_enabled_settings("dns");
+        s.files_domain = Some("files.example.com".into());
+        let policies = build_policy_set(&s, &[]);
+        let hosts: Vec<_> = policies.iter().map(|policy| policy.host.as_str()).collect();
+        assert_eq!(hosts, vec!["nas.example.com", "files.example.com"]);
+    }
+
+    #[test]
+    fn policy_set_dedupes_files_domain_case_insensitively_against_all_hosts() {
+        let mut s = acme_enabled_settings("dns");
+        s.files_domain = Some("FILES.EXAMPLE.COM".into());
+        let policies =
+            build_policy_set(&s, &["files.example.com".into(), "NAS.EXAMPLE.COM".into()]);
+        let hosts: Vec<_> = policies.iter().map(|policy| policy.host.as_str()).collect();
+        assert_eq!(hosts, vec!["nas.example.com", "FILES.EXAMPLE.COM"]);
     }
 
     #[test]

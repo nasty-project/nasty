@@ -527,13 +527,33 @@ pub(super) async fn try_route(
             Err(e) => err(req, e),
         },
         "system.settings.get" => ok(req, state.settings.get().await),
-        "system.settings.update" => match parse_params(req) {
-            Ok(p) => match state.settings.update(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
-            Err(e) => invalid(req, e),
-        },
+        "system.settings.update" => {
+            match parse_params::<nasty_system::settings::SettingsUpdate>(req) {
+                Ok(p) => match p.files_domain.as_deref() {
+                    Some(files_domain) => {
+                        let _reservation =
+                            crate::ingress_conflict::lock_hostname_reservations().await;
+                        match crate::ingress_conflict::ensure_files_domain_available(
+                            state,
+                            files_domain,
+                        )
+                        .await
+                        {
+                            Ok(()) => match state.settings.update(p).await {
+                                Ok(v) => ok(req, v),
+                                Err(e) => err(req, e),
+                            },
+                            Err(e) => err(req, e),
+                        }
+                    }
+                    None => match state.settings.update(p).await {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    },
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
         "system.acme.status" => ok(req, nasty_system::settings::get_acme_status()),
         "system.acme.reset" => {
             nasty_system::settings::reset_acme_status();

@@ -343,6 +343,7 @@ pub(super) async fn try_route(
         },
         "apps.ingress.set" => match parse_params::<nasty_apps::SetIngressRequest>(req) {
             Ok(p) => {
+                let _reservation = crate::ingress_conflict::lock_hostname_reservations().await;
                 // Gate the set on a subdomain-conflict check — catches the
                 // "two apps claim the same hostname" / "app subdomain ==
                 // WebUI hostname" cases that Caddy would silently let the

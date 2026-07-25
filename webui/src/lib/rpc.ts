@@ -1,5 +1,7 @@
 /** JSON-RPC 2.0 client over WebSocket with token auth */
 
+import type { UserRole } from './types';
+
 interface RpcError {
 	code: number;
 	message: string;
@@ -16,8 +18,14 @@ export type EventHandler = (method: string, params: unknown) => void;
 export interface AuthResult {
 	authenticated: boolean;
 	username: string;
-	role: string;
+	role: UserRole;
 	must_change_password?: boolean;
+}
+
+export function isReconnectAuthError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const message = error.message.toLowerCase();
+	return message.includes('invalid') || message.includes('unauthorized') || message.includes('expired');
 }
 
 export class NastyClient {
@@ -268,11 +276,7 @@ export class NastyClient {
 			this.connect().catch((err) => {
 				// Auth failure after reboot (cookie invalidated) — force page reload.
 				// The new page will show the login form.
-				if (err instanceof Error && (
-					err.message.includes('Invalid') ||
-					err.message.includes('Unauthorized') ||
-					err.message.includes('expired')
-				)) {
+				if (isReconnectAuthError(err)) {
 					location.reload();
 					return;
 				}

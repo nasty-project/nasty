@@ -89,6 +89,9 @@ pub struct CreateUserRequest {
     pub password: String,
     /// Role to assign to the new user.
     pub role: Role,
+    /// Required SMB/local or domain principal for Role::User; omitted for
+    /// management roles.
+    pub file_principal: Option<String>,
 }
 
 /// Mirror of the anonymous inline `struct P` in `router/auth.rs` that
@@ -123,6 +126,7 @@ pub struct WebauthnRegisterStartRequest {
 struct AuthMeResult {
     username: String,
     role: Role,
+    file_principal: Option<String>,
     scoped: bool,
 }
 
@@ -1259,21 +1263,38 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
         // ── Audit log ────────────────────────────────────────────────────
         (
             "Audit",
-            vec![Method {
-                name: "audit.list",
-                desc: "Return the most recent audit-log entries (default 200, capped by `limit`), parsed line-by-line in reverse chronological order. Entry shape depends on the action being audited.",
-                role: MethodRole::Any,
-                params: MethodParams::AdHoc(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "minimum": 0, "default": 200, "description": "Maximum number of entries to return."}
-                    }
-                })),
-                result: Some(serde_json::json!({
-                    "type": "array",
-                    "items": {"type": "object", "description": "Parsed JSON line from the audit log — schema varies by event."}
-                })),
-            }],
+            vec![
+                Method {
+                    name: "audit.list",
+                    desc: "Return the most recent audit-log entries (default 200, capped by `limit`), parsed line-by-line in reverse chronological order. Entry shape depends on the action being audited.",
+                    role: MethodRole::Any,
+                    params: MethodParams::AdHoc(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "minimum": 0, "default": 200, "description": "Maximum number of entries to return."}
+                        }
+                    })),
+                    result: Some(serde_json::json!({
+                        "type": "array",
+                        "items": {"type": "object", "description": "Parsed JSON line from the audit log — schema varies by event."}
+                    })),
+                },
+                Method {
+                    name: "audit.mine",
+                    desc: "Return only the current authenticated user's recent structured audit entries, filtered server-side before the bounded limit is applied.",
+                    role: MethodRole::Any,
+                    params: MethodParams::AdHoc(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "minimum": 0, "maximum": 500, "default": 200}
+                        }
+                    })),
+                    result: Some(serde_json::json!({
+                        "type": "array",
+                        "items": {"type": "object"}
+                    })),
+                },
+            ],
         ),
         // ── System (additions to the existing System group) ─────────────
         (

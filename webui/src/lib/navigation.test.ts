@@ -6,6 +6,7 @@ import {
 	flattenNavigation,
 	isNavGroup,
 	LAUNCHER_NAV_ITEM,
+	navigationForMode,
 	resolveNavigation,
 	searchNavigation
 } from './navigation';
@@ -71,5 +72,15 @@ describe('navigation model', () => {
 	test('search cannot expose capability-gated entries', () => {
 		const entries = resolveNavigation({ kvmAvailable: false });
 		expect(searchNavigation(entries, 'virtual machine')).toEqual(new Set());
+	});
+
+	test('standard users cannot recover management links through any navigation mode', () => {
+		const entries = resolveNavigation({ kvmAvailable: true, role: 'user' });
+		expect(flattenNavigation(entries).map((item) => item.href)).toEqual(['/portal']);
+		expect(flattenNavigation(navigationForMode(entries, 'full')).map((item) => item.href)).toEqual(['/portal']);
+		expect(flattenNavigation(navigationForMode(entries, 'common')).map((item) => item.href)).toEqual([]);
+		expect(searchNavigation(entries, 'filesystem')).toEqual(new Set());
+		expect(searchNavigation(entries, 'access control')).toEqual(new Set());
+		expect(currentNavigationItem('/menu', entries)).toBe(LAUNCHER_NAV_ITEM);
 	});
 });

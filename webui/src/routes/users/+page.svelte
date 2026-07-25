@@ -14,6 +14,7 @@
 		WebauthnConfigInfo,
 		WebauthnCredentialSummary,
 		WebauthnRegisterStart,
+		UserRole,
 	} from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -40,7 +41,7 @@
 	const sortedUsers = $derived.by(() => {
 		const sign = userSortDir === 'asc' ? 1 : -1;
 		// admin > operator > read-only when descending.
-		const roleRank = (r: string) => (r === 'admin' ? 3 : r === 'operator' ? 2 : 1);
+		const roleRank = (r: string) => (r === 'admin' ? 4 : r === 'operator' ? 3 : r === 'readonly' ? 2 : 1);
 		return [...users].sort((a, b) => {
 			let cmp =
 				userSortKey === 'role'
@@ -59,7 +60,23 @@
 	let newUsername = $state('');
 	let newPassword = $state('');
 	let newPasswordConfirm = $state('');
-	let newRole = $state<'admin' | 'readonly' | 'operator'>('readonly');
+	let newRole = $state<UserRole>('readonly');
+	let newFilePrincipal = $state('');
+	const newRoleDescription = $derived(
+		newRole === 'admin' ? 'Full system management access.'
+		: newRole === 'operator' ? 'Can operate storage and services without full administrative access.'
+		: newRole === 'readonly' ? 'Can view management information without making changes.'
+		: 'Personal file portal only. Requires an existing SMB or domain user principal.'
+	);
+	const newFilePrincipalError = $derived.by((): string | null => {
+		if (newRole !== 'user') return null;
+		const principal = newFilePrincipal.trim();
+		if (!principal) return 'A file principal is required.';
+		if (principal.length > 256 || [...principal].some((character) => character.charCodeAt(0) < 32)) {
+			return 'Principal must be 256 characters or fewer and contain no control characters.';
+		}
+		return null;
+	});
 
 	let newTokenName = $state('');
 	let newTokenRole = $state<'admin' | 'readonly' | 'operator'>('operator');
@@ -344,12 +361,14 @@
 		if (!newUsername || !newPassword || !newPasswordConfirm) { createUserTried = true; return; }
 		if (newPassword.length < 8) { createUserTried = true; return; }
 		if (newPassword !== newPasswordConfirm) { createUserTried = true; return; }
+		if (newRole === 'user' && (!newFilePrincipal.trim() || newFilePrincipalError)) { createUserTried = true; return; }
 		createUserTried = false;
 		const ok = await withToast(
 			() => client.call('auth.create_user', {
 				username: newUsername,
 				password: newPassword,
 				role: newRole,
+				...(newRole === 'user' ? { file_principal: newFilePrincipal.trim() } : {}),
 			}),
 			`User "${newUsername}" created`
 		);
@@ -359,6 +378,7 @@
 			newPassword = '';
 			newPasswordConfirm = '';
 			newRole = 'readonly';
+			newFilePrincipal = '';
 			createUserTried = false;
 			await refresh();
 		}
@@ -559,7 +579,7 @@
 
 <h2 class="mb-3 text-xl font-semibold">WebUI Users</h2>
 <p class="mb-4 text-sm text-muted-foreground">
-	Login accounts for the NASty web interface. These control who can manage the system, not who can access shares.
+	Login accounts for system management or the personal file portal. File portal accounts must be bound explicitly to an existing SMB or domain principal.
 </p>
 
 <div class="mb-4">
@@ -598,8 +618,26 @@
 					<option value="readonly">Read Only</option>
 					<option value="admin">Admin</option>
 					<option value="operator">Operator</option>
+					<option value="user">User (Files Portal)</option>
 				</select>
+				<span class="mt-1 block text-xs text-muted-foreground">{newRoleDescription}</span>
 			</div>
+			{#if newRole === 'user'}
+				<div class="mb-4">
+					<Label for="new-file-principal">File Principal {#if !newFilePrincipal.trim() && createUserTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
+					<Input id="new-file-principal" list="file-principal-options" bind:value={newFilePrincipal} placeholder="Select an SMB user or enter DOMAIN\\user" autocomplete="off" aria-invalid={!!newFilePrincipalError && (!!newFilePrincipal.trim() || createUserTried) ? 'true' : undefined} aria-describedby="new-file-principal-help" class="mt-1 {requiredFieldCls(!newFilePrincipal.trim(), createUserTried) || requiredFieldCls(!!newFilePrincipal.trim() && !!newFilePrincipalError)}" />
+					<datalist id="file-principal-options">
+						{#each systemUsers as systemUser (systemUser.username)}
+							<option value={systemUser.username}>{systemUser.username} (local SMB user)</option>
+						{/each}
+					</datalist>
+					{#if newFilePrincipalError && (newFilePrincipal.trim() || createUserTried)}
+						<span id="new-file-principal-help" class="mt-1 block text-xs text-destructive">{newFilePrincipalError}</span>
+					{:else}
+						<span id="new-file-principal-help" class="mt-1 block text-xs text-muted-foreground">Choose a local SMB user above, or enter the exact existing domain principal. The username is never inferred.</span>
+					{/if}
+				</div>
+			{/if}
 			<!-- Stays enabled; createUser validates and triggers the amber
 			     decoration on a missing-field click. -->
 			<Button onclick={createUser}>Create</Button>
@@ -612,11 +650,13 @@
 {:else if users.length === 0}
 	<p class="text-muted-foreground">No users configured.</p>
 {:else}
-	<table class="mb-10 w-full text-sm">
+	<div class="mb-10 overflow-x-auto">
+	<table class="w-full text-sm">
 		<thead>
 			<tr>
 				<SortTh label="Username" active={userSortKey === 'username'} dir={userSortDir} onclick={() => toggleUserSort('username')} />
 				<SortTh label="Role" active={userSortKey === 'role'} dir={userSortDir} onclick={() => toggleUserSort('role')} />
+				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground">File Principal</th>
 				<th class="border-b-2 border-border p-3 text-left text-xs uppercase text-muted-foreground w-px whitespace-nowrap">Actions</th>
 			</tr>
 		</thead>
@@ -627,11 +667,13 @@
 					<td class="p-3">
 						<Badge variant="secondary" class={
 							user.role === 'admin' ? 'bg-blue-950 text-blue-400' :
-							user.role === 'operator' ? 'bg-amber-950 text-amber-400' : ''
+							user.role === 'operator' ? 'bg-amber-950 text-amber-400' :
+							user.role === 'user' ? 'bg-emerald-950 text-emerald-400' : ''
 						}>
-							{user.role === 'admin' ? 'Admin' : user.role === 'operator' ? 'Operator' : 'Read Only'}
+							{user.role === 'admin' ? 'Admin' : user.role === 'operator' ? 'Operator' : user.role === 'user' ? 'User' : 'Read Only'}
 						</Badge>
 					</td>
+					<td class="p-3 font-mono text-xs text-muted-foreground">{user.role === 'user' ? (user.file_principal ?? 'Missing') : '-'}</td>
 					<td class="p-3">
 						<div class="flex gap-2">
 							<Button variant="secondary" size="xs" onclick={() => { pwUser = user.username; pwNew = ''; pwConfirm = ''; }}>
@@ -662,6 +704,7 @@
 			{/each}
 		</tbody>
 	</table>
+	</div>
 {/if}
 
 
@@ -1365,5 +1408,3 @@
 {/if}
 
 {/if}
-
-

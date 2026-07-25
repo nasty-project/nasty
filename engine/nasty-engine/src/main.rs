@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        DefaultBodyLimit, Multipart, State,
+        DefaultBodyLimit, Extension, Multipart, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -34,6 +34,7 @@ mod subvolume_dependents;
 mod swagger_ui;
 mod telemetry;
 mod terminal;
+mod user_files;
 mod vm_console;
 mod vm_disk_import;
 
@@ -807,6 +808,12 @@ async fn main() -> anyhow::Result<()> {
             post(upload_vm_image_handler).layer(DefaultBodyLimit::max(10_737_418_240)),
         )
         .route("/api/files/browse", get(files_browse_handler))
+        .route("/api/user/files/roots", get(user_files::roots_handler))
+        .route("/api/user/files/browse", get(user_files::browse_handler))
+        .route(
+            "/api/user/files/content",
+            get(user_files::content_handler).head(user_files::content_head_handler),
+        )
         .route("/api/files/size", get(files_size_handler))
         .route("/api/files", delete(files_delete_handler))
         .route(
@@ -829,6 +836,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/auth/check", get(auth_check_handler))
         .route("/health", get(health))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            files_domain_guard,
+        ))
         .with_state(state);
 
     // 127.0.0.1 only — Caddy proxies https://nas:443/ → http://127.0.0.1:2137/.
@@ -848,6 +859,118 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct FilesDomainRequest(bool);
+
+async fn files_domain_guard(
+    State(state): State<Arc<AppState>>,
+    mut request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let settings = state.settings.get().await;
+    let on_files_domain = host_matches_files_domain(
+        request
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok()),
+        settings.files_domain.as_deref(),
+    );
+    request
+        .extensions_mut()
+        .insert(FilesDomainRequest(on_files_domain));
+    if on_files_domain && !files_domain_path_allowed(request.uri().path()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
+}
+
+fn host_matches_files_domain(host_header: Option<&str>, files_domain: Option<&str>) -> bool {
+    let (Some(host_header), Some(files_domain)) = (host_header, files_domain) else {
+        return false;
+    };
+    let Ok(authority) = host_header.parse::<http::uri::Authority>() else {
+        return false;
+    };
+    authority.host().eq_ignore_ascii_case(files_domain)
+}
+
+fn files_domain_path_allowed(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/login"
+            | "/api/logout"
+            | "/api/auth/check"
+            | "/api/boot_status"
+            | "/api/auth/oidc/available"
+            | "/api/auth/webauthn/available"
+            | "/ws"
+            | "/health"
+    ) || path.starts_with("/api/user/files/")
+}
+
+#[cfg(test)]
+mod files_domain_guard_tests {
+    use super::{files_domain_path_allowed, host_matches_files_domain};
+
+    #[test]
+    fn files_domain_host_match_accepts_only_the_exact_host_with_optional_port() {
+        for host in ["files.example.com", "FILES.EXAMPLE.COM:443"] {
+            assert!(host_matches_files_domain(
+                Some(host),
+                Some("files.example.com")
+            ));
+        }
+        for host in [
+            "files.example.com.evil.test",
+            "evil-files.example.com",
+            "files.example.com.",
+            "https://files.example.com",
+            "files.example.com/path",
+        ] {
+            assert!(!host_matches_files_domain(
+                Some(host),
+                Some("files.example.com")
+            ));
+        }
+        assert!(!host_matches_files_domain(None, Some("files.example.com")));
+        assert!(!host_matches_files_domain(Some("files.example.com"), None));
+    }
+
+    #[test]
+    fn files_domain_path_allowlist_is_explicit_and_deny_by_default() {
+        for path in [
+            "/api/login",
+            "/api/logout",
+            "/api/auth/check",
+            "/api/boot_status",
+            "/api/auth/oidc/available",
+            "/api/auth/webauthn/available",
+            "/api/user/files/roots",
+            "/api/user/files/content",
+            "/ws",
+            "/health",
+        ] {
+            assert!(
+                files_domain_path_allowed(path),
+                "expected {path} to be allowed"
+            );
+        }
+        for path in [
+            "/api/v1/system/settings/get",
+            "/api/public/share/token",
+            "/api/openapi.json",
+            "/docs",
+            "/ws/terminal",
+            "/ws/apps/deploy",
+            "/api/auth/oidc/start",
+            "/api/auth/webauthn/login/start",
+            "/portal",
+        ] {
+            assert!(!files_domain_path_allowed(path), "accepted {path}");
+        }
+    }
 }
 
 /// Host interface facts for the apps Docker-network validator: each live
@@ -1709,6 +1832,7 @@ async fn validate_bearer(
 /// Returns 200 if the bearer token is valid, 401 otherwise.
 async fn auth_check_handler(
     headers: axum::http::HeaderMap,
+    Extension(FilesDomainRequest(on_files_domain)): Extension<FilesDomainRequest>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     match validate_bearer(
@@ -1719,7 +1843,10 @@ async fn auth_check_handler(
     )
     .await
     {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(authenticated) if !on_files_domain || authenticated.session.role == auth::Role::User => {
+            StatusCode::OK.into_response()
+        }
+        Ok(_) => StatusCode::UNAUTHORIZED.into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -3180,6 +3307,7 @@ async fn webauthn_login_finish_handler(
 
 async fn login_handler(
     headers: axum::http::HeaderMap,
+    Extension(FilesDomainRequest(on_files_domain)): Extension<FilesDomainRequest>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
@@ -3193,6 +3321,27 @@ async fn login_handler(
         .await
     {
         Ok(token) => {
+            if on_files_domain
+                && !matches!(
+                    state.auth.validate(&token, client_ip).await,
+                    Ok(Session {
+                        role: auth::Role::User,
+                        ..
+                    })
+                )
+            {
+                let _ = state.auth.logout(&token).await;
+                tracing::warn!(
+                    "Files portal login rejected non-user account '{}' from {}",
+                    req.username,
+                    client_ip
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({ "error": "invalid credentials" })),
+                )
+                    .into_response();
+            }
             info!(
                 "Login successful: user '{}' from {}",
                 req.username, client_ip
@@ -3677,7 +3826,13 @@ fn url_encode(s: &str) -> String {
 
 /// Tells the WebUI whether to render the "Sign in with SSO" button.
 /// No auth required — the response only exposes booleans / public config.
-async fn oidc_available_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn oidc_available_handler(
+    Extension(FilesDomainRequest(on_files_domain)): Extension<FilesDomainRequest>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if on_files_domain {
+        return Json(serde_json::json!({ "enabled": false }));
+    }
     let oidc = state.settings.get().await.oidc;
     let configured = state.oidc.current().await.is_some();
     Json(serde_json::json!({
@@ -3698,7 +3853,13 @@ async fn oidc_available_handler(State(state): State<Arc<AppState>>) -> impl Into
 /// is acceptable for the same reason it is there: rendering the
 /// login page right requires answering this question before auth
 /// has happened.
-async fn webauthn_available_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn webauthn_available_handler(
+    Extension(FilesDomainRequest(on_files_domain)): Extension<FilesDomainRequest>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if on_files_domain {
+        return Json(serde_json::json!({ "has_credentials": false }));
+    }
     let has_credentials = state.auth.any_webauthn_credentials_registered().await;
     Json(serde_json::json!({
         "has_credentials": has_credentials,
@@ -3865,6 +4026,7 @@ async fn openapi_handler() -> impl IntoResponse {
 async fn ws_handler(
     ws: WebSocketUpgrade,
     headers: axum::http::HeaderMap,
+    Extension(FilesDomainRequest(on_files_domain)): Extension<FilesDomainRequest>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let client_ip = headers
@@ -3878,7 +4040,9 @@ async fn ws_handler(
     // and still send {"token": "..."} as the first message — handled in
     // handle_socket().
     let pre_auth_token = token_from_headers(&headers);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, client_ip, pre_auth_token))
+    ws.on_upgrade(move |socket| {
+        handle_socket(socket, state, client_ip, pre_auth_token, on_files_domain)
+    })
 }
 
 async fn handle_socket(
@@ -3886,6 +4050,7 @@ async fn handle_socket(
     state: Arc<AppState>,
     client_ip: String,
     pre_auth_token: Option<String>,
+    on_files_domain: bool,
 ) {
     use futures_util::{SinkExt, StreamExt};
     use nasty_common::Notification;
@@ -3896,10 +4061,17 @@ async fn handle_socket(
         Some(s) => s,
         None => return,
     };
+    if on_files_domain && session.role != auth::Role::User {
+        let _ = socket
+            .send(Message::Text(r#"{"error":"invalid session"}"#.into()))
+            .await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
 
     info!("WebSocket authenticated as '{}'", session.username);
 
-    let mut event_rx = state.events.subscribe();
+    let mut event_rx = (session.role != auth::Role::User).then(|| state.events.subscribe());
     let (mut writer, mut reader) = socket.split();
 
     // Server-initiated WebSocket-level keepalive. Without this, a client
@@ -3934,7 +4106,17 @@ async fn handle_socket(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         last_seen = std::time::Instant::now();
-                        let response = handle_rpc_request(&text, &state, &session).await;
+                        let fresh_session = match state.auth.validate(&session.token, &client_ip).await {
+                            Ok(fresh)
+                                if session_security_context_unchanged(&session, &fresh)
+                                    && (!on_files_domain || fresh.role == auth::Role::User) => fresh,
+                            _ => {
+                                disconnect_reason = "session expired, revoked, or changed".to_string();
+                                let _ = writer.send(Message::Close(None)).await;
+                                break;
+                            }
+                        };
+                        let response = handle_rpc_request(&text, &state, &fresh_session).await;
                         if writer.send(Message::Text(response.into())).await.is_err() {
                             disconnect_reason = "write failed (socket closed)".to_string();
                             break;
@@ -3969,8 +4151,13 @@ async fn handle_socket(
                     }
                 }
             }
-            event = event_rx.recv() => {
-                if let Ok(collection) = event {
+            event = async {
+                match event_rx.as_mut() {
+                    Some(receiver) => Some(receiver.recv().await),
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(Ok(collection)) = event {
                     let notification = Notification::new(
                         "event",
                         Some(serde_json::json!({ "collection": collection })),
@@ -3983,6 +4170,16 @@ async fn handle_socket(
                 }
             }
             _ = ping_ticker.tick() => {
+                if !matches!(
+                    state.auth.validate(&session.token, &client_ip).await,
+                    Ok(ref fresh)
+                        if session_security_context_unchanged(&session, fresh)
+                            && (!on_files_domain || fresh.role == auth::Role::User)
+                ) {
+                    disconnect_reason = "session expired, revoked, or changed on ping".to_string();
+                    let _ = writer.send(Message::Close(None)).await;
+                    break;
+                }
                 if last_seen.elapsed() > IDLE_TIMEOUT {
                     disconnect_reason = format!(
                         "server idle timeout ({}s no traffic)",
@@ -4005,6 +4202,17 @@ async fn handle_socket(
         connected_at.elapsed(),
         disconnect_reason
     );
+}
+
+fn session_security_context_unchanged(initial: &Session, fresh: &Session) -> bool {
+    initial.token == fresh.token
+        && initial.username == fresh.username
+        && initial.role == fresh.role
+        && initial.file_principal == fresh.file_principal
+        && initial.filesystem == fresh.filesystem
+        && initial.owner == fresh.owner
+        && initial.created_at == fresh.created_at
+        && initial.client_ip == fresh.client_ip
 }
 
 /// Pick the right auth path for a WebSocket connection. If the upgrade
@@ -4294,6 +4502,7 @@ mod restore_tests {
             token: "token".to_string(),
             username: "test".to_string(),
             role: Role::Operator,
+            file_principal: None,
             filesystem: filesystem.map(str::to_string),
             owner: owner.map(str::to_string),
             created_at: 0,

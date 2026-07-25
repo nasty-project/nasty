@@ -26,6 +26,18 @@ pub(super) async fn try_route(
                 .unwrap_or(200) as usize;
             ok(req, crate::auth::read_audit_log(limit).await)
         }
+        "audit.mine" => {
+            let limit = req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("limit"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(200) as usize;
+            ok(
+                req,
+                crate::auth::read_audit_log_for_user(&session.username, limit).await,
+            )
+        }
         _ => return None,
     })
 }

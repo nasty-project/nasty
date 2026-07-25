@@ -48,6 +48,24 @@ fn is_universally_allowed(method: &str) -> bool {
         )
 }
 
+/// Standard users are intentionally disconnected from suffix heuristics. A
+/// new `.list` or `.get` method is denied until it is explicitly reviewed and
+/// added here.
+fn is_user_allowed(method: &str) -> bool {
+    matches!(
+        method,
+        "auth.me"
+            | "auth.logout"
+            | "auth.change_password"
+            | "auth.webauthn.config"
+            | "auth.webauthn.list"
+            | "auth.webauthn.register.start"
+            | "auth.webauthn.register.finish"
+            | "auth.webauthn.delete"
+            | "audit.mine"
+    )
+}
+
 /// Methods an operator token is allowed to call (in addition to
 /// everything in `is_universally_allowed`).
 fn is_operator_allowed(method: &str) -> bool {
@@ -308,6 +326,7 @@ fn is_read_only(method: &str) -> bool {
                 | "system.log.level"
                 | "system.settings.timezones"
                 | "audit.list"
+                | "audit.mine"
                 | "apps.check_ports"
                 | "apps.check_devices"
                 | "apps.check_volumes"
@@ -435,6 +454,7 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
         Role::Admin => false,
         Role::ReadOnly => !is_universally_allowed(&request.method),
         Role::Operator => !is_operator_allowed(&request.method),
+        Role::User => !is_user_allowed(&request.method),
     };
     if denied {
         // Record role-based denials so an attempted role-escalation
@@ -1375,7 +1395,35 @@ pub(super) async fn read_bcachefs_error_count(uuid: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_operator_allowed, is_read_only, is_universally_allowed};
+    use super::{is_operator_allowed, is_read_only, is_universally_allowed, is_user_allowed};
+
+    #[test]
+    fn standard_user_rpc_policy_is_explicit_and_deny_by_default() {
+        for method in [
+            "auth.me",
+            "auth.logout",
+            "auth.change_password",
+            "auth.webauthn.config",
+            "auth.webauthn.list",
+            "auth.webauthn.register.start",
+            "auth.webauthn.register.finish",
+            "auth.webauthn.delete",
+            "audit.mine",
+        ] {
+            assert!(is_user_allowed(method), "expected {method} to be allowed");
+        }
+        for method in [
+            "audit.list",
+            "auth.list_users",
+            "fs.list",
+            "share.smb.list",
+            "new.feature.list",
+            "auth.token.create",
+            "auth.webauthn.reset_for_user",
+        ] {
+            assert!(!is_user_allowed(method), "expected {method} to be denied");
+        }
+    }
 
     /// Regression for the Filesystems-page refresh loop on .71:
     /// before this fix, `fs.tpm.status` was classified as a write

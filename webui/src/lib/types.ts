@@ -749,9 +749,12 @@ export interface NvmeofPort {
 	addr_family: string;
 }
 
+export type UserRole = 'admin' | 'readonly' | 'operator' | 'user';
+
 export interface UserInfo {
 	username: string;
-	role: 'admin' | 'readonly' | 'operator';
+	role: UserRole;
+	file_principal?: string | null;
 	/** Number of registered WebAuthn credentials. Defaults to 0 for
 	 * compat with engines that pre-date the field. Drives the admin
 	 * "Reset security keys" button visibility on the /users page. */
@@ -766,6 +769,38 @@ export interface ApiTokenInfo {
 	filesystem: string | null;
 	expires_at: number | null;
 	allowed_ips: string[];
+}
+
+export interface AuthMe {
+	username: string;
+	role: UserRole;
+	file_principal: string | null;
+	scoped: boolean;
+}
+
+export interface PortalFileRoot {
+	id: string;
+	name: string;
+}
+
+export interface PortalFileEntry {
+	name: string;
+	is_dir: boolean;
+	size: number;
+	modified: number;
+}
+
+export interface PortalBrowseResult {
+	path: string;
+	entries: PortalFileEntry[];
+}
+
+export interface MyActivityEntry {
+	ts: number;
+	event: string;
+	user: string;
+	ip: string;
+	detail: string;
 }
 
 export interface ApiTokenCreated extends ApiTokenInfo {
@@ -1127,6 +1162,7 @@ export interface Settings {
 	clock_24h: boolean;
 	temp_unit: TempUnit;
 	tls_domain: string | null;
+	files_domain: string | null;
 	tls_acme_email: string | null;
 	tls_acme_enabled: boolean;
 	tls_challenge_type: 'tls-alpn' | 'http' | 'dns';

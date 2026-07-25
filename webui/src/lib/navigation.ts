@@ -26,6 +26,7 @@ import {
 	Terminal,
 	Wrench
 } from '@lucide/svelte';
+import { isStandardUser } from './access';
 
 export type NavIcon = typeof LayoutDashboard;
 export type NavMode = 'full' | 'common';
@@ -53,6 +54,7 @@ export type NavEntry = NavItem | NavGroup;
 
 export interface NavigationContext {
 	kvmAvailable: boolean;
+	role?: string | null;
 }
 
 export const NAVIGATION_CONTEXT = Symbol('navigation');
@@ -124,6 +126,7 @@ const NAVIGATION: NavEntry[] = [
 ];
 
 export const LAUNCHER_NAV_ITEM = item('launcher', '/menu', 'Launcher', Grid3X3, ['launcher', 'menu', 'navigation', 'pages']);
+export const PORTAL_NAV_ITEM = item('portal', '/portal', 'Files Portal', FolderOpen, ['files', 'folders', 'activity', 'account']);
 
 export function isNavGroup(entry: NavEntry): entry is NavGroup {
 	return entry.kind === 'group';
@@ -134,6 +137,7 @@ function isVisible(item: NavItem, context: NavigationContext): boolean {
 }
 
 export function resolveNavigation(context: NavigationContext): NavEntry[] {
+	if (isStandardUser(context.role)) return [PORTAL_NAV_ITEM];
 	return NAVIGATION.map((entry) => {
 		if (!isNavGroup(entry)) return entry;
 		return { ...entry, children: entry.children.filter((child) => isVisible(child, context)) };
