@@ -3497,14 +3497,17 @@ async fn public_share_zip_handler(
         }
     }
 
-    if state
-        .guest_shares
-        .register_download(&share.id, now)
-        .await
-        .is_err()
-    {
+    let Some(archive) = state.guest_shares.prepare_archive(&share).await else {
         return share_not_available();
-    }
+    };
+    let archive = match state
+        .guest_shares
+        .register_opened_archive(&share.id, now_unix_i64(), archive)
+        .await
+    {
+        Ok(archive) => archive,
+        Err(_) => return share_not_available(),
+    };
 
     let filename = guestshare::GuestShareService::zip_filename(&share);
     crate::auth::audit(
@@ -3514,7 +3517,7 @@ async fn public_share_zip_handler(
         &format!("share_id={} name={filename}", share.id),
     );
 
-    let reader = state.guest_shares.zip_stream(&share);
+    let reader = archive.into_stream();
     let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(reader));
     let mut resp_headers = axum::http::HeaderMap::new();
     resp_headers.insert(

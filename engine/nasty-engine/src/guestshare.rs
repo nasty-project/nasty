@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -48,6 +49,16 @@ const UNLOCK_MAX_TRACKED_IPS: usize = 4096;
 const MAX_CONCURRENT_PASSWORD_CHECKS: usize = 4;
 /// Bound descriptors held by guest downloads, including slow clients.
 const MAX_CONCURRENT_DOWNLOADS: usize = 32;
+/// ZIP compression is substantially heavier than streaming one file.
+const MAX_CONCURRENT_ARCHIVES: usize = 4;
+const MAX_ARCHIVE_ROOTS: usize = 32;
+const MAX_ARCHIVE_ENTRIES: usize = 50_000;
+const MAX_ARCHIVE_DIRECTORY_ENTRIES: usize = 25_000;
+const MAX_ARCHIVE_DEPTH: usize = 64;
+const MAX_ARCHIVE_PATH_BYTES: usize = u16::MAX as usize;
+const MAX_ARCHIVE_TOTAL_PATH_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ARCHIVE_UNCOMPRESSED_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_DURATION_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Error)]
 pub enum GuestShareError {
@@ -274,54 +285,250 @@ impl tokio::io::AsyncRead for GuestDownloadReader {
     }
 }
 
+pub struct OpenedGuestArchive {
+    roots: Vec<PreparedArchiveRoot>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct PreparedArchiveRoot {
+    node: crate::file_boundary::BoundaryNode,
+    name: String,
+}
+
+impl OpenedGuestArchive {
+    pub fn into_stream(self) -> GuestArchiveReader {
+        let (reader, writer) = tokio::io::duplex(64 * 1024);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let producer_cancelled = Arc::clone(&cancelled);
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let result = runtime.block_on(tokio::time::timeout(
+                std::time::Duration::from_secs(MAX_ARCHIVE_DURATION_SECS),
+                write_share_zip(writer, self.roots, self.permit, producer_cancelled),
+            ));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    // The client gets a truncated archive; nothing else we can
+                    // do once the response body has started streaming.
+                    tracing::warn!("guest share zip stream aborted: {error}");
+                }
+                Err(_) => tracing::warn!("guest share zip stream reached its time limit"),
+            }
+        });
+        GuestArchiveReader { reader, cancelled }
+    }
+}
+
+pub struct GuestArchiveReader {
+    reader: tokio::io::DuplexStream,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl tokio::io::AsyncRead for GuestArchiveReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.reader).poll_read(cx, buf)
+    }
+}
+
+impl Drop for GuestArchiveReader {
+    fn drop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+enum ArchiveWork {
+    Node {
+        node: crate::file_boundary::BoundaryNode,
+        name: String,
+        depth: usize,
+    },
+    Directory {
+        directory: crate::file_boundary::BoundaryDirectory,
+        prefix: String,
+        names: std::vec::IntoIter<std::ffi::OsString>,
+        depth: usize,
+    },
+}
+
 /// Write a ZIP of every `root` into `writer`, entries named relative to each
 /// root's parent (so a share of `/fs/tank/photos` yields `photos/img.jpg`).
-/// Iterative DFS — no async recursion — and symlinks are skipped so the
-/// archive stays within the roots.
+/// Every listed name is reopened relative to its authorized parent descriptor.
 async fn write_share_zip(
     writer: tokio::io::DuplexStream,
-    roots: Vec<PathBuf>,
+    roots: Vec<PreparedArchiveRoot>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use async_zip::{Compression, ZipEntryBuilder};
+    use futures_util::io::AsyncReadExt;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
 
     let mut zip = async_zip::tokio::write::ZipFileWriter::with_tokio(writer);
+    let mut entry_count = 0usize;
+    let mut total_path_bytes = 0usize;
+    let mut total_size = 0u64;
 
-    for root in &roots {
-        // Entry names are relative to the root's parent so the root's own
-        // basename appears as the top-level archive folder.
-        let base = root.parent().unwrap_or(root.as_path());
-        let mut stack = vec![root.clone()];
-        while let Some(path) = stack.pop() {
-            let meta = match tokio::fs::symlink_metadata(&path).await {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            // Never follow symlinks — that's the escape guard.
-            if meta.is_symlink() {
-                continue;
+    for root in roots {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        entry_count = entry_count
+            .checked_add(1)
+            .filter(|count| *count <= MAX_ARCHIVE_ENTRIES)
+            .ok_or_else(|| archive_limit("archive entry limit exceeded"))?;
+        validate_zip_path(&root.name)?;
+        let mut stack = vec![ArchiveWork::Node {
+            node: root.node,
+            name: root.name,
+            depth: 0,
+        }];
+
+        while let Some(work) = stack.pop() {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(());
             }
-            if meta.is_dir() {
-                let mut rd = tokio::fs::read_dir(&path).await?;
-                while let Some(entry) = rd.next_entry().await? {
-                    stack.push(entry.path());
+            match work {
+                ArchiveWork::Node {
+                    node: crate::file_boundary::BoundaryNode::File(file),
+                    name,
+                    ..
+                } => {
+                    let size = file.metadata()?.len();
+                    total_path_bytes = total_path_bytes
+                        .checked_add(name.len())
+                        .filter(|total| *total <= MAX_ARCHIVE_TOTAL_PATH_BYTES)
+                        .ok_or_else(|| archive_limit("archive path metadata limit exceeded"))?;
+                    total_size = total_size
+                        .checked_add(size)
+                        .filter(|total| *total <= MAX_ARCHIVE_UNCOMPRESSED_BYTES)
+                        .ok_or_else(|| archive_limit("archive byte limit exceeded"))?;
+                    let builder = ZipEntryBuilder::new(name.into(), Compression::Deflate);
+                    let mut entry = zip.write_entry_stream(builder).await?;
+                    let mut file = tokio::fs::File::from_std(file).compat().take(size);
+                    futures_util::io::copy(&mut file, &mut entry).await?;
+                    entry.close().await?;
                 }
-            } else if meta.is_file() {
-                let rel = path.strip_prefix(base).unwrap_or(&path);
-                let name = rel.to_string_lossy().replace('\\', "/");
-                let builder = ZipEntryBuilder::new(name.into(), Compression::Deflate);
-                let mut entry = zip.write_entry_stream(builder).await?;
-                // async_zip's entry writer is futures-io; bridge the tokio
-                // file into it with `.compat()` + futures copy.
-                use tokio_util::compat::TokioAsyncReadCompatExt;
-                let mut f = tokio::fs::File::open(&path).await?.compat();
-                futures_util::io::copy(&mut f, &mut entry).await?;
-                entry.close().await?;
+                ArchiveWork::Node {
+                    node: crate::file_boundary::BoundaryNode::Directory(directory),
+                    name,
+                    depth,
+                } => {
+                    let remaining = MAX_ARCHIVE_ENTRIES - entry_count;
+                    let limit = remaining.min(MAX_ARCHIVE_DIRECTORY_ENTRIES);
+                    let names = directory.entry_names(limit)?;
+                    entry_count += names.len();
+                    stack.push(ArchiveWork::Directory {
+                        directory,
+                        prefix: name,
+                        names: names.into_iter(),
+                        depth,
+                    });
+                }
+                ArchiveWork::Directory {
+                    directory,
+                    prefix,
+                    mut names,
+                    depth,
+                } => {
+                    let Some(child_name) = names.next() else {
+                        continue;
+                    };
+                    let child_depth = depth + 1;
+                    if child_depth > MAX_ARCHIVE_DEPTH {
+                        return Err(archive_limit("archive depth limit exceeded").into());
+                    }
+                    let archive_name = format!("{prefix}/{}", safe_zip_component(&child_name));
+                    validate_zip_path(&archive_name)?;
+                    stack.push(ArchiveWork::Directory {
+                        directory: directory.clone(),
+                        prefix,
+                        names,
+                        depth,
+                    });
+                    if let Ok(node) = directory.open_child(&child_name) {
+                        stack.push(ArchiveWork::Node {
+                            node,
+                            name: archive_name,
+                            depth: child_depth,
+                        });
+                    }
+                }
             }
         }
     }
 
     zip.close().await?;
     Ok(())
+}
+
+fn safe_zip_component(name: &std::ffi::OsStr) -> String {
+    const RAW_PREFIX: &str = "__nasty_raw_";
+
+    let mut value = if let Some(name) = name.to_str() {
+        let mut value = String::new();
+        for character in name.chars() {
+            if character == '/'
+                || character == '\\'
+                || character == ':'
+                || character == '%'
+                || character.is_control()
+            {
+                let mut bytes = [0; 4];
+                for byte in character.encode_utf8(&mut bytes).as_bytes() {
+                    value.push_str(&format!("%{byte:02X}"));
+                }
+            } else {
+                value.push(character);
+            }
+        }
+        if value.starts_with(RAW_PREFIX) {
+            value.replace_range(..1, "%5F");
+        }
+        value
+    } else {
+        let mut value = RAW_PREFIX.to_string();
+        for byte in name.as_bytes() {
+            value.push_str(&format!("{byte:02X}"));
+        }
+        value
+    };
+    if value.is_empty() {
+        value = "file".to_string();
+    } else if matches!(value.as_str(), "." | "..") {
+        value.replace_range(..1, "%2E");
+    }
+    value
+}
+
+fn unique_zip_root_name(name: String, used: &mut std::collections::HashSet<String>) -> String {
+    if used.insert(name.clone()) {
+        return name;
+    }
+    for suffix in 2.. {
+        let candidate = format!("{name} ({suffix})");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search must find an unused root name")
+}
+
+fn validate_zip_path(path: &str) -> std::io::Result<()> {
+    if path.len() > MAX_ARCHIVE_PATH_BYTES {
+        Err(archive_limit("archive path length limit exceeded"))
+    } else {
+        Ok(())
+    }
+}
+
+fn archive_limit(message: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
 fn now_secs() -> i64 {
@@ -471,6 +678,8 @@ pub struct GuestShareService {
     password_checks: Arc<tokio::sync::Semaphore>,
     /// Bounds guest descriptors for their full streaming lifetime.
     active_downloads: Arc<tokio::sync::Semaphore>,
+    /// Bounds CPU-heavy archive producers for their full streaming lifetime.
+    active_archives: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for GuestShareService {
@@ -495,6 +704,7 @@ impl GuestShareService {
             state_lock: Arc::new(tokio::sync::Mutex::new(())),
             password_checks: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_CHECKS)),
             active_downloads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
+            active_archives: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ARCHIVES)),
         }
     }
 
@@ -785,23 +995,46 @@ impl GuestShareService {
         self.register_download_holding(id, now, opened).await
     }
 
-    /// Stream a ZIP of all the share's roots into a pipe, returning the read
-    /// end for the HTTP body. The archive is built lazily as the client
-    /// reads, so a multi-gigabyte folder is never buffered in memory.
-    ///
-    /// Symlinks are skipped (never followed), so the archive cannot escape a
-    /// share root — the ZIP-time analog of the download path guard.
-    pub fn zip_stream(&self, share: &GuestShare) -> tokio::io::DuplexStream {
-        let (reader, writer) = tokio::io::duplex(64 * 1024);
-        let roots: Vec<PathBuf> = share.paths.iter().map(PathBuf::from).collect();
-        tokio::spawn(async move {
-            if let Err(e) = write_share_zip(writer, roots).await {
-                // The client gets a truncated archive; nothing else we can do
-                // once the response body has started streaming.
-                tracing::warn!("guest share zip stream aborted: {e}");
-            }
-        });
-        reader
+    /// Open and retain every archive root before registering the download.
+    pub async fn prepare_archive(&self, share: &GuestShare) -> Option<OpenedGuestArchive> {
+        let permit = self.active_archives.clone().try_acquire_owned().ok()?;
+        if share.paths.is_empty() || share.paths.len() > MAX_ARCHIVE_ROOTS {
+            return None;
+        }
+        let files_root = self.fs_root.clone();
+        let paths = share.paths.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<OpenedGuestArchive> {
+            let mut root_names = std::collections::HashSet::new();
+            let roots = paths
+                .into_iter()
+                .map(|path| {
+                    let path = PathBuf::from(path);
+                    let name = unique_zip_root_name(
+                        safe_zip_component(
+                            path.file_name()
+                                .unwrap_or_else(|| std::ffi::OsStr::new("share")),
+                        ),
+                        &mut root_names,
+                    );
+                    let node = crate::file_boundary::open_root_beneath(&files_root, &path)?;
+                    Ok(PreparedArchiveRoot { node, name })
+                })
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok(OpenedGuestArchive { roots, permit })
+        })
+        .await
+        .ok()?
+        .ok()
+    }
+
+    /// Register an archive while retaining its stream slot through persistence.
+    pub async fn register_opened_archive(
+        &self,
+        id: &str,
+        now: i64,
+        archive: OpenedGuestArchive,
+    ) -> Result<OpenedGuestArchive, GuestShareError> {
+        self.register_download_holding(id, now, archive).await
     }
 
     /// A filename for the downloaded archive, derived from the first shared
@@ -1594,6 +1827,14 @@ mod tests {
         std::fs::write(&secret, b"TOPSECRET").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, folder.join("leak.txt")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let fifo = folder.join("pipe");
+            let fifo = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        }
 
         let svc = GuestShareService::with_dirs(root.join("state"), root.clone());
         let share = GuestShare {
@@ -1601,29 +1842,186 @@ mod tests {
             ..bare("z")
         };
 
-        let mut reader = svc.zip_stream(&share);
+        let mut reader = svc.prepare_archive(&share).await.unwrap().into_stream();
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await.unwrap();
 
-        // Filenames live verbatim in the (uncompressed) local file headers,
-        // so we can assert on the raw archive bytes without a zip reader.
         assert!(!bytes.is_empty());
         assert_eq!(&bytes[..2], b"PK", "should be a zip archive");
-        let blob = String::from_utf8_lossy(&bytes);
-        assert!(
-            blob.contains("photos/a.txt"),
-            "expected top-level file entry"
+        let entries = read_zip_entries(bytes).await;
+        assert_eq!(entries.get("photos/a.txt").unwrap(), b"alpha");
+        assert_eq!(entries.get("photos/sub/b.txt").unwrap(), b"bravo");
+        assert!(!entries.contains_key("photos/leak.txt"));
+        assert!(!entries.contains_key("photos/pipe"));
+        assert!(entries.values().all(|content| content != b"TOPSECRET"));
+    }
+
+    #[tokio::test]
+    async fn zip_stream_sanitizes_backslashes_in_entry_names() {
+        use tokio::io::AsyncReadExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let folder = root.join("docs");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("..\\escape.txt"), b"safe").unwrap();
+        let svc = GuestShareService::with_dirs(root.join("state"), root.clone());
+        let share = GuestShare {
+            paths: vec![folder.to_string_lossy().into_owned()],
+            ..bare("safe-name")
+        };
+
+        let mut reader = svc.prepare_archive(&share).await.unwrap().into_stream();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        let entries = read_zip_entries(bytes).await;
+        assert_eq!(entries.get("docs/..%5Cescape.txt").unwrap(), b"safe");
+        assert!(entries.keys().all(|name| !name.contains("../")));
+    }
+
+    #[tokio::test]
+    async fn zip_stream_disambiguates_duplicate_root_names() {
+        use tokio::io::AsyncReadExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let first = root.join("one/docs");
+        let second = root.join("two/docs");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("first.txt"), b"first").unwrap();
+        std::fs::write(second.join("second.txt"), b"second").unwrap();
+        let svc = GuestShareService::with_dirs(root.join("state"), root.clone());
+        let share = GuestShare {
+            paths: vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            ..bare("duplicate-roots")
+        };
+
+        let mut reader = svc.prepare_archive(&share).await.unwrap().into_stream();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        let entries = read_zip_entries(bytes).await;
+        assert_eq!(entries.get("docs/first.txt").unwrap(), b"first");
+        assert_eq!(entries.get("docs (2)/second.txt").unwrap(), b"second");
+    }
+
+    #[test]
+    fn zip_components_are_relative_and_collision_resistant() {
+        assert_eq!(safe_zip_component(std::ffi::OsStr::new("C:")), "C%3A");
+        assert_eq!(
+            safe_zip_component(std::ffi::OsStr::new("..\\file")),
+            "..%5Cfile"
         );
-        assert!(
-            blob.contains("photos/sub/b.txt"),
-            "expected nested file entry"
+        assert_eq!(safe_zip_component(std::ffi::OsStr::new("100%")), "100%25");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+            assert_eq!(safe_zip_component(&invalid), "__nasty_raw_FF");
+            assert_ne!(
+                safe_zip_component(&invalid),
+                safe_zip_component(std::ffi::OsStr::new("__nasty_raw_FF"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_streams_have_an_independent_concurrency_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("file.txt");
+        std::fs::write(&file, b"content").unwrap();
+        let svc = GuestShareService::with_dirs(root.join("state"), root);
+        let share = GuestShare {
+            paths: vec![file.to_string_lossy().into_owned()],
+            ..bare("archive-limit")
+        };
+
+        let mut archives = Vec::new();
+        for _ in 0..MAX_CONCURRENT_ARCHIVES {
+            archives.push(svc.prepare_archive(&share).await.unwrap());
+        }
+        assert!(svc.prepare_archive(&share).await.is_none());
+        assert_eq!(
+            svc.active_downloads.available_permits(),
+            MAX_CONCURRENT_DOWNLOADS,
+            "archive load must not consume single-file slots"
         );
-        // The symlink itself is skipped and its target's content never appears.
-        assert!(!blob.contains("leak.txt"), "symlink entry must be skipped");
-        assert!(
-            !blob.contains("TOPSECRET"),
-            "symlink target must never be archived"
-        );
+
+        archives.pop();
+        assert!(svc.prepare_archive(&share).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn archive_preparation_rejects_missing_or_excess_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("file.txt");
+        std::fs::write(&file, b"content").unwrap();
+        let svc = GuestShareService::with_dirs(root.join("state"), root.clone());
+
+        let missing = GuestShare {
+            paths: vec![
+                file.to_string_lossy().into_owned(),
+                root.join("missing.txt").to_string_lossy().into_owned(),
+            ],
+            ..bare("missing-root")
+        };
+        assert!(svc.prepare_archive(&missing).await.is_none());
+
+        let excessive = GuestShare {
+            paths: vec![file.to_string_lossy().into_owned(); MAX_ARCHIVE_ROOTS + 1],
+            ..bare("excess-roots")
+        };
+        assert!(svc.prepare_archive(&excessive).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_archive_reader_releases_its_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let folder = root.join("folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        for index in 0..100 {
+            std::fs::create_dir(folder.join(format!("empty-{index}"))).unwrap();
+        }
+        let svc = GuestShareService::with_dirs(root.join("state"), root.clone());
+        let share = GuestShare {
+            paths: vec![folder.to_string_lossy().into_owned()],
+            ..bare("cancel-archive")
+        };
+
+        let reader = svc.prepare_archive(&share).await.unwrap().into_stream();
+        drop(reader);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while svc.active_archives.available_permits() != MAX_CONCURRENT_ARCHIVES {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled archive should release its stream slot");
+    }
+
+    async fn read_zip_entries(bytes: Vec<u8>) -> HashMap<String, Vec<u8>> {
+        let archive = async_zip::base::read::mem::ZipFileReader::new(bytes)
+            .await
+            .unwrap();
+        let mut entries = HashMap::new();
+        for (index, stored) in archive.file().entries().iter().enumerate() {
+            let name = stored.filename().as_str().unwrap().to_string();
+            let mut reader = archive.reader_without_entry(index).await.unwrap();
+            let mut content = Vec::new();
+            futures_util::io::AsyncReadExt::read_to_end(&mut reader, &mut content)
+                .await
+                .unwrap();
+            entries.insert(name, content);
+        }
+        entries
     }
 
     /// A throwaway share with everything empty/default but a distinct id.

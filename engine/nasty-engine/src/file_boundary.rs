@@ -1,12 +1,94 @@
 //! Descriptor-relative filesystem access for untrusted paths.
 
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path};
+use std::sync::Arc;
+
+pub enum BoundaryNode {
+    File(File),
+    Directory(BoundaryDirectory),
+}
+
+#[derive(Clone)]
+pub struct BoundaryDirectory {
+    fd: Arc<OwnedFd>,
+    device: u64,
+}
+
+impl BoundaryDirectory {
+    /// List names from the already-authorized directory descriptor. Returned
+    /// names are untrusted and must be reopened relative to this descriptor.
+    pub fn entry_names(&self, limit: usize) -> io::Result<Vec<OsString>> {
+        let dot = c_string(OsStr::new("."))?;
+        let directory = unsafe {
+            libc::openat(
+                self.fd.as_raw_fd(),
+                dot.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if directory < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let stream = unsafe { libc::fdopendir(directory) };
+        if stream.is_null() {
+            let error = io::Error::last_os_error();
+            unsafe { libc::close(directory) };
+            return Err(error);
+        }
+        let stream = DirectoryStream(stream);
+        let mut names = Vec::new();
+        loop {
+            set_errno(0);
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                let error = errno();
+                return if error == 0 {
+                    Ok(names)
+                } else {
+                    Err(io::Error::from_raw_os_error(error))
+                };
+            }
+            let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if bytes != b"." && bytes != b".." {
+                if names.len() >= limit {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "directory exceeds archive entry limit",
+                    ));
+                }
+                names.push(OsStr::from_bytes(bytes).to_os_string());
+            }
+        }
+    }
+
+    /// Open one listed name without following symlinks or crossing a mount.
+    pub fn open_child(&self, name: &OsStr) -> io::Result<BoundaryNode> {
+        let mut components = Path::new(name).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err(invalid_path("child name must be one normal component"));
+        }
+        let fd = open_relative(&self.fd, Path::new(name), true)?;
+        classify_node(fd, Some(self.device))
+    }
+}
+
+/// Open a shared file or directory as the root of a descriptor-relative walk.
+pub fn open_root_beneath(files_root: &Path, shared_root: &Path) -> io::Result<BoundaryNode> {
+    let shared_relative = shared_root
+        .strip_prefix(files_root)
+        .map_err(|_| invalid_path("shared root is outside the files root"))?;
+    validate_relative(shared_relative, false)?;
+
+    let files_fd = open_directory(files_root)?;
+    let shared_fd = open_relative(&files_fd, shared_relative, false)?;
+    classify_node(shared_fd, None)
+}
 
 /// Open a regular file under a configured shared root without ever resolving
 /// and reopening a pathname. Symlinks are not followed at either level.
@@ -31,10 +113,26 @@ pub fn open_regular_beneath(
     if !shared_meta.is_dir() {
         return Err(invalid_path("relative path supplied for a file share"));
     }
-
-    let shared_device = shared_meta.dev();
     let target_fd = open_relative(&shared_fd, relative, true)?;
-    readable_regular_file(target_fd, Some(shared_device))
+    readable_regular_file(target_fd, Some(shared_meta.dev()))
+}
+
+fn classify_node(fd: OwnedFd, expected_device: Option<u64>) -> io::Result<BoundaryNode> {
+    let metadata = metadata_for_fd(&fd)?;
+    if expected_device.is_some_and(|device| metadata.dev() != device) {
+        return Err(io::Error::from_raw_os_error(libc::EXDEV));
+    }
+    if metadata.is_file() {
+        return readable_regular_file(fd, expected_device).map(BoundaryNode::File);
+    }
+    if metadata.is_dir() {
+        let fd = readable_directory(fd, &metadata)?;
+        return Ok(BoundaryNode::Directory(BoundaryDirectory {
+            fd: Arc::new(fd),
+            device: metadata.dev(),
+        }));
+    }
+    Err(invalid_path("target is not a regular file or directory"))
 }
 
 fn readable_regular_file(fd: OwnedFd, expected_device: Option<u64>) -> io::Result<File> {
@@ -67,6 +165,28 @@ fn readable_regular_file(fd: OwnedFd, expected_device: Option<u64>) -> io::Resul
     }
 }
 
+fn readable_directory(fd: OwnedFd, metadata: &std::fs::Metadata) -> io::Result<OwnedFd> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY)
+            .open(path)?;
+        let reopened = file.metadata()?;
+        if reopened.dev() != metadata.dev() || reopened.ino() != metadata.ino() {
+            return Err(invalid_path("reopened directory identity changed"));
+        }
+        Ok(file.into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = metadata;
+        Ok(fd)
+    }
+}
+
 fn validate_relative(path: &Path, allow_empty: bool) -> io::Result<()> {
     if path.as_os_str().is_empty() {
         return if allow_empty {
@@ -93,6 +213,34 @@ fn open_directory(path: &Path) -> io::Result<OwnedFd> {
         .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(path)?;
     Ok(file.into())
+}
+
+struct DirectoryStream(*mut libc::DIR);
+
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        unsafe { libc::closedir(self.0) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn errno() -> libc::c_int {
+    unsafe { *libc::__errno_location() }
+}
+
+#[cfg(target_os = "linux")]
+fn set_errno(value: libc::c_int) {
+    unsafe { *libc::__errno_location() = value };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn errno() -> libc::c_int {
+    unsafe { *libc::__error() }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_errno(value: libc::c_int) {
+    unsafe { *libc::__error() = value };
 }
 
 #[cfg(target_os = "linux")]
@@ -268,6 +416,36 @@ mod tests {
         let mut bytes = Vec::new();
         opened.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"original");
+    }
+
+    #[test]
+    fn directory_walk_stays_on_opened_root_after_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = tmp.path().join("fs");
+        let shared = files.join("pool/docs");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("report.txt"), b"original").unwrap();
+
+        let BoundaryNode::Directory(opened) = open_root_beneath(&files, &shared).unwrap() else {
+            panic!("shared root should be a directory");
+        };
+        std::fs::rename(&shared, files.join("pool/old-docs")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("report.txt"), b"replacement").unwrap();
+        std::fs::write(shared.join("new-secret.txt"), b"secret").unwrap();
+
+        let names = opened.entry_names(10).unwrap();
+        assert!(names.iter().any(|name| name == "report.txt"));
+        assert!(!names.iter().any(|name| name == "new-secret.txt"));
+        assert!(opened.entry_names(0).is_err());
+        let BoundaryNode::File(mut report) = opened.open_child(OsStr::new("report.txt")).unwrap()
+        else {
+            panic!("report should be a regular file");
+        };
+        let mut bytes = Vec::new();
+        report.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"original");
+        assert!(opened.open_child(OsStr::new("../docs/report.txt")).is_err());
     }
 
     #[cfg(unix)]
