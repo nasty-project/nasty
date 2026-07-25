@@ -2631,12 +2631,10 @@ impl AppsService {
             storage_path: None,
             appdata_path: None,
         };
+        // Configure Docker data-root on bcachefs before recording the runtime
+        // as enabled or starting Docker. Existing data must fail closed.
+        configure_docker_data_root(req.filesystem.as_deref()).await?;
         Self::save_config(&config).await?;
-
-        // Configure Docker data-root on bcachefs before starting
-        if let Err(e) = configure_docker_data_root(req.filesystem.as_deref()).await {
-            warn!("Could not configure Docker data-root on bcachefs: {e}");
-        }
 
         // Start Docker via systemd
         run_cmd("systemctl", &["start", DOCKER_SERVICE]).await?;
@@ -6294,13 +6292,10 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
     // Stop Docker if running (we need to move/replace its data dir)
     let _ = run_cmd("systemctl", &["stop", DOCKER_SERVICE]).await;
 
-    // Clear whatever currently occupies /var/lib/docker — the default
-    // empty dir, stale data, or a *dangling* symlink (the state left
-    // when the operator deletes the apps subvolume out from under the
-    // data-root, #502). Critically uses lstat semantics so the dangling
-    // symlink is detected: plain `exists()` follows the link, reports a
-    // dangling symlink as absent, and the `symlink()` below then fails
-    // with EEXIST.
+    // Remove an empty default directory or a symlink, including the dangling
+    // state left when the apps subvolume is deleted (#502). A populated real
+    // directory or unexpected file may contain operator data and must block
+    // enablement rather than be deleted.
     clear_path_for_symlink(docker_lib).await?;
 
     // Create symlink
@@ -6314,24 +6309,29 @@ async fn configure_docker_data_root(filesystem: Option<&str>) -> Result<(), Apps
     Ok(())
 }
 
-/// Remove whatever currently lives at `path` so a fresh symlink can be
-/// created there — a regular directory (`remove_dir_all`), a file, or a
-/// symlink (`remove_file`, whether it resolves or *dangles*). No-op when
-/// nothing is there. Uses `symlink_metadata` (lstat), which does not
-/// follow the link, so a dangling symlink — which `Path::exists()`
-/// reports as absent because it follows to the missing target — is
-/// correctly detected and removed (#502).
+/// Remove an empty directory or symlink at `path` so a fresh symlink can be
+/// created there. Refuse populated directories and non-directory files because
+/// they may contain operator data. Uses `symlink_metadata` (lstat), so a
+/// dangling symlink is correctly detected and removed (#502).
 async fn clear_path_for_symlink(path: &Path) -> Result<(), AppsError> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(meta) if meta.file_type().is_symlink() => tokio::fs::remove_file(path)
             .await
             .map_err(|e| AppsError::CommandFailed(format!("remove symlink {path:?}: {e}"))),
-        Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(path)
-            .await
-            .map_err(|e| AppsError::CommandFailed(format!("remove dir {path:?}: {e}"))),
-        Ok(_) => tokio::fs::remove_file(path)
-            .await
-            .map_err(|e| AppsError::CommandFailed(format!("remove {path:?}: {e}"))),
+        Ok(meta) if meta.is_dir() => tokio::fs::remove_dir(path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+                AppsError::CommandFailed(format!(
+                    "refusing to replace nonempty Docker data directory {}; move or migrate its contents first",
+                    path.display()
+                ))
+            } else {
+                AppsError::CommandFailed(format!("remove empty dir {path:?}: {e}"))
+            }
+        }),
+        Ok(_) => Err(AppsError::CommandFailed(format!(
+            "refusing to replace Docker data path {}; move it aside first",
+            path.display()
+        ))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(AppsError::CommandFailed(format!("stat {path:?}: {e}"))),
     }
@@ -6909,13 +6909,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_path_removes_dir_symlink_and_noops_absent() {
+    async fn clear_path_removes_empty_dir_symlink_and_noops_absent() {
         let base = unique_tmp("clear-variants");
         std::fs::create_dir_all(&base).unwrap();
 
-        // Real directory with content → removed.
+        // Empty real directory → removed.
         let dir = base.join("realdir");
-        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::create_dir(&dir).unwrap();
         super::clear_path_for_symlink(&dir).await.unwrap();
         assert!(!dir.exists());
 
@@ -6934,6 +6934,39 @@ mod tests {
             .unwrap();
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn clear_path_preserves_populated_directory() {
+        let dir = unique_tmp("populated-data-root");
+        let data = dir.join("volumes/important-data");
+        std::fs::create_dir_all(data.parent().unwrap()).unwrap();
+        std::fs::write(&data, b"keep me").unwrap();
+
+        let err = super::clear_path_for_symlink(&dir)
+            .await
+            .expect_err("populated Docker data must block replacement");
+
+        assert!(err.to_string().contains("refusing to replace nonempty"));
+        assert_eq!(std::fs::read(&data).unwrap(), b"keep me");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn clear_path_preserves_regular_file() {
+        let file = unique_tmp("file-data-root");
+        std::fs::write(&file, b"keep me").unwrap();
+
+        let err = super::clear_path_for_symlink(&file)
+            .await
+            .expect_err("unexpected Docker data file must block replacement");
+
+        assert!(
+            err.to_string()
+                .contains("refusing to replace Docker data path")
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"keep me");
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
