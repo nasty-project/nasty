@@ -758,8 +758,29 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws/vm/{vm_id}/serial", get(vm_console::serial_handler))
         .layer(axum::middleware::from_fn(ws_origin_check));
 
+    let public_share_routes = Router::new()
+        .route("/api/public/share/{token}", get(public_share_meta_handler))
+        .route(
+            "/api/public/share/{token}/unlock",
+            post(public_share_unlock_handler),
+        )
+        .route(
+            "/api/public/share/{token}/browse",
+            get(public_share_browse_handler),
+        )
+        .route(
+            "/api/public/share/{token}/download",
+            get(public_share_download_handler).head(public_share_download_head_handler),
+        )
+        .route(
+            "/api/public/share/{token}/zip",
+            get(public_share_zip_handler).head(public_share_zip_head_handler),
+        )
+        .layer(axum::middleware::from_fn(public_share_no_store));
+
     let app = Router::new()
         .merge(ws_routes)
+        .merge(public_share_routes)
         .merge(rest_gateway::routes())
         .merge(swagger_ui::routes())
         .route("/api/openapi.json", get(openapi_handler))
@@ -779,21 +800,6 @@ async fn main() -> anyhow::Result<()> {
             get(webauthn_available_handler),
         )
         .route("/api/boot_status", get(boot_status_handler))
-        // Public guest-share access (#474) — unauthenticated by design; the
-        // URL token + optional unlock grant are the only credentials.
-        .route("/api/public/share/{token}", get(public_share_meta_handler))
-        .route(
-            "/api/public/share/{token}/unlock",
-            post(public_share_unlock_handler),
-        )
-        .route(
-            "/api/public/share/{token}/download",
-            get(public_share_download_handler),
-        )
-        .route(
-            "/api/public/share/{token}/zip",
-            get(public_share_zip_handler),
-        )
         .route("/api/auth/oidc/start", get(oidc_start_handler))
         .route("/api/auth/oidc/callback", get(oidc_callback_handler))
         .route(
@@ -3250,14 +3256,29 @@ async fn logout_handler(
 // short-lived unlock grant cookie. Every "unavailable" reason collapses to
 // one generic response so a token-guesser gets no oracle.
 
-const SHARE_GRANT_COOKIE: &str = "nasty_share_grant";
+const SHARE_GRANT_COOKIE: &str = "nasty_share_grant_v2";
 
-fn build_share_grant_cookie(token: &str) -> String {
+async fn public_share_no_store(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        "private, no-store".parse().unwrap(),
+    );
+    response
+        .headers_mut()
+        .insert(axum::http::header::VARY, "Cookie".parse().unwrap());
+    response
+}
+
+fn build_share_grant_cookie(share_token: &str, grant: &str) -> String {
     // Scoped to the public share path and short-lived to match the grant
     // TTL. SameSite=Strict is fine while shares are served same-origin
     // (path-based); the future share.* subdomain work revisits this.
     format!(
-        "{SHARE_GRANT_COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/api/public/share; Max-Age=3600"
+        "{SHARE_GRANT_COOKIE}={grant}; HttpOnly; Secure; SameSite=Strict; Path=/api/public/share/{share_token}; Max-Age=3600"
     )
 }
 
@@ -3288,6 +3309,18 @@ fn share_client_ip(headers: &axum::http::HeaderMap) -> String {
         .to_string()
 }
 
+fn share_is_unlocked(
+    state: &AppState,
+    share: &guestshare::GuestShare,
+    headers: &axum::http::HeaderMap,
+    now: i64,
+) -> bool {
+    !guestshare::GuestShareService::needs_password(share)
+        || share_grant_from_cookie(headers)
+            .map(|grant| state.guest_shares.check_grant(&grant, &share.id, now))
+            .unwrap_or(false)
+}
+
 /// One generic "not available" for unknown / expired / revoked / exhausted /
 /// unresolvable — no oracle for token or path guessing.
 fn share_not_available() -> axum::response::Response {
@@ -3301,14 +3334,51 @@ fn share_not_available() -> axum::response::Response {
 /// `GET /api/public/share/{token}` → guest landing metadata. Counts a view.
 async fn public_share_meta_handler(
     axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let now = now_unix_i64();
     let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
         return share_not_available();
     };
+    let unlocked = share_is_unlocked(&state, &share, &headers, now);
+    let Some(meta) = state.guest_shares.meta(&share, unlocked).await else {
+        return share_not_available();
+    };
     state.guest_shares.record_view(&share.id).await;
-    Json(guestshare::GuestShareService::meta(&share)).into_response()
+    Json(meta).into_response()
+}
+
+/// `GET /api/public/share/{token}/browse?root=N&path=...` → one directory.
+async fn public_share_browse_handler(
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let now = now_unix_i64();
+    let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
+        return share_not_available();
+    };
+    if !share_is_unlocked(&state, &share, &headers, now) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Password required"})),
+        )
+            .into_response();
+    }
+    let Some(root) = params.get("root").and_then(|root| root.parse().ok()) else {
+        return share_not_available();
+    };
+    let path = params.get("path").map(String::as_str).unwrap_or("");
+    let Some(listing) = state
+        .guest_shares
+        .browse_directory(&share, root, path)
+        .await
+    else {
+        return share_not_available();
+    };
+    Json(listing).into_response()
 }
 
 #[derive(Deserialize)]
@@ -3367,7 +3437,16 @@ async fn public_share_unlock_handler(
     };
 
     if password_matches {
+        // A correct password is a success even if metadata capacity is
+        // momentarily busy below; never let retries accumulate a lockout.
         state.guest_shares.clear_unlock_failures(&client_ip, &token);
+        let now = now_unix_i64();
+        let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
+            return share_not_available();
+        };
+        let Some(meta) = state.guest_shares.meta(&share, true).await else {
+            return share_not_available();
+        };
         let grant = state.guest_shares.mint_grant(&share.id, now);
         crate::auth::audit(
             "guest_share_unlock",
@@ -3378,14 +3457,9 @@ async fn public_share_unlock_handler(
         let mut resp_headers = axum::http::HeaderMap::new();
         resp_headers.insert(
             axum::http::header::SET_COOKIE,
-            build_share_grant_cookie(&grant).parse().unwrap(),
+            build_share_grant_cookie(&token, &grant).parse().unwrap(),
         );
-        return (
-            StatusCode::OK,
-            resp_headers,
-            Json(serde_json::json!({"ok": true})),
-        )
-            .into_response();
+        return (StatusCode::OK, resp_headers, Json(meta)).into_response();
     }
 
     (
@@ -3411,23 +3485,25 @@ async fn public_share_download_handler(
         return share_not_available();
     };
 
-    if guestshare::GuestShareService::needs_password(&share) {
-        let granted = share_grant_from_cookie(&headers)
-            .map(|g| state.guest_shares.check_grant(&g, &share.id, now))
-            .unwrap_or(false);
-        if !granted {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Password required"})),
-            )
-                .into_response();
-        }
+    if !share_is_unlocked(&state, &share, &headers, now) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Password required"})),
+        )
+            .into_response();
     }
 
     let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let root = match params.get("root") {
+        Some(root) => match root.parse::<usize>() {
+            Ok(root) => Some(root),
+            Err(_) => return share_not_available(),
+        },
+        None => None,
+    };
     // Opening first ensures invalid paths do not consume download quota. The
     // service bounds descriptors for the full lifetime of each stream.
-    let Some(opened) = state.guest_shares.open_download(&share, rel).await else {
+    let Some(opened) = state.guest_shares.open_download(&share, root, rel).await else {
         return share_not_available();
     };
 
@@ -3469,6 +3545,36 @@ async fn public_share_download_handler(
     (StatusCode::OK, resp_headers, body).into_response()
 }
 
+/// Validate a download without consuming quota. The WebUI uses this before
+/// triggering the browser-managed GET, and generic HEAD probes remain harmless.
+async fn public_share_download_head_handler(
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let now = now_unix_i64();
+    let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
+        return share_not_available();
+    };
+    if !share_is_unlocked(&state, &share, &headers, now) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let root = match params.get("root") {
+        Some(root) => match root.parse::<usize>() {
+            Ok(root) => Some(root),
+            Err(_) => return share_not_available(),
+        },
+        None => None,
+    };
+    let path = params.get("path").map(String::as_str).unwrap_or("");
+    let Some(opened) = state.guest_shares.open_download(&share, root, path).await else {
+        return share_not_available();
+    };
+    drop(opened);
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// `GET /api/public/share/{token}/zip` → stream a ZIP of the whole share
 /// (folders walked recursively, symlinks skipped). Same gates as download;
 /// counts as a single download against `max_downloads`.
@@ -3484,17 +3590,12 @@ async fn public_share_zip_handler(
         return share_not_available();
     };
 
-    if guestshare::GuestShareService::needs_password(&share) {
-        let granted = share_grant_from_cookie(&headers)
-            .map(|g| state.guest_shares.check_grant(&g, &share.id, now))
-            .unwrap_or(false);
-        if !granted {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Password required"})),
-            )
-                .into_response();
-        }
+    if !share_is_unlocked(&state, &share, &headers, now) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Password required"})),
+        )
+            .into_response();
     }
 
     let Some(archive) = state.guest_shares.prepare_archive(&share).await else {
@@ -3532,6 +3633,26 @@ async fn public_share_zip_handler(
             .unwrap(),
     );
     (StatusCode::OK, resp_headers, body).into_response()
+}
+
+/// Validate archive availability without starting compression or counting it.
+async fn public_share_zip_head_handler(
+    axum::extract::Path(token): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let now = now_unix_i64();
+    let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
+        return share_not_available();
+    };
+    if !share_is_unlocked(&state, &share, &headers, now) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(archive) = state.guest_shares.prepare_archive(&share).await else {
+        return share_not_available();
+    };
+    drop(archive);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// 8h, matches SESSION_TTL_SECS in auth.rs (kept in sync by hand).

@@ -78,6 +78,19 @@ impl BoundaryDirectory {
     }
 }
 
+impl BoundaryNode {
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        match self {
+            Self::File(file) => file.metadata(),
+            Self::Directory(directory) => metadata_for_fd(&directory.fd),
+        }
+    }
+
+    pub fn is_directory(&self) -> bool {
+        matches!(self, Self::Directory(_))
+    }
+}
+
 /// Open a shared file or directory as the root of a descriptor-relative walk.
 pub fn open_root_beneath(files_root: &Path, shared_root: &Path) -> io::Result<BoundaryNode> {
     let shared_relative = shared_root
@@ -90,8 +103,30 @@ pub fn open_root_beneath(files_root: &Path, shared_root: &Path) -> io::Result<Bo
     classify_node(shared_fd, None)
 }
 
+pub fn open_directory_from_root(
+    root: BoundaryNode,
+    relative: &Path,
+) -> io::Result<BoundaryDirectory> {
+    validate_relative(relative, true)?;
+    let mut directory = match root {
+        BoundaryNode::Directory(directory) => directory,
+        BoundaryNode::File(_) => return Err(invalid_path("shared root is not a directory")),
+    };
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(invalid_path("invalid directory component"));
+        };
+        directory = match directory.open_child(name)? {
+            BoundaryNode::Directory(child) => child,
+            BoundaryNode::File(_) => return Err(invalid_path("target is not a directory")),
+        };
+    }
+    Ok(directory)
+}
+
 /// Open a regular file under a configured shared root without ever resolving
 /// and reopening a pathname. Symlinks are not followed at either level.
+#[cfg(test)]
 pub fn open_regular_beneath(
     files_root: &Path,
     shared_root: &Path,
@@ -107,6 +142,30 @@ pub fn open_regular_beneath(
     let shared_fd = open_relative(&files_fd, shared_relative, false)?;
     let shared_meta = metadata_for_fd(&shared_fd)?;
 
+    open_regular_from_root_fd(shared_fd, shared_meta, relative)
+}
+
+pub fn open_regular_from_root(root: BoundaryNode, relative: &Path) -> io::Result<File> {
+    validate_relative(relative, true)?;
+    match root {
+        BoundaryNode::File(file) if relative.as_os_str().is_empty() => Ok(file),
+        BoundaryNode::File(_) => Err(invalid_path("relative path supplied for a file share")),
+        BoundaryNode::Directory(_) if relative.as_os_str().is_empty() => {
+            Err(invalid_path("target is not a regular file"))
+        }
+        BoundaryNode::Directory(directory) => {
+            let target_fd = open_relative(&directory.fd, relative, true)?;
+            readable_regular_file(target_fd, Some(directory.device))
+        }
+    }
+}
+
+#[cfg(test)]
+fn open_regular_from_root_fd(
+    shared_fd: OwnedFd,
+    shared_meta: std::fs::Metadata,
+    relative: &Path,
+) -> io::Result<File> {
     if relative.as_os_str().is_empty() {
         return readable_regular_file(shared_fd, None);
     }

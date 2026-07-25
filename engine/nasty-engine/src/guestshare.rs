@@ -47,11 +47,14 @@ const UNLOCK_REQUEST_MAX: usize = 30;
 const UNLOCK_REQUEST_WINDOW_SECS: i64 = 60;
 const UNLOCK_MAX_TRACKED_IPS: usize = 4096;
 const MAX_CONCURRENT_PASSWORD_CHECKS: usize = 4;
+const MAX_CONCURRENT_BROWSES: usize = 16;
+const MAX_PUBLIC_DIRECTORY_ENTRIES: usize = 10_000;
+const MAX_PUBLIC_PATH_BYTES: usize = 4096;
+const MAX_SHARE_ROOTS: usize = 32;
 /// Bound descriptors held by guest downloads, including slow clients.
 const MAX_CONCURRENT_DOWNLOADS: usize = 32;
 /// ZIP compression is substantially heavier than streaming one file.
 const MAX_CONCURRENT_ARCHIVES: usize = 4;
-const MAX_ARCHIVE_ROOTS: usize = 32;
 const MAX_ARCHIVE_ENTRIES: usize = 50_000;
 const MAX_ARCHIVE_DIRECTORY_ENTRIES: usize = 25_000;
 const MAX_ARCHIVE_DEPTH: usize = 64;
@@ -68,6 +71,8 @@ pub enum GuestShareError {
     NotRevoked(String),
     #[error("no paths supplied")]
     NoPaths,
+    #[error("too many paths supplied")]
+    TooManyPaths,
     #[error("path does not exist: {0}")]
     PathNotFound(String),
     #[error("path is not within a NASty filesystem: {0}")]
@@ -203,9 +208,24 @@ impl From<&GuestShare> for GuestShareInfo {
 /// One entry shown to a guest on the public share page.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PublicEntry {
+    pub root: usize,
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PublicDirectoryEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PublicDirectoryListing {
+    pub root: usize,
+    pub path: String,
+    pub entries: Vec<PublicDirectoryEntry>,
 }
 
 /// Public metadata for a share — deliberately minimal and leaks no absolute
@@ -214,6 +234,7 @@ pub struct PublicEntry {
 pub struct PublicShareMeta {
     pub entries: Vec<PublicEntry>,
     pub password_required: bool,
+    pub unlocked: bool,
     pub expires_at: Option<i64>,
 }
 
@@ -224,33 +245,6 @@ fn is_accessible(s: &GuestShare, now: i64) -> bool {
     !s.revoked
         && s.expires_at.is_none_or(|e| now < e)
         && s.max_downloads.is_none_or(|m| s.downloads < m)
-}
-
-/// Build the guest-visible metadata for a share. Lists each shared root by
-/// basename only (name/is_dir/size) — never the absolute `/fs/...` path.
-fn public_meta(share: &GuestShare) -> PublicShareMeta {
-    let entries = share
-        .paths
-        .iter()
-        .map(|p| {
-            let path = Path::new(p);
-            let md = std::fs::metadata(path).ok();
-            PublicEntry {
-                name: path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file")
-                    .to_string(),
-                is_dir: md.as_ref().map(|m| m.is_dir()).unwrap_or(false),
-                size: md.as_ref().map(|m| m.len()).unwrap_or(0),
-            }
-        })
-        .collect();
-    PublicShareMeta {
-        entries,
-        password_required: share.password_hash.is_some(),
-        expires_at: share.expires_at,
-    }
 }
 
 pub struct OpenedGuestFile {
@@ -571,6 +565,41 @@ fn canonicalize_under(root: &Path, requested: &str) -> Result<String, GuestShare
     Ok(canonical.to_string_lossy().into_owned())
 }
 
+fn public_relative_path(requested: &str) -> Option<(PathBuf, String)> {
+    if requested.len() > MAX_PUBLIC_PATH_BYTES
+        || requested
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '"' | '\'' | '\\'))
+    {
+        return None;
+    }
+    let path = Path::new(requested);
+    if path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    let mut names = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(name) = component else {
+            return None;
+        };
+        let name = name.to_str()?;
+        if !public_name_is_supported(name) {
+            return None;
+        }
+        normalized.push(name);
+        names.push(name);
+    }
+    Some((normalized, names.join("/")))
+}
+
+fn public_name_is_supported(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '"' | '\'' | '\\'))
+}
+
 /// A live password-unlock grant: proof a guest entered the right password
 /// for `share_id`, valid until `expires_at` (Unix seconds).
 struct GrantEntry {
@@ -680,6 +709,8 @@ pub struct GuestShareService {
     active_downloads: Arc<tokio::sync::Semaphore>,
     /// Bounds CPU-heavy archive producers for their full streaming lifetime.
     active_archives: Arc<tokio::sync::Semaphore>,
+    /// Bounds descriptor walks triggered by guest navigation and metadata.
+    browse_operations: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for GuestShareService {
@@ -705,6 +736,7 @@ impl GuestShareService {
             password_checks: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_CHECKS)),
             active_downloads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
             active_archives: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ARCHIVES)),
+            browse_operations: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSES)),
         }
     }
 
@@ -754,11 +786,13 @@ impl GuestShareService {
         if req.paths.is_empty() {
             return Err(GuestShareError::NoPaths);
         }
+        if req.paths.len() > MAX_SHARE_ROOTS {
+            return Err(GuestShareError::TooManyPaths);
+        }
         let mut canonical_paths = Vec::with_capacity(req.paths.len());
         for p in &req.paths {
             canonical_paths.push(canonicalize_under(&self.fs_root, p)?);
         }
-
         let password_hash = match req.password.as_deref() {
             Some(pw) if !pw.is_empty() => Some(
                 crate::auth::hash_password(pw).map_err(|e| GuestShareError::Hash(e.to_string()))?,
@@ -847,34 +881,144 @@ impl GuestShareService {
             .load_all::<GuestShare>()
             .await
             .into_iter()
-            .find(|s| s.token_hash == hash && is_accessible(s, now))
+            .find(|share| share.token_hash == hash && is_accessible(share, now))
     }
 
     /// Public metadata for the guest landing page.
-    pub fn meta(share: &GuestShare) -> PublicShareMeta {
-        public_meta(share)
+    pub async fn meta(&self, share: &GuestShare, unlocked: bool) -> Option<PublicShareMeta> {
+        let password_required = share.password_hash.is_some();
+        if password_required && !unlocked {
+            return Some(PublicShareMeta {
+                entries: Vec::new(),
+                password_required,
+                unlocked: false,
+                expires_at: share.expires_at,
+            });
+        }
+        if share.paths.len() > MAX_SHARE_ROOTS {
+            return None;
+        }
+        let permit = self.browse_operations.clone().try_acquire_owned().ok()?;
+        let files_root = self.fs_root.clone();
+        let paths = share.paths.clone();
+        let expires_at = share.expires_at;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let entries = paths
+                .into_iter()
+                .enumerate()
+                .filter_map(|(root, path)| {
+                    let path = PathBuf::from(path);
+                    let node = crate::file_boundary::open_root_beneath(&files_root, &path).ok()?;
+                    let metadata = node.metadata().ok()?;
+                    Some(PublicEntry {
+                        root,
+                        name: path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("file")
+                            .to_string(),
+                        is_dir: node.is_directory(),
+                        size: if metadata.is_file() {
+                            metadata.len()
+                        } else {
+                            0
+                        },
+                    })
+                })
+                .collect();
+            PublicShareMeta {
+                entries,
+                password_required,
+                unlocked: true,
+                expires_at,
+            }
+        })
+        .await
+        .ok()
+    }
+
+    /// List one guest-visible directory through retained descriptors.
+    pub async fn browse_directory(
+        &self,
+        share: &GuestShare,
+        root: usize,
+        requested: &str,
+    ) -> Option<PublicDirectoryListing> {
+        let (relative, path) = public_relative_path(requested)?;
+        let shared_root = PathBuf::from(share.paths.get(root)?);
+        let permit = self.browse_operations.clone().try_acquire_owned().ok()?;
+        let files_root = self.fs_root.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let root_node =
+                crate::file_boundary::open_root_beneath(&files_root, &shared_root).ok()?;
+            let directory =
+                crate::file_boundary::open_directory_from_root(root_node, &relative).ok()?;
+            let names = directory.entry_names(MAX_PUBLIC_DIRECTORY_ENTRIES).ok()?;
+            let mut entries = Vec::with_capacity(names.len());
+            for name in names {
+                let Some(name) = name.to_str().filter(|name| public_name_is_supported(name)) else {
+                    continue;
+                };
+                let Ok(node) = directory.open_child(std::ffi::OsStr::new(name)) else {
+                    continue;
+                };
+                let Ok(metadata) = node.metadata() else {
+                    continue;
+                };
+                entries.push(PublicDirectoryEntry {
+                    name: name.to_string(),
+                    is_dir: node.is_directory(),
+                    size: if metadata.is_file() {
+                        metadata.len()
+                    } else {
+                        0
+                    },
+                });
+            }
+            entries.sort_by(|left, right| {
+                right.is_dir.cmp(&left.is_dir).then_with(|| {
+                    left.name
+                        .to_lowercase()
+                        .cmp(&right.name.to_lowercase())
+                        .then_with(|| left.name.cmp(&right.name))
+                })
+            });
+            Some(PublicDirectoryListing {
+                root,
+                path,
+                entries,
+            })
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Open a guest file beneath one of the share roots. The returned
     /// descriptor is the object that was authorized; callers never reopen a
     /// validated pathname.
-    pub async fn open_download(&self, share: &GuestShare, rel: &str) -> Option<OpenedGuestFile> {
-        if rel
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\'))
-        {
-            return None;
-        }
+    pub async fn open_download(
+        &self,
+        share: &GuestShare,
+        root: Option<usize>,
+        rel: &str,
+    ) -> Option<OpenedGuestFile> {
+        let (relative, _) = public_relative_path(rel)?;
         let permit = self.active_downloads.clone().try_acquire_owned().ok()?;
         let files_root = self.fs_root.clone();
-        let roots = share.paths.clone();
-        let relative = PathBuf::from(rel);
+        let roots = match root {
+            Some(root) => vec![share.paths.get(root)?.clone()],
+            None => share.paths.clone(),
+        };
         tokio::task::spawn_blocking(move || {
             for root in roots {
                 let root = PathBuf::from(root);
-                let Ok(file) =
-                    crate::file_boundary::open_regular_beneath(&files_root, &root, &relative)
-                else {
+                let Ok(node) = crate::file_boundary::open_root_beneath(&files_root, &root) else {
+                    continue;
+                };
+                let Ok(file) = crate::file_boundary::open_regular_from_root(node, &relative) else {
                     continue;
                 };
                 let size = file.metadata().ok()?.len();
@@ -998,7 +1142,7 @@ impl GuestShareService {
     /// Open and retain every archive root before registering the download.
     pub async fn prepare_archive(&self, share: &GuestShare) -> Option<OpenedGuestArchive> {
         let permit = self.active_archives.clone().try_acquire_owned().ok()?;
-        if share.paths.is_empty() || share.paths.len() > MAX_ARCHIVE_ROOTS {
+        if share.paths.is_empty() || share.paths.len() > MAX_SHARE_ROOTS {
             return None;
         }
         let files_root = self.fs_root.clone();
@@ -1343,6 +1487,20 @@ mod tests {
             .await,
             Err(GuestShareError::NoPaths)
         ));
+        assert!(matches!(
+            svc.create(
+                CreateGuestShareRequest {
+                    paths: vec![shared.to_string_lossy().into_owned(); MAX_SHARE_ROOTS + 1],
+                    expires_at: None,
+                    password: None,
+                    max_downloads: None,
+                    note: None,
+                },
+                "bob",
+            )
+            .await,
+            Err(GuestShareError::TooManyPaths)
+        ));
     }
 
     /// Build and persist a share with field overrides, returning it. Lets a
@@ -1429,7 +1587,7 @@ mod tests {
             share.paths = vec![file.to_string_lossy().into_owned()];
         })
         .await;
-        let opened = svc.open_download(&share, "").await.unwrap();
+        let opened = svc.open_download(&share, None, "").await.unwrap();
         assert_eq!(
             svc.active_downloads.available_permits(),
             MAX_CONCURRENT_DOWNLOADS - 1
@@ -1723,32 +1881,44 @@ mod tests {
             ..bare("f")
         };
         // Relative file inside the shared folder (including a subdir): ok.
-        assert!(svc.open_download(&folder_share, "a.txt").await.is_some());
         assert!(
-            svc.open_download(&folder_share, "sub/b.txt")
+            svc.open_download(&folder_share, None, "a.txt")
+                .await
+                .is_some()
+        );
+        assert!(
+            svc.open_download(&folder_share, None, "sub/b.txt")
                 .await
                 .is_some()
         );
         // Escapes and non-files: rejected.
         assert!(
-            svc.open_download(&folder_share, "../secret.txt")
+            svc.open_download(&folder_share, None, "../secret.txt")
                 .await
                 .is_none()
         );
-        assert!(svc.open_download(&folder_share, "sub").await.is_none()); // a dir, not a file
         assert!(
-            svc.open_download(&folder_share, "missing.txt")
+            svc.open_download(&folder_share, None, "sub")
+                .await
+                .is_none()
+        ); // a dir, not a file
+        assert!(
+            svc.open_download(&folder_share, None, "missing.txt")
                 .await
                 .is_none()
         );
-        assert!(svc.open_download(&folder_share, "a\\b").await.is_none()); // backslash rejected
+        assert!(
+            svc.open_download(&folder_share, None, "a\\b")
+                .await
+                .is_none()
+        ); // backslash rejected
 
         // Single-file share: empty path resolves to the file itself.
         let file_share = GuestShare {
             paths: vec![single.to_string_lossy().into_owned()],
             ..bare("s")
         };
-        assert!(svc.open_download(&file_share, "").await.is_some());
+        assert!(svc.open_download(&file_share, None, "").await.is_some());
     }
 
     #[tokio::test]
@@ -1765,16 +1935,16 @@ mod tests {
 
         let mut opened = Vec::new();
         for _ in 0..MAX_CONCURRENT_DOWNLOADS {
-            opened.push(svc.open_download(&share, "").await.unwrap());
+            opened.push(svc.open_download(&share, None, "").await.unwrap());
         }
-        assert!(svc.open_download(&share, "").await.is_none());
+        assert!(svc.open_download(&share, None, "").await.is_none());
 
         opened.pop();
-        assert!(svc.open_download(&share, "").await.is_some());
+        assert!(svc.open_download(&share, None, "").await.is_some());
     }
 
-    #[test]
-    fn public_meta_lists_basenames_not_abspaths() {
+    #[tokio::test]
+    async fn public_meta_lists_basenames_not_abspaths() {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let dir = root.join("docs");
@@ -1792,8 +1962,14 @@ mod tests {
             expires_at: Some(42),
             ..bare("m")
         };
-        let meta = public_meta(&share);
+        let svc = GuestShareService::with_dirs(root.join("state"), root);
+        let locked = svc.meta(&share, false).await.unwrap();
+        assert!(locked.entries.is_empty());
+        assert!(!locked.unlocked);
+
+        let meta = svc.meta(&share, true).await.unwrap();
         assert!(meta.password_required);
+        assert!(meta.unlocked);
         assert_eq!(meta.expires_at, Some(42));
         assert_eq!(meta.entries.len(), 2);
         let names: Vec<&str> = meta.entries.iter().map(|e| e.name.as_str()).collect();
@@ -1808,6 +1984,94 @@ mod tests {
             .unwrap();
         assert!(!pdf.is_dir);
         assert_eq!(pdf.size, 8);
+        assert_eq!(pdf.root, 1);
+    }
+
+    #[tokio::test]
+    async fn browse_directory_is_sorted_and_stays_within_selected_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(first.join("sub")).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("z.txt"), b"z").unwrap();
+        std::fs::write(first.join("A.txt"), b"alpha").unwrap();
+        std::fs::write(first.join("sub/nested.txt"), b"nested").unwrap();
+        std::fs::write(second.join("other.txt"), b"other").unwrap();
+        std::fs::write(first.join("bad\"name.txt"), b"hidden").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            std::os::unix::fs::symlink(&second, first.join("escape")).unwrap();
+            let fifo = first.join("pipe");
+            let fifo = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        }
+        let svc = GuestShareService::with_dirs(root.join("state"), root);
+        let share = GuestShare {
+            paths: vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            ..bare("browse")
+        };
+
+        let listing = svc.browse_directory(&share, 0, "").await.unwrap();
+        assert_eq!(listing.root, 0);
+        assert_eq!(listing.path, "");
+        let names: Vec<&str> = listing
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["sub", "A.txt", "z.txt"]);
+        assert!(listing.entries[0].is_dir);
+        assert_eq!(listing.entries[1].size, 5);
+
+        let nested = svc.browse_directory(&share, 0, "sub").await.unwrap();
+        assert_eq!(nested.path, "sub");
+        assert_eq!(nested.entries[0].name, "nested.txt");
+        assert!(svc.browse_directory(&share, 0, "../second").await.is_none());
+        assert!(svc.browse_directory(&share, 2, "").await.is_none());
+        assert!(svc.browse_directory(&share, 0, "z.txt").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn download_root_index_disambiguates_shared_roots() {
+        use tokio::io::AsyncReadExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("same.txt"), b"first").unwrap();
+        std::fs::write(second.join("same.txt"), b"second").unwrap();
+        let svc = GuestShareService::with_dirs(root.join("state"), root);
+        let share = GuestShare {
+            paths: vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            ..bare("root-index")
+        };
+
+        let opened = svc
+            .open_download(&share, Some(1), "same.txt")
+            .await
+            .unwrap();
+        let (mut reader, _, _) = opened.into_parts();
+        let mut content = Vec::new();
+        reader.read_to_end(&mut content).await.unwrap();
+        assert_eq!(content, b"second");
+        assert!(
+            svc.open_download(&share, Some(2), "same.txt")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1975,7 +2239,7 @@ mod tests {
         assert!(svc.prepare_archive(&missing).await.is_none());
 
         let excessive = GuestShare {
-            paths: vec![file.to_string_lossy().into_owned(); MAX_ARCHIVE_ROOTS + 1],
+            paths: vec![file.to_string_lossy().into_owned(); MAX_SHARE_ROOTS + 1],
             ..bare("excess-roots")
         };
         assert!(svc.prepare_archive(&excessive).await.is_none());
