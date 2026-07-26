@@ -6,6 +6,7 @@ import { isReconnectAuthError, NastyClient } from './rpc';
 // receive(...), fireClose(), fireError() to simulate server activity.
 
 let mockInstances: MockWebSocket[] = [];
+let closeFiresEvent = true;
 
 class MockWebSocket {
 	static CONNECTING = 0;
@@ -33,7 +34,7 @@ class MockWebSocket {
 	// so tests can verify cleanup without awaiting.
 	close() {
 		this.readyState = MockWebSocket.CLOSED;
-		this.onclose?.({} as CloseEvent);
+		if (closeFiresEvent) this.onclose?.({} as CloseEvent);
 	}
 
 	// ── Test driver helpers ───────────────────────────────────────
@@ -72,6 +73,7 @@ async function connectAuthed(): Promise<NastyClient> {
 
 beforeEach(() => {
 	mockInstances = [];
+	closeFiresEvent = true;
 	vi.stubGlobal('WebSocket', MockWebSocket);
 });
 
@@ -100,6 +102,20 @@ describe('auth handshake', () => {
 		expect(client.authenticated).toBe(true);
 	});
 
+	test('concurrent connect calls share one socket and handshake', async () => {
+		const client = new NastyClient('ws://localhost/api');
+		const first = client.connect();
+		const second = client.connect();
+		expect(second).toBe(first);
+		expect(mockInstances).toHaveLength(1);
+
+		mockInstances[0].open();
+		mockInstances[0].receive({ authenticated: true, username: 'admin', role: 'admin' });
+
+		await expect(first).resolves.toMatchObject({ username: 'admin' });
+		await expect(second).resolves.toMatchObject({ username: 'admin' });
+	});
+
 	test('connect rejects when server returns an error', async () => {
 		const client = new NastyClient('ws://localhost/api');
 		const promise = client.connect();
@@ -124,6 +140,21 @@ describe('auth handshake', () => {
 		const promise = client.connect();
 		mockInstances[0].fireError();
 		await expect(promise).rejects.toThrow(/WebSocket connection failed/);
+	});
+
+	test('connect rejects when the socket closes before auth', async () => {
+		const client = new NastyClient('ws://localhost/api');
+		const promise = client.connect();
+		mockInstances[0].fireClose();
+		await expect(promise).rejects.toThrow(/closed before authentication/);
+	});
+
+	test('disconnect rejects an in-progress auth handshake', async () => {
+		closeFiresEvent = false;
+		const client = new NastyClient('ws://localhost/api');
+		const promise = client.connect();
+		client.disconnect();
+		await expect(promise).rejects.toThrow(/closed before authentication/);
 	});
 });
 
@@ -247,6 +278,47 @@ describe('connection lifecycle', () => {
 		expect(client.authenticated).toBe(false);
 		// No second WebSocket gets constructed — disconnect is one-shot.
 		expect(mockInstances).toHaveLength(1);
+	});
+
+	test('disconnect() rejects pending calls before the close event', async () => {
+		const client = await connectAuthed();
+		const callPromise = client.call('slow');
+		closeFiresEvent = false;
+
+		client.disconnect();
+
+		await expect(callPromise).rejects.toMatchObject({
+			code: -32000,
+			message: 'WebSocket disconnected'
+		});
+	});
+
+	test('disconnect() releases calls waiting for reconnect', async () => {
+		const client = await connectAuthed();
+		mockInstances[0].fireClose();
+		const callPromise = client.call('waiting');
+
+		client.disconnect();
+
+		await expect(callPromise).rejects.toThrow('Not connected or not authenticated');
+	});
+
+	test('disconnect() releases waiters after a failed reconnect attempt', async () => {
+		vi.useFakeTimers();
+		try {
+			const client = await connectAuthed();
+			mockInstances[0].fireClose();
+			const callPromise = client.call('waiting');
+			await vi.advanceTimersByTimeAsync(1000);
+			mockInstances[1].fireError();
+			await vi.advanceTimersByTimeAsync(0);
+
+			client.disconnect();
+
+			await expect(callPromise).rejects.toThrow('Not connected or not authenticated');
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test('forces page reload after enough consecutive failed reconnects', async () => {

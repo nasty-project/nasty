@@ -9,6 +9,7 @@
 	import { getClient } from '$lib/client';
 	import { normalizeShareDownloadLimit } from '$lib/public-share';
 	import { withToast, error as toastError, success as toastSuccess } from '$lib/toast.svelte';
+	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 
 	interface FileEntry {
@@ -123,6 +124,17 @@
 	let uploading = $state(false);
 	let uploadProgress = $state(0);
 	let uploadName = $state('');
+
+	class FileUploadError extends Error {
+		status: number;
+		overwriteAllowed: boolean;
+
+		constructor(message: string, status: number, overwriteAllowed = false) {
+			super(message);
+			this.status = status;
+			this.overwriteAllowed = overwriteAllowed;
+		}
+	}
 
 	// Mkdir state
 	let showMkdir = $state(false);
@@ -472,44 +484,74 @@
 		input.multiple = true;
 		input.onchange = async () => {
 			if (!input.files?.length) return;
+			const uploadPath = currentPath;
 			for (const file of input.files) {
-				await uploadFile(file);
+				await uploadFile(file, uploadPath);
 			}
 		};
 		input.click();
 	}
 
-	async function uploadFile(file: globalThis.File) {
-		uploading = true;
+	function sendUpload(file: globalThis.File, path: string, overwrite: boolean): Promise<void> {
 		uploadProgress = 0;
-		uploadName = file.name;
-
 		const form = new FormData();
 		form.append('file', file);
+		const query = new URLSearchParams({ path });
+		if (overwrite) query.set('overwrite', 'true');
+
+		return new Promise<void>((resolve, reject) => {
+			const xhr = new XMLHttpRequest();
+			xhr.open('POST', `/api/files/upload?${query}`);
+			// Cookie auth — XHR sends same-origin cookies automatically.
+			xhr.upload.onprogress = (e) => {
+				if (e.lengthComputable) uploadProgress = Math.round((e.loaded / e.total) * 100);
+			};
+			xhr.onload = () => {
+				if (xhr.status >= 200 && xhr.status < 300) {
+					resolve();
+					return;
+				}
+				let message = 'Upload failed';
+				let overwriteAllowed = false;
+				try {
+					const body = JSON.parse(xhr.responseText);
+					if (typeof body?.error === 'string') message = body.error;
+					overwriteAllowed = body?.overwrite_allowed === true;
+				} catch {
+					if (xhr.statusText) message = xhr.statusText;
+				}
+				reject(new FileUploadError(message, xhr.status, overwriteAllowed));
+			};
+			xhr.onerror = () => reject(new FileUploadError('Network error', 0));
+			xhr.send(form);
+		});
+	}
+
+	async function uploadFile(file: globalThis.File, uploadPath: string) {
+		uploading = true;
+		uploadName = file.name;
 
 		try {
-			await new Promise<void>((resolve, reject) => {
-				const xhr = new XMLHttpRequest();
-				xhr.open('POST', `/api/files/upload?path=${encodeURIComponent(currentPath)}`);
-				// Cookie auth — XHR sends same-origin cookies automatically.
-				xhr.upload.onprogress = (e) => {
-					if (e.lengthComputable) uploadProgress = Math.round((e.loaded / e.total) * 100);
-				};
-				xhr.onload = () => {
-					if (xhr.status === 200) resolve();
-					else reject(new Error(JSON.parse(xhr.responseText)?.error || 'Upload failed'));
-				};
-				xhr.onerror = () => reject(new Error('Network error'));
-				xhr.send(form);
-			});
+			try {
+				await sendUpload(file, uploadPath, false);
+			} catch (e) {
+				if (!(e instanceof FileUploadError) || e.status !== 409 || !e.overwriteAllowed) throw e;
+				const approved = await confirm(
+					`Overwrite “${file.name}”?`,
+					'A file with this name already exists. Replacing it cannot be undone.',
+					{ confirmLabel: 'Overwrite', cancelLabel: 'Keep existing' },
+				);
+				if (!approved) return;
+				await sendUpload(file, uploadPath, true);
+			}
 		} catch (e: unknown) {
 			alert(e instanceof Error ? e.message : 'Upload failed');
+		} finally {
+			uploading = false;
+			uploadProgress = 0;
+			uploadName = '';
+			await browse(currentPath);
 		}
-
-		uploading = false;
-		uploadProgress = 0;
-		uploadName = '';
-		await browse(currentPath);
 	}
 
 	async function createDir() {

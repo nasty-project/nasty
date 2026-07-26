@@ -1,5 +1,7 @@
 /** Toast notification store */
 
+import { getSessionGeneration, registerSessionReset } from './client';
+
 type ToastType = 'success' | 'error' | 'info';
 
 export interface Toast {
@@ -28,6 +30,10 @@ export function dismiss(id: number) {
 	toasts = toasts.filter((t) => t.id !== id);
 }
 
+export function clearToasts() {
+	toasts = [];
+}
+
 export function success(message: string) {
 	add('success', message);
 }
@@ -53,16 +59,22 @@ export async function withToast<T>(
 	fn: () => Promise<T>,
 	successMsg?: string
 ): Promise<T | undefined> {
+	const generation = getSessionGeneration();
 	_busy++;
 	try {
 		const result = await fn();
-		if (successMsg) success(successMsg);
+		if (successMsg && generation === getSessionGeneration()) success(successMsg);
 		return result;
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? e.message : typeof e === 'object' && e !== null && 'message' in e ? String((e as { message: unknown }).message) : String(e);
-		error(msg);
+		if (generation === getSessionGeneration()) error(msg);
 		return undefined;
 	} finally {
-		_busy--;
+		if (generation === getSessionGeneration()) _busy--;
 	}
 }
+
+registerSessionReset(() => {
+	clearToasts();
+	_busy = 0;
+});

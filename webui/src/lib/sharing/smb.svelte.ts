@@ -9,41 +9,49 @@
  * etc.) for that inline-create stays on the page — only the
  * "existing shares" half lives here. */
 
-import { getClient } from '$lib/client';
+import { getClient, registerSessionReset } from '$lib/client';
 import { withToast } from '$lib/toast.svelte';
 import { confirm } from '$lib/confirm.svelte';
 import type { SmbShare, SmbGroup, Subvolume, ProtocolStatus } from '$lib/types';
 
-const client = getClient();
-
 export type SmbSortKey = 'name' | 'path' | 'status';
 
-export const smb = $state({
-	shares: [] as SmbShare[],
-	loading: true,
-	protocol: null as ProtocolStatus | null,
-	showCreate: false,
-	subvolumes: [] as Subvolume[],
-	newSubvolume: '',
-	newName: '',
-	newComment: '',
-	newReadOnly: false,
-	newGuestOk: false,
-	newTimeMachine: false,
-	newTmMaxSize: null as number | null,
-	expanded: {} as Record<string, boolean>,
-	addUserShare: null as string | null,
-	addUserName: '',
-	groups: [] as SmbGroup[],
-	// Shared between the panel's "add user to share" picker and the
-	// create wizard's "valid users" picker on the page; lazy-loaded
-	// when either UI is opened to avoid a round-trip on every page
-	// load.
-	systemUsers: [] as { username: string; uid: number }[],
-	search: '',
-	sortKey: null as SmbSortKey | null,
-	sortDir: 'asc' as 'asc' | 'desc',
-});
+function initialSmbState() {
+	return {
+		shares: [] as SmbShare[],
+		loading: true,
+		protocol: null as ProtocolStatus | null,
+		showCreate: false,
+		subvolumes: [] as Subvolume[],
+		newSubvolume: '',
+		newName: '',
+		newComment: '',
+		newReadOnly: false,
+		newGuestOk: false,
+		newTimeMachine: false,
+		newTmMaxSize: null as number | null,
+		expanded: {} as Record<string, boolean>,
+		addUserShare: null as string | null,
+		addUserName: '',
+		groups: [] as SmbGroup[],
+		// Shared between the panel's "add user to share" picker and the
+		// create wizard's "valid users" picker on the page; lazy-loaded
+		// when either UI is opened to avoid a round-trip on every page
+		// load.
+		systemUsers: [] as { username: string; uid: number }[],
+		search: '',
+		sortKey: null as SmbSortKey | null,
+		sortDir: 'asc' as 'asc' | 'desc',
+	};
+}
+
+export const smb = $state(initialSmbState());
+
+export function resetSmbState() {
+	Object.assign(smb, initialSmbState());
+}
+
+registerSessionReset(resetSmbState);
 
 export function smbToggleSort(key: SmbSortKey) {
 	if (smb.sortKey === key) {
@@ -56,6 +64,7 @@ export function smbToggleSort(key: SmbSortKey) {
 
 export async function smbRefresh() {
 	await withToast(async () => {
+		const client = getClient();
 		const [shares, groups] = await Promise.all([
 			client.call<SmbShare[]>('share.smb.list'),
 			client.call<SmbGroup[]>('smb.group.list').catch(() => [] as SmbGroup[]),
@@ -67,14 +76,14 @@ export async function smbRefresh() {
 
 export async function smbLoadProtocol() {
 	try {
-		const all = await client.call<ProtocolStatus[]>('service.protocol.list');
+		const all = await getClient().call<ProtocolStatus[]>('service.protocol.list');
 		smb.protocol = all.find(p => p.name === 'smb') ?? null;
 	} catch { /* ignore */ }
 }
 
 export async function smbLoadSubvolumes() {
 	await withToast(async () => {
-		const all = await client.call<Subvolume[]>('subvolume.list_all');
+		const all = await getClient().call<Subvolume[]>('subvolume.list_all');
 		smb.subvolumes = all.filter(s => s.subvolume_type === 'filesystem');
 	});
 }
@@ -89,7 +98,7 @@ export function smbOnSubvolumeSelect() {
 export async function smbCreate() {
 	if (!smb.newName || !smb.newSubvolume) return;
 	const ok = await withToast(
-		() => client.call('share.smb.create', {
+		() => getClient().call('share.smb.create', {
 			name: smb.newName,
 			path: smb.newSubvolume,
 			comment: smb.newComment || undefined,
@@ -113,7 +122,7 @@ export async function smbCreate() {
 
 export async function smbToggleEnabled(share: SmbShare) {
 	await withToast(
-		() => client.call('share.smb.update', { id: share.id, enabled: !share.enabled }),
+		() => getClient().call('share.smb.update', { id: share.id, enabled: !share.enabled }),
 		`Share ${share.enabled ? 'disabled' : 'enabled'}`
 	);
 	await smbRefresh();
@@ -121,13 +130,13 @@ export async function smbToggleEnabled(share: SmbShare) {
 
 export async function smbRemove(id: string) {
 	if (!await confirm('Delete this SMB share?')) return;
-	await withToast(() => client.call('share.smb.delete', { id }), 'SMB share deleted');
+	await withToast(() => getClient().call('share.smb.delete', { id }), 'SMB share deleted');
 	await smbRefresh();
 }
 
 export async function smbToggleField(share: SmbShare, field: 'read_only' | 'browseable' | 'guest_ok') {
 	await withToast(
-		() => client.call('share.smb.update', { id: share.id, [field]: !share[field] }),
+		() => getClient().call('share.smb.update', { id: share.id, [field]: !share[field] }),
 		'Share updated'
 	);
 	await smbRefresh();
@@ -135,7 +144,7 @@ export async function smbToggleField(share: SmbShare, field: 'read_only' | 'brow
 
 export async function smbRemoveUser(share: SmbShare, username: string) {
 	const valid_users = share.valid_users.filter(u => u !== username);
-	await withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), 'User removed');
+	await withToast(() => getClient().call('share.smb.update', { id: share.id, valid_users }), 'User removed');
 	await smbRefresh();
 }
 
@@ -144,6 +153,6 @@ export async function smbRemoveUser(share: SmbShare, username: string) {
 export async function smbEnsureSystemUsers() {
 	if (smb.systemUsers.length > 0) return;
 	try {
-		smb.systemUsers = await client.call<{ username: string; uid: number }[]>('smb.user.list');
+		smb.systemUsers = await getClient().call<{ username: string; uid: number }[]>('smb.user.list');
 	} catch { /* ignore */ }
 }

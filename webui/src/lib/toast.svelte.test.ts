@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { resetClient } from './client';
 import { dismiss, error, getToasts, info, isBusy, success, withToast } from './toast.svelte';
 
 // Toast state is module-scoped, so each test must start from an empty queue.
@@ -136,6 +137,36 @@ describe('withToast', () => {
 		expect(isBusy()).toBe(true); // b still running
 		releaseB();
 		await opB;
+		expect(isBusy()).toBe(false);
+	});
+
+	test('does not surface completion from a previous session', async () => {
+		let rejectInner!: (error: Error) => void;
+		const inner = new Promise<void>((_, reject) => {
+			rejectInner = reject;
+		});
+		const op = withToast(() => inner, 'Old session saved');
+
+		resetClient();
+		rejectInner(new Error('Old session disconnected'));
+		await op;
+
+		expect(getToasts()).toEqual([]);
+	});
+
+	test('reset clears busy state without an old operation decrementing the new session', async () => {
+		let releaseInner!: () => void;
+		const inner = new Promise<void>((resolve) => {
+			releaseInner = resolve;
+		});
+		const op = withToast(() => inner);
+		expect(isBusy()).toBe(true);
+
+		resetClient();
+		expect(isBusy()).toBe(false);
+		releaseInner();
+		await op;
+
 		expect(isBusy()).toBe(false);
 	});
 });

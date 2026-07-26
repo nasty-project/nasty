@@ -3,31 +3,41 @@
  * small set of top-level lifecycle handlers. Per-principal CRUD (users,
  * groups, computers) lives in DcPanel.svelte itself, same split as
  * domain.svelte.ts (status/join/leave) vs. the SMB users/groups page. */
-import { getClient } from '$lib/client';
+import { getClient, getSessionGeneration, registerSessionReset } from '$lib/client';
 import { withToast, info } from '$lib/toast.svelte';
 import type { DcStatus, DcPrincipal } from '$lib/types';
 
-const client = getClient();
+function initialDcState() {
+	return {
+		status: null as DcStatus | null,
+		loading: true,
+		provisioning: false,
+		// provision form
+		realm: '',
+		adminPassword: '',
+		dnsForwarder: '',
+		// panel data (users/groups/computers tabs)
+		users: [] as DcPrincipal[],
+		groups: [] as DcPrincipal[],
+		computers: [] as DcPrincipal[],
+	};
+}
 
-export const dc = $state({
-	status: null as DcStatus | null,
-	loading: true,
-	provisioning: false,
-	// provision form
-	realm: '',
-	adminPassword: '',
-	dnsForwarder: '',
-	// panel data (users/groups/computers tabs)
-	users: [] as DcPrincipal[],
-	groups: [] as DcPrincipal[],
-	computers: [] as DcPrincipal[],
-});
+export const dc = $state(initialDcState());
+
+export function resetDcState() {
+	Object.assign(dc, initialDcState());
+}
+
+registerSessionReset(resetDcState);
 
 export async function dcRefresh() {
+	const generation = getSessionGeneration();
 	try {
-		dc.status = await client.call<DcStatus>('dc.status');
+		const status = await getClient().call<DcStatus>('dc.status');
+		if (generation === getSessionGeneration()) dc.status = status;
 	} catch { /* engine without dc support */ }
-	dc.loading = false;
+	if (generation === getSessionGeneration()) dc.loading = false;
 }
 
 export async function dcProvision(): Promise<boolean> {
@@ -39,7 +49,7 @@ export async function dcProvision(): Promise<boolean> {
 	};
 	if (dc.dnsForwarder.trim()) params.dns_forwarder = dc.dnsForwarder.trim();
 	const res = await withToast(
-		() => client.call<{ status: DcStatus; warnings: string[] }>('dc.provision', params),
+		() => getClient().call<{ status: DcStatus; warnings: string[] }>('dc.provision', params),
 		'Domain provisioned',
 	);
 	dc.adminPassword = '';
@@ -56,7 +66,7 @@ export async function dcProvision(): Promise<boolean> {
 
 export async function dcDemote(realmConfirmation: string): Promise<boolean> {
 	const ok = await withToast(
-		() => client.call('dc.demote', { realm_confirmation: realmConfirmation }),
+		() => getClient().call('dc.demote', { realm_confirmation: realmConfirmation }),
 		'Domain demoted',
 	);
 	if (ok !== undefined) await dcRefresh();
@@ -65,6 +75,7 @@ export async function dcDemote(realmConfirmation: string): Promise<boolean> {
 
 export async function dcLoadPrincipals() {
 	try {
+		const client = getClient();
 		[dc.users, dc.groups, dc.computers] = await Promise.all([
 			client.call<DcPrincipal[]>('dc.user.list'),
 			client.call<DcPrincipal[]>('dc.group.list'),

@@ -8,7 +8,7 @@
  * rendered persistently in the root layout — the user might navigate away
  * from the settings page during the confirm window. */
 
-import { getClient } from './client';
+import { getClient, getSessionGeneration, registerSessionReset } from './client';
 import { error as toastError, withToast } from './toast.svelte';
 import type { NetworkPendingTxn, NetworkUpdateRequest, NetworkUpdateResponse } from './types';
 
@@ -19,16 +19,49 @@ export interface PendingRollback {
 }
 
 let _pending = $state<PendingRollback | null>(null);
+let _confirmationError = $state<{ txnId: string; message: string } | null>(null);
+let _confirmingTxnId = $state<string | null>(null);
+let _applying = $state(false);
+let expiryRefresh: Promise<void> | null = null;
+let recoveryGeneration = 0;
+
+function setPending(pending: PendingRollback | null) {
+	if (pending?.txnId !== _pending?.txnId) {
+		_confirmationError = null;
+		_confirmingTxnId = null;
+	}
+	_pending = pending;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error
+		? error.message
+		: typeof error === 'object' && error !== null && 'message' in error
+			? String((error as { message: unknown }).message)
+			: String(error);
+}
 
 export const rollbackState = {
 	get pending(): PendingRollback | null {
 		return _pending;
 	},
 	set(p: PendingRollback) {
-		_pending = p;
+		setPending(p);
 	},
 	clear() {
-		_pending = null;
+		setPending(null);
+		_applying = false;
+	},
+	get confirmationError(): string | null {
+		return _confirmationError && _confirmationError.txnId === _pending?.txnId
+			? _confirmationError.message
+			: null;
+	},
+	get confirming(): boolean {
+		return _confirmingTxnId !== null && _confirmingTxnId === _pending?.txnId;
+	},
+	get applying(): boolean {
+		return _applying;
 	},
 	/** Compute remaining seconds until the server-side rollback fires. */
 	secondsRemaining(): number {
@@ -38,6 +71,11 @@ export const rollbackState = {
 	},
 };
 
+registerSessionReset(() => {
+	recoveryGeneration++;
+	rollbackState.clear();
+});
+
 /** Submit a network config change. Captures the response and, if the server
  * scheduled a rollback, populates the global store so the layout banner
  * shows up. Always shows a toast on success/error. */
@@ -45,32 +83,43 @@ export async function applyNetworkUpdate(
 	payload: NetworkUpdateRequest,
 	successMsg: string,
 ): Promise<NetworkUpdateResponse | undefined> {
+	if (_applying || _pending) {
+		toastError('Confirm or wait for the pending network change before applying another update');
+		return undefined;
+	}
+	_applying = true;
+	const generation = getSessionGeneration();
 	const client = getClient();
-	const res = await withToast(
-		() => client.call<NetworkUpdateResponse>('system.network.update', payload),
-		successMsg,
-	);
-	if (res?.txn_id && res.revert_at_unix) {
-		_pending = {
-			txnId: res.txn_id,
-			revertAtUnix: res.revert_at_unix,
-			riskReason: res.risk_reason ?? null,
-		};
-	}
-	// Surface per-connection NM errors as an explicit error toast.
-	// The success toast above already fired — engine treats partial
-	// failures as overall success — but the user needs to know that
-	// not everything went through.  Without this, a bond that NM
-	// rejected silently looks like it "worked" in the UI.
-	if (res?.apply_errors && res.apply_errors.length > 0) {
-		const lines = res.apply_errors
-			.map((e) => `${e.connection_id}: ${e.message}`)
-			.join('\n');
-		toastError(
-			`Network applied, but ${res.apply_errors.length} connection(s) reported errors:\n${lines}`,
+	try {
+		const res = await withToast(
+			() => client.call<NetworkUpdateResponse>('system.network.update', payload),
+			successMsg,
 		);
+		if (generation !== getSessionGeneration()) return undefined;
+		if (!res) {
+			void recoverPendingRollback();
+			return undefined;
+		}
+		if (res?.txn_id && res.revert_at_unix) {
+			setPending({
+				txnId: res.txn_id,
+				revertAtUnix: res.revert_at_unix,
+				riskReason: res.risk_reason ?? null,
+			});
+		}
+		// Surface per-connection NM errors as an explicit error toast.
+		if (res?.apply_errors && res.apply_errors.length > 0) {
+			const lines = res.apply_errors
+				.map((e) => `${e.connection_id}: ${e.message}`)
+				.join('\n');
+			toastError(
+				`Network applied, but ${res.apply_errors.length} connection(s) reported errors:\n${lines}`,
+			);
+		}
+		return res;
+	} finally {
+		if (generation === getSessionGeneration()) _applying = false;
 	}
-	return res;
 }
 
 /** Query the server for any active rollback transactions and populate the
@@ -84,6 +133,7 @@ export async function applyNetworkUpdate(
  * pending — pathological in practice (the in-memory table rarely has more
  * than one entry) but we want stable behavior. */
 export async function loadPendingRollback(): Promise<void> {
+	const generation = getSessionGeneration();
 	const client = getClient();
 	let txns: NetworkPendingTxn[];
 	try {
@@ -91,34 +141,63 @@ export async function loadPendingRollback(): Promise<void> {
 	} catch {
 		return;
 	}
+	if (generation !== getSessionGeneration()) return;
 	if (txns.length === 0) {
 		// Server says nothing pending — clear local in case we'd been
 		// holding a stale entry from a prior session.
-		_pending = null;
+		setPending(null);
 		return;
 	}
 	const soonest = txns.reduce((a, b) => (a.revert_at_unix <= b.revert_at_unix ? a : b));
-	_pending = {
+	setPending({
 		txnId: soonest.txn_id,
 		revertAtUnix: soonest.revert_at_unix,
 		riskReason: soonest.risk_reason || null,
-	};
+	});
 }
 
-/** Confirm a pending rollback — keeps the change. Clears the local store
- * even if the RPC fails (the server may have already reverted, in which
- * case the banner should disappear regardless). */
+/** Re-query instead of trusting the browser clock when a countdown expires. */
+export function reconcileExpiredRollback(): void {
+	if (!_pending || rollbackState.secondsRemaining() > 0 || expiryRefresh) return;
+	expiryRefresh = loadPendingRollback().finally(() => {
+		expiryRefresh = null;
+	});
+}
+
+/** Retry after reconnect because a risky update may register after connectivity returns. */
+export async function recoverPendingRollback(): Promise<void> {
+	const generation = getSessionGeneration();
+	const recovery = ++recoveryGeneration;
+	for (const delay of [0, 1000, 3000, 5000, 7000, 7000, 7000]) {
+		if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+		if (generation !== getSessionGeneration() || recovery !== recoveryGeneration) return;
+		await loadPendingRollback();
+		if (_pending) return;
+	}
+}
+
+/** Confirm a pending rollback and clear only after the server acknowledges it. */
 export async function confirmRollback(): Promise<void> {
 	const txn = _pending;
-	if (!txn) return;
+	if (!txn || _confirmingTxnId === txn.txnId) return;
+	_confirmingTxnId = txn.txnId;
+	const generation = getSessionGeneration();
 	const client = getClient();
 	try {
 		await client.call('system.network.confirm', { txn_id: txn.txnId });
-	} finally {
-		// Clear regardless: if the server didn't know the txn, the rollback
-		// already fired and the banner is stale.
+		if (generation !== getSessionGeneration()) return;
 		if (_pending?.txnId === txn.txnId) {
-			_pending = null;
+			setPending(null);
+		}
+	} catch (error) {
+		if (generation !== getSessionGeneration()) return;
+		if (_pending?.txnId !== txn.txnId) return;
+		const message = errorMessage(error);
+		_confirmationError = { txnId: txn.txnId, message };
+		toastError(message);
+	} finally {
+		if (generation === getSessionGeneration() && _confirmingTxnId === txn.txnId) {
+			_confirmingTxnId = null;
 		}
 	}
 }

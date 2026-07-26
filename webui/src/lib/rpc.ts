@@ -105,11 +105,20 @@ export class NastyClient {
 			: NastyClient.NORMAL_MAX_ATTEMPTS_BEFORE_RELOAD;
 	}
 	private _authenticated = false;
+	private _connectReject: ((error: Error) => void) | null = null;
+	private _connectPromise: Promise<AuthResult> | null = null;
 	/** Set to true after the first successful auth; cleared by disconnect(). */
 	private _shouldReconnect = false;
-	/** Resolves when the next successful auth completes; replaced on each disconnect. */
+	/** Resolves when the current reconnect cycle next authenticates successfully. */
 	private _readyResolve: (() => void) | null = null;
 	private _readyPromise: Promise<void> = Promise.resolve();
+
+	private rejectPendingCalls() {
+		for (const pending of this.pending.values()) {
+			pending.reject({ code: -32000, message: 'WebSocket disconnected' });
+		}
+		this.pending.clear();
+	}
 
 	constructor(private url: string) {}
 
@@ -122,20 +131,31 @@ export class NastyClient {
 	 *  message itself. The server replies first with `{authenticated: true}`
 	 *  or `{error: ...}`. */
 	connect(): Promise<AuthResult> {
-		return new Promise((resolve, reject) => {
-			this.ws = new WebSocket(this.url);
+		if (this._connectPromise) return this._connectPromise;
+		const connection = new Promise<AuthResult>((resolve, reject) => {
+			const socket = new WebSocket(this.url);
+			this.ws = socket;
 			let authResolved = false;
+			const failAuth = (error: Error) => {
+				if (authResolved) return;
+				authResolved = true;
+				if (this._connectReject === failAuth) this._connectReject = null;
+				reject(error);
+			};
+			this._connectReject = failAuth;
 
-			this.ws.onopen = () => {
+			socket.onopen = () => {
 				// Cookie auth: nothing to send on open. Server speaks first.
 			};
 
-			this.ws.onmessage = (event) => {
+			socket.onmessage = (event) => {
+				if (this.ws !== socket) return;
 				const msg = JSON.parse(event.data);
 
 				// Handle auth response (first message back)
 				if (!authResolved) {
 					authResolved = true;
+					if (this._connectReject === failAuth) this._connectReject = null;
 					if (msg.error) {
 						this._authenticated = false;
 						reject(new Error(msg.error));
@@ -183,13 +203,17 @@ export class NastyClient {
 				}
 			};
 
-			this.ws.onclose = (ev) => {
-				this._authenticated = false;
-				// Reject all pending calls so awaiting code doesn't hang forever
-				for (const pending of this.pending.values()) {
-					pending.reject({ code: -32000, message: 'WebSocket disconnected' });
+			socket.onclose = (ev) => {
+				if (this.ws !== socket) {
+					failAuth(new Error('WebSocket connection superseded'));
+					return;
 				}
-				this.pending.clear();
+				this._authenticated = false;
+				if (!authResolved) {
+					failAuth(new Error('WebSocket closed before authentication'));
+				}
+				// Reject all pending calls so awaiting code doesn't hang forever
+				this.rejectPendingCalls();
 				if (NastyClient.debug) {
 					console.debug(
 						`[rpc] ws closed (code=${ev.code}, reason="${ev.reason}", clean=${ev.wasClean}, _shouldReconnect=${this._shouldReconnect}, firing ${this._shouldReconnect ? this.disconnectHandlers.length : 0} disconnect handlers)`
@@ -202,8 +226,14 @@ export class NastyClient {
 				}
 			};
 
-			this.ws.onerror = () => {
-				if (!authResolved) reject(new Error('WebSocket connection failed'));
+			socket.onerror = () => {
+				if (this.ws !== socket) {
+					failAuth(new Error('WebSocket connection superseded'));
+					return;
+				}
+				if (!authResolved) {
+					failAuth(new Error('WebSocket connection failed'));
+				}
 				// If this was a reconnect attempt that failed to even open,
 				// onclose may not fire, so schedule retry here too.
 				if (this._shouldReconnect && !this._authenticated) {
@@ -211,6 +241,16 @@ export class NastyClient {
 				}
 			};
 		});
+		this._connectPromise = connection;
+		void connection.then(
+			() => {
+				if (this._connectPromise === connection) this._connectPromise = null;
+			},
+			() => {
+				if (this._connectPromise === connection) this._connectPromise = null;
+			},
+		);
+		return connection;
 	}
 
 	async call<T = unknown>(method: string, params?: unknown, timeoutMs = 10000): Promise<T> {
@@ -260,7 +300,9 @@ export class NastyClient {
 	 *  during a longer outage (a stuck client used to spam ~20 attempts/min). */
 	private _scheduleReconnect() {
 		if (this.reconnectTimer) return; // already scheduled
-		this._readyPromise = new Promise((res) => { this._readyResolve = res; });
+		if (!this._readyResolve) {
+			this._readyPromise = new Promise((res) => { this._readyResolve = res; });
+		}
 		const delay = this.reconnectDelayMs;
 		this.reconnectDelayMs = Math.min(
 			this.reconnectDelayMs * 2,
@@ -368,10 +410,15 @@ export class NastyClient {
 
 	disconnect() {
 		this._shouldReconnect = false;
+		this._readyResolve?.();
 		this._readyResolve = null;
 		this._readyPromise = Promise.resolve();
 		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
 		this._authenticated = false;
+		this.rejectPendingCalls();
+		this._connectReject?.(new Error('WebSocket closed before authentication'));
+		this._connectReject = null;
+		this._connectPromise = null;
 		this.ws?.close();
 	}
 }

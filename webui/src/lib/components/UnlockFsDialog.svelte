@@ -36,14 +36,12 @@
 		unlockFsRespond(false);
 	}
 
-	// Wipe the passphrase whenever the dialog re-opens for a different
-	// filesystem so a typed-but-not-submitted secret doesn't leak
-	// across opens.
+	// Wipe the passphrase whenever the dialog opens or closes so session
+	// reset cannot leave a typed secret in this persistent component.
 	$effect(() => {
-		if (unlockFsState.open) {
-			passphrase = '';
-			submitting = false;
-		}
+		void unlockFsState.open;
+		passphrase = '';
+		submitting = false;
 	});
 </script>
 

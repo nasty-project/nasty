@@ -4,6 +4,8 @@
  *   if (!await confirm('Title', 'Message')) return;
  */
 
+import { registerSessionReset } from './client';
+
 interface ConfirmState {
 	open: boolean;
 	title: string;
@@ -29,6 +31,7 @@ interface ConfirmOptions {
 
 export function confirm(title: string, message?: string, options?: ConfirmOptions): Promise<boolean> {
 	return new Promise((resolve) => {
+		confirmState.resolve?.(false);
 		confirmState.title = title;
 		confirmState.message = message ?? '';
 		confirmState.confirmLabel = options?.confirmLabel ?? 'Confirm';
@@ -42,4 +45,10 @@ export function confirmRespond(value: boolean) {
 	confirmState.open = false;
 	confirmState.resolve?.(value);
 	confirmState.resolve = null;
+	confirmState.title = '';
+	confirmState.message = '';
+	confirmState.confirmLabel = 'Confirm';
+	confirmState.cancelLabel = 'Cancel';
 }
+
+registerSessionReset(() => confirmRespond(false));

@@ -707,6 +707,10 @@ pub struct NetworkService {
     /// performs the rollback). Wrapped in `Arc` so spawned tasks can
     /// remove their own entry on completion.
     transactions: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, PendingTxn>>>,
+    /// Serializes network updates, confirmation, and rollback execution.
+    /// Only one unconfirmed update may exist because its rollback snapshot
+    /// is stored at a single well-known path.
+    transaction_lifecycle: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 struct PendingTxn {
@@ -718,7 +722,9 @@ struct PendingTxn {
     /// Why the server scheduled this rollback (human-readable). Same
     /// rationale as `revert_at_unix`.
     risk_reason: String,
-    cancel: tokio::sync::oneshot::Sender<()>,
+    /// Present while the confirmation window is active. Once timeout wins,
+    /// this becomes `None` so a failed rollback cannot later be confirmed.
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// Snapshot of one pending rollback, returned by
@@ -744,6 +750,7 @@ impl NetworkService {
             transactions: std::sync::Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            transaction_lifecycle: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -762,6 +769,21 @@ impl NetworkService {
         request: UpdateRequest,
         mgmt_iface: Option<String>,
     ) -> Result<UpdateResponse, String> {
+        let _lifecycle = self.transaction_lifecycle.lock().await;
+        if let Some(txn_id) = self.transactions.lock().await.keys().next().cloned() {
+            return Err(format!(
+                "network transaction {txn_id} is still awaiting confirmation"
+            ));
+        }
+        if tokio::fs::symlink_metadata(PENDING_REVERT_PATH)
+            .await
+            .is_ok()
+        {
+            return Err(
+                "a pending network rollback snapshot requires recovery before another update"
+                    .to_string(),
+            );
+        }
         let config = request.config;
 
         // Validate input. `Inherit` is allowed here — `resolve_inherit`
@@ -945,22 +967,36 @@ impl NetworkService {
     /// the pending-revert file. Returns an error if the txn_id is unknown
     /// (already confirmed, already reverted, or never existed).
     pub async fn confirm(&self, txn_id: &str) -> Result<(), String> {
-        let removed = self.transactions.lock().await.remove(txn_id);
-        match removed {
-            Some(txn) => {
-                // Best-effort cancel: if the rollback task already started
-                // executing, the receive end is gone — that's OK, we just
-                // race to clean up below.
-                let _ = txn.cancel.send(());
-                let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
-                info!("Network txn {txn_id} confirmed");
-                // NM keyfiles already persisted as part of the apply
-                // that scheduled this rollback. No explicit rebuild
-                // step needed on confirm.
-                Ok(())
+        let _lifecycle = self.transaction_lifecycle.lock().await;
+        {
+            let transactions = self.transactions.lock().await;
+            let Some(txn) = transactions.get(txn_id) else {
+                return Err(format!("unknown or already-completed txn_id {txn_id}"));
+            };
+            if txn.cancel.is_none() {
+                return Err(format!(
+                    "network txn {txn_id} rollback is already in progress or failed"
+                ));
             }
-            None => Err(format!("unknown or already-completed txn_id {txn_id}")),
         }
+        if let Err(e) = tokio::fs::remove_file(PENDING_REVERT_PATH).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(format!("remove pending network rollback snapshot: {e}"));
+        }
+        let txn = self
+            .transactions
+            .lock()
+            .await
+            .remove(txn_id)
+            .expect("transaction checked while lifecycle lock is held");
+        if let Some(cancel) = txn.cancel {
+            let _ = cancel.send(());
+        }
+        info!("Network txn {txn_id} confirmed");
+        // NM keyfiles already persisted as part of the apply that scheduled
+        // this rollback. No explicit rebuild step needed on confirm.
+        Ok(())
     }
 
     /// Called once at engine startup. If a `pending-revert` file exists, the
@@ -1010,29 +1046,49 @@ impl NetworkService {
     ) {
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         let transactions = std::sync::Arc::clone(&self.transactions);
+        let transaction_lifecycle = std::sync::Arc::clone(&self.transaction_lifecycle);
         let txn_id_for_task = txn_id.clone();
-        tokio::spawn(async move {
-            let timer = tokio::time::sleep(std::time::Duration::from_secs(secs));
-            tokio::pin!(timer);
-            tokio::select! {
-                _ = &mut timer => {
-                    warn!("Network txn {txn_id_for_task} not confirmed in {secs}s — rolling back");
-                    perform_rollback(&txn_id_for_task).await;
-                }
-                _ = cancel_rx => {
-                    // Confirmed; nothing to do, confirm() already cleaned up.
-                }
-            }
-            transactions.lock().await.remove(&txn_id_for_task);
-        });
         self.transactions.lock().await.insert(
             txn_id,
             PendingTxn {
                 revert_at_unix,
                 risk_reason,
-                cancel: cancel_tx,
+                cancel: Some(cancel_tx),
             },
         );
+        tokio::spawn(async move {
+            let timer = tokio::time::sleep(std::time::Duration::from_secs(secs));
+            tokio::pin!(timer);
+            tokio::select! {
+                _ = &mut timer => {
+                    let _lifecycle = transaction_lifecycle.lock().await;
+                    let should_rollback = {
+                        let mut transactions = transactions.lock().await;
+                        transactions.get_mut(&txn_id_for_task).is_some_and(|txn| {
+                            txn.cancel = None;
+                            true
+                        })
+                    };
+                    if should_rollback {
+                        warn!("Network txn {txn_id_for_task} not confirmed in {secs}s — rolling back");
+                        match perform_rollback(&txn_id_for_task).await {
+                            Ok(()) => {
+                                transactions.lock().await.remove(&txn_id_for_task);
+                            }
+                            Err(error) => {
+                                warn!("rollback {txn_id_for_task}: {error}");
+                                if let Some(txn) = transactions.lock().await.get_mut(&txn_id_for_task) {
+                                    txn.risk_reason = format!("Automatic rollback failed: {error}");
+                                }
+                            }
+                        }
+                    }
+                }
+                _ = cancel_rx => {
+                    // Confirmed; nothing to do, confirm() already cleaned up.
+                }
+            }
+        });
     }
 
     /// List physical interfaces (for UI to show available interfaces).
@@ -1174,35 +1230,34 @@ impl NetworkService {
 /// Top-level helper for the rollback timer. Reads the pending-revert file,
 /// applies it, and removes it. Best-effort — failures are logged but don't
 /// panic the spawned task.
-async fn perform_rollback(txn_id: &str) {
+async fn perform_rollback(txn_id: &str) -> Result<(), String> {
     let contents = match tokio::fs::read(PENDING_REVERT_PATH).await {
         Ok(c) => c,
         Err(e) => {
-            warn!("rollback {txn_id}: pending-revert file disappeared: {e}");
-            return;
+            return Err(format!("pending-revert file disappeared: {e}"));
         }
     };
     let prev: NetworkConfig = match serde_json::from_slice(&contents) {
         Ok(c) => c,
         Err(e) => {
-            warn!("rollback {txn_id}: unparseable pending-revert: {e}");
-            return;
+            return Err(format!("unparseable pending-revert: {e}"));
         }
     };
     if let Err(e) = persist_config(&prev).await {
-        warn!("rollback {txn_id}: persist failed: {e}");
-        return;
+        return Err(format!("persist failed: {e}"));
     }
     // Rollback runs from a tokio task without a session — no mgmt
     // iface to prefer. Same as `restore_pending_revert`: pre-existing
     // masters in the rolled-back config fall back to first-member
     // MAC, which matches what was applied originally.
     if let Err(e) = apply_config(&prev, None).await {
-        warn!("rollback {txn_id}: apply failed: {e}");
-        return;
+        return Err(format!("apply failed: {e}"));
     }
-    let _ = tokio::fs::remove_file(PENDING_REVERT_PATH).await;
+    tokio::fs::remove_file(PENDING_REVERT_PATH)
+        .await
+        .map_err(|e| format!("remove pending-revert after apply: {e}"))?;
     warn!("rollback {txn_id}: completed; previous config restored");
+    Ok(())
 }
 
 fn new_txn_id() -> String {

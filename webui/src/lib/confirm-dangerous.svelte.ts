@@ -4,6 +4,8 @@
  *   if (!await confirmDangerous('Delete X?', 'Type "X" to confirm', 'X')) return;
  */
 
+import { registerSessionReset } from './client';
+
 interface ConfirmDangerousState {
 	open: boolean;
 	title: string;
@@ -22,6 +24,7 @@ export const confirmDangerousState = $state<ConfirmDangerousState>({
 
 export function confirmDangerous(title: string, message: string, expectedValue: string): Promise<boolean> {
 	return new Promise((resolve) => {
+		confirmDangerousState.resolve?.(false);
 		confirmDangerousState.title = title;
 		confirmDangerousState.message = message;
 		confirmDangerousState.expectedValue = expectedValue;
@@ -34,4 +37,9 @@ export function confirmDangerousRespond(value: boolean) {
 	confirmDangerousState.open = false;
 	confirmDangerousState.resolve?.(value);
 	confirmDangerousState.resolve = null;
+	confirmDangerousState.title = '';
+	confirmDangerousState.message = '';
+	confirmDangerousState.expectedValue = '';
 }
+
+registerSessionReset(() => confirmDangerousRespond(false));

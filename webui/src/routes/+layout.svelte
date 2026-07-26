@@ -59,7 +59,7 @@
 	import { goto } from '$app/navigation';
 	import { refreshState } from '$lib/refresh.svelte';
 	import { rebootState } from '$lib/reboot.svelte';
-	import { rollbackState, confirmRollback, loadPendingRollback } from '$lib/rollbackState.svelte';
+	import { rollbackState, confirmRollback, loadPendingRollback, reconcileExpiredRollback, recoverPendingRollback } from '$lib/rollbackState.svelte';
 	import { tempUnit } from '$lib/temperature.svelte';
 	import { sysInfoRefresh } from '$lib/sysInfoRefresh.svelte';
 	import { theme } from '$lib/theme.svelte';
@@ -321,7 +321,7 @@
 				rollbackState.pending &&
 				Math.floor(Date.now() / 1000) >= rollbackState.pending.revertAtUnix
 			) {
-				rollbackState.clear();
+				reconcileExpiredRollback();
 			}
 		}, 1000);
 		return () => clearInterval(handle);
@@ -404,7 +404,7 @@
 	// already been torn down. The txn is still alive server-side; this
 	// fetch puts the banner back so the user can confirm.
 	$effect(() => {
-		if (connected && isManagementRole(authInfo?.role)) loadPendingRollback();
+		if (connected && authInfo?.role === 'admin') loadPendingRollback();
 	});
 
 	// Clock
@@ -436,47 +436,56 @@
 		$page.url.pathname === '/portal' || $page.url.pathname.startsWith('/portal/')
 	);
 
+	const onReconnect = async () => {
+		dbg(`reconnect cb fired — clearing powering=${powering}, reconnecting=${reconnecting}, timer=${reconnectingTimer ? 'armed' : 'none'}`);
+		powering = false;
+		if (reconnectingTimer) {
+			clearTimeout(reconnectingTimer);
+			reconnectingTimer = null;
+		}
+		reconnecting = false;
+		if (authInfo?.role === 'admin') void recoverPendingRollback();
+		// Check if engine was updated while we were disconnected.
+		// If the commit changed, the WebUI bundle likely changed too — force reload.
+		try {
+			const res = await fetch('/health');
+			const health = await res.json();
+			if (initialCommit && health.commit && health.commit !== initialCommit) {
+				console.log(`Engine commit changed: ${initialCommit} → ${health.commit} — reloading`);
+				location.reload();
+				return;
+			}
+		} catch { /* health check failed, continue with stale UI */ }
+		// Engine binary is the same, but the kernel/bcachefs module may have
+		// changed underneath (e.g. a bcachefs-tools-only bump rebuilt the DKMS
+		// module without moving the engine commit). The footer reads
+		// system.info, which is fetched once on connect and cached client-side
+		// — without this trigger it shows the pre-reboot version until the
+		// user hits cmd+R.
+		sysInfoRefresh.trigger();
+	};
+	const onDisconnect = () => {
+		dbg(`disconnect cb fired — arming ${RECONNECT_OVERLAY_DELAY_MS}ms reconnect-overlay timer (powering=${powering}, prior timer=${reconnectingTimer ? 'rearming' : 'fresh'})`);
+		if (reconnectingTimer) clearTimeout(reconnectingTimer);
+		reconnectingTimer = setTimeout(() => {
+			dbg(`reconnect-overlay timer fired — reconnecting=true (powering=${powering})`);
+			reconnecting = true;
+			reconnectingTimer = null;
+		}, RECONNECT_OVERLAY_DELAY_MS);
+	};
+	let lifecycleClient: ReturnType<typeof getClient> | null = null;
+	function bindClientLifecycle(client: ReturnType<typeof getClient>) {
+		if (lifecycleClient === client) return;
+		lifecycleClient?.offReconnect(onReconnect);
+		lifecycleClient?.offDisconnect(onDisconnect);
+		lifecycleClient = client;
+		client.onReconnect(onReconnect);
+		client.onDisconnect(onDisconnect);
+	}
+
 	onMount(() => {
 		if (isPublicShare) return;
 		tryConnect();
-		const onReconnect = async () => {
-			dbg(`reconnect cb fired — clearing powering=${powering}, reconnecting=${reconnecting}, timer=${reconnectingTimer ? 'armed' : 'none'}`);
-			powering = false;
-			if (reconnectingTimer) {
-				clearTimeout(reconnectingTimer);
-				reconnectingTimer = null;
-			}
-			reconnecting = false;
-			// Check if engine was updated while we were disconnected.
-			// If the commit changed, the WebUI bundle likely changed too — force reload.
-			try {
-				const res = await fetch('/health');
-				const health = await res.json();
-				if (initialCommit && health.commit && health.commit !== initialCommit) {
-					console.log(`Engine commit changed: ${initialCommit} → ${health.commit} — reloading`);
-					location.reload();
-					return;
-				}
-			} catch { /* health check failed, continue with stale UI */ }
-			// Engine binary is the same, but the kernel/bcachefs module may have
-			// changed underneath (e.g. a bcachefs-tools-only bump rebuilt the DKMS
-			// module without moving the engine commit). The footer reads
-			// system.info, which is fetched once on connect and cached client-side
-			// — without this trigger it shows the pre-reboot version until the
-			// user hits cmd+R.
-			sysInfoRefresh.trigger();
-		};
-		const onDisconnect = () => {
-			dbg(`disconnect cb fired — arming ${RECONNECT_OVERLAY_DELAY_MS}ms reconnect-overlay timer (powering=${powering}, prior timer=${reconnectingTimer ? 'rearming' : 'fresh'})`);
-			if (reconnectingTimer) clearTimeout(reconnectingTimer);
-			reconnectingTimer = setTimeout(() => {
-				dbg(`reconnect-overlay timer fired — reconnecting=true (powering=${powering})`);
-				reconnecting = true;
-				reconnectingTimer = null;
-			}, RECONNECT_OVERLAY_DELAY_MS);
-		};
-		getClient().onReconnect(onReconnect);
-		getClient().onDisconnect(onDisconnect);
 		const tick = setInterval(() => { now = new Date(); }, 1000);
 		const rebootPoll = setInterval(checkRebootRequired, 30_000);
 		const statusPoll = setInterval(refreshSystemStatus, 20_000);
@@ -485,9 +494,10 @@
 		const backupPoll = setInterval(checkConfigBackup, 30_000);
 		return () => {
 			if (reconnectingTimer) clearTimeout(reconnectingTimer);
-			getClient().offReconnect(onReconnect);
-			getClient().offDisconnect(onDisconnect);
-			getClient().disconnect();
+			lifecycleClient?.offReconnect(onReconnect);
+			lifecycleClient?.offDisconnect(onDisconnect);
+			lifecycleClient?.disconnect();
+			lifecycleClient = null;
 			clearInterval(sshPoll);
 			clearInterval(backupPoll);
 			clearInterval(tick);
@@ -533,6 +543,7 @@
 		}
 		try {
 			const client = getClient();
+			bindClientLifecycle(client);
 			authInfo = await client.connect();
 			const destination = redirectForRole(authInfo.role, $page.url.pathname);
 			if (destination) await goto(destination, { replaceState: true });
@@ -636,8 +647,25 @@
 		// own because JS can't clear an httpOnly cookie itself.
 		await doLogout();
 		resetClient();
+		if (reconnectingTimer) {
+			clearTimeout(reconnectingTimer);
+			reconnectingTimer = null;
+		}
+		reconnecting = false;
+		powering = false;
 		connected = false;
 		authInfo = null;
+		sysInfo = null;
+		systemStatus = null;
+		statusExpanded = false;
+		sshPasswordAuth = false;
+		configBackupMissing = false;
+		showPasswordChange = false;
+		newPassword = '';
+		confirmPassword = '';
+		passwordError = '';
+		profileOpen = false;
+		powerOpen = false;
 		showLogin = true;
 	}
 
@@ -1133,11 +1161,19 @@
 							<span class="font-medium">
 								{rollbackSecondsLeft}s to keep network change
 							</span>
+							{#if rollbackState.confirmationError}
+								<span
+									class="max-w-52 truncate text-xs text-red-300"
+									role="alert"
+									title={rollbackState.confirmationError}
+								>{rollbackState.confirmationError}</span>
+							{/if}
 							<button
 								onclick={() => confirmRollback()}
+								disabled={rollbackState.confirming}
 								class="rounded border border-amber-400/50 px-2 py-0.5 text-xs hover:bg-amber-500/10 hover:border-amber-400 active:bg-amber-500/20"
 							>
-								Keep changes
+								{rollbackState.confirming ? 'Keeping…' : 'Keep changes'}
 							</button>
 						</div>
 					{/if}

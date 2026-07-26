@@ -1955,6 +1955,17 @@ async fn files_upload_handler(
     };
 
     let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let overwrite = match params.get("overwrite").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "overwrite must be true or false"})),
+            )
+                .into_response();
+        }
+    };
     let dir = match safe_path_for_request(req_path, &authenticated, "files.upload") {
         Ok(p) => p,
         Err(status) => {
@@ -2004,12 +2015,46 @@ async fn files_upload_handler(
     }
 
     let dest = dir.join(&file_name);
-    let temp = dir.join(format!(
-        ".{file_name}.nasty-upload-{}",
-        uuid::Uuid::new_v4()
-    ));
+    match tokio::fs::symlink_metadata(&dest).await {
+        Ok(meta) => {
+            if meta.is_dir() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "Destination is a directory",
+                        "overwrite_allowed": false,
+                    })),
+                )
+                    .into_response();
+            }
+            if !overwrite {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "Destination already exists",
+                        "overwrite_allowed": true,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    }
 
-    let mut file = match tokio::fs::File::create(&temp).await {
+    let temp = dir.join(format!(".nasty-upload-{}", uuid::Uuid::new_v4()));
+
+    let file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+    {
         Ok(f) => f,
         Err(e) => {
             return (
@@ -2019,6 +2064,8 @@ async fn files_upload_handler(
                 .into_response();
         }
     };
+    let mut file = tokio::fs::File::from_std(file);
+    let mut temp_guard = UploadTempGuard::new(temp.clone(), &file);
 
     let mut total: u64 = 0;
     let t0 = std::time::Instant::now();
@@ -2056,14 +2103,32 @@ async fn files_upload_handler(
         )
             .into_response();
     }
-    drop(file);
-    if let Err(e) = tokio::fs::rename(&temp, &dest).await {
-        let _ = tokio::fs::remove_file(&temp).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to finalize upload: {e}")})),
-        )
-            .into_response();
+    match publish_upload(&temp, &dest, overwrite).await {
+        Ok(UploadPublish::Published) => temp_guard.disarm(),
+        Ok(UploadPublish::Conflict) => {
+            let overwrite_allowed = tokio::fs::symlink_metadata(&dest)
+                .await
+                .is_ok_and(|meta| !meta.is_dir());
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": if overwrite_allowed {
+                        "Destination already exists"
+                    } else {
+                        "Destination is a directory"
+                    },
+                    "overwrite_allowed": overwrite_allowed,
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to finalize upload: {e}")})),
+            )
+                .into_response();
+        }
     }
 
     let elapsed = t0.elapsed();
@@ -2076,7 +2141,10 @@ async fn files_upload_handler(
         "files.upload",
         &authenticated.session.username,
         &authenticated.client_ip,
-        &format!("path={} bytes={total}", dest.display()),
+        &format!(
+            "path={} bytes={total} overwrite={overwrite}",
+            dest.display()
+        ),
     );
     let _ = state.events.send("files".to_string());
 
@@ -2089,6 +2157,99 @@ async fn files_upload_handler(
         })),
     )
         .into_response()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UploadPublish {
+    Published,
+    Conflict,
+}
+
+struct UploadTempGuard {
+    path: std::path::PathBuf,
+    active: bool,
+    #[cfg(target_os = "linux")]
+    fd: std::os::fd::RawFd,
+}
+
+impl UploadTempGuard {
+    fn new(path: std::path::PathBuf, _file: &tokio::fs::File) -> Self {
+        Self {
+            path,
+            active: true,
+            #[cfg(target_os = "linux")]
+            fd: std::os::fd::AsRawFd::as_raw_fd(_file),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for UploadTempGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", self.fd))
+            .unwrap_or_else(|_| self.path.clone());
+        #[cfg(not(target_os = "linux"))]
+        let path = &self.path;
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Publish a fully-written sibling temporary file. The default path uses a
+/// hard link so destination creation is atomic and cannot replace an entry
+/// created after the handler's early collision check.
+async fn publish_upload(
+    temp: &std::path::Path,
+    dest: &std::path::Path,
+    overwrite: bool,
+) -> std::io::Result<UploadPublish> {
+    if overwrite {
+        return match tokio::fs::rename(temp, dest).await {
+            Ok(()) => Ok(UploadPublish::Published),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::AlreadyExists
+                        | std::io::ErrorKind::IsADirectory
+                        | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                let _ = tokio::fs::remove_file(temp).await;
+                Ok(UploadPublish::Conflict)
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(temp).await;
+                Err(e)
+            }
+        };
+    }
+
+    match tokio::fs::hard_link(temp, dest).await {
+        Ok(()) => {
+            if let Err(e) = tokio::fs::remove_file(temp).await {
+                tracing::warn!(
+                    "upload published at {} but temporary link {} could not be removed: {e}",
+                    dest.display(),
+                    temp.display()
+                );
+            }
+            Ok(UploadPublish::Published)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = tokio::fs::remove_file(temp).await;
+            Ok(UploadPublish::Conflict)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(temp).await;
+            Err(e)
+        }
+    }
 }
 
 /// Create a directory.  POST /api/files/mkdir?path=first/subdir/newdir
@@ -4490,6 +4651,120 @@ fn spawn_alert_notifier(state: Arc<AppState>) {
             ),
         }
     });
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::{UploadPublish, UploadTempGuard, publish_upload};
+
+    #[test]
+    fn temp_guard_removes_abandoned_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("temp");
+        std::fs::write(&temp, b"partial").unwrap();
+
+        let file =
+            tokio::fs::File::from_std(std::fs::OpenOptions::new().write(true).open(&temp).unwrap());
+        drop(UploadTempGuard::new(temp.clone(), &file));
+
+        assert!(!temp.exists());
+    }
+
+    #[tokio::test]
+    async fn publish_without_overwrite_creates_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("temp");
+        let dest = dir.path().join("dest");
+        tokio::fs::write(&temp, b"new").await.unwrap();
+
+        assert_eq!(
+            publish_upload(&temp, &dest, false).await.unwrap(),
+            UploadPublish::Published
+        );
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"new");
+        assert!(!temp.exists());
+    }
+
+    #[tokio::test]
+    async fn publish_without_overwrite_preserves_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("temp");
+        let dest = dir.path().join("dest");
+        tokio::fs::write(&temp, b"new").await.unwrap();
+        tokio::fs::write(&dest, b"old").await.unwrap();
+
+        assert_eq!(
+            publish_upload(&temp, &dest, false).await.unwrap(),
+            UploadPublish::Conflict
+        );
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"old");
+        assert!(!temp.exists());
+    }
+
+    #[tokio::test]
+    async fn publish_with_overwrite_atomically_replaces_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("temp");
+        let dest = dir.path().join("dest");
+        tokio::fs::write(&temp, b"new").await.unwrap();
+        tokio::fs::write(&dest, b"old").await.unwrap();
+
+        assert_eq!(
+            publish_upload(&temp, &dest, true).await.unwrap(),
+            UploadPublish::Published
+        );
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"new");
+        assert!(!temp.exists());
+    }
+
+    #[tokio::test]
+    async fn publish_with_overwrite_does_not_replace_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("temp");
+        let dest = dir.path().join("dest");
+        tokio::fs::write(&temp, b"new").await.unwrap();
+        tokio::fs::create_dir(&dest).await.unwrap();
+
+        assert_eq!(
+            publish_upload(&temp, &dest, true).await.unwrap(),
+            UploadPublish::Conflict
+        );
+        assert!(dest.is_dir());
+        assert!(!temp.exists());
+    }
+
+    #[tokio::test]
+    async fn concurrent_publish_without_overwrite_has_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let dest = dir.path().join("dest");
+        tokio::fs::write(&first, b"first").await.unwrap();
+        tokio::fs::write(&second, b"second").await.unwrap();
+
+        let (a, b) = tokio::join!(
+            publish_upload(&first, &dest, false),
+            publish_upload(&second, &dest, false)
+        );
+        let results = [a.unwrap(), b.unwrap()];
+
+        assert_eq!(
+            results
+                .iter()
+                .filter(|&&r| r == UploadPublish::Published)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|&&r| r == UploadPublish::Conflict)
+                .count(),
+            1
+        );
+        let data = tokio::fs::read(&dest).await.unwrap();
+        assert!(data == b"first" || data == b"second");
+    }
 }
 
 #[cfg(test)]

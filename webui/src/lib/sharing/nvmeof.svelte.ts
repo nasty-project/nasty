@@ -5,55 +5,63 @@
  * listeners), and allowed-host NQNs — three nested collections, each
  * with add/remove handlers. */
 
-import { getClient } from '$lib/client';
+import { getClient, registerSessionReset } from '$lib/client';
 import { withToast } from '$lib/toast.svelte';
 import { confirm } from '$lib/confirm.svelte';
 import type { NvmeofSubsystem, Subvolume, ProtocolStatus } from '$lib/types';
 
-const client = getClient();
+function initialNvmeState() {
+	return {
+		subsystems: [] as NvmeofSubsystem[],
+		loading: true,
+		protocol: null as ProtocolStatus | null,
+		showCreate: false,
+		blockSubvolumes: [] as Subvolume[],
+		expanded: {} as Record<string, boolean>,
+		newName: '',
+		newDevice: '',
+		newAddr: '0.0.0.0',
+		newPort: 4420,
+		addNsSubsys: '',
+		addNsDevice: '',
+		addPortSubsys: '',
+		addPortTransport: 'tcp',
+		addPortAddr: '0.0.0.0',
+		addPortSvcId: 4420,
+		addPortFamily: 'ipv4' as 'ipv4' | 'ipv6',
+		addHostSubsys: '',
+		addHostNqn: '',
+		search: '',
+		sortDir: 'asc' as 'asc' | 'desc',
+	};
+}
 
-export const nvme = $state({
-	subsystems: [] as NvmeofSubsystem[],
-	loading: true,
-	protocol: null as ProtocolStatus | null,
-	showCreate: false,
-	blockSubvolumes: [] as Subvolume[],
-	expanded: {} as Record<string, boolean>,
-	newName: '',
-	newDevice: '',
-	newAddr: '0.0.0.0',
-	newPort: 4420,
-	addNsSubsys: '',
-	addNsDevice: '',
-	addPortSubsys: '',
-	addPortTransport: 'tcp',
-	addPortAddr: '0.0.0.0',
-	addPortSvcId: 4420,
-	addPortFamily: 'ipv4' as 'ipv4' | 'ipv6',
-	addHostSubsys: '',
-	addHostNqn: '',
-	search: '',
-	sortDir: 'asc' as 'asc' | 'desc',
-});
+export const nvme = $state(initialNvmeState());
+
+export function resetNvmeState() {
+	Object.assign(nvme, initialNvmeState());
+}
+
+registerSessionReset(resetNvmeState);
 
 export function nvmeToggleSort() {
 	nvme.sortDir = nvme.sortDir === 'asc' ? 'desc' : 'asc';
 }
 
 export async function nvmeRefresh() {
-	await withToast(async () => { nvme.subsystems = await client.call<NvmeofSubsystem[]>('share.nvmeof.list'); });
+	await withToast(async () => { nvme.subsystems = await getClient().call<NvmeofSubsystem[]>('share.nvmeof.list'); });
 }
 
 export async function nvmeLoadProtocol() {
 	try {
-		const all = await client.call<ProtocolStatus[]>('service.protocol.list');
+		const all = await getClient().call<ProtocolStatus[]>('service.protocol.list');
 		nvme.protocol = all.find(p => p.name === 'nvmeof') ?? null;
 	} catch { /* ignore */ }
 }
 
 export async function nvmeLoadSubvolumes() {
 	await withToast(async () => {
-		const all = await client.call<Subvolume[]>('subvolume.list_all');
+		const all = await getClient().call<Subvolume[]>('subvolume.list_all');
 		nvme.blockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
 	});
 }
@@ -68,7 +76,7 @@ export function nvmeOnDeviceSelect() {
 export async function nvmeCreate() {
 	if (!nvme.newName || !nvme.newDevice) return;
 	const ok = await withToast(
-		() => client.call('share.nvmeof.create', {
+		() => getClient().call('share.nvmeof.create', {
 			name: nvme.newName,
 			device_path: nvme.newDevice,
 			addr: nvme.newAddr,
@@ -88,14 +96,14 @@ export async function nvmeCreate() {
 
 export async function nvmeRemove(id: string) {
 	if (!await confirm('Delete this NVMe-oF share?')) return;
-	await withToast(() => client.call('share.nvmeof.delete', { id }), 'NVMe-oF share deleted');
+	await withToast(() => getClient().call('share.nvmeof.delete', { id }), 'NVMe-oF share deleted');
 	await nvmeRefresh();
 }
 
 export async function nvmeAddNamespace() {
 	if (!nvme.addNsSubsys || !nvme.addNsDevice) return;
 	await withToast(
-		() => client.call('share.nvmeof.add_namespace', { subsystem_id: nvme.addNsSubsys, device_path: nvme.addNsDevice }),
+		() => getClient().call('share.nvmeof.add_namespace', { subsystem_id: nvme.addNsSubsys, device_path: nvme.addNsDevice }),
 		'Namespace added'
 	);
 	nvme.addNsSubsys = '';
@@ -106,7 +114,7 @@ export async function nvmeAddNamespace() {
 export async function nvmeRemoveNamespace(subsystemId: string, nsid: number) {
 	if (!await confirm(`Remove namespace ${nsid}?`)) return;
 	await withToast(
-		() => client.call('share.nvmeof.remove_namespace', { subsystem_id: subsystemId, nsid }),
+		() => getClient().call('share.nvmeof.remove_namespace', { subsystem_id: subsystemId, nsid }),
 		'Namespace removed'
 	);
 	await nvmeRefresh();
@@ -115,7 +123,7 @@ export async function nvmeRemoveNamespace(subsystemId: string, nsid: number) {
 export async function nvmeAddPort() {
 	if (!nvme.addPortSubsys) return;
 	await withToast(
-		() => client.call('share.nvmeof.add_port', {
+		() => getClient().call('share.nvmeof.add_port', {
 			subsystem_id: nvme.addPortSubsys,
 			transport: nvme.addPortTransport,
 			addr: nvme.addPortAddr,
@@ -135,7 +143,7 @@ export async function nvmeAddPort() {
 export async function nvmeRemovePort(subsystemId: string, portId: number) {
 	if (!await confirm(`Remove port ${portId}?`)) return;
 	await withToast(
-		() => client.call('share.nvmeof.remove_port', { subsystem_id: subsystemId, port_id: portId }),
+		() => getClient().call('share.nvmeof.remove_port', { subsystem_id: subsystemId, port_id: portId }),
 		'Port removed'
 	);
 	await nvmeRefresh();
@@ -144,7 +152,7 @@ export async function nvmeRemovePort(subsystemId: string, portId: number) {
 export async function nvmeAddHost() {
 	if (!nvme.addHostSubsys || !nvme.addHostNqn) return;
 	await withToast(
-		() => client.call('share.nvmeof.add_host', { subsystem_id: nvme.addHostSubsys, host_nqn: nvme.addHostNqn }),
+		() => getClient().call('share.nvmeof.add_host', { subsystem_id: nvme.addHostSubsys, host_nqn: nvme.addHostNqn }),
 		'Allowed host added'
 	);
 	nvme.addHostSubsys = '';
@@ -155,7 +163,7 @@ export async function nvmeAddHost() {
 export async function nvmeRemoveHost(subsystemId: string, hostNqn: string) {
 	if (!await confirm(`Remove access for ${hostNqn}?`)) return;
 	await withToast(
-		() => client.call('share.nvmeof.remove_host', { subsystem_id: subsystemId, host_nqn: hostNqn }),
+		() => getClient().call('share.nvmeof.remove_host', { subsystem_id: subsystemId, host_nqn: hostNqn }),
 		'Allowed host removed'
 	);
 	await nvmeRefresh();

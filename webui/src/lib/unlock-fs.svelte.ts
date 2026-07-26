@@ -14,6 +14,8 @@
  *    inline unlock without forcing the user to navigate away.
  */
 
+import { registerSessionReset } from './client';
+
 interface UnlockFsState {
 	open: boolean;
 	fsName: string;
@@ -40,3 +42,5 @@ export function unlockFsRespond(value: boolean) {
 	unlockFsState.resolve = null;
 	unlockFsState.fsName = '';
 }
+
+registerSessionReset(() => unlockFsRespond(false));

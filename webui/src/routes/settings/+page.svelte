@@ -124,7 +124,7 @@
 			vlans: network.vlans || [],
 			bridges: network.bridges || [],
 		};
-		await applyNetworkUpdate(payload, `Removed saved config for absent device ${name}`);
+		if (!await applyNetworkUpdate(payload, `Removed saved config for absent device ${name}`)) return;
 		networkState = await client.call<NetworkState>('system.network.get');
 	}
 	let savingNetwork = $state(false);
@@ -547,7 +547,10 @@
 			if (idx >= 0) payload.interfaces[idx] = entry; else payload.interfaces.push(entry);
 		}
 
-		await applyNetworkUpdate(payload, 'Network configuration applied');
+		if (!await applyNetworkUpdate(payload, 'Network configuration applied')) {
+			savingNetwork = false;
+			return;
+		}
 		networkState = await client.call<NetworkState>('system.network.get');
 		netChanged = false;
 		savingNetwork = false;
@@ -572,7 +575,7 @@
 			vlans: network.vlans || [],
 			bridges: network.bridges || [],
 		};
-		await applyNetworkUpdate(payload, `Bond ${bondName} created`);
+		if (!await applyNetworkUpdate(payload, `Bond ${bondName} created`)) return;
 		networkState = await client.call<NetworkState>('system.network.get');
 		showBondForm = false; bondName = 'bond0'; bondMembers = []; bondMtu = ''; bondNoInheritMac = false;
 	}
@@ -589,7 +592,7 @@
 			vlans: [...(network.vlans || []), { parent: vlanParent, vlan_id: vlanId, ipv4: { method: 'dhcp', addresses: [], gateway: null }, ipv6: { method: 'slaac', addresses: [], gateway: null }, mtu }],
 			bridges: network.bridges || [],
 		};
-		await applyNetworkUpdate(payload, `VLAN ${vlanParent}.${vlanId} created`);
+		if (!await applyNetworkUpdate(payload, `VLAN ${vlanParent}.${vlanId} created`)) return;
 		networkState = await client.call<NetworkState>('system.network.get');
 		showVlanForm = false; vlanParent = ''; vlanId = 100; vlanMtu = ''; vlanTried = false;
 	}
@@ -611,7 +614,7 @@
 			vlans: network.vlans || [],
 			bridges: network.bridges || [],
 		};
-		await applyNetworkUpdate(payload, `Bond ${name} removed`);
+		if (!await applyNetworkUpdate(payload, `Bond ${name} removed`)) return;
 		networkState = await client.call<NetworkState>('system.network.get');
 	}
 
@@ -628,7 +631,7 @@
 			vlans: network.vlans || [],
 			bridges: (network.bridges || []).filter(b => b.name !== name),
 		};
-		await applyNetworkUpdate(payload, `Bridge ${name} removed`);
+		if (!await applyNetworkUpdate(payload, `Bridge ${name} removed`)) return;
 		networkState = await client.call<NetworkState>('system.network.get');
 	}
 
@@ -642,7 +645,7 @@
 			vlans: (network.vlans || []).filter(v => !(v.parent === parent && v.vlan_id === vlan_id)),
 			bridges: network.bridges || [],
 		};
-		await applyNetworkUpdate(payload, `VLAN ${parent}.${vlan_id} removed`);
+		if (!await applyNetworkUpdate(payload, `VLAN ${parent}.${vlan_id} removed`)) return;
 		networkState = await client.call<NetworkState>('system.network.get');
 	}
 

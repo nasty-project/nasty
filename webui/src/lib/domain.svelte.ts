@@ -1,27 +1,37 @@
 /** AD membership state + handlers (Settings → Directory card). */
-import { getClient } from '$lib/client';
+import { getClient, getSessionGeneration, registerSessionReset } from '$lib/client';
 import { withToast } from '$lib/toast.svelte';
 import { confirm } from '$lib/confirm.svelte';
 import type { DomainStatus, DomainPrincipal } from '$lib/types';
 
-const client = getClient();
+function initialDomainState() {
+	return {
+		status: null as DomainStatus | null,
+		loading: true,
+		joining: false,
+		// join form
+		realm: '',
+		username: '',
+		password: '',
+		ou: '',
+	};
+}
 
-export const domain = $state({
-	status: null as DomainStatus | null,
-	loading: true,
-	joining: false,
-	// join form
-	realm: '',
-	username: '',
-	password: '',
-	ou: '',
-});
+export const domain = $state(initialDomainState());
+
+export function resetDomainState() {
+	Object.assign(domain, initialDomainState());
+}
+
+registerSessionReset(resetDomainState);
 
 export async function domainRefresh() {
+	const generation = getSessionGeneration();
 	try {
-		domain.status = await client.call<DomainStatus>('domain.status');
+		const status = await getClient().call<DomainStatus>('domain.status');
+		if (generation === getSessionGeneration()) domain.status = status;
 	} catch { /* engine without domain support */ }
-	domain.loading = false;
+	if (generation === getSessionGeneration()) domain.loading = false;
 }
 
 export async function domainJoin() {
@@ -33,7 +43,7 @@ export async function domainJoin() {
 		password: domain.password,
 	};
 	if (domain.ou.trim()) params.ou = domain.ou.trim();
-	const ok = await withToast(() => client.call<DomainStatus>('domain.join', params), 'Joined domain');
+	const ok = await withToast(() => getClient().call<DomainStatus>('domain.join', params), 'Joined domain');
 	domain.password = '';
 	if (ok !== undefined) {
 		domain.status = ok;
@@ -50,7 +60,7 @@ export async function domainLeave(force: boolean, username?: string, password?: 
 			: 'The computer account will be removed from AD. Shares referencing domain users keep their entries but domain logons stop working.'
 	)) return;
 	const params: Record<string, unknown> = force ? { force: true } : { username, password };
-	await withToast(() => client.call('domain.leave', params), 'Left domain');
+	await withToast(() => getClient().call('domain.leave', params), 'Left domain');
 	await domainRefresh();
 }
 
@@ -58,7 +68,7 @@ export async function domainLeave(force: boolean, username?: string, password?: 
 export async function domainSearchUsers(prefix: string): Promise<DomainPrincipal[]> {
 	if (prefix.trim().length < 2 || !domain.status?.joined) return [];
 	try {
-		return await client.call<DomainPrincipal[]>('domain.user.list', { prefix: prefix.trim() });
+		return await getClient().call<DomainPrincipal[]>('domain.user.list', { prefix: prefix.trim() });
 	} catch {
 		return [];
 	}

@@ -11,7 +11,12 @@
 	import { Button } from '$lib/components/ui/button';
 </script>
 
-<Dialog bind:open={confirmState.open}>
+<Dialog
+	open={confirmState.open}
+	onOpenChange={(open) => {
+		if (!open && confirmState.open) confirmRespond(false);
+	}}
+>
 	<DialogContent class="max-w-lg">
 		<DialogHeader>
 			<DialogTitle>{confirmState.title}</DialogTitle>

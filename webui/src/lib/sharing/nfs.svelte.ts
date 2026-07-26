@@ -11,33 +11,41 @@
  * across module boundaries — bare `let nfsLoading = $state(true)`
  * inside a module wouldn't survive import. */
 
-import { getClient } from '$lib/client';
+import { getClient, registerSessionReset } from '$lib/client';
 import { withToast } from '$lib/toast.svelte';
 import { confirm } from '$lib/confirm.svelte';
 import type { NfsShare, Subvolume, ProtocolStatus } from '$lib/types';
 
-const client = getClient();
-
 export type NfsSortKey = 'path' | 'status';
 
-export const nfs = $state({
-	shares: [] as NfsShare[],
-	loading: true,
-	protocol: null as ProtocolStatus | null,
-	showCreate: false,
-	subvolumes: [] as Subvolume[],
-	newSubvolume: '',
-	newComment: '',
-	newHost: '',
-	newOptions: 'rw,sync,no_subtree_check',
-	expanded: {} as Record<string, boolean>,
-	addClientShare: null as string | null,
-	addClientHost: '',
-	addClientOptions: 'rw,sync,no_subtree_check',
-	search: '',
-	sortKey: null as NfsSortKey | null,
-	sortDir: 'asc' as 'asc' | 'desc',
-});
+function initialNfsState() {
+	return {
+		shares: [] as NfsShare[],
+		loading: true,
+		protocol: null as ProtocolStatus | null,
+		showCreate: false,
+		subvolumes: [] as Subvolume[],
+		newSubvolume: '',
+		newComment: '',
+		newHost: '',
+		newOptions: 'rw,sync,no_subtree_check',
+		expanded: {} as Record<string, boolean>,
+		addClientShare: null as string | null,
+		addClientHost: '',
+		addClientOptions: 'rw,sync,no_subtree_check',
+		search: '',
+		sortKey: null as NfsSortKey | null,
+		sortDir: 'asc' as 'asc' | 'desc',
+	};
+}
+
+export const nfs = $state(initialNfsState());
+
+export function resetNfsState() {
+	Object.assign(nfs, initialNfsState());
+}
+
+registerSessionReset(resetNfsState);
 
 export function nfsToggleSort(key: NfsSortKey) {
 	if (nfs.sortKey === key) {
@@ -49,19 +57,19 @@ export function nfsToggleSort(key: NfsSortKey) {
 }
 
 export async function nfsRefresh() {
-	await withToast(async () => { nfs.shares = await client.call<NfsShare[]>('share.nfs.list'); });
+	await withToast(async () => { nfs.shares = await getClient().call<NfsShare[]>('share.nfs.list'); });
 }
 
 export async function nfsLoadProtocol() {
 	try {
-		const all = await client.call<ProtocolStatus[]>('service.protocol.list');
+		const all = await getClient().call<ProtocolStatus[]>('service.protocol.list');
 		nfs.protocol = all.find(p => p.name === 'nfs') ?? null;
 	} catch { /* ignore */ }
 }
 
 export async function nfsLoadSubvolumes() {
 	await withToast(async () => {
-		const all = await client.call<Subvolume[]>('subvolume.list_all');
+		const all = await getClient().call<Subvolume[]>('subvolume.list_all');
 		nfs.subvolumes = all.filter(s => s.subvolume_type === 'filesystem');
 	});
 }
@@ -69,7 +77,7 @@ export async function nfsLoadSubvolumes() {
 export async function nfsCreate() {
 	if (!nfs.newSubvolume || !nfs.newHost) return;
 	const ok = await withToast(
-		() => client.call('share.nfs.create', {
+		() => getClient().call('share.nfs.create', {
 			path: nfs.newSubvolume,
 			comment: nfs.newComment || undefined,
 			clients: [{ host: nfs.newHost, options: nfs.newOptions }],
@@ -87,7 +95,7 @@ export async function nfsCreate() {
 
 export async function nfsToggleEnabled(share: NfsShare) {
 	await withToast(
-		() => client.call('share.nfs.update', { id: share.id, enabled: !share.enabled }),
+		() => getClient().call('share.nfs.update', { id: share.id, enabled: !share.enabled }),
 		`Share ${share.enabled ? 'disabled' : 'enabled'}`
 	);
 	await nfsRefresh();
@@ -95,13 +103,13 @@ export async function nfsToggleEnabled(share: NfsShare) {
 
 export async function nfsRemove(id: string) {
 	if (!await confirm('Delete this NFS share?')) return;
-	await withToast(() => client.call('share.nfs.delete', { id }), 'NFS share deleted');
+	await withToast(() => getClient().call('share.nfs.delete', { id }), 'NFS share deleted');
 	await nfsRefresh();
 }
 
 export async function nfsRemoveClient(share: NfsShare, host: string) {
 	const clients = share.clients.filter(c => c.host !== host);
-	await withToast(() => client.call('share.nfs.update', { id: share.id, clients }), 'Client removed');
+	await withToast(() => getClient().call('share.nfs.update', { id: share.id, clients }), 'Client removed');
 	await nfsRefresh();
 }
 
@@ -109,7 +117,7 @@ export async function nfsAddClient(share: NfsShare) {
 	if (!nfs.addClientHost) return;
 	const clients = [...share.clients, { host: nfs.addClientHost, options: nfs.addClientOptions }];
 	const ok = await withToast(
-		() => client.call('share.nfs.update', { id: share.id, clients }),
+		() => getClient().call('share.nfs.update', { id: share.id, clients }),
 		'Client added'
 	);
 	if (ok !== undefined) {

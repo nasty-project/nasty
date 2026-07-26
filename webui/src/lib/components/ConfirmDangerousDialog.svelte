@@ -15,13 +15,17 @@
 	let matches = $derived(inputValue === confirmDangerousState.expectedValue);
 
 	$effect(() => {
-		if (confirmDangerousState.open) {
-			inputValue = '';
-		}
+		void confirmDangerousState.open;
+		inputValue = '';
 	});
 </script>
 
-<Dialog bind:open={confirmDangerousState.open}>
+<Dialog
+	open={confirmDangerousState.open}
+	onOpenChange={(open) => {
+		if (!open && confirmDangerousState.open) confirmDangerousRespond(false);
+	}}
+>
 	<DialogContent class="max-w-lg">
 		<DialogHeader>
 			<DialogTitle>{confirmDangerousState.title}</DialogTitle>

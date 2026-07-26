@@ -6,62 +6,70 @@
  * carry LUNs + ACLs (CHAP credentials), so the surface is bigger
  * than NFS but smaller than SMB. */
 
-import { getClient } from '$lib/client';
+import { getClient, registerSessionReset } from '$lib/client';
 import { withToast } from '$lib/toast.svelte';
 import { confirm } from '$lib/confirm.svelte';
 import type { IscsiTarget, Subvolume, ProtocolStatus } from '$lib/types';
 
-const client = getClient();
+function initialIscsiState() {
+	return {
+		targets: [] as IscsiTarget[],
+		loading: true,
+		protocol: null as ProtocolStatus | null,
+		showCreate: false,
+		blockSubvolumes: [] as Subvolume[],
+		expanded: {} as Record<string, boolean>,
+		newName: '',
+		newDevice: '',
+		addLunTarget: '',
+		addLunPath: '',
+		addLunType: '',
+		addAclTarget: '',
+		addAclIqn: '',
+		addAclUser: '',
+		addAclPass: '',
+		addPortalTarget: '',
+		addPortalIp: '',
+		addPortalPort: 3260,
+		addPortalFamily: 'ipv4' as 'ipv4' | 'ipv6',
+		addPortalIser: false,
+		// Edit mode reuses the addPortal* form fields; these remember which
+		// portal is being replaced so set_portals can swap it in one call
+		// (same-port wildcard→specific swaps included).
+		editPortalTarget: '',
+		editPortalOrigIp: '',
+		editPortalOrigPort: 0,
+		search: '',
+		sortDir: 'asc' as 'asc' | 'desc',
+	};
+}
 
-export const iscsi = $state({
-	targets: [] as IscsiTarget[],
-	loading: true,
-	protocol: null as ProtocolStatus | null,
-	showCreate: false,
-	blockSubvolumes: [] as Subvolume[],
-	expanded: {} as Record<string, boolean>,
-	newName: '',
-	newDevice: '',
-	addLunTarget: '',
-	addLunPath: '',
-	addLunType: '',
-	addAclTarget: '',
-	addAclIqn: '',
-	addAclUser: '',
-	addAclPass: '',
-	addPortalTarget: '',
-	addPortalIp: '',
-	addPortalPort: 3260,
-	addPortalFamily: 'ipv4' as 'ipv4' | 'ipv6',
-	addPortalIser: false,
-	// Edit mode reuses the addPortal* form fields; these remember which
-	// portal is being replaced so set_portals can swap it in one call
-	// (same-port wildcard→specific swaps included).
-	editPortalTarget: '',
-	editPortalOrigIp: '',
-	editPortalOrigPort: 0,
-	search: '',
-	sortDir: 'asc' as 'asc' | 'desc',
-});
+export const iscsi = $state(initialIscsiState());
+
+export function resetIscsiState() {
+	Object.assign(iscsi, initialIscsiState());
+}
+
+registerSessionReset(resetIscsiState);
 
 export function iscsiToggleSort() {
 	iscsi.sortDir = iscsi.sortDir === 'asc' ? 'desc' : 'asc';
 }
 
 export async function iscsiRefresh() {
-	await withToast(async () => { iscsi.targets = await client.call<IscsiTarget[]>('share.iscsi.list'); });
+	await withToast(async () => { iscsi.targets = await getClient().call<IscsiTarget[]>('share.iscsi.list'); });
 }
 
 export async function iscsiLoadProtocol() {
 	try {
-		const all = await client.call<ProtocolStatus[]>('service.protocol.list');
+		const all = await getClient().call<ProtocolStatus[]>('service.protocol.list');
 		iscsi.protocol = all.find(p => p.name === 'iscsi') ?? null;
 	} catch { /* ignore */ }
 }
 
 export async function iscsiLoadSubvolumes() {
 	await withToast(async () => {
-		const all = await client.call<Subvolume[]>('subvolume.list_all');
+		const all = await getClient().call<Subvolume[]>('subvolume.list_all');
 		iscsi.blockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
 	});
 }
@@ -76,7 +84,7 @@ export function iscsiOnDeviceSelect() {
 export async function iscsiCreate() {
 	if (!iscsi.newName || !iscsi.newDevice) return;
 	const ok = await withToast(
-		() => client.call('share.iscsi.create', { name: iscsi.newName, device_path: iscsi.newDevice }),
+		() => getClient().call('share.iscsi.create', { name: iscsi.newName, device_path: iscsi.newDevice }),
 		'iSCSI target created'
 	);
 	if (ok !== undefined) {
@@ -89,7 +97,7 @@ export async function iscsiCreate() {
 
 export async function iscsiRemove(id: string) {
 	if (!await confirm('Delete this iSCSI target?', 'All its LUNs will also be removed.')) return;
-	await withToast(() => client.call('share.iscsi.delete', { id }), 'iSCSI target deleted');
+	await withToast(() => getClient().call('share.iscsi.delete', { id }), 'iSCSI target deleted');
 	await iscsiRefresh();
 }
 
@@ -97,7 +105,7 @@ export async function iscsiAddLun() {
 	if (!iscsi.addLunTarget || !iscsi.addLunPath) return;
 	const params: Record<string, unknown> = { target_id: iscsi.addLunTarget, backstore_path: iscsi.addLunPath };
 	if (iscsi.addLunType) params.backstore_type = iscsi.addLunType;
-	await withToast(() => client.call('share.iscsi.add_lun', params), 'LUN added');
+	await withToast(() => getClient().call('share.iscsi.add_lun', params), 'LUN added');
 	iscsi.addLunTarget = '';
 	iscsi.addLunPath = '';
 	iscsi.addLunType = '';
@@ -106,7 +114,7 @@ export async function iscsiAddLun() {
 
 export async function iscsiRemoveLun(targetId: string, lunId: number) {
 	if (!await confirm(`Remove LUN ${lunId}?`)) return;
-	await withToast(() => client.call('share.iscsi.remove_lun', { target_id: targetId, lun_id: lunId }), 'LUN removed');
+	await withToast(() => getClient().call('share.iscsi.remove_lun', { target_id: targetId, lun_id: lunId }), 'LUN removed');
 	await iscsiRefresh();
 }
 
@@ -115,7 +123,7 @@ export async function iscsiAddAcl() {
 	const params: Record<string, unknown> = { target_id: iscsi.addAclTarget, initiator_iqn: iscsi.addAclIqn };
 	if (iscsi.addAclUser) params.userid = iscsi.addAclUser;
 	if (iscsi.addAclPass) params.password = iscsi.addAclPass;
-	await withToast(() => client.call('share.iscsi.add_acl', params), 'ACL added');
+	await withToast(() => getClient().call('share.iscsi.add_acl', params), 'ACL added');
 	iscsi.addAclTarget = '';
 	iscsi.addAclIqn = '';
 	iscsi.addAclUser = '';
@@ -126,7 +134,7 @@ export async function iscsiAddAcl() {
 export async function iscsiRemoveAcl(targetId: string, initiatorIqn: string) {
 	if (!await confirm(`Remove ACL for ${initiatorIqn}?`)) return;
 	await withToast(
-		() => client.call('share.iscsi.remove_acl', { target_id: targetId, initiator_iqn: initiatorIqn }),
+		() => getClient().call('share.iscsi.remove_acl', { target_id: targetId, initiator_iqn: initiatorIqn }),
 		'ACL removed'
 	);
 	await iscsiRefresh();
@@ -135,7 +143,7 @@ export async function iscsiRemoveAcl(targetId: string, initiatorIqn: string) {
 export async function iscsiAddPortal() {
 	if (!iscsi.addPortalTarget || !iscsi.addPortalIp) return;
 	const ok = await withToast(
-		() => client.call('share.iscsi.add_portal', {
+		() => getClient().call('share.iscsi.add_portal', {
 			target_id: iscsi.addPortalTarget,
 			ip: iscsi.addPortalIp.trim(),
 			port: iscsi.addPortalPort,
@@ -167,7 +175,7 @@ export async function iscsiReplacePortal() {
 			: { ip: p.ip, port: p.port, iser: p.iser ?? false }
 	);
 	const ok = await withToast(
-		() => client.call('share.iscsi.set_portals', { target_id: iscsi.editPortalTarget, portals }),
+		() => getClient().call('share.iscsi.set_portals', { target_id: iscsi.editPortalTarget, portals }),
 		'Portal updated',
 	);
 	if (ok !== undefined) {
@@ -185,7 +193,7 @@ export async function iscsiReplacePortal() {
 export async function iscsiRemovePortal(targetId: string, ip: string, port: number) {
 	if (!await confirm(`Remove portal ${ip}:${port}?`)) return;
 	await withToast(
-		() => client.call('share.iscsi.remove_portal', { target_id: targetId, ip, port }),
+		() => getClient().call('share.iscsi.remove_portal', { target_id: targetId, ip, port }),
 		'Portal removed',
 	);
 	await iscsiRefresh();
