@@ -1067,7 +1067,8 @@ in {
             fi
             ENGINE_VER=$(cat /etc/nasty-version 2>/dev/null || echo "?")
             printf "  engine:         %s\n" "$ENGINE_VER"
-            RUNNING_BCACHEFS=$(bcachefs --field version 2>/dev/null | head -1 || echo "?")
+            RUNNING_BCACHEFS=$(modinfo --field version bcachefs 2>/dev/null | head -1 || true)
+            RUNNING_BCACHEFS=''${RUNNING_BCACHEFS:-?}
             printf "  bcachefs kernel module: %s\n" "$RUNNING_BCACHEFS"
             if [ "$RUNNING_BCACHEFS" != "?" ] && [ "$BCACHEFS_TAG" != "?" ]; then
               BCACHEFS_TAG_BARE=''${BCACHEFS_TAG#v}
