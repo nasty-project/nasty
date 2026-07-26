@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -400,7 +400,7 @@ pub struct DeviceSpec {
     pub durability: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct CreateFilesystemRequest {
     /// Name for the new filesystem; becomes the mount point directory under `/fs/`.
     pub name: String,
@@ -837,9 +837,1103 @@ async fn detach_filesystem_loop_devices(mount_point: &str) -> Result<(), Filesys
     Ok(())
 }
 
+const MIN_CREATE_FREE_BYTES: u64 = 1_073_741_824;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockIdentity {
+    devno: String,
+    size_bytes: u64,
+    dev_type: String,
+    parent_devno: Option<String>,
+    /// Partition start as reported by lsblk, in 512-byte sectors.
+    start_512_sector: Option<u64>,
+    partition_number: Option<u32>,
+    partition_uuid: Option<String>,
+    partition_table_uuid: Option<String>,
+    disk_sequence: Option<u64>,
+    logical_sector_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PreflightBlockDevice {
+    path: String,
+    parent_path: Option<String>,
+    identity: BlockIdentity,
+    fs_type: Option<String>,
+    partition_table_type: Option<String>,
+    read_only: bool,
+    mount_points: Vec<String>,
+    children: HashSet<String>,
+    holders: Vec<String>,
+}
+
+#[derive(Debug)]
+struct BlockInventory {
+    devices: HashMap<String, PreflightBlockDevice>,
+    paths: HashMap<String, String>,
+}
+
+impl BlockInventory {
+    fn get_path(&self, path: &str) -> Option<&PreflightBlockDevice> {
+        self.paths
+            .get(path)
+            .and_then(|devno| self.devices.get(devno))
+    }
+
+    fn get_identity(&self, identity: &BlockIdentity) -> Option<&PreflightBlockDevice> {
+        self.devices.get(&identity.devno)
+    }
+
+    fn descendants<'a>(&'a self, root: &'a PreflightBlockDevice) -> Vec<&'a PreflightBlockDevice> {
+        let mut found = Vec::new();
+        let mut pending: Vec<&str> = root.children.iter().map(String::as_str).collect();
+        let mut seen = HashSet::new();
+        while let Some(devno) = pending.pop() {
+            if !seen.insert(devno) {
+                continue;
+            }
+            if let Some(node) = self.devices.get(devno) {
+                pending.extend(node.children.iter().map(String::as_str));
+                found.push(node);
+            }
+        }
+        found
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CreateTargetPlan {
+    Existing {
+        spec: DeviceSpec,
+        identity: BlockIdentity,
+    },
+    FreeSpace {
+        spec: DeviceSpec,
+        parent: BlockIdentity,
+        partition_number: u32,
+        start_sector: u64,
+        end_sector: u64,
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct CreateFilesystemPlan {
+    request: CreateFilesystemRequest,
+    targets: Vec<CreateTargetPlan>,
+    mount_point: String,
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn json_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    })
+}
+
+fn json_bool(value: &serde_json::Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(|v| {
+            v.as_bool()
+                .or_else(|| v.as_u64().map(|n| n != 0))
+                .or_else(|| v.as_str().map(|s| s == "1" || s == "true"))
+        })
+        .unwrap_or(false)
+}
+
+fn normalize_device_path(path: String) -> String {
+    if path.starts_with('/') {
+        path
+    } else {
+        format!("/dev/{path}")
+    }
+}
+
+fn parse_mount_points(value: &serde_json::Value) -> Vec<String> {
+    match value.get("mountpoints") {
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(serde_json::Value::String(value)) => value
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => json_string(value, "mountpoint").into_iter().collect(),
+    }
+}
+
+fn parse_lsblk_inventory(output: &str) -> Result<BlockInventory, FilesystemError> {
+    let parsed: serde_json::Value = serde_json::from_str(output).map_err(|e| {
+        FilesystemError::CommandFailed(format!("failed to parse lsblk device inventory: {e}"))
+    })?;
+    let roots = parsed
+        .get("blockdevices")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| FilesystemError::CommandFailed("lsblk returned no blockdevices".into()))?;
+
+    fn collect(
+        values: &[serde_json::Value],
+        tree_parent: Option<&str>,
+        devices: &mut HashMap<String, PreflightBlockDevice>,
+        paths: &mut HashMap<String, String>,
+        tree_edges: &mut Vec<(String, String)>,
+    ) -> Result<(), FilesystemError> {
+        for value in values {
+            let devno = json_string(value, "maj:min").ok_or_else(|| {
+                FilesystemError::CommandFailed("lsblk device is missing MAJ:MIN".into())
+            })?;
+            let path = json_string(value, "path")
+                .or_else(|| json_string(value, "name"))
+                .map(normalize_device_path)
+                .ok_or_else(|| {
+                    FilesystemError::CommandFailed("lsblk device is missing PATH".into())
+                })?;
+            let parent_path = json_string(value, "pkname").map(normalize_device_path);
+            let dev_type = json_string(value, "type").unwrap_or_default();
+            let identity = BlockIdentity {
+                devno: devno.clone(),
+                size_bytes: json_u64(value, "size").unwrap_or(0),
+                dev_type,
+                parent_devno: None,
+                start_512_sector: json_u64(value, "start"),
+                partition_number: json_u64(value, "partn").and_then(|n| u32::try_from(n).ok()),
+                partition_uuid: json_string(value, "partuuid"),
+                partition_table_uuid: json_string(value, "ptuuid"),
+                disk_sequence: json_u64(value, "disk-seq"),
+                logical_sector_bytes: json_u64(value, "log-sec").unwrap_or(512),
+            };
+
+            devices
+                .entry(devno.clone())
+                .or_insert_with(|| PreflightBlockDevice {
+                    path: path.clone(),
+                    parent_path,
+                    identity,
+                    fs_type: json_string(value, "fstype"),
+                    partition_table_type: json_string(value, "pttype"),
+                    read_only: json_bool(value, "ro"),
+                    mount_points: parse_mount_points(value),
+                    children: HashSet::new(),
+                    holders: Vec::new(),
+                });
+            paths.insert(path, devno.clone());
+            if let Some(name) = json_string(value, "name") {
+                paths.insert(normalize_device_path(name), devno.clone());
+            }
+            if let Some(kname) = json_string(value, "kname") {
+                paths.insert(normalize_device_path(kname), devno.clone());
+            }
+            if let Some(parent) = tree_parent {
+                tree_edges.push((devno.clone(), parent.to_string()));
+            }
+            if let Some(children) = value.get("children").and_then(|v| v.as_array()) {
+                collect(children, Some(&devno), devices, paths, tree_edges)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut devices = HashMap::new();
+    let mut paths = HashMap::new();
+    let mut tree_edges = Vec::new();
+    collect(roots, None, &mut devices, &mut paths, &mut tree_edges)?;
+
+    let path_parents: Vec<(String, String)> = devices
+        .iter()
+        .filter_map(|(devno, node)| {
+            let parent = node.parent_path.as_ref()?;
+            Some((devno.clone(), paths.get(parent)?.clone()))
+        })
+        .collect();
+    for (child, parent) in tree_edges.into_iter().chain(path_parents) {
+        if let Some(node) = devices.get_mut(&child) {
+            node.identity.parent_devno = Some(parent.clone());
+        }
+        if let Some(node) = devices.get_mut(&parent) {
+            node.children.insert(child);
+        }
+    }
+
+    Ok(BlockInventory { devices, paths })
+}
+
+async fn read_block_inventory() -> Result<BlockInventory, FilesystemError> {
+    let output = cmd::run_ok(
+        "lsblk",
+        &[
+            "--json",
+            "--bytes",
+            "--paths",
+            "--output",
+            "NAME,KNAME,PATH,MAJ:MIN,SIZE,TYPE,PKNAME,FSTYPE,PTTYPE,PTUUID,PARTUUID,PARTN,START,RO,MOUNTPOINTS,LOG-SEC,DISK-SEQ",
+        ],
+    )
+    .await
+    .map_err(FilesystemError::CommandFailed)?;
+    let mut inventory = parse_lsblk_inventory(&output)?;
+
+    for node in inventory.devices.values_mut() {
+        let holders_path = format!("/sys/dev/block/{}/holders", node.identity.devno);
+        let mut entries = tokio::fs::read_dir(&holders_path).await.map_err(|e| {
+            FilesystemError::CommandFailed(format!("failed to inspect {holders_path}: {e}"))
+        })?;
+        while let Some(entry) = entries.next_entry().await? {
+            node.holders
+                .push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    Ok(inventory)
+}
+
+async fn read_active_swaps(inventory: &BlockInventory) -> Result<HashSet<String>, FilesystemError> {
+    let output = cmd::run_ok(
+        "swapon",
+        &["--show", "--noheadings", "--raw", "--output", "NAME"],
+    )
+    .await
+    .map_err(FilesystemError::CommandFailed)?;
+    let mut swaps = HashSet::new();
+    for path in output.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        if let Some(node) = inventory.get_path(&canonical.to_string_lossy()) {
+            swaps.insert(node.identity.devno.clone());
+        }
+    }
+    Ok(swaps)
+}
+
+fn validate_create_name(name: &str) -> Result<(), FilesystemError> {
+    if name.is_empty() || name.len() > 32 {
+        return Err(FilesystemError::InvalidInput(
+            "filesystem name must be between 1 and 32 bytes".into(),
+        ));
+    }
+    if name == "."
+        || name == ".."
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        return Err(FilesystemError::InvalidInput(
+            "filesystem name may contain only ASCII letters, digits, '.', '-', and '_'".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_create_label(field: &str, label: &str) -> Result<(), FilesystemError> {
+    if label.is_empty()
+        || label.len() > 32
+        || !label
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{field} must be 1-32 ASCII letters, digits, '.', '-', or '_'"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_create_request(req: &CreateFilesystemRequest) -> Result<(), FilesystemError> {
+    validate_create_name(&req.name)?;
+    if req.devices.is_empty() {
+        return Err(FilesystemError::NoDevices);
+    }
+    if let Some(comp) = &req.compression {
+        validate_compression(comp).map_err(FilesystemError::InvalidInput)?;
+    }
+    if req.encryption == Some(true) && req.passphrase.as_deref().is_none_or(str::is_empty) {
+        return Err(FilesystemError::InvalidInput(
+            "passphrase is required when encryption=true".into(),
+        ));
+    }
+    if req.replicas == 0 {
+        return Err(FilesystemError::InvalidInput(
+            "replicas must be at least 1".into(),
+        ));
+    }
+
+    let mut total_durability = 0u32;
+    for dev in &req.devices {
+        if dev.path.is_empty() {
+            return Err(FilesystemError::InvalidInput(
+                "device path must not be empty".into(),
+            ));
+        }
+        let durability = dev.durability.unwrap_or(1);
+        if durability > 2 {
+            return Err(FilesystemError::InvalidInput(format!(
+                "device {} has invalid durability {durability}; expected 0, 1, or 2",
+                dev.path
+            )));
+        }
+        total_durability = total_durability.saturating_add(durability);
+        if let Some(label) = &dev.label {
+            validate_create_label("device label", label)?;
+        }
+    }
+    if req.replicas > total_durability {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{} replicas require at least that much total device durability (got {total_durability})",
+            req.replicas
+        )));
+    }
+    if req.erasure_code == Some(true) {
+        if req.replicas < 2 {
+            return Err(FilesystemError::InvalidInput(
+                "erasure coding requires replicas >= 2".into(),
+            ));
+        }
+        if req.devices.len() < (req.replicas as usize) + 1 {
+            return Err(FilesystemError::InvalidInput(format!(
+                "erasure coding with {} replicas requires at least {} devices (got {})",
+                req.replicas,
+                req.replicas + 1,
+                req.devices.len()
+            )));
+        }
+    }
+
+    for (field, value) in [
+        ("filesystem label", req.label.as_deref()),
+        ("foreground target", req.foreground_target.as_deref()),
+        ("metadata target", req.metadata_target.as_deref()),
+        ("background target", req.background_target.as_deref()),
+        ("promote target", req.promote_target.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_create_label(field, value)?;
+        }
+    }
+    let targets: Vec<&str> = [
+        req.foreground_target.as_deref(),
+        req.metadata_target.as_deref(),
+        req.background_target.as_deref(),
+        req.promote_target.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !targets.is_empty() {
+        let default_label = req.label.as_deref().unwrap_or(&req.name);
+        let labels: Vec<&str> = req
+            .devices
+            .iter()
+            .map(|device| device.label.as_deref().unwrap_or(default_label))
+            .collect();
+        for target in targets {
+            let target_prefix = format!("{target}.");
+            if !labels
+                .iter()
+                .any(|label| *label == target || label.starts_with(&target_prefix))
+            {
+                return Err(FilesystemError::InvalidInput(format!(
+                    "tiering target '{target}' does not match any selected device label"
+                )));
+            }
+        }
+    }
+    for (field, value) in [
+        ("data_checksum", req.data_checksum.as_deref()),
+        ("metadata_checksum", req.metadata_checksum.as_deref()),
+    ] {
+        if let Some(value) = value
+            && !matches!(value, "none" | "crc32c" | "crc64" | "xxhash")
+        {
+            return Err(FilesystemError::InvalidInput(format!(
+                "invalid {field} value '{value}'"
+            )));
+        }
+    }
+    for (field, value) in [
+        ("bucket_size", req.bucket_size.as_deref()),
+        ("encoded_extent_max", req.encoded_extent_max.as_deref()),
+    ] {
+        if let Some(value) = value {
+            let bytes = parse_human_bytes(value).ok_or_else(|| {
+                FilesystemError::InvalidInput(format!("invalid {field} value '{value}'"))
+            })?;
+            if bytes == 0 || !bytes.is_power_of_two() {
+                return Err(FilesystemError::InvalidInput(format!(
+                    "{field} must be a non-zero power-of-two size"
+                )));
+            }
+        }
+    }
+    if let Some(value) = req.version_upgrade.as_deref()
+        && !matches!(value, "compatible" | "incompatible" | "none")
+    {
+        return Err(FilesystemError::InvalidInput(format!(
+            "invalid version_upgrade value '{value}'"
+        )));
+    }
+    if let Some(value) = req.io_scheduler.as_deref()
+        && !matches!(value, "none" | "mq-deadline" | "kyber")
+    {
+        return Err(FilesystemError::InvalidInput(format!(
+            "invalid io_scheduler value '{value}'"
+        )));
+    }
+    Ok(())
+}
+
+fn node_usage_error(
+    inventory: &BlockInventory,
+    node: &PreflightBlockDevice,
+    swaps: &HashSet<String>,
+    include_descendants: bool,
+    reject_signatures: bool,
+) -> Option<String> {
+    let mut nodes = vec![node];
+    if include_descendants {
+        nodes.extend(inventory.descendants(node));
+    }
+    for candidate in nodes {
+        if candidate.read_only {
+            return Some(format!("{} is read-only", candidate.path));
+        }
+        if let Some(mount) = candidate.mount_points.first() {
+            return Some(format!("{} is mounted at {mount}", candidate.path));
+        }
+        if swaps.contains(&candidate.identity.devno) {
+            return Some(format!("{} is active swap", candidate.path));
+        }
+        if !candidate.holders.is_empty() {
+            return Some(format!(
+                "{} is held by {}",
+                candidate.path,
+                candidate.holders.join(", ")
+            ));
+        }
+        if reject_signatures && let Some(fs_type) = candidate.fs_type.as_deref() {
+            return Some(format!("{} contains a {fs_type} signature", candidate.path));
+        }
+    }
+    None
+}
+
+fn validate_existing_create_target(
+    inventory: &BlockInventory,
+    node: &PreflightBlockDevice,
+    swaps: &HashSet<String>,
+) -> Result<(), FilesystemError> {
+    if !matches!(node.identity.dev_type.as_str(), "disk" | "part") {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{} is a {} device, not a disk or partition",
+            node.path, node.identity.dev_type
+        )));
+    }
+    if let Some(reason) = node_usage_error(inventory, node, swaps, true, true) {
+        return Err(FilesystemError::DeviceInUse(format!(
+            "{} ({reason})",
+            node.path
+        )));
+    }
+    if node.identity.dev_type == "disk"
+        && (!node.children.is_empty() || node.partition_table_type.is_some())
+    {
+        return Err(FilesystemError::DeviceInUse(format!(
+            "{} (whole disk has a partition table or child devices)",
+            node.path
+        )));
+    }
+    if node.identity.size_bytes == 0 {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{} reports zero capacity",
+            node.path
+        )));
+    }
+    Ok(())
+}
+
+fn validate_free_space_parent(
+    inventory: &BlockInventory,
+    node: &PreflightBlockDevice,
+    swaps: &HashSet<String>,
+) -> Result<(), FilesystemError> {
+    if node.identity.dev_type != "disk" {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{}:free requires a whole disk, got {}",
+            node.path, node.identity.dev_type
+        )));
+    }
+    if node.partition_table_type.as_deref() != Some("gpt") {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{}:free requires an existing GPT partition table",
+            node.path
+        )));
+    }
+    if let Some(reason) = node_usage_error(inventory, node, swaps, false, true) {
+        return Err(FilesystemError::DeviceInUse(format!(
+            "{} ({reason})",
+            node.path
+        )));
+    }
+    Ok(())
+}
+
+async fn has_block_signatures(path: &str) -> Result<bool, FilesystemError> {
+    let output = cmd::run_ok(
+        "wipefs",
+        &["--no-act", "--noheadings", "--output", "TYPE", path],
+    )
+    .await
+    .map_err(FilesystemError::CommandFailed)?;
+    Ok(output.lines().any(|line| !line.trim().is_empty()))
+}
+
+fn canonical_block_path(path: &str) -> Result<String, FilesystemError> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|_| FilesystemError::DeviceNotFound(path.to_string()))?;
+    let canonical = canonical.to_string_lossy().into_owned();
+    if !canonical.starts_with("/dev/") {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{path} does not resolve to a /dev block device"
+        )));
+    }
+    Ok(canonical)
+}
+
+fn parse_sgdisk_sector(output: &str, what: &str) -> Result<u64, FilesystemError> {
+    output
+        .lines()
+        .find_map(|line| line.trim().parse().ok())
+        .ok_or_else(|| FilesystemError::CommandFailed(format!("sgdisk returned no {what} sector")))
+}
+
+fn parse_sgdisk_partition_numbers(output: &str) -> HashSet<u32> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let number = fields.next()?.parse::<u32>().ok()?;
+            fields.next()?.parse::<u64>().ok()?;
+            fields.next()?.parse::<u64>().ok()?;
+            Some(number)
+        })
+        .collect()
+}
+
+fn partition_device_path(disk_path: &str, number: u32) -> String {
+    if disk_path.as_bytes().last().is_some_and(u8::is_ascii_digit) {
+        format!("{disk_path}p{number}")
+    } else {
+        format!("{disk_path}{number}")
+    }
+}
+
+async fn plan_free_partition(
+    disk: &PreflightBlockDevice,
+) -> Result<(u32, u64, u64, String), FilesystemError> {
+    if disk.identity.logical_sector_bytes < 512
+        || !disk.identity.logical_sector_bytes.is_multiple_of(512)
+    {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{} reports unsupported logical sector size {}",
+            disk.path, disk.identity.logical_sector_bytes
+        )));
+    }
+    let first = cmd::run_ok("sgdisk", &["--first-aligned-in-largest", &disk.path])
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
+    let end = cmd::run_ok("sgdisk", &["--end-of-largest", &disk.path])
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
+    let table = cmd::run_ok("sgdisk", &["--print", &disk.path])
+        .await
+        .map_err(FilesystemError::CommandFailed)?;
+    let start_sector = parse_sgdisk_sector(&first, "first free")?;
+    let end_sector = parse_sgdisk_sector(&end, "last free")?;
+    if end_sector < start_sector {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{} has no usable contiguous free space",
+            disk.path
+        )));
+    }
+    let sectors = end_sector - start_sector + 1;
+    let bytes = sectors
+        .checked_mul(disk.identity.logical_sector_bytes)
+        .ok_or_else(|| FilesystemError::InvalidInput("free-space size overflow".into()))?;
+    if bytes < MIN_CREATE_FREE_BYTES {
+        return Err(FilesystemError::InvalidInput(format!(
+            "{} has only {bytes} bytes in its largest aligned free extent; at least {MIN_CREATE_FREE_BYTES} are required",
+            disk.path
+        )));
+    }
+    let used = parse_sgdisk_partition_numbers(&table);
+    let partition_number = (1..=128).find(|n| !used.contains(n)).ok_or_else(|| {
+        FilesystemError::InvalidInput(format!("{} has no free GPT partition slots", disk.path))
+    })?;
+    let path = partition_device_path(&disk.path, partition_number);
+    Ok((partition_number, start_sector, end_sector, path))
+}
+
+fn target_containing_disk<'a>(
+    inventory: &'a BlockInventory,
+    node: &'a PreflightBlockDevice,
+) -> Option<&'a str> {
+    if node.identity.dev_type == "disk" {
+        Some(&node.identity.devno)
+    } else {
+        node.identity.parent_devno.as_deref().and_then(|parent| {
+            inventory
+                .devices
+                .get(parent)
+                .filter(|p| p.identity.dev_type == "disk")
+                .map(|_| parent)
+        })
+    }
+}
+
+async fn build_create_plan(
+    req: CreateFilesystemRequest,
+) -> Result<CreateFilesystemPlan, FilesystemError> {
+    validate_create_request(&req)?;
+    if req.bind_to_tpm == Some(true) {
+        if req.encryption != Some(true) {
+            return Err(FilesystemError::InvalidInput(
+                "bind_to_tpm requires encryption=true".into(),
+            ));
+        }
+        if req.store_key == Some(false) {
+            return Err(FilesystemError::InvalidInput(
+                "bind_to_tpm requires store_key=true".into(),
+            ));
+        }
+        if !nasty_common::tpm::is_available().await {
+            return Err(FilesystemError::InvalidInput(
+                "bind_to_tpm requested but no TPM2 is available on this host".into(),
+            ));
+        }
+    }
+
+    let mount_point = format!("{NASTY_MOUNT_BASE}/{}", req.name);
+    match tokio::fs::symlink_metadata(&mount_point).await {
+        Ok(_) => return Err(FilesystemError::AlreadyExists(req.name.clone())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(FilesystemError::Io(e)),
+    }
+
+    let inventory = read_block_inventory().await?;
+    let swaps = read_active_swaps(&inventory).await?;
+    let mut resolved = Vec::with_capacity(req.devices.len());
+    for spec in &req.devices {
+        let (raw_path, free) = match spec.path.strip_suffix(":free") {
+            Some(path) => (path, true),
+            None => (spec.path.as_str(), false),
+        };
+        let path = canonical_block_path(raw_path)?;
+        let node = inventory
+            .get_path(&path)
+            .ok_or_else(|| FilesystemError::DeviceNotFound(spec.path.clone()))?;
+        if free {
+            validate_free_space_parent(&inventory, node, &swaps)?;
+        } else {
+            validate_existing_create_target(&inventory, node, &swaps)?;
+            if has_block_signatures(&node.path).await? {
+                return Err(FilesystemError::DeviceInUse(format!(
+                    "{} (existing disk, partition-table, RAID, LVM, or filesystem signature)",
+                    node.path
+                )));
+            }
+        }
+        resolved.push((spec.clone(), free, node));
+    }
+
+    let mut selected_devnos = HashSet::new();
+    for (_, free, node) in &resolved {
+        if !selected_devnos.insert(node.identity.devno.clone()) {
+            return Err(FilesystemError::InvalidInput(format!(
+                "{} is selected more than once, possibly through aliases",
+                node.path
+            )));
+        }
+        let Some(disk) = target_containing_disk(&inventory, node) else {
+            return Err(FilesystemError::InvalidInput(format!(
+                "could not determine the parent disk for {}",
+                node.path
+            )));
+        };
+        for (_, other_free, other) in &resolved {
+            if node.identity.devno == other.identity.devno {
+                continue;
+            }
+            if target_containing_disk(&inventory, other) == Some(disk)
+                && ((!free && node.identity.dev_type == "disk")
+                    || (!other_free && other.identity.dev_type == "disk"))
+            {
+                return Err(FilesystemError::InvalidInput(format!(
+                    "{} overlaps selected device {}",
+                    node.path, other.path
+                )));
+            }
+        }
+    }
+
+    let mut targets = Vec::with_capacity(resolved.len());
+    for (spec, free, node) in resolved {
+        if free {
+            let (partition_number, start_sector, end_sector, path) =
+                plan_free_partition(node).await?;
+            targets.push(CreateTargetPlan::FreeSpace {
+                spec,
+                parent: node.identity.clone(),
+                partition_number,
+                start_sector,
+                end_sector,
+                path,
+            });
+        } else {
+            targets.push(CreateTargetPlan::Existing {
+                spec,
+                identity: node.identity.clone(),
+            });
+        }
+    }
+
+    Ok(CreateFilesystemPlan {
+        request: req,
+        targets,
+        mount_point,
+    })
+}
+
+async fn reserve_create_mount_point(plan: &CreateFilesystemPlan) -> Result<(), FilesystemError> {
+    tokio::fs::create_dir_all(NASTY_MOUNT_BASE).await?;
+    match tokio::fs::create_dir(&plan.mount_point).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(FilesystemError::AlreadyExists(plan.request.name.clone()))
+        }
+        Err(e) => Err(FilesystemError::Io(e)),
+    }
+}
+
+fn identity_changed(
+    expected: &BlockIdentity,
+    current: Option<&PreflightBlockDevice>,
+    path: &str,
+) -> Result<(), FilesystemError> {
+    let current = current.ok_or_else(|| {
+        FilesystemError::InvalidInput(format!(
+            "device {path} disappeared after preflight; no changes were made"
+        ))
+    })?;
+    if &current.identity != expected {
+        return Err(FilesystemError::InvalidInput(format!(
+            "device {path} changed after preflight; refusing destructive operation"
+        )));
+    }
+    Ok(())
+}
+
+async fn revalidate_create_sources(plan: &CreateFilesystemPlan) -> Result<(), FilesystemError> {
+    let inventory = read_block_inventory().await?;
+    let swaps = read_active_swaps(&inventory).await?;
+    for target in &plan.targets {
+        match target {
+            CreateTargetPlan::Existing { identity, .. } => {
+                let current = inventory.get_identity(identity);
+                identity_changed(
+                    identity,
+                    current,
+                    current.map(|n| n.path.as_str()).unwrap_or(&identity.devno),
+                )?;
+                let current = current.expect("identity_changed checked presence");
+                validate_existing_create_target(&inventory, current, &swaps)?;
+                if has_block_signatures(&current.path).await? {
+                    return Err(FilesystemError::DeviceInUse(format!(
+                        "{} (a signature appeared after preflight)",
+                        current.path
+                    )));
+                }
+            }
+            CreateTargetPlan::FreeSpace { parent, .. } => {
+                let current = inventory.get_identity(parent);
+                identity_changed(
+                    parent,
+                    current,
+                    current.map(|n| n.path.as_str()).unwrap_or(&parent.devno),
+                )?;
+                validate_free_space_parent(
+                    &inventory,
+                    current.expect("identity_changed checked presence"),
+                    &swaps,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_created_partition(
+    inventory: &BlockInventory,
+    parent: &BlockIdentity,
+    partition_number: u32,
+    start_sector: u64,
+    end_sector: u64,
+    path: &str,
+) -> Result<BlockIdentity, FilesystemError> {
+    let node = inventory.get_path(path).ok_or_else(|| {
+        FilesystemError::CommandFailed(format!(
+            "created partition {path} did not appear in the kernel device inventory"
+        ))
+    })?;
+    let expected_size = (end_sector - start_sector + 1)
+        .checked_mul(parent.logical_sector_bytes)
+        .ok_or_else(|| FilesystemError::InvalidInput("partition size overflow".into()))?;
+    // sgdisk uses the disk's logical LBAs; lsblk START remains in 512-byte
+    // sectors even with --bytes, so normalize before comparing geometry.
+    let expected_start_512 = start_sector
+        .checked_mul(parent.logical_sector_bytes / 512)
+        .ok_or_else(|| FilesystemError::InvalidInput("partition start overflow".into()))?;
+    if node.identity.dev_type != "part"
+        || node.identity.parent_devno.as_deref() != Some(parent.devno.as_str())
+        || node.identity.partition_number != Some(partition_number)
+        || node.identity.start_512_sector != Some(expected_start_512)
+        || node.identity.size_bytes != expected_size
+    {
+        return Err(FilesystemError::InvalidInput(format!(
+            "created node {path} does not match planned partition {partition_number} ({start_sector}-{end_sector}); refusing to format it"
+        )));
+    }
+    Ok(node.identity.clone())
+}
+
+async fn execute_partition_plan(
+    plan: &CreateFilesystemPlan,
+) -> Result<Vec<DeviceSpec>, FilesystemError> {
+    revalidate_create_sources(plan).await?;
+    let mut devices = Vec::with_capacity(plan.targets.len());
+    let mut created_partitions = Vec::new();
+
+    for target in &plan.targets {
+        match target {
+            CreateTargetPlan::Existing { spec, identity } => {
+                let mut resolved = spec.clone();
+                let inventory = read_block_inventory().await?;
+                let node = inventory.get_identity(identity).ok_or_else(|| {
+                    FilesystemError::InvalidInput(format!(
+                        "device {} disappeared after preflight",
+                        spec.path
+                    ))
+                })?;
+                resolved.path = node.path.clone();
+                devices.push(resolved);
+            }
+            CreateTargetPlan::FreeSpace {
+                spec,
+                parent,
+                partition_number,
+                start_sector,
+                end_sector,
+                path,
+            } => {
+                // Recheck the parent immediately before changing its partition table.
+                let inventory = read_block_inventory().await?;
+                let swaps = read_active_swaps(&inventory).await?;
+                let disk = inventory.get_identity(parent);
+                identity_changed(
+                    parent,
+                    disk,
+                    disk.map(|n| n.path.as_str()).unwrap_or(&parent.devno),
+                )?;
+                let disk = disk.expect("identity_changed checked presence");
+                validate_free_space_parent(&inventory, disk, &swaps)?;
+
+                let new_arg = format!("--new={partition_number}:{start_sector}:{end_sector}");
+                cmd::run_ok("sgdisk", &[&new_arg, &disk.path])
+                    .await
+                    .map_err(FilesystemError::CommandFailed)?;
+                if let Err(e) = cmd::run_ok("partprobe", &[&disk.path]).await {
+                    warn!(
+                        "partprobe failed after creating {path}: {e}; waiting for the exact node"
+                    );
+                }
+                let _ = cmd::run_ok("udevadm", &["settle"]).await;
+
+                let mut created_identity = None;
+                for _ in 0..10 {
+                    let current = read_block_inventory().await?;
+                    if current.get_path(path).is_some() {
+                        created_identity = Some(verify_created_partition(
+                            &current,
+                            parent,
+                            *partition_number,
+                            *start_sector,
+                            *end_sector,
+                            path,
+                        )?);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let created_identity = created_identity.ok_or_else(|| {
+                    FilesystemError::CommandFailed(format!(
+                        "created partition {path} did not appear after partprobe"
+                    ))
+                })?;
+
+                created_partitions.push((path.clone(), created_identity));
+                let mut resolved = spec.clone();
+                resolved.path = path.clone();
+                devices.push(resolved);
+            }
+        }
+    }
+
+    // Do not wipe any selected free extent until every requested partition has
+    // been created and matched to its exact plan. This limits partial failure
+    // to GPT entries instead of erasing data before a later disk fails.
+    for (path, expected) in created_partitions {
+        let inventory = read_block_inventory().await?;
+        let swaps = read_active_swaps(&inventory).await?;
+        let current = inventory.get_path(&path);
+        identity_changed(&expected, current, &path)?;
+        if let Some(reason) = node_usage_error(
+            &inventory,
+            current.expect("identity_changed checked presence"),
+            &swaps,
+            true,
+            false,
+        ) {
+            return Err(FilesystemError::DeviceInUse(format!("{path} ({reason})")));
+        }
+        cmd::run_ok("wipefs", &["--all", "--force", &path])
+            .await
+            .map_err(FilesystemError::CommandFailed)?;
+    }
+    Ok(devices)
+}
+
+async fn revalidate_create_targets(
+    plan: &CreateFilesystemPlan,
+    devices: &[DeviceSpec],
+) -> Result<(), FilesystemError> {
+    let inventory = read_block_inventory().await?;
+    let swaps = read_active_swaps(&inventory).await?;
+    for (target, device) in plan.targets.iter().zip(devices) {
+        let node = inventory
+            .get_path(&device.path)
+            .ok_or_else(|| FilesystemError::DeviceNotFound(device.path.clone()))?;
+        match target {
+            CreateTargetPlan::Existing { identity, .. } => {
+                identity_changed(identity, Some(node), &device.path)?;
+            }
+            CreateTargetPlan::FreeSpace {
+                parent,
+                partition_number,
+                start_sector,
+                end_sector,
+                path,
+                ..
+            } => {
+                if path != &device.path {
+                    return Err(FilesystemError::InvalidInput(
+                        "resolved partition path changed after preflight".into(),
+                    ));
+                }
+                verify_created_partition(
+                    &inventory,
+                    parent,
+                    *partition_number,
+                    *start_sector,
+                    *end_sector,
+                    path,
+                )?;
+            }
+        }
+        validate_existing_create_target(&inventory, node, &swaps)?;
+        if has_block_signatures(&node.path).await? {
+            return Err(FilesystemError::DeviceInUse(format!(
+                "{} (a signature appeared before format)",
+                node.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn build_create_format_args(req: &CreateFilesystemRequest, devices: &[DeviceSpec]) -> Vec<String> {
+    let mut args = vec!["format".to_string(), format!("--label={}", req.name)];
+    if req.replicas > 1 {
+        args.push(format!("--replicas={}", req.replicas));
+    }
+    if let Some(comp) = &req.compression {
+        args.push(format!("--compression={comp}"));
+    }
+    if req.encryption == Some(true) {
+        args.push("--encrypted".to_string());
+    }
+    for (name, target) in [
+        ("foreground_target", req.foreground_target.as_deref()),
+        ("metadata_target", req.metadata_target.as_deref()),
+        ("background_target", req.background_target.as_deref()),
+        ("promote_target", req.promote_target.as_deref()),
+    ] {
+        if let Some(target) = target {
+            args.push(format!("--{name}={target}"));
+        }
+    }
+    if req.erasure_code == Some(true) {
+        args.push("--erasure_code".to_string());
+    }
+    for (name, value) in [
+        ("data_checksum", req.data_checksum.as_deref()),
+        ("metadata_checksum", req.metadata_checksum.as_deref()),
+        ("bucket", req.bucket_size.as_deref()),
+        ("encoded_extent_max", req.encoded_extent_max.as_deref()),
+    ] {
+        if let Some(value) = value {
+            args.push(format!("--{name}={value}"));
+        }
+    }
+
+    let has_targets = req.foreground_target.is_some()
+        || req.metadata_target.is_some()
+        || req.background_target.is_some()
+        || req.promote_target.is_some();
+    for dev in devices {
+        if let Some(label) = &dev.label {
+            args.push(format!("--label={label}"));
+        } else if has_targets {
+            args.push(format!(
+                "--label={}",
+                req.label.as_deref().unwrap_or(&req.name)
+            ));
+        }
+        if let Some(durability) = dev.durability {
+            args.push(format!("--durability={durability}"));
+        }
+        args.push(dev.path.clone());
+    }
+    args
+}
+
 #[derive(Clone)]
 pub struct FilesystemService {
     list_cache: ListCache,
+    /// Serializes operations that can claim, repartition, or wipe block
+    /// devices. Identity checks still protect against changes made by other
+    /// processes, but this closes the in-process preflight-to-format race.
+    block_mutations: Arc<Mutex<()>>,
     /// Per-filesystem scrub state, loaded from `SCRUB_STATE_PATH` on
     /// construction. Mutated by `scrub_start` (sets `running` /
     /// `started_at`) and the spawned scrub task (records completion);
@@ -921,6 +2015,7 @@ impl FilesystemService {
         };
         Self {
             list_cache: Arc::new(Mutex::new(None)),
+            block_mutations: Arc::new(Mutex::new(())),
             scrub_state: Arc::new(Mutex::new(scrub)),
             mount_state: Arc::new(Mutex::new(mount)),
             fsck_state: Arc::new(Mutex::new(fsck)),
@@ -1286,161 +2381,28 @@ impl FilesystemService {
     /// Create a new bcachefs filesystem: format devices, create mount point, mount
     pub async fn create(
         &self,
-        mut req: CreateFilesystemRequest,
+        req: CreateFilesystemRequest,
     ) -> Result<Filesystem, FilesystemError> {
-        if req.devices.is_empty() {
-            return Err(FilesystemError::NoDevices);
-        }
-
-        // Reject a malformed compression spec before formatting — the
-        // string is interpolated straight into `bcachefs format
-        // --compression=…`, and a bad level there fails the format with
-        // an opaque error after we've already started touching disk.
-        if let Some(ref comp) = req.compression {
-            validate_compression(comp).map_err(FilesystemError::InvalidInput)?;
-        }
-
-        // Upfront validation of `bind_to_tpm`. Fails the request before
-        // touching disk when prerequisites aren't met, so the operator
-        // doesn't end up with a half-baked FS (formatted but never
-        // sealed) after picking an inconsistent option set in the
-        // WebUI. The post-format tpm_bind call near the bottom of
-        // create() can still fail at runtime (e.g. tpm2-tools missing
-        // unexpectedly) — in that case the FS exists and the operator
-        // can retry via the WebUI's "Bind to TPM" affordance.
-        if req.bind_to_tpm == Some(true) {
-            if req.encryption != Some(true) {
-                return Err(FilesystemError::InvalidInput(
-                    "bind_to_tpm requires encryption=true (there's nothing to seal otherwise)"
-                        .into(),
-                ));
+        let _mutation_guard = self.block_mutations.lock().await;
+        let plan = build_create_plan(req).await?;
+        let mut req = plan.request.clone();
+        let mount_point = plan.mount_point.clone();
+        reserve_create_mount_point(&plan).await?;
+        req.devices = match execute_partition_plan(&plan).await {
+            Ok(devices) => devices,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir(&mount_point).await;
+                return Err(e);
             }
-            if req.store_key == Some(false) {
-                return Err(FilesystemError::InvalidInput(
-                    "bind_to_tpm requires store_key=true (the .key file is the input to the TPM seal)"
-                        .into(),
-                ));
-            }
-            if !nasty_common::tpm::is_available().await {
-                return Err(FilesystemError::InvalidInput(
-                    "bind_to_tpm requested but no TPM2 is available on this host (/dev/tpmrm0 missing)"
-                        .into(),
-                ));
-            }
-        }
+        };
 
-        // Resolve ":free" virtual devices — create a new partition in free space
-        for dev in &mut req.devices {
-            if let Some(disk_path) = dev.path.strip_suffix(":free") {
-                let new_part = create_partition_on_free_space(disk_path).await?;
-                info!("Resolved {}:free -> {}", disk_path, new_part);
-                dev.path = new_part;
-            }
+        // This is the last operation before `bcachefs format`: every target
+        // must still be the exact device planned above and remain unused.
+        if let Err(e) = revalidate_create_targets(&plan, &req.devices).await {
+            let _ = tokio::fs::remove_dir(&mount_point).await;
+            return Err(e);
         }
-
-        // Validate devices exist
-        for dev in &req.devices {
-            if !Path::new(&dev.path).exists() {
-                return Err(FilesystemError::DeviceNotFound(dev.path.clone()));
-            }
-        }
-
-        // Check devices aren't already in use by a bcachefs filesystem
-        for dev in &req.devices {
-            if is_device_bcachefs(&dev.path).await {
-                return Err(FilesystemError::DeviceInUse(dev.path.clone()));
-            }
-        }
-
-        // Check mount point doesn't already exist with content
-        let mount_point = format!("{NASTY_MOUNT_BASE}/{}", req.name);
-        if Path::new(&mount_point).exists() {
-            return Err(FilesystemError::AlreadyExists(req.name.clone()));
-        }
-
-        // Build bcachefs format command
-        // Global options first, then per-device options + device path pairs
-        let mut args: Vec<String> = vec!["format".to_string()];
-
-        args.push(format!("--label={}", req.name));
-
-        if req.replicas > 1 {
-            args.push(format!("--replicas={}", req.replicas));
-        }
-
-        if let Some(ref comp) = req.compression {
-            args.push(format!("--compression={comp}"));
-        }
-
-        if req.encryption == Some(true) {
-            args.push("--encrypted".to_string());
-        }
-
-        if let Some(ref t) = req.foreground_target {
-            args.push(format!("--foreground_target={t}"));
-        }
-        if let Some(ref t) = req.metadata_target {
-            args.push(format!("--metadata_target={t}"));
-        }
-        if let Some(ref t) = req.background_target {
-            args.push(format!("--background_target={t}"));
-        }
-        if let Some(ref t) = req.promote_target {
-            args.push(format!("--promote_target={t}"));
-        }
-
-        if req.erasure_code == Some(true) {
-            if req.replicas < 2 {
-                return Err(FilesystemError::InvalidInput(
-                    "Erasure coding requires replicas >= 2 (data is written as replicas first, then converted to parity stripes)".to_string(),
-                ));
-            }
-            if req.devices.len() < (req.replicas as usize) + 1 {
-                return Err(FilesystemError::InvalidInput(format!(
-                    "Erasure coding with {} replicas requires at least {} devices (got {})",
-                    req.replicas,
-                    req.replicas + 1,
-                    req.devices.len(),
-                )));
-            }
-            args.push("--erasure_code".to_string());
-        }
-
-        if let Some(ref v) = req.data_checksum {
-            args.push(format!("--data_checksum={v}"));
-        }
-        if let Some(ref v) = req.metadata_checksum {
-            args.push(format!("--metadata_checksum={v}"));
-        }
-        if let Some(ref v) = req.bucket_size {
-            args.push(format!("--bucket={v}"));
-        }
-        if let Some(ref v) = req.encoded_extent_max {
-            args.push(format!("--encoded_extent_max={v}"));
-        }
-
-        // Per-device options go immediately before each device path
-        let has_targets = req.foreground_target.is_some()
-            || req.metadata_target.is_some()
-            || req.background_target.is_some()
-            || req.promote_target.is_some();
-
-        for dev in &req.devices {
-            // Only add labels when tiering targets are configured or device has an explicit label
-            if let Some(ref label) = dev.label {
-                args.push(format!("--label={label}"));
-            } else if has_targets {
-                // Fall back to filesystem-level label or name when targets need labels to route to
-                let default_label = req.label.as_deref().unwrap_or(&req.name);
-                args.push(format!("--label={default_label}"));
-            }
-
-            if let Some(durability) = dev.durability {
-                args.push(format!("--durability={durability}"));
-            }
-
-            args.push(dev.path.clone());
-        }
+        let args = build_create_format_args(&req, &req.devices);
 
         // Format
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -1454,18 +2416,21 @@ impl FilesystemService {
         );
 
         if is_encrypted {
-            let passphrase = req.passphrase.as_deref().ok_or_else(|| {
-                FilesystemError::CommandFailed(
-                    "passphrase required for encrypted filesystem".to_string(),
-                )
-            })?;
+            let passphrase = req
+                .passphrase
+                .as_deref()
+                .expect("encrypted request was validated before execution");
             // bcachefs format --encrypted reads passphrase twice from stdin (passphrase + confirm)
             let stdin = format!("{passphrase}\n{passphrase}\n");
-            let output = cmd::run_stdin("bcachefs", &arg_refs, stdin.as_bytes())
-                .await
-                .map_err(|e| {
-                    FilesystemError::CommandFailed(format!("failed to execute bcachefs: {e}"))
-                })?;
+            let output = match cmd::run_stdin("bcachefs", &arg_refs, stdin.as_bytes()).await {
+                Ok(output) => output,
+                Err(e) => {
+                    let _ = tokio::fs::remove_dir(&mount_point).await;
+                    return Err(FilesystemError::CommandFailed(format!(
+                        "failed to execute bcachefs: {e}"
+                    )));
+                }
+            };
 
             if !output.status.success() {
                 // bcachefs format writes superblocks then does a trial open that
@@ -1473,6 +2438,7 @@ impl FilesystemService {
                 // succeeded.  Check if superblocks were actually written.
                 if !is_device_bcachefs(&req.devices[0].path).await {
                     let stderr = String::from_utf8_lossy(&output.stderr);
+                    let _ = tokio::fs::remove_dir(&mount_point).await;
                     return Err(FilesystemError::CommandFailed(format!(
                         "bcachefs exited with {}: {stderr}",
                         output.status
@@ -1492,13 +2458,20 @@ impl FilesystemService {
                 info!("Encryption key stored at {key_path}");
             }
         } else {
-            let output = cmd::run("bcachefs", &arg_refs).await.map_err(|e| {
-                FilesystemError::CommandFailed(format!("failed to execute bcachefs: {e}"))
-            })?;
+            let output = match cmd::run("bcachefs", &arg_refs).await {
+                Ok(output) => output,
+                Err(e) => {
+                    let _ = tokio::fs::remove_dir(&mount_point).await;
+                    return Err(FilesystemError::CommandFailed(format!(
+                        "failed to execute bcachefs: {e}"
+                    )));
+                }
+            };
 
             if !output.status.success() {
                 if !is_device_bcachefs(&req.devices[0].path).await {
                     let stderr = String::from_utf8_lossy(&output.stderr);
+                    let _ = tokio::fs::remove_dir(&mount_point).await;
                     return Err(FilesystemError::CommandFailed(format!(
                         "bcachefs exited with {}: {stderr}",
                         output.status
@@ -1510,9 +2483,6 @@ impl FilesystemService {
                 );
             }
         }
-
-        // Create mount point
-        tokio::fs::create_dir_all(&mount_point).await?;
 
         let device_arg = req
             .devices
@@ -1666,6 +2636,7 @@ impl FilesystemService {
                 "confirmation name does not match filesystem name".into(),
             ));
         }
+        let _mutation_guard = self.block_mutations.lock().await;
 
         let fs = self.get(&req.name).await?;
 
@@ -2525,6 +3496,7 @@ impl FilesystemService {
     /// Wipe all filesystem signatures from a device.
     /// Only allowed if the device is not currently in use by any filesystem.
     pub async fn device_wipe(&self, path: &str) -> Result<(), FilesystemError> {
+        let _mutation_guard = self.block_mutations.lock().await;
         let devices = self.list_devices().await?;
         let dev = devices
             .iter()
@@ -2563,6 +3535,7 @@ impl FilesystemService {
     /// Add a device to an existing mounted filesystem.
     /// bcachefs device add [--label=X] [--durability=X] <mountpoint> <device>
     pub async fn device_add(&self, req: DeviceAddRequest) -> Result<Filesystem, FilesystemError> {
+        let _mutation_guard = self.block_mutations.lock().await;
         let fs = self.get(&req.filesystem).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
@@ -3822,53 +4795,6 @@ async fn get_disk_free_space(disk_path: &str) -> Result<u64, String> {
         }
     }
     Ok(0)
-}
-
-/// Create a new GPT partition in the free space of a disk.
-/// Returns the path of the new partition (e.g. `/dev/sda3`).
-pub async fn create_partition_on_free_space(disk_path: &str) -> Result<String, FilesystemError> {
-    // Use sgdisk to create a new partition using the largest available block
-    cmd::run_ok("sgdisk", &["--largest-new=0", disk_path])
-        .await
-        .map_err(FilesystemError::CommandFailed)?;
-
-    // Re-read partition table
-    let _ = cmd::run_ok("partprobe", &[disk_path]).await;
-    // Brief settle time for the kernel to create the device node
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-    // Find the new partition — it's the highest-numbered one
-    let output = cmd::run_ok("lsblk", &["-Jno", "NAME,TYPE", disk_path])
-        .await
-        .map_err(FilesystemError::CommandFailed)?;
-    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap_or_default();
-    let mut last_part = String::new();
-    if let Some(devs) = parsed.get("blockdevices").and_then(|v| v.as_array()) {
-        for dev in devs {
-            if let Some(children) = dev.get("children").and_then(|v| v.as_array()) {
-                for child in children {
-                    if child.get("type").and_then(|v| v.as_str()) == Some("part")
-                        && let Some(name) = child.get("name").and_then(|v| v.as_str())
-                    {
-                        last_part = format!("/dev/{name}");
-                    }
-                }
-            }
-        }
-    }
-
-    if last_part.is_empty() {
-        return Err(FilesystemError::CommandFailed(
-            "failed to find new partition after creation".to_string(),
-        ));
-    }
-
-    // Wipe any stale filesystem signatures inherited from the disk's
-    // previously unpartitioned space (e.g. old ZFS/LVM metadata).
-    let _ = cmd::run_ok("wipefs", &["-a", &last_part]).await;
-
-    info!("Created partition {last_part} on {disk_path}");
-    Ok(last_part)
 }
 
 /// Read per-device info (labels, durability) for a mounted bcachefs filesystem.
@@ -5751,6 +6677,279 @@ fn find_fs_name_by_devices(_devices: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn create_request(paths: &[&str]) -> CreateFilesystemRequest {
+        CreateFilesystemRequest {
+            name: "tank".into(),
+            devices: paths
+                .iter()
+                .map(|path| DeviceSpec {
+                    path: (*path).into(),
+                    label: None,
+                    durability: None,
+                })
+                .collect(),
+            replicas: 1,
+            compression: None,
+            encryption: None,
+            passphrase: None,
+            store_key: Some(true),
+            bind_to_tpm: None,
+            label: None,
+            foreground_target: None,
+            metadata_target: None,
+            background_target: None,
+            promote_target: None,
+            erasure_code: None,
+            data_checksum: None,
+            metadata_checksum: None,
+            bucket_size: None,
+            encoded_extent_max: None,
+            version_upgrade: None,
+            journal_flush_delay: None,
+            io_scheduler: None,
+        }
+    }
+
+    fn create_inventory_fixture() -> BlockInventory {
+        parse_lsblk_inventory(
+            r#"{
+                "blockdevices": [
+                    {
+                        "name": "/dev/sda", "kname": "/dev/sda", "path": "/dev/sda",
+                        "maj:min": "8:0", "size": 107374182400, "type": "disk",
+                        "pkname": null, "fstype": null, "pttype": "gpt",
+                        "ptuuid": "disk-a", "partuuid": null, "partn": null,
+                        "start": null, "ro": false, "mountpoints": [null],
+                        "log-sec": 512, "disk-seq": 10,
+                        "children": [
+                            {
+                                "name": "/dev/sda1", "kname": "/dev/sda1", "path": "/dev/sda1",
+                                "maj:min": "8:1", "size": 1073741824, "type": "part",
+                                "pkname": "/dev/sda", "fstype": "vfat", "pttype": null,
+                                "ptuuid": null, "partuuid": "boot", "partn": 1,
+                                "start": 2048, "ro": false, "mountpoints": ["/boot"],
+                                "log-sec": 512, "disk-seq": 10
+                            },
+                            {
+                                "name": "/dev/sda2", "kname": "/dev/sda2", "path": "/dev/sda2",
+                                "maj:min": "8:2", "size": 96636764160, "type": "part",
+                                "pkname": "/dev/sda", "fstype": "bcachefs", "pttype": null,
+                                "ptuuid": null, "partuuid": "root", "partn": 2,
+                                "start": 1050624, "ro": false, "mountpoints": ["/"],
+                                "log-sec": 512, "disk-seq": 10
+                            },
+                            {
+                                "name": "/dev/sda3", "kname": "/dev/sda3", "path": "/dev/sda3",
+                                "maj:min": "8:3", "size": 1048576, "type": "part",
+                                "pkname": "/dev/sda", "fstype": null, "pttype": null,
+                                "ptuuid": null, "partuuid": "data", "partn": 3,
+                                "start": 4096, "ro": false, "mountpoints": [null],
+                                "log-sec": 512, "disk-seq": 10
+                            }
+                        ]
+                    },
+                    {
+                        "name": "/dev/sdb", "kname": "/dev/sdb", "path": "/dev/sdb",
+                        "maj:min": "8:16", "size": 10737418240, "type": "disk",
+                        "pkname": null, "fstype": null, "pttype": null,
+                        "ptuuid": null, "partuuid": null, "partn": null,
+                        "start": null, "ro": false, "mountpoints": [null],
+                        "log-sec": 512, "disk-seq": 11
+                    }
+                ]
+            }"#,
+        )
+        .expect("fixture parses")
+    }
+
+    // ── Filesystem creation preflight (DATA-2) ─────────────────────
+
+    #[test]
+    fn create_preflight_accepts_unused_sibling_of_boot_partition() {
+        let inventory = create_inventory_fixture();
+        let data = inventory.get_path("/dev/sda3").unwrap();
+        let result = validate_existing_create_target(&inventory, data, &HashSet::new());
+        assert!(
+            result.is_ok(),
+            "the installer's reserved data partition must remain eligible: {result:?}"
+        );
+    }
+
+    #[test]
+    fn create_preflight_rejects_whole_boot_disk_but_allows_its_free_extent() {
+        let inventory = create_inventory_fixture();
+        let disk = inventory.get_path("/dev/sda").unwrap();
+        let err = validate_existing_create_target(&inventory, disk, &HashSet::new()).unwrap_err();
+        assert!(err.to_string().contains("mounted"), "{err}");
+
+        assert!(
+            validate_free_space_parent(&inventory, disk, &HashSet::new()).is_ok(),
+            "an exact unallocated extent may coexist with mounted sibling partitions"
+        );
+    }
+
+    #[test]
+    fn create_preflight_rejects_swap_holders_signatures_and_read_only_devices() {
+        let mut inventory = create_inventory_fixture();
+        let data_devno = inventory
+            .get_path("/dev/sda3")
+            .unwrap()
+            .identity
+            .devno
+            .clone();
+
+        let swaps = HashSet::from([data_devno.clone()]);
+        assert!(
+            validate_existing_create_target(
+                &inventory,
+                inventory.devices.get(&data_devno).unwrap(),
+                &swaps
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("active swap")
+        );
+
+        inventory.devices.get_mut(&data_devno).unwrap().holders = vec!["md0".into()];
+        assert!(
+            validate_existing_create_target(
+                &inventory,
+                inventory.devices.get(&data_devno).unwrap(),
+                &HashSet::new()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("md0")
+        );
+
+        let node = inventory.devices.get_mut(&data_devno).unwrap();
+        node.holders.clear();
+        node.fs_type = Some("LVM2_member".into());
+        assert!(
+            validate_existing_create_target(
+                &inventory,
+                inventory.devices.get(&data_devno).unwrap(),
+                &HashSet::new()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("LVM2_member")
+        );
+
+        let node = inventory.devices.get_mut(&data_devno).unwrap();
+        node.fs_type = None;
+        node.read_only = true;
+        assert!(
+            validate_existing_create_target(
+                &inventory,
+                inventory.devices.get(&data_devno).unwrap(),
+                &HashSet::new()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("read-only")
+        );
+    }
+
+    #[test]
+    fn create_request_validation_finishes_before_any_execution_plan() {
+        let mut encrypted = create_request(&["/dev/sdb"]);
+        encrypted.encryption = Some(true);
+        assert!(
+            validate_create_request(&encrypted)
+                .unwrap_err()
+                .to_string()
+                .contains("passphrase")
+        );
+
+        let mut erasure = create_request(&["/dev/sdb:free", "/dev/sdc:free"]);
+        erasure.erasure_code = Some(true);
+        erasure.replicas = 2;
+        assert!(
+            validate_create_request(&erasure)
+                .unwrap_err()
+                .to_string()
+                .contains("at least 3 devices")
+        );
+    }
+
+    #[test]
+    fn create_request_rejects_unmatched_tiering_target() {
+        let mut req = create_request(&["/dev/sdb"]);
+        req.devices[0].label = Some("slow".into());
+        req.foreground_target = Some("fast".into());
+        assert!(
+            validate_create_request(&req)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+
+        req.devices[0].label = Some("fast.nvme".into());
+        assert!(validate_create_request(&req).is_ok());
+    }
+
+    #[test]
+    fn created_partition_must_match_exact_parent_number_and_geometry() {
+        let inventory = create_inventory_fixture();
+        let parent = &inventory.get_path("/dev/sda").unwrap().identity;
+        assert_eq!(parent.disk_sequence, Some(10));
+        let identity = verify_created_partition(&inventory, parent, 3, 4096, 6143, "/dev/sda3")
+            .expect("exact planned partition accepted");
+        assert_eq!(identity.devno, "8:3");
+        assert!(verify_created_partition(&inventory, parent, 2, 4096, 6143, "/dev/sda3").is_err());
+        assert!(verify_created_partition(&inventory, parent, 3, 4097, 6144, "/dev/sda3").is_err());
+    }
+
+    #[test]
+    fn device_identity_detects_preflight_to_format_changes() {
+        let inventory = create_inventory_fixture();
+        let expected = inventory.get_path("/dev/sdb").unwrap().identity.clone();
+        assert!(identity_changed(&expected, inventory.get_path("/dev/sdb"), "/dev/sdb").is_ok());
+
+        let mut changed = create_inventory_fixture();
+        changed
+            .devices
+            .get_mut("8:16")
+            .unwrap()
+            .identity
+            .disk_sequence = Some(99);
+        assert!(
+            identity_changed(&expected, changed.get_path("/dev/sdb"), "/dev/sdb")
+                .unwrap_err()
+                .to_string()
+                .contains("changed after preflight")
+        );
+    }
+
+    #[test]
+    fn created_partition_normalizes_4kn_lbas_to_lsblk_start_units() {
+        let mut inventory = create_inventory_fixture();
+        inventory
+            .devices
+            .get_mut("8:0")
+            .unwrap()
+            .identity
+            .logical_sector_bytes = 4096;
+        let partition = &mut inventory.devices.get_mut("8:3").unwrap().identity;
+        partition.logical_sector_bytes = 4096;
+        partition.start_512_sector = Some(4096 * 8);
+        partition.size_bytes = 2048 * 4096;
+
+        let parent = &inventory.get_path("/dev/sda").unwrap().identity;
+        assert!(verify_created_partition(&inventory, parent, 3, 4096, 6143, "/dev/sda3").is_ok());
+    }
+
+    #[test]
+    fn free_partition_helpers_choose_exact_slot_and_device_path() {
+        let table = "Number  Start (sector)    End (sector)  Size       Code  Name\n\
+                         1            2048         1050623   512.0 MiB   EF00  boot\n\
+                         3         2099200         4196351   1024.0 MiB  8300  data\n";
+        assert_eq!(parse_sgdisk_partition_numbers(table), HashSet::from([1, 3]));
+        assert_eq!(partition_device_path("/dev/sda", 2), "/dev/sda2");
+        assert_eq!(partition_device_path("/dev/nvme0n1", 2), "/dev/nvme0n1p2");
+    }
 
     #[test]
     fn loop_device_filter_matches_only_mount_descendants() {
