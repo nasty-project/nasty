@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { uiPrefs } from './uiPrefs.svelte';
+import { parseMenuStyle, uiPrefs } from './uiPrefs.svelte';
 
 beforeEach(() => {
 	uiPrefs.setLogoHidden(false);
@@ -9,6 +9,17 @@ beforeEach(() => {
 });
 
 describe('uiPrefs', () => {
+	test('defaults fresh and invalid preferences to icons', () => {
+		expect(parseMenuStyle(null)).toBe('icons');
+		expect(parseMenuStyle('unknown')).toBe('icons');
+	});
+
+	test('preserves every explicit menu preference', () => {
+		expect(parseMenuStyle('classic')).toBe('classic');
+		expect(parseMenuStyle('icons')).toBe('icons');
+		expect(parseMenuStyle('launcher')).toBe('launcher');
+	});
+
 	test('persists the selected menu presentation', () => {
 		uiPrefs.setMenuStyle('icons');
 		expect(uiPrefs.menuStyle).toBe('icons');

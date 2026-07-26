@@ -7,12 +7,16 @@ const ICON_GROUP_KEY = 'nasty:icon_nav_group';
 
 export type MenuStyle = 'classic' | 'icons' | 'launcher';
 
+export function parseMenuStyle(value: string | null): MenuStyle {
+	return value === 'classic' || value === 'icons' || value === 'launcher' ? value : 'icons';
+}
+
 function createUiPrefs() {
 	let logoHidden = $state<boolean>(
 		typeof localStorage !== 'undefined' && localStorage.getItem(LOGO_HIDDEN_KEY) === '1'
 	);
 	const storedMenuStyle = typeof localStorage !== 'undefined' ? localStorage.getItem(MENU_STYLE_KEY) : null;
-	let menuStyle = $state<MenuStyle>(storedMenuStyle === 'icons' || storedMenuStyle === 'launcher' ? storedMenuStyle : 'classic');
+	let menuStyle = $state<MenuStyle>(parseMenuStyle(storedMenuStyle));
 	let iconGroupId = $state<string | null>(
 		typeof localStorage !== 'undefined' ? localStorage.getItem(ICON_GROUP_KEY) : null
 	);
