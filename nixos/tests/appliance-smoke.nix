@@ -17,6 +17,7 @@ let
   rpcSmoke = pkgs.writeText "rpc-smoke.py" ''
     import json
     import ssl
+    import subprocess
     import sys
     import urllib.request
     import websocket
@@ -50,15 +51,22 @@ let
         return ws, auth
 
 
+    def recv_response(ws, request_id):
+        while True:
+            resp = json.loads(ws.recv())
+            if resp.get("id") == request_id:
+                return resp
+            assert "id" not in resp and resp.get("method") == "event", (
+                f"unexpected frame while waiting for id={request_id}: {resp!r}"
+            )
+
+
     def call(ws, method, request_id, params=None):
         req = {"jsonrpc": "2.0", "method": method, "id": request_id}
         if params is not None:
             req["params"] = params
         ws.send(json.dumps(req))
-        resp = json.loads(ws.recv())
-        assert resp.get("id") == request_id, (
-            f"id mismatch: req={request_id} resp={resp!r}"
-        )
+        resp = recv_response(ws, request_id)
         assert "error" not in resp, f"{method} returned error: {resp!r}"
         return resp["result"]
 
@@ -113,14 +121,28 @@ let
 
         fs_list = call(ws, "fs.list", 2)
         assert isinstance(fs_list, list), f"fs.list not a list: {fs_list!r}"
-        # Fresh appliance with no virtual disks => empty list.
+        # The test disk is still unformatted at this point.
         assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
+
+        # Apps require their Docker data root on a managed bcachefs pool.
+        # Create one through the public RPC so the later apps smoke exercises
+        # the same supported setup path as a real appliance.
+        ws.settimeout(60)
+        created = call(ws, "fs.create", 3, {
+            "name": "smoke-pool",
+            "devices": [{"path": "/dev/vdb"}],
+        })
+        ws.settimeout(10)
+        assert created["name"] == "smoke-pool", f"fs.create wrong: {created!r}"
+        fs_list = call(ws, "fs.list", 4)
+        assert any(fs["name"] == "smoke-pool" for fs in fs_list), (
+            f"created filesystem missing from fs.list: {fs_list!r}"
+        )
 
         # Unknown method must come back as a JSON-RPC error envelope,
         # not a silent drop.
-        ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 3}))
-        bad = json.loads(ws.recv())
-        assert bad.get("id") == 3, f"id mismatch: {bad!r}"
+        ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 5}))
+        bad = recv_response(ws, 5)
         assert bad.get("error"), f"unknown method should error: {bad!r}"
         print("unknown method error:", bad["error"], file=sys.stderr)
     finally:
@@ -177,8 +199,16 @@ let
             )
             _time.sleep(1)
 
+        # Load only after apps.enable has moved Docker's data root onto the
+        # managed pool. Loading earlier would deliberately trip the guard that
+        # refuses to replace a populated /var/lib/docker directory.
+        subprocess.run(
+            ["docker", "load", "-i", "${smokeAppImage}"],
+            check=True,
+        )
+
         # Install the smoke app — image is already in docker daemon
-        # via the `docker load` step in testScript, so the engine's
+        # via the `docker load` step above, so the engine's
         # `pull_image` step is a no-op cache hit.
         call(ws, "apps.install", 3, {
             "name": "smoke",
@@ -275,6 +305,7 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [ pythonWithWs ];
 
     virtualisation.memorySize = 2048;
+    virtualisation.emptyDiskImages = [ 2048 ];
   };
 
   testScript = ''
@@ -435,15 +466,8 @@ pkgs.testers.runNixOSTest {
     # third session, and (session 4) installs a Docker app whose
     # /apps/<name>/ ingress we then assert against below.
     #
-    # Docker is needed before we can `docker load` the smoke image.
-    # The engine's `apps.enable` RPC would start it too, but the
-    # load step runs from the testScript (host-side), so we bring
-    # it up explicitly first.  Once up, rpc-smoke's `apps.enable`
-    # is a no-op systemctl restart.
-    machine.succeed("systemctl start docker.socket")
-    machine.wait_for_unit("docker.socket")
-    machine.wait_until_succeeds("docker info >/dev/null 2>&1")
-    machine.succeed("docker load -i ${smokeAppImage}")
+    # rpc-smoke creates a managed pool, enables apps (which starts Docker),
+    # and only then loads the image into the managed Docker data root.
     machine.succeed(
         f"${pythonWithWs}/bin/python3 ${rpcSmoke} {shlex.quote(login_obj['token'])}"
     )
