@@ -152,18 +152,39 @@ pub(super) async fn try_route(
                     // disabling under live consumers would strand them
                     // (nvmet-rdma port writes fail, iSER portals die).
                     let mut consumers: Vec<String> = Vec::new();
-                    if let Ok(subsystems) = state.nvmeof.list().await {
-                        for s in subsystems {
-                            if s.ports.iter().any(|port| port.transport == "rdma") {
-                                consumers.push(format!("NVMe-oF subsystem '{}'", s.nqn));
+                    match state.nvmeof.list().await {
+                        Ok(subsystems) => {
+                            for s in subsystems {
+                                if s.ports.iter().any(|port| port.transport == "rdma") {
+                                    consumers.push(format!("NVMe-oF subsystem '{}'", s.nqn));
+                                }
                             }
                         }
+                        Err(error) => {
+                            return Some(err(
+                                req,
+                                format!(
+                                    "cannot safely disable RDMA because NVMe-oF state failed to load: {error}"
+                                ),
+                            ));
+                        }
                     }
-                    if let Ok(targets) = state.iscsi.list().await {
-                        for t in targets {
-                            if t.portals.iter().any(|portal| portal.iser) {
-                                consumers.push(format!("iSCSI target '{}' (iSER portal)", t.iqn));
+                    match state.iscsi.list().await {
+                        Ok(targets) => {
+                            for t in targets {
+                                if t.portals.iter().any(|portal| portal.iser) {
+                                    consumers
+                                        .push(format!("iSCSI target '{}' (iSER portal)", t.iqn));
+                                }
                             }
+                        }
+                        Err(error) => {
+                            return Some(err(
+                                req,
+                                format!(
+                                    "cannot safely disable RDMA because iSCSI state failed to load: {error}"
+                                ),
+                            ));
                         }
                     }
                     if !consumers.is_empty() {

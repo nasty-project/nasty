@@ -39,6 +39,7 @@ pub struct SubvolumeDependents {
     pub smb_shares: Vec<String>,
     pub iscsi_targets: Vec<String>,
     pub nvmeof_subsystems: Vec<String>,
+    pub state_errors: Vec<String>,
 }
 
 /// Find the subvolume (by path) that owns `target`. Returns `None`
@@ -76,6 +77,8 @@ pub async fn find_all_subvolume_dependents(state: &AppState) -> Vec<SubvolumeDep
     let mut by_path: HashMap<String, SubvolumeDependents> = HashMap::new();
     // Index of block-device → subvolume path, for the loop-backed case.
     let mut by_block_dev: HashMap<String, String> = HashMap::new();
+    // Stable block identity → subvolume path, valid while detached too.
+    let mut by_block_id: HashMap<nasty_common::BlockVolumeId, String> = HashMap::new();
     // Subvolume paths sorted longest-first so the prefix match picks
     // the most-specific subvolume — `/fs/tank/apps/grafana/data`
     // attributes to `/fs/tank/apps/grafana` rather than `/fs/tank` if
@@ -94,6 +97,9 @@ pub async fn find_all_subvolume_dependents(state: &AppState) -> Vec<SubvolumeDep
         );
         if let Some(bd) = sv.block_device.clone() {
             by_block_dev.insert(bd, sv.path.clone());
+        }
+        if let Some(identity) = sv.block_volume_id.clone() {
+            by_block_id.insert(identity, sv.path.clone());
         }
         paths_desc.push(sv.path.clone());
     }
@@ -175,41 +181,73 @@ pub async fn find_all_subvolume_dependents(state: &AppState) -> Vec<SubvolumeDep
 
     // iSCSI targets. Each LUN's backstore_path is either a file path
     // (image-backed) or a block device (loop-backed).
-    if let Ok(targets) = state.iscsi.list().await {
-        for t in targets {
-            let mut owners: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for l in &t.luns {
-                if let Some(p) = owning_subvol(&paths_desc, &l.backstore_path) {
-                    owners.insert(p.to_string());
+    match state.iscsi.list().await {
+        Ok(targets) => {
+            for t in targets {
+                let mut owners: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for l in &t.luns {
+                    if let Some(p) = owning_subvol(&paths_desc, &l.backstore_path) {
+                        owners.insert(p.to_string());
+                    }
+                    if let Some(p) = by_block_dev.get(&l.backstore_path) {
+                        owners.insert(p.clone());
+                    }
+                    if let Some(p) = l
+                        .backing_volume
+                        .as_ref()
+                        .and_then(|identity| by_block_id.get(identity))
+                    {
+                        owners.insert(p.clone());
+                    }
                 }
-                if let Some(p) = by_block_dev.get(&l.backstore_path) {
-                    owners.insert(p.clone());
+                for path in owners {
+                    if let Some(deps) = by_path.get_mut(&path) {
+                        deps.iscsi_targets.push(t.iqn.clone());
+                    }
                 }
             }
-            for path in owners {
-                if let Some(deps) = by_path.get_mut(&path) {
-                    deps.iscsi_targets.push(t.iqn.clone());
-                }
+        }
+        Err(error) => {
+            let message = format!("iSCSI state failed to load: {error}");
+            for deps in by_path.values_mut() {
+                deps.state_errors.push(message.clone());
             }
         }
     }
 
     // NVMe-oF subsystems.
-    if let Ok(subs) = state.nvmeof.list().await {
-        for s in subs {
-            let mut owners: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for n in &s.namespaces {
-                if let Some(p) = owning_subvol(&paths_desc, &n.device_path) {
-                    owners.insert(p.to_string());
+    match state.nvmeof.list().await {
+        Ok(subs) => {
+            for s in subs {
+                let mut owners: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for n in &s.namespaces {
+                    if let Some(p) = owning_subvol(&paths_desc, &n.device_path) {
+                        owners.insert(p.to_string());
+                    }
+                    if let Some(p) = by_block_dev.get(&n.device_path) {
+                        owners.insert(p.clone());
+                    }
+                    if let Some(p) = n
+                        .backing_volume
+                        .as_ref()
+                        .and_then(|identity| by_block_id.get(identity))
+                    {
+                        owners.insert(p.clone());
+                    }
                 }
-                if let Some(p) = by_block_dev.get(&n.device_path) {
-                    owners.insert(p.clone());
+                for path in owners {
+                    if let Some(deps) = by_path.get_mut(&path) {
+                        deps.nvmeof_subsystems.push(s.nqn.clone());
+                    }
                 }
             }
-            for path in owners {
-                if let Some(deps) = by_path.get_mut(&path) {
-                    deps.nvmeof_subsystems.push(s.nqn.clone());
-                }
+        }
+        Err(error) => {
+            let message = format!("NVMe-oF state failed to load: {error}");
+            for deps in by_path.values_mut() {
+                deps.state_errors.push(message.clone());
             }
         }
     }

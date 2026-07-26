@@ -653,32 +653,62 @@ pub(super) async fn check_block_device_conflict(
     device_path: &str,
     exclude_protocol: &str,
 ) -> Option<String> {
-    if exclude_protocol != "iscsi"
-        && let Ok(targets) = state.iscsi.list().await
+    let identity = match state
+        .subvolumes
+        .block_volume_id_for_device(device_path)
+        .await
     {
-        for target in &targets {
-            for lun in &target.luns {
-                if lun.backstore_path == device_path {
-                    return Some(format!(
-                        "device {} is already exported via iSCSI (target '{}')",
-                        device_path, target.iqn
-                    ));
+        Ok(identity) => identity,
+        Err(error) => return Some(error.to_string()),
+    };
+    if exclude_protocol != "iscsi" {
+        match state.iscsi.list().await {
+            Ok(targets) => {
+                for target in &targets {
+                    for lun in &target.luns {
+                        if lun.backstore_path == device_path
+                            || identity.as_ref().is_some_and(|identity| {
+                                lun.backing_volume.as_ref() == Some(identity)
+                            })
+                        {
+                            return Some(format!(
+                                "device {} is already exported via iSCSI (target '{}')",
+                                device_path, target.iqn
+                            ));
+                        }
+                    }
                 }
+            }
+            Err(error) => {
+                return Some(format!(
+                    "cannot verify iSCSI device conflicts because state failed to load: {error}"
+                ));
             }
         }
     }
 
-    if exclude_protocol != "nvmeof"
-        && let Ok(subsystems) = state.nvmeof.list().await
-    {
-        for sub in &subsystems {
-            for ns in &sub.namespaces {
-                if ns.device_path == device_path {
-                    return Some(format!(
-                        "device {} is already exported via NVMe-oF (subsystem '{}')",
-                        device_path, sub.nqn
-                    ));
+    if exclude_protocol != "nvmeof" {
+        match state.nvmeof.list().await {
+            Ok(subsystems) => {
+                for sub in &subsystems {
+                    for ns in &sub.namespaces {
+                        if ns.device_path == device_path
+                            || identity.as_ref().is_some_and(|identity| {
+                                ns.backing_volume.as_ref() == Some(identity)
+                            })
+                        {
+                            return Some(format!(
+                                "device {} is already exported via NVMe-oF (subsystem '{}')",
+                                device_path, sub.nqn
+                            ));
+                        }
+                    }
                 }
+            }
+            Err(error) => {
+                return Some(format!(
+                    "cannot verify NVMe-oF device conflicts because state failed to load: {error}"
+                ));
             }
         }
     }
@@ -811,6 +841,7 @@ pub(super) async fn check_subvolume_in_use(
         None => return None,
     };
     let block_device = sv.block_device.as_deref();
+    let block_volume_id = sv.block_volume_id.as_ref();
     let subvol_path = &sv.path;
 
     // ── Block device checks (VMs, iSCSI, NVMe-oF) ──
@@ -829,12 +860,18 @@ pub(super) async fn check_subvolume_in_use(
                 }
             }
         }
+    }
 
-        // Check iSCSI targets
-        if let Ok(targets) = state.iscsi.list().await {
+    // Sharing state persists immutable block identities, so these checks remain
+    // valid even while the backing volume is detached or loop numbers changed.
+    match state.iscsi.list().await {
+        Ok(targets) => {
             for target in &targets {
                 for lun in &target.luns {
-                    if lun.backstore_path == bd {
+                    if block_device.is_some_and(|device| lun.backstore_path == device)
+                        || block_volume_id
+                            .is_some_and(|identity| lun.backing_volume.as_ref() == Some(identity))
+                    {
                         return Some(format!(
                             "subvolume is in use by iSCSI target '{}'. Delete the target first.",
                             target.iqn
@@ -843,12 +880,21 @@ pub(super) async fn check_subvolume_in_use(
                 }
             }
         }
+        Err(error) => {
+            return Some(format!(
+                "cannot verify iSCSI dependencies because state failed to load: {error}"
+            ));
+        }
+    }
 
-        // Check NVMe-oF subsystems
-        if let Ok(subsystems) = state.nvmeof.list().await {
+    match state.nvmeof.list().await {
+        Ok(subsystems) => {
             for subsys in &subsystems {
                 for ns in &subsys.namespaces {
-                    if ns.device_path == bd {
+                    if block_device.is_some_and(|device| ns.device_path == device)
+                        || block_volume_id
+                            .is_some_and(|identity| ns.backing_volume.as_ref() == Some(identity))
+                    {
                         return Some(format!(
                             "subvolume is in use by NVMe-oF subsystem '{}'. Delete the subsystem first.",
                             subsys.nqn
@@ -856,6 +902,11 @@ pub(super) async fn check_subvolume_in_use(
                     }
                 }
             }
+        }
+        Err(error) => {
+            return Some(format!(
+                "cannot verify NVMe-oF dependencies because state failed to load: {error}"
+            ));
         }
     }
 

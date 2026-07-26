@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use nasty_common::secrets::{self, EncryptedBlob};
-use nasty_common::{HasId, StateDir};
+use nasty_common::{BlockDeviceMappings, BlockVolumeId, HasId, StateDir};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -12,6 +12,8 @@ const STATE_DIR: &str = "/var/lib/nasty/shares/iscsi";
 const DEFAULT_IQN_PREFIX: &str = "iqn.2137-04.storage.nasty";
 const ISCSI_BASE: &str = "/sys/kernel/config/target/iscsi";
 const CORE_BASE: &str = "/sys/kernel/config/target/core";
+const UNRESOLVED_BACKSTORE: &str = "/dev/nasty-unresolved-block-volume";
+const SAVECONFIG: &str = "/etc/target/saveconfig.json";
 
 #[derive(Debug, Error)]
 pub enum IscsiError {
@@ -73,6 +75,12 @@ pub struct Lun {
     /// "block" or "fileio"
     pub backstore_type: String,
     pub size_bytes: Option<u64>,
+    /// Stable identity of a NASty-managed block subvolume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backing_volume: Option<BlockVolumeId>,
+    /// Prevents startup from trusting a stale legacy loop path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub backing_volume_unresolved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -166,6 +174,10 @@ pub struct CreateTargetRequest {
     /// Block device path (e.g. /dev/loop0). When provided, a LUN is
     /// automatically created and the target is ready for connections.
     pub device_path: Option<String>,
+    /// Filled authoritatively by the engine router; not accepted from clients.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub backing_volume: Option<BlockVolumeId>,
     /// Initiator ACLs to set up. When provided, `generate_node_acls` is
     /// disabled and only these initiators are allowed.
     pub acls: Option<Vec<AclEntry>>,
@@ -197,6 +209,16 @@ pub struct AddLunRequest {
     pub backstore_type: Option<String>,
     /// Required for fileio if file doesn't exist yet
     pub size_bytes: Option<u64>,
+    /// Filled authoritatively by the engine router; not accepted from clients.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub backing_volume: Option<BlockVolumeId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeviceRemapOutcome {
+    pub safe_to_restore: bool,
+    pub changed: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -283,33 +305,79 @@ impl IscsiService {
         Self
     }
 
-    /// Update persisted device paths after a reboot where loop device numbers changed.
-    /// `dev_map` maps subvolume_name → current loop device (e.g. "vol1" → "/dev/loop0").
-    /// The subvolume name is extracted from the IQN suffix after the last ':'.
-    /// Also patches /etc/target/saveconfig.json so target.service loads with correct paths.
-    pub async fn remap_device_paths(&self, dev_map: &std::collections::HashMap<String, String>) {
-        let mut targets: Vec<IscsiTarget> = state_dir().load_all().await;
-        for target in &mut targets {
-            let name = target.iqn.rsplit(':').next().unwrap_or("").to_string();
-            let Some(new_dev) = dev_map.get(&name) else {
-                continue;
+    /// Resolve every managed LUN independently by immutable backing identity.
+    /// Legacy loop paths without an identity are never trusted.
+    pub async fn remap_device_paths(&self, mappings: &BlockDeviceMappings) -> DeviceRemapOutcome {
+        let mut targets: Vec<IscsiTarget> = match state_dir().load_all_strict().await {
+            Ok(targets) => targets,
+            Err(error) => {
+                warn!("Cannot safely load all iSCSI state: {error}");
+                return DeviceRemapOutcome::default();
+            }
+        };
+        if targets.is_empty() {
+            let safe_to_restore = match validate_no_saved_exports().await {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!("Cannot safely restore empty iSCSI state: {error}");
+                    false
+                }
             };
-            let mut changed = false;
-            for lun in &mut target.luns {
-                if &lun.backstore_path != new_dev {
-                    info!(
-                        "Remapping iSCSI '{}' lun{} {} → {}",
-                        target.iqn, lun.lun_id, lun.backstore_path, new_dev
-                    );
-                    lun.backstore_path = new_dev.clone();
-                    changed = true;
+            return DeviceRemapOutcome {
+                safe_to_restore,
+                changed: false,
+            };
+        }
+        let mut patches = std::collections::HashMap::new();
+        let mut safe_to_restore = true;
+        let mut any_changed = false;
+        for target in &mut targets {
+            let (changed, target_safe, target_patches) = remap_target(target, mappings);
+            any_changed |= changed;
+            let persisted = if changed {
+                match state_dir().save(&target.id, target).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(
+                            "Failed to persist iSCSI block identities for '{}': {error}",
+                            target.iqn
+                        );
+                        safe_to_restore = false;
+                        false
+                    }
+                }
+            } else {
+                true
+            };
+            safe_to_restore &= target_safe;
+            if persisted {
+                for (name, path) in target_patches {
+                    insert_backstore_patch(&mut patches, name, path, &mut safe_to_restore);
                 }
             }
-            if changed {
-                let _ = state_dir().save(&target.id, target).await;
+            for lun in &target.luns {
+                let path = if persisted || !is_managed_lun(lun) {
+                    lun.backstore_path.clone()
+                } else {
+                    UNRESOLVED_BACKSTORE.to_string()
+                };
+                insert_backstore_patch(
+                    &mut patches,
+                    lun.backstore_name.clone(),
+                    path,
+                    &mut safe_to_restore,
+                );
             }
         }
-        patch_saveconfig(dev_map).await;
+        let expected_targets = targets.iter().map(|target| target.iqn.clone()).collect();
+        if let Err(error) = patch_saveconfig(&patches, &expected_targets).await {
+            warn!("Failed to patch iSCSI saveconfig safely: {error}");
+            safe_to_restore = false;
+        }
+        DeviceRemapOutcome {
+            safe_to_restore,
+            changed: any_changed,
+        }
     }
 
     /// Eagerly seal plaintext CHAP passwords left in state files from
@@ -351,7 +419,7 @@ impl IscsiService {
     }
 
     pub async fn list(&self) -> Result<Vec<IscsiTarget>, IscsiError> {
-        let targets: Vec<IscsiTarget> = state_dir().load_all().await;
+        let targets: Vec<IscsiTarget> = state_dir().load_all_strict().await?;
         Ok(targets.into_iter().map(|t| t.redacted()).collect())
     }
 
@@ -365,7 +433,7 @@ impl IscsiService {
 
     pub async fn create(&self, req: CreateTargetRequest) -> Result<IscsiTarget, IscsiError> {
         validate_target_name(&req.name)?;
-        let targets: Vec<IscsiTarget> = state_dir().load_all().await;
+        let targets: Vec<IscsiTarget> = state_dir().load_all_strict().await?;
         let iqn = format!("{DEFAULT_IQN_PREFIX}:{}", req.name);
 
         if let Some(existing) = targets.into_iter().find(|t| t.iqn == iqn) {
@@ -472,6 +540,7 @@ impl IscsiService {
                         backstore_path: device_path,
                         backstore_type: Some("block".to_string()),
                         size_bytes: None,
+                        backing_volume: req.backing_volume,
                     })
                     .await?;
             } else {
@@ -662,6 +731,8 @@ impl IscsiService {
             backstore_name,
             backstore_type,
             size_bytes: req.size_bytes,
+            backing_volume: req.backing_volume,
+            backing_volume_unresolved: false,
         };
 
         target.luns.push(lun);
@@ -931,6 +1002,87 @@ impl IscsiService {
     }
 }
 
+fn is_managed_lun(lun: &Lun) -> bool {
+    lun.backstore_type == "block"
+        && (lun.backing_volume.is_some()
+            || lun.backing_volume_unresolved
+            || lun.backstore_path.starts_with("/dev/loop"))
+}
+
+fn remap_target(
+    target: &mut IscsiTarget,
+    mappings: &BlockDeviceMappings,
+) -> (bool, bool, Vec<(String, String)>) {
+    let mut changed = false;
+    let mut safe = true;
+    let mut patches = Vec::new();
+
+    for lun in &mut target.luns {
+        if !is_managed_lun(lun) {
+            continue;
+        }
+        let identity = lun.backing_volume.clone();
+        let resolved = identity
+            .as_ref()
+            .and_then(|identity| mappings.current.get(identity))
+            .cloned();
+
+        match (identity, resolved) {
+            (Some(identity), Some(device_path)) => {
+                if lun.backing_volume.as_ref() != Some(&identity) {
+                    lun.backing_volume = Some(identity);
+                    changed = true;
+                }
+                if lun.backstore_path != device_path {
+                    info!(
+                        "Remapping iSCSI '{}' lun{} {} → {}",
+                        target.iqn, lun.lun_id, lun.backstore_path, device_path
+                    );
+                    lun.backstore_path = device_path.clone();
+                    changed = true;
+                }
+                if lun.backing_volume_unresolved {
+                    lun.backing_volume_unresolved = false;
+                    changed = true;
+                }
+                patches.push((lun.backstore_name.clone(), device_path.clone()));
+            }
+            _ => {
+                warn!(
+                    "Cannot safely resolve iSCSI '{}' lun{} backing volume; blocking iSCSI restore",
+                    target.iqn, lun.lun_id
+                );
+                if !lun.backing_volume_unresolved {
+                    lun.backing_volume_unresolved = true;
+                    changed = true;
+                }
+                patches.push((lun.backstore_name.clone(), UNRESOLVED_BACKSTORE.to_string()));
+                safe = false;
+            }
+        }
+    }
+
+    (changed, safe, patches)
+}
+
+fn insert_backstore_patch(
+    patches: &mut std::collections::HashMap<String, String>,
+    name: String,
+    path: String,
+    safe_to_restore: &mut bool,
+) {
+    match patches.entry(name.clone()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(path);
+        }
+        std::collections::hash_map::Entry::Occupied(entry) if entry.get() != &path => {
+            warn!("Duplicate iSCSI backstore name '{name}' has conflicting devices");
+            *safe_to_restore = false;
+        }
+        std::collections::hash_map::Entry::Occupied(_) => {}
+    }
+}
+
 // ── configfs helpers ────────────────────────────────────────────
 
 /// Create a network portal (np) directory, flipping it to iSER when
@@ -1091,39 +1243,81 @@ async fn wait_for_target_ready(iqn: &str) {
     warn!("iSCSI target {iqn} readiness check timed out — proceeding anyway");
 }
 
-/// Patch /etc/target/saveconfig.json to fix stale loop device paths.
-async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
-    const SAVECONFIG: &str = "/etc/target/saveconfig.json";
+/// Patch /etc/target/saveconfig.json by exact persisted backstore name.
+async fn patch_saveconfig(
+    backstores: &std::collections::HashMap<String, String>,
+    targets: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let text = tokio::fs::read_to_string(SAVECONFIG)
+        .await
+        .map_err(|e| format!("read {SAVECONFIG}: {e}"))?;
+    let mut json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("parse {SAVECONFIG}: {e}"))?;
+    let changed = patch_saveconfig_value(&mut json, backstores, targets)?;
+    if changed {
+        let out = serde_json::to_string_pretty(&json)
+            .map_err(|e| format!("serialize {SAVECONFIG}: {e}"))?;
+        tokio::fs::write(SAVECONFIG, out)
+            .await
+            .map_err(|e| format!("write {SAVECONFIG}: {e}"))?;
+    }
+    Ok(())
+}
+
+async fn validate_no_saved_exports() -> Result<(), String> {
     let text = match tokio::fs::read_to_string(SAVECONFIG).await {
-        Ok(t) => t,
-        Err(_) => return,
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("read {SAVECONFIG}: {error}")),
     };
-    let mut json: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("Failed to parse {SAVECONFIG}: {e}");
-            return;
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("parse {SAVECONFIG}: {error}"))?;
+    validate_empty_saveconfig_value(&json)
+}
+
+fn validate_empty_saveconfig_value(json: &serde_json::Value) -> Result<(), String> {
+    for key in ["storage_objects", "targets"] {
+        let values = json
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("saveconfig has no {key} array"))?;
+        if !values.is_empty() {
+            return Err(format!(
+                "saveconfig contains {} stale {key} entries but iSCSI state is empty",
+                values.len()
+            ));
         }
-    };
+    }
+    Ok(())
+}
+
+fn patch_saveconfig_value(
+    json: &mut serde_json::Value,
+    backstores: &std::collections::HashMap<String, String>,
+    targets: &std::collections::HashSet<String>,
+) -> Result<bool, String> {
     let Some(objects) = json
         .get_mut("storage_objects")
         .and_then(|v| v.as_array_mut())
     else {
-        return;
+        return Err("saveconfig has no storage_objects array".to_string());
     };
     let mut changed = false;
+    let mut matched = std::collections::HashMap::<String, usize>::new();
     for obj in objects.iter_mut() {
         let name = obj
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        for (subvol_name, new_dev) in dev_map {
-            let expected_prefix = format!("nasty_{subvol_name}_");
-            if name.starts_with(&expected_prefix)
-                && let Some(dev_field) = obj.get("dev").and_then(|v| v.as_str())
-                && dev_field != new_dev
-            {
+        if !backstores.contains_key(&name) {
+            return Err(format!("saveconfig contains unexpected backstore '{name}'"));
+        }
+        if let Some(new_dev) = backstores.get(&name)
+            && let Some(dev_field) = obj.get("dev").and_then(|v| v.as_str())
+        {
+            *matched.entry(name.clone()).or_default() += 1;
+            if dev_field != new_dev {
                 info!(
                     "Patching saveconfig.json backstore '{name}' {} → {new_dev}",
                     dev_field
@@ -1133,19 +1327,47 @@ async fn patch_saveconfig(dev_map: &std::collections::HashMap<String, String>) {
             }
         }
     }
-    if changed {
-        match serde_json::to_string_pretty(&json) {
-            Ok(out) => {
-                if let Err(e) = tokio::fs::write(SAVECONFIG, out).await {
-                    // The patched config exists in memory but won't survive
-                    // a restart — log so a "iSCSI config keeps reverting"
-                    // bug is debuggable from a single message.
-                    warn!("write patched saveconfig to {SAVECONFIG} failed: {e}");
-                }
+    if objects.len() != backstores.len() {
+        return Err(format!(
+            "saveconfig contains {} backstores but persisted state expects {}",
+            objects.len(),
+            backstores.len()
+        ));
+    }
+    for name in backstores.keys() {
+        match matched.get(name).copied().unwrap_or(0) {
+            1 => {}
+            0 => return Err(format!("saveconfig is missing backstore '{name}'")),
+            count => {
+                return Err(format!(
+                    "saveconfig contains {count} backstores named '{name}'"
+                ));
             }
-            Err(e) => warn!("Failed to serialize patched saveconfig.json: {e}"),
         }
     }
+    let saved_targets = json
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "saveconfig has no targets array".to_string())?;
+    let mut matched_targets = std::collections::HashMap::<String, usize>::new();
+    for target in saved_targets {
+        let wwn = target
+            .get("wwn")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "saveconfig target has no wwn".to_string())?;
+        if !targets.contains(wwn) {
+            return Err(format!("saveconfig contains unexpected target '{wwn}'"));
+        }
+        *matched_targets.entry(wwn.to_string()).or_default() += 1;
+    }
+    for wwn in targets {
+        match matched_targets.get(wwn).copied().unwrap_or(0) {
+            1 => {}
+            0 => return Err(format!("saveconfig is missing target '{wwn}'")),
+            count => return Err(format!("saveconfig contains target '{wwn}' {count} times")),
+        }
+    }
+    Ok(changed)
 }
 
 /// Build the configfs `np/<addr>` path for a portal. LIO's configfs
@@ -1292,6 +1514,200 @@ fn validate_portal_ip(ip: &str) -> Result<String, IscsiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn volume(pool: &str, id: u32) -> BlockVolumeId {
+        BlockVolumeId {
+            filesystem_uuid: pool.to_string(),
+            subvolume_id: id,
+        }
+    }
+
+    fn lun(lun_id: u32, path: &str, identity: Option<BlockVolumeId>) -> Lun {
+        Lun {
+            lun_id,
+            backstore_path: path.to_string(),
+            backstore_name: format!("backstore-{lun_id}"),
+            backstore_type: "block".to_string(),
+            size_bytes: None,
+            backing_volume: identity,
+            backing_volume_unresolved: false,
+        }
+    }
+
+    fn target(name: &str, luns: Vec<Lun>) -> IscsiTarget {
+        IscsiTarget {
+            id: "target-id".to_string(),
+            iqn: format!("iqn.test:{name}"),
+            alias: None,
+            portals: vec![],
+            luns,
+            acls: vec![],
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn remaps_each_lun_by_immutable_identity() {
+        let first = volume("pool-a", 10);
+        let second = volume("pool-b", 20);
+        let mut mappings = BlockDeviceMappings::default();
+        mappings.current.insert(first.clone(), "/dev/loop9".into());
+        mappings.current.insert(second.clone(), "/dev/loop4".into());
+        let mut target = target(
+            "custom-name",
+            vec![
+                lun(0, "/dev/loop0", Some(first.clone())),
+                lun(1, "/dev/loop1", Some(second.clone())),
+            ],
+        );
+
+        let (changed, safe, patches) = remap_target(&mut target, &mappings);
+
+        assert!(changed);
+        assert!(safe);
+        assert_eq!(target.luns[0].backstore_path, "/dev/loop9");
+        assert_eq!(target.luns[1].backstore_path, "/dev/loop4");
+        assert_eq!(patches[0], ("backstore-0".into(), "/dev/loop9".into()));
+        assert_eq!(patches[1], ("backstore-1".into(), "/dev/loop4".into()));
+    }
+
+    #[test]
+    fn ambiguous_legacy_multi_lun_state_fails_closed() {
+        let identity = volume("pool-a", 10);
+        let mut mappings = BlockDeviceMappings::default();
+        mappings
+            .current
+            .insert(identity.clone(), "/dev/loop7".into());
+        let mut target = target(
+            "volume",
+            vec![lun(0, "/dev/loop0", None), lun(1, "/dev/loop1", None)],
+        );
+
+        let (_, safe, patches) = remap_target(&mut target, &mappings);
+
+        assert!(!safe);
+        assert!(target.luns.iter().all(|lun| lun.backing_volume_unresolved));
+        assert!(patches.iter().all(|(_, path)| path == UNRESOLVED_BACKSTORE));
+    }
+
+    #[test]
+    fn duplicate_names_do_not_enable_legacy_fallback() {
+        let first = volume("pool-a", 10);
+        let second = volume("pool-b", 10);
+        let mut mappings = BlockDeviceMappings::default();
+        mappings.current.insert(first.clone(), "/dev/loop7".into());
+        mappings.current.insert(second.clone(), "/dev/loop8".into());
+        let mut target = target("volume", vec![lun(0, "/dev/loop0", None)]);
+
+        let (_, safe, _) = remap_target(&mut target, &mappings);
+
+        assert!(!safe);
+        assert!(target.luns[0].backing_volume_unresolved);
+    }
+
+    #[test]
+    fn custom_target_name_never_migrates_legacy_lun() {
+        let identity = volume("pool-a", 10);
+        let mut mappings = BlockDeviceMappings::default();
+        mappings
+            .current
+            .insert(identity.clone(), "/dev/loop7".into());
+        let mut target = target("volume", vec![lun(0, "/dev/loop0", None)]);
+
+        let (_, safe, _) = remap_target(&mut target, &mappings);
+
+        assert!(!safe);
+        assert!(target.luns[0].backing_volume.is_none());
+        assert!(target.luns[0].backing_volume_unresolved);
+        assert_eq!(target.luns[0].backstore_path, "/dev/loop0");
+    }
+
+    #[test]
+    fn raw_block_device_is_not_remapped() {
+        let mut target = target("raw", vec![lun(0, "/dev/sda", None)]);
+
+        let (changed, safe, patches) = remap_target(&mut target, &BlockDeviceMappings::default());
+
+        assert!(!changed);
+        assert!(safe);
+        assert!(patches.is_empty());
+        assert_eq!(target.luns[0].backstore_path, "/dev/sda");
+    }
+
+    #[test]
+    fn lun_loads_legacy_state_without_identity() {
+        let lun: Lun = serde_json::from_str(
+            r#"{"lun_id":0,"backstore_path":"/dev/loop0","backstore_name":"old","backstore_type":"block","size_bytes":null}"#,
+        )
+        .unwrap();
+        assert!(lun.backing_volume.is_none());
+        assert!(!lun.backing_volume_unresolved);
+    }
+
+    #[test]
+    fn saveconfig_patch_is_exact_per_backstore() {
+        let mut json = serde_json::json!({
+            "storage_objects": [
+                {"name": "backstore-0", "dev": "/dev/loop0"},
+                {"name": "backstore-1", "dev": "/dev/loop1"}
+            ],
+            "targets": [{"wwn": "iqn.test:target"}]
+        });
+        let patches = std::collections::HashMap::from([
+            ("backstore-0".to_string(), "/dev/loop9".to_string()),
+            ("backstore-1".to_string(), "/dev/loop4".to_string()),
+        ]);
+        let targets = std::collections::HashSet::from(["iqn.test:target".to_string()]);
+
+        assert!(patch_saveconfig_value(&mut json, &patches, &targets).unwrap());
+        assert_eq!(json["storage_objects"][0]["dev"], "/dev/loop9");
+        assert_eq!(json["storage_objects"][1]["dev"], "/dev/loop4");
+    }
+
+    #[test]
+    fn saveconfig_patch_rejects_missing_backstore() {
+        let mut json = serde_json::json!({ "storage_objects": [], "targets": [] });
+        let patches =
+            std::collections::HashMap::from([("missing".to_string(), "/dev/loop9".to_string())]);
+
+        assert!(patch_saveconfig_value(&mut json, &patches, &Default::default()).is_err());
+    }
+
+    #[test]
+    fn saveconfig_patch_rejects_unpersisted_exports() {
+        let mut json = serde_json::json!({
+            "storage_objects": [
+                {"name": "expected", "dev": "/dev/loop0"},
+                {"name": "stale", "dev": "/dev/loop1"}
+            ],
+            "targets": [
+                {"wwn": "iqn.test:expected"},
+                {"wwn": "iqn.test:stale"}
+            ]
+        });
+        let patches =
+            std::collections::HashMap::from([("expected".to_string(), "/dev/loop0".to_string())]);
+        let targets = std::collections::HashSet::from(["iqn.test:expected".to_string()]);
+
+        assert!(patch_saveconfig_value(&mut json, &patches, &targets).is_err());
+    }
+
+    #[test]
+    fn empty_state_rejects_stale_saveconfig_exports() {
+        let json = serde_json::json!({
+            "storage_objects": [{"name": "stale", "dev": "/dev/loop0"}],
+            "targets": [{"wwn": "iqn.test:stale"}]
+        });
+
+        assert!(validate_empty_saveconfig_value(&json).is_err());
+        assert!(
+            validate_empty_saveconfig_value(&serde_json::json!({
+                "storage_objects": [],
+                "targets": []
+            }))
+            .is_ok()
+        );
+    }
 
     fn fake_blob() -> EncryptedBlob {
         serde_json::from_str("\"c2VhbGVkLWJsb2I=\"").unwrap()

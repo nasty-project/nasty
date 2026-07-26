@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
+use nasty_common::{BlockDeviceMappings, BlockVolumeId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -409,6 +410,9 @@ pub struct Subvolume {
     pub volsize_bytes: Option<u64>,
     /// Loop device path currently attached to the backing image (block subvolumes only).
     pub block_device: Option<String>,
+    /// Stable backing identity for sharing and reboot restoration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_volume_id: Option<BlockVolumeId>,
     /// Filesystem initialized inside the block image by the backend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_filesystem: Option<BlockFilesystem>,
@@ -865,14 +869,13 @@ impl SubvolumeService {
     }
 
     /// Re-attach loop devices for block subvolumes after filesystems are mounted.
-    /// Returns a map of subvolume_name → current loop device path so callers
-    /// can patch NVMe-oF / iSCSI state files before those services start.
-    pub async fn restore_block_devices(&self) -> std::collections::HashMap<String, String> {
+    /// Returns stable identities and current loop paths for sharing restoration.
+    pub async fn restore_block_devices(&self) -> BlockDeviceMappings {
         let all = match self.list_all(None, None).await {
             Ok(v) => v,
             Err(e) => {
                 warn!("restore_block_devices: failed to list subvolumes: {e}");
-                return std::collections::HashMap::new();
+                return BlockDeviceMappings::default();
             }
         };
 
@@ -881,14 +884,21 @@ impl SubvolumeService {
             .filter(|s| s.subvolume_type == SubvolumeType::Block)
             .collect();
 
-        let mut dev_map = std::collections::HashMap::new();
+        let mut mappings = BlockDeviceMappings::default();
 
         if block_subvols.is_empty() {
             info!("No block subvolumes to restore");
-            return dev_map;
+            return mappings;
         }
 
         for subvol in block_subvols {
+            let Some(identity) = subvol.block_volume_id.clone() else {
+                warn!(
+                    "Block subvolume {}/{} has no bcachefs subvolume ID; refusing to use it for share restoration",
+                    subvol.filesystem, subvol.name
+                );
+                continue;
+            };
             let img_path = format!("{}/{BLOCK_FILE_NAME}", subvol.path);
             if !Path::new(&img_path).exists() {
                 warn!(
@@ -930,10 +940,10 @@ impl SubvolumeService {
                 }
             };
 
-            dev_map.insert(subvol.name.clone(), loop_dev);
+            mappings.current.insert(identity, loop_dev);
         }
 
-        dev_map
+        mappings
     }
 
     /// One-shot migration: assign a project quota ID to every
@@ -1042,11 +1052,19 @@ impl SubvolumeService {
         fs_name: &str,
         owner_filter: Option<&str>,
     ) -> Result<Vec<Subvolume>, SubvolumeError> {
-        let mount_point = self.fs_mount_point(fs_name).await?;
+        let fs = self
+            .filesystems
+            .get(fs_name)
+            .await
+            .map_err(|_| SubvolumeError::FilesystemNotFound(fs_name.to_string()))?;
+        let filesystem_uuid = fs.uuid;
+        let mount_point = fs
+            .mount_point
+            .ok_or_else(|| SubvolumeError::FilesystemNotMounted(fs_name.to_string()))?;
         let mut subvolumes = Vec::new();
 
         // Ask bcachefs which paths are real subvolumes (filters out plain dirs)
-        let info = bcachefs_list_all(&mount_point).await;
+        let info = bcachefs_list_all_strict(&mount_point).await?;
 
         // Batch queries: run repquota + losetup once instead of du/losetup per subvolume
         let (project_usages, losetup_map) =
@@ -1134,6 +1152,17 @@ impl SubvolumeService {
             };
 
             let parent = info.snapshot_parents.get(name.as_str()).cloned();
+            let block_volume_id = if attrs.meta.subvolume_type == SubvolumeType::Block {
+                info.subvolume_ids
+                    .get(name.as_str())
+                    .copied()
+                    .map(|subvolume_id| BlockVolumeId {
+                        filesystem_uuid: filesystem_uuid.clone(),
+                        subvolume_id,
+                    })
+            } else {
+                None
+            };
 
             subvolumes.push(Subvolume {
                 name: name.to_string(),
@@ -1146,6 +1175,7 @@ impl SubvolumeService {
                 comments: attrs.meta.comments,
                 volsize_bytes: attrs.meta.volsize_bytes,
                 block_device,
+                block_volume_id,
                 block_filesystem: attrs.meta.block_filesystem,
                 block_filesystem_uuid: attrs.meta.block_filesystem_uuid,
                 snapshots: snapshots.iter().map(|s| s.name.clone()).collect(),
@@ -1159,6 +1189,26 @@ impl SubvolumeService {
         }
 
         Ok(subvolumes)
+    }
+
+    /// Resolve a currently attached managed block subvolume by its loop path.
+    /// `None` means the path is not a NASty-managed block subvolume.
+    pub async fn block_volume_id_for_device(
+        &self,
+        device_path: &str,
+    ) -> Result<Option<BlockVolumeId>, SubvolumeError> {
+        let matched = self.list_all(None, None).await?.into_iter().find(|subvol| {
+            subvol.subvolume_type == SubvolumeType::Block
+                && subvol.block_device.as_deref() == Some(device_path)
+        });
+        match matched {
+            Some(subvol) => subvol.block_volume_id.map(Some).ok_or_else(|| {
+                SubvolumeError::CommandFailed(format!(
+                    "managed block device {device_path} has no stable bcachefs identity"
+                ))
+            }),
+            None => Ok(None),
+        }
     }
 
     /// List subvolumes across all mounted filesystems.
@@ -1185,10 +1235,8 @@ impl SubvolumeService {
             {
                 continue;
             }
-            match self.list(&fs.name, owner_filter).await {
-                Ok(mut subvols) => all.append(&mut subvols),
-                Err(_) => continue,
-            }
+            let mut subvols = self.list(&fs.name, owner_filter).await?;
+            all.append(&mut subvols);
         }
         Ok(all)
     }
@@ -2493,9 +2541,12 @@ impl SubvolumeService {
 }
 
 /// Parsed result from `bcachefs subvolume list --snapshots --json`.
+#[derive(Default)]
 struct BcachefsInfo {
     /// Relative paths of non-snapshot subvolumes (e.g. "foo").
     subvol_paths: std::collections::HashSet<String>,
+    /// Relative subvolume path to stable bcachefs subvolume ID.
+    subvolume_ids: std::collections::HashMap<String, u32>,
     /// Relative path of each snapshot → read_only flag (e.g. "foo@snap" → true).
     snapshot_flags: std::collections::HashMap<String, bool>,
     /// Relative path of each snapshot → parent path (from bcachefs snapshot_parent).
@@ -2508,6 +2559,8 @@ struct BcachefsInfo {
 struct BcachefsListEntry {
     path: String,
     #[serde(default)]
+    subvolid: Option<u32>,
+    #[serde(default)]
     flags: Option<String>,
     snapshot_parent: Option<String>,
     #[serde(default)]
@@ -2518,24 +2571,43 @@ struct BcachefsListEntry {
 /// return both the subvolume paths and per-snapshot read_only flags.
 /// On any error returns empty collections so callers degrade gracefully.
 async fn bcachefs_list_all(mount_point: &str) -> BcachefsInfo {
+    bcachefs_list_all_strict(mount_point)
+        .await
+        .unwrap_or_default()
+}
+
+async fn bcachefs_list_all_strict(mount_point: &str) -> Result<BcachefsInfo, SubvolumeError> {
     let output = cmd::run_ok(
         "bcachefs",
         &["subvolume", "list", "--snapshots", "--json", mount_point],
     )
     .await
-    .unwrap_or_default();
-    parse_bcachefs_list(&output)
+    .map_err(|error| SubvolumeError::CommandFailed(error.to_string()))?;
+    let entries: Vec<BcachefsListEntry> = serde_json::from_str(&output).map_err(|error| {
+        SubvolumeError::CommandFailed(format!(
+            "parse bcachefs subvolume list for {mount_point}: {error}"
+        ))
+    })?;
+    Ok(build_bcachefs_info(entries))
 }
 
+#[cfg(test)]
 fn parse_bcachefs_list(output: &str) -> BcachefsInfo {
     let entries: Vec<BcachefsListEntry> = serde_json::from_str(output).unwrap_or_default();
+    build_bcachefs_info(entries)
+}
 
+fn build_bcachefs_info(entries: Vec<BcachefsListEntry>) -> BcachefsInfo {
     let mut subvol_paths = std::collections::HashSet::new();
+    let mut subvolume_ids = std::collections::HashMap::new();
     let mut snapshot_flags = std::collections::HashMap::new();
     let mut snapshot_parents = std::collections::HashMap::new();
     let mut snapshot_created_at = std::collections::HashMap::new();
 
     for entry in entries {
+        if let Some(subvolume_id) = entry.subvolid {
+            subvolume_ids.insert(entry.path.clone(), subvolume_id);
+        }
         let is_ro = entry.flags.as_deref() == Some("ro");
         if let Some(ref parent) = entry.snapshot_parent {
             if is_ro {
@@ -2559,6 +2631,7 @@ fn parse_bcachefs_list(output: &str) -> BcachefsInfo {
 
     BcachefsInfo {
         subvol_paths,
+        subvolume_ids,
         snapshot_flags,
         snapshot_parents,
         snapshot_created_at,
@@ -3074,6 +3147,19 @@ async fn materialize_subvol_from_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bcachefs_subvolume_id_is_preserved() {
+        let info = parse_bcachefs_list(
+            r#"[
+                {"path":"volume","subvolid":41,"flags":null,"snapshot_parent":null},
+                {"path":"volume@snap","subvolid":42,"flags":"ro","snapshot_parent":"/volume"}
+            ]"#,
+        );
+
+        assert_eq!(info.subvolume_ids.get("volume"), Some(&41));
+        assert_eq!(info.subvolume_ids.get("volume@snap"), Some(&42));
+    }
 
     #[test]
     fn bcachefs_snapshot_creation_time_is_preserved() {

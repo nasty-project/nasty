@@ -17,9 +17,10 @@ export function summarizeDependents(deps: FsDependents): string | null {
 		{ label: 'NVMe-oF subsystem', items: deps.nvmeof_subsystems },
 	];
 	const non_empty = groups.filter((g) => g.items.length > 0);
-	if (non_empty.length === 0) return null;
+	if (non_empty.length === 0 && deps.state_errors.length === 0) return null;
 
 	const lines = non_empty.map((g) => `• ${formatLine(g.label, g.items)}`);
+	lines.push(...deps.state_errors.map((error) => `• Dependency state error: ${error}`));
 	return lines.join('\n');
 }
 

@@ -313,10 +313,9 @@ async fn main() -> anyhow::Result<()> {
         );
         *state.mount_failures.lock().await = mount_failures;
     }
-    // Re-attach loop devices and get the current name→device mapping.
-    // Loop device numbers change across reboots, so NVMe-oF and iSCSI state
-    // files must be patched before their respective restore steps run.
-    let dev_map = state
+    // Re-attach loop devices and resolve persisted sharing state by immutable
+    // filesystem UUID + bcachefs subvolume ID before protocols start.
+    let block_devices = state
         .boot_status
         .run_phase(
             "subvolumes.restore_block_devices",
@@ -324,27 +323,56 @@ async fn main() -> anyhow::Result<()> {
             state.subvolumes.restore_block_devices(),
         )
         .await;
-    if !dev_map.is_empty() {
-        state
-            .boot_status
-            .run_phase(
-                "nvmeof.remap_device_paths",
-                secs(15), // string substitution + state-file save
-                state.nvmeof.remap_device_paths(&dev_map),
-            )
+    let nvmeof_remap = state
+        .boot_status
+        .run_phase(
+            "nvmeof.remap_device_paths",
+            secs(15),
+            state.nvmeof.remap_device_paths(&block_devices),
+        )
+        .await;
+    let iscsi_remap = state
+        .boot_status
+        .run_phase(
+            "iscsi.remap_device_paths",
+            secs(15),
+            state.iscsi.remap_device_paths(&block_devices),
+        )
+        .await;
+    let reload_iscsi = !iscsi_remap.safe_to_restore
+        || state
+            .protocols
+            .is_enabled(nasty_system::protocol::Protocol::Iscsi)
             .await;
-        state
-            .boot_status
-            .run_phase(
-                "iscsi.remap_device_paths",
-                secs(15),
-                state.iscsi.remap_device_paths(&dev_map),
-            )
-            .await;
+    if reload_iscsi {
+        tokio::time::timeout(
+            secs(30),
+            state
+                .protocols
+                .quiesce(nasty_system::protocol::Protocol::Iscsi),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out quiescing iSCSI before protocol restore"))?
+        .map_err(|error| {
+            anyhow::anyhow!("failed to quiesce iSCSI before protocol restore: {error}")
+        })?;
+    }
+    if !nvmeof_remap.safe_to_restore {
+        tokio::time::timeout(secs(30), state.nvmeof.quiesce())
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out quiescing unsafe NVMe-oF state"))?
+            .map_err(|error| anyhow::anyhow!("failed to quiesce unsafe NVMe-oF state: {error}"))?;
     }
 
     // Settle any interrupted network transaction and remove orphaned profiles
     // before rendering interface-restricted firewall rules.
+    let mut excluded_protocols = std::collections::HashSet::new();
+    if !iscsi_remap.safe_to_restore {
+        excluded_protocols.insert(nasty_system::protocol::Protocol::Iscsi);
+    }
+    if !nvmeof_remap.safe_to_restore {
+        excluded_protocols.insert(nasty_system::protocol::Protocol::Nvmeof);
+    }
     state
         .boot_status
         .run_phase(
@@ -411,7 +439,7 @@ async fn main() -> anyhow::Result<()> {
         .run_phase(
             "protocols.restore",
             secs(90), // 9 systemd services × up to ~10s each on a bursty box
-            state.protocols.restore(),
+            state.protocols.restore_excluding(&excluded_protocols),
         )
         .await;
     // Protocol restore disables persisted entries whose daemons fail to start.
@@ -421,7 +449,10 @@ async fn main() -> anyhow::Result<()> {
         use nasty_system::protocol::Protocol;
         let mut actual_states = Vec::new();
         for proto in Protocol::ALL {
-            actual_states.push((*proto, state.protocols.is_enabled(*proto).await));
+            actual_states.push((
+                *proto,
+                !excluded_protocols.contains(proto) && state.protocols.is_enabled(*proto).await,
+            ));
         }
         state
             .firewall
@@ -489,15 +520,29 @@ async fn main() -> anyhow::Result<()> {
 
     state
         .boot_status
-        .run_phase(
-            "nvmeof.restore",
-            // configfs writes are fast, but restore first waits (up to 45s)
-            // for specific port addresses to come up so binds don't race the
-            // network and fail with EADDRNOTAVAIL (#625). Budget covers the
-            // wait plus the writes.
-            secs(75),
-            state.nvmeof.restore(),
-        )
+        .run_phase("nvmeof.restore", secs(75), async {
+            if nvmeof_remap.safe_to_restore {
+                if let Err(error) = state.nvmeof.restore().await {
+                    tracing::error!("Failed to restore NVMe-oF safely: {error}");
+                    if let Err(error) = state.nvmeof.quiesce().await {
+                        tracing::error!("Failed to quiesce partial NVMe-oF restore: {error}");
+                    }
+                    if let Err(error) = state
+                        .firewall
+                        .close(nasty_system::protocol::Protocol::Nvmeof)
+                        .await
+                    {
+                        tracing::error!(
+                            "Failed to close NVMe-oF firewall after restore failure: {error}"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Skipping NVMe-oF configfs restore because block identity resolution failed"
+                );
+            }
+        })
         .await;
     state
         .boot_status

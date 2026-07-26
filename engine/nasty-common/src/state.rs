@@ -124,6 +124,35 @@ impl StateDir {
         items
     }
 
+    /// Load every JSON item or fail the whole operation. Use this for safety-
+    /// critical restoration where silently omitting one corrupt item could
+    /// leave an independent runtime configuration pointing at stale devices.
+    pub async fn load_all_strict<T: DeserializeOwned>(&self) -> std::io::Result<Vec<T>> {
+        let mut items = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(items),
+            Err(error) => return Err(error),
+        };
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let content = tokio::fs::read_to_string(&path).await?;
+            let item = serde_json::from_str(&content).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("parse {}: {error}", path.display()),
+                )
+            })?;
+            items.push(item);
+        }
+
+        Ok(items)
+    }
+
     /// Load a single item by its ID.
     pub async fn load<T: DeserializeOwned>(&self, id: &str) -> Option<T> {
         let path = self.item_path(id);
@@ -234,5 +263,20 @@ mod tests {
             }
         }
         assert!(found_backup, "expected bad.json.corrupt.<ts> backup file");
+    }
+
+    #[tokio::test]
+    async fn strict_directory_load_rejects_partial_state() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("good.json"), br#"{"name":"ok","count":1}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("bad.json"), b"not json")
+            .await
+            .unwrap();
+
+        let result = StateDir::new(dir.path()).load_all_strict::<Sample>().await;
+
+        assert!(result.is_err());
     }
 }

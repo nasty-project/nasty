@@ -40,6 +40,7 @@ pub struct FsDependents {
     pub smb_shares: Vec<String>,
     pub iscsi_targets: Vec<String>,
     pub nvmeof_subsystems: Vec<String>,
+    pub state_errors: Vec<String>,
 }
 
 /// True if `path` falls under `/fs/<fs_name>/` (the canonical NASty
@@ -78,6 +79,10 @@ pub async fn find_dependents(state: &AppState, fs_name: &str) -> FsDependents {
     let block_devs: HashSet<String> = subvols
         .iter()
         .filter_map(|s| s.block_device.clone())
+        .collect();
+    let block_ids: HashSet<nasty_common::BlockVolumeId> = subvols
+        .iter()
+        .filter_map(|s| s.block_volume_id.clone())
         .collect();
     out.subvolumes = subvols.into_iter().map(|s| s.name).collect();
 
@@ -136,29 +141,45 @@ pub async fn find_dependents(state: &AppState, fs_name: &str) -> FsDependents {
             .map(|s| s.name)
             .collect();
     }
-    if let Ok(targets) = state.iscsi.list().await {
-        out.iscsi_targets = targets
-            .into_iter()
-            .filter(|t| {
-                t.luns.iter().any(|l| {
-                    path_belongs_to_fs(&l.backstore_path, fs_name)
-                        || block_devs.contains(&l.backstore_path)
+    match state.iscsi.list().await {
+        Ok(targets) => {
+            out.iscsi_targets = targets
+                .into_iter()
+                .filter(|t| {
+                    t.luns.iter().any(|l| {
+                        path_belongs_to_fs(&l.backstore_path, fs_name)
+                            || block_devs.contains(&l.backstore_path)
+                            || l.backing_volume
+                                .as_ref()
+                                .is_some_and(|identity| block_ids.contains(identity))
+                    })
                 })
-            })
-            .map(|t| t.iqn)
-            .collect();
+                .map(|t| t.iqn)
+                .collect();
+        }
+        Err(error) => out
+            .state_errors
+            .push(format!("iSCSI state failed to load: {error}")),
     }
-    if let Ok(subs) = state.nvmeof.list().await {
-        out.nvmeof_subsystems = subs
-            .into_iter()
-            .filter(|s| {
-                s.namespaces.iter().any(|n| {
-                    path_belongs_to_fs(&n.device_path, fs_name)
-                        || block_devs.contains(&n.device_path)
+    match state.nvmeof.list().await {
+        Ok(subs) => {
+            out.nvmeof_subsystems = subs
+                .into_iter()
+                .filter(|s| {
+                    s.namespaces.iter().any(|n| {
+                        path_belongs_to_fs(&n.device_path, fs_name)
+                            || block_devs.contains(&n.device_path)
+                            || n.backing_volume
+                                .as_ref()
+                                .is_some_and(|identity| block_ids.contains(identity))
+                    })
                 })
-            })
-            .map(|s| s.nqn)
-            .collect();
+                .map(|s| s.nqn)
+                .collect();
+        }
+        Err(error) => out
+            .state_errors
+            .push(format!("NVMe-oF state failed to load: {error}")),
     }
 
     out

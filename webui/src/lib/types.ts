@@ -361,6 +361,7 @@ export interface SubvolumeDependents {
 	smb_shares: string[];
 	iscsi_targets: string[];
 	nvmeof_subsystems: string[];
+	state_errors: string[];
 }
 
 export interface FsDependents {
@@ -374,6 +375,7 @@ export interface FsDependents {
 	smb_shares: string[];
 	iscsi_targets: string[];
 	nvmeof_subsystems: string[];
+	state_errors: string[];
 }
 
 export interface ServiceStatus {
@@ -600,6 +602,11 @@ export interface TieringProfile {
 
 export type SubvolumeType = 'filesystem' | 'block';
 
+export interface BlockVolumeId {
+	filesystem_uuid: string;
+	subvolume_id: number;
+}
+
 export interface Subvolume {
 	name: string;
 	filesystem: string;
@@ -612,6 +619,7 @@ export interface Subvolume {
 	comments: string | null;
 	volsize_bytes: number | null;
 	block_device: string | null;
+	block_volume_id?: BlockVolumeId | null;
 	snapshots: string[];
 	owner: string | null;
 	properties: Record<string, string>;
@@ -720,6 +728,8 @@ export interface Lun {
 	backstore_name: string;
 	backstore_type: string;
 	size_bytes: number | null;
+	backing_volume?: BlockVolumeId | null;
+	backing_volume_unresolved?: boolean;
 }
 
 export interface Acl {
@@ -742,6 +752,8 @@ export interface Namespace {
 	nsid: number;
 	device_path: string;
 	enabled: boolean;
+	backing_volume?: BlockVolumeId | null;
+	backing_volume_unresolved?: boolean;
 }
 
 export interface NvmeofPort {

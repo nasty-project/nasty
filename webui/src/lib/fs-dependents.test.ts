@@ -14,6 +14,7 @@ function deps(over: Partial<FsDependents> = {}): FsDependents {
 		smb_shares: [],
 		iscsi_targets: [],
 		nvmeof_subsystems: [],
+		state_errors: [],
 		...over,
 	};
 }

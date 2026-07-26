@@ -1959,7 +1959,7 @@ in {
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = "${pkgs.bash}/bin/bash -c 'test -f /etc/target/saveconfig.json && ${targetcli-fixed}/bin/targetcli restoreconfig /etc/target/saveconfig.json || true'";
+        ExecStart = "${pkgs.bash}/bin/bash -c 'if test -f /etc/target/saveconfig.json; then exec ${targetcli-fixed}/bin/targetcli restoreconfig /etc/target/saveconfig.json; fi'";
         ExecStop = "${targetcli-fixed}/bin/targetcli clearconfig confirm=True";
       };
     };

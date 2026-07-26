@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use nasty_common::{HasId, StateDir};
+use nasty_common::{BlockDeviceMappings, BlockVolumeId, HasId, StateDir};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -59,6 +59,12 @@ pub struct Namespace {
     pub device_path: String,
     /// Whether the namespace is enabled in configfs.
     pub enabled: bool,
+    /// Stable identity of a NASty-managed block subvolume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backing_volume: Option<BlockVolumeId>,
+    /// Prevents startup from trusting a stale legacy loop path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub backing_volume_unresolved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -86,6 +92,10 @@ pub struct CreateSubsystemRequest {
     /// Block device path (e.g. /dev/loop0). When provided, a namespace is
     /// automatically created.
     pub device_path: Option<String>,
+    /// Filled authoritatively by the engine router; not accepted from clients.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub backing_volume: Option<BlockVolumeId>,
     /// Listen address (default 0.0.0.0). Only used when `device_path` is set.
     pub addr: Option<String>,
     /// Port number (default 4420). Only used when `device_path` is set.
@@ -107,6 +117,16 @@ pub struct AddNamespaceRequest {
     pub subsystem_id: String,
     /// Block device path (e.g. /dev/sdc)
     pub device_path: String,
+    /// Filled authoritatively by the engine router; not accepted from clients.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub backing_volume: Option<BlockVolumeId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeviceRemapOutcome {
+    pub safe_to_restore: bool,
+    pub changed: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -198,7 +218,7 @@ impl NvmeofService {
 
     /// Restore NVMe-oF configfs state from persisted JSON files.
     /// Called at startup — configfs is volatile and lost on reboot.
-    pub async fn restore(&self) {
+    pub async fn restore(&self) -> Result<(), NvmeofError> {
         // Only restore if the nvmeof protocol is enabled
         let proto_state: serde_json::Value =
             tokio::fs::read_to_string("/var/lib/nasty/protocols.json")
@@ -209,14 +229,15 @@ impl NvmeofService {
 
         if proto_state.get("nvmeof").and_then(|v| v.as_bool()) != Some(true) {
             info!("NVMe-oF protocol disabled, skipping restore");
-            return;
+            return Ok(());
         }
 
-        let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
+        let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all_strict().await?;
         if subsystems.is_empty() {
             info!("No NVMe-oF subsystems to restore");
-            return;
+            return Ok(());
         }
+        let mut failures = Vec::new();
 
         // Boot restore races the network coming up: a port bound to a
         // specific address whose interface isn't configured yet fails to
@@ -234,34 +255,37 @@ impl NvmeofService {
 
             // Create subsystem
             let subsys_path = format!("{NVMET_BASE}/subsystems/{}", subsys.nqn);
-            if let Err(e) = configfs_mkdir(&subsys_path).await {
+            if let Err(e) = configfs_ensure_dir(&subsys_path).await {
                 warn!("Failed to create subsystem {}: {e}", subsys.nqn);
+                failures.push(format!("{} subsystem: {e}", subsys.nqn));
                 continue;
             }
-            let _ = configfs_write(
+            if let Err(error) = configfs_write(
                 &format!("{subsys_path}/attr_allow_any_host"),
                 if subsys.allow_any_host { "1" } else { "0" },
             )
-            .await;
+            .await
+            {
+                warn!(
+                    "Failed to restore access policy for {}: {error}",
+                    subsys.nqn
+                );
+                failures.push(format!("{} access policy: {error}", subsys.nqn));
+                continue;
+            }
 
             // Restore namespaces
             for ns in &subsys.namespaces {
-                if !Path::new(&ns.device_path).exists() {
-                    warn!(
-                        "  Device {} not found, skipping namespace {}",
-                        ns.device_path, ns.nsid
-                    );
-                    continue;
-                }
                 let ns_path = format!("{subsys_path}/namespaces/{}", ns.nsid);
-                if let Err(e) = configfs_mkdir(&ns_path).await {
+                if let Err(e) = configfs_ensure_dir(&ns_path).await {
                     warn!("  Failed to create namespace {}: {e}", ns.nsid);
+                    failures.push(format!("{} namespace {}: {e}", subsys.nqn, ns.nsid));
                     continue;
                 }
-                let _ = configfs_write(&format!("{ns_path}/device_path"), &ns.device_path).await;
-                let _ = configfs_write(&format!("{ns_path}/buffered_io"), "0").await;
-                if ns.enabled {
-                    let _ = configfs_write(&format!("{ns_path}/enable"), "1").await;
+                if let Err(error) = restore_namespace(&ns_path, ns).await {
+                    warn!("  Failed to restore namespace {} safely: {error}", ns.nsid);
+                    failures.push(format!("{} namespace {}: {error}", subsys.nqn, ns.nsid));
+                    continue;
                 }
                 info!("  Restored namespace {} -> {}", ns.nsid, ns.device_path);
             }
@@ -269,9 +293,16 @@ impl NvmeofService {
             // Restore allowed hosts
             for host_nqn in &subsys.allowed_hosts {
                 let host_path = format!("{NVMET_BASE}/hosts/{host_nqn}");
-                let _ = configfs_mkdir(&host_path).await;
+                if let Err(error) = configfs_ensure_dir(&host_path).await {
+                    warn!("  Failed to restore allowed host {host_nqn}: {error}");
+                    failures.push(format!("{} host {host_nqn}: {error}", subsys.nqn));
+                    continue;
+                }
                 let link = format!("{subsys_path}/allowed_hosts/{host_nqn}");
-                let _ = configfs_symlink(&host_path, &link).await;
+                if let Err(error) = configfs_ensure_symlink(&host_path, &link).await {
+                    warn!("  Failed to link allowed host {host_nqn}: {error}");
+                    failures.push(format!("{} host {host_nqn}: {error}", subsys.nqn));
+                }
             }
 
             // Restore ports — reuse existing port if one already binds to the same address
@@ -283,17 +314,27 @@ impl NvmeofService {
                     existing
                 } else {
                     let port_path = format!("{NVMET_BASE}/ports/{}", port.port_id);
-                    if let Err(e) = configfs_mkdir(&port_path).await {
+                    if let Err(e) = configfs_ensure_dir(&port_path).await {
                         warn!("  Failed to create port {}: {e}", port.port_id);
+                        failures.push(format!("{} port {}: {e}", subsys.nqn, port.port_id));
                         continue;
                     }
-                    let _ =
-                        configfs_write(&format!("{port_path}/addr_trtype"), &port.transport).await;
-                    let _ = configfs_write(&format!("{port_path}/addr_traddr"), &port.addr).await;
-                    let _ = configfs_write(&format!("{port_path}/addr_trsvcid"), &port.service_id)
-                        .await;
-                    let _ = configfs_write(&format!("{port_path}/addr_adrfam"), &port.addr_family)
-                        .await;
+                    let configured = async {
+                        configfs_write(&format!("{port_path}/addr_trtype"), &port.transport)
+                            .await?;
+                        configfs_write(&format!("{port_path}/addr_traddr"), &port.addr).await?;
+                        configfs_write(&format!("{port_path}/addr_trsvcid"), &port.service_id)
+                            .await?;
+                        configfs_write(&format!("{port_path}/addr_adrfam"), &port.addr_family)
+                            .await?;
+                        Ok::<(), NvmeofError>(())
+                    }
+                    .await;
+                    if let Err(error) = configured {
+                        warn!("  Failed to configure port {}: {error}", port.port_id);
+                        failures.push(format!("{} port {}: {error}", subsys.nqn, port.port_id));
+                        continue;
+                    }
                     port.port_id
                 };
 
@@ -303,54 +344,133 @@ impl NvmeofService {
                 // bind, so this is where EADDRNOTAVAIL surfaces. Report it
                 // instead of swallowing it (#625) — a silent failure left the
                 // target dead with no clue in the logs.
-                match configfs_symlink(&format!("{NVMET_BASE}/subsystems/{}", subsys.nqn), &link)
-                    .await
+                match configfs_ensure_symlink(
+                    &format!("{NVMET_BASE}/subsystems/{}", subsys.nqn),
+                    &link,
+                )
+                .await
                 {
                     Ok(()) => info!(
                         "  Restored port {} ({}:{})",
                         actual_port_id, port.addr, port.service_id
                     ),
-                    Err(e) => warn!(
-                        "  NVMe-oF port {} bind to {}:{} failed ({e}) — the address may not \
-                         be up yet; re-add the portal once its interface is active",
-                        actual_port_id, port.addr, port.service_id
-                    ),
+                    Err(e) => {
+                        warn!(
+                            "  NVMe-oF port {} bind to {}:{} failed ({e}) — the address may not \
+                             be up yet; re-add the portal once its interface is active",
+                            actual_port_id, port.addr, port.service_id
+                        );
+                        failures.push(format!("{} port {} bind: {e}", subsys.nqn, actual_port_id));
+                    }
                 }
             }
         }
 
         info!("NVMe-oF restore complete");
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(NvmeofError::ConfigFs(failures.join("; ")))
+        }
     }
 
-    /// Update persisted device paths after a reboot where loop device numbers changed.
-    /// `dev_map` maps subvolume_name → current loop device (e.g. "tank-vol" → "/dev/loop0").
-    /// The subvolume name is extracted from the NQN suffix after the last ':'.
-    pub async fn remap_device_paths(&self, dev_map: &std::collections::HashMap<String, String>) {
-        let mut subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
-        for subsys in &mut subsystems {
-            let name = subsys.nqn.rsplit(':').next().unwrap_or("").to_string();
-            let Some(new_dev) = dev_map.get(&name) else {
+    /// Disable every NASty-managed live namespace without changing persisted
+    /// state. nvmet configfs survives an engine-process restart, so merely
+    /// skipping restore is not sufficient when backing identity is unsafe.
+    pub async fn quiesce(&self) -> Result<(), NvmeofError> {
+        let subsystem_dir = format!("{NVMET_BASE}/subsystems");
+        let mut subsystems = match tokio::fs::read_dir(&subsystem_dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(NvmeofError::Io(error)),
+        };
+        while let Some(subsystem) = subsystems.next_entry().await? {
+            let nqn = subsystem.file_name();
+            let nqn = nqn.to_string_lossy();
+            if !nqn.starts_with(DEFAULT_NQN_PREFIX) {
                 continue;
+            }
+            let namespace_dir = subsystem.path().join("namespaces");
+            let mut namespaces = match tokio::fs::read_dir(&namespace_dir).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(NvmeofError::Io(error)),
             };
-            let mut changed = false;
-            for ns in &mut subsys.namespaces {
-                if &ns.device_path != new_dev {
-                    info!(
-                        "Remapping NVMe-oF '{}' ns{} {} → {}",
-                        subsys.nqn, ns.nsid, ns.device_path, new_dev
-                    );
-                    ns.device_path = new_dev.clone();
-                    changed = true;
+            while let Some(namespace) = namespaces.next_entry().await? {
+                let enable = namespace.path().join("enable");
+                tokio::fs::write(&enable, "0").await.map_err(|error| {
+                    NvmeofError::ConfigFs(format!("disable {}: {error}", enable.display()))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether every persisted enabled namespace is currently enabled in
+    /// configfs. Used to avoid disrupting healthy initiators on unrelated
+    /// filesystem mounts while still recovering a previously quiesced export.
+    pub async fn is_active(&self) -> Result<bool, NvmeofError> {
+        let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all_strict().await?;
+        for subsystem in subsystems {
+            for namespace in subsystem.namespaces.into_iter().filter(|ns| ns.enabled) {
+                let enable = format!(
+                    "{NVMET_BASE}/subsystems/{}/namespaces/{}/enable",
+                    subsystem.nqn, namespace.nsid
+                );
+                match tokio::fs::read_to_string(&enable).await {
+                    Ok(value) if value.trim() == "1" => {}
+                    Ok(_) => return Ok(false),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(NvmeofError::Io(error)),
                 }
             }
-            if changed {
-                let _ = state_dir().save(&subsys.id, subsys).await;
+        }
+        Ok(true)
+    }
+
+    /// Resolve every namespace independently by immutable backing identity.
+    pub async fn remap_device_paths(&self, mappings: &BlockDeviceMappings) -> DeviceRemapOutcome {
+        let mut subsystems: Vec<NvmeofSubsystem> = match state_dir().load_all_strict().await {
+            Ok(subsystems) => subsystems,
+            Err(error) => {
+                warn!("Cannot safely load all NVMe-oF state: {error}");
+                return DeviceRemapOutcome::default();
             }
+        };
+        let mut safe_to_restore = match validate_managed_configfs_inventory(&subsystems).await {
+            Ok(()) => true,
+            Err(error) => {
+                warn!("Cannot validate live NVMe-oF inventory safely: {error}");
+                false
+            }
+        };
+        if subsystems.is_empty() {
+            return DeviceRemapOutcome {
+                safe_to_restore,
+                changed: false,
+            };
+        }
+        let mut any_changed = false;
+        for subsys in &mut subsystems {
+            let (changed, subsystem_safe) = remap_subsystem(subsys, mappings);
+            any_changed |= changed;
+            safe_to_restore &= subsystem_safe;
+            if changed && let Err(error) = state_dir().save(&subsys.id, subsys).await {
+                warn!(
+                    "Failed to persist NVMe-oF block identities for '{}': {error}",
+                    subsys.nqn
+                );
+                safe_to_restore = false;
+            }
+        }
+        DeviceRemapOutcome {
+            safe_to_restore,
+            changed: any_changed,
         }
     }
 
     pub async fn list(&self) -> Result<Vec<NvmeofSubsystem>, NvmeofError> {
-        Ok(state_dir().load_all().await)
+        Ok(state_dir().load_all_strict().await?)
     }
 
     pub async fn get(&self, id: &str) -> Result<NvmeofSubsystem, NvmeofError> {
@@ -370,7 +490,7 @@ impl NvmeofService {
                 validate_host_nqn(host_nqn)?;
             }
         }
-        let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all().await;
+        let subsystems: Vec<NvmeofSubsystem> = state_dir().load_all_strict().await?;
         let nqn = format!("{DEFAULT_NQN_PREFIX}:{}", req.name);
 
         if let Some(existing) = subsystems.into_iter().find(|s| s.nqn == nqn) {
@@ -411,6 +531,7 @@ impl NvmeofService {
                     .add_namespace(AddNamespaceRequest {
                         subsystem_id: subsystem.id.clone(),
                         device_path,
+                        backing_volume: req.backing_volume,
                     })
                     .await?;
             } else {
@@ -601,6 +722,8 @@ impl NvmeofService {
             nsid,
             device_path: req.device_path,
             enabled: true,
+            backing_volume: req.backing_volume,
+            backing_volume_unresolved: false,
         });
 
         state_dir()
@@ -1002,6 +1125,17 @@ async fn configfs_mkdir(path: &str) -> Result<(), NvmeofError> {
         .map_err(|e| NvmeofError::ConfigFs(format!("mkdir {path}: {e}")))
 }
 
+async fn configfs_ensure_dir(path: &str) -> Result<(), NvmeofError> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(NvmeofError::ConfigFs(format!(
+            "{path} exists and is not a directory"
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => configfs_mkdir(path).await,
+        Err(error) => Err(NvmeofError::ConfigFs(format!("stat {path}: {error}"))),
+    }
+}
+
 async fn configfs_rmdir(path: &str) -> Result<(), NvmeofError> {
     tokio::fs::remove_dir(path)
         .await
@@ -1025,6 +1159,20 @@ async fn configfs_symlink(target: &str, link: &str) -> Result<(), NvmeofError> {
     tokio::fs::symlink(target, link)
         .await
         .map_err(|e| NvmeofError::ConfigFs(format!("symlink {link} -> {target}: {e}")))
+}
+
+async fn configfs_ensure_symlink(target: &str, link: &str) -> Result<(), NvmeofError> {
+    match tokio::fs::read_link(link).await {
+        Ok(existing) if existing == Path::new(target) => Ok(()),
+        Ok(existing) => Err(NvmeofError::ConfigFs(format!(
+            "symlink {link} points to {} instead of {target}",
+            existing.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            configfs_symlink(target, link).await
+        }
+        Err(error) => Err(NvmeofError::ConfigFs(format!("readlink {link}: {error}"))),
+    }
 }
 
 async fn dir_is_empty(path: &str) -> bool {
@@ -1069,6 +1217,136 @@ async fn detect_primary_ip() -> Option<String> {
         }
     }
     None
+}
+
+fn is_managed_namespace(namespace: &Namespace) -> bool {
+    namespace.backing_volume.is_some()
+        || namespace.backing_volume_unresolved
+        || namespace.device_path.starts_with("/dev/loop")
+}
+
+async fn restore_namespace(ns_path: &str, namespace: &Namespace) -> Result<(), NvmeofError> {
+    configfs_write(&format!("{ns_path}/enable"), "0").await?;
+    if !Path::new(&namespace.device_path).exists() {
+        return Err(NvmeofError::DeviceNotFound(namespace.device_path.clone()));
+    }
+    configfs_write(&format!("{ns_path}/device_path"), &namespace.device_path).await?;
+    configfs_write(&format!("{ns_path}/buffered_io"), "0").await?;
+    if namespace.enabled {
+        configfs_write(&format!("{ns_path}/enable"), "1").await?;
+    }
+    Ok(())
+}
+
+async fn validate_managed_configfs_inventory(
+    expected: &[NvmeofSubsystem],
+) -> Result<(), NvmeofError> {
+    let expected: std::collections::HashMap<&str, std::collections::HashSet<u32>> = expected
+        .iter()
+        .map(|subsystem| {
+            (
+                subsystem.nqn.as_str(),
+                subsystem
+                    .namespaces
+                    .iter()
+                    .map(|namespace| namespace.nsid)
+                    .collect(),
+            )
+        })
+        .collect();
+    let subsystem_dir = format!("{NVMET_BASE}/subsystems");
+    let mut subsystems = match tokio::fs::read_dir(&subsystem_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(NvmeofError::Io(error)),
+    };
+    while let Some(subsystem) = subsystems.next_entry().await? {
+        let nqn = subsystem.file_name().to_string_lossy().to_string();
+        if !nqn.starts_with(DEFAULT_NQN_PREFIX) {
+            continue;
+        }
+        let Some(expected_namespaces) = expected.get(nqn.as_str()) else {
+            return Err(NvmeofError::ConfigFs(format!(
+                "live subsystem '{nqn}' has no persisted state"
+            )));
+        };
+        let mut namespaces = match tokio::fs::read_dir(subsystem.path().join("namespaces")).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(NvmeofError::Io(error)),
+        };
+        while let Some(namespace) = namespaces.next_entry().await? {
+            let nsid = namespace
+                .file_name()
+                .to_string_lossy()
+                .parse::<u32>()
+                .map_err(|_| {
+                    NvmeofError::ConfigFs(format!(
+                        "live subsystem '{nqn}' has invalid namespace entry '{}'",
+                        namespace.file_name().to_string_lossy()
+                    ))
+                })?;
+            if !expected_namespaces.contains(&nsid) {
+                return Err(NvmeofError::ConfigFs(format!(
+                    "live subsystem '{nqn}' namespace {nsid} has no persisted state"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remap_subsystem(
+    subsystem: &mut NvmeofSubsystem,
+    mappings: &BlockDeviceMappings,
+) -> (bool, bool) {
+    let mut changed = false;
+    let mut safe = true;
+
+    for namespace in &mut subsystem.namespaces {
+        if !is_managed_namespace(namespace) {
+            continue;
+        }
+        let identity = namespace.backing_volume.clone();
+        let resolved = identity
+            .as_ref()
+            .and_then(|identity| mappings.current.get(identity))
+            .cloned();
+
+        match (identity, resolved) {
+            (Some(identity), Some(device_path)) => {
+                if namespace.backing_volume.as_ref() != Some(&identity) {
+                    namespace.backing_volume = Some(identity);
+                    changed = true;
+                }
+                if namespace.device_path != device_path {
+                    info!(
+                        "Remapping NVMe-oF '{}' ns{} {} → {}",
+                        subsystem.nqn, namespace.nsid, namespace.device_path, device_path
+                    );
+                    namespace.device_path = device_path;
+                    changed = true;
+                }
+                if namespace.backing_volume_unresolved {
+                    namespace.backing_volume_unresolved = false;
+                    changed = true;
+                }
+            }
+            _ => {
+                warn!(
+                    "Cannot safely resolve NVMe-oF '{}' ns{} backing volume; blocking NVMe-oF restore",
+                    subsystem.nqn, namespace.nsid
+                );
+                if !namespace.backing_volume_unresolved {
+                    namespace.backing_volume_unresolved = true;
+                    changed = true;
+                }
+                safe = false;
+            }
+        }
+    }
+
+    (changed, safe)
 }
 
 /// Validate the user-supplied portion of an NVMe-oF subsystem name.
@@ -1146,6 +1424,202 @@ fn validate_transport(t: &str) -> Result<(), NvmeofError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn volume(pool: &str, id: u32) -> BlockVolumeId {
+        BlockVolumeId {
+            filesystem_uuid: pool.to_string(),
+            subvolume_id: id,
+        }
+    }
+
+    fn namespace(nsid: u32, path: &str, identity: Option<BlockVolumeId>) -> Namespace {
+        Namespace {
+            nsid,
+            device_path: path.to_string(),
+            enabled: true,
+            backing_volume: identity,
+            backing_volume_unresolved: false,
+        }
+    }
+
+    fn subsystem(name: &str, namespaces: Vec<Namespace>) -> NvmeofSubsystem {
+        NvmeofSubsystem {
+            id: "subsystem-id".to_string(),
+            nqn: format!("nqn.test:{name}"),
+            namespaces,
+            ports: vec![],
+            allowed_hosts: vec![],
+            allow_any_host: true,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn remaps_each_namespace_by_immutable_identity() {
+        let first = volume("pool-a", 10);
+        let second = volume("pool-b", 20);
+        let mut mappings = BlockDeviceMappings::default();
+        mappings.current.insert(first.clone(), "/dev/loop9".into());
+        mappings.current.insert(second.clone(), "/dev/loop4".into());
+        let mut subsystem = subsystem(
+            "custom-name",
+            vec![
+                namespace(1, "/dev/loop0", Some(first)),
+                namespace(2, "/dev/loop1", Some(second)),
+            ],
+        );
+
+        let (changed, safe) = remap_subsystem(&mut subsystem, &mappings);
+
+        assert!(changed);
+        assert!(safe);
+        assert_eq!(subsystem.namespaces[0].device_path, "/dev/loop9");
+        assert_eq!(subsystem.namespaces[1].device_path, "/dev/loop4");
+    }
+
+    #[test]
+    fn ambiguous_legacy_multi_namespace_state_fails_closed() {
+        let identity = volume("pool-a", 10);
+        let mut mappings = BlockDeviceMappings::default();
+        mappings
+            .current
+            .insert(identity.clone(), "/dev/loop7".into());
+        let mut subsystem = subsystem(
+            "volume",
+            vec![
+                namespace(1, "/dev/loop0", None),
+                namespace(2, "/dev/loop1", None),
+            ],
+        );
+
+        let (_, safe) = remap_subsystem(&mut subsystem, &mappings);
+
+        assert!(!safe);
+        assert!(
+            subsystem
+                .namespaces
+                .iter()
+                .all(|namespace| namespace.backing_volume_unresolved)
+        );
+    }
+
+    #[test]
+    fn duplicate_names_do_not_enable_legacy_fallback() {
+        let first = volume("pool-a", 10);
+        let second = volume("pool-b", 10);
+        let mut mappings = BlockDeviceMappings::default();
+        mappings.current.insert(first.clone(), "/dev/loop7".into());
+        mappings.current.insert(second.clone(), "/dev/loop8".into());
+        let mut subsystem = subsystem("volume", vec![namespace(1, "/dev/loop0", None)]);
+
+        let (_, safe) = remap_subsystem(&mut subsystem, &mappings);
+
+        assert!(!safe);
+        assert!(subsystem.namespaces[0].backing_volume_unresolved);
+    }
+
+    #[test]
+    fn custom_subsystem_name_never_migrates_legacy_namespace() {
+        let identity = volume("pool-a", 10);
+        let mut mappings = BlockDeviceMappings::default();
+        mappings
+            .current
+            .insert(identity.clone(), "/dev/loop7".into());
+        let mut subsystem = subsystem("volume", vec![namespace(1, "/dev/loop0", None)]);
+
+        let (_, safe) = remap_subsystem(&mut subsystem, &mappings);
+
+        assert!(!safe);
+        assert!(subsystem.namespaces[0].backing_volume.is_none());
+        assert!(subsystem.namespaces[0].backing_volume_unresolved);
+        assert_eq!(subsystem.namespaces[0].device_path, "/dev/loop0");
+    }
+
+    #[test]
+    fn raw_block_device_is_not_remapped() {
+        let mut subsystem = subsystem("raw", vec![namespace(1, "/dev/sda", None)]);
+
+        let (changed, safe) = remap_subsystem(&mut subsystem, &BlockDeviceMappings::default());
+
+        assert!(!changed);
+        assert!(safe);
+        assert_eq!(subsystem.namespaces[0].device_path, "/dev/sda");
+    }
+
+    #[test]
+    fn namespace_loads_legacy_state_without_identity() {
+        let namespace: Namespace =
+            serde_json::from_str(r#"{"nsid":1,"device_path":"/dev/loop0","enabled":true}"#)
+                .unwrap();
+        assert!(namespace.backing_volume.is_none());
+        assert!(!namespace.backing_volume_unresolved);
+    }
+
+    #[tokio::test]
+    async fn failed_namespace_rewrite_leaves_existing_namespace_disabled() {
+        let dir = std::env::temp_dir().join(format!("nasty-nvmeof-test-{}", Uuid::new_v4()));
+        let ns_path = dir.join("namespace");
+        tokio::fs::create_dir_all(&ns_path).await.unwrap();
+        tokio::fs::write(ns_path.join("enable"), "1").await.unwrap();
+        tokio::fs::write(ns_path.join("device_path"), "/dev/old")
+            .await
+            .unwrap();
+        tokio::fs::write(ns_path.join("buffered_io"), "0")
+            .await
+            .unwrap();
+        let namespace = namespace(1, "/path/that/does/not/exist", None);
+
+        let result = restore_namespace(ns_path.to_str().unwrap(), &namespace).await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            tokio::fs::read_to_string(ns_path.join("enable"))
+                .await
+                .unwrap(),
+            "0"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(ns_path.join("device_path"))
+                .await
+                .unwrap(),
+            "/dev/old"
+        );
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn namespace_rewrite_enables_only_after_new_path_is_written() {
+        let dir = std::env::temp_dir().join(format!("nasty-nvmeof-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir(&dir).await.unwrap();
+        let backing = dir.join("backing");
+        tokio::fs::write(&backing, []).await.unwrap();
+        let ns_path = dir.join("namespace");
+        tokio::fs::create_dir(&ns_path).await.unwrap();
+        for attribute in ["enable", "device_path", "buffered_io"] {
+            tokio::fs::write(ns_path.join(attribute), "old")
+                .await
+                .unwrap();
+        }
+        let namespace = namespace(1, backing.to_str().unwrap(), None);
+
+        restore_namespace(ns_path.to_str().unwrap(), &namespace)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(ns_path.join("device_path"))
+                .await
+                .unwrap(),
+            backing.to_str().unwrap()
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(ns_path.join("enable"))
+                .await
+                .unwrap(),
+            "1"
+        );
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
 
     // ── port-address readiness (reboot restore race, #625) ────────
 

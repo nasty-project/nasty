@@ -21,10 +21,92 @@ pub(super) async fn try_route(
         "service.protocol.enable" => match require_str(req, "name") {
             Ok(name) => {
                 if let Some(proto) = nasty_system::protocol::Protocol::from_name(name) {
+                    if matches!(
+                        proto,
+                        nasty_system::protocol::Protocol::Iscsi
+                            | nasty_system::protocol::Protocol::Nvmeof
+                    ) {
+                        let mappings = state.subvolumes.restore_block_devices().await;
+                        let safe = match proto {
+                            nasty_system::protocol::Protocol::Iscsi => {
+                                let outcome = state.iscsi.remap_device_paths(&mappings).await;
+                                outcome.safe_to_restore
+                            }
+                            nasty_system::protocol::Protocol::Nvmeof => {
+                                let outcome = state.nvmeof.remap_device_paths(&mappings).await;
+                                outcome.safe_to_restore
+                            }
+                            _ => true,
+                        };
+                        if !safe {
+                            let quiesce_error = match proto {
+                                nasty_system::protocol::Protocol::Iscsi => {
+                                    state.protocols.quiesce(proto).await.err()
+                                }
+                                nasty_system::protocol::Protocol::Nvmeof => state
+                                    .nvmeof
+                                    .quiesce()
+                                    .await
+                                    .err()
+                                    .map(|error| error.to_string()),
+                                _ => None,
+                            };
+                            let _ = state.firewall.close(proto).await;
+                            return Some(err(
+                                req,
+                                if let Some(quiesce_error) = quiesce_error {
+                                    format!(
+                                        "{} backing volumes could not be resolved safely; live export quiescing also failed: {quiesce_error}",
+                                        proto.display_name()
+                                    )
+                                } else {
+                                    format!(
+                                        "{} backing volumes could not be resolved safely",
+                                        proto.display_name()
+                                    )
+                                },
+                            ));
+                        }
+                        if proto == nasty_system::protocol::Protocol::Iscsi
+                            && let Err(error) = state.protocols.quiesce(proto).await
+                        {
+                            return Some(err(
+                                req,
+                                format!("failed to reload remapped iSCSI state: {error}"),
+                            ));
+                        }
+                    }
                     match state.firewall.open(proto).await {
                         Err(e) => err(req, format!("firewall update failed: {e}")),
                         Ok(()) => match state.protocols.enable(name).await {
-                            Ok(v) => ok(req, v),
+                            Ok(v) => {
+                                if proto == nasty_system::protocol::Protocol::Nvmeof
+                                    && let Err(error) = state.nvmeof.restore().await
+                                {
+                                    let quiesce = state.nvmeof.quiesce().await.err();
+                                    let disable = state.protocols.disable(name).await.err();
+                                    let close = state.firewall.close(proto).await.err();
+                                    let mut message =
+                                        format!("failed to restore NVMe-oF safely: {error}");
+                                    if let Some(error) = quiesce {
+                                        message.push_str(&format!(
+                                            "; live namespace quiescing also failed: {error}"
+                                        ));
+                                    }
+                                    if let Some(error) = disable {
+                                        message.push_str(&format!(
+                                            "; protocol rollback also failed: {error}"
+                                        ));
+                                    }
+                                    if let Some(error) = close {
+                                        message.push_str(&format!(
+                                            "; firewall rollback also failed: {error}"
+                                        ));
+                                    }
+                                    return Some(err(req, message));
+                                }
+                                ok(req, v)
+                            }
                             Err(service_error) => {
                                 let rollback = state.firewall.close(proto).await;
                                 match rollback {

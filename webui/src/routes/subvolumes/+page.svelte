@@ -508,12 +508,13 @@
 	 * subvolume can go. Apps/VMs/backups all imply non-trivial
 	 * lifecycles we shouldn't tear down implicitly from a Delete
 	 * Subvolume click. */
-	const blockingDeps = $derived.by((): { label: string; route: string }[] => {
+	const blockingDeps = $derived.by((): { label: string; route?: string }[] => {
 		if (!deleteDeps) return [];
-		const out: { label: string; route: string }[] = [];
+		const out: { label: string; route?: string }[] = [];
 		for (const v of deleteDeps.vms) out.push({ label: `VM '${v}'`, route: '/vms' });
 		for (const a of deleteDeps.apps) out.push({ label: `app '${a}'`, route: '/apps' });
 		for (const b of deleteDeps.backup_jobs) out.push({ label: `backup job '${b}'`, route: '/backups' });
+		for (const error of deleteDeps.state_errors) out.push({ label: `Dependency state error: ${error}` });
 		return out;
 	});
 
@@ -1691,7 +1692,7 @@
 						{#each blockingDeps as b}
 							<li>
 								{b.label}
-								<a href={b.route} class="ml-1 text-xs text-primary underline">go to {b.route}</a>
+								{#if b.route}<a href={b.route} class="ml-1 text-xs text-primary underline">go to {b.route}</a>{/if}
 							</li>
 						{/each}
 					</ul>
@@ -1738,4 +1739,3 @@
 		{/if}
 	</Dialog.Content>
 </Dialog.Root>
-

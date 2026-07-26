@@ -243,7 +243,7 @@ async fn route_inner(req: &Request, state: &AppState, session: &Session) -> Opti
                 return Some(r);
             }
             match parse_params::<nasty_sharing::iscsi::CreateTargetRequest>(req) {
-                Ok(p) => {
+                Ok(mut p) => {
                     if p.portals
                         .as_deref()
                         .is_some_and(|ps| ps.iter().any(|portal| portal.iser))
@@ -256,6 +256,16 @@ async fn route_inner(req: &Request, state: &AppState, session: &Session) -> Opti
                             check_block_device_conflict(state, dp, "iscsi").await
                     {
                         return Some(err(req, conflict));
+                    }
+                    if let Some(ref device_path) = p.device_path {
+                        match state
+                            .subvolumes
+                            .block_volume_id_for_device(device_path)
+                            .await
+                        {
+                            Ok(identity) => p.backing_volume = identity,
+                            Err(error) => return Some(err(req, error)),
+                        }
                     }
                     match state.iscsi.create(p).await {
                         Ok(v) => ok(req, v),
@@ -286,12 +296,20 @@ async fn route_inner(req: &Request, state: &AppState, session: &Session) -> Opti
                 return Some(r);
             }
             match parse_params::<nasty_sharing::iscsi::AddLunRequest>(req) {
-                Ok(p) => {
+                Ok(mut p) => {
                     if let Some(conflict) =
                         check_block_device_conflict(state, &p.backstore_path, "iscsi").await
                     {
                         err(req, conflict)
                     } else {
+                        match state
+                            .subvolumes
+                            .block_volume_id_for_device(&p.backstore_path)
+                            .await
+                        {
+                            Ok(identity) => p.backing_volume = identity,
+                            Err(error) => return Some(err(req, error)),
+                        }
                         match state.iscsi.add_lun(p).await {
                             Ok(v) => ok(req, v),
                             Err(e) => err(req, e),
@@ -417,12 +435,22 @@ async fn route_inner(req: &Request, state: &AppState, session: &Session) -> Opti
                 return Some(r);
             }
             match parse_params::<nasty_sharing::nvmeof::CreateSubsystemRequest>(req) {
-                Ok(p) => {
+                Ok(mut p) => {
                     if let Some(ref device_path) = p.device_path
                         && let Some(conflict) =
                             check_block_device_conflict(state, device_path, "nvmeof").await
                     {
                         return Some(err(req, conflict));
+                    }
+                    if let Some(ref device_path) = p.device_path {
+                        match state
+                            .subvolumes
+                            .block_volume_id_for_device(device_path)
+                            .await
+                        {
+                            Ok(identity) => p.backing_volume = identity,
+                            Err(error) => return Some(err(req, error)),
+                        }
                     }
                     match state.nvmeof.create(p).await {
                         Ok(v) => {
@@ -477,12 +505,20 @@ async fn route_inner(req: &Request, state: &AppState, session: &Session) -> Opti
                 return Some(r);
             }
             match parse_params::<nasty_sharing::nvmeof::AddNamespaceRequest>(req) {
-                Ok(p) => {
+                Ok(mut p) => {
                     if let Some(conflict) =
                         check_block_device_conflict(state, &p.device_path, "nvmeof").await
                     {
                         err(req, conflict)
                     } else {
+                        match state
+                            .subvolumes
+                            .block_volume_id_for_device(&p.device_path)
+                            .await
+                        {
+                            Ok(identity) => p.backing_volume = identity,
+                            Err(error) => return Some(err(req, error)),
+                        }
                         match state.nvmeof.add_namespace(p).await {
                             Ok(v) => ok(req, v),
                             Err(e) => err(req, e),

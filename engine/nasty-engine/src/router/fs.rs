@@ -77,8 +77,7 @@ pub(super) async fn try_route(
                     .await
                 {
                     Ok(v) => {
-                        // Cascade: restore block devices on this filesystem
-                        let _ = state.subvolumes.restore_block_devices().await;
+                        reconcile_block_shares(state).await;
                         ok(req, v)
                     }
                     Err(e) => err(req, e),
@@ -98,7 +97,10 @@ pub(super) async fn try_route(
                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let passphrase = p.get("passphrase").and_then(|v| v.as_str()).unwrap_or("");
                 match state.filesystems.unlock(name, passphrase).await {
-                    Ok(fs) => ok(req, fs),
+                    Ok(fs) => {
+                        reconcile_block_shares(state).await;
+                        ok(req, fs)
+                    }
                     Err(e) => err(req, e),
                 }
             }
@@ -365,4 +367,88 @@ pub(super) async fn try_route(
         }
         _ => return None,
     })
+}
+
+async fn reconcile_block_shares(state: &AppState) {
+    let mappings = state.subvolumes.restore_block_devices().await;
+    let nvmeof = state.nvmeof.remap_device_paths(&mappings).await;
+    let iscsi = state.iscsi.remap_device_paths(&mappings).await;
+    if !iscsi.safe_to_restore {
+        if let Err(error) = state
+            .protocols
+            .quiesce(nasty_system::protocol::Protocol::Iscsi)
+            .await
+        {
+            tracing::error!("Failed to quiesce unsafe iSCSI state: {error}");
+        }
+        let _ = state
+            .firewall
+            .close(nasty_system::protocol::Protocol::Iscsi)
+            .await;
+    } else if state
+        .protocols
+        .is_enabled(nasty_system::protocol::Protocol::Iscsi)
+        .await
+        && (iscsi.changed
+            || !state
+                .protocols
+                .is_running(nasty_system::protocol::Protocol::Iscsi)
+                .await)
+    {
+        let result = match state
+            .protocols
+            .quiesce(nasty_system::protocol::Protocol::Iscsi)
+            .await
+        {
+            Ok(()) => match state
+                .firewall
+                .open(nasty_system::protocol::Protocol::Iscsi)
+                .await
+            {
+                Ok(()) => state.protocols.enable("iscsi").await.map(|_| ()),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            tracing::warn!("Failed to reactivate iSCSI after mount: {error}");
+            let _ = state
+                .firewall
+                .close(nasty_system::protocol::Protocol::Iscsi)
+                .await;
+        }
+    }
+    if !nvmeof.safe_to_restore {
+        if let Err(error) = state.nvmeof.quiesce().await {
+            tracing::error!("Failed to quiesce unsafe NVMe-oF state: {error}");
+        }
+        let _ = state
+            .firewall
+            .close(nasty_system::protocol::Protocol::Nvmeof)
+            .await;
+    } else if state
+        .protocols
+        .is_enabled(nasty_system::protocol::Protocol::Nvmeof)
+        .await
+        && (nvmeof.changed || !state.nvmeof.is_active().await.unwrap_or(false))
+    {
+        if let Err(error) = state
+            .firewall
+            .open(nasty_system::protocol::Protocol::Nvmeof)
+            .await
+        {
+            tracing::warn!("Failed to reopen NVMe-oF firewall after mount: {error}");
+        } else if let Err(error) = state.protocols.enable("nvmeof").await {
+            tracing::warn!("Failed to reactivate NVMe-oF after mount: {error}");
+        } else if let Err(error) = state.nvmeof.restore().await {
+            tracing::warn!("Failed to restore NVMe-oF after mount: {error}");
+            if let Err(error) = state.nvmeof.quiesce().await {
+                tracing::error!("Failed to quiesce partial NVMe-oF restore: {error}");
+            }
+            let _ = state
+                .firewall
+                .close(nasty_system::protocol::Protocol::Nvmeof)
+                .await;
+        }
+    }
 }

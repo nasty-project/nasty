@@ -10,7 +10,7 @@ use tracing::{info, warn};
 const STATE_PATH: &str = "/var/lib/nasty/protocols.json";
 const SMB_NASTY_CONF: &str = "/etc/samba/smb.nasty.conf";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Nfs,
@@ -223,10 +223,23 @@ impl ProtocolService {
     /// Restore enabled protocol services on startup.
     /// Starts daemons and loads kernel modules for protocols the user enabled.
     pub async fn restore(&self) {
+        self.restore_excluding(&std::collections::HashSet::new())
+            .await;
+    }
+
+    /// Restore enabled protocols except entries whose backing state failed
+    /// safety validation during boot.
+    pub async fn restore_excluding(&self, excluded: &std::collections::HashSet<Protocol>) {
         let state = load_state().await;
 
         for &proto in Protocol::ALL {
-            if !state.get(proto) {
+            if !state.get(proto) || excluded.contains(&proto) {
+                if excluded.contains(&proto) {
+                    warn!(
+                        "Skipping {} restore because its persisted backing state is unsafe",
+                        proto.display_name()
+                    );
+                }
                 continue;
             }
 
@@ -284,9 +297,23 @@ impl ProtocolService {
         }
     }
 
+    /// Stop a protocol's live services without changing the operator's
+    /// persisted enabled preference. Used when boot-time safety validation
+    /// fails and the protocol may have survived an engine-only restart.
+    pub async fn quiesce(&self, proto: Protocol) -> Result<(), String> {
+        for service in proto.services().iter().rev() {
+            systemctl("stop", service).await?;
+        }
+        Ok(())
+    }
+
     /// List all protocols with their enabled/running status
     pub async fn is_enabled(&self, proto: Protocol) -> bool {
         load_state().await.get(proto)
+    }
+
+    pub async fn is_running(&self, proto: Protocol) -> bool {
+        is_protocol_running(proto).await
     }
 
     pub async fn list(&self) -> Vec<ProtocolStatus> {
@@ -442,7 +469,7 @@ async fn is_protocol_running(proto: Protocol) -> bool {
     match proto {
         Protocol::Nfs => systemctl_is_active("nfs-server.service").await,
         Protocol::Smb => systemctl_is_active("samba-smbd.service").await,
-        Protocol::Iscsi => std::path::Path::new("/sys/module/iscsi_target_mod").exists(),
+        Protocol::Iscsi => systemctl_is_active("target.service").await,
         Protocol::Nvmeof => {
             // NVMe-oF is "running" if nvmet configfs is available
             std::path::Path::new("/sys/kernel/config/nvmet").exists()
@@ -518,10 +545,11 @@ async fn protocol_modules(proto: Protocol) -> Vec<&'static str> {
 }
 
 pub(crate) async fn systemctl(action: &str, service: &str) -> Result<(), String> {
-    let output = tokio::process::Command::new("systemctl")
-        .args([action, service])
-        .output()
+    let mut command = tokio::process::Command::new("systemctl");
+    command.args([action, service]).kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
         .await
+        .map_err(|_| format!("systemctl {action} {service} timed out after 30 seconds"))?
         .map_err(|e| format!("failed to run systemctl: {e}"))?;
 
     if output.status.success() {
