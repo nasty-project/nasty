@@ -417,6 +417,16 @@
       nasty-webui = mkWebui "x86_64-linux";
       nasty-bcachefs-tools = mkBcachefsTools "x86_64-linux";
     in {
+      # target.service is restored only after the engine has remapped persisted
+      # LUN identities. NixOS must not independently restart an active changed
+      # unit during a generation switch or it races the engine's quiesce step.
+      iscsi-engine-owned-lifecycle = let
+        restartIfChanged =
+          (mkNixosConfigs "x86_64-linux").nasty.config.systemd.services.target.restartIfChanged;
+      in pkgs.runCommand "iscsi-engine-owned-lifecycle" {} ''
+        test "${nixpkgs.lib.boolToString restartIfChanged}" = false
+        touch "$out"
+      '';
       bcachefs-smoke = import ./nixos/tests/bcachefs-smoke.nix {
         inherit pkgs nasty-bcachefs-tools;
       };

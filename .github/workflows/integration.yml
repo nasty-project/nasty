@@ -73,6 +73,7 @@ jobs:
       - name: Run integration tests
         run: |
           nix build \
+            .#checks.x86_64-linux.iscsi-engine-owned-lifecycle \
             .#checks.x86_64-linux.bcachefs-smoke \
             .#checks.x86_64-linux.appliance-smoke \
             -L --print-build-logs

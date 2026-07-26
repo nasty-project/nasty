@@ -1955,6 +1955,11 @@ in {
     # loading kernel modules and patching device paths.
     systemd.services.target = mkIf cfg.iscsi.enable {
       description = "LIO iSCSI target restore";
+      # The engine owns this unit's lifecycle so it can patch persisted
+      # backstore paths before restoring LIO. If NixOS restarts an active,
+      # changed unit during a generation switch, it races engine startup's
+      # mandatory quiesce and the switch fails when targetcli receives SIGTERM.
+      restartIfChanged = false;
       path = [ targetcli-fixed ];
       serviceConfig = {
         Type = "oneshot";
