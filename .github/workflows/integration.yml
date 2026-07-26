@@ -15,6 +15,9 @@ on:
       # test validates. Watch all of nixos/ so build-affecting config
       # can't merge unvalidated.
       - 'nixos/**'
+      # Engine behavior is exercised by appliance-smoke and the AD DC/member
+      # test; engine-only changes must not skip those integration checks.
+      - 'engine/**'
       - 'flake.nix'
       - 'flake.lock'
 
@@ -78,19 +81,10 @@ jobs:
             .#checks.x86_64-linux.appliance-smoke \
             -L --print-build-logs
 
-      - name: AD DC VM test (non-gating while stabilizing)
-        # ad-dc (#20): NASty provisions a real domain via
-        # samba-dc.service + dc.provision, and a second NASty joins it
-        # with the shipped member-join flow. This is
-        # the test's first live CI run, and a brand-new two-VM AD test is
-        # exactly the kind of thing that finds a harness or
-        # readiness-signal issue the first time it runs for real (see
-        # nixos/tests/ad-dc.nix's header for the two named fallbacks).
-        # Non-gating until it has built up a green track record, then
-        # promote to gating. continue-on-error masks the step's
-        # conclusion in the GitHub UI, so its logs — not the checkmark —
-        # are the source of truth while it stabilizes.
-        continue-on-error: true
+      - name: AD DC VM test
+        # Full two-node interoperability check: one NASty provisions a real
+        # domain and another joins it, resolves a domain user, and authenticates
+        # to SMB. Keep this gating so a green workflow means AD actually passed.
         run: |
           nix build \
             .#checks.x86_64-linux.ad-dc \

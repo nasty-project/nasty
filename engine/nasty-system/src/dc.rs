@@ -13,6 +13,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,8 @@ const FS_ROOT: &str = "/fs";
 /// NASty's own network config — consulted (read-only) by the static-IP
 /// precondition. Path mirrors `network.rs`'s private `JSON_PATH`.
 const NETWORKING_JSON_PATH: &str = "/var/lib/nasty/networking.json";
+const LDAP_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const LDAP_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DcError {
@@ -141,6 +144,58 @@ fn strip_dns_forwarder_lines(conf: &str) -> String {
         })
         .map(|l| format!("{l}\n"))
         .collect()
+}
+
+fn ldap_ready_args(workgroup: &str) -> Vec<String> {
+    vec![
+        "--kill-after=1s".into(),
+        "5s".into(),
+        "ldbsearch".into(),
+        "--configfile".into(),
+        DC_CONF_PATH.into(),
+        "-H".into(),
+        "ldap://127.0.0.1".into(),
+        "-s".into(),
+        "base".into(),
+        "-b".into(),
+        String::new(),
+        "-U".into(),
+        format!(r"{workgroup}\Administrator"),
+        "--use-kerberos=off".into(),
+        "defaultNamingContext".into(),
+    ]
+}
+
+fn ldap_rootdse_ready(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, value)| name == "defaultNamingContext" && !value.trim().is_empty())
+    })
+}
+
+async fn wait_for_ldap_ready(workgroup: &str, admin_password: &str) -> Result<(), DcError> {
+    let args = ldap_ready_args(workgroup);
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let deadline = Instant::now() + LDAP_READY_TIMEOUT;
+
+    loop {
+        let last_error = match run_cmd_stdin("timeout", &args, &[], admin_password).await {
+            Ok(output) if ldap_rootdse_ready(&output) => {
+                info!("dc: authenticated LDAP is ready");
+                return Ok(());
+            }
+            Ok(_) => "LDAP RootDSE did not return defaultNamingContext".to_string(),
+            Err(error) => error.to_string(),
+        };
+
+        if Instant::now() >= deadline {
+            return Err(DcError::CommandFailed(format!(
+                "samba-dc became active but authenticated LDAP was not ready within {}s: {last_error}",
+                LDAP_READY_TIMEOUT.as_secs()
+            )));
+        }
+        tokio::time::sleep(LDAP_READY_POLL_INTERVAL).await;
+    }
 }
 
 /// Insert `extra` immediately after the `[global]` section header. A blind
@@ -520,6 +575,11 @@ impl DcService {
             // samba-dc conflicts with smbd/nmbd/winbindd — systemd swaps
             // them atomically.
             run_cmd("systemctl", &["start", "samba-dc.service"], &[]).await?;
+            // Samba sends READY=1 before asynchronous TLS generation and
+            // authenticated LDAP initialization finish. Do not expose a DC
+            // as provisioned until the same remote-auth path used by domain
+            // joins can query RootDSE successfully.
+            wait_for_ldap_ready(&workgroup, &req.admin_password).await?;
 
             Self::save_config(&DcConfig {
                 realm: realm.clone(),
@@ -869,6 +929,26 @@ mod tests {
             1,
             "expected exactly one dns forwarder line, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn ldap_readiness_probe_uses_stdin_credentials_and_requires_rootdse() {
+        let secret = "Sup3r.Secret!";
+        let args = ldap_ready_args("ADEXAMPLE");
+        assert_eq!(args[0], "--kill-after=1s");
+        assert_eq!(args[1], "5s");
+        assert_eq!(args[2], "ldbsearch");
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-U" && w[1] == r"ADEXAMPLE\Administrator")
+        );
+        assert!(!args.iter().any(|arg| arg.contains(secret)));
+
+        assert!(ldap_rootdse_ready(
+            "# record 1\ndn:\ndefaultNamingContext: DC=ad,DC=example,DC=com\n"
+        ));
+        assert!(!ldap_rootdse_ready("# record 1\ndn:\n"));
+        assert!(!ldap_rootdse_ready("defaultNamingContext:\n"));
     }
 
     // ── looks_provisioned ─────────────────────────────────────
