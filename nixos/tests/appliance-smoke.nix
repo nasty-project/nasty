@@ -51,15 +51,22 @@ let
         return ws, auth
 
 
+    def recv_response(ws, request_id):
+        while True:
+            resp = json.loads(ws.recv())
+            if resp.get("id") == request_id:
+                return resp
+            assert "id" not in resp and resp.get("method") == "event", (
+                f"unexpected frame while waiting for id={request_id}: {resp!r}"
+            )
+
+
     def call(ws, method, request_id, params=None):
         req = {"jsonrpc": "2.0", "method": method, "id": request_id}
         if params is not None:
             req["params"] = params
         ws.send(json.dumps(req))
-        resp = json.loads(ws.recv())
-        assert resp.get("id") == request_id, (
-            f"id mismatch: req={request_id} resp={resp!r}"
-        )
+        resp = recv_response(ws, request_id)
         assert "error" not in resp, f"{method} returned error: {resp!r}"
         return resp["result"]
 
@@ -135,8 +142,7 @@ let
         # Unknown method must come back as a JSON-RPC error envelope,
         # not a silent drop.
         ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such.method", "id": 5}))
-        bad = json.loads(ws.recv())
-        assert bad.get("id") == 5, f"id mismatch: {bad!r}"
+        bad = recv_response(ws, 5)
         assert bad.get("error"), f"unknown method should error: {bad!r}"
         print("unknown method error:", bad["error"], file=sys.stderr)
     finally:
