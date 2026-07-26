@@ -825,6 +825,31 @@ in {
 
       (writeShellScriptBin "nasty-rebuild" ''
         set -euo pipefail
+
+        # The WebUI terminal's PTY belongs to nasty-engine. Activation stops
+        # the engine, so keeping switch-to-configuration attached to that PTY
+        # makes its next stderr write fail and the Rust binary panic (exit 101).
+        if [ -n "''${NASTY_WEBUI_TERMINAL:-}" ]; then
+          unit=nasty-manual-rebuild
+          if systemctl is-active --quiet "$unit"; then
+            echo "==> A detached rebuild is already running: $unit"
+            exit 1
+          fi
+          systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+          systemd-run \
+            --unit "$unit" \
+            --collect \
+            --no-block \
+            --description "NASty manual rebuild" \
+            --property StandardOutput=journal \
+            --property StandardError=journal \
+            --setenv "PATH=$PATH" \
+            -- /run/current-system/sw/bin/nasty-rebuild
+          echo "==> Rebuild detached from the WebUI terminal. Follow it with:"
+          echo "    journalctl -fu $unit"
+          exit 0
+        fi
+
         echo "==> Rebuilding NASty from /etc/nixos..."
         nixos-rebuild switch --flake /etc/nixos#nasty
         NASTY_REV=$(${pkgs.jq}/bin/jq -r '.nodes["nasty"].locked.rev // empty' /etc/nixos/flake.lock 2>/dev/null || true)
