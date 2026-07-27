@@ -290,6 +290,34 @@ fn state_dir() -> StateDir {
     StateDir::new(STATE_DIR)
 }
 
+fn chap_enabled(userid: Option<&str>, password: Option<&str>) -> Result<bool, IscsiError> {
+    match (userid, password) {
+        (None, None) => Ok(false),
+        (Some(userid), Some(password)) if !userid.is_empty() && !password.is_empty() => Ok(true),
+        _ => Err(IscsiError::CommandFailed(
+            "CHAP username and password must be provided together and must not be empty"
+                .to_string(),
+        )),
+    }
+}
+
+async fn rollback_new_acl(
+    acl_path: &str,
+    tpg_path: &str,
+    original_generate_node_acls: &str,
+    original_enable: &str,
+) -> Result<(), IscsiError> {
+    let enable_path = format!("{tpg_path}/enable");
+    configfs_write(&enable_path, "0").await?;
+    configfs_rmdir(acl_path).await?;
+    configfs_write(
+        &format!("{tpg_path}/attrib/generate_node_acls"),
+        original_generate_node_acls,
+    )
+    .await?;
+    configfs_write(&enable_path, original_enable).await
+}
+
 // ── Service ─────────────────────────────────────────────────────
 
 pub struct IscsiService;
@@ -303,6 +331,25 @@ impl Default for IscsiService {
 impl IscsiService {
     pub fn new() -> Self {
         Self
+    }
+
+    async fn cleanup_failed_create(&self, target_id: &str, error: IscsiError) -> IscsiError {
+        if let Err(cleanup_error) = self
+            .delete(DeleteTargetRequest {
+                id: target_id.to_string(),
+            })
+            .await
+        {
+            return IscsiError::ConfigFs(format!(
+                "{error}; failed to clean up target: {cleanup_error}"
+            ));
+        }
+        if let Err(cleanup_error) = save_lio_config_checked().await {
+            return IscsiError::ConfigFs(format!(
+                "{error}; failed to persist target cleanup: {cleanup_error}"
+            ));
+        }
+        error
     }
 
     /// Resolve every managed LUN independently by immutable backing identity.
@@ -433,12 +480,25 @@ impl IscsiService {
 
     pub async fn create(&self, req: CreateTargetRequest) -> Result<IscsiTarget, IscsiError> {
         validate_target_name(&req.name)?;
+        let has_explicit_acls = req.acls.is_some();
+        if let Some(acls) = &req.acls {
+            let mut initiators = std::collections::HashSet::new();
+            for acl in acls {
+                chap_enabled(acl.userid.as_deref(), acl.password.as_deref())?;
+                if !initiators.insert(acl.initiator_iqn.to_ascii_lowercase()) {
+                    return Err(IscsiError::AlreadyExists(acl.initiator_iqn.clone()));
+                }
+            }
+        }
         let targets: Vec<IscsiTarget> = state_dir().load_all_strict().await?;
         let iqn = format!("{DEFAULT_IQN_PREFIX}:{}", req.name);
 
-        if let Some(existing) = targets.into_iter().find(|t| t.iqn == iqn) {
+        if let Some(existing) = targets
+            .into_iter()
+            .find(|target| target.iqn.eq_ignore_ascii_case(&iqn))
+        {
             info!("iSCSI target {iqn} already exists, returning existing (idempotent)");
-            return Ok(existing);
+            return Ok(existing.redacted());
         }
 
         // Split portals into "must succeed" and "best effort" buckets.
@@ -506,9 +566,13 @@ impl IscsiService {
             }
         }
 
-        // Disable authentication, allow any initiator, allow writes
+        // Explicit ACL targets start deny-by-default and never enter demo mode.
         configfs_write(&format!("{tpg_path}/attrib/authentication"), "0").await?;
-        configfs_write(&format!("{tpg_path}/attrib/generate_node_acls"), "1").await?;
+        configfs_write(
+            &format!("{tpg_path}/attrib/generate_node_acls"),
+            if has_explicit_acls { "0" } else { "1" },
+        )
+        .await?;
         configfs_write(&format!("{tpg_path}/attrib/demo_mode_write_protect"), "0").await?;
 
         // Enable the TPG
@@ -534,7 +598,7 @@ impl IscsiService {
         let mut target = target;
         if let Some(device_path) = req.device_path {
             if target.luns.is_empty() {
-                target = self
+                target = match self
                     .add_lun(AddLunRequest {
                         target_id: target.id.clone(),
                         backstore_path: device_path,
@@ -542,7 +606,13 @@ impl IscsiService {
                         size_bytes: None,
                         backing_volume: req.backing_volume,
                     })
-                    .await?;
+                    .await
+                {
+                    Ok(target) => target,
+                    Err(error) => {
+                        return Err(self.cleanup_failed_create(&target.id, error).await);
+                    }
+                };
             } else {
                 info!(
                     "iSCSI target {} already has {} LUN(s), skipping",
@@ -555,14 +625,20 @@ impl IscsiService {
         // Optional: add ACLs if provided
         if let Some(acls) = req.acls {
             for acl_entry in acls {
-                target = self
+                target = match self
                     .add_acl(AddAclRequest {
                         target_id: target.id.clone(),
                         initiator_iqn: acl_entry.initiator_iqn,
                         userid: acl_entry.userid,
                         password: acl_entry.password,
                     })
-                    .await?;
+                    .await
+                {
+                    Ok(target) => target,
+                    Err(error) => {
+                        return Err(self.cleanup_failed_create(&target.id, error).await);
+                    }
+                };
             }
         }
 
@@ -789,23 +865,70 @@ impl IscsiService {
     }
 
     pub async fn add_acl(&self, req: AddAclRequest) -> Result<IscsiTarget, IscsiError> {
+        let enable_chap = chap_enabled(req.userid.as_deref(), req.password.as_deref())?;
         let mut target: IscsiTarget = state_dir()
             .load(&req.target_id)
             .await
             .ok_or_else(|| IscsiError::NotFound(req.target_id.clone()))?;
+        if target
+            .acls
+            .iter()
+            .any(|acl| acl.initiator_iqn.eq_ignore_ascii_case(&req.initiator_iqn))
+        {
+            return Err(IscsiError::AlreadyExists(req.initiator_iqn));
+        }
+        let original_target = target.clone();
 
         let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
         let acl_path = format!("{tpg_path}/acls/{}", req.initiator_iqn);
-        configfs_mkdir(&acl_path).await?;
-
-        if let (Some(userid), Some(password)) = (&req.userid, &req.password) {
-            configfs_write(&format!("{acl_path}/auth/userid"), userid).await?;
-            configfs_write_secret(&format!("{acl_path}/auth/password"), password).await?;
+        let generate_path = format!("{tpg_path}/attrib/generate_node_acls");
+        let enable_path = format!("{tpg_path}/enable");
+        let original_generate_node_acls = tokio::fs::read_to_string(&generate_path)
+            .await?
+            .trim()
+            .to_string();
+        let original_enable = tokio::fs::read_to_string(&enable_path)
+            .await?
+            .trim()
+            .to_string();
+        configfs_write(&enable_path, "0").await?;
+        if let Err(error) = configfs_mkdir(&acl_path).await {
+            if let Err(restore_error) = configfs_write(&enable_path, &original_enable).await {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; failed to restore TPG enable state: {restore_error}"
+                )));
+            }
+            return Err(error);
         }
 
-        // Disable generate_node_acls when explicit ACLs are added
-        configfs_write(&format!("{tpg_path}/attrib/generate_node_acls"), "0").await?;
-        configfs_write(&format!("{tpg_path}/attrib/authentication"), "0").await?;
+        let configure = async {
+            if enable_chap && let (Some(userid), Some(password)) = (&req.userid, &req.password) {
+                // An incomplete setup must deny login rather than inherit open TPG auth.
+                configfs_write(&format!("{acl_path}/attrib/authentication"), "1").await?;
+                configfs_write(&format!("{acl_path}/auth/userid"), userid).await?;
+                configfs_write_secret(&format!("{acl_path}/auth/password"), password).await?;
+            }
+
+            configfs_write(&format!("{tpg_path}/attrib/generate_node_acls"), "0").await?;
+            configfs_write(&format!("{tpg_path}/attrib/authentication"), "0").await?;
+            Ok::<(), IscsiError>(())
+        }
+        .await;
+        if let Err(error) = configure {
+            if let Err(rollback_error) = rollback_new_acl(
+                &acl_path,
+                &tpg_path,
+                &original_generate_node_acls,
+                &original_enable,
+            )
+            .await
+            {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; ACL rollback failed with the TPG disabled: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
 
         // configfs already has the plaintext (written above); seal the
         // copy we persist in NASty's state file.
@@ -818,8 +941,77 @@ impl IscsiService {
             password_encrypted,
         });
 
-        state_dir().save(&target.id, &target).await?;
-        save_lio_config().await;
+        if let Err(error) = state_dir().save(&target.id, &target).await {
+            if let Err(rollback_error) = rollback_new_acl(
+                &acl_path,
+                &tpg_path,
+                &original_generate_node_acls,
+                &original_enable,
+            )
+            .await
+            {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; ACL rollback failed with the TPG disabled: {rollback_error}"
+                )));
+            }
+            return Err(error.into());
+        }
+        if let Err(error) = configfs_write(&enable_path, &original_enable).await {
+            if let Err(restore_error) = state_dir()
+                .save(&original_target.id, &original_target)
+                .await
+            {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; failed to restore target state with the TPG disabled: {restore_error}"
+                )));
+            }
+            if let Err(rollback_error) = rollback_new_acl(
+                &acl_path,
+                &tpg_path,
+                &original_generate_node_acls,
+                &original_enable,
+            )
+            .await
+            {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; ACL rollback failed with the TPG disabled: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+        if let Err(error) = save_lio_config_checked().await {
+            if let Err(disable_error) = configfs_write(&enable_path, "0").await {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; failed to disable TPG for rollback: {disable_error}"
+                )));
+            }
+            if let Err(restore_error) = state_dir()
+                .save(&original_target.id, &original_target)
+                .await
+            {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; failed to restore target state with the TPG disabled: {restore_error}"
+                )));
+            }
+            if let Err(rollback_error) = rollback_new_acl(
+                &acl_path,
+                &tpg_path,
+                &original_generate_node_acls,
+                &original_enable,
+            )
+            .await
+            {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; ACL rollback failed with the TPG disabled: {rollback_error}"
+                )));
+            }
+            if let Err(rollback_error) = save_lio_config_checked().await {
+                return Err(IscsiError::ConfigFs(format!(
+                    "{error}; failed to persist ACL rollback: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
 
         info!("Added ACL to target '{}'", target.iqn);
         Ok(target.redacted())
@@ -1210,18 +1402,24 @@ async fn hba_is_empty(hba_path: &str) -> bool {
 
 /// Save the running LIO config so it persists across reboots.
 /// Uses targetcli saveconfig — the only remaining targetcli dependency.
-async fn save_lio_config() {
-    let result = tokio::process::Command::new("targetcli")
+async fn save_lio_config_checked() -> Result<(), IscsiError> {
+    let output = tokio::process::Command::new("targetcli")
         .args(["saveconfig"])
         .output()
-        .await;
-    match result {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("targetcli saveconfig failed: {stderr}");
-        }
-        Err(e) => warn!("Failed to run targetcli saveconfig: {e}"),
+        .await
+        .map_err(|error| IscsiError::CommandFailed(format!("targetcli saveconfig: {error}")))?;
+    if !output.status.success() {
+        return Err(IscsiError::CommandFailed(format!(
+            "targetcli saveconfig: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+async fn save_lio_config() {
+    if let Err(error) = save_lio_config_checked().await {
+        warn!("{error}");
     }
 }
 
@@ -1749,6 +1947,16 @@ mod tests {
         let acl: Acl = serde_json::from_str(json).unwrap();
         assert_eq!(acl.password.as_deref(), Some("legacy"));
         assert!(acl.password_encrypted.is_none());
+    }
+
+    #[test]
+    fn chap_requires_a_complete_nonempty_credential_pair() {
+        assert!(!chap_enabled(None, None).unwrap());
+        assert!(chap_enabled(Some("user"), Some("password")).unwrap());
+        assert!(chap_enabled(Some("user"), None).is_err());
+        assert!(chap_enabled(None, Some("password")).is_err());
+        assert!(chap_enabled(Some(""), Some("password")).is_err());
+        assert!(chap_enabled(Some("user"), Some("")).is_err());
     }
 
     #[test]
