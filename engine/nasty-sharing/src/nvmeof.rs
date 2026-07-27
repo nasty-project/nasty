@@ -1164,10 +1164,19 @@ async fn configfs_symlink(target: &str, link: &str) -> Result<(), NvmeofError> {
 async fn configfs_ensure_symlink(target: &str, link: &str) -> Result<(), NvmeofError> {
     match tokio::fs::read_link(link).await {
         Ok(existing) if existing == Path::new(target) => Ok(()),
-        Ok(existing) => Err(NvmeofError::ConfigFs(format!(
-            "symlink {link} points to {} instead of {target}",
-            existing.display()
-        ))),
+        Ok(existing) => {
+            let resolved_link = tokio::fs::canonicalize(link).await;
+            let resolved_target = tokio::fs::canonicalize(target).await;
+            if matches!((&resolved_link, &resolved_target), (Ok(link), Ok(target)) if link == target)
+            {
+                Ok(())
+            } else {
+                Err(NvmeofError::ConfigFs(format!(
+                    "symlink {link} points to {} instead of {target}",
+                    existing.display()
+                )))
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             configfs_symlink(target, link).await
         }
@@ -1618,6 +1627,48 @@ mod tests {
                 .unwrap(),
             "1"
         );
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_symlink_accepts_relative_link_to_absolute_target() {
+        let dir = std::env::temp_dir().join(format!("nasty-nvmeof-test-{}", Uuid::new_v4()));
+        let target = dir.join("subsystems/test");
+        let link = dir.join("ports/1/subsystems/test");
+        tokio::fs::create_dir_all(&target).await.unwrap();
+        tokio::fs::create_dir_all(link.parent().unwrap())
+            .await
+            .unwrap();
+        let relative = Path::new("../../../subsystems/test");
+        tokio::fs::symlink(relative, &link).await.unwrap();
+
+        configfs_ensure_symlink(target.to_str().unwrap(), link.to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read_link(&link).await.unwrap(), relative);
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_symlink_rejects_relative_link_to_different_target() {
+        let dir = std::env::temp_dir().join(format!("nasty-nvmeof-test-{}", Uuid::new_v4()));
+        let target = dir.join("subsystems/expected");
+        let wrong = dir.join("subsystems/wrong");
+        let link = dir.join("ports/1/subsystems/expected");
+        tokio::fs::create_dir_all(&target).await.unwrap();
+        tokio::fs::create_dir_all(&wrong).await.unwrap();
+        tokio::fs::create_dir_all(link.parent().unwrap())
+            .await
+            .unwrap();
+        let relative = Path::new("../../../subsystems/wrong");
+        tokio::fs::symlink(relative, &link).await.unwrap();
+
+        let result =
+            configfs_ensure_symlink(target.to_str().unwrap(), link.to_str().unwrap()).await;
+
+        assert!(matches!(result, Err(NvmeofError::ConfigFs(_))));
+        assert_eq!(tokio::fs::read_link(&link).await.unwrap(), relative);
         tokio::fs::remove_dir_all(dir).await.unwrap();
     }
 
