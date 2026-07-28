@@ -525,9 +525,16 @@ impl IscsiService {
             }
         };
 
-        // Create target and TPG in configfs
+        // Create the IQN and TPG separately. Apart from allowing cleanup of a
+        // half-created target, this keeps configfs errors tied to the component
+        // that actually failed instead of create_dir_all reporting only the leaf.
+        let target_path = format!("{ISCSI_BASE}/{iqn}");
         let tpg_path = format!("{ISCSI_BASE}/{iqn}/tpgt_1");
-        configfs_mkdir(&tpg_path).await?;
+        configfs_mkdir_new(&target_path).await?;
+        if let Err(error) = configfs_mkdir(&tpg_path).await {
+            let _ = configfs_rmdir(&target_path).await;
+            return Err(error);
+        }
 
         // Create mandatory portals first — any failure aborts the
         // whole create, but we've only created the TPG dir so far,
@@ -535,11 +542,7 @@ impl IscsiService {
         let mut created_portals = Vec::with_capacity(mandatory_portals.len() + 1);
         for portal in &mandatory_portals {
             if let Err(e) = create_np(&tpg_path, portal).await {
-                // Best-effort cleanup of what we created so far so the
-                // next attempt doesn't trip the idempotency check with
-                // a stale half-target.
-                let _ = configfs_rmdir(&tpg_path).await;
-                let _ = configfs_rmdir(&format!("{ISCSI_BASE}/{iqn}")).await;
+                cleanup_unpersisted_target(&target_path, &tpg_path, &created_portals).await;
                 return Err(e);
             }
             created_portals.push(portal.clone());
@@ -566,17 +569,23 @@ impl IscsiService {
             }
         }
 
-        // Explicit ACL targets start deny-by-default and never enter demo mode.
-        configfs_write(&format!("{tpg_path}/attrib/authentication"), "0").await?;
-        configfs_write(
-            &format!("{tpg_path}/attrib/generate_node_acls"),
-            if has_explicit_acls { "0" } else { "1" },
-        )
-        .await?;
-        configfs_write(&format!("{tpg_path}/attrib/demo_mode_write_protect"), "0").await?;
-
-        // Enable the TPG
-        configfs_write(&format!("{tpg_path}/enable"), "1").await?;
+        let configure = async {
+            // Explicit ACL targets start deny-by-default and never enter demo mode.
+            configfs_write(&format!("{tpg_path}/attrib/authentication"), "0").await?;
+            configfs_write(
+                &format!("{tpg_path}/attrib/generate_node_acls"),
+                if has_explicit_acls { "0" } else { "1" },
+            )
+            .await?;
+            configfs_write(&format!("{tpg_path}/attrib/demo_mode_write_protect"), "0").await?;
+            configfs_write(&format!("{tpg_path}/enable"), "1").await?;
+            Ok::<(), IscsiError>(())
+        }
+        .await;
+        if let Err(error) = configure {
+            cleanup_unpersisted_target(&target_path, &tpg_path, &created_portals).await;
+            return Err(error);
+        }
 
         let target = IscsiTarget {
             id: Uuid::new_v4().to_string(),
@@ -591,7 +600,10 @@ impl IscsiService {
             enabled: true,
         };
 
-        state_dir().save(&target.id, &target).await?;
+        if let Err(error) = state_dir().save(&target.id, &target).await {
+            cleanup_unpersisted_target(&target_path, &tpg_path, &target.portals).await;
+            return Err(error.into());
+        }
         save_lio_config().await;
 
         // Optional: add LUN if device_path was provided
@@ -1296,8 +1308,23 @@ async fn create_np(tpg_path: &str, portal: &Portal) -> Result<(), IscsiError> {
     Ok(())
 }
 
+async fn cleanup_unpersisted_target(target_path: &str, tpg_path: &str, portals: &[Portal]) {
+    let _ = configfs_write(&format!("{tpg_path}/enable"), "0").await;
+    for portal in portals.iter().rev() {
+        let _ = configfs_rmdir(&np_path_for(tpg_path, &portal.ip, portal.port)).await;
+    }
+    let _ = configfs_rmdir(tpg_path).await;
+    let _ = configfs_rmdir(target_path).await;
+}
+
 async fn configfs_mkdir(path: &str) -> Result<(), IscsiError> {
     tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|e| IscsiError::ConfigFs(format!("mkdir {path}: {e}")))
+}
+
+async fn configfs_mkdir_new(path: &str) -> Result<(), IscsiError> {
+    tokio::fs::create_dir(path)
         .await
         .map_err(|e| IscsiError::ConfigFs(format!("mkdir {path}: {e}")))
 }
