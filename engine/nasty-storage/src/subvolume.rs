@@ -221,19 +221,16 @@ fn authorize_snapshot_provenance(
     Ok(())
 }
 
-fn authorize_snapshot_delete(
-    orphaned: bool,
-    snapshot_exists: bool,
-    allow_orphan_cleanup: bool,
-    snapshot_name: &str,
+fn authorize_orphan_snapshot(
+    snapshot_owner: Option<&str>,
+    owner_filter: Option<&str>,
+    allow_admin_override: bool,
 ) -> Result<(), SubvolumeError> {
-    if orphaned && !allow_orphan_cleanup {
-        return Err(SubvolumeError::AccessDenied);
+    if allow_admin_override {
+        return Ok(());
     }
-    if !snapshot_exists {
-        return Err(SubvolumeError::NotFound(snapshot_name.to_string()));
-    }
-    Ok(())
+    let owner = owner_filter.ok_or(SubvolumeError::AccessDenied)?;
+    require_owner(snapshot_owner, Some(owner))
 }
 
 fn validate_volsize_bytes(bytes: u64) -> Result<(), SubvolumeError> {
@@ -2000,7 +1997,8 @@ impl SubvolumeService {
     }
 
     /// Delete a snapshot.
-    /// `owner_filter`: if Some, verifies the caller owns the parent subvolume.
+    /// `owner_filter`: if Some, verifies the caller owns the parent subvolume or
+    /// a retained orphan snapshot.
     pub async fn delete_snapshot(
         &self,
         req: DeleteSnapshotRequest,
@@ -2017,24 +2015,26 @@ impl SubvolumeService {
             Err(SubvolumeError::NotFound(_)) => None,
             Err(error) => return Err(error),
         };
-        let orphaned = parent.is_none();
-        if orphaned && !allow_orphan_cleanup {
+        if parent.is_none() && owner_filter.is_none() && !allow_orphan_cleanup {
             return Err(SubvolumeError::AccessDenied);
         }
 
         let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.name);
-        authorize_snapshot_delete(
-            orphaned,
-            Path::new(&snap_path).exists(),
-            allow_orphan_cleanup,
-            &req.name,
-        )?;
+        if !Path::new(&snap_path).exists() {
+            return Err(SubvolumeError::NotFound(req.name.clone()));
+        }
         let snapshot_meta = read_meta_xattrs(Path::new(&snap_path));
         if let Some(parent) = parent.as_ref() {
             authorize_snapshot_provenance(
                 snapshot_meta.owner.as_deref(),
                 parent.owner.as_deref(),
+                owner_filter,
+                allow_orphan_cleanup,
+            )?;
+        } else {
+            authorize_orphan_snapshot(
+                snapshot_meta.owner.as_deref(),
                 owner_filter,
                 allow_orphan_cleanup,
             )?;
@@ -2147,7 +2147,8 @@ impl SubvolumeService {
     }
 
     /// Clone a snapshot into a new writable subvolume.
-    /// `owner_filter`: if Some, verifies the caller owns the parent subvolume.
+    /// `owner_filter`: if Some, verifies the caller owns the parent subvolume or
+    /// a retained orphan snapshot.
     pub async fn clone_snapshot(
         &self,
         req: CloneSnapshotRequest,
@@ -2164,10 +2165,12 @@ impl SubvolumeService {
             .await
         {
             Ok(parent) => Some(parent),
-            Err(SubvolumeError::NotFound(_)) if allow_admin_override => None,
-            Err(SubvolumeError::NotFound(_)) => return Err(SubvolumeError::AccessDenied),
+            Err(SubvolumeError::NotFound(_)) => None,
             Err(error) => return Err(error),
         };
+        if parent.is_none() && owner_filter.is_none() && !allow_admin_override {
+            return Err(SubvolumeError::AccessDenied);
+        }
 
         let mount_point = self.fs_mount_point(&req.filesystem).await?;
         let snap_path = snap_path(&mount_point, &req.subvolume, &req.snapshot);
@@ -2184,6 +2187,12 @@ impl SubvolumeService {
             authorize_snapshot_provenance(
                 snapshot_meta.owner.as_deref(),
                 parent.owner.as_deref(),
+                owner_filter,
+                allow_admin_override,
+            )?;
+        } else {
+            authorize_orphan_snapshot(
+                snapshot_meta.owner.as_deref(),
                 owner_filter,
                 allow_admin_override,
             )?;
@@ -3419,21 +3428,22 @@ mod tests {
     }
 
     #[test]
-    fn orphan_snapshot_cleanup_requires_explicit_authority() {
-        assert!(authorize_snapshot_delete(false, true, false, "snap").is_ok());
+    fn orphan_snapshot_requires_matching_owner_or_admin() {
+        assert!(authorize_orphan_snapshot(Some("token-a"), Some("token-a"), false).is_ok());
         assert!(matches!(
-            authorize_snapshot_delete(true, true, false, "snap"),
-            Err(SubvolumeError::AccessDenied)
-        ));
-        assert!(authorize_snapshot_delete(true, true, true, "snap").is_ok());
-        assert!(matches!(
-            authorize_snapshot_delete(true, false, false, "snap"),
+            authorize_orphan_snapshot(Some("token-b"), Some("token-a"), false),
             Err(SubvolumeError::AccessDenied)
         ));
         assert!(matches!(
-            authorize_snapshot_delete(true, false, true, "snap"),
-            Err(SubvolumeError::NotFound(name)) if name == "snap"
+            authorize_orphan_snapshot(None, Some("token-a"), false),
+            Err(SubvolumeError::AccessDenied)
         ));
+        assert!(matches!(
+            authorize_orphan_snapshot(Some("token-a"), None, false),
+            Err(SubvolumeError::AccessDenied)
+        ));
+        assert!(authorize_orphan_snapshot(Some("token-b"), None, true).is_ok());
+        assert!(authorize_orphan_snapshot(None, None, true).is_ok());
     }
 
     #[test]
