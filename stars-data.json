@@ -1,0 +1,576 @@
+{
+  "version": 1,
+  "snapshots": [
+    {
+      "timestamp": "2026-08-31T17:23:47.732Z",
+      "totalStars": 1205,
+      "repos": [
+        {
+          "fullName": "fenio/anylinuxfs-gui",
+          "name": "anylinuxfs-gui",
+          "owner": "fenio",
+          "stars": 190
+        },
+        {
+          "fullName": "fenio/bcachefs-wiki",
+          "name": "bcachefs-wiki",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/dlna-proxy",
+          "name": "dlna-proxy",
+          "owner": "fenio",
+          "stars": 8
+        },
+        {
+          "fullName": "fenio/dotfiles",
+          "name": "dotfiles",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/dumb-provisioner",
+          "name": "dumb-provisioner",
+          "owner": "fenio",
+          "stars": 12
+        },
+        {
+          "fullName": "fenio/fenio.github.io",
+          "name": "fenio.github.io",
+          "owner": "fenio",
+          "stars": 1
+        },
+        {
+          "fullName": "fenio/furman",
+          "name": "furman",
+          "owner": "fenio",
+          "stars": 15
+        },
+        {
+          "fullName": "fenio/gh-rmrf",
+          "name": "gh-rmrf",
+          "owner": "fenio",
+          "stars": 2
+        },
+        {
+          "fullName": "fenio/ha-addons",
+          "name": "ha-addons",
+          "owner": "fenio",
+          "stars": 17
+        },
+        {
+          "fullName": "fenio/homebrew-tap",
+          "name": "homebrew-tap",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/homelab",
+          "name": "homelab",
+          "owner": "fenio",
+          "stars": 35
+        },
+        {
+          "fullName": "fenio/k3s-synology",
+          "name": "k3s-synology",
+          "owner": "fenio",
+          "stars": 37
+        },
+        {
+          "fullName": "fenio/k8s-truenas",
+          "name": "k8s-truenas",
+          "owner": "fenio",
+          "stars": 109
+        },
+        {
+          "fullName": "fenio/kerneloops",
+          "name": "kerneloops",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/modern-fs-benchmark",
+          "name": "modern-fs-benchmark",
+          "owner": "fenio",
+          "stars": 30
+        },
+        {
+          "fullName": "fenio/mongodb-no-avx",
+          "name": "mongodb-no-avx",
+          "owner": "fenio",
+          "stars": 9
+        },
+        {
+          "fullName": "fenio/netalchemy",
+          "name": "netalchemy",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/omada-controller-no-avx",
+          "name": "omada-controller-no-avx",
+          "owner": "fenio",
+          "stars": 2
+        },
+        {
+          "fullName": "fenio/pv-mounter",
+          "name": "pv-mounter",
+          "owner": "fenio",
+          "stars": 149
+        },
+        {
+          "fullName": "fenio/scoop-bucket",
+          "name": "scoop-bucket",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/setup-k0s",
+          "name": "setup-k0s",
+          "owner": "fenio",
+          "stars": 1
+        },
+        {
+          "fullName": "fenio/setup-k3s",
+          "name": "setup-k3s",
+          "owner": "fenio",
+          "stars": 2
+        },
+        {
+          "fullName": "fenio/setup-krew",
+          "name": "setup-krew",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/setup-kubesolo",
+          "name": "setup-kubesolo",
+          "owner": "fenio",
+          "stars": 7
+        },
+        {
+          "fullName": "fenio/setup-microk8s",
+          "name": "setup-microk8s",
+          "owner": "fenio",
+          "stars": 1
+        },
+        {
+          "fullName": "fenio/setup-minikube",
+          "name": "setup-minikube",
+          "owner": "fenio",
+          "stars": 1
+        },
+        {
+          "fullName": "fenio/setup-talos",
+          "name": "setup-talos",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/skadis",
+          "name": "skadis",
+          "owner": "fenio",
+          "stars": 0
+        },
+        {
+          "fullName": "fenio/terrarium",
+          "name": "terrarium",
+          "owner": "fenio",
+          "stars": 7
+        },
+        {
+          "fullName": "fenio/tns-csi",
+          "name": "tns-csi",
+          "owner": "fenio",
+          "stars": 122
+        },
+        {
+          "fullName": "fenio/ugly-nas",
+          "name": "ugly-nas",
+          "owner": "fenio",
+          "stars": 64
+        },
+        {
+          "fullName": "fenio/wharf",
+          "name": "wharf",
+          "owner": "fenio",
+          "stars": 1
+        },
+        {
+          "fullName": "fenio/zod",
+          "name": "zod",
+          "owner": "fenio",
+          "stars": 7
+        },
+        {
+          "fullName": "nasty-project/.github",
+          "name": ".github",
+          "owner": "nasty-project",
+          "stars": 0
+        },
+        {
+          "fullName": "nasty-project/nasty",
+          "name": "nasty",
+          "owner": "nasty-project",
+          "stars": 350
+        },
+        {
+          "fullName": "nasty-project/nasty-chart",
+          "name": "nasty-chart",
+          "owner": "nasty-project",
+          "stars": 1
+        },
+        {
+          "fullName": "nasty-project/nasty-csi",
+          "name": "nasty-csi",
+          "owner": "nasty-project",
+          "stars": 2
+        },
+        {
+          "fullName": "nasty-project/nasty-docs",
+          "name": "nasty-docs",
+          "owner": "nasty-project",
+          "stars": 0
+        },
+        {
+          "fullName": "nasty-project/nasty-go",
+          "name": "nasty-go",
+          "owner": "nasty-project",
+          "stars": 1
+        },
+        {
+          "fullName": "nasty-project/nasty-plugin",
+          "name": "nasty-plugin",
+          "owner": "nasty-project",
+          "stars": 1
+        },
+        {
+          "fullName": "nasty-project/nasty-telemetry",
+          "name": "nasty-telemetry",
+          "owner": "nasty-project",
+          "stars": 0
+        },
+        {
+          "fullName": "nasty-project/nasty-tests",
+          "name": "nasty-tests",
+          "owner": "nasty-project",
+          "stars": 0
+        },
+        {
+          "fullName": "nasty-project/nasty-top",
+          "name": "nasty-top",
+          "owner": "nasty-project",
+          "stars": 21
+        },
+        {
+          "fullName": "tns-project/api_client",
+          "name": "api_client",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/apps_validation",
+          "name": "apps_validation",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/audit_rules",
+          "name": "audit_rules",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/avahi",
+          "name": "avahi",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/binaries",
+          "name": "binaries",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/freeipa",
+          "name": "freeipa",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/grub2",
+          "name": "grub2",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/ixdiagnose",
+          "name": "ixdiagnose",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/ixhardware",
+          "name": "ixhardware",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/licenselib",
+          "name": "licenselib",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/linux",
+          "name": "linux",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/midcli",
+          "name": "midcli",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/middleware",
+          "name": "middleware",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/nfs-utils",
+          "name": "nfs-utils",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/nfs4xdr-acl-tools",
+          "name": "nfs4xdr-acl-tools",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/openssl-fips",
+          "name": "openssl-fips",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/pam_truenas",
+          "name": "pam_truenas",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/parted",
+          "name": "parted",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/py-cryptit",
+          "name": "py-cryptit",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/py-fenced",
+          "name": "py-fenced",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/py-libzfs",
+          "name": "py-libzfs",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/py-nvme",
+          "name": "py-nvme",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/py-sg3",
+          "name": "py-sg3",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/py-sgio",
+          "name": "py-sgio",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/python-netsnmpagent",
+          "name": "python-netsnmpagent",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/python-truenas-requirements",
+          "name": "python-truenas-requirements",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/rclone",
+          "name": "rclone",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/samba",
+          "name": "samba",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/scale-build",
+          "name": "scale-build",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/scst",
+          "name": "scst",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/sedutil",
+          "name": "sedutil",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/smartmontools",
+          "name": "smartmontools",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/sssd",
+          "name": "sssd",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas-installer",
+          "name": "truenas-installer",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_connect_utils",
+          "name": "truenas_connect_utils",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_crypto_utils",
+          "name": "truenas_crypto_utils",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_pwenc",
+          "name": "truenas_pwenc",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_pykeyring",
+          "name": "truenas_pykeyring",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_pylibvirt",
+          "name": "truenas_pylibvirt",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_pylibzfs",
+          "name": "truenas_pylibzfs",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_pynetif",
+          "name": "truenas_pynetif",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_pyos",
+          "name": "truenas_pyos",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_pypam",
+          "name": "truenas_pypam",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_pyscstadmin",
+          "name": "truenas_pyscstadmin",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_scram",
+          "name": "truenas_scram",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_spdk",
+          "name": "truenas_spdk",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/truenas_verify",
+          "name": "truenas_verify",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/webui",
+          "name": "webui",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/zectl",
+          "name": "zectl",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/zettarepl",
+          "name": "zettarepl",
+          "owner": "tns-project",
+          "stars": 0
+        },
+        {
+          "fullName": "tns-project/zfs",
+          "name": "zfs",
+          "owner": "tns-project",
+          "stars": 0
+        }
+      ]
+    }
+  ],
+  "starsAtLastNotification": 1205
+}
