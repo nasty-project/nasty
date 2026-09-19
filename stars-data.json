@@ -822,7 +822,19 @@
           "stars": 381
         }
       ]
+    },
+    {
+      "timestamp": "2026-09-19T02:55:51.672Z",
+      "totalStars": 382,
+      "repos": [
+        {
+          "fullName": "nasty-project/nasty",
+          "name": "nasty",
+          "owner": "nasty-project",
+          "stars": 382
+        }
+      ]
     }
   ],
-  "starsAtLastNotification": 381
+  "starsAtLastNotification": 382
 }
