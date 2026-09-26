@@ -1,4 +1,4 @@
-{ config, pkgs, lib, nasty-engine, nasty-webui, nasty-version, nixpkgs, nasty-rootfs-toplevel ? null, installerSystemFlake, installerNastySource ? null, ... }:
+{ config, pkgs, lib, nasty-engine, nasty-webui, nasty-version, nixpkgs, nasty-rootfs-toplevel ? null, installerSystemFlake, ... }:
 
 let
   nasty-grub-theme = pkgs.runCommand "nasty-grub-theme" {
@@ -86,13 +86,14 @@ in
   # can reuse them instead of recompiling from source.
   system.extraDependencies = [ nixpkgs nasty-engine ]
     ++ lib.optional (nasty-rootfs-toplevel != null) nasty-rootfs-toplevel
-    ++ lib.optional (installerNastySource != null) installerNastySource
     ++ lib.optional (nasty-webui != null) nasty-webui;
 
   # Bundle the slim local system flake on the ISO. The installed appliance keeps
   # only a wrapper flake plus machine-local modules under /etc/nixos.
   environment.etc."nasty-system-flake".source = installerSystemFlake;
-  environment.etc."nasty-source".source = lib.mkIf (installerNastySource != null) installerNastySource;
+  # The installer only needs this template. Embedding the entire source tree
+  # under /etc/nasty-source kept unrelated docs and assets in the ISO closure.
+  environment.etc."nasty-system-flake-template".source = ./system-flake/flake.nix.template;
 
   # ── Branding ──────────────────────────────────────────────
   image.baseName = lib.mkForce "nasty";
@@ -127,11 +128,11 @@ in
   # image — well over 100 MB of headroom — at the cost of a slightly
   # slower installer live-boot. The *installed* appliance runs from
   # bcachefs, not this squashfs, so runtime performance is unaffected.
-  # The x86 BCJ filter keeps machine-code-heavy x86_64 images below the limit
-  # without removing anything from the installer closure.
+  # BCJ filters improve compression of architecture-specific machine code.
   isoImage.squashfsCompression = lib.mkForce (
     "xz -Xdict-size 100%"
     + lib.optionalString pkgs.stdenv.hostPlatform.isx86_64 " -Xbcj x86"
+    + lib.optionalString pkgs.stdenv.hostPlatform.isAarch64 " -Xbcj arm64"
   );
 
   environment.systemPackages = with pkgs; [
@@ -326,13 +327,13 @@ in
         echo "Error: failed to detect local system identifier"
         exit 1
       fi
-      if [ ! -f /etc/nasty-source/nixos/system-flake/flake.nix.template ]; then
-        echo "Error: missing /etc/nasty-source/nixos/system-flake/flake.nix.template"
+      if [ ! -f /etc/nasty-system-flake-template ]; then
+        echo "Error: missing /etc/nasty-system-flake-template"
         exit 1
       fi
       ${nasty-engine}/bin/nasty-engine bootstrap-system-flake \
         --dest-dir /mnt/etc/nixos \
-        --template-file /etc/nasty-source/nixos/system-flake/flake.nix.template \
+        --template-file /etc/nasty-system-flake-template \
         --system "$LOCAL_SYSTEM" >/dev/null
       install -m 0644 "$BOOT_MODULE_TMP" /mnt/etc/nixos/nasty-installer-boot.nix
 

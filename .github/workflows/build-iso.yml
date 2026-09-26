@@ -11,6 +11,7 @@ on:
 jobs:
   build-iso:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: x86_64
@@ -56,6 +57,7 @@ jobs:
           ISO_FILE=$(find "$ISO_DIR" -name "*.iso" -type f | head -1)
           echo "ISO: $ISO_FILE"
           ls -lh "$ISO_FILE"
+          echo "ISO size: $(stat -c%s "$ISO_FILE") bytes (GitHub asset limit: 2147483648 bytes)"
 
           # Use the input ref if it looks like a version tag, otherwise commit-based
           INPUT_REF="${{ inputs.ref }}"
