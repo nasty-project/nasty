@@ -364,7 +364,6 @@
           inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nixpkgs;
           nasty-rootfs-toplevel = nasty-rootfs.config.system.build.toplevel;
           installerSystemFlake = installerSystemFlake;
-          installerNastySource = self.outPath;
         };
         modules = [
           ./nixos/modules/bcachefs.nix
@@ -383,7 +382,6 @@
           inherit nasty-engine nasty-webui nasty-version nasty-bcachefs-tools nixpkgs;
           nasty-rootfs-toplevel = nasty-rootfs.config.system.build.toplevel;
           installerSystemFlake = installerSystemFlake;
-          installerNastySource = self.outPath;
         };
         modules = [
           ./nixos/modules/bcachefs.nix
