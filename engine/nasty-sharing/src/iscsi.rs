@@ -680,6 +680,13 @@ impl IscsiService {
             }
         }
 
+        // The configfs writes can succeed while targetcli refuses to serialize
+        // the result (e.g. an unsupported IQN). Never report a working target
+        // that would disappear on reboot.
+        if let Err(error) = save_lio_config_checked().await {
+            return Err(self.cleanup_failed_create(&target.id, error).await);
+        }
+
         // Wait for target readiness when a LUN was attached
         if !target.luns.is_empty() {
             wait_for_target_ready(&target.iqn).await;
@@ -1510,10 +1517,22 @@ async fn save_lio_config_checked() -> Result<(), IscsiError> {
     if !output.status.success() {
         return Err(IscsiError::CommandFailed(format!(
             "targetcli saveconfig: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            saveconfig_error_detail(&output.stdout, &output.stderr)
         )));
     }
     Ok(())
+}
+
+fn saveconfig_error_detail(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    if !stderr.trim().is_empty() {
+        return stderr.trim().to_string();
+    }
+    let stdout = String::from_utf8_lossy(stdout);
+    if !stdout.trim().is_empty() {
+        return stdout.trim().to_string();
+    }
+    "no error details".to_string()
 }
 
 async fn save_lio_config() {
@@ -1760,8 +1779,9 @@ fn np_path_for(tpg_path: &str, ip: &str, port: u16) -> String {
 /// then uses that string as a configfs directory name and a key in
 /// state files. RFC 3720 allows lowercase ASCII letters, digits, and
 /// `-`, `.`, `:` in the user-suffix — we accept the same set plus
-/// uppercase (LIO is case-insensitive in practice) and `_` (common in
-/// existing operator naming conventions). Reject everything else,
+/// uppercase (LIO is case-insensitive in practice). In particular reject `_`:
+/// configfs accepts it but targetcli rejects the resulting IQN when saving,
+/// making a seemingly successful target disappear on reboot. Reject everything else,
 /// notably `/` (would escape the configfs subsystem dir) and control
 /// characters (would smuggle newlines into saveconfig.json).
 fn validate_target_name(name: &str) -> Result<(), IscsiError> {
@@ -1777,11 +1797,11 @@ fn validate_target_name(name: &str) -> Result<(), IscsiError> {
     }
     if !name
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':'))
     {
         return Err(IscsiError::CommandFailed(format!(
             "iSCSI target name '{name}' contains invalid characters \
-             (allowed: A-Z, a-z, 0-9, '-', '.', '_', ':')"
+             (allowed: A-Z, a-z, 0-9, '-', '.', ':'; use '-' instead of '_')"
         )));
     }
     Ok(())
@@ -2218,7 +2238,7 @@ mod tests {
         assert!(validate_target_name("tank").is_ok());
         assert!(validate_target_name("DB-Server-01").is_ok());
         assert!(validate_target_name("vmware.cluster.prod").is_ok());
-        assert!(validate_target_name("backup_2024").is_ok());
+        assert!(validate_target_name("backup-2024").is_ok());
         // Colon is allowed in the user-suffix per RFC 3720; some shops
         // use it to mirror their hostname:purpose convention.
         assert!(validate_target_name("host:purpose").is_ok());
@@ -2241,6 +2261,17 @@ mod tests {
         assert!(validate_target_name("with tab\t").is_err());
         assert!(validate_target_name("with space").is_err());
         assert!(validate_target_name("with\x00null").is_err());
+    }
+
+    #[test]
+    fn reject_target_names_targetcli_cannot_persist() {
+        let error = validate_target_name("backup_2024").unwrap_err().to_string();
+        assert!(error.contains("use '-' instead of '_'"));
+        assert_eq!(
+            saveconfig_error_detail(b"WWN not valid as: iqn, naa, eui\n", b""),
+            "WWN not valid as: iqn, naa, eui"
+        );
+        assert_eq!(saveconfig_error_detail(b"ignored", b"error"), "error");
     }
 
     #[test]
