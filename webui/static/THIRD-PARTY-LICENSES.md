@@ -40,6 +40,7 @@ All dependencies use licenses compatible with GPL-3.0.
 | @internationalized/date | Apache-2.0 |
 | @lucide/svelte | ISC |
 | @novnc/novnc | MPL-2.0 |
+| @mediabunny/ac3 | MPL-2.0; includes FFmpeg AC-3/E-AC-3 WASM codecs |
 | @sveltejs/adapter-static | MIT |
 | @sveltejs/kit | MIT |
 | @sveltejs/vite-plugin-svelte | MIT |

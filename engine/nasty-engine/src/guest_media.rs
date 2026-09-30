@@ -27,7 +27,7 @@ pub(crate) fn media_type(name: &str) -> Option<&'static str> {
 
 /// Only single byte ranges are supported. Reject malformed/multipart or empty
 /// ranges rather than accidentally sending a full large file.
-fn byte_range(value: &str, size: u64) -> Option<(u64, u64)> {
+pub(crate) fn byte_range(value: &str, size: u64) -> Option<(u64, u64)> {
     let (start, end) = value.strip_prefix("bytes=")?.split_once('-')?;
     if size == 0 || value.contains(',') {
         return None;

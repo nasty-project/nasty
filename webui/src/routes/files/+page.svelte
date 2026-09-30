@@ -11,6 +11,7 @@
 	import { withToast, error as toastError, success as toastSuccess } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
+	import MediaPreview from '$lib/components/MediaPreview.svelte';
 
 	interface FileEntry {
 		name: string;
@@ -1092,17 +1093,10 @@
 			<div class="flex-1 overflow-auto p-4 flex items-center justify-center min-h-[200px]">
 				{#if cat === 'image'}
 					<img src={contentUrl(previewFile)} alt={previewFile.name} class="max-w-full max-h-[80vh] object-contain" />
-				{:else if cat === 'video'}
-					<video controls autoplay class="max-w-full max-h-[80vh]">
-						<source src={contentUrl(previewFile)} />
-						<track kind="captions" />
-					</video>
-				{:else if cat === 'audio'}
-					<div class="flex flex-col items-center gap-4 py-8">
-						<Music size={48} class="text-green-400" />
-						<span class="text-sm text-muted-foreground">{previewFile.name}</span>
-						<audio controls autoplay src={contentUrl(previewFile)} class="w-full max-w-md"></audio>
-					</div>
+				{:else if cat === 'video' || cat === 'audio'}
+					{#key contentUrl(previewFile)}
+						<div class="w-[80vw] max-w-4xl"><MediaPreview url={contentUrl(previewFile)} name={previewFile.name} mediaKind={cat} /></div>
+					{/key}
 				{:else if cat === 'pdf'}
 					<iframe src={contentUrl(previewFile)} class="w-full h-[80vh]" title={previewFile.name}></iframe>
 				{:else if cat === 'text'}

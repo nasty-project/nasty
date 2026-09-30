@@ -3313,6 +3313,7 @@ async fn files_restore_handler(
 /// send it automatically) or `Authorization: Bearer` (CLI tools).
 async fn files_content_handler(
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -3403,7 +3404,7 @@ async fn files_content_handler(
         .unwrap_or("application/octet-stream");
 
     // Stream the file
-    let file = match tokio::fs::File::open(&target).await {
+    let mut file = match tokio::fs::File::open(&target).await {
         Ok(f) => f,
         Err(_) => {
             return (
@@ -3421,8 +3422,39 @@ async fn files_content_handler(
         .and_then(|n| n.to_str())
         .unwrap_or("file");
 
-    let stream = tokio_util::io::ReaderStream::new(file);
-    let body = axum::body::Body::from_stream(stream);
+    let range = match headers.get(axum::http::header::RANGE) {
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .and_then(|value| guest_media::byte_range(value, file_size))
+        {
+            Some(range) => Some(range),
+            None => {
+                return (
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [(
+                        axum::http::header::CONTENT_RANGE,
+                        format!("bytes */{file_size}"),
+                    )],
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let (start, length) = range.map_or((0, file_size), |(start, end)| (start, end - start + 1));
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let body = if method == axum::http::Method::HEAD {
+        axum::body::Body::empty()
+    } else {
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+            file.take(length),
+            64 * 1024,
+        ))
+    };
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
@@ -3431,8 +3463,15 @@ async fn files_content_handler(
     );
     headers.insert(
         axum::http::header::CONTENT_LENGTH,
-        file_size.to_string().parse().unwrap(),
+        length.to_string().parse().unwrap(),
     );
+    headers.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    if let Some((start, end)) = range {
+        headers.insert(
+            axum::http::header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{file_size}").parse().unwrap(),
+        );
+    }
     // Inline display for previewable types, attachment for downloads
     let disposition = if content_type.starts_with("image/")
         || content_type.starts_with("video/")
@@ -3449,7 +3488,16 @@ async fn files_content_handler(
         disposition.parse().unwrap(),
     );
 
-    (StatusCode::OK, headers, body).into_response()
+    (
+        if range.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        },
+        headers,
+        body,
+    )
+        .into_response()
 }
 
 /// Overwrite a file with new content. PUT /api/files/content?path=…
