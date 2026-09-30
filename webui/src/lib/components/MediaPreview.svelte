@@ -3,7 +3,7 @@
 	import { mediaPreviewKind } from '$lib/public-share';
 	import { formatBytes } from '$lib/format';
 	import { readMediaProperties, type MediaProperties, type MediaTrackProperties } from '$lib/media-properties';
-	import { MediaAudioSync } from '$lib/media-audio';
+	import { automaticDecodedTrack, MediaAudioSync } from '$lib/media-audio';
 
 	let { url, name, onclose, mediaKind }: { url: string; name: string; onclose?: () => void; mediaKind?: 'video' | 'audio' } = $props();
 	let details = $state('Inspecting media with Mediabunny…');
@@ -50,7 +50,15 @@
 		audioLoading = false;
 	}
 
-	async function enableDecodedAudio() {
+	function resumeDecodedAudio() {
+		if (!audioContext) return;
+		const generation = audioGeneration;
+		void audioContext.resume().catch(error => {
+			if (generation === audioGeneration) audioError = error instanceof Error ? error.message : 'Audio could not start.';
+		});
+	}
+
+	async function enableDecodedAudio(automatic = false) {
 		if (!player || selectedAudioId == null) return;
 		const wasPlaying = !player.paused;
 		player.pause();
@@ -64,7 +72,10 @@
 			// introduce high-frequency artifacts at its boundaries.
 			const sampleRate = ac3Tracks.find(track => track.id === selectedAudioId)?.sampleRate;
 			audioContext = new AudioContext(sampleRate ? { sampleRate } : undefined);
-			await audioContext.resume();
+			// Automatic preparation must not wait indefinitely for an autoplay
+			// grant. Native Play/control gestures resume the prepared context.
+			if (automatic) resumeDecodedAudio();
+			else await audioContext.resume();
 			const [{ registerAc3Decoder }, m] = await Promise.all([import('@mediabunny/ac3'), import('$lib/media-readers')]);
 			if (generation !== audioGeneration) return;
 			registerAc3Decoder();
@@ -105,6 +116,11 @@
 
 	onMount(() => {
 		let cancelled = false;
+		// Resume while a control gesture is active, including native controls.
+		const mountedPlayer = player;
+		mountedPlayer?.addEventListener('pointerdown', resumeDecodedAudio, true);
+		mountedPlayer?.addEventListener('keydown', resumeDecodedAudio, true);
+		mountedPlayer?.addEventListener('play', resumeDecodedAudio);
 		const controller = new AbortController();
 		let input: import('mediabunny').Input | undefined;
 		// Metadata/frame probing is capped independently of native playback.
@@ -156,6 +172,13 @@
 				selectedAudioId = (audioTracks.find(track => track.isDefault) ?? audioTracks[0])?.id ?? null;
 				const capability = player?.canPlayType(nextProperties.mimeType);
 				nativeSupport = capability === 'probably' ? 'Probably' : capability === 'maybe' ? 'Maybe' : 'Not advertised by this browser';
+				if (player) {
+					const automaticTrack = automaticDecodedTrack(nextProperties.tracks, type => player!.canPlayType(type));
+					if (automaticTrack != null) {
+						selectedAudioId = automaticTrack;
+						void enableDecodedAudio(true);
+					}
+				}
 				const video = await input.getPrimaryVideoTrack();
 				if (cancelled) return;
 				details = 'File properties read from container metadata.';
@@ -180,6 +203,9 @@
 			}
 		})();
 		return () => {
+			mountedPlayer?.removeEventListener('pointerdown', resumeDecodedAudio, true);
+			mountedPlayer?.removeEventListener('keydown', resumeDecodedAudio, true);
+			mountedPlayer?.removeEventListener('play', resumeDecodedAudio);
 			stopDecodedAudio();
 			cancelled = true;
 			clearTimeout(deadline);
@@ -218,7 +244,7 @@
 	{/if}
 	<p class="text-xs text-muted-foreground">{details}</p>
 	{#if seeking}<p role="status" class="text-sm text-muted-foreground">Seeking… The browser may need to fetch an index and decode from an earlier keyframe.</p>{/if}
-	<details open class="rounded-md border border-border p-3 text-sm">
+	<details class="rounded-md border border-border p-3 text-sm">
 		<summary class="cursor-pointer font-medium">File properties</summary>
 		<dl class="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
 			<dt class="text-muted-foreground">File</dt><dd class="break-all">{name}</dd>

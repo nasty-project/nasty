@@ -1,4 +1,14 @@
 import type { WrappedAudioBuffer } from 'mediabunny';
+import type { MediaTrackProperties } from './media-properties';
+
+/** Native audio support is independent of Mediabunny's optional decoders. */
+export function automaticDecodedTrack(tracks: MediaTrackProperties[], canPlayType: (type: string) => CanPlayTypeResult): number | null {
+	const audio = tracks.filter(track => track.type === 'audio');
+	const primary = audio.find(track => track.isDefault) ?? audio[0];
+	if (!primary || !['ac3', 'eac3'].includes(primary.codec ?? '')) return null;
+	const codec = primary.codecParameter ?? (primary.codec === 'ac3' ? 'ac-3' : 'ec-3');
+	return canPlayType(`audio/mp4; codecs="${codec}"`) ? null : primary.id;
+}
 
 /** Schedule against the actual media clock, including offsets after a seek. */
 export function audioSchedule(timestamp: number, duration: number, mediaTime: number, rate: number) {

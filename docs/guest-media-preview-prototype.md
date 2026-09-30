@@ -13,8 +13,8 @@ endpoint. Mediabunny is loaded on demand to read duration/codec metadata and,
 where WebCodecs is available, decode a first-frame thumbnail. Media inspection
 has a 15-second timeout, a 16 MiB total read budget, and a 4 MiB source cache.
 
-The File properties panel shows file size/container/duration and up to 16
-audio/video tracks, including codec and stored codec IDs, dimensions, channels,
+The File properties panel starts collapsed and shows file size/container/duration
+and up to 16 audio/video tracks, including codec and stored codec IDs, dimensions, channels,
 sample rate, language/title, default-track metadata and metadata bitrate where
 available. No full-file frame-rate or bitrate scan is performed. Native player
 capability hints and Mediabunny decoder availability are reported separately;
@@ -24,8 +24,14 @@ cannot diagnose every silent-file case.
 
 ## Browser-decoded AC-3 / E-AC-3 audio
 
-When inspection finds AC-3 or E-AC-3 tracks, select a track and click **Enable
-decoded sound**. The lazily loaded `@mediabunny/ac3` extension decodes that track
+When the default audio track is AC-3 or E-AC-3 and the browser does not advertise
+native support for its codec, decoded sound is selected automatically after
+inspection. Decoder preparation does not wait for an autoplay grant; pressing
+the native Play control resumes Web Audio if a user gesture is needed. When
+native support is advertised, select a track and click **Enable decoded sound**
+to opt in. Codec capability checks are hints, not silence detection; manual
+selection remains available when a browser advertises support but plays silently.
+The lazily loaded `@mediabunny/ac3` extension decodes that track
 using FFmpeg WASM in the browser. Native video remains the playback clock;
 decoded audio follows pause, buffering, seek and playback-rate changes. Native
 audio stays muted during decoded playback. Use **Decoded volume** to adjust or
@@ -113,3 +119,9 @@ introduced additional boundary artifacts. These synthetic checks do not replace
 listening to real material through the deployed player.
 Long-running lip-sync and the deployed HTTP path still need the
 manual acceptance checks above.
+
+Default-mode checks in Chrome and Firefox used mocked native codec capability
+responses to verify automatic fallback versus native playback. Simulated blocked
+AudioContext resume promises verified that automatic decoder preparation completes
+before a control gesture grants audio startup. Properties remained collapsed on
+initial open in both the file-manager modal and guest-share preview.

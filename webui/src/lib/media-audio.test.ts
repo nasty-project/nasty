@@ -1,5 +1,32 @@
 import { expect, test, vi } from 'vitest';
-import { audioSchedule, MediaAudioSync } from './media-audio';
+import { audioSchedule, automaticDecodedTrack, MediaAudioSync } from './media-audio';
+import type { MediaTrackProperties } from './media-properties';
+
+function track(id: number, codec: string, isDefault = false): MediaTrackProperties {
+	return { id, number: id, type: 'audio', codec, isDefault, codecParameter: null,
+		internalCodec: null, name: null, language: null, bitrate: null, width: null,
+		height: null, channels: 6, sampleRate: 48000, canDecode: true };
+}
+
+test('defaults to decoded E-AC-3 when native audio is unsupported, even if WASM was registered earlier', () => {
+	const native = vi.fn(() => '' as CanPlayTypeResult);
+	expect(automaticDecodedTrack([track(1, 'ac3'), track(2, 'eac3', true)], native)).toBe(2);
+	expect(native).toHaveBeenCalledWith('audio/mp4; codecs="ec-3"');
+});
+
+test('retains native playback for a supported codec or an AAC default with an AC-3 alternative', () => {
+	expect(automaticDecodedTrack([track(1, 'eac3', true)], () => 'probably')).toBeNull();
+	expect(automaticDecodedTrack([track(1, 'ac3', true)], () => 'maybe')).toBeNull();
+	const native = vi.fn(() => '' as CanPlayTypeResult);
+	expect(automaticDecodedTrack([track(1, 'ac3'), track(2, 'aac', true)], native)).toBeNull();
+	expect(native).not.toHaveBeenCalled();
+});
+
+test('uses the first audio track when no default is declared and ignores absent or unsupported fallback codecs', () => {
+	expect(automaticDecodedTrack([track(1, 'ac3'), track(2, 'eac3')], () => '')).toBe(1);
+	expect(automaticDecodedTrack([], () => '')).toBeNull();
+	expect(automaticDecodedTrack([track(1, 'dts', true)], () => '')).toBeNull();
+});
 
 test('maps media timestamps to audio time without replaying samples before a seek', () => {
 	expect(audioSchedule(10, 1, 9.5, 1)).toEqual({ delay: 0.5, offset: 0 });
