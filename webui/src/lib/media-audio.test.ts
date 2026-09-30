@@ -9,15 +9,24 @@ test('maps media timestamps to audio time without replaying samples before a see
 	expect(audioSchedule(10, 1, 10, 0)).toBeNull();
 });
 
-test('pause cancels scheduled sound and disposal restores the native mute state', async () => {
+test('surround playback preserves volume headroom, pause cancels sound, and disposal restores native mute', async () => {
 	const player = Object.assign(new EventTarget(), { paused: false, seeking: false, readyState: 4, currentTime: 10, playbackRate: 1, muted: false });
 	const node = { buffer: null, playbackRate: { value: 1 }, connect: vi.fn(), disconnect: vi.fn(), start: vi.fn(), stop: vi.fn(), onended: null };
 	const gain = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() };
 	const context = { currentTime: 5, resume: async () => {}, createGain: () => gain, createBufferSource: () => node, destination: {} };
-	const sink = { async *buffers() { yield { buffer: { duration: 0.5 }, timestamp: 10, duration: 0.5 }; } };
+	const sink = { async *buffers() { yield { buffer: { duration: 0.5, numberOfChannels: 6 }, timestamp: 10, duration: 0.5 }; } };
 	const error = vi.fn();
 	const sync = new MediaAudioSync(player as unknown as HTMLMediaElement, context as unknown as AudioContext, sink as never, error);
 	await vi.waitFor(() => expect(node.start).toHaveBeenCalledWith(5, 0, 0.5));
+	const fullGain = gain.gain.value;
+	expect(fullGain).toBeGreaterThan(0);
+	expect(fullGain).toBeLessThan(0.5);
+	sync.setVolume(0.5);
+	expect(gain.gain.value).toBe(fullGain / 2);
+	sync.setVolume(0);
+	expect(gain.gain.value).toBe(0);
+	sync.setVolume(1);
+	expect(gain.gain.value).toBe(fullGain);
 	expect(player.muted).toBe(true);
 	player.paused = true;
 	player.dispatchEvent(new Event('pause'));

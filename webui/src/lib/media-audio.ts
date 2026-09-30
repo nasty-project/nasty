@@ -20,6 +20,8 @@ export class MediaAudioSync {
 	private pump: Promise<void> = Promise.resolve();
 	private nodes = new Set<AudioBufferSourceNode>();
 	private gain: GainNode;
+	private volume = 1;
+	private channels = 2;
 	private previousMuted: boolean;
 	private events: Array<[string, EventListener]> = [];
 
@@ -47,7 +49,14 @@ export class MediaAudioSync {
 		this.player.addEventListener(event, callback);
 	}
 
-	setVolume(volume: number) { this.gain.gain.value = Math.max(0, Math.min(1, volume)); }
+	setVolume(volume: number) {
+		this.volume = Math.max(0, Math.min(1, volume));
+		// Web Audio's speaker downmix sums L + 0.707*C + 0.707*SL for
+		// 5.1, or L + 0.5*SL for quad. Normalize those coefficient sums
+		// so correlated full-scale channels cannot clip the stereo output.
+		const headroom = this.channels === 6 ? 1 / (1 + Math.SQRT2) : this.channels === 4 ? 2 / 3 : 1;
+		this.gain.gain.value = this.volume * headroom;
+	}
 
 	private stop() {
 		this.generation++;
@@ -92,6 +101,10 @@ export class MediaAudioSync {
 						const offset = Math.max(schedule.offset, start - chunk.timestamp);
 						const duration = Math.min(chunk.buffer.duration, start + 2 - chunk.timestamp) - offset;
 						if (duration <= 0) continue;
+						if (this.channels !== chunk.buffer.numberOfChannels) {
+							this.channels = chunk.buffer.numberOfChannels;
+							this.setVolume(this.volume);
+						}
 						const node = this.context.createBufferSource();
 						node.buffer = chunk.buffer;
 						node.playbackRate.value = rate;

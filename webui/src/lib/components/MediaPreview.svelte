@@ -60,7 +60,10 @@
 		audioError = '';
 		try {
 			// Open/resume Web Audio in the button gesture, before fetching WASM.
-			audioContext = new AudioContext();
+			// Match the PCM rate: resampling each short source independently can
+			// introduce high-frequency artifacts at its boundaries.
+			const sampleRate = ac3Tracks.find(track => track.id === selectedAudioId)?.sampleRate;
+			audioContext = new AudioContext(sampleRate ? { sampleRate } : undefined);
 			await audioContext.resume();
 			const [{ registerAc3Decoder }, m] = await Promise.all([import('@mediabunny/ac3'), import('$lib/media-readers')]);
 			if (generation !== audioGeneration) return;
