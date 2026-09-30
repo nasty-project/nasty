@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { mediaPreviewKind } from '$lib/public-share';
+	import { formatBytes } from '$lib/format';
+	import { readMediaProperties, type MediaProperties } from '$lib/media-properties';
 
 	let { url, name, onclose }: { url: string; name: string; onclose: () => void } = $props();
 	let details = $state('Inspecting media with Mediabunny…');
@@ -8,6 +10,11 @@
 	let playbackError = $state(false);
 	let thumbnail = $state<HTMLCanvasElement>();
 	let hasThumbnail = $state(false);
+	let properties = $state<MediaProperties | null>(null);
+	let fileSize = $state<number | null>(null);
+	let player = $state<HTMLMediaElement>();
+	let seeking = $state(false);
+	let nativeSupport = $state('Not checked');
 	const kind = $derived(mediaPreviewKind(name));
 
 	onMount(() => {
@@ -34,6 +41,7 @@
 							if (!response.ok) throw new Error('Preview access expired or this file is unavailable.');
 							const length = Number(response.headers.get('Content-Length'));
 							if (!Number.isSafeInteger(length) || length <= 0) throw new Error('Media size is unavailable.');
+							if (!cancelled) fileSize = length;
 							return length;
 						},
 						read: async (start, end) => {
@@ -55,12 +63,14 @@
 						}
 					})
 				});
-				const duration = await input.getDurationFromMetadata();
-				const video = await input.getPrimaryVideoTrack();
-				const audio = await input.getPrimaryAudioTrack();
-				const codecs = await Promise.all([video?.getCodec(), audio?.getCodec()]);
+				const nextProperties = await readMediaProperties(input);
 				if (cancelled) return;
-				details = [duration != null ? `${duration.toFixed(1)} seconds` : 'Duration unavailable', ...codecs.filter(Boolean)].join(' · ');
+				properties = nextProperties;
+				const capability = player?.canPlayType(nextProperties.mimeType);
+				nativeSupport = capability === 'probably' ? 'Probably' : capability === 'maybe' ? 'Maybe' : 'Not advertised by this browser';
+				const video = await input.getPrimaryVideoTrack();
+				if (cancelled) return;
+				details = 'File properties read from container metadata.';
 				if (video && await video.canDecode()) {
 					const sink = new m.CanvasSink(video, { width: 480 });
 					const frame = await sink.getCanvas(Math.max(0, await video.getFirstTimestamp()));
@@ -98,12 +108,50 @@
 	<p class="text-xs text-muted-foreground">Prototype · Native playback; Mediabunny metadata and frame preview. Browser codec support varies.</p>
 	{#if kind === 'video'}
 		<!-- svelte-ignore a11y_media_has_caption -->
-		<video src={url} controls preload="metadata" playsinline onerror={() => playbackError = true} class="max-h-96 w-full rounded bg-black"></video>
+		<video bind:this={player} src={url} controls preload="metadata" playsinline onerror={() => { playbackError = true; seeking = false; }} onseeking={() => seeking = true} onseeked={() => seeking = false} class="max-h-96 w-full rounded bg-black"></video>
 	{:else}
-		<audio src={url} controls preload="metadata" onerror={() => playbackError = true} class="w-full"></audio>
+		<audio bind:this={player} src={url} controls preload="metadata" onerror={() => { playbackError = true; seeking = false; }} onseeking={() => seeking = true} onseeked={() => seeking = false} class="w-full"></audio>
 	{/if}
 	{#if playbackError}<p class="text-sm text-muted-foreground">This browser could not play the file, or preview access ended. You can still try downloading it.</p>{/if}
 	<p class="text-xs text-muted-foreground">{details}</p>
+	{#if seeking}<p role="status" class="text-sm text-muted-foreground">Seeking… The browser may need to fetch an index and decode from an earlier keyframe.</p>{/if}
+	<details open class="rounded-md border border-border p-3 text-sm">
+		<summary class="cursor-pointer font-medium">File properties</summary>
+		<dl class="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+			<dt class="text-muted-foreground">File</dt><dd class="break-all">{name}</dd>
+			<dt class="text-muted-foreground">Size</dt><dd>{fileSize != null ? formatBytes(fileSize) : 'Unavailable'}</dd>
+			{#if properties}
+				<dt class="text-muted-foreground">Container</dt><dd>{properties.container}</dd>
+				<dt class="text-muted-foreground">MIME type</dt><dd class="break-all">{properties.mimeType}</dd>
+				<dt class="text-muted-foreground">Duration</dt><dd>{properties.duration != null ? `${properties.duration.toFixed(1)} seconds` : 'Not present in metadata'}</dd>
+				<dt class="text-muted-foreground">Native container support</dt><dd>{nativeSupport}</dd>
+			{/if}
+		</dl>
+		{#if properties}
+			{#each properties.tracks as track (track.id)}
+				<div class="mt-3 rounded border border-border p-3">
+					<h3 class="font-medium">{track.type === 'audio' ? 'Audio' : 'Video'} track {track.number}{track.isDefault ? ' · Default' : ''}</h3>
+					<dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+						<dt class="text-muted-foreground">Codec</dt><dd class="break-all">{track.codec ?? 'Unrecognized'}{track.internalCodec ? ` (${track.internalCodec})` : ''}</dd>
+						{#if track.codecParameter}<dt class="text-muted-foreground">Codec identifier</dt><dd class="break-all">{track.codecParameter}</dd>{/if}
+						{#if track.name}<dt class="text-muted-foreground">Title</dt><dd class="break-all">{track.name}</dd>{/if}
+						{#if track.language && track.language !== 'und'}<dt class="text-muted-foreground">Language</dt><dd>{track.language}</dd>{/if}
+						{#if track.width && track.height}<dt class="text-muted-foreground">Dimensions</dt><dd>{track.width} × {track.height}</dd>{/if}
+						{#if track.channels}<dt class="text-muted-foreground">Channels</dt><dd>{track.channels}</dd>{/if}
+						{#if track.sampleRate}<dt class="text-muted-foreground">Sample rate</dt><dd>{track.sampleRate} Hz</dd>{/if}
+						{#if track.bitrate}<dt class="text-muted-foreground">Metadata bitrate</dt><dd>{Math.round(track.bitrate / 1000)} kbps</dd>{/if}
+						<dt class="text-muted-foreground">Mediabunny decoding</dt><dd>{track.canDecode == null ? 'Unknown' : track.canDecode ? 'Available' : 'Unavailable in this browser'}</dd>
+					</dl>
+					{#if track.type === 'audio' && ['ac3', 'eac3', 'dts'].includes(track.codec ?? '')}
+						<p class="mt-2 text-xs text-muted-foreground">{track.codec?.toUpperCase()} audio often needs an additional decoder. The native player may show video without sound.</p>
+					{/if}
+				</div>
+			{/each}
+			{#if properties.trackCount > properties.tracks.length}<p class="mt-2 text-xs text-muted-foreground">Showing the first {properties.tracks.length} of {properties.trackCount} audio/video tracks.</p>{/if}
+			{#if !properties.tracks.some(track => track.type === 'audio')}<p class="mt-2 text-xs text-muted-foreground">No audio track found in the container.</p>{/if}
+			<p class="mt-3 text-xs text-muted-foreground">Container support is only a browser capability hint. Mediabunny decoding and native player support are separate; these checks do not confirm which audio track the native player selected.</p>
+		{/if}
+	</details>
 	<canvas bind:this={thumbnail} class:hidden={!hasThumbnail} class="max-h-48 max-w-full rounded" aria-label="Mediabunny decoded first frame"></canvas>
 	{#if inspectionError}<p class="text-xs text-muted-foreground">{inspectionError}</p>{/if}
 </section>
