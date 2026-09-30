@@ -35,6 +35,10 @@ Switching audio tracks briefly pauses playback while the new decoder opens.
 Audio scheduling anchors the video and Web Audio clocks once on playback/resume
 and seek/rate changes, then keeps decoded samples on a continuous Web Audio
 timeline. Decode-window boundaries split a buffer without replaying samples.
+The audio context requests the track's sample rate to avoid independently
+resampling each short buffer. Quad and 5.1 stereo downmixes normalize the speaker
+coefficient sums to reserve headroom; surround tracks may therefore sound quieter
+at the same decoded-volume setting. Mono/stereo volume is not attenuated.
 Properties distinguish an optional WASM decoder not yet loaded, a loaded decoder,
 and the currently active WASM audio track; the initial capability probe alone
 does not describe playback after the extension is enabled.
@@ -101,5 +105,11 @@ playback across decode windows, pause, seek/resume, volume and playback-rate
 changes, track switching and native-mute restoration under the application CSP.
 Local Chrome and Firefox checks also measured continuous adjacent audio-buffer
 scheduling through decode-window boundaries after fixing per-buffer clock jitter.
+An 8 kHz six-channel E-AC-3 stress sample was compared with a native FFmpeg PCM
+reference and rendered through offline Web Audio graphs in both browsers. The
+matched-rate, normalized stereo graph produced no samples above full scale;
+the unnormalized downmix clipped, and Chrome's per-buffer 48→44.1 kHz resampling
+introduced additional boundary artifacts. These synthetic checks do not replace
+listening to real material through the deployed player.
 Long-running lip-sync and the deployed HTTP path still need the
 manual acceptance checks above.
