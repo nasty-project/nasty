@@ -67,7 +67,13 @@ export class MediaAudioSync {
 			if (!this.current(generation)) return;
 			try {
 				await this.context.resume();
-				let start = this.player.currentTime;
+				// Read the native media clock once per playback generation. Sampling
+				// it for every buffer creates gaps/overlaps (especially with Firefox's
+				// rounded currentTime). Web Audio owns the continuous sample timeline.
+				const mediaAnchor = this.player.currentTime;
+				const audioAnchor = this.context.currentTime;
+				const rate = this.player.playbackRate;
+				let start = mediaAnchor;
 				while (this.current(generation)) {
 					let yielded = false;
 					for await (const chunk of this.sink.buffers(start, start + 2)) {
@@ -77,17 +83,22 @@ export class MediaAudioSync {
 							await new Promise(resolve => setTimeout(resolve, 25));
 						}
 						if (!this.current(generation)) break;
-						const schedule = audioSchedule(chunk.timestamp, chunk.buffer.duration, this.player.currentTime, this.player.playbackRate);
+						const audioNow = this.context.currentTime;
+						const mediaNow = mediaAnchor + (audioNow - audioAnchor) * rate;
+						const schedule = audioSchedule(chunk.timestamp, chunk.buffer.duration, mediaNow, rate);
 						if (!schedule) continue;
+						// The sink can return the buffer straddling a window boundary.
+						// Play only this window's slice, never duplicate its leading samples.
+						const offset = Math.max(schedule.offset, start - chunk.timestamp);
+						const duration = Math.min(chunk.buffer.duration, start + 2 - chunk.timestamp) - offset;
+						if (duration <= 0) continue;
 						const node = this.context.createBufferSource();
 						node.buffer = chunk.buffer;
-						node.playbackRate.value = this.player.playbackRate;
+						node.playbackRate.value = rate;
 						node.connect(this.gain);
 						this.nodes.add(node);
 						node.onended = () => { this.nodes.delete(node); node.disconnect(); };
-						const duration = Math.min(chunk.buffer.duration, start + 2 - chunk.timestamp) - schedule.offset;
-						if (duration > 0) node.start(this.context.currentTime + schedule.delay, schedule.offset, duration);
-						else { this.nodes.delete(node); node.disconnect(); }
+						node.start(audioAnchor + (chunk.timestamp + offset - mediaAnchor) / rate, offset, duration);
 					}
 					// Keep consecutive window boundaries exact and prepare the next
 					// window before this one ends, avoiding polling-sized audio gaps.
