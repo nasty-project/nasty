@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import { Input, CustomSource, WAVE } from 'mediabunny';
+import { readMediaProperties } from './media-properties';
 
 test('Mediabunny can inspect PCM metadata through bounded range reads', async () => {
 	const buffer = new ArrayBuffer(44 + 16000);
@@ -27,6 +28,14 @@ test('Mediabunny can inspect PCM metadata through bounded range reads', async ()
 	try {
 		expect(await input.getDurationFromMetadata()).toBe(1);
 		expect(await (await input.getPrimaryAudioTrack())?.getCodec()).toBe('pcm-s16');
+		const properties = await readMediaProperties(input);
+		expect(properties.container).toBe(WAVE.name);
+		expect(properties.duration).toBe(1);
+		expect(properties.trackCount).toBe(1);
+		expect(properties.tracks[0]).toMatchObject({
+			type: 'audio', codec: 'pcm-s16', internalCodec: '1', channels: 1, sampleRate: 8000,
+			width: null, height: null
+		});
 		expect(reads.length).toBeGreaterThan(0);
 		expect(Math.max(...reads)).toBeLessThanOrEqual(buffer.byteLength);
 	} finally {
