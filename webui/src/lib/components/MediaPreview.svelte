@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { mediaPreviewKind } from '$lib/public-share';
 	import { formatBytes } from '$lib/format';
-	import { readMediaProperties, type MediaProperties } from '$lib/media-properties';
+	import { readMediaProperties, type MediaProperties, type MediaTrackProperties } from '$lib/media-properties';
 	import { MediaAudioSync } from '$lib/media-audio';
 
 	let { url, name, onclose, mediaKind }: { url: string; name: string; onclose?: () => void; mediaKind?: 'video' | 'audio' } = $props();
@@ -21,12 +21,22 @@
 	let selectedAudioId = $state<number | null>(null);
 	let audioLoading = $state(false);
 	let decodedAudio = $state(false);
+	let wasmDecoderLoaded = $state(false);
 	let audioError = $state('');
 	let audioVolume = $state(1);
 	let audioSync: MediaAudioSync | undefined;
 	let audioInput: import('mediabunny').Input | undefined;
 	let audioContext: AudioContext | undefined;
 	let audioGeneration = 0;
+
+	function decoderStatus(track: MediaTrackProperties) {
+		if (track.type === 'audio' && ['ac3', 'eac3'].includes(track.codec ?? '')) {
+			if (decodedAudio && track.id === selectedAudioId) return 'Active (WASM decoder)';
+			if (wasmDecoderLoaded) return 'Optional WASM decoder loaded';
+			return track.canDecode ? 'Available' : 'Optional WASM decoder not loaded';
+		}
+		return track.canDecode == null ? 'Unknown' : track.canDecode ? 'Available' : 'Unavailable to Mediabunny';
+	}
 
 	function stopDecodedAudio() {
 		audioGeneration++;
@@ -55,6 +65,7 @@
 			const [{ registerAc3Decoder }, m] = await Promise.all([import('@mediabunny/ac3'), import('$lib/media-readers')]);
 			if (generation !== audioGeneration) return;
 			registerAc3Decoder();
+			wasmDecoderLoaded = true;
 			audioInput = new m.Input({
 				formats: [m.MP4, m.QTFF, m.MATROSKA, m.WEBM],
 				source: new m.UrlSource(url, {
@@ -229,10 +240,12 @@
 						{#if track.channels}<dt class="text-muted-foreground">Channels</dt><dd>{track.channels}</dd>{/if}
 						{#if track.sampleRate}<dt class="text-muted-foreground">Sample rate</dt><dd>{track.sampleRate} Hz</dd>{/if}
 						{#if track.bitrate}<dt class="text-muted-foreground">Metadata bitrate</dt><dd>{Math.round(track.bitrate / 1000)} kbps</dd>{/if}
-						<dt class="text-muted-foreground">Mediabunny decoding</dt><dd>{track.canDecode == null ? 'Unknown' : track.canDecode ? 'Available' : 'Unavailable in this browser'}</dd>
+						<dt class="text-muted-foreground">Mediabunny decoding</dt><dd>{decoderStatus(track)}</dd>
 					</dl>
-					{#if track.type === 'audio' && ['ac3', 'eac3', 'dts'].includes(track.codec ?? '')}
-						<p class="mt-2 text-xs text-muted-foreground">{track.codec?.toUpperCase()} audio often needs an additional decoder. The native player may show video without sound.</p>
+					{#if track.type === 'audio' && ['ac3', 'eac3'].includes(track.codec ?? '')}
+						<p class="mt-2 text-xs text-muted-foreground">Native playback may show video without sound. Use Enable decoded sound to try the optional AC-3 / E-AC-3 WASM decoder.</p>
+					{:else if track.type === 'audio' && track.codec === 'dts'}
+						<p class="mt-2 text-xs text-muted-foreground">No optional DTS decoder is included. Native playback may show video without sound.</p>
 					{/if}
 				</div>
 			{/each}

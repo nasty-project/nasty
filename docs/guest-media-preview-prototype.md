@@ -32,6 +32,13 @@ audio stays muted during decoded playback. Use **Decoded volume** to adjust or
 silence the decoded soundtrack, and **Use native audio** to restore native sound.
 Switching audio tracks briefly pauses playback while the new decoder opens.
 
+Audio scheduling anchors the video and Web Audio clocks once on playback/resume
+and seek/rate changes, then keeps decoded samples on a continuous Web Audio
+timeline. Decode-window boundaries split a buffer without replaying samples.
+Properties distinguish an optional WASM decoder not yet loaded, a loaded decoder,
+and the currently active WASM audio track; the initial capability probe alone
+does not describe playback after the extension is enabled.
+
 Decoding uses the client's CPU, not the NAS. Output is downmixed to stereo;
 Atmos passthrough and DTS decoding are not supported. Native browser video and
 container support are still required. Audio reads use a separate 4 MiB cache,
@@ -92,5 +99,7 @@ WebUI tests and build checks. A local production-build Chrome check with a
 generated H.264/six-channel AC-3 and E-AC-3 MKVs verified nonzero decoded buffers,
 playback across decode windows, pause, seek/resume, volume and playback-rate
 changes, track switching and native-mute restoration under the application CSP.
-Long-running lip-sync, Firefox and the deployed HTTP path still need the
+Local Chrome and Firefox checks also measured continuous adjacent audio-buffer
+scheduling through decode-window boundaries after fixing per-buffer clock jitter.
+Long-running lip-sync and the deployed HTTP path still need the
 manual acceptance checks above.
