@@ -1057,7 +1057,7 @@
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm" role="button" tabindex="-1" onclick={() => { if (!editing) previewFile = null; }} onkeydown={(e) => { if (e.key === 'Escape' && !editing) previewFile = null; }}>
 		<div class="relative flex flex-col max-w-[90vw] max-h-[90vh] rounded-lg border border-border bg-[#0f1117] shadow-2xl" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 			<!-- Header -->
-			<div class="flex items-center justify-between px-4 py-2 border-b border-border">
+			<div class="shrink-0 flex items-center justify-between px-4 py-2 border-b border-border">
 				<span class="text-sm font-semibold text-white font-mono">{previewFile.name}{editing ? ' (editing)' : ''}</span>
 				<div class="flex items-center gap-2">
 					{#if cat === 'text' && !isRoot}
@@ -1090,7 +1090,8 @@
 			</div>
 
 			<!-- Content -->
-			<div class="flex-1 overflow-auto p-4 flex items-center justify-center min-h-[200px]">
+			<!-- Tall media properties must start at the scroll origin, not above it. -->
+			<div class="flex-1 overflow-auto p-4 {cat === 'video' || cat === 'audio' ? 'min-h-0' : 'flex items-center justify-center min-h-[200px]'}">
 				{#if cat === 'image'}
 					<img src={contentUrl(previewFile)} alt={previewFile.name} class="max-w-full max-h-[80vh] object-contain" />
 				{:else if cat === 'video' || cat === 'audio'}
