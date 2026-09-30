@@ -3,8 +3,9 @@
 	import { mediaPreviewKind } from '$lib/public-share';
 	import { formatBytes } from '$lib/format';
 	import { readMediaProperties, type MediaProperties } from '$lib/media-properties';
+	import { MediaAudioSync } from '$lib/media-audio';
 
-	let { url, name, onclose }: { url: string; name: string; onclose: () => void } = $props();
+	let { url, name, onclose, mediaKind }: { url: string; name: string; onclose?: () => void; mediaKind?: 'video' | 'audio' } = $props();
 	let details = $state('Inspecting media with Mediabunny…');
 	let inspectionError = $state('');
 	let playbackError = $state(false);
@@ -15,7 +16,78 @@
 	let player = $state<HTMLMediaElement>();
 	let seeking = $state(false);
 	let nativeSupport = $state('Not checked');
-	const kind = $derived(mediaPreviewKind(name));
+	const kind = $derived(mediaKind ?? mediaPreviewKind(name));
+	const ac3Tracks = $derived(properties?.tracks.filter(track => track.type === 'audio' && ['ac3', 'eac3'].includes(track.codec ?? '')) ?? []);
+	let selectedAudioId = $state<number | null>(null);
+	let audioLoading = $state(false);
+	let decodedAudio = $state(false);
+	let audioError = $state('');
+	let audioVolume = $state(1);
+	let audioSync: MediaAudioSync | undefined;
+	let audioInput: import('mediabunny').Input | undefined;
+	let audioContext: AudioContext | undefined;
+	let audioGeneration = 0;
+
+	function stopDecodedAudio() {
+		audioGeneration++;
+		audioSync?.dispose();
+		audioSync = undefined;
+		audioInput?.dispose();
+		audioInput = undefined;
+		void audioContext?.close().catch(() => {});
+		audioContext = undefined;
+		decodedAudio = false;
+		audioLoading = false;
+	}
+
+	async function enableDecodedAudio() {
+		if (!player || selectedAudioId == null) return;
+		const wasPlaying = !player.paused;
+		player.pause();
+		stopDecodedAudio();
+		const generation = audioGeneration;
+		audioLoading = true;
+		audioError = '';
+		try {
+			// Open/resume Web Audio in the button gesture, before fetching WASM.
+			audioContext = new AudioContext();
+			await audioContext.resume();
+			const [{ registerAc3Decoder }, m] = await Promise.all([import('@mediabunny/ac3'), import('$lib/media-readers')]);
+			if (generation !== audioGeneration) return;
+			registerAc3Decoder();
+			audioInput = new m.Input({
+				formats: [m.MP4, m.QTFF, m.MATROSKA, m.WEBM],
+				source: new m.UrlSource(url, {
+					maxCacheSize: 4 * 1024 * 1024,
+					getRetryDelay: () => null,
+					fetchFn: (request, init) => fetch(request, {
+						...init, redirect: 'error',
+						signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(15000)])
+					})
+				})
+			});
+			const track = (await audioInput.getAudioTracks()).find(track => track.id === selectedAudioId);
+			if (generation !== audioGeneration) return;
+			if (!track || !['ac3', 'eac3'].includes(await track.getCodec() ?? '') || !await track.canDecode()) {
+				throw new Error('The selected AC-3/E-AC-3 track could not be decoded.');
+			}
+			if (generation !== audioGeneration) return;
+			audioSync = new MediaAudioSync(player, audioContext, new m.AudioBufferSink(track), error => {
+				stopDecodedAudio();
+				audioError = error instanceof Error ? error.message : 'Audio decoding failed.';
+			});
+			audioSync.setVolume(audioVolume);
+			decodedAudio = true;
+			if (wasPlaying) await player.play();
+		} catch (error) {
+			if (generation === audioGeneration) {
+				stopDecodedAudio();
+				audioError = error instanceof Error ? error.message : 'Audio decoding failed.';
+			}
+		} finally {
+			if (generation === audioGeneration) audioLoading = false;
+		}
+	}
 
 	onMount(() => {
 		let cancelled = false;
@@ -66,6 +138,8 @@
 				const nextProperties = await readMediaProperties(input);
 				if (cancelled) return;
 				properties = nextProperties;
+				const audioTracks = nextProperties.tracks.filter(track => track.type === 'audio' && ['ac3', 'eac3'].includes(track.codec ?? ''));
+				selectedAudioId = (audioTracks.find(track => track.isDefault) ?? audioTracks[0])?.id ?? null;
 				const capability = player?.canPlayType(nextProperties.mimeType);
 				nativeSupport = capability === 'probably' ? 'Probably' : capability === 'maybe' ? 'Maybe' : 'Not advertised by this browser';
 				const video = await input.getPrimaryVideoTrack();
@@ -92,6 +166,7 @@
 			}
 		})();
 		return () => {
+			stopDecodedAudio();
 			cancelled = true;
 			clearTimeout(deadline);
 			controller.abort();
@@ -103,7 +178,7 @@
 <section class="my-4 space-y-3 rounded-lg border border-border p-4" aria-label="Media preview">
 	<div class="flex items-center justify-between gap-3">
 		<h2 class="min-w-0 truncate font-medium">{name}</h2>
-		<button type="button" onclick={onclose} class="rounded-md border px-3 py-1 text-sm">Close preview</button>
+		{#if onclose}<button type="button" onclick={onclose} class="rounded-md border px-3 py-1 text-sm">Close preview</button>{/if}
 	</div>
 	<p class="text-xs text-muted-foreground">Prototype · Native playback; Mediabunny metadata and frame preview. Browser codec support varies.</p>
 	{#if kind === 'video'}
@@ -113,6 +188,20 @@
 		<audio bind:this={player} src={url} controls preload="metadata" onerror={() => { playbackError = true; seeking = false; }} onseeking={() => seeking = true} onseeked={() => seeking = false} class="w-full"></audio>
 	{/if}
 	{#if playbackError}<p class="text-sm text-muted-foreground">This browser could not play the file, or preview access ended. You can still try downloading it.</p>{/if}
+	{#if ac3Tracks.length}
+		<div class="space-y-2 rounded-md border border-border p-3 text-sm">
+			<label for="decoded-audio-track" class="block font-medium">Browser-decoded AC-3 / E-AC-3 audio</label>
+			<select id="decoded-audio-track" bind:value={selectedAudioId} disabled={audioLoading} onchange={() => { if (decodedAudio) void enableDecodedAudio(); }} class="w-full rounded-md border bg-background p-2">
+				{#each ac3Tracks as track (track.id)}<option value={track.id}>Track {track.number} · {track.language ?? 'Unknown language'} · {track.codec?.toUpperCase()}{track.name ? ` · ${track.name}` : ''}</option>{/each}
+			</select>
+			<button type="button" disabled={audioLoading} onclick={() => { if (decodedAudio) stopDecodedAudio(); else void enableDecodedAudio(); }} class="rounded-md border px-3 py-1">{audioLoading ? 'Loading decoder…' : decodedAudio ? 'Use native audio' : 'Enable decoded sound'}</button>
+			{#if decodedAudio}
+				<label class="flex items-center gap-3">Decoded volume<input type="range" min="0" max="1" step="0.01" bind:value={audioVolume} oninput={event => audioSync?.setVolume(event.currentTarget.valueAsNumber)} /></label>
+			{/if}
+			<p class="text-xs text-muted-foreground">WASM audio decoding uses this device, not the NAS. Native sound stays muted while decoded audio is enabled; use Decoded volume. Stereo output, no Atmos passthrough. Video still requires native browser playback.</p>
+			{#if audioError}<p role="alert" class="text-sm text-destructive">{audioError}</p>{/if}
+		</div>
+	{/if}
 	<p class="text-xs text-muted-foreground">{details}</p>
 	{#if seeking}<p role="status" class="text-sm text-muted-foreground">Seeking… The browser may need to fetch an index and decode from an earlier keyframe.</p>{/if}
 	<details open class="rounded-md border border-border p-3 text-sm">

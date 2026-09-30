@@ -1,8 +1,12 @@
-# Guest media preview prototype
+# Shared media preview prototype
 
 Related: #558. Audio/video Preview buttons appear for an unlocked guest share
 without a download limit. Supported filename types: MP4/M4V, MOV, WebM, MKV,
 MP3, M4A, WAV, Ogg/OGA, FLAC and AAC.
+
+The authenticated file-manager audio/video modal uses the same `MediaPreview`
+component. Its `/api/files/content` endpoint also supports single byte ranges
+and HEAD requests; existing authentication and path restrictions still apply.
 
 The native browser player streams and seeks through a dedicated single-range
 endpoint. Mediabunny is loaded on demand to read duration/codec metadata and,
@@ -17,6 +21,32 @@ capability hints and Mediabunny decoder availability are reported separately;
 neither proves which audio track the native player will select. AC-3/E-AC-3/DTS
 audio can account for a video playing without sound, but these properties alone
 cannot diagnose every silent-file case.
+
+## Browser-decoded AC-3 / E-AC-3 audio
+
+When inspection finds AC-3 or E-AC-3 tracks, select a track and click **Enable
+decoded sound**. The lazily loaded `@mediabunny/ac3` extension decodes that track
+using FFmpeg WASM in the browser. Native video remains the playback clock;
+decoded audio follows pause, buffering, seek and playback-rate changes. Native
+audio stays muted during decoded playback. Use **Decoded volume** to adjust or
+silence the decoded soundtrack, and **Use native audio** to restore native sound.
+Switching audio tracks briefly pauses playback while the new decoder opens.
+
+Decoding uses the client's CPU, not the NAS. Output is downmixed to stereo;
+Atmos passthrough and DTS decoding are not supported. Native browser video and
+container support are still required. Audio reads use a separate 4 MiB cache,
+15-second request timeouts and bounded two-second decode windows; the metadata
+inspection read budget does not apply to ongoing playback.
+
+The application CSP permits WASM compilation (`script-src 'wasm-unsafe-eval'`)
+and decoder workers (`worker-src 'self' blob:`). Deploy the WebUI and updated
+Caddy configuration together. The separate sandbox policy on file responses
+remains in effect.
+
+`@mediabunny/server` is a different extension: it uses NodeAV/native FFmpeg in a
+Node/Bun/Deno process, with broader codec support and optional hardware
+acceleration. It is not used by this prototype; adding it would require a media
+service alongside the Rust engine and its own deployment/resource management.
 
 This is not a custom MKV player or a universal codec/transcoding solution.
 An MKV can have readable metadata and a thumbnail but still fail native
@@ -50,8 +80,17 @@ playback. Download remains available. Images and text previews are not included.
    manually constructed media URL must return unavailable without serving data.
 6. Try invalid roots, path traversal, HTML/SVG and multipart/invalid ranges.
    Confirm ordinary single-file downloads and ZIPs retain their previous behavior.
+7. Preview an H.264 file with AC-3/E-AC-3 audio. Enable decoded sound; check
+   lip-sync, pause/resume, repeated seeks, buffering and playback-rate changes.
+   Switch tracks, change decoded volume, restore native sound, and close the
+   preview during decoder startup. Repeat in Chrome and Firefox, including the
+   authenticated file-manager modal.
 
 The prototype is covered by range/parser and descriptor-boundary unit tests,
-a generated PCM metadata test using Mediabunny, WebUI tests and build checks.
-Real browser codec behavior and the deployed HTTP path still need the manual
-acceptance checks above.
+a generated PCM metadata test using Mediabunny, audio-clock/cancellation tests,
+WebUI tests and build checks. A local production-build Chrome check with a
+generated H.264/six-channel AC-3 and E-AC-3 MKVs verified nonzero decoded buffers,
+playback across decode windows, pause, seek/resume, volume and playback-rate
+changes, track switching and native-mute restoration under the application CSP.
+Long-running lip-sync, Firefox and the deployed HTTP path still need the
+manual acceptance checks above.

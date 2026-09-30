@@ -18,7 +18,7 @@
 		type PublicShareRoot
 	} from '$lib/public-share';
 	import logoLight from '$lib/assets/nasty.svg';
-	import GuestMediaPreview from '$lib/components/GuestMediaPreview.svelte';
+	import MediaPreview from '$lib/components/MediaPreview.svelte';
 	import logoDark from '$lib/assets/nasty-white.svg';
 	import { ArrowLeft, ChevronRight, Download, File, FolderOpen, Home, Lock } from '@lucide/svelte';
 
@@ -348,7 +348,7 @@
 
 				{#if preview}
 					{#key preview.url}
-						<GuestMediaPreview url={preview.url} name={preview.name} onclose={() => preview = null} />
+						<MediaPreview url={preview.url} name={preview.name} onclose={() => preview = null} />
 					{/key}
 				{/if}
 				{#if browseLoading}
