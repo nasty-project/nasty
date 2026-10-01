@@ -1096,7 +1096,7 @@
 					<img src={contentUrl(previewFile)} alt={previewFile.name} class="max-w-full max-h-[80vh] object-contain" />
 				{:else if cat === 'video' || cat === 'audio'}
 					{#key contentUrl(previewFile)}
-						<div class="w-[80vw] max-w-4xl"><MediaPreview url={contentUrl(previewFile)} name={previewFile.name} mediaKind={cat} /></div>
+						<div class="dark w-[80vw] max-w-4xl text-foreground"><MediaPreview url={contentUrl(previewFile)} name={previewFile.name} mediaKind={cat} /></div>
 					{/key}
 				{:else if cat === 'pdf'}
 					<iframe src={contentUrl(previewFile)} class="w-full h-[80vh]" title={previewFile.name}></iframe>

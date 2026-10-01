@@ -8,8 +8,14 @@ The authenticated file-manager audio/video modal uses the same `MediaPreview`
 component. Its `/api/files/content` endpoint also supports single byte ranges
 and HEAD requests; existing authentication and path restrictions still apply.
 
-The native browser player streams and seeks through a dedicated single-range
-endpoint. Mediabunny is loaded on demand to read duration/codec metadata and,
+The media element streams and seeks through a dedicated single-range endpoint.
+One shared control bar provides play/pause, seeking, speed, mute, volume and fullscreen
+for native and decoded audio alike. Fullscreen contains the video and controls;
+audio-track/decoder settings are in a collapsed Audio options panel. Video opens
+paused with a centered Play button and a first-frame poster where inspection can
+decode one. An unlocked, uncapped single-video guest share opens straight into
+this preview; multi-file, folder and capped shares retain the file-list view.
+Downloads remain available. Mediabunny is loaded on demand to read metadata and,
 where WebCodecs is available, decode a first-frame thumbnail. Media inspection
 has a 15-second timeout, a 16 MiB total read budget, and a 4 MiB source cache.
 
@@ -27,15 +33,17 @@ cannot diagnose every silent-file case.
 When the default audio track is AC-3 or E-AC-3 and the browser does not advertise
 native support for its codec, decoded sound is selected automatically after
 inspection. Decoder preparation does not wait for an autoplay grant; pressing
-the native Play control resumes Web Audio if a user gesture is needed. When
+the Play control resumes Web Audio if a user gesture is needed. When
 native support is advertised, select a track and click **Enable decoded sound**
 to opt in. Codec capability checks are hints, not silence detection; manual
 selection remains available when a browser advertises support but plays silently.
 The lazily loaded `@mediabunny/ac3` extension decodes that track
 using FFmpeg WASM in the browser. Native video remains the playback clock;
 decoded audio follows pause, buffering, seek and playback-rate changes. Native
-audio stays muted during decoded playback. Use **Decoded volume** to adjust or
-silence the decoded soundtrack, and **Use native audio** to restore native sound.
+audio stays internally muted during decoded playback. The shared player's
+volume and mute controls adjust or silence the active audio path, including in
+fullscreen. **Use native audio** in Audio options restores native sound while
+preserving the user's volume/mute selection.
 Switching audio tracks briefly pauses playback while the new decoder opens.
 
 Audio scheduling anchors the video and Web Audio clocks once on playback/resume
@@ -102,6 +110,11 @@ playback. Download remains available. Images and text previews are not included.
    Switch tracks, change decoded volume, restore native sound, and close the
    preview during decoder startup. Repeat in Chrome and Firefox, including the
    authenticated file-manager modal.
+8. Enter fullscreen and check mute/unmute and volume in decoded mode, then
+   switch to native mode and verify the same controls and selected mute state.
+   Open an uncapped single-video guest link: preview should appear automatically
+   with a poster/Play button and remain paused until clicked. Check password
+   unlock, capped shares, folders and multiple-file shares separately.
 
 The prototype is covered by range/parser and descriptor-boundary unit tests,
 a generated PCM metadata test using Mediabunny, audio-clock/cancellation tests,
@@ -125,3 +138,11 @@ responses to verify automatic fallback versus native playback. Simulated blocked
 AudioContext resume promises verified that automatic decoder preparation completes
 before a control gesture grants audio startup. Properties remained collapsed on
 initial open in both the file-manager modal and guest-share preview.
+
+Unified-control checks in Chrome and Firefox covered fullscreen mute/volume,
+keyboard mute, mute-preserving native/decoded mode switches, seeking/speed and
+closing the preview. Single-video checks covered paused startup, first-frame
+posters and password unlock with no media requests before unlock. Chrome also
+passed native-only AAC playback. The automated Firefox native-only MP4 fixture
+stalled even on a standalone page with native controls and no NASty code, so that
+case still needs validation in a normal Firefox session.

@@ -8,7 +8,9 @@ import {
 	shareDownloadUrl,
 	shareZipUrl,
 	mediaPreviewKind,
-	shareMediaUrl
+	shareMediaUrl,
+	singleVideoPreview,
+	type PublicShareMeta
 } from './public-share';
 
 describe('public share navigation', () => {
@@ -51,6 +53,17 @@ describe('public share navigation', () => {
 		expect(mediaPreviewKind('song.mp3')).toBe('audio');
 		for (const name of ['page.html', 'picture.svg', 'remote.m3u8', 'file.mp4.html']) {
 			expect(mediaPreviewKind(name)).toBeNull();
+		}
+	});
+
+	test('opens a single eligible video only after unlock and when preview access is enabled', () => {
+		const meta: PublicShareMeta = { entries: [{ root: 2, name: 'movie.mp4', is_dir: false, size: 100 }], password_required: false, unlocked: true, expires_at: null, media_preview_enabled: true };
+		expect(singleVideoPreview(meta)).toEqual(meta.entries[0]);
+		expect(singleVideoPreview({ ...meta, media_preview_enabled: false })).toBeNull();
+		expect(singleVideoPreview({ ...meta, password_required: true, unlocked: false })).toBeNull();
+		expect(singleVideoPreview({ ...meta, entries: [...meta.entries, { root: 3, name: 'other.mp4', is_dir: false, size: 100 }] })).toBeNull();
+		for (const entry of [{ ...meta.entries[0], is_dir: true }, { ...meta.entries[0], name: 'notes.txt' }, { ...meta.entries[0], name: 'music.mp3' }]) {
+			expect(singleVideoPreview({ ...meta, entries: [entry] })).toBeNull();
 		}
 	});
 });
