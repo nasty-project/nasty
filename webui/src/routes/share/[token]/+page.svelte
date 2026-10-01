@@ -12,6 +12,7 @@
 		shareZipUrl,
 		shareMediaUrl,
 		mediaPreviewKind,
+		singleVideoPreview,
 		type PublicDirectoryEntry,
 		type PublicDirectoryListing,
 		type PublicShareMeta,
@@ -45,6 +46,7 @@
 	let unlockError = $state('');
 
 	const needsUnlock = $derived(!!meta?.password_required && !unlocked);
+	const directVideo = $derived(meta ? singleVideoPreview(meta) : null);
 	const breadcrumbs = $derived(
 		selectedRoot && listing ? shareBreadcrumbs(selectedRoot.name, listing.path) : []
 	);
@@ -85,6 +87,7 @@
 			if (generation !== shareGeneration) return;
 			meta = nextMeta;
 			unlocked = nextMeta.unlocked;
+			openSingleVideo(nextMeta, requestToken);
 		} catch {
 			if (generation === shareGeneration) notAvailable = true;
 		} finally {
@@ -114,6 +117,7 @@
 				password = '';
 				meta = nextMeta;
 				unlocked = nextMeta.unlocked;
+				openSingleVideo(nextMeta, requestToken);
 			} else if (response.status === 429) {
 				unlockError = 'Too many attempts. Please try again later.';
 			} else if (response.status === 404) {
@@ -170,6 +174,11 @@
 		downloadError = '';
 		selectedRoot = null;
 		listing = null;
+	}
+
+	function openSingleVideo(share: PublicShareMeta, shareToken: string) {
+		const video = singleVideoPreview(share);
+		if (video) preview = { url: shareMediaUrl(shareToken, video.root, ''), name: video.name };
 	}
 
 	function openDirectory(entry: PublicDirectoryEntry) {
@@ -244,7 +253,7 @@
 </svelte:head>
 
 <div class="flex min-h-screen items-center justify-center bg-background p-3 sm:p-6">
-	<div class="w-full max-w-3xl rounded-xl border border-border bg-card p-4 shadow-sm sm:p-8">
+	<div class="w-full {directVideo && preview && !needsUnlock ? 'max-w-5xl' : 'max-w-3xl'} rounded-xl border border-border bg-card p-4 shadow-sm sm:p-8">
 		<img src={theme.isDark ? logoDark : logoLight} alt="NASty" class="mx-auto mb-6 h-16" />
 
 		{#if loading}
@@ -289,6 +298,14 @@
 						{unlocking ? 'Unlocking...' : 'Unlock'}
 					</button>
 				</form>
+			{:else if directVideo && preview}
+				{#key preview.url}
+					<MediaPreview url={preview.url} name={preview.name} onclose={() => preview = null} />
+				{/key}
+				<div class="flex justify-end">
+					<a href={shareDownloadUrl(token, directVideo.root, '')} download={directVideo.name} aria-disabled={downloadPending} onclick={event => void startDownload(event, shareDownloadUrl(token, directVideo!.root, ''), directVideo!.name)} class="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm {downloadPending ? 'pointer-events-none opacity-50' : ''}"><Download size={15} /> Download</a>
+				</div>
+				{#if downloadError}<p role="alert" class="mt-3 text-sm text-destructive">{downloadError}</p>{/if}
 			{:else}
 				<div class="mt-6 flex flex-col gap-3 border-b border-border pb-4 sm:flex-row sm:items-center sm:justify-between">
 					<p class="text-sm text-muted-foreground">

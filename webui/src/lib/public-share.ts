@@ -90,3 +90,9 @@ export function mediaPreviewKind(name: string): 'audio' | 'video' | null {
 	if (['mp3', 'm4a', 'wav', 'ogg', 'oga', 'flac', 'aac'].includes(extension ?? '')) return 'audio';
 	return null;
 }
+
+export function singleVideoPreview(meta: PublicShareMeta): PublicShareRoot | null {
+	if (!meta.media_preview_enabled || (meta.password_required && !meta.unlocked) || meta.entries.length !== 1) return null;
+	const entry = meta.entries[0];
+	return !entry.is_dir && mediaPreviewKind(entry.name) === 'video' ? entry : null;
+}

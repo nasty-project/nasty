@@ -4,13 +4,13 @@
 	import { formatBytes } from '$lib/format';
 	import { readMediaProperties, type MediaProperties, type MediaTrackProperties } from '$lib/media-properties';
 	import { automaticDecodedTrack, MediaAudioSync } from '$lib/media-audio';
+	import { Play, Pause, Volume2, VolumeX, Maximize, Minimize } from '@lucide/svelte';
 
 	let { url, name, onclose, mediaKind }: { url: string; name: string; onclose?: () => void; mediaKind?: 'video' | 'audio' } = $props();
 	let details = $state('Inspecting media with Mediabunny…');
 	let inspectionError = $state('');
 	let playbackError = $state(false);
-	let thumbnail = $state<HTMLCanvasElement>();
-	let hasThumbnail = $state(false);
+	let poster = $state<string>();
 	let properties = $state<MediaProperties | null>(null);
 	let fileSize = $state<number | null>(null);
 	let player = $state<HTMLMediaElement>();
@@ -24,10 +24,67 @@
 	let wasmDecoderLoaded = $state(false);
 	let audioError = $state('');
 	let audioVolume = $state(1);
+	let soundMuted = $state(false);
+	let playerFrame = $state<HTMLDivElement>();
+	let paused = $state(true);
+	let hasPlayed = $state(false);
+	let position = $state(0);
+	let playerDuration = $state(0);
+	let playbackRate = $state(1);
+	let fullscreen = $state(false);
+	const duration = $derived(playerDuration || properties?.duration || 0);
 	let audioSync: MediaAudioSync | undefined;
 	let audioInput: import('mediabunny').Input | undefined;
 	let audioContext: AudioContext | undefined;
 	let audioGeneration = 0;
+
+	function timeLabel(time: number) {
+		const seconds = Math.max(0, Math.floor(Number.isFinite(time) ? time : 0));
+		const hours = Math.floor(seconds / 3600);
+		const minutes = Math.floor(seconds / 60) % 60;
+		return `${hours ? `${hours}:${String(minutes).padStart(2, '0')}` : Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+	}
+
+	async function togglePlayback() {
+		if (!player || audioLoading) return;
+		if (!player.paused) { player.pause(); return; }
+		resumeDecodedAudio();
+		try { await player.play(); } catch { playbackError = true; }
+	}
+
+	function setVolume(volume: number) {
+		audioVolume = Math.max(0, Math.min(1, volume));
+		if (player) player.volume = audioVolume;
+		audioSync?.setVolume(soundMuted ? 0 : audioVolume);
+	}
+
+	function toggleMute() {
+		soundMuted = !soundMuted;
+		if (player && !decodedAudio) player.muted = soundMuted;
+		audioSync?.setVolume(soundMuted ? 0 : audioVolume);
+	}
+
+	function seek(time: number) {
+		if (player && duration > 0) player.currentTime = Math.max(0, Math.min(duration, time));
+	}
+
+	async function toggleFullscreen() {
+		try {
+			if (document.fullscreenElement === playerFrame) await document.exitFullscreen();
+			else await playerFrame?.requestFullscreen();
+		} catch { /* The browser may not expose the Fullscreen API. */ }
+	}
+
+	function playerKey(event: KeyboardEvent) {
+		if (event.ctrlKey || event.metaKey || event.altKey) return;
+		if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
+		if (event.target instanceof HTMLButtonElement && (event.code === 'Space' || event.key === 'Enter')) return;
+		if (event.code === 'Space' || event.key === 'k') { event.preventDefault(); void togglePlayback(); }
+		else if (event.key === 'm') { event.preventDefault(); toggleMute(); }
+		else if (event.key === 'f' && kind === 'video') { event.preventDefault(); void toggleFullscreen(); }
+		else if (event.key === 'ArrowLeft') { event.preventDefault(); seek(position - 5); }
+		else if (event.key === 'ArrowRight') { event.preventDefault(); seek(position + 5); }
+	}
 
 	function decoderStatus(track: MediaTrackProperties) {
 		if (track.type === 'audio' && ['ac3', 'eac3'].includes(track.codec ?? '')) {
@@ -48,6 +105,7 @@
 		audioContext = undefined;
 		decodedAudio = false;
 		audioLoading = false;
+		if (player) player.muted = soundMuted;
 	}
 
 	function resumeDecodedAudio() {
@@ -101,7 +159,7 @@
 				stopDecodedAudio();
 				audioError = error instanceof Error ? error.message : 'Audio decoding failed.';
 			});
-			audioSync.setVolume(audioVolume);
+			audioSync.setVolume(soundMuted ? 0 : audioVolume);
 			decodedAudio = true;
 			if (wasPlaying) await player.play();
 		} catch (error) {
@@ -118,6 +176,29 @@
 		let cancelled = false;
 		// Resume while a control gesture is active, including native controls.
 		const mountedPlayer = player;
+		const mountedFrame = playerFrame;
+		mountedFrame?.addEventListener('keydown', playerKey);
+		const updatePlayer = () => {
+			if (!mountedPlayer) return;
+			paused = mountedPlayer.paused;
+			position = mountedPlayer.currentTime;
+			playerDuration = Number.isFinite(mountedPlayer.duration) ? mountedPlayer.duration : 0;
+			playbackRate = mountedPlayer.playbackRate;
+			if (!paused) hasPlayed = true;
+		};
+		const updateVolume = () => {
+			if (!mountedPlayer) return;
+			audioVolume = mountedPlayer.volume;
+			if (!decodedAudio) soundMuted = mountedPlayer.muted;
+			audioSync?.setVolume(soundMuted ? 0 : audioVolume);
+		};
+		const updateFullscreen = () => { fullscreen = document.fullscreenElement === playerFrame; };
+		const playbackEvents = ['loadedmetadata', 'durationchange', 'timeupdate', 'play', 'pause', 'ended', 'ratechange'];
+		for (const event of playbackEvents) mountedPlayer?.addEventListener(event, updatePlayer);
+		mountedPlayer?.addEventListener('volumechange', updateVolume);
+		document.addEventListener('fullscreenchange', updateFullscreen);
+		updatePlayer();
+		updateVolume();
 		mountedPlayer?.addEventListener('pointerdown', resumeDecodedAudio, true);
 		mountedPlayer?.addEventListener('keydown', resumeDecodedAudio, true);
 		mountedPlayer?.addEventListener('play', resumeDecodedAudio);
@@ -185,11 +266,12 @@
 				if (video && await video.canDecode()) {
 					const sink = new m.CanvasSink(video, { width: 480 });
 					const frame = await sink.getCanvas(Math.max(0, await video.getFirstTimestamp()));
-					if (!cancelled && frame && thumbnail) {
-						thumbnail.width = frame.canvas.width;
-						thumbnail.height = frame.canvas.height;
-						thumbnail.getContext('2d')?.drawImage(frame.canvas, 0, 0);
-						hasThumbnail = true;
+					if (!cancelled && frame) {
+						const canvas = document.createElement('canvas');
+						canvas.width = frame.canvas.width;
+						canvas.height = frame.canvas.height;
+						canvas.getContext('2d')?.drawImage(frame.canvas, 0, 0);
+						poster = canvas.toDataURL('image/jpeg', 0.8);
 					}
 				}
 			} catch (error) {
@@ -203,6 +285,11 @@
 			}
 		})();
 		return () => {
+			mountedFrame?.removeEventListener('keydown', playerKey);
+			mountedPlayer?.pause();
+			for (const event of playbackEvents) mountedPlayer?.removeEventListener(event, updatePlayer);
+			mountedPlayer?.removeEventListener('volumechange', updateVolume);
+			document.removeEventListener('fullscreenchange', updateFullscreen);
 			mountedPlayer?.removeEventListener('pointerdown', resumeDecodedAudio, true);
 			mountedPlayer?.removeEventListener('keydown', resumeDecodedAudio, true);
 			mountedPlayer?.removeEventListener('play', resumeDecodedAudio);
@@ -220,28 +307,45 @@
 		<h2 class="min-w-0 truncate font-medium">{name}</h2>
 		{#if onclose}<button type="button" onclick={onclose} class="rounded-md border px-3 py-1 text-sm">Close preview</button>{/if}
 	</div>
-	<p class="text-xs text-muted-foreground">Prototype · Native playback; Mediabunny metadata and frame preview. Browser codec support varies.</p>
-	{#if kind === 'video'}
-		<!-- svelte-ignore a11y_media_has_caption -->
-		<video bind:this={player} src={url} controls preload="metadata" playsinline onerror={() => { playbackError = true; seeking = false; }} onseeking={() => seeking = true} onseeked={() => seeking = false} class="max-h-96 w-full rounded bg-black"></video>
-	{:else}
-		<audio bind:this={player} src={url} controls preload="metadata" onerror={() => { playbackError = true; seeking = false; }} onseeking={() => seeking = true} onseeked={() => seeking = false} class="w-full"></audio>
-	{/if}
+	<div bind:this={playerFrame} class="media-player overflow-hidden rounded bg-black text-white" role="group" aria-label="Media player">
+		{#if kind === 'video'}
+			<div class="media-picture relative">
+				<!-- svelte-ignore a11y_media_has_caption -->
+				<video bind:this={player} src={url} {poster} preload="metadata" playsinline onerror={() => { playbackError = true; seeking = false; }} onseeking={() => seeking = true} onseeked={() => seeking = false} class="aspect-video max-h-96 w-full object-contain"></video>
+				<button type="button" aria-label={!hasPlayed ? 'Play video' : paused ? 'Resume video' : 'Pause video'} disabled={audioLoading} onclick={() => void togglePlayback()} class="absolute inset-0 flex items-center justify-center disabled:opacity-60">
+					{#if paused}<span class="flex size-16 items-center justify-center rounded-full bg-black/70 shadow-lg"><Play size={32} fill="currentColor" /></span>{/if}
+				</button>
+			</div>
+		{:else}
+			<audio bind:this={player} src={url} preload="metadata" onerror={() => { playbackError = true; seeking = false; }} onseeking={() => seeking = true} onseeked={() => seeking = false}></audio>
+		{/if}
+		{#if hasPlayed || kind === 'audio'}
+			<div class="flex shrink-0 items-center gap-2 bg-black/90 px-3 py-2 text-xs sm:gap-3" aria-label="Playback controls">
+				<button type="button" aria-label={paused ? 'Play' : 'Pause'} disabled={audioLoading} onclick={() => void togglePlayback()} class="shrink-0 rounded p-1 hover:bg-white/20">{#if paused}<Play size={20} />{:else}<Pause size={20} />{/if}</button>
+				<input type="range" aria-label="Seek" min="0" max={Math.max(duration, 1)} step="0.1" value={position} disabled={!duration} oninput={event => seek(event.currentTarget.valueAsNumber)} class="min-w-0 flex-1 accent-sky-400" />
+				<span class="shrink-0 tabular-nums">{timeLabel(position)}<span class="hidden sm:inline"> / {timeLabel(duration)}</span></span>
+				<select aria-label="Playback speed" value={playbackRate} onchange={event => { if (player) player.playbackRate = Number(event.currentTarget.value); }} class="w-12 shrink-0 rounded bg-black text-white">
+					{#each [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as rate}<option value={rate}>{rate}×</option>{/each}
+				</select>
+				<button type="button" aria-label={soundMuted ? 'Unmute' : 'Mute'} onclick={toggleMute} class="shrink-0 rounded p-1 hover:bg-white/20">{#if soundMuted || audioVolume === 0}<VolumeX size={20} />{:else}<Volume2 size={20} />{/if}</button>
+				<input type="range" aria-label="Volume" min="0" max="1" step="0.01" value={audioVolume} oninput={event => setVolume(event.currentTarget.valueAsNumber)} class="w-12 shrink-0 accent-sky-400 sm:w-20" />
+				{#if kind === 'video'}<button type="button" aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} onclick={() => void toggleFullscreen()} class="shrink-0 rounded p-1 hover:bg-white/20">{#if fullscreen}<Minimize size={20} />{:else}<Maximize size={20} />{/if}</button>{/if}
+			</div>
+		{/if}
+	</div>
 	{#if playbackError}<p class="text-sm text-muted-foreground">This browser could not play the file, or preview access ended. You can still try downloading it.</p>{/if}
 	{#if ac3Tracks.length}
-		<div class="space-y-2 rounded-md border border-border p-3 text-sm">
-			<label for="decoded-audio-track" class="block font-medium">Browser-decoded AC-3 / E-AC-3 audio</label>
+		<details class="space-y-2 rounded-md border border-border p-3 text-sm">
+			<summary class="cursor-pointer font-medium">Audio options · {audioLoading ? 'Loading decoder…' : decodedAudio ? 'Decoded audio' : 'Native audio'}</summary>
+			<label for="decoded-audio-track" class="block font-medium">Decoded audio track</label>
 			<select id="decoded-audio-track" bind:value={selectedAudioId} disabled={audioLoading} onchange={() => { if (decodedAudio) void enableDecodedAudio(); }} class="w-full rounded-md border bg-background p-2">
 				{#each ac3Tracks as track (track.id)}<option value={track.id}>Track {track.number} · {track.language ?? 'Unknown language'} · {track.codec?.toUpperCase()}{track.name ? ` · ${track.name}` : ''}</option>{/each}
 			</select>
 			<button type="button" disabled={audioLoading} onclick={() => { if (decodedAudio) stopDecodedAudio(); else void enableDecodedAudio(); }} class="rounded-md border px-3 py-1">{audioLoading ? 'Loading decoder…' : decodedAudio ? 'Use native audio' : 'Enable decoded sound'}</button>
-			{#if decodedAudio}
-				<label class="flex items-center gap-3">Decoded volume<input type="range" min="0" max="1" step="0.01" bind:value={audioVolume} oninput={event => audioSync?.setVolume(event.currentTarget.valueAsNumber)} /></label>
-			{/if}
-			<p class="text-xs text-muted-foreground">WASM audio decoding uses this device, not the NAS. Native sound stays muted while decoded audio is enabled; use Decoded volume. Stereo output, no Atmos passthrough. Video still requires native browser playback.</p>
-			{#if audioError}<p role="alert" class="text-sm text-destructive">{audioError}</p>{/if}
-		</div>
+			<p class="text-xs text-muted-foreground">AC-3 / E-AC-3 decoding runs on this device. Player mute and volume control either audio mode, including fullscreen. Stereo output, no Atmos passthrough. Video still requires native browser playback.</p>
+		</details>
 	{/if}
+	{#if audioError}<p role="alert" class="text-sm text-destructive">{audioError}</p>{/if}
 	<p class="text-xs text-muted-foreground">{details}</p>
 	{#if seeking}<p role="status" class="text-sm text-muted-foreground">Seeking… The browser may need to fetch an index and decode from an earlier keyframe.</p>{/if}
 	<details class="rounded-md border border-border p-3 text-sm">
@@ -283,6 +387,11 @@
 			<p class="mt-3 text-xs text-muted-foreground">Container support is only a browser capability hint. Mediabunny decoding and native player support are separate; these checks do not confirm which audio track the native player selected.</p>
 		{/if}
 	</details>
-	<canvas bind:this={thumbnail} class:hidden={!hasThumbnail} class="max-h-48 max-w-full rounded" aria-label="Mediabunny decoded first frame"></canvas>
 	{#if inspectionError}<p class="text-xs text-muted-foreground">{inspectionError}</p>{/if}
 </section>
+
+<style>
+	.media-player:fullscreen { display: flex; flex-direction: column; width: 100%; height: 100%; border-radius: 0; }
+	.media-player:fullscreen .media-picture { flex: 1; min-height: 0; }
+	.media-player:fullscreen video { width: 100%; height: 100%; max-height: none; }
+</style>
