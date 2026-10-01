@@ -4,7 +4,7 @@
 	import { formatBytes } from '$lib/format';
 	import { readMediaProperties, type MediaProperties, type MediaTrackProperties } from '$lib/media-properties';
 	import { automaticDecodedTrack, MediaAudioSync, type AudioDiagnostics } from '$lib/media-audio';
-	import { Play, Pause, Volume2, VolumeX, Maximize, Minimize } from '@lucide/svelte';
+	import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Loader2 } from '@lucide/svelte';
 
 	let { url, name, onclose, mediaKind }: { url: string; name: string; onclose?: () => void; mediaKind?: 'video' | 'audio' } = $props();
 	let details = $state('Inspecting media with Mediabunny…');
@@ -20,6 +20,7 @@
 	const ac3Tracks = $derived(properties?.tracks.filter(track => track.type === 'audio' && ['ac3', 'eac3'].includes(track.codec ?? '')) ?? []);
 	let selectedAudioId = $state<number | null>(null);
 	let audioLoading = $state(false);
+	let audioBuffering = $state(false);
 	let decodedAudio = $state(false);
 	let wasmDecoderLoaded = $state(false);
 	let audioError = $state('');
@@ -78,8 +79,12 @@
 
 	async function togglePlayback() {
 		if (!player || audioLoading) return;
-		if (!player.paused) { player.pause(); return; }
+		if (audioBuffering || !player.paused) {
+			if (audioSync) audioSync.pause(); else player.pause();
+			return;
+		}
 		resumeDecodedAudio();
+		if (audioSync) { audioSync.play(); return; }
 		try { await player.play(); } catch { playbackError = true; }
 	}
 
@@ -211,10 +216,10 @@
 			audioSync = new MediaAudioSync(player, audioContext, new m.AudioBufferSink(track), error => {
 				stopDecodedAudio();
 				audioError = error instanceof Error ? error.message : 'Audio decoding failed.';
-			});
+			}, value => audioBuffering = value);
 			audioSync.setVolume(soundMuted ? 0 : audioVolume);
 			decodedAudio = true;
-			if (wasPlaying) await player.play();
+			if (wasPlaying) audioSync.play();
 		} catch (error) {
 			if (generation === audioGeneration) {
 				stopDecodedAudio();
@@ -365,8 +370,8 @@
 			<div class="media-picture relative">
 				<!-- svelte-ignore a11y_media_has_caption -->
 				<video bind:this={player} src={url} {poster} preload="metadata" playsinline onerror={() => { playbackError = true; seeking = false; }} onseeking={() => seeking = true} onseeked={() => seeking = false} class="aspect-video max-h-96 w-full object-contain"></video>
-				<button type="button" aria-label={!hasPlayed ? 'Play video' : paused ? 'Resume video' : 'Pause video'} disabled={audioLoading} onclick={() => void togglePlayback()} class="absolute inset-0 flex items-center justify-center disabled:opacity-60">
-					{#if paused}<span class="flex size-16 items-center justify-center rounded-full bg-black/70 shadow-lg"><Play size={32} fill="currentColor" /></span>{/if}
+				<button type="button" aria-label={audioBuffering ? 'Cancel audio buffering' : !hasPlayed ? 'Play video' : paused ? 'Resume video' : 'Pause video'} disabled={audioLoading} onclick={() => void togglePlayback()} class="absolute inset-0 flex items-center justify-center disabled:opacity-60">
+					{#if audioBuffering}<span class="flex size-16 items-center justify-center rounded-full bg-black/70"><Loader2 size={32} class="animate-spin" /></span>{:else if paused}<span class="flex size-16 items-center justify-center rounded-full bg-black/70 shadow-lg"><Play size={32} fill="currentColor" /></span>{/if}
 				</button>
 			</div>
 		{:else}
@@ -374,7 +379,7 @@
 		{/if}
 		{#if hasPlayed || kind === 'audio'}
 			<div class="flex shrink-0 items-center gap-2 bg-black/90 px-3 py-2 text-xs sm:gap-3" aria-label="Playback controls">
-				<button type="button" aria-label={paused ? 'Play' : 'Pause'} disabled={audioLoading} onclick={() => void togglePlayback()} class="shrink-0 rounded p-1 hover:bg-white/20">{#if paused}<Play size={20} />{:else}<Pause size={20} />{/if}</button>
+				<button type="button" aria-label={audioBuffering ? 'Cancel buffering' : paused ? 'Play' : 'Pause'} disabled={audioLoading} onclick={() => void togglePlayback()} class="shrink-0 rounded p-1 hover:bg-white/20">{#if paused && !audioBuffering}<Play size={20} />{:else}<Pause size={20} />{/if}</button>
 				<input type="range" aria-label="Seek" min="0" max={Math.max(duration, 1)} step="0.1" value={position} disabled={!duration} oninput={event => seek(event.currentTarget.valueAsNumber)} class="min-w-0 flex-1 accent-sky-400" />
 				<span class="shrink-0 tabular-nums">{timeLabel(position)}<span class="hidden sm:inline"> / {timeLabel(duration)}</span></span>
 				<select aria-label="Playback speed" value={playbackRate} onchange={event => { if (player) player.playbackRate = Number(event.currentTarget.value); }} class="w-12 shrink-0 rounded bg-black text-white">
@@ -386,6 +391,7 @@
 			</div>
 		{/if}
 	</div>
+	{#if audioBuffering}<p role="status" class="text-xs text-muted-foreground">Buffering decoded audio before playback…</p>{/if}
 	{#if playbackError}<p class="text-sm text-muted-foreground">This browser could not play the file, or preview access ended. You can still try downloading it.</p>{/if}
 	{#if ac3Tracks.length}
 		<details class="space-y-2 rounded-md border border-border p-3 text-sm">
@@ -407,6 +413,9 @@
 					<dt>Status / context</dt><dd>{audioDiagnostics.status} / {audioDiagnostics.contextState}</dd>
 					<dt>PCM / context rate</dt><dd>{audioDiagnostics.pcmSampleRate} / {audioDiagnostics.contextSampleRate} Hz · {audioDiagnostics.channels} channels</dd>
 					<dt>PCM batch target / average</dt><dd>{audioDiagnostics.targetBatchMs.toFixed(0)} / {audioDiagnostics.averageBatchMs.toFixed(1)} ms</dd>
+					<dt>Look-ahead / prebuffer target</dt><dd>{audioDiagnostics.lookAheadTargetMs} / {audioDiagnostics.prebufferTargetMs} ms of playback</dd>
+					<dt>Prebuffered / decoder starts</dt><dd>{audioDiagnostics.prebufferedAheadMs.toFixed(1)} ms / {audioDiagnostics.decoderStarts}</dd>
+					<dt>Video vs audio clock drift</dt><dd>{audioDiagnostics.clockDriftMs?.toFixed(1) ?? 'Not playing'} ms</dd>
 					<dt>Audio queued ahead</dt><dd>{audioDiagnostics.queuedAheadMs.toFixed(1)} ms · {audioDiagnostics.activeNodes} nodes</dd>
 					<dt>Decoded frames / scheduled batches</dt><dd>{audioDiagnostics.decodedBuffers} / {audioDiagnostics.scheduledBatches}</dd>
 					<dt>Late batches (&gt;5 ms) / worst</dt><dd>{audioDiagnostics.lateBatches} / {audioDiagnostics.worstLateMs.toFixed(1)} ms</dd>
