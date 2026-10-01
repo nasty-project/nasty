@@ -1,5 +1,32 @@
 import type { WrappedAudioBuffer } from 'mediabunny';
 import type { MediaTrackProperties } from './media-properties';
+import { batchPcmBuffers, PCM_BATCH_SECONDS } from './media-pcm';
+
+export interface AudioDiagnostics {
+	status: string;
+	contextState: AudioContextState;
+	contextSampleRate: number;
+	pcmSampleRate: number;
+	channels: number;
+	playbackRate: number;
+	targetBatchMs: number;
+	averageBatchMs: number;
+	queuedAheadMs: number;
+	activeNodes: number;
+	decodedBuffers: number;
+	scheduledBatches: number;
+	lateBatches: number;
+	worstLateMs: number;
+	trimmedLateMs: number;
+	droppedBatches: number;
+	possibleQueueGaps: number;
+	queueGapMs: number;
+	sourceDiscontinuities: number;
+	averageReadDecodeWaitMs: number;
+	worstReadDecodeWaitMs: number;
+	baseLatencyMs: number;
+	outputLatencyMs: number | null;
+}
 
 /** Native audio support is independent of Mediabunny's optional decoders. */
 export function automaticDecodedTrack(tracks: MediaTrackProperties[], canPlayType: (type: string) => CanPlayTypeResult): number | null {
@@ -34,6 +61,9 @@ export class MediaAudioSync {
 	private channels = 2;
 	private previousMuted: boolean;
 	private events: Array<[string, EventListener]> = [];
+	private queuedUntil: number | null = null;
+	private counters = { decodedBuffers: 0, scheduledBatches: 0, scheduledSeconds: 0, lateBatches: 0, worstLateMs: 0, trimmedLateMs: 0, droppedBatches: 0, possibleQueueGaps: 0, queueGapMs: 0, sourceDiscontinuities: 0, readWaitMs: 0, worstReadWaitMs: 0 };
+	private pcmSampleRate = 0;
 
 	constructor(
 		private player: HTMLMediaElement,
@@ -68,6 +98,24 @@ export class MediaAudioSync {
 		this.gain.gain.value = this.volume * headroom;
 	}
 
+	getDiagnostics(): AudioDiagnostics {
+		const c = this.counters;
+		return {
+			status: this.disposed ? 'stopped' : this.player.seeking ? 'seeking' : this.player.paused ? 'paused' : 'playing',
+			contextState: this.context.state, contextSampleRate: this.context.sampleRate, pcmSampleRate: this.pcmSampleRate,
+			channels: this.channels, playbackRate: this.player.playbackRate, targetBatchMs: PCM_BATCH_SECONDS * 1000,
+			averageBatchMs: c.scheduledBatches ? c.scheduledSeconds * 1000 / c.scheduledBatches : 0,
+			queuedAheadMs: Math.max(0, (this.queuedUntil ?? this.context.currentTime) - this.context.currentTime) * 1000,
+			activeNodes: this.nodes.size, decodedBuffers: c.decodedBuffers, scheduledBatches: c.scheduledBatches,
+			lateBatches: c.lateBatches, worstLateMs: c.worstLateMs, trimmedLateMs: c.trimmedLateMs,
+			droppedBatches: c.droppedBatches, possibleQueueGaps: c.possibleQueueGaps, queueGapMs: c.queueGapMs,
+			sourceDiscontinuities: c.sourceDiscontinuities,
+			averageReadDecodeWaitMs: c.decodedBuffers ? c.readWaitMs / c.decodedBuffers : 0, worstReadDecodeWaitMs: c.worstReadWaitMs,
+			baseLatencyMs: (this.context.baseLatency ?? 0) * 1000,
+			outputLatencyMs: Number.isFinite(this.context.outputLatency) ? this.context.outputLatency * 1000 : null
+		};
+	}
+
 	private stop() {
 		this.generation++;
 		for (const node of this.nodes) {
@@ -75,6 +123,7 @@ export class MediaAudioSync {
 			node.disconnect();
 		}
 		this.nodes.clear();
+		this.queuedUntil = null;
 	}
 
 	private restart() {
@@ -95,7 +144,18 @@ export class MediaAudioSync {
 				let start = mediaAnchor;
 				while (this.current(generation)) {
 					let yielded = false;
-					for await (const chunk of this.sink.buffers(start, start + 2)) {
+					const batches = batchPcmBuffers(this.sink.buffers(start, start + 2), {
+						start, end: start + 2, createBuffer: this.context.createBuffer.bind(this.context),
+						isCurrent: () => this.current(generation),
+						onRead: (waitMs, buffer) => {
+							this.counters.decodedBuffers++;
+							this.counters.readWaitMs += waitMs;
+							this.counters.worstReadWaitMs = Math.max(this.counters.worstReadWaitMs, waitMs);
+							this.pcmSampleRate = buffer.sampleRate;
+						},
+						onDiscontinuity: () => { this.counters.sourceDiscontinuities++; }
+					});
+					for await (const chunk of batches) {
 						if (!this.current(generation)) break;
 						yielded = true;
 						while (chunk.timestamp - this.player.currentTime > 0.5 && this.current(generation)) {
@@ -104,12 +164,15 @@ export class MediaAudioSync {
 						if (!this.current(generation)) break;
 						const audioNow = this.context.currentTime;
 						const mediaNow = mediaAnchor + (audioNow - audioAnchor) * rate;
+						const latenessMs = Math.max(0, (mediaNow - chunk.timestamp) / rate) * 1000;
+						this.counters.worstLateMs = Math.max(this.counters.worstLateMs, latenessMs);
+						if (latenessMs > 5) this.counters.lateBatches++;
 						const schedule = audioSchedule(chunk.timestamp, chunk.buffer.duration, mediaNow, rate);
-						if (!schedule) continue;
-						// The sink can return the buffer straddling a window boundary.
-						// Play only this window's slice, never duplicate its leading samples.
-						const offset = Math.max(schedule.offset, start - chunk.timestamp);
-						const duration = Math.min(chunk.buffer.duration, start + 2 - chunk.timestamp) - offset;
+						this.counters.trimmedLateMs += Math.min(chunk.buffer.duration, Math.max(0, mediaNow - chunk.timestamp)) * 1000;
+						if (!schedule) { this.counters.droppedBatches++; continue; }
+						// Window boundaries have already been clipped to exact PCM samples.
+						const offset = schedule.offset;
+						const duration = chunk.buffer.duration - offset;
 						if (duration <= 0) continue;
 						if (this.channels !== chunk.buffer.numberOfChannels) {
 							this.channels = chunk.buffer.numberOfChannels;
@@ -121,7 +184,15 @@ export class MediaAudioSync {
 						node.connect(this.gain);
 						this.nodes.add(node);
 						node.onended = () => { this.nodes.delete(node); node.disconnect(); };
-						node.start(audioAnchor + (chunk.timestamp + offset - mediaAnchor) / rate, offset, duration);
+						const when = audioAnchor + (chunk.timestamp + offset - mediaAnchor) / rate;
+						if (this.queuedUntil != null && when - this.queuedUntil > 0.005) {
+							this.counters.possibleQueueGaps++;
+							this.counters.queueGapMs += (when - this.queuedUntil) * 1000;
+						}
+						node.start(when, offset, duration);
+						this.queuedUntil = when + duration / rate;
+						this.counters.scheduledBatches++;
+						this.counters.scheduledSeconds += chunk.buffer.duration;
 					}
 					// Keep consecutive window boundaries exact and prepare the next
 					// window before this one ends, avoiding polling-sized audio gaps.

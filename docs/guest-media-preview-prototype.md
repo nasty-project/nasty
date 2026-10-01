@@ -49,6 +49,12 @@ Switching audio tracks briefly pauses playback while the new decoder opens.
 Audio scheduling anchors the video and Web Audio clocks once on playback/resume
 and seek/rate changes, then keeps decoded samples on a continuous Web Audio
 timeline. Decode-window boundaries split a buffer without replaying samples.
+Contiguous PCM frames are copied into batches of at most 192 ms (six typical
+32 ms AC-3 frames), reducing short-source boundaries. Window/stream tails may
+be shorter. Timestamp gaps and format changes flush the current batch rather
+than padding or joining incompatible samples. Cancellation discards partial
+batches. The existing 0.5-second scheduling lead and two-second decode windows
+remain in place.
 The audio context requests the track's sample rate to avoid independently
 resampling each short buffer. Quad and 5.1 stereo downmixes normalize the speaker
 coefficient sums to reserve headroom; surround tracks may therefore sound quieter
@@ -76,6 +82,25 @@ service alongside the Rust engine and its own deployment/resource management.
 This is not a custom MKV player or a universal codec/transcoding solution.
 An MKV can have readable metadata and a thumbnail but still fail native
 playback. Download remains available. Images and text previews are not included.
+
+## Decoded audio diagnostics
+
+The collapsed diagnostics panel samples playback state every 500 ms while open.
+It reports PCM/context rates, batch size, queued-audio horizon, active source
+nodes, decoded-frame/scheduled-batch counts, late/dropped batches, trimmed late
+PCM, possible scheduling gaps, source discontinuities and read/decode waits.
+Late-batch and queue-gap counters use a 5 ms threshold. Counters include startup
+and seeks; pause/seek/rate changes reset the queued horizon without counting an
+intentional stop as starvation. These are scheduling estimates, not measured
+hardware underruns. Read/decode waits include demuxing, body reads and WASM
+decoding; HTTP timings cover waiting for headers, not full body transfers.
+
+Copy diagnostics produces a local JSON report with browser/codec, audio counters
+and HTTP request timing/status counters. It does not include file names, URLs,
+share tokens or request headers, and does not upload telemetry. Counters reset
+on decoder/track activation; the stopped session's snapshot remains available.
+Physical Android/Vivaldi playback still needs device testing to establish
+whether batching reduces the reported interruptions.
 
 ## Access and accounting
 

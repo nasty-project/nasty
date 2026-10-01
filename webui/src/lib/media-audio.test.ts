@@ -8,6 +8,11 @@ function track(id: number, codec: string, isDefault = false): MediaTrackProperti
 		height: null, channels: 6, sampleRate: 48000, canDecode: true };
 }
 
+function pcmBuffer(channels: number, length: number, sampleRate: number): AudioBuffer {
+	const data = Array.from({ length: channels }, () => new Float32Array(length));
+	return { numberOfChannels: channels, length, sampleRate, duration: length / sampleRate, getChannelData: (channel: number) => data[channel] } as AudioBuffer;
+}
+
 test('defaults to decoded E-AC-3 when native audio is unsupported, even if WASM was registered earlier', () => {
 	const native = vi.fn(() => '' as CanPlayTypeResult);
 	expect(automaticDecodedTrack([track(1, 'ac3'), track(2, 'eac3', true)], native)).toBe(2);
@@ -40,11 +45,11 @@ test('surround playback preserves volume headroom, pause cancels sound, and disp
 	const player = Object.assign(new EventTarget(), { paused: false, seeking: false, readyState: 4, currentTime: 10, playbackRate: 1, muted: false });
 	const node = { buffer: null, playbackRate: { value: 1 }, connect: vi.fn(), disconnect: vi.fn(), start: vi.fn(), stop: vi.fn(), onended: null };
 	const gain = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() };
-	const context = { currentTime: 5, resume: async () => {}, createGain: () => gain, createBufferSource: () => node, destination: {} };
-	const sink = { async *buffers() { yield { buffer: { duration: 0.5, numberOfChannels: 6 }, timestamp: 10, duration: 0.5 }; } };
+	const context = { currentTime: 5, resume: async () => {}, createGain: () => gain, createBuffer: pcmBuffer, createBufferSource: () => node, destination: {} };
+	const sink = { async *buffers() { yield { buffer: pcmBuffer(6, 24000, 48000), timestamp: 10, duration: 0.5 }; } };
 	const error = vi.fn();
 	const sync = new MediaAudioSync(player as unknown as HTMLMediaElement, context as unknown as AudioContext, sink as never, error);
-	await vi.waitFor(() => expect(node.start).toHaveBeenCalledWith(5, 0, 0.5));
+	await vi.waitFor(() => expect(node.start).toHaveBeenCalledWith(5, 0, 0.192));
 	const fullGain = gain.gain.value;
 	expect(fullGain).toBeGreaterThan(0);
 	expect(fullGain).toBeLessThan(0.5);
@@ -70,8 +75,8 @@ test('a read completed after seeking cannot schedule stale audio', async () => {
 	const wait = new Promise<void>(resolve => deliver = resolve);
 	const create = vi.fn();
 	const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
-	const context = { currentTime: 5, resume: async () => {}, createGain: () => gain, createBufferSource: create, destination: {} };
-	const sink = { async *buffers() { await wait; yield { buffer: { duration: 0.5 }, timestamp: 10, duration: 0.5 }; } };
+	const context = { currentTime: 5, resume: async () => {}, createGain: () => gain, createBuffer: pcmBuffer, createBufferSource: create, destination: {} };
+	const sink = { async *buffers() { await wait; yield { buffer: pcmBuffer(2, 24000, 48000), timestamp: 10, duration: 0.5 }; } };
 	const sync = new MediaAudioSync(player as unknown as HTMLMediaElement, context as unknown as AudioContext, sink as never, vi.fn());
 	await new Promise(resolve => setTimeout(resolve, 0));
 	player.seeking = true;
@@ -91,7 +96,7 @@ test('keeps PCM continuous across rounded video-clock ticks and overlapping deco
 	const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
 	const context = {
 		get currentTime() { return 5 + elapsed; },
-		resume: async () => {}, createGain: () => gain, destination: {},
+		resume: async () => {}, createGain: () => gain, createBuffer: pcmBuffer, destination: {},
 		createBufferSource: () => ({
 			buffer: null, playbackRate: { value: 1 }, connect() {}, disconnect() {}, stop() {}, onended: null,
 			start(time: number, offset: number, duration: number) { scheduled.push({ time, offset, duration }); }
@@ -101,7 +106,7 @@ test('keeps PCM continuous across rounded video-clock ticks and overlapping deco
 		async *buffers(start = 10, end = Infinity) {
 			// Like AudioBufferSink, include the frame that straddles start.
 			for (let frame = Math.floor((start - 10) / 0.032); 10 + frame * 0.032 < end; frame++) {
-				yield { buffer: { duration: 0.032 }, timestamp: 10 + frame * 0.032, duration: 0.032 };
+				yield { buffer: pcmBuffer(2, 1536, 48000), timestamp: 10 + frame * 0.032, duration: 0.032 };
 			}
 		}
 	};
@@ -110,17 +115,54 @@ test('keeps PCM continuous across rounded video-clock ticks and overlapping deco
 	const clock = setInterval(() => { elapsed += 0.025; }, 25);
 	try {
 		await vi.advanceTimersByTimeAsync(4500);
-		expect(scheduled.length).toBeGreaterThan(120);
+		expect(scheduled.length).toBeGreaterThan(20);
+		expect(scheduled.length).toBeLessThan(35);
 		for (let index = 1; index < scheduled.length; index++) {
 			const previous = scheduled[index - 1];
 			expect(scheduled[index].time).toBeCloseTo(previous.time + previous.duration, 8);
 		}
-		expect(scheduled.some(chunk => chunk.offset > 0 && chunk.duration < 0.032)).toBe(true);
+		expect(scheduled.some(chunk => chunk.duration === 0.192)).toBe(true);
 		expect(error).not.toHaveBeenCalled();
 	} finally {
 		sync.dispose();
 		clearInterval(clock);
 		await vi.runOnlyPendingTimersAsync();
 		vi.useRealTimers();
+	}
+});
+
+test('reports decoder stalls, dropped/late batches and queue gaps without treating pause as an underrun', async () => {
+	vi.useFakeTimers();
+	let elapsed = 0;
+	const player = Object.assign(new EventTarget(), { paused: false, seeking: false, readyState: 4, playbackRate: 1, muted: false });
+	Object.defineProperty(player, 'currentTime', { get: () => 10 + elapsed });
+	const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
+	const context = {
+		get currentTime() { return 5 + elapsed; }, sampleRate: 48000, state: 'running', baseLatency: 0.01,
+		resume: async () => {}, createGain: () => gain, createBuffer: pcmBuffer, destination: {},
+		createBufferSource: () => ({ buffer: null, playbackRate: { value: 1 }, connect() {}, disconnect() {}, stop() {}, onended: null, start() {} })
+	};
+	const sink = { async *buffers(start = 10, end = 12) {
+		for (let frame = Math.floor((start - 10) / 0.032); 10 + frame * 0.032 < end; frame++) {
+			if (frame === 12) await new Promise(resolve => setTimeout(resolve, 700));
+			yield { buffer: pcmBuffer(2, 1536, 48000), timestamp: 10 + frame * 0.032, duration: 0.032 };
+		}
+	} };
+	const sync = new MediaAudioSync(player as unknown as HTMLMediaElement, context as unknown as AudioContext, sink, vi.fn());
+	const clock = setInterval(() => { elapsed += 0.025; }, 25);
+	try {
+		await vi.advanceTimersByTimeAsync(1000);
+		const stats = sync.getDiagnostics();
+		expect(stats.worstReadDecodeWaitMs).toBeGreaterThanOrEqual(700);
+		expect(stats.lateBatches).toBeGreaterThan(0);
+		expect(stats.droppedBatches).toBeGreaterThan(0);
+		expect(stats.possibleQueueGaps).toBeGreaterThan(0);
+		expect(stats.trimmedLateMs).toBeGreaterThan(0);
+		expect(stats.decodedBuffers).toBeGreaterThan(stats.scheduledBatches * 4);
+		player.paused = true;
+		player.dispatchEvent(new Event('pause'));
+		expect(sync.getDiagnostics()).toMatchObject({ status: 'paused', activeNodes: 0, queuedAheadMs: 0, possibleQueueGaps: stats.possibleQueueGaps });
+	} finally {
+		sync.dispose(); clearInterval(clock); await vi.runOnlyPendingTimersAsync(); vi.useRealTimers();
 	}
 });
