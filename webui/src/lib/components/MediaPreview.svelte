@@ -3,7 +3,7 @@
 	import { mediaPreviewKind } from '$lib/public-share';
 	import { formatBytes } from '$lib/format';
 	import { readMediaProperties, type MediaProperties, type MediaTrackProperties } from '$lib/media-properties';
-	import { automaticDecodedTrack, MediaAudioSync } from '$lib/media-audio';
+	import { automaticDecodedTrack, MediaAudioSync, type AudioDiagnostics } from '$lib/media-audio';
 	import { Play, Pause, Volume2, VolumeX, Maximize, Minimize } from '@lucide/svelte';
 
 	let { url, name, onclose, mediaKind }: { url: string; name: string; onclose?: () => void; mediaKind?: 'video' | 'audio' } = $props();
@@ -37,6 +37,37 @@
 	let audioInput: import('mediabunny').Input | undefined;
 	let audioContext: AudioContext | undefined;
 	let audioGeneration = 0;
+	let diagnosticsOpen = $state(false);
+	let audioDiagnostics = $state<AudioDiagnostics | null>(null);
+	let networkDiagnostics = $state({ requests: 0, failures: 0, cancelled: 0, inFlight: 0, averageHeadersMs: 0, worstHeadersMs: 0, lastStatus: 0 });
+	let diagnosticCopyMessage = $state('');
+	let networkStats = { requests: 0, failures: 0, cancelled: 0, inFlight: 0, totalHeadersMs: 0, worstHeadersMs: 0, lastStatus: 0 };
+
+	function updateDiagnostics() {
+		if (audioSync) audioDiagnostics = audioSync.getDiagnostics();
+		const { totalHeadersMs, ...stats } = networkStats;
+		networkDiagnostics = { ...stats, averageHeadersMs: totalHeadersMs / Math.max(1, stats.requests - stats.inFlight) };
+	}
+
+	$effect(() => {
+		const active = decodedAudio;
+		if (!diagnosticsOpen) return;
+		updateDiagnostics();
+		if (!active) return;
+		// Poll only while the panel is visible, not on every decoded frame.
+		const timer = setInterval(updateDiagnostics, 500);
+		return () => clearInterval(timer);
+	});
+
+	function diagnosticReport() {
+		return JSON.stringify({ browser: navigator.userAgent, codec: ac3Tracks.find(track => track.id === selectedAudioId)?.codec, audio: audioDiagnostics, network: networkDiagnostics }, null, 2);
+	}
+
+	async function copyDiagnostics() {
+		updateDiagnostics();
+		try { await navigator.clipboard.writeText(diagnosticReport()); diagnosticCopyMessage = 'Copied'; }
+		catch { diagnosticCopyMessage = 'Select the report below to copy it.'; }
+	}
 
 	function timeLabel(time: number) {
 		const seconds = Math.max(0, Math.floor(Number.isFinite(time) ? time : 0));
@@ -98,6 +129,7 @@
 	function stopDecodedAudio() {
 		audioGeneration++;
 		audioSync?.dispose();
+		updateDiagnostics();
 		audioSync = undefined;
 		audioInput?.dispose();
 		audioInput = undefined;
@@ -124,6 +156,10 @@
 		const generation = audioGeneration;
 		audioLoading = true;
 		audioError = '';
+		audioDiagnostics = null;
+		diagnosticCopyMessage = '';
+		const requests = { requests: 0, failures: 0, cancelled: 0, inFlight: 0, totalHeadersMs: 0, worstHeadersMs: 0, lastStatus: 0 };
+		networkStats = requests;
 		try {
 			// Open/resume Web Audio in the button gesture, before fetching WASM.
 			// Match the PCM rate: resampling each short source independently can
@@ -143,10 +179,27 @@
 				source: new m.UrlSource(url, {
 					maxCacheSize: 4 * 1024 * 1024,
 					getRetryDelay: () => null,
-					fetchFn: (request, init) => fetch(request, {
-						...init, redirect: 'error',
-						signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(15000)])
-					})
+					fetchFn: async (request, init) => {
+						const before = performance.now();
+						requests.requests++; requests.inFlight++;
+						try {
+							const response = await fetch(request, {
+								...init, redirect: 'error',
+								signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(15000)])
+							});
+							requests.lastStatus = response.status;
+							if (!response.ok) requests.failures++;
+							return response;
+						} catch (error) {
+							if (error instanceof DOMException && error.name === 'AbortError') requests.cancelled++;
+							else requests.failures++;
+							throw error;
+						} finally {
+							const elapsed = performance.now() - before;
+							requests.inFlight--; requests.totalHeadersMs += elapsed;
+							requests.worstHeadersMs = Math.max(requests.worstHeadersMs, elapsed);
+						}
+					}
 				})
 			});
 			const track = (await audioInput.getAudioTracks()).find(track => track.id === selectedAudioId);
@@ -346,6 +399,32 @@
 		</details>
 	{/if}
 	{#if audioError}<p role="alert" class="text-sm text-destructive">{audioError}</p>{/if}
+	{#if ac3Tracks.length}
+		<details class="rounded-md border border-border p-3 text-sm" ontoggle={event => diagnosticsOpen = event.currentTarget.open}>
+			<summary class="cursor-pointer font-medium">Decoded audio diagnostics</summary>
+			{#if audioDiagnostics}
+				<dl class="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+					<dt>Status / context</dt><dd>{audioDiagnostics.status} / {audioDiagnostics.contextState}</dd>
+					<dt>PCM / context rate</dt><dd>{audioDiagnostics.pcmSampleRate} / {audioDiagnostics.contextSampleRate} Hz · {audioDiagnostics.channels} channels</dd>
+					<dt>PCM batch target / average</dt><dd>{audioDiagnostics.targetBatchMs.toFixed(0)} / {audioDiagnostics.averageBatchMs.toFixed(1)} ms</dd>
+					<dt>Audio queued ahead</dt><dd>{audioDiagnostics.queuedAheadMs.toFixed(1)} ms · {audioDiagnostics.activeNodes} nodes</dd>
+					<dt>Decoded frames / scheduled batches</dt><dd>{audioDiagnostics.decodedBuffers} / {audioDiagnostics.scheduledBatches}</dd>
+					<dt>Late batches (&gt;5 ms) / worst</dt><dd>{audioDiagnostics.lateBatches} / {audioDiagnostics.worstLateMs.toFixed(1)} ms</dd>
+					<dt>Trimmed late PCM / dropped batches</dt><dd>{audioDiagnostics.trimmedLateMs.toFixed(1)} ms / {audioDiagnostics.droppedBatches}</dd>
+					<dt>Possible queue gaps / total</dt><dd>{audioDiagnostics.possibleQueueGaps} / {audioDiagnostics.queueGapMs.toFixed(1)} ms</dd>
+					<dt>Source discontinuities</dt><dd>{audioDiagnostics.sourceDiscontinuities}</dd>
+					<dt>Read/decode wait average / worst</dt><dd>{audioDiagnostics.averageReadDecodeWaitMs.toFixed(1)} / {audioDiagnostics.worstReadDecodeWaitMs.toFixed(1)} ms</dd>
+					<dt>Base / output latency</dt><dd>{audioDiagnostics.baseLatencyMs.toFixed(1)} / {audioDiagnostics.outputLatencyMs?.toFixed(1) ?? 'Unknown'} ms</dd>
+					<dt>HTTP requests / failures / cancelled</dt><dd>{networkDiagnostics.requests} / {networkDiagnostics.failures} / {networkDiagnostics.cancelled}</dd>
+					<dt>HTTP headers average / worst</dt><dd>{networkDiagnostics.averageHeadersMs.toFixed(1)} / {networkDiagnostics.worstHeadersMs.toFixed(1)} ms</dd>
+				</dl>
+				<p class="mt-3 text-xs text-muted-foreground">Counters cover this decoded session, including startup and seeks. Queue gaps are scheduling estimates, not measured speaker underruns. Read/decode wait includes demuxing, network body reads and WASM decoding; HTTP timing measures headers only.</p>
+				<button type="button" onclick={() => void copyDiagnostics()} class="mt-3 rounded-md border px-3 py-1 text-xs">Copy diagnostics</button>
+				{#if diagnosticCopyMessage}<p role="status" class="mt-1 text-xs">{diagnosticCopyMessage}</p>{/if}
+				<pre class="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-xs" aria-label="Audio diagnostic report">{diagnosticReport()}</pre>
+			{:else}<p class="mt-3 text-xs text-muted-foreground">Enable decoded sound in Audio options to collect diagnostics.</p>{/if}
+		</details>
+	{/if}
 	<p class="text-xs text-muted-foreground">{details}</p>
 	{#if seeking}<p role="status" class="text-sm text-muted-foreground">Seeking… The browser may need to fetch an index and decode from an earlier keyframe.</p>{/if}
 	<details class="rounded-md border border-border p-3 text-sm">
