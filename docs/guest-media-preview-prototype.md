@@ -1,5 +1,11 @@
 # Shared media preview prototype
 
+Repeatable browser/device checks are now described in
+[`tests/media-browser/README.md`](../tests/media-browser/README.md), including
+an Android 16 Firefox emulator workflow and automatically saved diagnostic/video
+event reports. Desktop checks run on media-related pull requests; Android runs
+are manually dispatched until the emulator/browser baseline is established.
+
 Related: #558. Audio/video Preview buttons appear for an unlocked guest share
 without a download limit. Supported filename types: MP4/M4V, MOV, WebM, MKV,
 MP3, M4A, WAV, Ogg/OGA, FLAC and AAC.

@@ -1,0 +1,14 @@
+{
+  "name": "nasty-media-browser-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fixtures": "node fixtures.mjs",
+    "test": "node run.mjs",
+    "test:unit": "node --test harness.test.mjs",
+    "test:android": "node run.mjs --browser=android-firefox"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
+  }
+}
