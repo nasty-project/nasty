@@ -365,10 +365,10 @@ pub(super) async fn try_route(
                 Ok(k) => k.trim().to_string(),
                 Err(r) => return Some(r),
             };
-            if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") {
+            if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") && !key.starts_with("sk-") {
                 return Some(err(
                     req,
-                    "Invalid SSH public key — must start with ssh-rsa, ssh-ed25519, etc.",
+                    "Invalid SSH public key — must start with ssh-, ecdsa-, or sk-.",
                 ));
             }
             if let Err(e) = tokio::fs::create_dir_all("/root/.ssh").await {
