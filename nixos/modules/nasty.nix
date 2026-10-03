@@ -1760,6 +1760,7 @@ in {
 
       path = with pkgs; [
         bashInteractive  # bash for terminal
+        config.services.openssh.package  # ssh-keygen for public key validation
         util-linux       # lsblk, blkid, wipefs, mount, umount
         e2fsprogs        # mkfs.ext3, mkfs.ext4
         xfsprogs         # mkfs.xfs

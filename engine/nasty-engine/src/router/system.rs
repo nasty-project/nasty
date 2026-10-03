@@ -11,6 +11,52 @@ use super::*;
 use crate::AppState;
 use crate::auth::{Role, Session};
 
+/// Accept one bare public-key line, with an optional comment. OpenSSH decides
+/// which algorithms and key encodings are valid; no algorithm allowlist here.
+async fn validate_ssh_public_key(key: &str) -> Result<(), String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+
+    let invalid = || "Invalid SSH public key".to_string();
+    if key.is_empty() || key.contains(['\n', '\r', '\0']) {
+        return Err("Expected a single SSH public key line".to_string());
+    }
+    let mut fields = key.split_ascii_whitespace();
+    let key_type = fields.next().ok_or_else(invalid)?;
+    let encoded = fields.next().ok_or_else(invalid)?;
+    let blob = STANDARD
+        .decode(encoded)
+        .or_else(|_| STANDARD_NO_PAD.decode(encoded))
+        .map_err(|_| invalid())?;
+    // ssh-keygen also reads known_hosts and authorized_keys options. Require
+    // the bare public-key format by matching the first field to the SSH wire
+    // blob's length-prefixed type; leave the rest of the blob to OpenSSH.
+    let length = blob.get(..4).ok_or_else(invalid)?;
+    let length = u32::from_be_bytes(length.try_into().expect("four bytes")) as usize;
+    if blob.get(4..).and_then(|rest| rest.get(..length)) != Some(key_type.as_bytes()) {
+        return Err(invalid());
+    }
+    let input = format!("{key}\n");
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        nasty_common::cmd::run_with_input(
+            "ssh-keygen",
+            &["-l", "-f", "/dev/stdin"],
+            input.as_bytes(),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        tracing::warn!("SSH public key validation timed out");
+        "SSH public key validation timed out".to_string()
+    })?
+    .map_err(|e| format!("Could not validate SSH public key: {e}"))?;
+    if !output.status.success() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 struct CustomRuleUpdateParams {
     id: String,
@@ -365,11 +411,8 @@ pub(super) async fn try_route(
                 Ok(k) => k.trim().to_string(),
                 Err(r) => return Some(r),
             };
-            if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") && !key.starts_with("sk-") {
-                return Some(err(
-                    req,
-                    "Invalid SSH public key — must start with ssh-, ecdsa-, or sk-.",
-                ));
+            if let Err(e) = validate_ssh_public_key(&key).await {
+                return Some(err(req, e));
             }
             if let Err(e) = tokio::fs::create_dir_all("/root/.ssh").await {
                 tracing::warn!("create_dir_all(/root/.ssh) failed: {e}");
@@ -1389,6 +1432,86 @@ fn human_bytes(b: u64) -> String {
         format!("{b} B")
     } else {
         format!("{v:.1} {}", U[i])
+    }
+}
+
+#[cfg(test)]
+mod ssh_key_tests {
+    use super::validate_ssh_public_key;
+
+    const ED25519: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWn6lmf1fzNTbc2IAz8fk8qnex0MMI4hgVfKwkqqq93";
+    const ECDSA: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBKZ+ftKTKHlbl4fMGcqdZP6Q8QRekzzP5g94QKiOFz6ajdOYFDnE++tZxClD+rrTBDYHDHjla+DKXBg2g4w86ZY=";
+    // Public fixtures only: the FIDO blobs contain an ordinary public key and
+    // the "ssh:" application string. No authenticator is needed to parse them.
+    const ED25519_SK: &str = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAICWn6lmf1fzNTbc2IAz8fk8qnex0MMI4hgVfKwkqqq93AAAABHNzaDo=";
+    const ECDSA_SK: &str = "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20AAAAIbmlzdHAyNTYAAABBBKZ+ftKTKHlbl4fMGcqdZP6Q8QRekzzP5g94QKiOFz6ajdOYFDnE++tZxClD+rrTBDYHDHjla+DKXBg2g4w86ZYAAAAEc3NoOg==";
+
+    #[tokio::test]
+    async fn ssh_key_accepts_regular_and_fido_public_keys() {
+        for key in [ED25519, ECDSA, ED25519_SK, ECDSA_SK] {
+            validate_ssh_public_key(key).await.unwrap();
+            validate_ssh_public_key(&format!("{key} user@host optional comment"))
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_key_rejects_malformed_and_unsupported_keys() {
+        for key in [
+            "",
+            "ssh-ed25519",
+            "sk-wawawa dudu",
+            "ssh-ed25519 !!!!",
+            "ssh-ed25519 AAAA",
+            // Correct type header, but no actual Ed25519 public key.
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5",
+            // Well-formed SSH type string, but an unknown algorithm.
+            "future-key AAAACmZ1dHVyZS1rZXk=",
+        ] {
+            assert!(validate_ssh_public_key(key).await.is_err(), "{key}");
+        }
+        let mismatched = ED25519.replacen("ssh-ed25519", "ssh-rsa", 1);
+        assert!(validate_ssh_public_key(&mismatched).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ssh_key_rejects_multiple_lines_and_non_public_key_formats() {
+        for key in [
+            format!("{ED25519}\n{ECDSA}"),
+            format!("{ED25519}\ninvalid second line"),
+            format!("{ED25519}\r{ECDSA}"),
+            format!("{ED25519}\0comment"),
+            format!("host.example {ED25519}"),
+            format!("restrict {ED25519}"),
+            format!("# {ED25519}"),
+        ] {
+            assert!(validate_ssh_public_key(&key).await.is_err(), "{key:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_key_accepts_generated_rsa_and_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("key");
+        let private = private.to_str().unwrap();
+        nasty_common::cmd::run_ok(
+            "ssh-keygen",
+            &["-q", "-t", "rsa", "-b", "2048", "-N", "", "-f", private],
+        )
+        .await
+        .unwrap();
+        let public = format!("{private}.pub");
+        let key = tokio::fs::read_to_string(&public).await.unwrap();
+        validate_ssh_public_key(key.trim()).await.unwrap();
+        nasty_common::cmd::run_ok("ssh-keygen", &["-s", private, "-I", "test", &public])
+            .await
+            .unwrap();
+        let certificate = tokio::fs::read_to_string(format!("{private}-cert.pub"))
+            .await
+            .unwrap();
+        validate_ssh_public_key(certificate.trim()).await.unwrap();
     }
 }
 

@@ -62,6 +62,31 @@ pub async fn run(program: &str, args: &[&str]) -> std::io::Result<Output> {
     result
 }
 
+/// Like [`run`], but supplies stdin without a shell or temporary file.
+/// Cancelling the future kills the child, including while writing stdin.
+pub async fn run_with_input(program: &str, args: &[&str], input: &[u8]) -> std::io::Result<Output> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    debug!(target: "nasty::cmd", "exec: {} {}", program, args.join(" "));
+    let result = async {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        stdin.write_all(input).await?;
+        drop(stdin);
+        child.wait_with_output().await
+    }
+    .await;
+    log_result(program, args, &result);
+    result
+}
+
 /// Like [`run`] but returns `Ok(stdout)` on success or `Err(stderr-with-context)`
 /// on either spawn failure or non-zero exit. Useful when the caller wants to
 /// surface the error message back to a user (e.g., over JSON-RPC) rather than

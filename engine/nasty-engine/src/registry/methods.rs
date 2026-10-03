@@ -1799,7 +1799,7 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Admin,
                     params: MethodParams::AdHoc(ad_hoc_one(
                         "key",
-                        "Full public key line (must start with `ssh-`, `ecdsa-`, or `sk-`).",
+                        "One OpenSSH public key line with an optional comment, validated by ssh-keygen.",
                     )),
                     result: None,
                 },
