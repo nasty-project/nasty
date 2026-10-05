@@ -10,10 +10,10 @@
     tailscale-nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # ── bcachefs override (optional) ──────────────────────────────
-    # Pinned to v1.39.6 release tag.
+    # Pinned to v1.39.7 release tag.
     # To revert to pure nixpkgs: comment out these two lines.
     # No other changes needed — bcachefs.nix defaults to pkgs.bcachefs-tools.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.39.6";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.39.7";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
     # ── lanzaboote (Secure Boot for NixOS) ─────────────────────────
@@ -192,6 +192,11 @@
         src = bcachefs-tools;
         cargoDeps = pkgs.rustPlatform.importCargoLock {
           lockFile = "${bcachefs-tools}/Cargo.lock";
+          # v1.39.7 pins koverstreet/fuser's destroy-before-reply branch in
+          # Cargo.lock (88195892644d78da0f90c84ad52fbe916cbd1886).
+          outputHashes = {
+            "fuser-0.17.0" = "sha256-ncPvPzPNBGTaZ7PDJW8+RkPKtnYuxIm/svRUE3wkunI=";
+          };
         };
         # bcachefs-tools v1.38.3 added libunwind as a pkg-config dep
         # (Makefile:113 fails with "pkg-config error: libunwind" without it).
