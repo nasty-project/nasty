@@ -2783,13 +2783,11 @@ async fn fetch_github_text_file(
     if let Some(token) = token.filter(|t| !t.is_empty()) {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
-    let body: serde_json::Value = req
+    let response = req
         .send()
         .await
-        .map_err(|e| UpdateError::CommandFailed(format!("GitHub API request failed: {e}")))?
-        .json()
-        .await
-        .map_err(|e| UpdateError::CommandFailed(format!("failed to parse GitHub response: {e}")))?;
+        .map_err(|e| UpdateError::CommandFailed(format!("GitHub API request failed: {e}")))?;
+    let body: serde_json::Value = github_response_json(response, "file contents").await?;
 
     let encoding = body["encoding"].as_str().unwrap_or_default();
     let content = body["content"].as_str().ok_or_else(|| {
@@ -2869,6 +2867,60 @@ fn github_http_client() -> Result<reqwest::Client, UpdateError> {
         .map_err(|e| UpdateError::CommandFailed(format!("failed to build GitHub HTTP client: {e}")))
 }
 
+/// Check status before interpreting an API error as file/release/commit data.
+async fn github_response_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    context: &str,
+) -> Result<T, UpdateError> {
+    let status = response.status();
+    if !status.is_success() {
+        let headers = response.headers().clone();
+        let body = response.json::<serde_json::Value>().await.ok();
+        return Err(github_api_error(status, &headers, body.as_ref(), context));
+    }
+    response.json().await.map_err(|e| {
+        UpdateError::CommandFailed(format!("failed to parse GitHub {context} response: {e}"))
+    })
+}
+
+fn github_api_error(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Option<&serde_json::Value>,
+    context: &str,
+) -> UpdateError {
+    let message = body
+        .and_then(|body| body["message"].as_str())
+        .filter(|message| !message.is_empty());
+    let header_number = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || (status == reqwest::StatusCode::FORBIDDEN
+            && (header_number("x-ratelimit-remaining") == Some(0)
+                || headers.contains_key("retry-after")
+                || message
+                    .is_some_and(|message| message.to_ascii_lowercase().contains("rate limit"))));
+    let mut error = format!("GitHub {context} request failed with HTTP {status}");
+    if let Some(message) = message {
+        error.push_str(&format!(": {message}"));
+    }
+    if rate_limited {
+        error.push_str("; GitHub API rate limit reached");
+        if let Some(seconds) = header_number("retry-after") {
+            error.push_str(&format!("; retry after {seconds} seconds"));
+        }
+        if let Some(reset) = header_number("x-ratelimit-reset") {
+            error.push_str(&format!("; quota resets at Unix timestamp {reset}"));
+        }
+        error.push_str("; wait before retrying (rebooting does not reset the quota)");
+    }
+    UpdateError::CommandFailed(error)
+}
+
 fn published_stable_release_tag(release: GitHubRelease) -> Result<String, UpdateError> {
     if release.draft || release.prerelease {
         return Err(UpdateError::CommandFailed(format!(
@@ -2905,15 +2957,7 @@ async fn check_latest_stable_release(
         .send()
         .await
         .map_err(|e| UpdateError::CommandFailed(format!("GitHub API request failed: {e}")))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(UpdateError::CommandFailed(format!(
-            "GitHub latest stable release request failed with HTTP {status}"
-        )));
-    }
-    let release: GitHubRelease = response.json().await.map_err(|e| {
-        UpdateError::CommandFailed(format!("failed to parse GitHub release response: {e}"))
-    })?;
+    let release: GitHubRelease = github_response_json(response, "latest stable release").await?;
     published_stable_release_tag(release)
 }
 
@@ -2924,16 +2968,14 @@ async fn check_via_github_api_branch(
     branch: &str,
 ) -> Result<String, UpdateError> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{branch}");
-    let body: serde_json::Value = github_http_client()?
+    let response = github_http_client()?
         .get(&url)
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "nasty-engine")
         .send()
         .await
-        .map_err(|e| UpdateError::CommandFailed(format!("GitHub API request failed: {e}")))?
-        .json()
-        .await
-        .map_err(|e| UpdateError::CommandFailed(format!("failed to parse GitHub response: {e}")))?;
+        .map_err(|e| UpdateError::CommandFailed(format!("GitHub API request failed: {e}")))?;
+    let body: serde_json::Value = github_response_json(response, "branch commit").await?;
 
     let sha = body["sha"]
         .as_str()
@@ -3524,6 +3566,152 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use std::time::Instant;
+
+    #[test]
+    fn github_api_errors_preserve_status_and_message() {
+        for (status, message) in [
+            (reqwest::StatusCode::UNAUTHORIZED, "Bad credentials"),
+            (reqwest::StatusCode::FORBIDDEN, "Resource not accessible"),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                "No commit found for the ref missing",
+            ),
+        ] {
+            let body = serde_json::json!({"message": message});
+            let error = super::github_api_error(
+                status,
+                &reqwest::header::HeaderMap::new(),
+                Some(&body),
+                "file contents",
+            )
+            .to_string();
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+            assert!(error.contains(message), "{error}");
+            assert!(!error.contains("rate limit reached"), "{error}");
+            assert!(!error.contains("missing file content"), "{error}");
+        }
+    }
+
+    #[test]
+    fn github_api_errors_explain_primary_and_secondary_rate_limits() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        headers.insert("x-ratelimit-reset", "1791230000".parse().unwrap());
+        let error = super::github_api_error(
+            reqwest::StatusCode::FORBIDDEN,
+            &headers,
+            Some(&serde_json::json!({"message": "API rate limit exceeded"})),
+            "file contents",
+        )
+        .to_string();
+        assert!(error.contains("HTTP 403"), "{error}");
+        assert!(error.contains("rate limit reached"), "{error}");
+        assert!(error.contains("Unix timestamp 1791230000"), "{error}");
+        assert!(error.contains("rebooting does not reset"), "{error}");
+
+        headers.clear();
+        headers.insert("x-ratelimit-remaining", "42".parse().unwrap());
+        headers.insert("retry-after", "60".parse().unwrap());
+        let error = super::github_api_error(
+            reqwest::StatusCode::FORBIDDEN,
+            &headers,
+            Some(&serde_json::json!({"message": "You have exceeded a secondary rate limit"})),
+            "latest stable release",
+        )
+        .to_string();
+        assert!(error.contains("secondary rate limit"), "{error}");
+        assert!(error.contains("retry after 60 seconds"), "{error}");
+
+        headers.clear();
+        let error = super::github_api_error(
+            reqwest::StatusCode::FORBIDDEN,
+            &headers,
+            Some(&serde_json::json!({"message": "API rate limit exceeded"})),
+            "branch commit",
+        )
+        .to_string();
+        assert!(error.contains("rate limit reached"), "{error}");
+    }
+
+    async fn mock_github_response(status: &str, body: &str) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reply = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let mut request = Vec::new();
+            loop {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        server.await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn github_response_errors_check_status_before_parsing_body() {
+        for (status, body, expected) in [
+            (
+                "403 Forbidden",
+                r#"{"message":"API rate limit exceeded"}"#,
+                "rate limit reached",
+            ),
+            ("429 Too Many Requests", "not JSON", "rate limit reached"),
+            ("502 Bad Gateway", "<html>proxy failure</html>", "HTTP 502"),
+        ] {
+            let response = mock_github_response(status, body).await;
+            let error = super::github_response_json::<serde_json::Value>(response, "file contents")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("failed to parse"), "{error}");
+            assert!(!error.contains("missing file content"), "{error}");
+            assert!(!error.contains("<html>"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn github_response_json_preserves_success_and_reports_malformed_json() {
+        let response =
+            mock_github_response("200 OK", r#"{"encoding":"base64","content":"aGVsbG8="}"#).await;
+        let body: serde_json::Value = super::github_response_json(response, "file contents")
+            .await
+            .unwrap();
+        assert_eq!(body["content"], "aGVsbG8=");
+
+        let response = mock_github_response("200 OK", "not JSON").await;
+        let error = super::github_response_json::<serde_json::Value>(response, "file contents")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("failed to parse GitHub file contents response"),
+            "{error}"
+        );
+    }
 
     #[tokio::test]
     async fn cached_update_check_reuses_recent_appliance_result() {

@@ -63,7 +63,7 @@
 	type TaggedReleaseBannerState =
 		| { kind: 'loading' }
 		| { kind: 'switching' }
-		| { kind: 'failure' }
+		| { kind: 'failure'; message: string }
 		| ({ kind: 'ready' } & VersionTaggedReleaseStatus);
 
 	const client = getClient();
@@ -339,9 +339,12 @@
 			if (requestId === taggedReleaseBannerRequestId) {
 				taggedReleaseBanner = { kind: 'ready', ...releaseStatus };
 			}
-		} catch {
+		} catch (error) {
 			if (requestId === taggedReleaseBannerRequestId && prev.kind !== 'ready') {
-				taggedReleaseBanner = { kind: 'failure' };
+				taggedReleaseBanner = {
+					kind: 'failure',
+					message: error instanceof Error ? error.message : String(error)
+				};
 			}
 			// If we already had release info, keep it rather than showing an error
 		}
@@ -858,7 +861,7 @@
 								{#if taggedReleaseBanner.kind === 'loading'}
 									<span class="text-xs text-muted-foreground">· Fetching...</span>
 								{:else if taggedReleaseBanner.kind === 'failure'}
-									<span class="text-xs text-amber-400">· Network failure</span>
+									<span class="text-xs text-amber-400">· Lookup failed</span>
 								{/if}
 							</div>
 							<div class="px-4 py-3">
@@ -880,6 +883,8 @@
 									{:else if taggedReleaseBanner.current_is_latest_standard_url}
 										<div class="mt-2 text-xs text-muted-foreground">You are on this release.</div>
 									{/if}
+								{:else if taggedReleaseBanner.kind === 'failure'}
+									<div class="text-xs text-muted-foreground">{taggedReleaseBanner.message}</div>
 								{:else if taggedReleaseBanner.kind !== 'loading'}
 									<div class="text-xs text-muted-foreground">Could not fetch release info.</div>
 								{/if}
