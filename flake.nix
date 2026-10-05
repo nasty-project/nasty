@@ -10,10 +10,10 @@
     tailscale-nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # ── bcachefs override (optional) ──────────────────────────────
-    # Pinned to v1.39.6 release tag.
+    # Pinned to v1.39.7 release tag.
     # To revert to pure nixpkgs: comment out these two lines.
     # No other changes needed — bcachefs.nix defaults to pkgs.bcachefs-tools.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.39.6";
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.39.7";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
 
     # ── lanzaboote (Secure Boot for NixOS) ─────────────────────────
@@ -187,11 +187,24 @@
       # enabling the VFS quotactl_ops (sb->s_qcop) that setquota/repquota need.
       base = pkgs.bcachefs-tools.overrideAttrs (old: let
         sourceVersion = (builtins.fromTOML (builtins.readFile "${bcachefs-tools}/Cargo.toml")).package.version;
+        sourceCargoLock = builtins.fromTOML (builtins.readFile "${bcachefs-tools}/Cargo.lock");
+        hasPinnedFuser = builtins.any
+          (package: package.name == "fuser"
+            && package.version == "0.17.0"
+            && (package.source or "") == "git+https://github.com/koverstreet/fuser?branch=destroy-before-reply#88195892644d78da0f90c84ad52fbe916cbd1886")
+          (sourceCargoLock.package or []);
       in {
         version = sourceVersion;
         src = bcachefs-tools;
         cargoDeps = pkgs.rustPlatform.importCargoLock {
           lockFile = "${bcachefs-tools}/Cargo.lock";
+          # v1.39.7 pins koverstreet/fuser's destroy-before-reply branch in
+          # Cargo.lock (88195892644d78da0f90c84ad52fbe916cbd1886).
+          # Operators may override bcachefs to older releases without this
+          # Git dependency. Do not supply an unused output hash in that case.
+          outputHashes = pkgs.lib.optionalAttrs hasPinnedFuser {
+            "fuser-0.17.0" = "sha256-ncPvPzPNBGTaZ7PDJW8+RkPKtnYuxIm/svRUE3wkunI=";
+          };
         };
         # bcachefs-tools v1.38.3 added libunwind as a pkg-config dep
         # (Makefile:113 fails with "pkg-config error: libunwind" without it).
