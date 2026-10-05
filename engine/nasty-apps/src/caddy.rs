@@ -787,6 +787,13 @@ fn dns_provider_json(provider: &str) -> Value {
         // AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN) from env on its
         // own. Empty config object lets it self-configure.
         "route53" => json!({ "name": "route53" }),
+        "alidns" => json!({
+            "name": "alidns",
+            "access_key_id": "{env.ALIYUN_ACCESS_KEY_ID}",
+            "access_key_secret": "{env.ALIYUN_ACCESS_KEY_SECRET}",
+            // Optional for long-lived keys; required for STS credentials.
+            "security_token": "{env.ALIYUN_SECURITY_TOKEN}"
+        }),
         "porkbun" => json!({
             "name": "porkbun",
             "api_key": "{env.PORKBUN_API_KEY}",
@@ -1317,6 +1324,31 @@ mod tests {
         let prov = &issuer["challenges"]["dns"]["provider"];
         assert_eq!(prov["name"], "cloudflare");
         assert_eq!(prov["api_token"], "{env.CLOUDFLARE_DNS_API_TOKEN}");
+    }
+
+    #[test]
+    fn tls_automation_alidns_dns_shape() {
+        let body = build_tls_automation_json(
+            &[TlsPolicy {
+                host: "nas.example.com".into(),
+            }],
+            &TlsIssuer {
+                dns_provider: Some("alidns".into()),
+                ..Default::default()
+            },
+            &[],
+        );
+        let issuer = &body["policies"][0]["issuers"][0];
+        assert_eq!(issuer["module"], "acme");
+        assert_eq!(
+            issuer["challenges"]["dns"]["provider"],
+            json!({
+                "name": "alidns",
+                "access_key_id": "{env.ALIYUN_ACCESS_KEY_ID}",
+                "access_key_secret": "{env.ALIYUN_ACCESS_KEY_SECRET}",
+                "security_token": "{env.ALIYUN_SECURITY_TOKEN}"
+            })
+        );
     }
 
     #[test]

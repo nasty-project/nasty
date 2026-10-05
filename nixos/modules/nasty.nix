@@ -2330,8 +2330,7 @@ in {
       # only supports HTTP-01 / TLS-ALPN-01 (no DNS providers), so users
       # whose ACME challenge type is "dns" need a custom build.
       #
-      # Provider list is intentionally short — the four below cover the
-      # vast majority of selfhost / indie-NAS users, and each plugin
+      # Provider list is intentionally short — each plugin
       # we add lengthens the Caddy build (xcaddy compiles them in via a
       # fresh `go build`). To add a provider, append to `plugins`, run
       # `nix build .#nixosConfigurations.nasty-vm.config.services.caddy.package`,
@@ -2344,6 +2343,7 @@ in {
           "github.com/caddy-dns/duckdns@v0.5.0"
           # Cloud / hosting providers commonly running NASty boxes.
           "github.com/caddy-dns/route53@v1.6.2"
+          "github.com/caddy-dns/alidns@v1.0.29"
           "github.com/caddy-dns/hetzner/v2@v2.0.1"
           "github.com/caddy-dns/linode@v0.8.0"
           # Indie domain registrars with first-class API support.
@@ -2355,7 +2355,7 @@ in {
           "github.com/caddy-dns/desec@v1.1.0"
           "github.com/caddy-dns/rfc2136@v1.0.0"
         ];
-        hash = "sha256-4iF976LfeFS3xmRmLUG9lfPnYkWc2tY5XyGaB32FYoM=";
+        hash = "sha256-PqxwMYygC5keQk+AR+fuSM8nio2IhIXjvrBBBpdBPMQ=";
       };
       globalConfig = ''
         # auto_https stays ON so Caddy generates the per-hostname
