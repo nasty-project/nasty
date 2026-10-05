@@ -65,9 +65,11 @@
     # (`embedded_default_bcachefs_tools_ref`), so a fresh install always
     # inherits exactly the version the running system ships — one source
     # of truth, no second pin to bump. This hardcoded value is used only
-    # if that embedded flake.nix can't be parsed; keep it sane (matching
-    # the repo-root flake.nix) so even that fallback is correct.
-    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.39.7";
+    # if that embedded flake.nix can't be parsed, or by the standalone
+    # installer targeting the current tagged NASty release (v0.1.1). Keep
+    # that fallback compatible with the tagged release's Cargo packaging;
+    # updated engines select their own bundled pin via the rewrite above.
+    bcachefs-tools.url = "github:koverstreet/bcachefs-tools/v1.39.6";
     bcachefs-tools.inputs.nixpkgs.follows = "nixpkgs";
     # `nasty.packages.<system>.bcachefs-tools` is the package wired into
     # boot.bcachefs.package below. Override nasty's nested source with the
