@@ -54,6 +54,7 @@
 			case 'namecheap': return 'NAMECHEAP_USER=xxxxx\nNAMECHEAP_API_KEY=xxxxx\nNAMECHEAP_CLIENT_IP=192.0.2.1';
 			case 'rfc2136': return 'RFC2136_KEY_NAME=xxxxx\nRFC2136_KEY=xxxxx\nRFC2136_KEY_ALG=hmac-sha256\nRFC2136_SERVER=192.0.2.1:53';
 			case 'route53': return 'AWS_REGION=xxxxx\nAWS_ACCESS_KEY_ID=xxxxx\nAWS_SECRET_ACCESS_KEY=xxxxx\nAWS_SESSION_TOKEN=xxxxx';
+			case 'alidns': return 'ALIYUN_ACCESS_KEY_ID=xxxxx\nALIYUN_ACCESS_KEY_SECRET=xxxxx';
 			default: return 'KEY=VALUE';
 		}
 	});
@@ -82,6 +83,7 @@
 	const popularDnsProviders = [
 		{ code: 'cloudflare', name: 'Cloudflare' },
 		{ code: 'route53', name: 'Amazon Route 53' },
+		{ code: 'alidns', name: 'Aliyun (AliDNS)' },
 		{ code: 'hetzner', name: 'Hetzner' },
 		{ code: 'linode', name: 'Linode' },
 		{ code: 'porkbun', name: 'Porkbun' },
@@ -447,6 +449,12 @@
 						generated <code>tls</code> block via <code>{'{env.KEY}'}</code> placeholders. No inbound ports needed —
 						verification happens via DNS records. Stored encrypted at rest (systemd-creds).
 					</span>
+					{#if tlsDnsProvider === 'alidns'}
+						<span class="mt-1 block text-xs text-muted-foreground">
+							Use an Aliyun RAM access key with DNS record-management permissions.
+							For temporary STS credentials, also add <code>ALIYUN_SECURITY_TOKEN</code>.
+						</span>
+					{/if}
 				</div>
 
 				<div class="mb-4">

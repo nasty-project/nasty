@@ -400,7 +400,7 @@ pkgs.testers.runNixOSTest {
     virtualisation.emptyDiskImages = [ 2048 ];
   };
 
-  testScript = ''
+  testScript = { nodes, ... }: ''
     import json
     import shlex
 
@@ -476,6 +476,8 @@ pkgs.testers.runNixOSTest {
         "avahi-daemon.service",
     ]:
         machine.wait_for_unit(unit)
+    # The dropdown's AliDNS provider must exist in the shipped Caddy binary.
+    machine.succeed("${nodes.machine.services.caddy.package}/bin/caddy list-modules | grep -Fx dns.providers.alidns")
     after_restart = machine.succeed("nft list table inet nasty")
     assert "tcp dport 443 accept" in after_restart, (
         f"nftables restart did not restore dynamic policy: {after_restart}"
