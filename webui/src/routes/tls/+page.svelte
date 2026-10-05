@@ -6,6 +6,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { selectPrimaryTlsStatus, type AcmeStatus, type HostTlsStatus } from '$lib/tls-status';
+	import { TlsDnsProviderForm } from '$lib/tls-dns-provider.svelte';
 
 	const client = getClient();
 
@@ -19,11 +20,9 @@
 	let acmeStatus: AcmeStatus | null = $state(null);
 	let tlsAcmeStaging = $state(false);
 	let tlsChallengeType = $state<'tls-alpn' | 'http' | 'dns'>('tls-alpn');
-	let tlsDnsProviderSelection = $state('');
-	let tlsCustomDnsProvider = $state('');
-	let tlsDnsProvider = $derived(
-		tlsDnsProviderSelection === 'other' ? tlsCustomDnsProvider.trim() : tlsDnsProviderSelection
-	);
+	const tlsDnsProviderForm = new TlsDnsProviderForm();
+	let tlsDnsProvider = $derived(tlsDnsProviderForm.provider);
+	const dnsProviderError = $derived(tlsDnsProviderForm.validationError(tlsAcmeEnabled, tlsChallengeType));
 	let tlsDnsCredentials = $state('');
 	/** Credentials exist server-side (sealed or legacy) — the engine
 	 * never returns them, so this drives the "stored" marker and the
@@ -101,10 +100,7 @@
 		tlsAcmeEmail = settings?.tls_acme_email ?? '';
 		tlsAcmeEnabled = settings?.tls_acme_enabled ?? false;
 		tlsChallengeType = settings?.tls_challenge_type ?? 'tls-alpn';
-		const savedDnsProvider = settings?.tls_dns_provider ?? '';
-		const isCustomDnsProvider = !!savedDnsProvider && !popularDnsProviders.some(p => p.code === savedDnsProvider);
-		tlsDnsProviderSelection = isCustomDnsProvider ? 'other' : savedDnsProvider;
-		tlsCustomDnsProvider = isCustomDnsProvider ? savedDnsProvider : '';
+		tlsDnsProviderForm.load(settings?.tls_dns_provider ?? '', popularDnsProviders);
 		// Credentials are encrypted at rest and not returned once sealed —
 		// the textarea starts blank and a marker shows whether something
 		// is stored. Saving with the field blank keeps the stored value
@@ -225,6 +221,7 @@
 	}
 
 	async function saveTls() {
+		if (dnsProviderError) return;
 		savingTls = true;
 		const result = await withToast(
 			() => client.call<Settings>('system.settings.update', {
@@ -391,8 +388,10 @@
 					<label for="tls-dns-provider" class="mb-1 block text-xs text-muted-foreground">DNS Provider</label>
 					<select
 						id="tls-dns-provider"
-						bind:value={tlsDnsProviderSelection}
+						bind:value={tlsDnsProviderForm.selection}
 						onchange={() => tlsChanged = true}
+						aria-invalid={dnsProviderError ? 'true' : undefined}
+						aria-describedby={dnsProviderError ? 'tls-dns-provider-error' : undefined}
 						class="w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm"
 					>
 						<option value="">Select provider...</option>
@@ -402,18 +401,24 @@
 						<option disabled>───────────</option>
 						<option value="other">Other (enter code manually)</option>
 					</select>
-					{#if tlsDnsProviderSelection === 'other'}
+					{#if tlsDnsProviderForm.selection === 'other'}
 						<input
 							type="text"
-							bind:value={tlsCustomDnsProvider}
+							bind:value={tlsDnsProviderForm.customCode}
 							oninput={() => tlsChanged = true}
+							aria-label="Custom DNS provider code"
+							aria-invalid={dnsProviderError ? 'true' : undefined}
+							aria-describedby={dnsProviderError ? 'tls-dns-provider-error' : undefined}
 							class="mt-2 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
 							placeholder="provider code (e.g. inwx, gandi)"
 						/>
 					{/if}
+					{#if dnsProviderError}
+						<span id="tls-dns-provider-error" class="mt-1 block text-xs text-destructive">{dnsProviderError}</span>
+					{/if}
 					<span class="mt-1 block text-xs text-muted-foreground">
 						The provider must be one of the plugins compiled into NASty's Caddy build (the dropdown lists all of them).
-						Need a different one? Open an issue — adding it is a one-line change to the Nix package definition.
+						Additional providers require a compiled Caddy plugin and compatible credential configuration. Open an issue to request support.
 					</span>
 				</div>
 
@@ -508,7 +513,7 @@
 		{/if}
 
 		<div class="flex gap-2">
-			<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged || !!filesDomainError}>
+			<Button size="sm" onclick={saveTls} disabled={savingTls || !tlsChanged || !!filesDomainError || !!dnsProviderError}>
 				{savingTls ? 'Saving…' : 'Save'}
 			</Button>
 			{#if tlsAcmeEnabled && displayAcmeStatus?.state !== 'running'}
