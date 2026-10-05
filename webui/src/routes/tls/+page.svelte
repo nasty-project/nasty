@@ -19,7 +19,11 @@
 	let acmeStatus: AcmeStatus | null = $state(null);
 	let tlsAcmeStaging = $state(false);
 	let tlsChallengeType = $state<'tls-alpn' | 'http' | 'dns'>('tls-alpn');
-	let tlsDnsProvider = $state('');
+	let tlsDnsProviderSelection = $state('');
+	let tlsCustomDnsProvider = $state('');
+	let tlsDnsProvider = $derived(
+		tlsDnsProviderSelection === 'other' ? tlsCustomDnsProvider.trim() : tlsDnsProviderSelection
+	);
 	let tlsDnsCredentials = $state('');
 	/** Credentials exist server-side (sealed or legacy) — the engine
 	 * never returns them, so this drives the "stored" marker and the
@@ -97,7 +101,10 @@
 		tlsAcmeEmail = settings?.tls_acme_email ?? '';
 		tlsAcmeEnabled = settings?.tls_acme_enabled ?? false;
 		tlsChallengeType = settings?.tls_challenge_type ?? 'tls-alpn';
-		tlsDnsProvider = settings?.tls_dns_provider ?? '';
+		const savedDnsProvider = settings?.tls_dns_provider ?? '';
+		const isCustomDnsProvider = !!savedDnsProvider && !popularDnsProviders.some(p => p.code === savedDnsProvider);
+		tlsDnsProviderSelection = isCustomDnsProvider ? 'other' : savedDnsProvider;
+		tlsCustomDnsProvider = isCustomDnsProvider ? savedDnsProvider : '';
 		// Credentials are encrypted at rest and not returned once sealed —
 		// the textarea starts blank and a marker shows whether something
 		// is stored. Saving with the field blank keeps the stored value
@@ -384,7 +391,7 @@
 					<label for="tls-dns-provider" class="mb-1 block text-xs text-muted-foreground">DNS Provider</label>
 					<select
 						id="tls-dns-provider"
-						bind:value={tlsDnsProvider}
+						bind:value={tlsDnsProviderSelection}
 						onchange={() => tlsChanged = true}
 						class="w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm"
 					>
@@ -393,12 +400,12 @@
 							<option value={p.code}>{p.name}</option>
 						{/each}
 						<option disabled>───────────</option>
-						<option value="_custom">Other (enter code manually)</option>
+						<option value="other">Other (enter code manually)</option>
 					</select>
-					{#if tlsDnsProvider === '_custom'}
+					{#if tlsDnsProviderSelection === 'other'}
 						<input
 							type="text"
-							bind:value={tlsDnsProvider}
+							bind:value={tlsCustomDnsProvider}
 							oninput={() => tlsChanged = true}
 							class="mt-2 w-full rounded-md border border-input bg-background px-3 py-1.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
 							placeholder="provider code (e.g. inwx, gandi)"
