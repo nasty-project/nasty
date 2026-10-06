@@ -144,6 +144,10 @@ in pkgs.testers.runNixOSTest {
         machine.succeed("ip netns exec guest ip link set guest-eth up")
         machine.succeed("ip netns exec guest ip link set lo up")
         machine.succeed("ip route replace 203.0.113.0/24 via 10.10.20.97 dev eth1")
+        # Model a routed service /32: its owner is the router's loopback,
+        # not an Ethernet peer that responds to ARP for the service address.
+        router.succeed("ip -4 addr show lo | grep -F 10.10.20.110")
+        machine.succeed("ip route replace 10.10.20.110/32 via 10.10.20.97 dev eth1")
         machine.succeed("ip netns exec guest ${pkgs.busybox}/bin/udhcpc -i guest-eth -s ${leaseScript} -n -q -t 10 -T 2", timeout=40)
         lease = machine.succeed("cat /run/relay-lease").splitlines()
         assert lease == ["10.10.30.50", "10.10.30.1", "10.10.20.97"], lease
