@@ -123,8 +123,6 @@ in pkgs.testers.runNixOSTest {
     };
   };
   testScript = ''
-    import json
-
     machine.start(allow_reboot=True)
     router.start()
     outside.start()
