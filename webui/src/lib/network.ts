@@ -1,4 +1,12 @@
-import type { InterfaceConfig, LiveInterface, NetworkConfig } from './types';
+import type { InterfaceConfig, IpConfig, LiveInterface, NetworkConfig } from './types';
+
+export function bridgeIpv4(method: 'inherit' | 'static', address: string, gateway: string): IpConfig {
+	return {
+		method,
+		addresses: method === 'static' ? [address.trim()] : [],
+		gateway: method === 'static' ? gateway.trim() || null : null,
+	};
+}
 
 /** A standalone interface entry with default DHCP / SLAAC L3.
  * Used when a bond/bridge member becomes orphaned by its master's

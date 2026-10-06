@@ -9,7 +9,7 @@
  * from the settings page during the confirm window. */
 
 import { getClient, getSessionGeneration, registerSessionReset } from './client';
-import { error as toastError, withToast } from './toast.svelte';
+import { error as toastError, success as toastSuccess, withToast } from './toast.svelte';
 import type { NetworkPendingTxn, NetworkUpdateRequest, NetworkUpdateResponse } from './types';
 
 export interface PendingRollback {
@@ -93,7 +93,6 @@ export async function applyNetworkUpdate(
 	try {
 		const res = await withToast(
 			() => client.call<NetworkUpdateResponse>('system.network.update', payload),
-			successMsg,
 		);
 		if (generation !== getSessionGeneration()) return undefined;
 		if (!res) {
@@ -115,6 +114,8 @@ export async function applyNetworkUpdate(
 			toastError(
 				`Network applied, but ${res.apply_errors.length} connection(s) reported errors:\n${lines}`,
 			);
+		} else {
+			toastSuccess(successMsg);
 		}
 		return res;
 	} finally {
