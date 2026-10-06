@@ -2,6 +2,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
 	import type { NetworkState, NetworkConfig } from '$lib/types';
+	import { bridgeIpv4 } from '$lib/network';
 
 	interface Props {
 		networkState: NetworkState | null;
@@ -17,6 +18,9 @@
 	let bridgeName = $state('br0');
 	let bridgeMembers: string[] = $state([]);
 	let bridgeMtu = $state('');
+	let ipMethod: 'inherit' | 'static' = $state('inherit');
+	let ipAddress = $state('');
+	let ipGateway = $state('');
 	// Inverted UI flag (checked = NM generates a random MAC). Default
 	// unchecked: bridges adopt the primary member's MAC so DHCP keeps
 	// handing out the same lease and the user's WebUI session survives
@@ -46,7 +50,7 @@
 					{
 						name: bridgeName,
 						members: bridgeMembers,
-						ipv4: { method: 'inherit', addresses: [], gateway: null },
+						ipv4: bridgeIpv4(ipMethod, ipAddress, ipGateway),
 						ipv6: { method: 'inherit', addresses: [], gateway: null },
 						mtu,
 						inherit_member_mac: !bridgeNoInheritMac,
@@ -59,6 +63,9 @@
 				bridgeName = 'br0';
 				bridgeMembers = [];
 				bridgeMtu = '';
+				ipMethod = 'inherit';
+				ipAddress = '';
+				ipGateway = '';
 				bridgeNoInheritMac = false;
 				await onCreated?.(created);
 			}
@@ -75,6 +82,24 @@
 		<label for="bridge-name" class="text-xs text-muted-foreground">Name</label>
 		<input id="bridge-name" bind:value={bridgeName} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
 	</div>
+	<div>
+		<label for="bridge-ip-method" class="text-xs text-muted-foreground">IPv4 configuration</label>
+		<select id="bridge-ip-method" bind:value={ipMethod} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm">
+			<option value="inherit">Inherit from members (no IP when empty)</option>
+			<option value="static">Static address</option>
+		</select>
+	</div>
+	{#if ipMethod === 'static'}
+		<div>
+			<label for="bridge-ip-address" class="text-xs text-muted-foreground">IPv4 address / prefix</label>
+			<input id="bridge-ip-address" bind:value={ipAddress} placeholder="10.10.30.1/24" class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
+		</div>
+		<div>
+			<label for="bridge-ip-gateway" class="text-xs text-muted-foreground">Host default gateway (optional)</label>
+			<input id="bridge-ip-gateway" bind:value={ipGateway} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
+			<p class="mt-1 text-xs text-muted-foreground">Leave empty for an internal VM bridge. This is not the gateway advertised to guests.</p>
+		</div>
+	{/if}
 	<div>
 		<div class="text-xs text-muted-foreground mb-1">Members (optional)</div>
 		{#if networkState}
@@ -115,7 +140,7 @@
 		</div>
 	{/if}
 	<div class="flex gap-2">
-		<Button size="sm" onclick={create} disabled={!bridgeName || busy}>{busy ? 'Creating…' : 'Create Bridge'}</Button>
+		<Button size="sm" onclick={create} disabled={!bridgeName || busy || (ipMethod === 'static' && !ipAddress.trim())}>{busy ? 'Creating…' : 'Create Bridge'}</Button>
 		{#if onCancel}
 			<Button size="sm" variant="ghost" onclick={onCancel} disabled={busy}>Cancel</Button>
 		{/if}

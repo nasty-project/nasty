@@ -2,9 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Stub the underlying RPC client so we can drive `loadPendingRollback`
 // deterministically — no real WebSocket needed for these tests.
-const { callMock, toastErrorMock } = vi.hoisted(() => ({
+const { callMock, toastErrorMock, toastSuccessMock } = vi.hoisted(() => ({
 	callMock: vi.fn(),
 	toastErrorMock: vi.fn(),
+	toastSuccessMock: vi.fn(),
 }));
 vi.mock('./client', () => ({
 	getClient: () => ({ call: callMock }),
@@ -20,6 +21,7 @@ vi.mock('./toast.svelte', () => ({
 		}
 	},
 	error: toastErrorMock,
+	success: toastSuccessMock,
 }));
 
 import { applyNetworkUpdate, confirmRollback, loadPendingRollback, recoverPendingRollback, rollbackState } from './rollbackState.svelte';
@@ -27,6 +29,7 @@ import { applyNetworkUpdate, confirmRollback, loadPendingRollback, recoverPendin
 beforeEach(() => {
 	callMock.mockReset();
 	toastErrorMock.mockReset();
+	toastSuccessMock.mockReset();
 	rollbackState.clear();
 });
 
@@ -86,6 +89,24 @@ describe('confirmRollback', () => {
 });
 
 describe('applyNetworkUpdate', () => {
+	it('does not announce success when activation reports errors, but keeps rollback state', async () => {
+		callMock.mockResolvedValueOnce({
+			txn_id: 'partial', revert_at_unix: 3000,
+			apply_errors: [{ connection_id: 'nasty-br-vm', message: 'activation failed' }],
+		});
+		const result = await applyNetworkUpdate({ interfaces: [], dns: [], bonds: [], vlans: [], bridges: [] }, 'Bridge created');
+		expect(result?.apply_errors).toHaveLength(1);
+		expect(rollbackState.pending?.txnId).toBe('partial');
+		expect(toastSuccessMock).not.toHaveBeenCalled();
+		expect(toastErrorMock).toHaveBeenCalledWith(expect.stringContaining('activation failed'));
+	});
+
+	it('announces success only after checking activation errors', async () => {
+		callMock.mockResolvedValueOnce({ apply_errors: [] });
+		await applyNetworkUpdate({ interfaces: [], dns: [], bonds: [], vlans: [], bridges: [] }, 'Bridge created');
+		expect(toastSuccessMock).toHaveBeenCalledWith('Bridge created');
+	});
+
 	it('blocks overlapping updates while a rollback decision is pending', async () => {
 		rollbackState.set({
 			txnId: 'txn-1',

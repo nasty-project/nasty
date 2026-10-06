@@ -131,6 +131,34 @@ let
         # The test disk is still unformatted at this point.
         assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
 
+        # Creating a software device must not require a pre-existing NM
+        # device. Exercise the actual RPC/D-Bus path, without touching NICs.
+        original_network = call(ws, "system.network.get", 300)["config"]
+        bridge_network = json.loads(json.dumps(original_network))
+        bridge_network.setdefault("bridges", []).append({
+            "name": "br-vm", "members": [],
+            "ipv4": {"method": "static", "addresses": ["10.10.30.1/24"], "gateway": None},
+            "ipv6": {"method": "disabled", "addresses": [], "gateway": None},
+            "stp": False, "forward_delay_s": 0,
+        })
+        before_routes = subprocess.check_output(["ip", "-4", "route", "show", "default"], text=True)
+        result = call(ws, "system.network.update", 301, bridge_network)
+        assert not result.get("apply_errors"), result
+        if result.get("txn_id"):
+            call(ws, "system.network.confirm", 302, {"txn_id": result["txn_id"]})
+        for attempt in range(30):
+            addr = subprocess.run(["ip", "-4", "addr", "show", "br-vm"], capture_output=True, text=True)
+            if "10.10.30.1/24" in addr.stdout:
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError("memberless bridge did not activate with its static address")
+        assert subprocess.check_output(["ip", "-4", "route", "show", "default"], text=True) == before_routes
+        result = call(ws, "system.network.update", 303, original_network)
+        assert not result.get("apply_errors"), result
+        if result.get("txn_id"):
+            call(ws, "system.network.confirm", 304, {"txn_id": result["txn_id"]})
+
         smart = call(ws, "service.protocol.enable", 20, {"name": "smart"})
         assert smart["enabled"] is True and smart["running"] is True, smart
         smart = call(ws, "service.protocol.disable", 21, {"name": "smart"})

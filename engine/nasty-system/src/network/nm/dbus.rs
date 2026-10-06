@@ -15,7 +15,7 @@ use zbus::Connection as DbusConnection;
 use zbus::proxy;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
-use super::{NmConnection, to_settings_dict};
+use super::{NmConnection, NmConnectionType, to_settings_dict};
 
 /// NM's settings dict shape: `a{sa{sv}}` — section name → setting
 /// name → variant. We use `OwnedValue` so the dict can hold any
@@ -455,7 +455,7 @@ pub async fn apply_profiles(
     // order so masters get activated before their members would
     // — though NM tolerates either order via the `controller` field
     // on the port profile.
-    let mut activate_targets: Vec<(String, OwnedObjectPath, String)> = Vec::new();
+    let mut activate_targets: Vec<(&NmConnection, OwnedObjectPath)> = Vec::new();
 
     for d in desired {
         match existing_by_id.get(d.id.as_str()) {
@@ -465,7 +465,7 @@ pub async fn apply_profiles(
                     Ok(path) => {
                         outcome.added.push(d.id.clone());
                         if d.autoconnect {
-                            activate_targets.push((d.id.clone(), path, d.interface_name.clone()));
+                            activate_targets.push((d, path));
                         }
                     }
                     Err(e) => {
@@ -480,11 +480,7 @@ pub async fn apply_profiles(
                         Ok(()) => {
                             outcome.updated.push(d.id.clone());
                             if d.autoconnect {
-                                activate_targets.push((
-                                    d.id.clone(),
-                                    existing_conn.path.clone(),
-                                    d.interface_name.clone(),
-                                ));
+                                activate_targets.push((d, existing_conn.path.clone()));
                             }
                         }
                         Err(e) => {
@@ -494,11 +490,7 @@ pub async fn apply_profiles(
                 } else {
                     outcome.unchanged.push(d.id.clone());
                     if d.autoconnect {
-                        activate_targets.push((
-                            d.id.clone(),
-                            existing_conn.path.clone(),
-                            d.interface_name.clone(),
-                        ));
+                        activate_targets.push((d, existing_conn.path.clone()));
                     }
                 }
             }
@@ -517,21 +509,19 @@ pub async fn apply_profiles(
         }
     }
 
-    // Activate phase. Each activation is independent — failure to
-    // activate one connection doesn't abort the others. A common
-    // benign failure is "no NM-managed device matches this iface
-    // name" (e.g., the iface is in `unmanaged-devices` or hasn't
-    // come up yet); we surface that as an error in the outcome map
-    // so the caller can decide whether to retry.
-    for (id, conn_path, iface_name) in &activate_targets {
-        let device = match client.find_device_by_name(iface_name).await {
-            Ok(Some(d)) => d,
-            Ok(None) => {
-                outcome.errors.insert(
-                    id.clone(),
-                    format!("no NM-managed device matches interface '{iface_name}'"),
-                );
-                continue;
+    // Software devices may not exist until activation. Passing `/` lets NM
+    // create them from the profile; physical NICs still require an exact match.
+    for (profile, conn_path) in &activate_targets {
+        let id = &profile.id;
+        let device = match client.find_device_by_name(&profile.interface_name).await {
+            Ok(device) => {
+                match activation_device(profile.conn_type, device, &profile.interface_name) {
+                    Ok(device) => device,
+                    Err(e) => {
+                        outcome.errors.insert(id.clone(), e);
+                        continue;
+                    }
+                }
             }
             Err(e) => {
                 outcome.errors.insert(id.clone(), e);
@@ -547,6 +537,27 @@ pub async fn apply_profiles(
     }
 
     Ok(outcome)
+}
+
+fn activation_device(
+    kind: NmConnectionType,
+    existing: Option<OwnedObjectPath>,
+    iface: &str,
+) -> Result<OwnedObjectPath, String> {
+    if let Some(device) = existing {
+        return Ok(device);
+    }
+    match kind {
+        NmConnectionType::Bridge
+        | NmConnectionType::Bond
+        | NmConnectionType::Vlan
+        | NmConnectionType::Macvlan => {
+            Ok(OwnedObjectPath::try_from("/").expect("root is a valid D-Bus path"))
+        }
+        NmConnectionType::Ethernet | NmConnectionType::Infiniband => {
+            Err(format!("no NM-managed device matches interface '{iface}'"))
+        }
+    }
 }
 
 /// Quick "any section differs" check, mirroring `diff_sections`. Returns
@@ -565,6 +576,46 @@ mod tests {
     use crate::network::nm::{
         NmConnection, NmConnectionType, NmIpMethod, NmIpSettings, NmTypeSpecific,
     };
+
+    #[test]
+    fn missing_software_devices_are_created_by_activation() {
+        for kind in [
+            NmConnectionType::Bridge,
+            NmConnectionType::Bond,
+            NmConnectionType::Vlan,
+            NmConnectionType::Macvlan,
+        ] {
+            assert_eq!(
+                activation_device(kind, None, "new-device")
+                    .unwrap()
+                    .as_str(),
+                "/"
+            );
+        }
+    }
+
+    #[test]
+    fn activation_preserves_existing_devices_and_rejects_missing_physical_nics() {
+        for kind in [
+            NmConnectionType::Ethernet,
+            NmConnectionType::Infiniband,
+            NmConnectionType::Bridge,
+        ] {
+            let path =
+                OwnedObjectPath::try_from("/org/freedesktop/NetworkManager/Devices/1").unwrap();
+            assert_eq!(
+                activation_device(kind, Some(path.clone()), "eth0").unwrap(),
+                path
+            );
+        }
+        for kind in [NmConnectionType::Ethernet, NmConnectionType::Infiniband] {
+            assert!(
+                activation_device(kind, None, "eth0")
+                    .unwrap_err()
+                    .contains("eth0")
+            );
+        }
+    }
 
     fn ethernet_profile(id: &str) -> NmConnection {
         NmConnection {
