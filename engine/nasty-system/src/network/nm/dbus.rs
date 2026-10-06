@@ -92,6 +92,9 @@ trait Device {
     /// `ActivateConnection` needs.
     #[zbus(property)]
     fn interface(&self) -> zbus::Result<String>;
+
+    fn get_applied_connection(&self, flags: u32) -> zbus::Result<(SettingsDict, u64)>;
+    fn reapply(&self, connection: SettingsDict, version_id: u64, flags: u32) -> zbus::Result<()>;
 }
 
 // ── Client ─────────────────────────────────────────────────────
@@ -275,6 +278,40 @@ impl NmDbusClient {
         nm.activate_connection(&conn_ref, &dev_ref, &unspecified)
             .await
             .map_err(|e| format!("activate_connection: {e}"))
+    }
+
+    /// Updating an active controller by ActivateConnection tears down its
+    /// externally attached VM ports. Prefer NM's in-place update when this
+    /// device is already running the same profile. Unsupported changes still
+    /// use the normal activation path (e.g. genuinely changed topology).
+    async fn apply_connection(
+        &self,
+        profile: &NmConnection,
+        connection: &OwnedObjectPath,
+        device: &OwnedObjectPath,
+    ) -> Result<(), String> {
+        if profile.conn_type == NmConnectionType::Bridge && device.as_str() != "/" {
+            let proxy = DeviceProxy::builder(&self.conn)
+                .path(device.clone())
+                .map_err(|e| format!("device path: {e}"))?
+                .build()
+                .await
+                .map_err(|e| format!("device proxy: {e}"))?;
+            if let Ok((applied, version)) = proxy.get_applied_connection(0).await
+                && read_string(&applied, "connection", "uuid").as_deref() == Some(&profile.uuid)
+            {
+                match proxy.reapply(to_settings_dict(profile), version, 0).await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => tracing::warn!(
+                        "profile '{}' cannot be reapplied in place: {error}; activating",
+                        profile.id
+                    ),
+                }
+            }
+        }
+        self.activate_connection(connection, device)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -528,7 +565,7 @@ pub async fn apply_profiles(
                 continue;
             }
         };
-        match client.activate_connection(conn_path, &device).await {
+        match client.apply_connection(profile, conn_path, &device).await {
             Ok(_active) => outcome.activated.push(id.clone()),
             Err(e) => {
                 outcome.errors.insert(id.clone(), format!("activate: {e}"));
