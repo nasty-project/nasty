@@ -1719,6 +1719,23 @@ impl UpdateService {
         Ok(())
     }
 
+    /// The helper persists the boot flag before scheduling the reboot. It
+    /// refuses unsafe state paths and leaves the flag intact on reboot failure.
+    pub async fn enter_maintenance(&self) -> Result<(), UpdateError> {
+        let output = tokio::process::Command::new("nasty-maintenance")
+            .arg("enter")
+            .output()
+            .await
+            .map_err(|e| UpdateError::CommandFailed(format!("enter maintenance: {e}")))?;
+        if !output.status.success() {
+            return Err(UpdateError::CommandFailed(format!(
+                "enter maintenance: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn shutdown(&self) -> Result<(), UpdateError> {
         info!("System shutdown requested");
         let output = tokio::process::Command::new("systemctl")

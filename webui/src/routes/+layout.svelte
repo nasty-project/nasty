@@ -895,6 +895,18 @@
 		void safetyTimer;
 	}
 
+	let maintenanceRequested = $state(false);
+	async function handleMaintenance() {
+		powerOpen = false;
+		if (!await confirm('Reboot into storage maintenance?', 'Data pools, shares, apps, VMs and the WebUI will stay offline across reboots. Verify SSH access with a local OS account or console access first. Exit over SSH with sudo nasty-maintenance exit. No repairs run automatically.')) return;
+		maintenanceRequested = true;
+		const result = await withToast(
+			() => getClient().call('system.maintenance.enter'),
+			'Maintenance reboot scheduled'
+		);
+		if (result === undefined) maintenanceRequested = false;
+	}
+
 	async function handleShutdown() {
 		powerOpen = false;
 		if (!await confirm('Shut down NASty?', 'The system will power off. All active connections will be dropped.')) return;
@@ -1531,6 +1543,14 @@
 									<RotateCcw size={14} />
 									Restart
 								</button>
+								{#if authInfo?.role === 'admin'}
+									<button
+										onclick={handleMaintenance}
+										class="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+									>
+										Storage maintenance
+									</button>
+								{/if}
 								<div class="border-t border-border"></div>
 								<button
 									onclick={handleShutdown}
@@ -1594,7 +1614,15 @@
 			</main>
 		</div>
 
-		{#if reconnecting}
+		{#if maintenanceRequested}
+			<div class="absolute inset-0 z-50 flex items-center justify-center bg-background/95">
+				<div class="max-w-lg space-y-3 p-6 text-center">
+					<h2 class="text-lg font-semibold">Storage maintenance reboot requested</h2>
+					<p class="text-sm text-muted-foreground">The WebUI will be unavailable. Connect over SSH or the console and verify data pools are unmounted before running repairs.</p>
+					<p class="text-sm">To return to normal operation: <code>sudo nasty-maintenance exit</code></p>
+				</div>
+			</div>
+		{:else if reconnecting}
 			<div class="absolute inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
 				<ReconnectSpinner />
 			</div>

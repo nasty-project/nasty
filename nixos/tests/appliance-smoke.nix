@@ -396,6 +396,14 @@ pkgs.testers.runNixOSTest {
     # The rpc-smoke script needs websocket-client at runtime in the guest.
     environment.systemPackages = [ pythonWithWs ];
 
+    # Also exercise the guard on an explicitly configured mount unit. The
+    # engine creates/formats this pool later; noauto avoids a first-boot mount.
+    fileSystems."/fs/smoke-pool" = {
+      device = "/dev/vdb";
+      fsType = "bcachefs";
+      options = [ "noauto" ];
+    };
+
     virtualisation.memorySize = 2048;
     virtualisation.emptyDiskImages = [ 2048 ];
   };
@@ -649,5 +657,83 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds(
         "ip netns exec fwclient curl -fsS --max-time 2 http://192.0.2.1:18082/"
     )
+
+    # ── Persistent offline-storage maintenance (#948) ─────────────
+    # This pool contains the managed Docker data root, so successful normal
+    # restoration also proves consumers are not enabled before the pool.
+    machine.succeed("nasty-maintenance status | grep -F 'Normal operation'")
+    machine.fail("runuser -u nobody -- nasty-maintenance enter --no-reboot")
+    machine.fail("test -e /var/lib/nasty/maintenance")
+    # A failed durable write must never schedule a reboot.
+    machine.succeed("mkdir /var/lib/nasty/maintenance")
+    machine.fail("nasty-maintenance enter")
+    machine.fail("systemctl list-timers --all --no-legend | grep -F nasty-maintenance-reboot")
+    machine.succeed("rmdir /var/lib/nasty/maintenance")
+    machine.succeed("nasty-maintenance enter --no-reboot")
+    machine.succeed("test -f /var/lib/nasty/maintenance")
+    machine.succeed("test $(stat -c %a /var/lib/nasty/maintenance) = 600")
+    machine.succeed("nasty-maintenance status | grep -F 'pools may still be mounted'")
+    machine.succeed("mountpoint -q /fs/smoke-pool")
+    machine.reboot()
+    machine.wait_for_unit("nasty-maintenance-access.service")
+    machine.wait_for_unit("sshd.service")
+    machine.succeed("test -e /run/nasty-maintenance")
+    machine.succeed("nft -nn list table inet nasty | grep -F 'udp sport 67 udp dport 68 accept'")
+    machine.fail("mountpoint -q /fs/smoke-pool")
+    machine.fail("findmnt -rn -t bcachefs")
+    for unit in ["nasty-engine", "nasty-metrics", "caddy", "docker", "smartd", "nasty-watchdog"]:
+        machine.fail(f"systemctl is-active --quiet {unit}.service")
+    # Explicit systemd starts/socket activation must not bypass the guards.
+    for unit in ["nasty-engine.service", "docker.service", "docker.socket", "caddy.service"]:
+        machine.execute(f"systemctl start {unit}")
+        machine.fail(f"systemctl is-active --quiet {unit}")
+    machine.execute("systemctl start \"$(systemd-escape --path --suffix=mount /fs/smoke-pool)\"")
+    machine.fail("mountpoint -q /fs/smoke-pool")
+
+    # Verify SSH through the default-drop firewall from outside loopback.
+    machine.succeed("mkdir -p /root/.ssh; chmod 700 /root/.ssh")
+    machine.succeed("ssh-keygen -q -t ed25519 -N \"\" -f /root/maintenance-test-key")
+    machine.succeed("cat /root/maintenance-test-key.pub >> /root/.ssh/authorized_keys")
+    machine.succeed("chmod 600 /root/.ssh/authorized_keys")
+    machine.succeed("ip netns add maintenance-client")
+    machine.succeed("ip link add maint-host type veth peer name maint-peer")
+    machine.succeed("ip addr add 192.0.2.1/24 dev maint-host")
+    machine.succeed("ip link set maint-host up")
+    machine.succeed("ip link set maint-peer netns maintenance-client")
+    machine.succeed("ip netns exec maintenance-client ip link set lo up")
+    machine.succeed("ip netns exec maintenance-client ip addr add 192.0.2.2/24 dev maint-peer")
+    machine.succeed("ip netns exec maintenance-client ip link set maint-peer up")
+    machine.wait_until_succeeds(
+        "ip netns exec maintenance-client ssh -i /root/maintenance-test-key "
+        "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        "root@192.0.2.1 nasty-maintenance status | grep -F 'maintenance is active'"
+    )
+    # Reinstall maintenance SSH rules after a firewall restart too.
+    machine.succeed("systemctl restart nftables.service")
+    machine.wait_for_unit("nasty-maintenance-access.service")
+    machine.succeed("nft list table inet nasty | grep -F 'tcp dport 22 accept'")
+
+    machine.reboot()
+    machine.wait_for_unit("nasty-maintenance-access.service")
+    machine.fail("mountpoint -q /fs/smoke-pool")
+    machine.fail("systemctl is-active --quiet nasty-engine.service")
+
+    machine.succeed("nasty-maintenance exit --no-reboot")
+    machine.fail("test -e /var/lib/nasty/maintenance")
+    machine.succeed("test -e /run/nasty-maintenance")
+    machine.succeed("systemctl daemon-reload")
+    machine.succeed("systemctl restart nasty-maintenance-state.service")
+    machine.succeed("test -e /run/nasty-maintenance")
+    machine.execute("systemctl start nasty-engine.service docker.socket")
+    machine.fail("systemctl is-active --quiet nasty-engine.service")
+    machine.fail("systemctl is-active --quiet docker.socket")
+    machine.fail("mountpoint -q /fs/smoke-pool")
+    machine.reboot()
+    machine.wait_for_unit("nasty-engine.service")
+    machine.fail("test -e /run/nasty-maintenance")
+    machine.wait_until_succeeds("mountpoint -q /fs/smoke-pool")
+    machine.succeed("test -f /fs/smoke-pool/media/movies/readme.txt")
+    machine.wait_for_unit("docker.service")
+    machine.wait_until_succeeds("curl -ksS https://127.0.0.1/apps/smoke/ | grep -q nasty-smoke-test-OK")
   '';
 }
