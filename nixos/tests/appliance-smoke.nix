@@ -154,6 +154,19 @@ let
         else:
             raise AssertionError("memberless bridge did not activate with its static address")
         assert subprocess.check_output(["ip", "-4", "route", "show", "default"], text=True) == before_routes
+        # Keep Docker's generated bridges outside NM ownership while allowing
+        # normal user bridge names such as br-vm.
+        subprocess.run(["ip", "link", "add", "br-012345abcdef", "type", "bridge"], check=True)
+        try:
+            for attempt in range(30):
+                state = subprocess.run(["nmcli", "-g", "GENERAL.STATE", "device", "show", "br-012345abcdef"], capture_output=True, text=True)
+                if state.returncode == 0 and "unmanaged" in state.stdout:
+                    break
+                time.sleep(1)
+            else:
+                raise AssertionError(f"Docker bridge unexpectedly managed: {state}")
+        finally:
+            subprocess.run(["ip", "link", "delete", "br-012345abcdef"], check=True)
         result = call(ws, "system.network.update", 303, original_network)
         assert not result.get("apply_errors"), result
         if result.get("txn_id"):

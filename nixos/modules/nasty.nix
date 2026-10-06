@@ -2731,7 +2731,10 @@ in {
     # discriminator until phase 4 makes it more sophisticated.
     networking.networkmanager.unmanaged = [
       "interface-name:docker*"
-      "interface-name:br-*"
+      # Docker's generated bridge names are br- followed by a 12-digit hex
+      # network ID. A blanket br-* also excludes user-created br-vm and makes
+      # NM reject their activation even when explicitly given a profile.
+      "interface-name:br-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
       "interface-name:veth*"
       "interface-name:vnet*"
       "interface-name:tap*"
