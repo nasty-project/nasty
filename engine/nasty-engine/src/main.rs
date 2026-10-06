@@ -435,6 +435,12 @@ async fn main() -> anyhow::Result<()> {
         None => return Err(anyhow::anyhow!("firewall initialization timed out")),
     }
 
+    match tokio::time::timeout(secs(30), state.network.restore_dhcp_relay()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!("DHCP relay restore failed: {error}"),
+        Err(_) => warn!("DHCP relay restore timed out"),
+    }
+
     // An engine-only restart can inherit a running NFS daemon from the prior
     // process. Keep its external rule closed and stop it before mounting so it
     // cannot serve a fallback directory while bcachefs recovery is in flight.

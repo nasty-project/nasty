@@ -518,6 +518,9 @@
       ad-dc = import ./nixos/tests/ad-dc.nix {
         inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
       };
+      dhcp-relay = import ./nixos/tests/dhcp-relay.nix {
+        inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
+      };
     };
   };
 }

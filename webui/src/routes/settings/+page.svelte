@@ -3,6 +3,9 @@
 	import { getClient } from '$lib/client';
 	import { error as toastError, success as toastSuccess, withToast } from '$lib/toast.svelte';
 	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
+	import DhcpRelayEditor from '$lib/components/DhcpRelayEditor.svelte';
+	import type { DhcpRelayConfig } from '$lib/types';
+	let netDhcpRelay = $state<DhcpRelayConfig | null>(null);
 	import { tempUnit } from '$lib/temperature.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 	import { hasRootEquivalentAccess } from '$lib/access';
@@ -472,6 +475,8 @@
 		if (!selectedIface || !network) return;
 
 		const kind = liveKind(name);
+		const relay = network.bridges?.find(b => b.name === name)?.dhcp_relay;
+		netDhcpRelay = relay ? { ...relay } : null;
 		let cfg: { ipv4: IpConfig; ipv6: IpConfig; mtu: number | null } | undefined;
 		if (kind === 'bond') {
 			cfg = network.bonds?.find(b => b.name === name);
@@ -547,7 +552,7 @@
 			if (idx >= 0) payload.bonds[idx] = { ...payload.bonds[idx], ipv4, ipv6, mtu };
 		} else if (kind === 'bridge') {
 			const idx = payload.bridges.findIndex(b => b.name === selectedIface);
-			if (idx >= 0) payload.bridges[idx] = { ...payload.bridges[idx], ipv4, ipv6, mtu };
+			if (idx >= 0) payload.bridges[idx] = { ...payload.bridges[idx], ipv4, ipv6, mtu, dhcp_relay: netDhcpRelay };
 		} else if (kind === 'vlan') {
 			const idx = payload.vlans.findIndex(v => `${v.parent}.${v.vlan_id}` === selectedIface);
 			if (idx >= 0) payload.vlans[idx] = { ...payload.vlans[idx], ipv4, ipv6, mtu };
@@ -1455,6 +1460,10 @@
 									</div>
 
 									<!-- MTU -->
+									{#if selectedIface && liveKind(selectedIface) === 'bridge'}
+										<DhcpRelayEditor bind:value={netDhcpRelay} {networkState} bridgeName={selectedIface} onchange={() => netChanged = true} />
+									{/if}
+
 									<div>
 										<label for="net-mtu" class="text-xs text-muted-foreground">MTU</label>
 										<input id="net-mtu" type="number" min="68" max="65535" bind:value={netMtu} placeholder="default (1500)" oninput={() => netChanged = true} class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-sm" />

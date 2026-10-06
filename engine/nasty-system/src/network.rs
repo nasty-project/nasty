@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+pub mod dhcp_relay;
 pub mod layered;
 pub mod nm;
 
@@ -202,6 +203,9 @@ pub struct BridgeConfig {
     /// the master across the enslave step).
     #[serde(default = "default_true")]
     pub inherit_member_mac: bool,
+    /// Optional DHCPv4 relay for an isolated, statically addressed bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcp_relay: Option<dhcp_relay::DhcpRelayConfig>,
 }
 
 fn inherit_ip() -> IpConfig {
@@ -813,6 +817,7 @@ impl NetworkService {
             validate_ip_config(&bridge.ipv4, "IPv4")?;
             validate_ip_config(&bridge.ipv6, "IPv6")?;
         }
+        dhcp_relay::render(&config)?;
         for mv in &config.macvlans {
             if mv.name.is_empty() || mv.parent.is_empty() {
                 return Err("macvlan name and parent are required".to_string());
@@ -864,6 +869,7 @@ impl NetworkService {
         // still fail validation as before.
         let live_names: std::collections::HashSet<String> =
             live_ifaces.into_iter().map(|i| i.name).collect();
+        dhcp_relay::validate_upstreams(&config, &live_names)?;
         let superseded = supersede_absent_physical_entries(&mut config, &live_names);
         if !superseded.is_empty() {
             info!(
@@ -1200,30 +1206,18 @@ impl NetworkService {
     }
 
     /// Manual NM apply RPC — push the current desired config into NM
-    /// via DBus.  **Persists profiles to disk; does not activate them.**
-    /// Intended as an inspection / dry-run hook (curl + `nm_apply`);
-    /// the normal apply flow goes through `apply_profiles` and runs
-    /// activation too.
+    /// via D-Bus, activate profiles, and reconcile the managed DHCP relay.
     ///
     /// Calling this on a box without NM installed errors out at the
     /// DBus connect step; safe.
     pub async fn nm_apply(&self) -> Result<nm::dbus::NmApplyOutcome, String> {
+        let _lifecycle = self.transaction_lifecycle.lock().await;
         let cfg = load_config().await;
-        let layered_cfg = layered::to_layered(&cfg);
-        let live = enumerate_interfaces().await;
-        let ctx = nm::MacContext {
-            infiniband_ifaces: infiniband_names(&live),
-            ..Default::default()
-        };
-        let live_names: std::collections::HashSet<String> =
-            live.into_iter().map(|i| i.name).collect();
-        let desired = retain_live_physical_profiles(
-            nm::to_nm_profiles_with_macs(&layered_cfg, &ctx),
-            &live_names,
-        );
+        apply_config(&cfg, None).await
+    }
 
-        let client = nm::dbus::NmDbusClient::new().await?;
-        nm::dbus::apply_profiles(&client, &desired).await
+    pub async fn restore_dhcp_relay(&self) -> Result<(), String> {
+        dhcp_relay::reconcile(&load_config().await).await
     }
 }
 
@@ -2203,7 +2197,17 @@ async fn apply_config(
     // before pushing profiles, so a newly-configured IB port is managed
     // by the time its profile activates.
     sync_ib_unmanaged_conf(&live, config, Some(&client)).await;
-    let outcome = nm::dbus::apply_profiles(&client, &profiles).await?;
+    let mut outcome = nm::dbus::apply_profiles(&client, &profiles).await?;
+    // Rollback and startup recovery use this same path. Never retain a relay
+    // listening against a topology whose activation just failed.
+    let relay_config = if outcome.errors.is_empty() {
+        config.clone()
+    } else {
+        NetworkConfig::default()
+    };
+    if let Err(error) = dhcp_relay::reconcile(&relay_config).await {
+        outcome.errors.insert("dhcp-relay".into(), error);
+    }
 
     info!(
         "Network config applied via NM: {} added, {} updated, {} deleted, {} unchanged, {} activated, {} errors",
@@ -2330,6 +2334,7 @@ mod tests {
             stp: false,
             forward_delay_s: None,
             inherit_member_mac: false,
+            dhcp_relay: None,
         }
     }
 

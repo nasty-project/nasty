@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
 	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
-	import type { NetworkState, NetworkConfig } from '$lib/types';
+	import type { NetworkState, NetworkConfig, DhcpRelayConfig } from '$lib/types';
+	import DhcpRelayEditor from './DhcpRelayEditor.svelte';
 	import { bridgeIpv4 } from '$lib/network';
 
 	interface Props {
@@ -21,6 +22,7 @@
 	let ipMethod: 'inherit' | 'static' = $state('inherit');
 	let ipAddress = $state('');
 	let ipGateway = $state('');
+	let dhcpRelay = $state<DhcpRelayConfig | null>(null);
 	// Inverted UI flag (checked = NM generates a random MAC). Default
 	// unchecked: bridges adopt the primary member's MAC so DHCP keeps
 	// handing out the same lease and the user's WebUI session survives
@@ -51,6 +53,7 @@
 						name: bridgeName,
 						members: bridgeMembers,
 						ipv4: bridgeIpv4(ipMethod, ipAddress, ipGateway),
+						dhcp_relay: dhcpRelay,
 						ipv6: { method: 'inherit', addresses: [], gateway: null },
 						mtu,
 						inherit_member_mac: !bridgeNoInheritMac,
@@ -66,6 +69,7 @@
 				ipMethod = 'inherit';
 				ipAddress = '';
 				ipGateway = '';
+				dhcpRelay = null;
 				bridgeNoInheritMac = false;
 				await onCreated?.(created);
 			}
@@ -115,6 +119,7 @@
 		{/if}
 	</div>
 	<div>
+		<DhcpRelayEditor bind:value={dhcpRelay} {networkState} {bridgeName} />
 		<label for="bridge-mtu" class="text-xs text-muted-foreground">MTU (optional)</label>
 		<input id="bridge-mtu" type="number" min="68" max="65535" bind:value={bridgeMtu} placeholder="default (1500), 9000 for jumbo frames" class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm font-mono" />
 	</div>

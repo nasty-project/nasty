@@ -97,6 +97,8 @@ pub enum LinkKind {
         /// instead of getting a random one (NM/kernel default).
         #[serde(default = "default_true")]
         inherit_member_mac: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dhcp_relay: Option<super::dhcp_relay::DhcpRelayConfig>,
     },
     Vlan {
         parent: String,
@@ -220,6 +222,7 @@ pub fn to_layered(legacy: &NetworkConfig) -> LayeredConfig {
                 stp: bridge.stp,
                 forward_delay_s: bridge.forward_delay_s,
                 inherit_member_mac: bridge.inherit_member_mac,
+                dhcp_relay: bridge.dhcp_relay.clone(),
             },
         });
         push_addresses(&mut addresses, &bridge.name, &bridge.ipv4, &bridge.ipv6);
@@ -403,6 +406,7 @@ pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
                 stp,
                 forward_delay_s,
                 inherit_member_mac,
+                dhcp_relay,
             } => bridges.push(BridgeConfig {
                 name: link.name.clone(),
                 members: members.clone(),
@@ -412,6 +416,7 @@ pub fn from_layered(layered: &LayeredConfig) -> NetworkConfig {
                 stp: *stp,
                 forward_delay_s: *forward_delay_s,
                 inherit_member_mac: *inherit_member_mac,
+                dhcp_relay: dhcp_relay.clone(),
             }),
             LinkKind::Vlan { parent, id } => vlans.push(VlanConfig {
                 parent: parent.clone(),
@@ -628,6 +633,7 @@ mod tests {
             stp: false,
             forward_delay_s: None,
             inherit_member_mac: false,
+            dhcp_relay: None,
         }
     }
 
@@ -917,6 +923,7 @@ mod tests {
             vfs: Vec::new(),
             kind: LinkKind::Bridge {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
+                dhcp_relay: None,
                 stp: false,
                 forward_delay_s: None,
                 inherit_member_mac: false,
