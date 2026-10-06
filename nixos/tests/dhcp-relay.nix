@@ -35,7 +35,7 @@ let
                 return response["result"]
     if auth.get("must_change_password"):
         password = "relay-Test-Password-123!"
-        call("auth.change_password", {"current_password":"admin", "new_password":password})
+        call("auth.change_password", {"username":"admin", "new_password":password})
         password_file.write_text(password)
         ws.close()
         ws, auth = connect(password)
