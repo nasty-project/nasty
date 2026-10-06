@@ -95,7 +95,16 @@ in pkgs.testers.runNixOSTest {
     networking.useDHCP = false;
     networking.interfaces.eth1.ipv4.addresses = [ { address = "10.10.20.97"; prefixLength = 28; } ];
     networking.interfaces.eth2.ipv4.addresses = [ { address = "203.0.113.1"; prefixLength = 24; } ];
-    networking.interfaces.lo.ipv4.addresses = [ { address = "10.10.20.110"; prefixLength = 32; } ];
+    # NixOS's built-in loopback setup does not consume an ordinary lo
+    # interface declaration here. Install the mock routed service explicitly.
+    systemd.services.mock-service-address = {
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${pkgs.iproute2}/bin/ip address replace 10.10.20.110/32 dev lo";
+      };
+    };
     networking.interfaces.eth1.ipv4.routes = [ { address = "10.10.30.0"; prefixLength = 24; via = "10.10.20.100"; } ];
     networking.firewall.allowedUDPPorts = [ 53 67 ];
     networking.nat = { enable = true; externalInterface = "eth2"; internalIPs = [ "10.10.0.0/16" ]; };
@@ -127,6 +136,7 @@ in pkgs.testers.runNixOSTest {
     router.start()
     outside.start()
     router.wait_for_unit("dnsmasq.service")
+    router.wait_for_unit("mock-service-address.service")
     outside.wait_for_unit("wan-http.service")
     machine.wait_for_unit("nasty-engine.service")
     machine.wait_until_succeeds("curl -fsS http://127.0.0.1:2137/health")
