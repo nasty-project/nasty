@@ -60,6 +60,9 @@ let
     assert not response.get("apply_errors"), response
     if mode not in ("rollback", "pending") and response.get("txn_id"):
         call("system.network.confirm", {"txn_id":response["txn_id"]})
+    if mode == "enable":
+        state = call("system.network.get")
+        assert any(i["name"] == "br-vm" and i["kind"] == "bridge" for i in state["interfaces"]), state
     ws.close()
   '';
   leaseScript = pkgs.writeShellScript "relay-lease" ''
@@ -146,10 +149,10 @@ in pkgs.testers.runNixOSTest {
 
     def guest():
         machine.succeed("ip netns add guest")
-        machine.succeed("ip link add vm-tap type veth peer name guest-eth")
+        machine.succeed("ip link add veth-guest type veth peer name guest-eth")
         machine.succeed("ip link set guest-eth netns guest")
-        machine.succeed("ip link set vm-tap master br-vm")
-        machine.succeed("ip link set vm-tap up")
+        machine.succeed("ip link set veth-guest master br-vm")
+        machine.succeed("ip link set veth-guest up")
         machine.succeed("ip netns exec guest ip link set guest-eth address 02:00:00:00:30:50")
         machine.succeed("ip netns exec guest ip link set guest-eth up")
         machine.succeed("ip netns exec guest ip link set lo up")
@@ -178,6 +181,7 @@ in pkgs.testers.runNixOSTest {
     machine.wait_for_unit("nasty-engine.service")
     machine.wait_for_unit("nasty-dhcp-relay.service")
     assert "10.10.20.97" in machine.succeed("nft list chain inet nasty dhcp_relay")
+    machine.succeed("readlink /sys/class/net/veth-guest/master | grep -F /br-vm")
     machine.succeed("ip netns exec guest ${pkgs.busybox}/bin/udhcpc -i guest-eth -s ${leaseScript} -n -q -t 10 -T 2", timeout=40)
 
     # Timed rollback restores the daemon and generated firewall policy.

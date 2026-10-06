@@ -1482,6 +1482,15 @@ pub async fn local_tls_subjects() -> Vec<String> {
     out
 }
 
+fn is_docker_bridge(name: &str) -> bool {
+    name.strip_prefix("br-").is_some_and(|id| {
+        id.len() == 12
+            && id
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    })
+}
+
 async fn enumerate_interfaces() -> Vec<LiveInterface> {
     let mut result = Vec::new();
     let sys_net = std::path::Path::new("/sys/class/net");
@@ -1495,7 +1504,7 @@ async fn enumerate_interfaces() -> Vec<LiveInterface> {
         if name == "lo"
             || name.starts_with("docker")
             || name.starts_with("veth")
-            || name.starts_with("br-")
+            || is_docker_bridge(&name)
             || name.starts_with("cni")
         {
             continue;
@@ -2305,6 +2314,20 @@ pub(crate) async fn rebind_discovery_daemons() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_excludes_only_docker_format_bridge_names() {
+        assert!(is_docker_bridge("br-012345abcdef"));
+        for name in [
+            "br-vm",
+            "br-lan",
+            "br0",
+            "br-012345abcde",
+            "br-012345abcdefg",
+        ] {
+            assert!(!is_docker_bridge(name), "{name}");
+        }
+    }
 
     fn empty_live() -> LiveTopology {
         LiveTopology::default()
