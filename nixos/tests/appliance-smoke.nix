@@ -412,7 +412,7 @@ pkgs.testers.runNixOSTest {
     import json
     import shlex
 
-    machine.start()
+    machine.start(allow_reboot=True)
 
     machine.succeed("nasty-top --version | grep -Fq '0.0.11'")
     machine.succeed("command -v sqlite3 && sqlite3 --version")
