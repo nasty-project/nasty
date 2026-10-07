@@ -203,7 +203,7 @@ fn compute_blocker(r: &ReadinessReport) -> Option<String> {
 /// the codebase.
 ///
 /// `#[allow(clippy::unnecessary_cast)]` is load-bearing here. The
-/// `libc::statvfs` struct layout is target-dependent: on Linux glibc
+/// The filesystem-stat struct layout is target-dependent: on Linux glibc
 /// (CI's clippy target) `f_bavail` is already `u64`, so `as u64` is
 /// flagged as unnecessary; on macOS (the dev target) it's `u32`, so
 /// dropping the cast breaks the multiplication. Neither `u64::from`
@@ -213,14 +213,19 @@ fn compute_blocker(r: &ReadinessReport) -> Option<String> {
 fn statvfs_free_bytes(path: &str) -> Option<u64> {
     use std::ffi::CString;
     use std::mem::MaybeUninit;
+    // The ordinary glibc ABI can fail with EOVERFLOW on large 32-bit pools.
+    #[cfg(not(target_os = "linux"))]
+    use libc::statvfs;
+    #[cfg(target_os = "linux")]
+    use libc::statvfs64 as statvfs;
     let path = CString::new(path).ok()?;
-    let mut buf = MaybeUninit::<libc::statvfs>::uninit();
-    let ret = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
+    let mut buf = MaybeUninit::<statvfs>::uninit();
+    let ret = unsafe { statvfs(path.as_ptr(), buf.as_mut_ptr()) };
     if ret != 0 {
         return None;
     }
     let stat = unsafe { buf.assume_init() };
-    Some(stat.f_bavail as u64 * stat.f_frsize)
+    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
 }
 
 /// Scan `/etc/nixos/flake.nix` for a top-level `lanzaboote.url`
