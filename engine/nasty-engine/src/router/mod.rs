@@ -22,7 +22,7 @@ mod subvolume;
 mod system;
 mod vm;
 
-pub(crate) use vm::CreateVmDiskRequest;
+pub(crate) use vm::{CreateVmDiskRequest, VmDiskCandidate};
 
 use crate::AppState;
 use crate::auth::{Role, Session};
@@ -132,6 +132,7 @@ fn is_operator_allowed(method: &str) -> bool {
                 | "share.nvmeof.remove_host"
                 | "vm.create"
                 | "vm.disk.create"
+                | "vm.disk.candidates"
                 | "vm.update"
                 // `vm.delete` was admin-only; operator could spin up
                 // VMs they had no way to tear down. Closes the same
@@ -759,6 +760,46 @@ pub(super) async fn check_block_device_conflict(
         Ok(identity) => identity,
         Err(error) => return Some(error.to_string()),
     };
+    // Reserve VM disks even while stopped. The shared mutation lock held by
+    // callers prevents a simultaneous VM attach and protocol export.
+    if exclude_protocol != "vm" {
+        let managed = match state.subvolumes.list_all(None, None).await {
+            Ok(v) => v,
+            Err(e) => return Some(format!("cannot verify VM backing inventory: {e}")),
+        };
+        let candidate = managed.iter().find(|sv| {
+            identity
+                .as_ref()
+                .is_some_and(|id| sv.block_volume_id.as_ref() == Some(id))
+                || sv
+                    .block_device
+                    .as_deref()
+                    .is_some_and(|path| vm::paths_match(path, device_path))
+        });
+        match state.vms.list_strict().await {
+            Ok(vms) => {
+                for status in vms {
+                    if status.config.disks.iter().any(|disk| {
+                        candidate.map_or_else(
+                            || {
+                                vm::paths_match(
+                                    disk.source.as_deref().unwrap_or(&disk.path),
+                                    device_path,
+                                )
+                            },
+                            |sv| vm::disk_matches_subvolume(disk, sv),
+                        )
+                    }) {
+                        return Some(format!(
+                            "device {device_path} is reserved by VM '{}' (including stopped VMs)",
+                            status.config.name
+                        ));
+                    }
+                }
+            }
+            Err(e) => return Some(format!("cannot verify VM disk usage: {e}")),
+        }
+    }
     if exclude_protocol != "iscsi" {
         match state.iscsi.list().await {
             Ok(targets) => {
