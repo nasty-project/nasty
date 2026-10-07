@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Subvolume } from './types';
-import { attachableVmDisks, validNewVmDisk, type VmDiskCandidate } from './vm-disk-safety';
+import { attachableVmDisks, validNewVmDisk, diskUsagePresentation, otherDiskConsumers, type VmDiskCandidate } from './vm-disk-safety';
 
 const candidate = (name: string, consumers: string[] = [], device: string | null = `/dev/${name}`): VmDiskCandidate => ({
 	subvolume: { name, filesystem: 'tank', subvolume_type: 'block', block_device: device } as Subvolume,
@@ -33,5 +33,36 @@ describe('inline disk creation validation', () => {
 	it('requires a filesystem and nonblank name', () => {
 		expect(validNewVmDisk('', 'data', 10)).toBe(false);
 		expect(validNewVmDisk('tank', '  ', 10)).toBe(false);
+	});
+});
+
+describe('disk usage presentation', () => {
+	it('leads with the PVC namespace/name and deduplicates compact usage categories', () => {
+		const item = candidate('pvc-long-uuid', ['Kubernetes CSI volume (PVC db/postgres-3); reserved even when not mounted', "iSCSI target 'long-iqn'", "iSCSI target 'another-iqn'"]);
+		item.subvolume.properties = { 'nasty-csi:pvc_name': 'postgres-3', 'nasty-csi:pvc_namespace': 'db' };
+		expect(diskUsagePresentation(item)).toEqual({ name: 'db/postgres-3', categories: ['Kubernetes', 'iSCSI'] });
+		expect(item.subvolume.name).toBe('pvc-long-uuid');
+		expect(item.consumers).toHaveLength(3);
+		expect(attachableVmDisks([item])).toEqual([]);
+	});
+	it('falls back to the real volume name without inventing workload names', () => {
+		const item = candidate('data', ['Unknown consumer']);
+		expect(diskUsagePresentation(item)).toEqual({ name: 'tank/data', categories: ['Other usage'] });
+		item.subvolume.properties = { 'nasty-csi:pvc_name': 'partial-metadata' };
+		expect(diskUsagePresentation(item).name).toBe('tank/data');
+	});
+	it('recognizes VM, NVMe-oF, and local mount usage without displaying identifiers as badges', () => {
+		const item = candidate('data', ["VM 'other' (stopped)", "NVMe-oF subsystem 'nqn-long'", "Local mount '/mnt/data'"]);
+		expect(diskUsagePresentation(item).categories).toEqual(['Virtual machine', 'NVMe-oF', 'Local mount']);
+	});
+	it('omits only the obvious current VM attachment from attached-row summaries', () => {
+		expect(otherDiskConsumers(["VM 'mos' (running)"], 'mos')).toEqual([]);
+		const consumers = ["VM 'mos' (stopped)", 'Kubernetes CSI volume', "iSCSI target 'iqn'"];
+		expect(otherDiskConsumers(consumers, 'mos')).toEqual(['Kubernetes CSI volume', "iSCSI target 'iqn'"]);
+		expect(consumers).toHaveLength(3);
+		expect(otherDiskConsumers(["VM 'other' (stopped)"], 'mos')).toEqual(["VM 'other' (stopped)"]);
+	});
+	it('does not hide another VM reservation even when names coincide', () => {
+		expect(otherDiskConsumers(["VM 'mos' (stopped)", "VM 'mos' (stopped)"], 'mos')).toEqual(["VM 'mos' (stopped)"]);
 	});
 });

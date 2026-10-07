@@ -5,7 +5,8 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
-	import { attachableVmDisks, validNewVmDisk, type VmDiskCandidate } from '$lib/vm-disk-safety';
+	import { attachableVmDisks, validNewVmDisk, otherDiskConsumers, type VmDiskCandidate } from '$lib/vm-disk-safety';
+	import UnavailableVmDisks from '$lib/components/UnavailableVmDisks.svelte';
 	import type { VmStatus, VmCapabilities, Subvolume, FsDependents, NetworkState, UsbPassthrough, HardwareSummary, UsbDevice } from '$lib/types';
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { Button } from '$lib/components/ui/button';
@@ -1791,12 +1792,15 @@
 										<div class="space-y-1">
 											{#each vm.disks as disk, i}
 												{@const sv = blockSubvolumes.find(s => disk.source ? `${s.path}/vol.img` === disk.source : s.block_device === disk.path || `${s.path}/vol.img` === disk.path)}
-												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
+												<div class="flex flex-wrap items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
 													<span class="font-mono text-xs font-semibold">Disk {i}</span>
 													{#if sv}
 														<span class="text-xs">{sv.filesystem}/{sv.name}</span>
-														{#if diskInventoryReady && diskUsage(sv).length > 0}
-															<span class="text-xs text-muted-foreground" title="Known consumers">Used by: {diskUsage(sv).join('; ')}</span>
+														{#if diskInventoryReady && otherDiskConsumers(diskUsage(sv), vm.name).length > 0}
+															<details class="text-xs text-amber-400">
+																<summary class="cursor-pointer">Also used elsewhere ({otherDiskConsumers(diskUsage(sv), vm.name).length})</summary>
+																<ul class="mt-1 max-w-lg list-disc space-y-1 pl-4 text-muted-foreground">{#each otherDiskConsumers(diskUsage(sv), vm.name) as consumer}<li class="break-words [overflow-wrap:anywhere]">{consumer}</li>{/each}</ul>
+															</details>
 														{/if}
 														<span class="text-xs text-muted-foreground">{disk.path}</span>
 														{#if sv.volsize_bytes}
@@ -1846,11 +1850,7 @@
 									{#if !vm.running}
 										{@const attachedPaths = new Set(vm.disks.map(d => d.path))}
 										{@const available = freeDisks.filter(s => s.block_device && !attachedPaths.has(s.block_device))}
-										<p class="mt-2 text-xs text-amber-400">Existing disks may contain data. Only attach a disk whose contents and ownership you know.</p>
-										{#if !diskInventoryReady}<p class="text-xs text-destructive">Disk usage could not be verified. Existing disk attachment is disabled.</p>{/if}
-										{#each blockSubvolumes.filter(s => !attachedPaths.has(s.block_device ?? '') && diskUsage(s).length > 0) as sv}
-											<p class="mt-1 text-xs text-muted-foreground">Unavailable: {sv.filesystem}/{sv.name} — {diskUsage(sv).join('; ')}</p>
-										{/each}
+											{#if !diskInventoryReady}<p class="text-xs text-destructive">Disk usage could not be verified. Existing disk attachment is disabled.</p>{/if}
 										<Button variant="outline" size="xs" class="mt-2" onclick={async () => { await loadFilesystems(); createDiskVm = vm.id; extraDiskFs = filesystems.find(f => f.mounted)?.name ?? ''; extraDiskName = `${vm.name}-data`; extraDiskSize = 10; }}>Create new disk</Button>
 										{#if createDiskVm === vm.id}
 											<div class="mt-2 flex flex-wrap items-center gap-2">
@@ -1861,7 +1861,8 @@
 												<Button size="xs" variant="ghost" disabled={creatingExtraDisk} onclick={() => createDiskVm = null}>Cancel</Button>
 											</div>
 										{/if}
-										{#if available.length > 0}
+											{#if available.length > 0}
+												<p class="mt-3 text-xs text-amber-400">Existing disks may contain data. Only attach a disk whose contents and ownership you know.</p>
 											<div class="mt-2 flex items-center gap-2">
 												<select
 													id="attach-disk-{vm.id}"
@@ -1878,10 +1879,12 @@
 													Attach disk
 												</Button>
 											</div>
-										{:else if vm.disks.length === 0}
-											<p class="mt-1 text-xs text-muted-foreground">No block subvolumes available.</p>
-											<Button size="xs" class="mt-1" onclick={() => goto('/subvolumes')}>Subvolumes</Button>
-										{/if}
+											{:else if diskInventoryReady}
+												<p class="mt-2 text-xs text-muted-foreground">No unused disks available. Create a new disk for this VM.</p>
+											{/if}
+											{#if diskInventoryReady}
+												<UnavailableVmDisks candidates={blockSubvolumes.filter(s => !attachedPaths.has(s.block_device ?? '') && diskUsage(s).length > 0).map(subvolume => ({ subvolume, consumers: diskUsage(subvolume) }))} />
+											{/if}
 									{/if}
 								</div>
 
