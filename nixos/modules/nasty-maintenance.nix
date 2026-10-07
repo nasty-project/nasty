@@ -11,7 +11,10 @@ let
     NASTY_MAINTENANCE_CERT = if config.services.nasty.tls.certFile == null then "" else toString config.services.nasty.tls.certFile;
     NASTY_MAINTENANCE_KEY = if config.services.nasty.tls.keyFile == null then "" else toString config.services.nasty.tls.keyFile;
     NASTY_MAINTENANCE_SSH_PORTS = builtins.toJSON (if config.services.openssh.enable then config.services.openssh.ports else []);
-    NASTY_MAINTENANCE_ASSETS = toString ../maintenance-web;
+    # Interpolation copies the directory into the store and retains its runtime
+    # dependency. toString only points at the flake source, which need not be in
+    # the booted appliance's closure.
+    NASTY_MAINTENANCE_ASSETS = "${../maintenance-web}";
   };
   command = pkgs.writeShellApplication {
     name = "nasty-maintenance";

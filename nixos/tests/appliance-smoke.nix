@@ -810,8 +810,11 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("nasty-maintenance-access.service")
     machine.wait_for_unit("sshd.service")
     machine.wait_for_unit("nasty-maintenance-caddy.service")
+    machine.succeed("assets=$(systemctl show nasty-maintenance-http.service -p Environment --value | tr ' ' '\\n' | sed -n 's/^NASTY_MAINTENANCE_ASSETS=//p'); test -f \"$assets/index.html\"; test -f \"$assets/maintenance.js\"; test -f \"$assets/maintenance.css\"")
     machine.wait_until_succeeds("curl -kfsS https://127.0.0.1/api/maintenance/status | jq -e '.maintenance == true and .ssh_ready == true and .data_mounts == \"unmounted\"'")
     machine.succeed("curl -kfsS https://127.0.0.1/settings | grep -F 'Maintenance mode is active'")
+    machine.succeed("curl -kfsS https://127.0.0.1/maintenance.js | grep -F 'async function poll()'")
+    machine.succeed("curl -kfsS https://127.0.0.1/maintenance.css | grep -F 'color-scheme: dark'")
     maintenance_cert = machine.succeed("python3 -c \"import ssl, hashlib; print(hashlib.sha256(ssl.get_server_certificate(('127.0.0.1', 443)).encode()).hexdigest())\"").strip()
     assert maintenance_cert == normal_cert, "maintenance should reuse the cached normal WebUI certificate"
     machine.fail("curl -kfsS -X POST https://127.0.0.1/api/maintenance/exit")
