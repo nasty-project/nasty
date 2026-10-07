@@ -4,6 +4,7 @@
 	import { error as toastError, success as toastSuccess, withToast } from '$lib/toast.svelte';
 	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
 	import DhcpRelayEditor from '$lib/components/DhcpRelayEditor.svelte';
+	import WebuiListeners from '$lib/components/WebuiListeners.svelte';
 	import type { DhcpRelayConfig } from '$lib/types';
 	let netDhcpRelay = $state<DhcpRelayConfig | null>(null);
 	import { tempUnit } from '$lib/temperature.svelte';
@@ -849,6 +850,7 @@
 </div>
 
 {#if activeTab === 'general'}
+	<WebuiListeners />
 
 	{#if !settings}
 		<p class="text-muted-foreground">Loading...</p>

@@ -131,6 +131,53 @@ let
         # The test disk is still unformatted at this point.
         assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
 
+        # Configurable management listeners: real Caddy, firewall and RPC
+        # transaction, with no data/network changes and SSH kept available.
+        import http.client
+        original_ports = call(ws, "system.webui.get", 500)["confirmed"]
+        pending_ports = call(ws, "system.webui.update", 501, {"https_port":8443, "http_port":8080})
+        assert pending_ports["pending"]["ports"]["https_port"] == 8443, pending_ports
+        for host, expected in [("nas.example:8080", "https://nas.example:8443/health?x=1"), ("[2001:db8::123]:8080", "https://[2001:db8::123]:8443/health?x=1")]:
+            conn = http.client.HTTPConnection("127.0.0.1", 8080, timeout=5)
+            conn.request("GET", "/health?x=1", headers={"Host":host})
+            response = conn.getresponse()
+            assert response.status == 308, response.status
+            assert response.getheader("Location") == expected, response.getheaders()
+            conn.close()
+        new_token_ports = http_login(NEW_PW, url="https://127.0.0.1:8443/api/login", ctx=ssl._create_unverified_context())
+        new_ws, _ = ws_auth(new_token_ports, url="wss://127.0.0.1:8443/ws", sslopt=SSL_OPTS)
+        confirmed_ports = call(new_ws, "system.webui.confirm", 502, {"txn_id":pending_ports["pending"]["txn_id"]})
+        new_ws.close()
+        assert confirmed_ports["pending"] is None, confirmed_ports
+        ipv6_https = http.client.HTTPSConnection("::1", 8443, timeout=5, context=ssl._create_unverified_context())
+        ipv6_https.request("GET", "/health")
+        ipv6_response = ipv6_https.getresponse()
+        assert ipv6_response.status == 200 and json.loads(ipv6_response.read())["status"] == "ok"
+        ipv6_https.close()
+        firewall = subprocess.check_output(["nft", "list", "table", "inet", "nasty"], text=True)
+        assert "tcp dport 8443 accept" in firewall and "tcp dport 8080 accept" in firewall, firewall
+        assert "tcp dport 443 accept" not in firewall and "tcp dport 80 accept" not in firewall, firewall
+        subprocess.run(["systemctl", "is-active", "--quiet", "sshd.service"], check=True)
+        # Confirmed runtime settings survive Caddy-only restart.
+        subprocess.run(["systemctl", "restart", "caddy.service"], check=True)
+        with urllib.request.urlopen("https://127.0.0.1:8443/health", context=ssl._create_unverified_context()) as response:
+            assert json.loads(response.read())["status"] == "ok"
+        # HTTP can be disabled without taking HTTPS away.
+        disabled = call(ws, "system.webui.update", 503, {"https_port":8443, "http_port":None})
+        assert disabled["pending"]["ports"]["http_port"] is None
+        assert subprocess.run(["curl", "-fsS", "--max-time", "2", "http://127.0.0.1:8080/health"], capture_output=True).returncode != 0
+        call(ws, "system.webui.rollback", 504)
+        # Do not confirm this change: exercise the actual timeout worker.
+        call(ws, "system.webui.update", 505, {"https_port":8444, "http_port":None})
+        deadline = time.monotonic() + 145
+        while call(ws, "system.webui.get", 506)["pending"] is not None:
+            assert time.monotonic() < deadline, "WebUI listener rollback did not complete"
+            time.sleep(2)
+        with urllib.request.urlopen("https://127.0.0.1:8443/health", context=ssl._create_unverified_context()) as response:
+            assert json.loads(response.read())["status"] == "ok"
+        restored = call(ws, "system.webui.update", 507, original_ports)
+        call(ws, "system.webui.confirm", 508, {"txn_id":restored["pending"]["txn_id"]})
+
         # Creating a software device must not require a pre-existing NM
         # device. Exercise the actual RPC/D-Bus path, without touching NICs.
         original_network = call(ws, "system.network.get", 300)["config"]

@@ -575,6 +575,12 @@ else
     fi
 fi
 
+# Confirmed runtime listener settings override the baked defaults on restart.
+if [ "$CADDY_REQUIRED" = true ] && [ -f /var/lib/nasty/webui-listeners.json ]; then
+    CADDY_PORT=$(jq -er '.confirmed.https_port | select(type == "number" and . >= 1 and . <= 65535)' /var/lib/nasty/webui-listeners.json)
+    CADDY_HEALTH_URL="https://127.0.0.1:$CADDY_PORT/health"
+fi
+
 # Suppress generation recovery until activation has passed health checks.
 install -m 0600 /dev/null "$MARKER"
 MARKER_SET=true

@@ -333,8 +333,8 @@ pub fn ports_for_protocol(proto: Protocol) -> Vec<PortSpec> {
 }
 
 /// Ports for the WebUI — always present but can have source restrictions.
-pub fn webui_ports() -> Vec<PortSpec> {
-    vec![tcp(80), tcp(443)]
+pub fn webui_ports(https_port: u16, http_port: Option<u16>) -> Vec<PortSpec> {
+    http_port.into_iter().chain([https_port]).map(tcp).collect()
 }
 
 /// Ports for the RDMA share transports (per-box opt-in, #602).
@@ -540,7 +540,11 @@ impl FirewallService {
             .unwrap_or_default();
         candidate.state.rules.push(FirewallRule {
             service: "webui".to_string(),
-            ports: apply_restrictions(webui_ports(), &webui_sources, &webui_ifaces),
+            ports: apply_restrictions(
+                crate::webui::load()?.confirmed.ports(),
+                &webui_sources,
+                &webui_ifaces,
+            ),
             active: true,
         });
 
@@ -727,6 +731,31 @@ impl FirewallService {
         }
     }
 
+    pub async fn set_webui_ports(&self, https: u16, http: Option<u16>) -> Result<(), String> {
+        let mut current = self.config.lock().await;
+        let mut candidate = current.clone();
+        let sources = candidate
+            .restrictions
+            .services
+            .get("webui")
+            .cloned()
+            .unwrap_or_default();
+        let ifaces = candidate
+            .restrictions
+            .interfaces
+            .get("webui")
+            .cloned()
+            .unwrap_or_default();
+        let rule = candidate
+            .state
+            .rules
+            .iter_mut()
+            .find(|r| r.service == "webui")
+            .ok_or("WebUI firewall rule is not initialized")?;
+        rule.ports = apply_restrictions(webui_ports(https, http), &sources, &ifaces);
+        self.commit_candidate(&mut current, candidate, None).await
+    }
+
     pub async fn set_restriction(
         &self,
         service: &str,
@@ -744,7 +773,7 @@ impl FirewallService {
             }
         }
         let default_ports = if service == "webui" {
-            webui_ports()
+            crate::webui::load()?.confirmed.ports()
         } else if service == "rdma" {
             rdma_ports()
         } else if service == "dc" {
@@ -1595,6 +1624,46 @@ mod tests {
         assert_eq!(rule.ports.len(), 2, "re-saving must not multiply ports");
         assert!(rule.ports.iter().all(|port| port.port == 3261));
         assert_eq!(rule.ports[0].source.as_deref(), Some("10.0.0.0/8"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn webui_listener_changes_preserve_ipv4_ipv6_and_interface_restrictions() {
+        let dir = tempfile::tempdir().unwrap();
+        let nft = mock_nft(dir.path(), "cat >/dev/null\nexit 0");
+        let mut config = FirewallConfig {
+            state: state_with_rule("webui", webui_ports(443, Some(80)), true),
+            ..FirewallConfig::default()
+        };
+        config.restrictions.services.insert(
+            "webui".into(),
+            vec!["10.0.0.0/8".into(), "2001:db8::/32".into()],
+        );
+        config
+            .restrictions
+            .interfaces
+            .insert("webui".into(), vec!["eth0".into()]);
+        let service = test_service(dir.path(), nft, config);
+        service.set_webui_ports(8443, Some(8080)).await.unwrap();
+        let rule = &service.status().await.rules[0];
+        assert_eq!(rule.ports.len(), 4);
+        assert!(
+            rule.ports
+                .iter()
+                .all(|p| [8443, 8080].contains(&p.port) && p.iface.as_deref() == Some("eth0"))
+        );
+        assert!(
+            rule.ports
+                .iter()
+                .any(|p| p.source.as_deref() == Some("2001:db8::/32"))
+        );
+        service.set_webui_ports(8443, None).await.unwrap();
+        assert!(
+            service.status().await.rules[0]
+                .ports
+                .iter()
+                .all(|p| p.port == 8443)
+        );
     }
 
     #[cfg(unix)]

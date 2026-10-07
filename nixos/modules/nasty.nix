@@ -253,9 +253,9 @@ in {
       };
 
       httpPort = mkOption {
-        type = types.port;
+        type = types.nullOr types.port;
         default = 80;
-        description = "HTTP port (redirects to HTTPS)";
+        description = "HTTP redirect port; null disables the redirect listener";
       };
     };
 
@@ -364,6 +364,17 @@ in {
     })
 
     (mkIf cfg.enable {
+
+    assertions = [
+      {
+        assertion = cfg.webui.httpPort == null || cfg.webui.httpPort != cfg.webui.port;
+        message = "NASty WebUI HTTP and HTTPS ports must differ.";
+      }
+      {
+        assertion = !(builtins.elem cfg.webui.port [ 2019 2137 ]) && !(builtins.elem cfg.webui.httpPort [ 2019 2137 ]);
+        message = "NASty WebUI ports cannot use the Caddy admin or engine API ports (2019/2137).";
+      }
+    ];
 
     # ── Required kernel support ────────────────────────────────
     # bcachefs kernel module + tools live in modules/bcachefs.nix
@@ -1810,6 +1821,9 @@ in {
 
       environment = {
         RUST_LOG = cfg.engine.logLevel;
+        NASTY_WEBUI_ENABLED = if cfg.webui.package != null then "true" else "false";
+        NASTY_WEBUI_HTTPS_PORT = toString cfg.webui.port;
+        NASTY_WEBUI_HTTP_PORT = if cfg.webui.httpPort == null then "disabled" else toString cfg.webui.httpPort;
         # Pin the TPM2 TCTI to /dev/tpmrm0. Without this every tpm2-tools
         # invocation (Hardware page vendor probe, the seal/unseal flow
         # for #102) prints a stderr stanza about failing to dlopen
@@ -2360,6 +2374,8 @@ in {
         hash = "sha256-PqxwMYygC5keQk+AR+fuSM8nio2IhIXjvrBBBpdBPMQ=";
       };
       globalConfig = ''
+        https_port ${toString cfg.webui.port}
+        http_port ${toString (if cfg.webui.httpPort == null then 80 else cfg.webui.httpPort)}
         # auto_https stays ON so Caddy generates the per-hostname
         # `tls_connection_policies` entries that route a given SNI to
         # the right managed cert. The engine still drives issuance
@@ -2594,9 +2610,11 @@ in {
         }
 
         # HTTP -> HTTPS redirect, port-only (works for IP and hostname).
-        :${toString cfg.webui.httpPort} {
-          redir https://{host}{uri} permanent
-        }
+        ${lib.optionalString (cfg.webui.httpPort != null) ''
+          :${toString cfg.webui.httpPort} {
+            redir https://{host}${lib.optionalString (cfg.webui.port != 443) ":${toString cfg.webui.port}"}{uri} permanent
+          }
+        ''}
 
         # Fallback site bound to `nasty.local` AND the port-only
         # catch-all on :${toString cfg.webui.port}. The hostname is
@@ -2617,7 +2635,7 @@ in {
         # User-supplied cert + key still honoured via
         # `cfg.tls.certFile/keyFile`; we pick that path instead of
         # `tls internal` when both are set.
-        nasty.local, :${toString cfg.webui.port} {
+        nasty.local:${toString cfg.webui.port}, :${toString cfg.webui.port} {
           ${caddyTlsDirective}
           import nasty_webui_routes
         }
@@ -2629,6 +2647,13 @@ in {
     # "ignore if missing" so the unit still starts on a fresh box
     # before the engine has written anything.
     systemd.services.caddy = mkIf (cfg.webui.package != null) {
+      environment = {
+        NASTY_WEBUI_HTTPS_PORT = toString cfg.webui.port;
+        NASTY_WEBUI_HTTP_PORT = if cfg.webui.httpPort == null then "disabled" else toString cfg.webui.httpPort;
+      };
+      # The baked Caddyfile is the baseline, then confirmed runtime ports are
+      # restored on every Caddy restart, without depending on engine startup.
+      serviceConfig.ExecStartPost = "${cfg.engine.package}/bin/nasty-engine webui-listeners-restore";
       after = [ "nftables.service" ];
       requires = [ "nftables.service" ];
       partOf = [ "nftables.service" ];
