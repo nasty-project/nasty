@@ -139,6 +139,22 @@ fn protocol_restore_exclusions(
     excluded
 }
 
+/// Preserve the 10 GiB limit on 64-bit hosts; cap it at the largest
+/// representable body size on 32-bit hosts rather than truncating it.
+fn upload_body_limit() -> usize {
+    usize::try_from(10_737_418_240u64).unwrap_or(usize::MAX)
+}
+
+#[test]
+fn upload_limit_fits_target_without_truncation() {
+    let expected = if usize::BITS == 32 {
+        u32::MAX as u64
+    } else {
+        10_737_418_240u64
+    };
+    assert_eq!(upload_body_limit() as u64, expected);
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
@@ -1046,7 +1062,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/oidc/callback", get(oidc_callback_handler))
         .route(
             "/api/upload/vm-image",
-            post(upload_vm_image_handler).layer(DefaultBodyLimit::max(10_737_418_240)),
+            post(upload_vm_image_handler).layer(DefaultBodyLimit::max(upload_body_limit())),
         )
         .route("/api/files/browse", get(files_browse_handler))
         .route("/api/user/files/roots", get(user_files::roots_handler))
@@ -1059,7 +1075,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/files", delete(files_delete_handler))
         .route(
             "/api/files/upload",
-            post(files_upload_handler).layer(DefaultBodyLimit::max(10_737_418_240)),
+            post(files_upload_handler).layer(DefaultBodyLimit::max(upload_body_limit())),
         )
         .route("/api/files/mkdir", post(files_mkdir_handler))
         .route("/api/files/rename", post(files_rename_handler))

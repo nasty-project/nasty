@@ -370,28 +370,41 @@ pub fn read_device_stats(sysfs: &Path) -> Vec<DeviceMetrics> {
 // ── Space usage ─────────────────────────────────────────────────
 
 /// Read space usage via statvfs.
+#[allow(clippy::unnecessary_cast)] // libc field widths vary across targets.
 pub fn read_space(mount_point: &str) -> SpaceUsage {
     use std::ffi::CString;
+    // The ordinary glibc ABI can overflow block counters on 32-bit Linux.
+    #[cfg(not(target_os = "linux"))]
+    use libc::statvfs;
+    #[cfg(target_os = "linux")]
+    use libc::statvfs64 as statvfs;
 
     let Ok(path) = CString::new(mount_point) else {
         return SpaceUsage::default();
     };
 
     unsafe {
-        let mut stat: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(path.as_ptr(), &mut stat) == 0 {
-            let block_size = stat.f_frsize;
-            let total = stat.f_blocks as u64 * block_size;
-            let available = stat.f_bavail as u64 * block_size;
-            let used = total.saturating_sub(stat.f_bfree as u64 * block_size);
-            SpaceUsage {
-                total_bytes: total,
-                used_bytes: used,
-                available_bytes: available,
-            }
+        let mut stat: statvfs = std::mem::zeroed();
+        if statvfs(path.as_ptr(), &mut stat) == 0 {
+            let block_size = stat.f_frsize as u64;
+            space_from_blocks(
+                stat.f_blocks as u64,
+                stat.f_bfree as u64,
+                stat.f_bavail as u64,
+                block_size,
+            )
         } else {
             SpaceUsage::default()
         }
+    }
+}
+
+fn space_from_blocks(blocks: u64, free: u64, available: u64, block_size: u64) -> SpaceUsage {
+    let total = blocks * block_size;
+    SpaceUsage {
+        total_bytes: total,
+        used_bytes: total.saturating_sub(free * block_size),
+        available_bytes: available * block_size,
     }
 }
 
@@ -553,6 +566,24 @@ fn parse_human_bytes(s: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn space_usage_above_32_bit_block_counter_limit() {
+        let blocks = u32::MAX as u64 + 1;
+        let space = super::space_from_blocks(blocks, blocks / 2, blocks / 4, 4096);
+        assert_eq!(space.total_bytes, 16 * 1024u64.pow(4));
+        assert_eq!(space.used_bytes, 8 * 1024u64.pow(4));
+        assert_eq!(space.available_bytes, 4 * 1024u64.pow(4));
+    }
+
+    #[test]
+    fn space_usage_handles_invalid_paths() {
+        assert_eq!(super::read_space("/\0").total_bytes, 0);
+        assert_eq!(
+            super::read_space("/nasty-nonexistent-space-test").total_bytes,
+            0
+        );
+    }
+
     use super::{
         BcachefsMetrics, CompressionEntry, parse_bcachefs_mount_line, parse_compression_line,
         parse_human_bytes, total_btree_cache_bytes,

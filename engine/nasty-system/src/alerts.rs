@@ -1249,9 +1249,14 @@ fn boot_free_mb() -> Option<f64> {
 fn statvfs_free_bytes(path: &str) -> Option<f64> {
     use std::ffi::CString;
     use std::mem::MaybeUninit;
+    // Use wide block counters even on 32-bit glibc.
+    #[cfg(not(target_os = "linux"))]
+    use libc::statvfs;
+    #[cfg(target_os = "linux")]
+    use libc::statvfs64 as statvfs;
     let path = CString::new(path).ok()?;
-    let mut buf = MaybeUninit::<libc::statvfs>::uninit();
-    let ret = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
+    let mut buf = MaybeUninit::<statvfs>::uninit();
+    let ret = unsafe { statvfs(path.as_ptr(), buf.as_mut_ptr()) };
     if ret != 0 {
         return None;
     }
