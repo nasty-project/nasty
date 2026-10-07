@@ -159,7 +159,12 @@ let
         assert "tcp dport 443 accept" not in firewall and "tcp dport 80 accept" not in firewall, firewall
         subprocess.run(["systemctl", "is-active", "--quiet", "sshd.service"], check=True)
         # Confirmed runtime settings survive Caddy-only restart.
+        listener_state = "/var/lib/nasty/webui-listeners.json"
+        assert subprocess.check_output(["stat", "-c", "%a", listener_state], text=True).strip() == "600"
+        assert subprocess.run(["runuser", "-u", "caddy", "--", "test", "-r", listener_state]).returncode != 0
         subprocess.run(["systemctl", "restart", "caddy.service"], check=True)
+        assert subprocess.check_output(["systemctl", "show", "caddy.service", "-p", "User", "--value"], text=True).strip() == "caddy"
+        assert subprocess.run(["runuser", "-u", "caddy", "--", "test", "-r", listener_state]).returncode != 0
         with urllib.request.urlopen("https://127.0.0.1:8443/health", context=ssl._create_unverified_context()) as response:
             assert json.loads(response.read())["status"] == "ok"
         # HTTP can be disabled without taking HTTPS away.

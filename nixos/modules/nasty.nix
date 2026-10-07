@@ -2653,7 +2653,9 @@ in {
       };
       # The baked Caddyfile is the baseline, then confirmed runtime ports are
       # restored on every Caddy restart, without depending on engine startup.
-      serviceConfig.ExecStartPost = "${cfg.engine.package}/bin/nasty-engine webui-listeners-restore";
+      # Only this helper runs as root: the engine journals state with a private
+      # umask. Keep those permissions and Caddy's unprivileged daemon intact.
+      serviceConfig.ExecStartPost = "+${cfg.engine.package}/bin/nasty-engine webui-listeners-restore";
       after = [ "nftables.service" ];
       requires = [ "nftables.service" ];
       partOf = [ "nftables.service" ];
