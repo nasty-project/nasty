@@ -169,7 +169,7 @@ let
         call(ws, "system.webui.rollback", 504)
         # Do not confirm this change: exercise the actual timeout worker.
         call(ws, "system.webui.update", 505, {"https_port":8444, "http_port":None})
-        deadline = time.monotonic() + 145
+        deadline = time.monotonic() + 55
         while call(ws, "system.webui.get", 506)["pending"] is not None:
             assert time.monotonic() < deadline, "WebUI listener rollback did not complete"
             time.sleep(2)

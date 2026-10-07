@@ -44,7 +44,7 @@
 	});
 	async function apply() {
 		if (!validListenerPorts(https, httpEnabled ? http : null)) return;
-		if (!await confirm('Change WebUI ports?', 'Open the new HTTPS URL and confirm within 120 seconds, otherwise the previous ports will be restored. Re-login or certificate trust may be required. This also changes the listener used by app ingress. SSH is unchanged.')) return;
+		if (!await confirm('Change WebUI ports?', 'Open the new HTTPS URL and confirm within 30 seconds, otherwise the previous ports will be restored. Re-login or certificate trust may be required. This also changes the listener used by app ingress. SSH is unchanged.')) return;
 		busy = true;
 		await withToast(async () => {
 			listenerState = await getClient().call<ListenerState>('system.webui.update', { https_port: https, http_port: httpEnabled ? http : null });
@@ -72,7 +72,7 @@
 				{#if httpEnabled}<label class="text-sm">HTTP <input aria-label="WebUI HTTP redirect port" type="number" min="1" max="65535" bind:value={http} disabled={busy || !!pending} class="ml-2 w-24 rounded border border-input bg-transparent px-2 py-1" /></label>{/if}
 				<Button size="sm" disabled={busy || !!pending || !validListenerPorts(https, httpEnabled ? http : null)} onclick={apply}>Apply ports</Button>
 			</div>
-			{#if proposedUrl}<p class="text-xs">If applying disconnects this page, open <a href={proposedUrl} target="_blank" rel="noopener noreferrer" class="underline">{proposedUrl}</a> to confirm, or wait 120 seconds for rollback.</p>{/if}
+			{#if proposedUrl}<p class="text-xs">If applying disconnects this page, open <a href={proposedUrl} target="_blank" rel="noopener noreferrer" class="underline">{proposedUrl}</a> to confirm, or wait 30 seconds for rollback.</p>{/if}
 			{#if !validListenerPorts(https, httpEnabled ? http : null)}<p class="text-xs text-destructive">Choose distinct ports between 1 and 65535. Ports 2019 and 2137 are reserved.</p>{/if}
 			{#if pending}
 				<p class="text-sm text-amber-500">Unconfirmed change: automatic rollback in {Math.max(0, Math.ceil(pending.deadline - clock / 1000))} seconds.</p>

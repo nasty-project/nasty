@@ -5,7 +5,7 @@ administrator to select an HTTPS port and an optional HTTP redirect port.
 HTTPS cannot be disabled. Ports must be distinct, in 1–65535, and cannot use
 the internal engine API (2137) or Caddy admin API (2019).
 
-Applying creates a 120-second transaction. Open the displayed new HTTPS URL,
+Applying creates a 30-second transaction. Open the displayed new HTTPS URL,
 log in if necessary, and confirm from its Settings page. The browser enables
 confirmation only on the candidate HTTPS port. The confirmation RPC checks
 the local HTTPS health endpoint before persisting the selection; API callers

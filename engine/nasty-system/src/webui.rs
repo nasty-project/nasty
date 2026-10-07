@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 const STATE: &str = "/var/lib/nasty/webui-listeners.json";
 const ADMIN: &str = "http://127.0.0.1:2019/config/apps/http/";
-const TIMEOUT: u64 = 120;
+const TIMEOUT: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ListenerPorts {
@@ -408,7 +408,7 @@ mod tests {
     }
     #[tokio::test]
     async fn restart_drops_unconfirmed_candidate_and_requires_recovery() {
-        let service = WebuiService::from_state(pending_state(now() + 120));
+        let service = WebuiService::from_state(pending_state(now() + TIMEOUT));
         let state = service.get().await;
         assert_eq!(state.confirmed.https_port, 443);
         assert!(state.pending.is_none());
@@ -446,7 +446,7 @@ mod tests {
             .pending
             .as_mut()
             .unwrap()
-            .deadline = now() + 120;
+            .deadline = now() + TIMEOUT;
         assert!(
             service
                 .confirm("other")
