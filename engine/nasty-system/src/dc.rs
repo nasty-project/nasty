@@ -1060,6 +1060,7 @@ mod tests {
             stp: false,
             forward_delay_s: None,
             inherit_member_mac: true,
+            dhcp_relay: None,
         }
     }
 

@@ -60,7 +60,9 @@ let
         ip protocol icmp accept
         ip6 nexthdr icmpv6 accept
         udp dport 546 accept
+        jump dhcp_relay
       }
+      chain dhcp_relay { }
       chain forward {
         type filter hook forward priority -10; policy accept;
         ct direction original ct status dnat drop
@@ -2684,6 +2686,29 @@ in {
     # Never flush unrelated Docker/CNI tables when loading our baseline.
     networking.nftables.flushRuleset = lib.mkForce false;
     networking.nftables.ruleset = nastyFirewallBaselineText;
+    # Routed internal VM bridges use the upstream router for Internet NAT.
+    boot.kernel.sysctl."net.ipv4.ip_forward" = lib.mkDefault 1;
+    systemd.services.nasty-dhcp-relay = {
+      description = "NASty DHCPv4 relay for isolated VM bridges";
+      after = [ "NetworkManager.service" "nftables.service" ];
+      requires = [ "nftables.service" ];
+      partOf = [ "nftables.service" "nasty-engine.service" ];
+      # The engine restores only confirmed configuration after startup recovery.
+      wantedBy = [ ];
+      serviceConfig = {
+        Type = "exec";
+        ExecStartPre = "${pkgs.dnsmasq}/bin/dnsmasq --test --conf-file=/var/lib/nasty/dhcp-relay.conf";
+        ExecStart = "${pkgs.dnsmasq}/bin/dnsmasq --keep-in-foreground --conf-file=/var/lib/nasty/dhcp-relay.conf --pid-file=/run/nasty-dhcp-relay/dnsmasq.pid";
+        RuntimeDirectory = "nasty-dhcp-relay";
+        Restart = "on-failure";
+        RestartSec = 5;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        NoNewPrivileges = true;
+        CapabilityBoundingSet = [ "CAP_NET_ADMIN" "CAP_NET_RAW" "CAP_NET_BIND_SERVICE" "CAP_SETUID" "CAP_SETGID" "CAP_CHOWN" "CAP_DAC_OVERRIDE" ];
+      };
+    };
     # Loading the static baseline without restarting the engine would discard
     # its dynamic state. Disable direct reloads and make NixOS activation use a
     # restart; PartOf then restarts each listener and the engine after the

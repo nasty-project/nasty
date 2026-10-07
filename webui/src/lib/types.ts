@@ -1383,6 +1383,11 @@ export interface VlanConfig {
 	mtu: number | null;
 }
 
+export interface DhcpRelayConfig {
+	server: string;
+	upstream: string;
+}
+
 export interface BridgeConfig {
 	name: string;
 	members: string[];
@@ -1395,6 +1400,7 @@ export interface BridgeConfig {
 	 * the bridge takes its MAC from the primary member instead of
 	 * getting a kernel-random MAC at creation. */
 	inherit_member_mac?: boolean;
+	dhcp_relay?: DhcpRelayConfig | null;
 }
 
 export interface NetworkConfig {

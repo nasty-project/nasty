@@ -1154,7 +1154,9 @@ async fn apply_nftables_with(
     custom: &[CustomRule],
     published: &[PublishedAppPort],
 ) -> Result<(), String> {
+    let _relay_lock = crate::network::dhcp_relay::POLICY_LOCK.lock().await;
     let transaction = render_transaction(state, custom, published);
+    let transaction = transaction + &crate::network::dhcp_relay::policy().await?;
     run_nft(
         nft_program,
         &["--check", "--file", "-"],
@@ -1165,7 +1167,7 @@ async fn apply_nftables_with(
     run_nft(nft_program, &["--file", "-"], &transaction, "apply").await
 }
 
-async fn run_nft(
+pub(crate) async fn run_nft(
     nft_program: &Path,
     args: &[&str],
     transaction: &str,
@@ -1245,6 +1247,7 @@ fn render_ruleset_with_published(
 ) -> String {
     let mut rules = String::new();
     rules.push_str("table inet nasty {\n");
+    rules.push_str("    chain dhcp_relay { }\n");
     rules.push_str("    chain input {\n");
     rules.push_str("        type filter hook input priority 0; policy drop;\n");
     rules.push_str("        ct state established,related accept\n");
@@ -1255,6 +1258,7 @@ fn render_ruleset_with_published(
     rules.push_str("        ip6 nexthdr icmpv6 accept\n");
     rules.push_str("        # DHCPv6 client\n");
     rules.push_str("        udp dport 546 accept\n");
+    rules.push_str("        jump dhcp_relay\n");
 
     for rule in &state.rules {
         if !rule.active {
@@ -1313,6 +1317,7 @@ fn render_ruleset_with_published(
 
     rules.push_str("    }\n");
     rules.push_str("    chain forward {\n");
+    // DHCP rules are appended in the same atomic transaction under POLICY_LOCK.
     rules.push_str("        type filter hook forward priority -10; policy accept;\n");
     rules.push_str("        # Explicitly allowed Docker-published host ports\n");
     for port in published {

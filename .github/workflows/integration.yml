@@ -82,6 +82,7 @@ jobs:
             .#checks.x86_64-linux.tailscale-independent-package \
             .#checks.x86_64-linux.bcachefs-smoke \
             .#checks.x86_64-linux.appliance-smoke \
+            .#checks.x86_64-linux.dhcp-relay \
             -L --print-build-logs
 
       - name: AD DC VM test

@@ -1065,6 +1065,7 @@ mod tests {
             vfs: Vec::new(),
             kind: LinkKind::Bridge {
                 members: members.iter().map(|s| (*s).to_string()).collect(),
+                dhcp_relay: None,
                 stp: false,
                 forward_delay_s: None,
                 inherit_member_mac: false,
@@ -1474,6 +1475,7 @@ mod tests {
                     members: vec![],
                     stp: true,
                     forward_delay_s: Some(0),
+                    dhcp_relay: None,
                     inherit_member_mac: false,
                 },
             }],
@@ -1649,6 +1651,7 @@ mod tests {
                     members: vec![],
                     stp: true,
                     forward_delay_s: Some(4),
+                    dhcp_relay: None,
                     inherit_member_mac: false,
                 },
             }],
@@ -1945,6 +1948,7 @@ mod tests {
                     members: vec![],
                     stp: true,
                     forward_delay_s: Some(7),
+                    dhcp_relay: None,
                     inherit_member_mac: false,
                 },
             }],
@@ -2335,6 +2339,7 @@ mod tests {
                 stp: false,
                 forward_delay_s: None,
                 inherit_member_mac: true,
+                dhcp_relay: None,
             },
         }
     }
