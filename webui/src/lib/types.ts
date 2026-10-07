@@ -404,6 +404,10 @@ export interface ServiceStatus {
 
 export interface FilesystemDevice {
 	path: string;
+	/** Live kernel member path; display and actions retain the persistent path. */
+	kernel_path?: string | null;
+	/** Partition parent from kernel topology, for whole-disk SMART/I/O. */
+	parent_path?: string | null;
 	/** Hierarchical label for tiering (e.g. "ssd.fast", "hdd.archive") */
 	label: string | null;
 	/** Durability: 0 = cache, 1 = normal, 2 = hardware RAID */
