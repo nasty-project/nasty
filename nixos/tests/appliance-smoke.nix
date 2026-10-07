@@ -790,6 +790,7 @@ pkgs.testers.runNixOSTest {
     )
 
     # ── Persistent offline-storage maintenance (#948) ─────────────
+    normal_cert = machine.succeed("python3 -c \"import ssl, hashlib; print(hashlib.sha256(ssl.get_server_certificate(('127.0.0.1', 443)).encode()).hexdigest())\"").strip()
     # This pool contains the managed Docker data root, so successful normal
     # restoration also proves consumers are not enabled before the pool.
     machine.succeed("nasty-maintenance status | grep -F 'Normal operation'")
@@ -808,6 +809,27 @@ pkgs.testers.runNixOSTest {
     machine.reboot()
     machine.wait_for_unit("nasty-maintenance-access.service")
     machine.wait_for_unit("sshd.service")
+    machine.wait_for_unit("nasty-maintenance-caddy.service")
+    machine.wait_until_succeeds("curl -kfsS https://127.0.0.1/api/maintenance/status | jq -e '.maintenance == true and .ssh_ready == true and .data_mounts == \"unmounted\"'")
+    machine.succeed("curl -kfsS https://127.0.0.1/settings | grep -F 'Maintenance mode is active'")
+    maintenance_cert = machine.succeed("python3 -c \"import ssl, hashlib; print(hashlib.sha256(ssl.get_server_certificate(('127.0.0.1', 443)).encode()).hexdigest())\"").strip()
+    assert maintenance_cert == normal_cert, "maintenance should reuse the cached normal WebUI certificate"
+    machine.fail("curl -kfsS -X POST https://127.0.0.1/api/maintenance/exit")
+    machine.fail("curl -kfsS https://127.0.0.1/api/login")
+    machine.fail("curl -kfsS https://127.0.0.1/ws")
+    machine.succeed("test -f /var/lib/nasty/maintenance")
+    machine.succeed("test $(systemctl show nasty-maintenance-http.service -p User --value) = caddy")
+    machine.fail("curl -fsS http://127.0.0.1:2019/config/")
+    # A stopped SSH daemon must not be labelled ready. It is not restarted by
+    # the read-only page; ordinary maintenance access stays independent.
+    machine.succeed("systemctl stop sshd.service")
+    machine.wait_until_succeeds("curl -kfsS https://127.0.0.1/api/maintenance/status | jq -e '.ssh_ready == false'")
+    machine.succeed("systemctl start sshd.service")
+    machine.wait_until_succeeds("curl -kfsS https://127.0.0.1/api/maintenance/status | jq -e '.ssh_ready == true'")
+    # Mount observations are not inferred from the maintenance latch.
+    machine.succeed("mkdir -p /fs/maintenance-test; mount -t tmpfs tmpfs /fs/maintenance-test")
+    machine.wait_until_succeeds("curl -kfsS https://127.0.0.1/api/maintenance/status | jq -e '.data_mounts == \"mounted\"'")
+    machine.succeed("umount /fs/maintenance-test; rmdir /fs/maintenance-test")
     machine.succeed("test -e /run/nasty-maintenance")
     machine.succeed("nft -nn list table inet nasty | grep -F 'udp sport 67 udp dport 68 accept'")
     machine.fail("mountpoint -q /fs/smoke-pool")
@@ -839,13 +861,18 @@ pkgs.testers.runNixOSTest {
         "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
         "root@192.0.2.1 nasty-maintenance status | grep -F 'maintenance is active'"
     )
+    machine.succeed("ip netns exec maintenance-client curl -kfsS https://192.0.2.1/api/maintenance/status | jq -e '.maintenance == true'")
     # Reinstall maintenance SSH rules after a firewall restart too.
     machine.succeed("systemctl restart nftables.service")
     machine.wait_for_unit("nasty-maintenance-access.service")
     machine.succeed("nft list table inet nasty | grep -F 'tcp dport 22 accept'")
+    machine.wait_for_unit("nasty-maintenance-caddy.service")
+    machine.wait_until_succeeds("curl -kfsS https://127.0.0.1/api/maintenance/status | jq -e '.maintenance == true'")
 
     machine.reboot()
     machine.wait_for_unit("nasty-maintenance-access.service")
+    machine.wait_for_unit("nasty-maintenance-caddy.service")
+    machine.wait_until_succeeds("curl -kfsS https://127.0.0.1/api/maintenance/status | jq -e '.maintenance == true and .ssh_ready == true'")
     machine.fail("mountpoint -q /fs/smoke-pool")
     machine.fail("systemctl is-active --quiet nasty-engine.service")
 
@@ -854,6 +881,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test -e /run/nasty-maintenance")
     machine.succeed("systemctl daemon-reload")
     machine.succeed("systemctl restart nasty-maintenance-state.service")
+    machine.wait_until_succeeds("curl -kfsS https://127.0.0.1/api/maintenance/status | jq -e '.maintenance == true and .exit_scheduled == true'")
     machine.succeed("test -e /run/nasty-maintenance")
     machine.execute("systemctl start nasty-engine.service docker.socket")
     machine.fail("systemctl is-active --quiet nasty-engine.service")
@@ -861,6 +889,8 @@ pkgs.testers.runNixOSTest {
     machine.fail("mountpoint -q /fs/smoke-pool")
     machine.reboot()
     machine.wait_for_unit("nasty-engine.service")
+    for unit in ["nasty-maintenance-web", "nasty-maintenance-http", "nasty-maintenance-caddy"]:
+        machine.fail(f"systemctl is-active --quiet {unit}.service")
     machine.fail("test -e /run/nasty-maintenance")
     machine.wait_until_succeeds("mountpoint -q /fs/smoke-pool")
     machine.succeed("test -f /fs/smoke-pool/media/movies/readme.txt")

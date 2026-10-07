@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NASty · Storage maintenance</title><link rel="stylesheet" href="/maintenance.css"><script src="/maintenance.js" defer></script></head>
+<body>
+<main>
+  <header><span class="brand">NASty</span><span class="badge">STORAGE MAINTENANCE</span></header>
+  <h1>Maintenance mode is active</h1>
+  <p class="intro">The normal dashboard, data pools, shares, apps, and VMs are not started automatically. No repairs run automatically.</p>
+  <section class="status" aria-live="polite">
+    <p id="connection">Checking maintenance readiness…</p>
+    <p id="ssh-status">Checking the SSH service…</p>
+    <p id="mount-status">Checking data mounts…</p>
+    <p id="exit-status"></p>
+  </section>
+  <section>
+    <h2>Connect over SSH</h2>
+    <p>Use a <strong>local operating-system account</strong> with SSH access. Your dashboard login may be different.</p>
+    <label for="username">Local OS username <span>(optional)</span></label>
+    <input id="username" placeholder="YOUR_OS_USER" autocomplete="off" spellcheck="false">
+    <label for="ssh-port">SSH port</label><select id="ssh-port" aria-label="SSH port"><option value="22">22</option></select>
+    <div class="command"><code id="ssh-command">SSH connection details are loading…</code><button id="copy-ssh" disabled>Copy command</button></div>
+    <p class="note">“SSH service ready” verifies a running service and an SSH listener, not your credentials or reachability from every network. Console access remains available if SSH fails.</p>
+  </section>
+  <section>
+    <h2>Before making repairs</h2>
+    <p>Check that the intended data pools are unmounted. This page only checks mounted paths under <code>/fs</code> and non-root bcachefs mounts; it does not certify that all disks are safe to repair.</p>
+    <div class="command"><code>findmnt -rn -t bcachefs</code><button data-copy="findmnt -rn -t bcachefs">Copy command</button></div>
+  </section>
+  <section>
+    <h2>Return to normal operation</h2>
+    <p>When you are finished, run this over SSH or at the console. It explicitly exits maintenance and reboots the NAS.</p>
+    <div class="command"><code>sudo nasty-maintenance exit</code><button data-copy="sudo nasty-maintenance exit">Copy command</button></div>
+    <p class="note">This page will detect the normal dashboard returning after reboot. It cannot exit maintenance or run commands for you.</p>
+    <a id="dashboard" href="/" hidden>Open the normal dashboard →</a>
+  </section>
+  <noscript><p>Live readiness checks require JavaScript. Maintenance is active; connect using your configured SSH address and port, or use the console.</p></noscript>
+</main>
+</body>
+</html>

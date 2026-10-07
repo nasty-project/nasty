@@ -9,8 +9,8 @@ place of the pool's actual member devices.
 
 First verify you can log in over SSH with a local OS account or use the local
 console. Your existing SSH keys and authentication policy remain in effect;
-domain logins may depend on Samba services that will be disabled. The WebUI
-does not remain available during maintenance.
+domain logins may depend on Samba services that will be disabled. The normal
+dashboard is replaced by a read-only maintenance landing page.
 
 As a root-equivalent administrator, select **Power → Storage maintenance** and
 confirm, or run:
@@ -32,7 +32,7 @@ findmnt -t bcachefs
 lsblk -f
 ```
 
-The engine, metrics, WebUI, managed shares, Docker (including socket activation
+The engine, metrics, normal WebUI, managed shares, Docker (including socket activation
 and pruning), storage exports, and watchdog do not start automatically. The
 engine therefore cannot restore pools, apps, VMs, backups, or scheduled storage
 jobs. Declarative mounts/automounts below `/fs` are also guarded. The root/OS
@@ -40,6 +40,30 @@ filesystem and networking remain available; the maintenance firewall permits
 the configured SSH ports. Previously enabled Tailscale is started separately
 using its existing daemon state. It still needs valid tailnet authorization and
 reachable networking; retain a LAN/console recovery path.
+
+### Maintenance landing page
+
+The same WebUI HTTPS address (including confirmed custom ports) serves a
+standalone page, independent of the engine, storage consumers, and normal Caddy
+service. The reboot screen waits for this page automatically. A minimal
+maintenance-only Caddy instance has no admin API, app routes, engine proxy, DNS
+credentials, or public ACME issuance. Cached OS-filesystem certificates are
+reused where available; otherwise an internal certificate may require a browser
+trust exception. SSH/console access does not depend on the landing page working.
+
+The page shows verified maintenance state, SSH service/listener readiness, and
+whether data mounts under `/fs` or non-root bcachefs mounts are detected. It does
+not validate your SSH credentials or certify that disks are safe to repair.
+Unknown/stale observations are not shown as ready. Copyable SSH instructions use
+your browser's NAS hostname and configured SSH ports; enter your local OS user.
+
+The page is read-only and contains no browser shell, login API, repair action,
+or exit/reboot button. Only minimal status is public: no account lists, logs,
+pool names, or storage contents. Root collects status without handling HTTP;
+the HTTP backend and HTTPS listener run as the unprivileged Caddy user.
+Existing WebUI source/interface firewall restrictions are retained. The page
+stays in maintenance after `exit --no-reboot` and detects the normal dashboard
+returning after the explicit exit/reboot.
 
 Verify the relevant pools are actually unmounted and identify **all correct
 member devices** before running any offline filesystem check or repair. No
