@@ -55,15 +55,15 @@ pub async fn report(state: &crate::AppState) -> Value {
         if let Ok(text) = tokio::fs::read_to_string(format!("/proc/pressure/{kind}")).await {
             for line in text.lines() {
                 let mut fields = line.split_whitespace();
-                if let Some(scope @ ("some" | "full")) = fields.next() {
-                    if let Some(value) = fields.find_map(|field| {
+                if let Some(scope @ ("some" | "full")) = fields.next()
+                    && let Some(value) = fields.find_map(|field| {
                         field
                             .strip_prefix("avg10=")
                             .and_then(|v| v.parse::<f64>().ok())
                             .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
-                    }) {
-                        pressure.insert(format!("{kind}_{scope}_avg10"), json!(value));
-                    }
+                    })
+                {
+                    pressure.insert(format!("{kind}_{scope}_avg10"), json!(value));
                 }
             }
         }
