@@ -3,6 +3,7 @@
 	import type { DiskHealth, Filesystem, FilesystemDevice, FsDeviceUsage, FsUsage } from '$lib/types';
 	import { formatBytes, formatPercent } from '$lib/format';
 	import { formatTemp } from '$lib/temperature.svelte';
+	import { memberUsage, memberHealthEntries, memberRate } from '$lib/storage-member-statistics';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Database, TriangleAlert } from '@lucide/svelte';
 
@@ -20,13 +21,11 @@
 	}
 
 	function usageFor(filesystem: Filesystem, device: FilesystemDevice): FsDeviceUsage | undefined {
-		return usages[filesystem.name]?.devices.find((usage) =>
-			usage.path === device.path || deviceName(usage.path) === deviceName(device.path)
-		);
+		return memberUsage(device, usages[filesystem.name]?.devices ?? []);
 	}
 
 	function healthEntriesFor(device: FilesystemDevice): DiskHealth[] {
-		return health.filter((disk) => disk.device === device.path || deviceName(disk.device) === deviceName(device.path));
+		return memberHealthEntries(device, health);
 	}
 
 	function healthFor(device: FilesystemDevice): DiskHealth | undefined {
@@ -44,7 +43,7 @@
 	}
 
 	function rateFor(device: FilesystemDevice): DiskRate | undefined {
-		return rates.get(deviceName(device.path));
+		return memberRate(device, rates);
 	}
 
 	function filesystemState(filesystem: Filesystem): { label: string; className: string } {

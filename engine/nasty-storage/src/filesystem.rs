@@ -331,6 +331,12 @@ pub struct FilesystemOptions {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FilesystemDevice {
     pub path: String,
+    /// Live kernel member path from bcachefs sysfs, independent of mount aliases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_path: Option<String>,
+    /// Kernel parent of a partition, resolved via sysfs (never guessed by name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_path: Option<String>,
     /// Hierarchical label (e.g. "ssd.fast", "hdd.archive").
     /// Used for target-based tiering.
     pub label: Option<String>,
@@ -2751,6 +2757,8 @@ impl FilesystemService {
                 .iter()
                 .map(|d| FilesystemDevice {
                     path: d.clone(),
+                    kernel_path: None,
+                    parent_path: None,
                     label: None,
                     durability: None,
                     state: None,
@@ -3123,6 +3131,8 @@ impl FilesystemService {
             .iter()
             .map(|d| FilesystemDevice {
                 path: d.path.clone(),
+                kernel_path: None,
+                parent_path: None,
                 label: d.label.clone(),
                 durability: d.durability,
                 state: Some("rw".to_string()),
@@ -6184,6 +6194,11 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         if let Some(sy) = find_sysfs_member(dev_path, &sysfs_by_path).await {
             devices.push(FilesystemDevice {
                 path: dev_path.clone(),
+                kernel_path: sy.path.clone(),
+                parent_path: match sy.path.as_deref() {
+                    Some(path) => partition_parent_path(path, Path::new("/sys/class/block")).await,
+                    None => None,
+                },
                 label: sy.label.clone(),
                 durability: sy.durability,
                 state: sy.state.clone(),
@@ -6243,6 +6258,8 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
                 bound_slots.insert(m.member_index);
                 devices.push(FilesystemDevice {
                     path: dev_path.clone(),
+                    kernel_path: None,
+                    parent_path: None,
                     label: m.label.clone(),
                     durability: m.durability,
                     state: m.state.clone(),
@@ -6263,6 +6280,8 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
 
         devices.push(FilesystemDevice {
             path: dev_path.clone(),
+            kernel_path: None,
+            parent_path: None,
             label,
             durability,
             state,
@@ -6301,6 +6320,8 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         devices.push(FilesystemDevice {
             // Synthetic, stable per-slot key (the row has no real /dev node).
             path: format!("(missing dev-{slot})"),
+            kernel_path: None,
+            parent_path: None,
             label: m.label.clone(),
             durability: m.durability,
             state: m.state.clone(),
@@ -6404,6 +6425,19 @@ async fn find_sysfs_member<'a>(
     }
     let resolved = tokio::fs::canonicalize(path).await.ok()?;
     members.get(resolved.to_str()?).copied()
+}
+
+/// Resolve a partition's parent through the kernel block topology.
+async fn partition_parent_path(path: &str, sysfs: &Path) -> Option<String> {
+    let name = Path::new(path).file_name()?;
+    let entry = sysfs.join(name);
+    // Whole disks and device-mapper nodes have no partition attribute.
+    tokio::fs::read_to_string(entry.join("partition"))
+        .await
+        .ok()?;
+    let resolved = tokio::fs::canonicalize(entry).await.ok()?;
+    let parent = resolved.parent()?.file_name()?.to_str()?;
+    Some(format!("/dev/{parent}"))
 }
 
 /// Read one sysfs attribute file, trimmed; `None` if absent/empty or the
@@ -8464,6 +8498,39 @@ async fn verify_filesystem_device_identity(fs: &Filesystem) -> Result<(), Filesy
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn member_partition_parent_comes_from_sysfs_topology() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let class = dir.path().join("class");
+        std::fs::create_dir(&class).unwrap();
+        for (disk, partition) in [
+            ("sda", "sda1"),
+            ("nvme0n1", "nvme0n1p2"),
+            ("mmcblk0", "mmcblk0p1"),
+        ] {
+            let physical = dir.path().join("devices").join(disk);
+            let member = physical.join(partition);
+            std::fs::create_dir_all(&member).unwrap();
+            std::fs::write(member.join("partition"), "1\n").unwrap();
+            symlink(&member, class.join(partition)).unwrap();
+            symlink(&physical, class.join(disk)).unwrap();
+            assert_eq!(
+                partition_parent_path(&format!("/dev/{partition}"), &class).await,
+                Some(format!("/dev/{disk}"))
+            );
+            assert_eq!(
+                partition_parent_path(&format!("/dev/{disk}"), &class).await,
+                None
+            );
+        }
+        assert_eq!(partition_parent_path("/dev/missing", &class).await, None);
+        let dm = class.join("dm-0");
+        std::fs::create_dir(&dm).unwrap();
+        assert_eq!(partition_parent_path("/dev/dm-0", &class).await, None);
+    }
 
     #[tokio::test]
     async fn sysfs_members_match_device_aliases_without_guessing_missing_members() {
