@@ -2450,6 +2450,13 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_entry_is_admin_only() {
+        assert!(!is_read_only("system.maintenance.enter"));
+        assert!(!is_universally_allowed("system.maintenance.enter"));
+        assert!(!is_operator_allowed("system.maintenance.enter"));
+    }
+
+    #[test]
     fn firmware_mutations_are_admin_only() {
         for method in ["firmware.check", "firmware.update"] {
             assert!(!is_read_only(method));

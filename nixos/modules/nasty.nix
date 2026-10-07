@@ -59,6 +59,8 @@ let
         iif lo accept
         ip protocol icmp accept
         ip6 nexthdr icmpv6 accept
+        # DHCP must keep working when maintenance leaves the engine offline.
+        udp sport 67 udp dport 68 accept
         udp dport 546 accept
         jump dhcp_relay
       }
@@ -207,7 +209,7 @@ in {
   # option-existence validation. On older wrappers without the
   # input, this is just `[]` — the option below stays unflippable
   # and the assertion catches anyone who flips it anyway.
-  imports = lib.optionals lanzabooteAvailable [
+  imports = [ ./nasty-maintenance.nix ] ++ lib.optionals lanzabooteAvailable [
     lanzaboote.nixosModules.lanzaboote
     ./nasty-secure-boot.nix
   ];

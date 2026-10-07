@@ -967,6 +967,16 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
+        "system.maintenance.enter" => {
+            if let Some(response) = require_root_equivalent(req, session, "storage_maintenance") {
+                response
+            } else {
+                match state.updates.enter_maintenance().await {
+                    Ok(()) => ok(req, "ok"),
+                    Err(e) => err(req, e),
+                }
+            }
+        }
         "system.reboot" => match state.updates.reboot().await {
             Ok(()) => ok(req, "ok"),
             Err(e) => err(req, e),

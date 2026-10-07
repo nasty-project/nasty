@@ -288,6 +288,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     result: None,
                 },
                 Method {
+                    name: "system.maintenance.enter",
+                    desc: "Persist storage maintenance mode and reboot. Data pools and consumers, including the engine/WebUI, stay disabled until an explicit SSH/console exit. Requires a root-equivalent administrator session.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: None,
+                },
+                Method {
                     name: "system.shutdown",
                     desc: "Shut down the system.",
                     role: MethodRole::Admin,
