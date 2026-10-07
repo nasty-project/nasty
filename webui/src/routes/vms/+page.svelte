@@ -5,6 +5,7 @@
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
+	import { attachableVmDisks, validNewVmDisk, type VmDiskCandidate } from '$lib/vm-disk-safety';
 	import type { VmStatus, VmCapabilities, Subvolume, FsDependents, NetworkState, UsbPassthrough, HardwareSummary, UsbDevice } from '$lib/types';
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { Button } from '$lib/components/ui/button';
@@ -25,6 +26,15 @@
 	// badge so the user sees why their stopped VM can't start.
 	let lockedFsByVm = $state(new Map<string, string>());
 	let blockSubvolumes: Subvolume[] = $state([]);
+	let diskConsumers: Record<string, string[]> = $state({});
+	let diskInventoryReady = $state(false);
+	let createDiskVm = $state<string | null>(null);
+	let extraDiskFs = $state('');
+	let extraDiskName = $state('');
+	let extraDiskSize = $state(10);
+	let creatingExtraDisk = $state(false);
+	function diskUsage(sv: Subvolume): string[] { return diskConsumers[`${sv.filesystem}/${sv.name}`] ?? []; }
+	let freeDisks = $derived(diskInventoryReady ? attachableVmDisks(blockSubvolumes.map(subvolume => ({ subvolume, consumers: diskUsage(subvolume) }))) : []);
 	let resizingDisk: string | null = $state(null); // `${vmId}:${index}` of the disk row being resized
 	let diskResizeValue = $state('');
 	let networkState: NetworkState | null = $state(null);
@@ -632,9 +642,12 @@
 	}
 
 	async function loadSubvolumes() {
+		diskInventoryReady = false;
 		await withToast(async () => {
-			const all = await client.call<Subvolume[]>('subvolume.list_all');
-			blockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
+			const all = await client.call<VmDiskCandidate[]>('vm.disk.candidates');
+			blockSubvolumes = all.map(c => c.subvolume).filter(s => s.block_device);
+			diskConsumers = Object.fromEntries(all.map(c => [`${c.subvolume.filesystem}/${c.subvolume.name}`, c.consumers]));
+			diskInventoryReady = true;
 		});
 	}
 
@@ -645,6 +658,10 @@
 	async function create() {
 		if (!newName) { vmNameTried = true; return; }
 		vmNameTried = false;
+		if (!newDiskCreate && newDisk) {
+			const candidate = freeDisks.find(s => s.block_device === newDisk);
+			if (!candidate || !await confirmExistingDisk(candidate)) return;
+		}
 
 		let diskPath = newDisk;
 
@@ -840,13 +857,47 @@
 		await refresh();
 	}
 
+	async function confirmExistingDisk(candidate: Subvolume): Promise<boolean> {
+		return confirm('Attach existing disk?', `${candidate.filesystem}/${candidate.name} may contain data. No configured consumer was found, but manual or external use cannot be ruled out. The guest can overwrite this disk. Only continue if you know what it contains.`);
+	}
+
 	async function attachDisk(vmId: string, currentDisks: VmStatus['disks'], blockDevice: string) {
+		if (!diskInventoryReady) return;
+		const candidate = blockSubvolumes.find(s => s.block_device === blockDevice);
+		if (!candidate || diskUsage(candidate).length > 0) return;
+		if (!await confirmExistingDisk(candidate)) return;
 		const disks = [...currentDisks, { path: blockDevice, interface: 'virtio', readonly: false }];
 		await withToast(
 			() => client.call('vm.update', { id: vmId, disks }),
 			'Disk attached'
 		);
 		await refresh();
+		await loadSubvolumes();
+	}
+
+	async function createExtraDisk(vm: VmStatus) {
+		if (creatingExtraDisk || vm.running || !validNewVmDisk(extraDiskFs, extraDiskName, extraDiskSize)) return;
+		creatingExtraDisk = true;
+		try {
+			const disk = await withToast(() => client.call<Subvolume>('vm.disk.create', { filesystem: extraDiskFs, name: extraDiskName.trim(), volsize_bytes: extraDiskSize * 1073741824 }), 'New disk created');
+			if (!disk) return;
+			if (!disk.block_device) {
+				await confirm('Disk created but not attached', `The volume ${disk.filesystem}/${disk.name} has no attached block device. It has been kept; do not recreate or delete it blindly.`);
+				return;
+			}
+			// Reload config so editing another field cannot make us drop an existing disk.
+			const current = await withToast(() => client.call<VmStatus>('vm.get', { id: vm.id }));
+			if (!current) {
+				await confirm('New disk kept', `${disk.filesystem}/${disk.name} was created but VM status could not be loaded. The disk remains under Subvolumes; retry attaching it rather than recreating it.`);
+				return;
+			}
+			const attached = await withToast(() => client.call('vm.update', { id: vm.id, disks: [...current.disks, { path: disk.block_device, interface: 'virtio', readonly: false }] }), `Disk attached to ${vm.name}`);
+			if (attached === undefined) await confirm('New disk kept', `${disk.filesystem}/${disk.name} was created but attachment failed. It remains available under Subvolumes; retry attaching it rather than creating another disk.`);
+			else createDiskVm = null;
+		} finally {
+			creatingExtraDisk = false;
+			await Promise.all([loadSubvolumes(), refresh()]);
+		}
 	}
 
 	async function toggleAutostart(vm: VmStatus) {
@@ -1212,7 +1263,7 @@
 				{:else}
 					<select bind:value={newDisk} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
 						<option value="">None (ISO boot only)</option>
-						{#each blockSubvolumes as sv}
+						{#each freeDisks as sv}
 							<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
 						{/each}
 					</select>
@@ -1739,11 +1790,14 @@
 									{:else}
 										<div class="space-y-1">
 											{#each vm.disks as disk, i}
-												{@const sv = blockSubvolumes.find(s => s.block_device === disk.path)}
+												{@const sv = blockSubvolumes.find(s => disk.source ? `${s.path}/vol.img` === disk.source : s.block_device === disk.path || `${s.path}/vol.img` === disk.path)}
 												<div class="flex items-center gap-3 rounded bg-secondary/50 px-2 py-1.5">
 													<span class="font-mono text-xs font-semibold">Disk {i}</span>
 													{#if sv}
 														<span class="text-xs">{sv.filesystem}/{sv.name}</span>
+														{#if diskInventoryReady && diskUsage(sv).length > 0}
+															<span class="text-xs text-muted-foreground" title="Known consumers">Used by: {diskUsage(sv).join('; ')}</span>
+														{/if}
 														<span class="text-xs text-muted-foreground">{disk.path}</span>
 														{#if sv.volsize_bytes}
 															<span class="text-xs text-muted-foreground">{(sv.volsize_bytes / 1073741824).toFixed(0)} GiB</span>
@@ -1791,7 +1845,22 @@
 									{/if}
 									{#if !vm.running}
 										{@const attachedPaths = new Set(vm.disks.map(d => d.path))}
-										{@const available = blockSubvolumes.filter(s => s.block_device && !attachedPaths.has(s.block_device))}
+										{@const available = freeDisks.filter(s => s.block_device && !attachedPaths.has(s.block_device))}
+										<p class="mt-2 text-xs text-amber-400">Existing disks may contain data. Only attach a disk whose contents and ownership you know.</p>
+										{#if !diskInventoryReady}<p class="text-xs text-destructive">Disk usage could not be verified. Existing disk attachment is disabled.</p>{/if}
+										{#each blockSubvolumes.filter(s => !attachedPaths.has(s.block_device ?? '') && diskUsage(s).length > 0) as sv}
+											<p class="mt-1 text-xs text-muted-foreground">Unavailable: {sv.filesystem}/{sv.name} — {diskUsage(sv).join('; ')}</p>
+										{/each}
+										<Button variant="outline" size="xs" class="mt-2" onclick={async () => { await loadFilesystems(); createDiskVm = vm.id; extraDiskFs = filesystems.find(f => f.mounted)?.name ?? ''; extraDiskName = `${vm.name}-data`; extraDiskSize = 10; }}>Create new disk</Button>
+										{#if createDiskVm === vm.id}
+											<div class="mt-2 flex flex-wrap items-center gap-2">
+												<select aria-label="New disk filesystem" bind:value={extraDiskFs} class="rounded-md border border-input bg-transparent px-2 py-1 text-xs">{#each filesystems.filter(f => f.mounted) as fs}<option value={fs.name}>{fs.name}</option>{/each}</select>
+												<Input aria-label="New disk name" bind:value={extraDiskName} placeholder="Disk name" class="w-48" />
+												<Input aria-label="New disk size in GiB" type="number" min="1" bind:value={extraDiskSize} class="w-24" /><span class="text-xs">GiB</span>
+												<Button size="xs" disabled={creatingExtraDisk || !validNewVmDisk(extraDiskFs, extraDiskName, extraDiskSize)} onclick={() => createExtraDisk(vm)}>Create and attach</Button>
+												<Button size="xs" variant="ghost" disabled={creatingExtraDisk} onclick={() => createDiskVm = null}>Cancel</Button>
+											</div>
+										{/if}
 										{#if available.length > 0}
 											<div class="mt-2 flex items-center gap-2">
 												<select

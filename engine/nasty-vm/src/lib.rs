@@ -697,6 +697,16 @@ impl VmService {
 
     pub async fn list(&self) -> Result<Vec<VmStatus>, VmError> {
         let configs: Vec<VmConfig> = state_dir().load_all().await;
+        self.statuses(configs).await
+    }
+
+    /// Disk conflict checks must not silently omit unreadable VM configs.
+    pub async fn list_strict(&self) -> Result<Vec<VmStatus>, VmError> {
+        let configs = state_dir().load_all_strict().await?;
+        self.statuses(configs).await
+    }
+
+    async fn statuses(&self, configs: Vec<VmConfig>) -> Result<Vec<VmStatus>, VmError> {
         let mut result = Vec::with_capacity(configs.len());
         for mut config in configs {
             config.migrate_cdroms();

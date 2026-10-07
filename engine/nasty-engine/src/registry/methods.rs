@@ -9,7 +9,7 @@ use super::{Method, MethodParams, MethodRole, ad_hoc_one, ad_hoc_two, gen_schema
 use crate::auth::{ApiToken, ApiTokenInfo, Role, UserInfo};
 use crate::fs_dependents::FsDependents;
 use crate::guestshare::{CreateGuestShareRequest, CreateGuestShareResult, GuestShareInfo};
-use crate::router::CreateVmDiskRequest;
+use crate::router::{CreateVmDiskRequest, VmDiskCandidate};
 use crate::subvolume_dependents::SubvolumeDependents;
 use nasty_apps::{
     App, AppConfig, AppIngress, AppStats, AppdataRelocateStatus, AppsStatus, CaddyRouteSummary,
@@ -2823,6 +2823,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     role: MethodRole::Operator,
                     params: MethodParams::Schema(gen_schema::<CreateVmDiskRequest>(generator)),
                     result: Some(gen_schema::<Subvolume>(generator)),
+                },
+                Method {
+                    name: "vm.disk.candidates",
+                    desc: "List visible block volumes and their configured VM, CSI, export, and local mount consumers. Empty consumers is not proof of an empty disk.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<VmDiskCandidate>>(generator)),
                 },
                 Method {
                     name: "vm.update",

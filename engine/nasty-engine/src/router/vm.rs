@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use nasty_common::{ErrorCode, Request, Response};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::AppState;
@@ -27,6 +27,217 @@ pub(crate) struct CreateVmDiskRequest {
     pub volsize_bytes: u64,
 }
 
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct VmDiskCandidate {
+    pub subvolume: nasty_storage::subvolume::Subvolume,
+    pub consumers: Vec<String>,
+}
+
+fn csi_consumer(properties: &std::collections::HashMap<String, String>) -> Option<String> {
+    if !properties.keys().any(|key| key.starts_with("nasty-csi:")) {
+        return None;
+    }
+    let namespace = properties
+        .get("nasty-csi:pvc_namespace")
+        .map(String::as_str)
+        .unwrap_or("?");
+    let name = properties
+        .get("nasty-csi:pvc_name")
+        .map(String::as_str)
+        .unwrap_or("?");
+    Some(format!(
+        "Kubernetes CSI volume (PVC {namespace}/{name}); reserved even when not mounted"
+    ))
+}
+
+pub(super) fn disk_matches_subvolume(
+    disk: &nasty_vm::VmDisk,
+    sv: &nasty_storage::subvolume::Subvolume,
+) -> bool {
+    let source = Path::new(&sv.path).join("vol.img");
+    if let Some(saved_source) = disk.source.as_deref() {
+        return paths_match(saved_source, &source.to_string_lossy());
+    }
+    paths_match(&disk.path, &source.to_string_lossy())
+        || sv
+            .block_device
+            .as_deref()
+            .is_some_and(|p| paths_match(p, &disk.path))
+}
+
+fn disks_share_backing(left: &nasty_vm::VmDisk, right: &nasty_vm::VmDisk) -> bool {
+    paths_match(
+        left.source.as_deref().unwrap_or(&left.path),
+        right.source.as_deref().unwrap_or(&right.path),
+    )
+}
+
+fn mounted_disk_consumers(device: &str, mounts: &str) -> Vec<String> {
+    let decode = |field: &str| {
+        field
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\")
+    };
+    mounts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let source = decode(fields.next()?);
+            let mountpoint = decode(fields.next()?);
+            paths_match(device, &source).then(|| format!("Local mount '{mountpoint}'"))
+        })
+        .collect()
+}
+
+async fn disk_consumers(
+    state: &AppState,
+    sv: &nasty_storage::subvolume::Subvolume,
+    except_vm: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut consumers = Vec::new();
+    if let Some(csi) = csi_consumer(&sv.properties) {
+        consumers.push(csi);
+    }
+    for vm in state
+        .vms
+        .list_strict()
+        .await
+        .map_err(|e| format!("cannot verify VM disk usage: {e}"))?
+    {
+        if except_vm == Some(vm.config.id.as_str()) {
+            continue;
+        }
+        if vm
+            .config
+            .disks
+            .iter()
+            .any(|d| disk_matches_subvolume(d, sv))
+        {
+            consumers.push(format!(
+                "VM '{}' ({})",
+                vm.config.name,
+                if vm.running { "running" } else { "stopped" }
+            ));
+        }
+    }
+    for target in state
+        .iscsi
+        .list()
+        .await
+        .map_err(|e| format!("cannot verify iSCSI usage: {e}"))?
+    {
+        if target.luns.iter().any(|lun| {
+            sv.block_volume_id
+                .as_ref()
+                .is_some_and(|id| lun.backing_volume.as_ref() == Some(id))
+                || sv
+                    .block_device
+                    .as_deref()
+                    .is_some_and(|p| paths_match(p, &lun.backstore_path))
+        }) {
+            consumers.push(format!("iSCSI target '{}'", target.iqn));
+        }
+    }
+    for sub in state
+        .nvmeof
+        .list()
+        .await
+        .map_err(|e| format!("cannot verify NVMe-oF usage: {e}"))?
+    {
+        if sub.namespaces.iter().any(|ns| {
+            sv.block_volume_id
+                .as_ref()
+                .is_some_and(|id| ns.backing_volume.as_ref() == Some(id))
+                || sv
+                    .block_device
+                    .as_deref()
+                    .is_some_and(|p| paths_match(p, &ns.device_path))
+        }) {
+            consumers.push(format!("NVMe-oF subsystem '{}'", sub.nqn));
+        }
+    }
+    // Local mounts are consumers too, even when not configured as exports.
+    let mounts = tokio::fs::read_to_string("/proc/mounts")
+        .await
+        .map_err(|e| format!("cannot verify local mounts: {e}"))?;
+    if let Some(device) = sv.block_device.as_deref() {
+        consumers.extend(mounted_disk_consumers(device, &mounts));
+    }
+    Ok(consumers)
+}
+
+async fn check_new_vm_disks(
+    state: &AppState,
+    disks: &[nasty_vm::VmDisk],
+    existing: &[nasty_vm::VmDisk],
+    vm_id: Option<&str>,
+) -> Result<(), String> {
+    if disks.is_empty() {
+        return Ok(());
+    }
+    for (index, disk) in disks.iter().enumerate() {
+        if disks[..index]
+            .iter()
+            .any(|other| disks_share_backing(disk, other))
+        {
+            return Err("The same backing disk cannot be attached twice to one VM".into());
+        }
+    }
+    let managed = state
+        .subvolumes
+        .list_all(None, None)
+        .await
+        .map_err(|e| format!("cannot verify disk inventory: {e}"))?;
+    let vms = state
+        .vms
+        .list_strict()
+        .await
+        .map_err(|e| format!("cannot verify VM disk usage: {e}"))?;
+    for disk in disks {
+        if existing
+            .iter()
+            .any(|d| d.source == disk.source && paths_match(&d.path, &disk.path))
+        {
+            continue;
+        }
+        for vm in &vms {
+            if vm_id == Some(vm.config.id.as_str()) {
+                continue;
+            }
+            if vm.config.disks.iter().any(|d| disks_share_backing(d, disk)) {
+                return Err(format!(
+                    "Disk is already attached to VM '{}'. Detach it there first.",
+                    vm.config.name
+                ));
+            }
+        }
+        if let Some(sv) = managed.iter().find(|sv| disk_matches_subvolume(disk, sv)) {
+            if disks
+                .iter()
+                .filter(|d| disk_matches_subvolume(d, sv))
+                .count()
+                > 1
+            {
+                return Err("The same backing disk cannot be attached twice to one VM".into());
+            }
+            let consumers = disk_consumers(state, sv, vm_id).await?;
+            if !consumers.is_empty() {
+                return Err(format!(
+                    "Cannot attach {}/{}: {}",
+                    sv.filesystem,
+                    sv.name,
+                    consumers.join("; ")
+                ));
+            }
+        } else if let Some(reason) = check_block_device_conflict(state, &disk.path, "vm").await {
+            return Err(reason);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct VmSecurityFields<'a> {
     disks: &'a [nasty_vm::VmDisk],
@@ -40,7 +251,7 @@ struct VmSecurityFields<'a> {
     vga: Option<&'a str>,
 }
 
-fn paths_match(left: &str, right: &str) -> bool {
+pub(super) fn paths_match(left: &str, right: &str) -> bool {
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| PathBuf::from(left));
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| PathBuf::from(right));
     left == right
@@ -226,6 +437,31 @@ pub(super) async fn try_route(
 
     Some(match req.method.as_str() {
         "vm.capabilities" => ok(req, state.vms.capabilities().await),
+        "vm.disk.candidates" => {
+            let result = async {
+                let subvolumes = state
+                    .subvolumes
+                    .list_all(session.filesystem.as_deref(), session.owner.as_deref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut candidates = Vec::new();
+                for subvolume in subvolumes.into_iter().filter(|sv| {
+                    sv.subvolume_type == nasty_storage::subvolume::SubvolumeType::Block
+                }) {
+                    let consumers = disk_consumers(state, &subvolume, None).await?;
+                    candidates.push(VmDiskCandidate {
+                        subvolume,
+                        consumers,
+                    });
+                }
+                Ok::<_, String>(candidates)
+            }
+            .await;
+            match result {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            }
+        }
         "vm.list" => match state.vms.list().await {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
@@ -259,6 +495,12 @@ pub(super) async fn try_route(
                 .await
                 {
                     return Some(response);
+                }
+                if let Err(error) =
+                    check_new_vm_disks(state, p.disks.as_deref().unwrap_or_default(), &[], None)
+                        .await
+                {
+                    return Some(err(req, error));
                 }
                 match state.vms.create(p).await {
                     Ok(v) => ok(req, v),
@@ -354,6 +596,17 @@ pub(super) async fn try_route(
                         return Some(response);
                     }
                 }
+                if let Some(disks) = p.disks.as_deref() {
+                    let existing = match state.vms.get(&p.id).await {
+                        Ok(vm) => vm.config,
+                        Err(error) => return Some(err(req, error)),
+                    };
+                    if let Err(error) =
+                        check_new_vm_disks(state, disks, &existing.disks, Some(&p.id)).await
+                    {
+                        return Some(err(req, error));
+                    }
+                }
                 match state.vms.update(p).await {
                     Ok(v) => ok(req, v),
                     Err(e) => err(req, e),
@@ -397,6 +650,11 @@ pub(super) async fn try_route(
                         .await
                         {
                             return Some(response);
+                        }
+                        if let Err(error) =
+                            check_new_vm_disks(state, &status.config.disks, &[], Some(id)).await
+                        {
+                            return Some(err(req, error));
                         }
                         match state.vms.start(id).await {
                             Ok(v) => ok(req, v),
@@ -493,6 +751,77 @@ pub(super) async fn try_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_subvolume() -> nasty_storage::subvolume::Subvolume {
+        serde_json::from_value(serde_json::json!({
+            "name":"data", "filesystem":"tank", "subvolume_type":"block",
+            "path":"/fs/tank/data", "block_device":"/dev/loop7", "snapshots":[]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn csi_reservation_reports_pvc_even_without_an_active_export() {
+        let mut properties = std::collections::HashMap::new();
+        assert!(csi_consumer(&properties).is_none());
+        properties.insert("nasty-csi:managed_by".into(), "nasty-csi".into());
+        properties.insert("nasty-csi:pvc_namespace".into(), "lab".into());
+        properties.insert("nasty-csi:pvc_name".into(), "database".into());
+        assert!(csi_consumer(&properties).unwrap().contains("lab/database"));
+        properties.remove("nasty-csi:pvc_name");
+        assert!(csi_consumer(&properties).is_some());
+    }
+
+    #[test]
+    fn saved_disk_source_wins_over_recycled_loop_device() {
+        let sv = test_subvolume();
+        assert!(disk_matches_subvolume(
+            &disk("/dev/loop99", Some("/fs/tank/data/vol.img")),
+            &sv
+        ));
+        assert!(!disk_matches_subvolume(
+            &disk("/dev/loop7", Some("/fs/tank/other/vol.img")),
+            &sv
+        ));
+        assert!(disk_matches_subvolume(&disk("/dev/loop7", None), &sv));
+        assert!(disk_matches_subvolume(
+            &disk("/fs/tank/data/vol.img", None),
+            &sv
+        ));
+        assert!(!disks_share_backing(
+            &disk("/dev/loop7", Some("/fs/tank/data/vol.img")),
+            &disk("/dev/loop7", Some("/fs/tank/other/vol.img")),
+        ));
+    }
+
+    #[test]
+    fn managed_disk_aliases_match_by_source_and_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("vol.img");
+        std::fs::write(&file, []).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&file, &alias).unwrap();
+        let mut sv = test_subvolume();
+        sv.path = dir.path().to_string_lossy().into_owned();
+        assert!(disk_matches_subvolume(
+            &disk(alias.to_str().unwrap(), None),
+            &sv
+        ));
+        assert!(disk_matches_subvolume(
+            &disk("/dev/loop99", Some(alias.to_str().unwrap())),
+            &sv
+        ));
+    }
+
+    #[test]
+    fn local_mount_consumers_decode_escaped_paths_and_ignore_unrelated_devices() {
+        let mounts = "/dev/loop7 /mnt/with\\040space ext4 rw 0 0\n/dev/loop8 /other ext4 rw 0 0\n";
+        assert_eq!(
+            mounted_disk_consumers("/dev/loop7", mounts),
+            ["Local mount '/mnt/with space'"]
+        );
+        assert!(mounted_disk_consumers("/dev/loop9", mounts).is_empty());
+    }
 
     fn disk(path: &str, source: Option<&str>) -> nasty_vm::VmDisk {
         nasty_vm::VmDisk {

@@ -227,6 +227,44 @@ let
             f"created filesystem missing from fs.list: {fs_list!r}"
         )
 
+        # Disk ownership is reserved even when a VM is stopped. Exercise the
+        # RPC safeguards independently of the frontend picker.
+        def disk_error(method, request_id, params, expected):
+            ws.send(json.dumps({"jsonrpc":"2.0", "id":request_id, "method":method, "params":params}))
+            response = recv_response(ws, request_id)
+            assert expected in response.get("error", {}).get("message", ""), response
+
+        ws.settimeout(60)
+        data_disk = call(ws, "vm.disk.create", 400, {"filesystem":"smoke-pool", "name":"safe-data", "volsize_bytes":67108864})
+        vm_a = call(ws, "vm.create", 401, {"name":"disk-owner", "disks":[{"path":data_disk["block_device"]}]})
+        vm_b = call(ws, "vm.create", 402, {"name":"disk-recipient", "disks":[]})
+        candidates = call(ws, "vm.disk.candidates", 403)
+        owned = next(c for c in candidates if c["subvolume"]["name"] == data_disk["name"])
+        assert any("disk-owner" in c and "stopped" in c for c in owned["consumers"]), owned
+        subprocess.run(["ln", "-s", data_disk["block_device"], "/run/test-disk-alias"], check=True)
+        disk_error("vm.update", 404, {"id":vm_b["id"], "disks":[{"path":"/run/test-disk-alias"}]}, "disk-owner")
+        disk_error("vm.create", 405, {"name":"duplicate-owner", "disks":[{"path":data_disk["block_device"]}]}, "disk-owner")
+        assert call(ws, "vm.get", 406, {"id":vm_b["id"]})["disks"] == []
+
+        csi_disk = call(ws, "vm.disk.create", 407, {"filesystem":"smoke-pool", "name":"reserved-csi", "volsize_bytes":67108864})
+        call(ws, "subvolume.set_properties", 408, {"filesystem":"smoke-pool", "name":csi_disk["name"], "properties":{"nasty-csi:managed_by":"nasty-csi", "nasty-csi:pvc_namespace":"lab", "nasty-csi:pvc_name":"database"}})
+        reserved = next(c for c in call(ws, "vm.disk.candidates", 409) if c["subvolume"]["name"] == csi_disk["name"])
+        assert any("lab/database" in c for c in reserved["consumers"]), reserved
+        disk_error("vm.update", 410, {"id":vm_b["id"], "disks":[{"path":csi_disk["block_device"]}]}, "Kubernetes CSI")
+        new_disk = call(ws, "vm.disk.create", 411, {"filesystem":"smoke-pool", "name":"recipient-data", "volsize_bytes":67108864})
+        call(ws, "vm.update", 412, {"id":vm_b["id"], "disks":[{"path":new_disk["block_device"]}]})
+        assert call(ws, "vm.get", 413, {"id":vm_a["id"]})["disks"][0]["path"] == data_disk["block_device"]
+        corrupt = "/var/lib/nasty/vms/corrupt.json"
+        with open(corrupt, "w") as broken:
+            broken.write("{invalid")
+        try:
+            disk_error("vm.disk.candidates", 414, {}, "cannot verify VM disk usage")
+        finally:
+            subprocess.run(["rm", corrupt], check=True)
+        call(ws, "vm.delete", 415, {"id":vm_a["id"]})
+        call(ws, "vm.delete", 416, {"id":vm_b["id"]})
+        ws.settimeout(10)
+
         # Public folder links and the standard-user portal both walk paths
         # through file_boundary. Exercise a real /fs/<name> mount here: unit
         # tests use ordinary temp directories and cannot catch mount-crossing
