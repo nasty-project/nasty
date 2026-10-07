@@ -261,6 +261,7 @@ fn is_read_only(method: &str) -> bool {
             // can hold sensitive settings. Its `.get` suffix would otherwise slip
             // it into the universally-allowed read set; keep it Admin-only.
             | "system.custom_config.get"
+            | "system.webui.get"
             // These return container environment, raw Docker metadata,
             // compose source, or notification endpoint details that can
             // contain credentials.

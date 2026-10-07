@@ -19,6 +19,7 @@ pub mod tailscale;
 pub mod tuning;
 pub mod update;
 pub mod watchdog;
+pub mod webui;
 
 // Re-export metrics types from nasty-common so downstream code
 // (nasty-engine, alerts) can still use `nasty_system::SystemStats` etc.

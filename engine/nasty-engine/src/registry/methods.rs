@@ -422,6 +422,39 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     params: MethodParams::None,
                     result: Some(gen_schema::<Vec<String>>(generator)),
                 },
+                Method {
+                    name: "system.webui.get",
+                    desc: "Return confirmed WebUI ports and a pending 30-second confirm-or-rollback transaction. Unscoped admin only.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<nasty_system::webui::ListenerState>(generator)),
+                },
+                Method {
+                    name: "system.webui.update",
+                    desc: "Apply HTTPS and optional HTTP redirect ports with firewall reconciliation. Confirm within 30 seconds or revert. HTTP null disables the redirect listener.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<nasty_system::webui::ListenerPorts>(
+                        generator,
+                    )),
+                    result: Some(gen_schema::<nasty_system::webui::ListenerState>(generator)),
+                },
+                Method {
+                    name: "system.webui.confirm",
+                    desc: "Confirm a pending WebUI listener transaction after verifying the new HTTPS URL is reachable.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(ad_hoc_one(
+                        "txn_id",
+                        "Pending transaction identifier.",
+                    )),
+                    result: Some(gen_schema::<nasty_system::webui::ListenerState>(generator)),
+                },
+                Method {
+                    name: "system.webui.rollback",
+                    desc: "Restore confirmed WebUI listeners and firewall ports immediately.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<nasty_system::webui::ListenerState>(generator)),
+                },
             ],
         ),
         (

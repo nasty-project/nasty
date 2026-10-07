@@ -72,6 +72,7 @@ pub struct AppState {
     pub network: nasty_system::network::NetworkService,
     pub protocols: nasty_system::protocol::ProtocolService,
     pub firewall: nasty_system::firewall::FirewallService,
+    pub webui: nasty_system::webui::WebuiService,
     pub updates: nasty_system::update::UpdateService,
     pub tailscale: nasty_system::tailscale::TailscaleService,
     pub metrics_client: reqwest::Client,
@@ -160,6 +161,15 @@ async fn main() -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let built = env!("NASTY_BUILD_DATE");
     let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).is_some_and(|a| a == "webui-listeners-restore") {
+        let ports = nasty_system::webui::load()
+            .map_err(anyhow::Error::msg)?
+            .confirmed;
+        nasty_system::webui::apply_caddy(ports)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        return Ok(());
+    }
 
     // --version flag. Includes the git commit so it can be matched
     // against a deployed branch/commit — the version alone (0.0.10 on
@@ -266,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
         network: nasty_system::network::NetworkService::new(),
         protocols: nasty_system::protocol::ProtocolService::new(),
         firewall: nasty_system::firewall::FirewallService::new(),
+        webui: nasty_system::webui::WebuiService::new().map_err(anyhow::Error::msg)?,
         updates: nasty_system::update::UpdateService::new(),
         tailscale: nasty_system::tailscale::TailscaleService::new().await,
         metrics_client: reqwest::Client::new(),
@@ -848,6 +859,23 @@ async fn main() -> anyhow::Result<()> {
                 state.apps.reconcile_networks(ifaces),
             )
             .await;
+    }
+
+    // Recover unconfirmed listener changes on engine-only restart as well.
+    if std::env::var("NASTY_WEBUI_ENABLED").as_deref() != Ok("false") {
+        if let Err(e) = state.webui.rollback(&state.firewall).await {
+            warn!("WebUI listener startup recovery failed; retrying in background: {e}");
+        }
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                if let Err(e) = state.webui.tick(&state.firewall).await {
+                    warn!("WebUI listener rollback: {e}");
+                }
+            }
+        });
     }
 
     // TLS automation reconcile — push the policy set (main domain +

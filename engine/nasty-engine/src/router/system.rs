@@ -114,6 +114,11 @@ pub(super) async fn try_route(
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
+    if req.method.starts_with("system.webui.")
+        && let Some(response) = require_root_equivalent(req, session, "webui_listener_management")
+    {
+        return Some(response);
+    }
     if let Some(message) = system_inventory_access_error(&req.method, session) {
         return Some(err(req, message));
     }
@@ -605,6 +610,25 @@ pub(super) async fn try_route(
                 ok(req, Vec::<nasty_system::DiskHealth>::new())
             }
         }
+        "system.webui.get" => ok(req, state.webui.get().await),
+        "system.webui.update" => match parse_params::<nasty_system::webui::ListenerPorts>(req) {
+            Ok(p) => match state.webui.update(p, &state.firewall).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => invalid(req, e),
+        },
+        "system.webui.confirm" => match require_str(req, "txn_id") {
+            Ok(id) => match state.webui.confirm(id).await {
+                Ok(v) => ok(req, v),
+                Err(e) => err(req, e),
+            },
+            Err(e) => e,
+        },
+        "system.webui.rollback" => match state.webui.rollback(&state.firewall).await {
+            Ok(v) => ok(req, v),
+            Err(e) => err(req, e),
+        },
         "system.settings.timezones" => match nasty_system::settings::list_timezones().await {
             Ok(v) => ok(req, v),
             Err(e) => err(req, e),
