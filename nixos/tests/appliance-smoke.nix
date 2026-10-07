@@ -126,10 +126,18 @@ let
         health = call(ws, "system.health", 1)
         print("system.health:", health, file=sys.stderr)
 
+        call(ws, "system.diagnostics.capture", 600, {"enabled": True})
         fs_list = call(ws, "fs.list", 2)
         assert isinstance(fs_list, list), f"fs.list not a list: {fs_list!r}"
         # The test disk is still unformatted at this point.
         assert fs_list == [], f"fs.list expected empty, got {fs_list!r}"
+        diagnostics = call(ws, "system.diagnostics.report", 601)
+        assert diagnostics["schema_version"] == 1 and diagnostics["detailed_capture"] is True
+        assert any(t["operation"] == "fs.list" and t["stage"] == "backend" for t in diagnostics["timings"]), diagnostics
+        assert all(set(t) == {"sequence", "operation", "stage", "duration_ms", "outcome"} for t in diagnostics["timings"])
+        call(ws, "system.diagnostics.capture", 602, {"enabled": False})
+        call(ws, "system.diagnostics.clear", 603)
+        assert call(ws, "system.diagnostics.report", 604)["timings"] == []
 
         # Configurable management listeners: real Caddy, firewall and RPC
         # transaction, with no data/network changes and SSH kept available.

@@ -5,6 +5,7 @@
 	import { applyNetworkUpdate } from '$lib/rollbackState.svelte';
 	import DhcpRelayEditor from '$lib/components/DhcpRelayEditor.svelte';
 	import WebuiListeners from '$lib/components/WebuiListeners.svelte';
+	import PerformanceDiagnostics from '$lib/components/PerformanceDiagnostics.svelte';
 	import type { DhcpRelayConfig } from '$lib/types';
 	let netDhcpRelay = $state<DhcpRelayConfig | null>(null);
 	import { tempUnit } from '$lib/temperature.svelte';
@@ -851,6 +852,7 @@
 
 {#if activeTab === 'general'}
 	<WebuiListeners />
+	<PerformanceDiagnostics />
 
 	{#if !settings}
 		<p class="text-muted-foreground">Loading...</p>

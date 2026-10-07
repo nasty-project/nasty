@@ -610,6 +610,40 @@ pub(super) async fn try_route(
                 ok(req, Vec::<nasty_system::DiskHealth>::new())
             }
         }
+        "system.diagnostics.report" => {
+            if !diagnostics_access(session) {
+                return Some(err(req, "Permission denied"));
+            }
+            ok(req, crate::diagnostics::report(state).await)
+        }
+        "system.diagnostics.capture" => {
+            if !diagnostics_access(session) {
+                return Some(err(req, "Permission denied"));
+            }
+            match req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("enabled"))
+                .and_then(|v| v.as_bool())
+            {
+                Some(enabled) => {
+                    nasty_common::diagnostics::detailed(enabled);
+                    ok(req, serde_json::json!({"enabled": enabled}))
+                }
+                None => Response::error(
+                    req.id.clone(),
+                    ErrorCode::InvalidParams,
+                    "enabled must be a boolean",
+                ),
+            }
+        }
+        "system.diagnostics.clear" => {
+            if !diagnostics_access(session) {
+                return Some(err(req, "Permission denied"));
+            }
+            nasty_common::diagnostics::clear();
+            ok(req, serde_json::json!({"cleared": true}))
+        }
         "system.webui.get" => ok(req, state.webui.get().await),
         "system.webui.update" => match parse_params::<nasty_system::webui::ListenerPorts>(req) {
             Ok(p) => match state.webui.update(p, &state.firewall).await {
@@ -1081,6 +1115,10 @@ fn system_inventory_access_error(method: &str, session: &Session) -> Option<&'st
     ((method == "system.status" && scoped)
         || (method == "system.operations.list" && session.owner.is_some()))
     .then_some("access denied: scoped credentials cannot read global system inventory")
+}
+
+fn diagnostics_access(session: &Session) -> bool {
+    session.role == Role::Admin && session.filesystem.is_none() && session.owner.is_none()
 }
 
 fn filesystem_visible(name: &str, filter: Option<&str>) -> bool {
@@ -1617,8 +1655,8 @@ mod tests {
 #[cfg(test)]
 mod operations_tests {
     use super::{
-        evacuate_idle_row, filesystem_visible, scrub_idle_detail, scrub_outcome_name,
-        system_inventory_access_error,
+        diagnostics_access, evacuate_idle_row, filesystem_visible, scrub_idle_detail,
+        scrub_outcome_name, system_inventory_access_error,
     };
     use crate::auth::{Role, Session};
     use nasty_storage::filesystem::{ScrubErrorKind, ScrubOutcome, ScrubStatus};
@@ -1653,6 +1691,21 @@ mod operations_tests {
         assert!(filesystem_visible("tank", Some("tank")));
         assert!(!filesystem_visible("other", Some("tank")));
         assert!(filesystem_visible("other", None));
+    }
+
+    #[test]
+    fn diagnostics_only_allow_unscoped_admins() {
+        let mut admin = session(false, false);
+        admin.role = Role::Admin;
+        assert!(diagnostics_access(&admin));
+        for role in [Role::Operator, Role::ReadOnly, Role::User] {
+            admin.role = role;
+            assert!(!diagnostics_access(&admin));
+        }
+        for mut scoped in [session(true, false), session(false, true)] {
+            scoped.role = Role::Admin;
+            assert!(!diagnostics_access(&scoped));
+        }
     }
 
     fn status(last_run_at: Option<i64>, last_outcome: Option<ScrubOutcome>) -> ScrubStatus {

@@ -1,5 +1,6 @@
 pub mod block_volume;
 pub mod cmd;
+pub mod diagnostics;
 pub mod jsonrpc;
 pub mod metrics_types;
 pub mod priority;

@@ -20,6 +20,7 @@ mod auth;
 mod auth_oidc;
 mod auth_webauthn;
 mod boot_status;
+mod diagnostics;
 mod file_boundary;
 mod fs_dependents;
 mod fs_lock;

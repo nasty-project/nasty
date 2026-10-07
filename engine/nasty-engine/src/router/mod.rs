@@ -493,7 +493,11 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
     }
 
     let t0 = std::time::Instant::now();
-    let response = route(&request, state, session).await;
+    let operation = crate::diagnostics::operation(&request.method);
+    let sequence = nasty_common::diagnostics::next_sequence();
+    let response = nasty_common::diagnostics::REQUEST
+        .scope((sequence, operation), route(&request, state, session))
+        .await;
     let elapsed = t0.elapsed();
     if elapsed.as_millis() > 5000 {
         tracing::error!(
@@ -528,7 +532,36 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
         }
     }
 
-    serde_json::to_string(&response).unwrap()
+    let serialize_start = std::time::Instant::now();
+    let mut wire = serde_json::to_string(&response).unwrap();
+    let serialization = serialize_start.elapsed();
+    // Append the optional transport extension without cloning a potentially
+    // large response into serde_json::Value and serializing it a second time.
+    wire.pop();
+    wire.push_str(",\"_timing\":");
+    wire.push_str(&serde_json::to_string(&serde_json::json!({"sequence": sequence, "epoch": crate::diagnostics::epoch(), "backend_ms": t0.elapsed().as_millis() as u64})).unwrap());
+    wire.push('}');
+    if !request.method.starts_with("system.diagnostics.") {
+        nasty_common::diagnostics::record(
+            sequence,
+            operation,
+            "backend",
+            t0.elapsed(),
+            if response.error.is_some() {
+                "error"
+            } else {
+                "ok"
+            },
+        );
+        nasty_common::diagnostics::record(
+            sequence,
+            operation,
+            "response_serialization",
+            serialization,
+            "ok",
+        );
+    }
+    wire
 }
 
 async fn route(req: &Request, state: &AppState, session: &Session) -> Response {

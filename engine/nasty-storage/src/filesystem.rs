@@ -2642,15 +2642,31 @@ impl FilesystemService {
     /// Results are cached for up to 3 seconds to avoid redundant subprocess calls.
     pub async fn list(&self) -> Result<Vec<Filesystem>, FilesystemError> {
         {
+            let mut timing = nasty_common::diagnostics::Stage::new("filesystem.cache_lock_wait");
             let cache = self.list_cache.lock().await;
+            timing.finish(true);
+            drop(timing);
             if let Some((ts, ref data)) = *cache
                 && ts.elapsed() < FS_LIST_CACHE_TTL
             {
+                nasty_common::diagnostics::observe_pools(
+                    data.iter()
+                        .map(|fs| (fs.total_bytes, fs.devices.len() as u64)),
+                );
                 return Ok(data.clone());
             }
         }
 
-        let result = self.list_uncached().await?;
+        let mut timing = nasty_common::diagnostics::Stage::new("filesystem.discovery");
+        let result = self.list_uncached().await;
+        timing.finish(result.is_ok());
+        drop(timing);
+        let result = result?;
+        nasty_common::diagnostics::observe_pools(
+            result
+                .iter()
+                .map(|fs| (fs.total_bytes, fs.devices.len() as u64)),
+        );
 
         {
             let mut cache = self.list_cache.lock().await;
