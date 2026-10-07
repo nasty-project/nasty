@@ -6181,7 +6181,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         // stale on reshuffle and made labels/slots land on the wrong row
         // (#455). So prefer sysfs; only fall back to show-super when the
         // filesystem isn't mounted (no sysfs tree).
-        if let Some(sy) = sysfs_by_path.get(dev_path.as_str()) {
+        if let Some(sy) = find_sysfs_member(dev_path, &sysfs_by_path).await {
             devices.push(FilesystemDevice {
                 path: dev_path.clone(),
                 label: sy.label.clone(),
@@ -6224,7 +6224,8 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
             .and_then(|b| b.first())
             .and_then(|hdr| parse_device_index(hdr));
 
-        // On a mounted pool every *attached* member is in sysfs_by_path,
+        // On a mounted pool every *attached* member is in sysfs_by_path
+        // after resolving mount-source aliases,
         // so reaching here with a non-empty sysfs tree means this
         // /proc/mounts path dropped out after mount. Its slot lives on as
         // a phantom dev-N — bind the two into one row carrying the real
@@ -6389,6 +6390,20 @@ struct DeviceSysfs {
     data_allowed: Option<String>,
     has_data: Option<String>,
     discard: Option<bool>,
+}
+
+/// Match persistent mount-source aliases to sysfs's live kernel paths.
+/// Keep the original path on the returned filesystem row; an unresolved
+/// alias must not match a different member by label or basename.
+async fn find_sysfs_member<'a>(
+    path: &str,
+    members: &HashMap<&str, &'a DeviceSysfs>,
+) -> Option<&'a DeviceSysfs> {
+    if let Some(member) = members.get(path) {
+        return Some(*member);
+    }
+    let resolved = tokio::fs::canonicalize(path).await.ok()?;
+    members.get(resolved.to_str()?).copied()
 }
 
 /// Read one sysfs attribute file, trimmed; `None` if absent/empty or the
@@ -8449,6 +8464,61 @@ async fn verify_filesystem_device_identity(fs: &Filesystem) -> Result<(), Filesy
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sysfs_members_match_device_aliases_without_guessing_missing_members() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let kernel_path = dir.path().join("sda1");
+        std::fs::write(&kernel_path, []).unwrap();
+        let kernel_path = std::fs::canonicalize(kernel_path).unwrap();
+        let by_id = dir.path().join("by-id");
+        std::fs::create_dir(&by_id).unwrap();
+        let alias = by_id.join("wwn-disk-a-part1");
+        symlink("../sda1", &alias).unwrap();
+        let dangling = by_id.join("wwn-disk-b-part1");
+        symlink("../sdb1", &dangling).unwrap();
+        let unrelated = dir.path().join("sdc1");
+        std::fs::write(&unrelated, []).unwrap();
+
+        let member = DeviceSysfs {
+            path: Some(kernel_path.to_str().unwrap().to_owned()),
+            member_index: Some(0),
+            state: Some("rw".into()),
+            label: Some("hdd.disk-a".into()),
+            ..Default::default()
+        };
+        let members = HashMap::from([(member.path.as_deref().unwrap(), &member)]);
+        for path in [&kernel_path, &alias] {
+            let found = find_sysfs_member(path.to_str().unwrap(), &members)
+                .await
+                .unwrap();
+            assert!(std::ptr::eq(found, &member));
+            assert_eq!(found.member_index, Some(0));
+            assert_eq!(found.state.as_deref(), Some("rw"));
+        }
+        for path in [&dangling, &unrelated] {
+            assert!(
+                find_sysfs_member(path.to_str().unwrap(), &members)
+                    .await
+                    .is_none()
+            );
+        }
+
+        // Detaching the device makes the previously valid alias dangling.
+        std::fs::remove_file(&kernel_path).unwrap();
+        assert!(
+            find_sysfs_member(alias.to_str().unwrap(), &members)
+                .await
+                .is_none()
+        );
+        assert!(
+            find_sysfs_member(alias.to_str().unwrap(), &HashMap::new())
+                .await
+                .is_none()
+        );
+    }
 
     fn smart_identity(
         rotational: Option<bool>,
