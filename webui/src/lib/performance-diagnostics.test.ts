@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import { buildDiagnosticExport, clearClientTimings, trackClientTiming, type DiagnosticReport } from './performance-diagnostics';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildDiagnosticExport, clearClientTimings, resumeDiagnosticCapture, trackClientTiming, type DiagnosticReport } from './performance-diagnostics';
 const report: DiagnosticReport = { schema_version: 1, epoch: 'private-epoch', engine_version: '1', kernel_version: '6.18', cpu_count_bucket: 8, memory_kib_bucket: 1024, pressure: {}, detailed_capture: false, dropped_records: 0, boot_phases: [], pool_context: [], limitations: [], timings: [{ sequence: 900, operation: 'fs.list', stage: 'backend', duration_ms: 15000, outcome: 'ok' }] };
 describe('performance report privacy and summaries', () => {
 	beforeEach(clearClientTimings);
@@ -32,5 +32,30 @@ describe('performance report privacy and summaries', () => {
 		trackClientTiming({ method: 'private-method', duration_ms: 10000, outcome: 'timeout' });
 		const result = buildDiagnosticExport({ ...report, allowed_operations: ['fs.list'] });
 		expect(result.client_timings.map(t => t.operation)).toEqual(['fs.list', 'unknown']);
+	});
+});
+
+describe('resuming detailed capture on navigation', () => {
+	it('loads an active capture for an unscoped admin', async () => {
+		const active = { ...report, detailed_capture: true };
+		const call = vi.fn().mockResolvedValue(active);
+		expect(await resumeDiagnosticCapture({ call }, { role: 'admin', scoped: false })).toBe(active);
+		expect(call).toHaveBeenCalledWith('system.diagnostics.report');
+	});
+	it('rechecks capture state and does not restore stopped or expired captures', async () => {
+		const call = vi.fn().mockResolvedValueOnce({ ...report, detailed_capture: true }).mockResolvedValueOnce(report);
+		expect(await resumeDiagnosticCapture({ call }, { role: 'admin', scoped: false })).not.toBeNull();
+		expect(await resumeDiagnosticCapture({ call }, { role: 'admin', scoped: false })).toBeNull();
+	});
+	it('does not fetch reports for scoped or non-admin identities', async () => {
+		const call = vi.fn();
+		for (const identity of [{ role: 'admin' as const, scoped: true }, { role: 'operator' as const, scoped: false }, { role: 'readonly' as const, scoped: false }]) {
+			expect(await resumeDiagnosticCapture({ call }, identity)).toBeNull();
+		}
+		expect(call).not.toHaveBeenCalled();
+	});
+	it('handles unavailable diagnostics without blocking settings', async () => {
+		const call = vi.fn().mockRejectedValue(new Error('Unavailable'));
+		expect(await resumeDiagnosticCapture({ call }, { role: 'admin', scoped: false })).toBeNull();
 	});
 });

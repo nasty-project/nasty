@@ -11,6 +11,11 @@ This feature is independent of usage telemetry. It never uploads reports.
 4. Stop detailed capture or let it expire. **Clear history** clears engine history
    and this browser's timing history, not other browsers' histories.
 
+Returning to Settings while detailed capture is active automatically opens System
+tuning and loads a fresh report with the complete preview expanded. Returning to
+the tuning tab also rechecks the engine; stopped or expired captures are not
+restored from stale browser state.
+
 ## Collected information
 
 The engine keeps a bounded in-memory ring of 2,048 structured timings. Ordinary
