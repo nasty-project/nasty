@@ -56,15 +56,18 @@ use tracing::{debug, warn};
 /// inspects `output.status` is *also* getting the failure into the journal
 /// for free.
 pub async fn run(program: &str, args: &[&str]) -> std::io::Result<Output> {
+    let mut timing = crate::diagnostics::Stage::new(crate::diagnostics::command_stage(program));
     debug!(target: "nasty::cmd", "exec: {} {}", program, args.join(" "));
     let result = Command::new(program).args(args).output().await;
     log_result(program, args, &result);
+    timing.finish(result.as_ref().is_ok_and(|output| output.status.success()));
     result
 }
 
 /// Like [`run`], but supplies stdin without a shell or temporary file.
 /// Cancelling the future kills the child, including while writing stdin.
 pub async fn run_with_input(program: &str, args: &[&str], input: &[u8]) -> std::io::Result<Output> {
+    let mut timing = crate::diagnostics::Stage::new(crate::diagnostics::command_stage(program));
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
 
@@ -84,6 +87,7 @@ pub async fn run_with_input(program: &str, args: &[&str], input: &[u8]) -> std::
     }
     .await;
     log_result(program, args, &result);
+    timing.finish(result.as_ref().is_ok_and(|output| output.status.success()));
     result
 }
 

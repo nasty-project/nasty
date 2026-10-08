@@ -430,6 +430,29 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     result: Some(gen_schema::<nasty_system::webui::ListenerState>(generator)),
                 },
                 Method {
+                    name: "system.diagnostics.report",
+                    desc: "Preview bounded local performance timings without raw logs or identifiers. Unscoped admin only.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(serde_json::json!({"type": "object"})),
+                },
+                Method {
+                    name: "system.diagnostics.capture",
+                    desc: "Enable detailed subprocess timing for 15 minutes, or stop it. Nothing is uploaded. Unscoped admin only.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(
+                        serde_json::json!({"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"]}),
+                    ),
+                    result: Some(serde_json::json!({"type": "object"})),
+                },
+                Method {
+                    name: "system.diagnostics.clear",
+                    desc: "Clear local performance history. Unscoped admin only.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: Some(serde_json::json!({"type": "object"})),
+                },
+                Method {
                     name: "system.webui.update",
                     desc: "Apply HTTPS and optional HTTP redirect ports with firewall reconciliation. Confirm within 30 seconds or revert. HTTP null disables the redirect listener.",
                     role: MethodRole::Admin,

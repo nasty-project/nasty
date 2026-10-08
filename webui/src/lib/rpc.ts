@@ -1,6 +1,7 @@
 /** JSON-RPC 2.0 client over WebSocket with token auth */
 
 import type { UserRole } from './types';
+import { trackClientTiming, type ClientTiming } from './performance-diagnostics';
 
 interface RpcError {
 	code: number;
@@ -9,6 +10,7 @@ interface RpcError {
 }
 
 interface PendingCall {
+	observe?: (metadata: unknown) => void;
 	resolve: (value: unknown) => void;
 	reject: (error: RpcError) => void;
 }
@@ -32,6 +34,7 @@ export class NastyClient {
 	private ws: WebSocket | null = null;
 	private nextId = 1;
 	private pending = new Map<number, PendingCall>();
+	private late = new Map<number, { timing: ClientTiming; started: number }>();
 	private eventHandlers: EventHandler[] = [];
 	private reconnectHandlers: (() => void)[] = [];
 	private disconnectHandlers: (() => void)[] = [];
@@ -189,11 +192,20 @@ export class NastyClient {
 				if ('id' in msg && msg.id !== null) {
 					const pending = this.pending.get(msg.id);
 					if (pending) {
+						pending.observe?.(msg._timing);
 						this.pending.delete(msg.id);
 						if (msg.error) {
 							pending.reject(msg.error);
 						} else {
 							pending.resolve(msg.result);
+						}
+					} else {
+						const late = this.late.get(msg.id);
+						if (late) {
+							this.late.delete(msg.id);
+							this.observeTiming(late.timing, msg._timing);
+							late.timing.late_response_ms = Math.round(performance.now() - late.started);
+							late.timing.late_outcome = msg.error ? 'error' : 'ok';
 						}
 					}
 				} else if ('method' in msg) {
@@ -214,6 +226,7 @@ export class NastyClient {
 				}
 				// Reject all pending calls so awaiting code doesn't hang forever
 				this.rejectPendingCalls();
+				this.late.clear();
 				if (NastyClient.debug) {
 					console.debug(
 						`[rpc] ws closed (code=${ev.code}, reason="${ev.reason}", clean=${ev.wasClean}, _shouldReconnect=${this._shouldReconnect}, firing ${this._shouldReconnect ? this.disconnectHandlers.length : 0} disconnect handlers)`
@@ -271,25 +284,40 @@ export class NastyClient {
 			id
 		};
 
-		const t0 = NastyClient.debug ? performance.now() : 0;
+		const t0 = performance.now();
+		const timing: ClientTiming = { method, duration_ms: 0, outcome: 'pending' };
+		if (!method.startsWith('system.diagnostics.')) trackClientTiming(timing);
 		return new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
+				timing.duration_ms = Math.round(performance.now() - t0); timing.outcome = 'timeout';
+				this.late.set(id, { timing, started: t0 });
+				if (this.late.size > 128) this.late.delete(this.late.keys().next().value!);
 				reject({ code: -32000, message: 'Request timed out' });
 			}, timeoutMs);
 
 			this.pending.set(id, {
+				observe: metadata => this.observeTiming(timing, metadata),
 				resolve: (v) => {
+					timing.duration_ms = Math.round(performance.now() - t0); timing.outcome = 'ok';
 					clearTimeout(timer);
 					if (NastyClient.debug) {
 						console.debug(`[rpc] ${method}: ${(performance.now() - t0).toFixed(0)}ms`);
 					}
 					resolve(v as T);
 				},
-				reject: (e) => { clearTimeout(timer); reject(e); }
+				reject: (e) => { clearTimeout(timer); timing.duration_ms = Math.round(performance.now() - t0); timing.outcome = e.message === 'WebSocket disconnected' ? 'disconnected' : 'error'; reject(e); }
 			});
 			this.ws!.send(JSON.stringify(request));
 		});
+	}
+
+	private observeTiming(timing: ClientTiming, metadata: unknown) {
+		if (!metadata || typeof metadata !== 'object') return;
+		const value = metadata as { sequence?: unknown; epoch?: unknown };
+		if (typeof value.sequence === 'number' && Number.isSafeInteger(value.sequence) && value.sequence >= 0 && typeof value.epoch === 'string' && value.epoch.length <= 64) {
+			timing.sequence = value.sequence; timing.epoch = value.epoch;
+		}
 	}
 
 	/** Schedule a reconnection attempt. Deduplicates to avoid multiple timers.
@@ -409,6 +437,7 @@ export class NastyClient {
 	}
 
 	disconnect() {
+		this.late.clear();
 		this._shouldReconnect = false;
 		this._readyResolve?.();
 		this._readyResolve = null;

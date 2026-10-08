@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { isReconnectAuthError, NastyClient } from './rpc';
+import { buildDiagnosticExport, clearClientTimings, type DiagnosticReport } from './performance-diagnostics';
 
 // ── Mock WebSocket ──────────────────────────────────────────────────
 // Tests drive the lifecycle synchronously: construct, then call open(),
@@ -217,6 +218,20 @@ describe('request/response correlation', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	test('diagnostics preserve timeout and correlate a late successful response', async () => {
+		clearClientTimings(); vi.useFakeTimers();
+		try {
+			const client = await connectAuthed();
+			const promise = client.call('fs.list', undefined, 100);
+			const expectation = expect(promise).rejects.toMatchObject({ message: 'Request timed out' });
+			const sent = mockInstances[0].sentRequest(0);
+			await vi.advanceTimersByTimeAsync(150); await expectation;
+			mockInstances[0].receive({ jsonrpc: '2.0', id: sent.id, result: [], _timing: { sequence: 7, epoch: 'capture' } });
+			const report: DiagnosticReport = { schema_version: 1, epoch: 'capture', engine_version: '1', kernel_version: null, cpu_count_bucket: null, memory_kib_bucket: null, pressure: {}, pool_context: [], detailed_capture: false, dropped_records: 0, boot_phases: [], limitations: [], timings: [{ sequence: 7, operation: 'fs.list', stage: 'backend', duration_ms: 140, outcome: 'ok' }] };
+			expect(buildDiagnosticExport(report).client_timings[0]).toMatchObject({ request: 'request-1', operation: 'fs.list', outcome: 'timeout', late_outcome: 'ok' });
+		} finally { vi.useRealTimers(); clearClientTimings(); }
 	});
 
 	test('call before authentication rejects', async () => {
