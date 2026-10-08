@@ -3,22 +3,40 @@
 	import { getClient } from '$lib/client';
 	import { hasRootEquivalentAccess } from '$lib/access';
 	import type { AuthMe } from '$lib/types';
-	import { buildDiagnosticExport, clearClientTimings, type DiagnosticReport } from '$lib/performance-diagnostics';
+	import { buildDiagnosticExport, clearClientTimings, resumeDiagnosticCapture, type DiagnosticReport } from '$lib/performance-diagnostics';
 	let allowed = $state(false);
 	let busy = $state(false);
 	let error = $state('');
 	let detailed = $state(false);
+	let expanded = $state(false);
 	let preview = $state<ReturnType<typeof buildDiagnosticExport> | null>(null);
-	onMount(() => { void getClient().call<AuthMe>('auth.me').then(me => { allowed = hasRootEquivalentAccess(me.role, me.scoped); }).catch(() => {}); });
+	onMount(() => {
+		let disposed = false;
+		void (async () => {
+			try {
+				const client = getClient();
+				const me = await client.call<AuthMe>('auth.me');
+				if (disposed) return;
+				allowed = hasRootEquivalentAccess(me.role, me.scoped);
+				if (!allowed) return;
+				const report = await resumeDiagnosticCapture(client, me);
+				if (!disposed && report?.detailed_capture) {
+					detailed = true; expanded = true; preview = buildDiagnosticExport(report);
+				}
+			} catch { /* Fail closed if session details are unavailable. */ }
+		})();
+		return () => { disposed = true; };
+	});
 	async function action(method: string, params?: unknown) {
 		busy = true; error = '';
 		try {
 			if (method !== 'system.diagnostics.report') await getClient().call(method, params);
-			if (method === 'system.diagnostics.clear') { clearClientTimings(); preview = null; }
+			if (method === 'system.diagnostics.clear') { clearClientTimings(); preview = null; expanded = false; }
 			else {
 				const report = await getClient().call<DiagnosticReport>('system.diagnostics.report');
 				detailed = report.detailed_capture;
 				preview = buildDiagnosticExport(report);
+				expanded = true;
 			}
 		} catch { error = 'Could not collect diagnostics. Try again when the engine is responsive.'; }
 		finally { busy = false; }
@@ -48,7 +66,7 @@
 		{#each preview.summary.slice(0, 10) as row}<tr><td>{row.operation_stage}</td><td class="text-center">{row.count}</td><td class="text-center">{row.total_ms}</td><td class="text-center">{row.max_ms}</td><td class="text-center">{row.p95_ms}</td></tr>{/each}
 		</tbody></table></div>
 		<p class="text-sm text-muted-foreground">Stage totals overlap with backend totals; do not add them together. A browser timeout does not cancel server work. Late responses are included when this browser receives them.</p>
-		<details><summary class="cursor-pointer text-sm">Review complete report</summary><pre class="mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(preview, null, 2)}</pre></details>
+		<details bind:open={expanded}><summary class="cursor-pointer text-sm">Review complete report</summary><pre class="mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(preview, null, 2)}</pre></details>
 		<button class="rounded border px-3 py-2 text-sm" onclick={download}>Download reviewed JSON report</button>
 		<p class="text-sm text-muted-foreground">Nothing is sent to NASty developers. Attach this file yourself if you choose to share it. History is lost on engine restart or browser reload.</p>
 	{/if}

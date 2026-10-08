@@ -6,6 +6,7 @@
 	import DhcpRelayEditor from '$lib/components/DhcpRelayEditor.svelte';
 	import WebuiListeners from '$lib/components/WebuiListeners.svelte';
 	import PerformanceDiagnostics from '$lib/components/PerformanceDiagnostics.svelte';
+	import { resumeDiagnosticCapture } from '$lib/performance-diagnostics';
 	import type { DhcpRelayConfig } from '$lib/types';
 	let netDhcpRelay = $state<DhcpRelayConfig | null>(null);
 	import { tempUnit } from '$lib/temperature.svelte';
@@ -298,6 +299,8 @@
 		try {
 			const identity = await client.call<AuthMe>('auth.me');
 			canManageNotifications = hasRootEquivalentAccess(identity.role, identity.scoped);
+			const activeCapture = await resumeDiagnosticCapture(client, identity);
+			if (activeCapture && activeTab === 'general') switchTab('tuning');
 		} catch { /* Fail closed if session details are unavailable. */ }
 		await withToast(async () => {
 			let liveLogFilter: string;
@@ -852,7 +855,6 @@
 
 {#if activeTab === 'general'}
 	<WebuiListeners />
-	<PerformanceDiagnostics />
 
 	{#if !settings}
 		<p class="text-muted-foreground">Loading...</p>
@@ -1879,6 +1881,8 @@
 	</div>
 
 {:else if activeTab === 'tuning'}
+
+	<PerformanceDiagnostics />
 
 	{#if !tuning}
 		<p class="text-muted-foreground">Loading...</p>

@@ -23,6 +23,18 @@ export interface DiagnosticReport {
 	limitations: string[];
 	allowed_operations?: string[];
 }
+
+/** Re-read engine state on navigation; never assume an earlier capture is active. */
+export async function resumeDiagnosticCapture(
+	client: { call<T>(method: string): Promise<T> },
+	identity: Pick<AuthMe, 'role' | 'scoped'>
+): Promise<DiagnosticReport | null> {
+	if (!hasRootEquivalentAccess(identity.role, identity.scoped)) return null;
+	try {
+		const report = await client.call<DiagnosticReport>('system.diagnostics.report');
+		return report.detailed_capture ? report : null;
+	} catch { return null; }
+}
 /** Build a fresh allowlisted export; no spread of server or client objects. */
 export function buildDiagnosticExport(report: DiagnosticReport) {
 	const aliases = new Map<number, string>();
@@ -60,3 +72,5 @@ export function buildDiagnosticExport(report: DiagnosticReport) {
 		boot_phases: report.boot_phases.map(p => ({ operation: p.operation, state: p.state, duration_ms: p.duration_ms })),
 		limitations: report.limitations, summary, backend_timings: timings, client_timings: client };
 }
+import { hasRootEquivalentAccess } from './access';
+import type { AuthMe } from './types';

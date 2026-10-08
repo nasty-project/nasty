@@ -1,6 +1,6 @@
 # Performance diagnostics
 
-Use **Settings → General → Performance diagnostics** as an unscoped admin.
+Use **Settings → System tuning → Performance diagnostics** as an unscoped admin.
 This feature is independent of usage telemetry. It never uploads reports.
 
 1. Select **Capture details for 15 minutes** before reproducing a slow action.
@@ -10,6 +10,11 @@ This feature is independent of usage telemetry. It never uploads reports.
    the reviewed snapshot. Explicitly attach it to an issue if you choose to share it.
 4. Stop detailed capture or let it expire. **Clear history** clears engine history
    and this browser's timing history, not other browsers' histories.
+
+Returning to Settings while detailed capture is active automatically opens System
+tuning and loads a fresh report with the complete preview expanded. Returning to
+the tuning tab also rechecks the engine; stopped or expired captures are not
+restored from stale browser state.
 
 ## Collected information
 
