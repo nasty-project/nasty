@@ -852,7 +852,6 @@
 
 {#if activeTab === 'general'}
 	<WebuiListeners />
-	<PerformanceDiagnostics />
 
 	{#if !settings}
 		<p class="text-muted-foreground">Loading...</p>
@@ -1879,6 +1878,8 @@
 	</div>
 
 {:else if activeTab === 'tuning'}
+
+	<PerformanceDiagnostics />
 
 	{#if !tuning}
 		<p class="text-muted-foreground">Loading...</p>

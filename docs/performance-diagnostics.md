@@ -1,6 +1,6 @@
 # Performance diagnostics
 
-Use **Settings → General → Performance diagnostics** as an unscoped admin.
+Use **Settings → System tuning → Performance diagnostics** as an unscoped admin.
 This feature is independent of usage telemetry. It never uploads reports.
 
 1. Select **Capture details for 15 minutes** before reproducing a slow action.
