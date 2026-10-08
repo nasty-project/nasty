@@ -1,4 +1,5 @@
 <script lang="ts">
+	import MaintenanceReboot from '$lib/components/MaintenanceReboot.svelte';
 	import { onMount, setContext } from 'svelte';
 	import { page } from '$app/stores';
 	import { getClient, resetClient } from '$lib/client';
@@ -898,7 +899,7 @@
 	let maintenanceRequested = $state(false);
 	async function handleMaintenance() {
 		powerOpen = false;
-		if (!await confirm('Reboot into storage maintenance?', 'Data pools, shares, apps, VMs and the WebUI will stay offline across reboots. Verify SSH access with a local OS account or console access first. Exit over SSH with sudo nasty-maintenance exit. No repairs run automatically.')) return;
+		if (!await confirm('Reboot into storage maintenance?', 'Data pools, shares, apps, VMs and the normal dashboard will stay offline across reboots. A read-only maintenance page will show readiness and SSH instructions. Verify SSH access with a local OS account or console access first. Exit over SSH with sudo nasty-maintenance exit. No repairs run automatically.')) return;
 		maintenanceRequested = true;
 		const result = await withToast(
 			() => getClient().call('system.maintenance.enter'),
@@ -1615,13 +1616,7 @@
 		</div>
 
 		{#if maintenanceRequested}
-			<div class="absolute inset-0 z-50 flex items-center justify-center bg-background/95">
-				<div class="max-w-lg space-y-3 p-6 text-center">
-					<h2 class="text-lg font-semibold">Storage maintenance reboot requested</h2>
-					<p class="text-sm text-muted-foreground">The WebUI will be unavailable. Connect over SSH or the console and verify data pools are unmounted before running repairs.</p>
-					<p class="text-sm">To return to normal operation: <code>sudo nasty-maintenance exit</code></p>
-				</div>
-			</div>
+			<MaintenanceReboot />
 		{:else if reconnecting}
 			<div class="absolute inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
 				<ReconnectSpinner />

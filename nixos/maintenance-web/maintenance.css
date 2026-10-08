@@ -1,0 +1,26 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101114; color: #eef0f4; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 760px; margin: 0 auto; padding: 48px 24px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 28px; }
+.brand { font-weight: 800; font-size: 24px; }
+.badge { font-size: 11px; letter-spacing: .08em; border: 1px solid #725a24; color: #ffd479; padding: 6px 10px; border-radius: 20px; }
+h1 { font-size: clamp(24px, 5vw, 34px); margin-bottom: 12px; }
+h2 { font-size: 18px; margin: 0 0 12px; }
+p { line-height: 1.6; color: #bdc2ce; }
+.intro { margin-bottom: 24px; }
+section { margin: 20px 0; padding: 22px; border: 1px solid #30333d; border-radius: 12px; background: #191b21; }
+.status p { margin: 6px 0; }
+.ready { color: #8ddbb4; }
+.warning { color: #ffd479; }
+.note, label { font-size: 13px; }
+label { display: block; margin: 12px 0 6px; }
+label span { color: #9ca3b2; }
+input, select { background: #101114; color: inherit; border: 1px solid #474c5a; border-radius: 6px; padding: 9px 12px; max-width: 100%; }
+.command { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px; background: #101114; border-radius: 8px; margin-top: 14px; }
+code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.command code { flex: 1; min-width: 150px; font-size: 13px; }
+button { font: inherit; font-size: 12px; color: #eef0f4; background: #252a36; border: 1px solid #515e7b; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid #9abfff; outline-offset: 3px; }
+a { color: #9abfff; }

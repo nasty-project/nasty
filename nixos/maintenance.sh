@@ -15,7 +15,7 @@ if [[ $# -eq 2 && $2 != --no-reboot ]]; then usage; exit 2; fi
 case "$action" in
   status)
     if [[ -e $active ]]; then
-      echo "Storage maintenance is active. WebUI and storage consumers are disabled."
+      echo "Storage maintenance is active. The normal dashboard and storage consumers are disabled."
       if [[ ! -e $flag ]]; then echo "Normal startup is scheduled for the next reboot."; fi
     elif [[ -e $flag ]]; then
       echo "Storage maintenance is scheduled for the next reboot; pools may still be mounted."
@@ -45,7 +45,7 @@ flock -x 9
 
 if [[ $action == enter ]]; then
   if ! systemctl cat sshd.service >/dev/null 2>&1; then
-    echo "SSH must be configured before entering maintenance; the WebUI will be unavailable." >&2
+    echo "SSH must be configured before entering maintenance; the normal dashboard will be unavailable." >&2
     exit 1
   fi
   temporary=$(mktemp /var/lib/nasty/.maintenance.XXXXXX)
