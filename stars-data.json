@@ -1062,7 +1062,19 @@
           "stars": 402
         }
       ]
+    },
+    {
+      "timestamp": "2026-10-09T04:21:31.922Z",
+      "totalStars": 404,
+      "repos": [
+        {
+          "fullName": "nasty-project/nasty",
+          "name": "nasty",
+          "owner": "nasty-project",
+          "stars": 404
+        }
+      ]
     }
   ],
-  "starsAtLastNotification": 402
+  "starsAtLastNotification": 404
 }
