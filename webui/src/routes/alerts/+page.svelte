@@ -12,16 +12,23 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
+	import AlertRuleEditor from '$lib/components/AlertRuleEditor.svelte';
+	import { hasRootEquivalentAccess } from '$lib/access';
+	import type { TempUnit } from '$lib/types';
+	import type { alertRuleEditPatch } from '$lib/alert-rule-edit';
 
 	let rules: AlertRule[] = $state([]);
 	let activeAlerts: ActiveAlert[] = $state([]);
 	let loading = $state(true);
 	let showCreate = $state(false);
 	let role = $state<UserRole>('readonly');
+	let scoped = $state(false);
+	let editing = $state<AlertRule | null>(null);
+	let editingUnit = $state<TempUnit>('celsius');
 	let acknowledging = $state<string | null>(null);
 	let refreshTimer: ReturnType<typeof setInterval> | undefined;
 	const canAcknowledge = $derived(role === 'admin' || role === 'operator');
-	const canManageRules = $derived(role === 'admin');
+	const canManageRules = $derived(hasRootEquivalentAccess(role, scoped));
 
 	let newName = $state('');
 	let createTried = $state(false);
@@ -115,6 +122,7 @@
 			rules = nextRules;
 			activeAlerts = nextAlerts;
 			role = me.role;
+			scoped = me.scoped ?? false;
 		});
 	}
 
@@ -193,6 +201,23 @@
 		await refresh();
 	}
 
+	function editRule(rule: AlertRule) {
+		editing = { ...rule };
+		editingUnit = tempUnit.current;
+		showCreate = false;
+	}
+
+	async function saveRule(patch: ReturnType<typeof alertRuleEditPatch>): Promise<boolean> {
+		if (!canManageRules) return false;
+		const updated = await withToast(
+			() => client.call<AlertRule>('alert.rules.update', patch),
+			'Alert rule updated'
+		);
+		if (updated === undefined) return false;
+		await refresh();
+		return true;
+	}
+
 	async function deleteRule(id: string) {
 		if (!await confirm('Delete this alert rule?')) return;
 		await withToast(
@@ -240,13 +265,21 @@
 
 {#if canManageRules}
 	<div class="mb-4 flex items-center gap-3">
-		<Button size="sm" onclick={() => showCreate = !showCreate}>
+		<Button size="sm" disabled={editing !== null} onclick={() => showCreate = !showCreate}>
 			{showCreate ? 'Cancel' : 'Create Rule'}
 		</Button>
 	</div>
 {/if}
 
-{#if showCreate}
+{#if editing && canManageRules}
+	{#key editing.id}
+		<AlertRuleEditor rule={editing} unit={editingUnit}
+			metricLabel={editing.metric === 'disk_temperature' ? `Disk Temperature (${tempUnitLabel(editingUnit)})` : metricLabels[editing.metric]}
+			conditionLabel={conditionLabels[editing.condition]} onSave={saveRule} onCancel={() => editing = null} />
+	{/key}
+{/if}
+
+{#if showCreate && canManageRules}
 	<Card class="mb-6 max-w-lg">
 		<CardContent class="pt-6">
 			<h3 class="mb-4 text-lg font-semibold">New Alert Rule</h3>
@@ -332,6 +365,7 @@
 					<td class="p-3">
 						{#if canManageRules}
 							<div class="flex gap-2">
+								<Button variant="secondary" size="xs" disabled={editing !== null} onclick={() => editRule(rule)}>Edit</Button>
 								<Button variant="secondary" size="xs" onclick={() => toggleRule(rule)}>
 									{rule.enabled ? 'Disable' : 'Enable'}
 								</Button>

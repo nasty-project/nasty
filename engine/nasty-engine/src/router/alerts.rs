@@ -91,7 +91,11 @@ pub(super) async fn try_route(
         },
         "alert.rules.update" => match parse_params::<nasty_system::alerts::AlertRuleUpdate>(req) {
             Ok(update) => match state.alerts.update_rule(&update.id.clone(), update).await {
-                Ok(r) => ok(req, r),
+                Ok(r) => {
+                    *state.alerts_cache.lock().await = None;
+                    *state.status_cache.lock().await = None;
+                    ok(req, r)
+                }
                 Err(e) => err(req, e),
             },
             Err(e) => invalid(req, e),
