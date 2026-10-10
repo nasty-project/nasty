@@ -138,6 +138,15 @@ let
         call(ws, "system.diagnostics.capture", 602, {"enabled": False})
         call(ws, "system.diagnostics.clear", 603)
         assert call(ws, "system.diagnostics.report", 604)["timings"] == []
+        # Existing default rules can be edited without delete/recreate. Partial
+        # updates retain identity, metric, condition and enable/disable state.
+        original_rule = next(r for r in call(ws, "alert.rules.list", 610) if r["id"] == "disk-temp-warn")
+        edited_rule = call(ws, "alert.rules.update", 611, {"id": original_rule["id"], "threshold": 65, "severity": "critical"})
+        assert edited_rule["threshold"] == 65 and edited_rule["severity"] == "critical"
+        for field in ["id", "name", "metric", "condition", "enabled"]:
+            assert edited_rule[field] == original_rule[field]
+        assert next(r for r in call(ws, "alert.rules.list", 612) if r["id"] == original_rule["id"])["threshold"] == 65
+        call(ws, "alert.rules.update", 613, {"id": original_rule["id"], "threshold": original_rule["threshold"], "severity": original_rule["severity"]})
 
         # Configurable management listeners: real Caddy, firewall and RPC
         # transaction, with no data/network changes and SSH kept available.
