@@ -32,9 +32,15 @@ pkgs.testers.runNixOSTest {
     machine.succeed("bcachefs subvolume create /mnt/bcachefs/source")
     machine.succeed("printf fixture > /mnt/bcachefs/source/data")
     machine.succeed("setproject -c -P source /mnt/bcachefs/source")
-    machine.succeed("bcachefs subvolume snapshot /mnt/bcachefs/source /mnt/bcachefs/clone")
+    # Atomic provisioning creates clones below a private same-filesystem
+    # staging directory, then atomically publishes them at the pool root.
+    # Reproduce that layout without invoking any appliance code.
+    machine.succeed("mkdir -p /mnt/bcachefs/.stage/clone /mnt/bcachefs/.stage/snapshot-clone")
+    machine.succeed("bcachefs subvolume snapshot /mnt/bcachefs/source /mnt/bcachefs/.stage/clone/volume")
+    machine.succeed("mv /mnt/bcachefs/.stage/clone/volume /mnt/bcachefs/clone")
     machine.succeed("bcachefs subvolume snapshot -r /mnt/bcachefs/source /mnt/bcachefs/point")
-    machine.succeed("bcachefs subvolume snapshot /mnt/bcachefs/point /mnt/bcachefs/snapshot-clone")
+    machine.succeed("bcachefs subvolume snapshot /mnt/bcachefs/point /mnt/bcachefs/.stage/snapshot-clone/volume")
+    machine.succeed("mv /mnt/bcachefs/.stage/snapshot-clone/volume /mnt/bcachefs/snapshot-clone")
 
     # #980's fault was after an engine-process restart with the pool mounted.
     # A full VM reboot/remount is stronger at the filesystem boundary and does
