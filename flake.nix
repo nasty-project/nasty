@@ -512,6 +512,9 @@
       bcachefs-smoke = import ./nixos/tests/bcachefs-smoke.nix {
         inherit pkgs nasty-bcachefs-tools;
       };
+      bcachefs-project-quota-repro = import ./nixos/tests/bcachefs-project-quota-repro.nix {
+        inherit pkgs nasty-bcachefs-tools;
+      };
       appliance-smoke = import ./nixos/tests/appliance-smoke.nix {
         inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
       };
