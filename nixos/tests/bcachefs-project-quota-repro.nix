@@ -14,7 +14,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    machine.start()
+    machine.start(allow_reboot=True)
     machine.wait_for_unit("multi-user.target")
 
     # Record the exact independently-pinned bcachefs/kernel/tool environment.
