@@ -12,6 +12,42 @@
 
 let
   atomicSmoke = pkgs.writeText "atomic-provisioning-smoke.py" (builtins.readFile ./atomic-provisioning-smoke.py);
+  publicationCrashTest = pkgs.writeText "publication-crash-test.py" (builtins.readFile ./publication-crash-test.py);
+  publicationFault = pkgs.runCommand "publication-fault-test-only" { } ''
+    mkdir -p $out/lib
+    ${pkgs.stdenv.cc}/bin/cc -Wall -Wextra -Werror -shared -fPIC \
+      ${./publication-fault.c} -ldl -o $out/lib/publication-fault.so
+  '';
+  publicationFaultTools = pkgs.runCommand "publication-command-shims-test-only" { } ''
+    mkdir -p $out/bin
+    cat > $out/bin/mkfs.ext4 <<'SH'
+    #!${pkgs.bash}/bin/bash
+    set -euo pipefail
+    if [[ -f /run/nasty-publication-fault ]]; then
+      mapfile -t fault < /run/nasty-publication-fault
+      if [[ "''${fault[0]}" == block-init ]]; then
+        printf 'block-init %s %s\n' "$*" "$$" > /run/nasty-publication-fault-hit
+        kill -STOP "$$"
+      fi
+    fi
+    exec ${pkgs.e2fsprogs}/bin/mkfs.ext4 "$@"
+    SH
+    cat > $out/bin/bcachefs <<'SH'
+    #!${pkgs.bash}/bin/bash
+    set -euo pipefail
+    if [[ -f /run/nasty-publication-fault && "''${1:-}" == subvolume && "''${2:-}" == snapshot ]]; then
+      mapfile -t fault < /run/nasty-publication-fault
+      if [[ "''${fault[0]}" == clone-copy && "''${4:-}" == */.nasty/provisioning/"''${fault[1]}"/volume ]]; then
+        ${nasty-bcachefs-tools}/bin/bcachefs "$@"
+        printf 'clone-copy %s %s\n' "$4" "$$" > /run/nasty-publication-fault-hit
+        kill -STOP "$$"
+        exit 0
+      fi
+    fi
+    exec ${nasty-bcachefs-tools}/bin/bcachefs "$@"
+    SH
+    chmod +x $out/bin/*
+  '';
   # Self-contained Python script run inside the guest. Putting it in its own
   # file avoids nesting a triple-quoted Python string inside a Nix `''`
   # string, which mangles indentation under the testScript type-checker.
@@ -522,6 +558,12 @@ pkgs.testers.runNixOSTest {
       watchdog.enable = true;
     };
 
+    # Fault hooks exist only in this disposable VM's service environment/PATH.
+    # Production packages and the public RPC surface contain no test switches.
+    systemd.services.nasty-engine.environment.LD_PRELOAD = "${publicationFault}/lib/publication-fault.so";
+    systemd.services.nasty-engine.path = lib.mkBefore [ publicationFaultTools ];
+    systemd.services.nasty-engine.unitConfig.StartLimitIntervalSec = 0;
+
     # Docker is needed for the apps-ingress assertion.  The engine's
     # `apps.enable` RPC starts docker.service itself, but the unit has
     # to exist — wantedBy is cleared so it doesn't race nasty-engine
@@ -761,6 +803,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed(
         f"${pythonWithWs}/bin/python3 ${rpcSmoke} {shlex.quote(login_obj['token'])}"
     )
+    machine.succeed("${pythonWithWs}/bin/python3 ${publicationCrashTest}")
     machine.succeed("grep -Fqx 'ping = 127.0.0.1' /var/lib/nasty/watchdog.conf")
     machine.fail("systemctl is-active --quiet nasty-watchdog.service")
 

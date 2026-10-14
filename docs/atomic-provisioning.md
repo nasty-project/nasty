@@ -58,7 +58,16 @@ destination properties/retention survive publication, inherited source identity
 is removed, internal owner metadata is preserved and the successful journal is
 removed. The disposable appliance smoke test now exercises filesystem/block
 create and both clone paths through RPC, but that full VM test has not yet been
-run for this change. None of these fixture checks proves bcachefs
+run locally for this change (the regular smoke has since passed GitHub CI).
+The appliance VM also runs a test-only crash harness: command shims pause a real
+block create before formatting and both clone types after the kernel copy but
+before destination metadata is written; a preload interposer pauses each create/
+clone immediately before and after no-replace rename. The harness kills the
+entire engine service cgroup, restarts it, and checks visibility, property/retain
+preservation, no mutation replay and source data/metadata. Hooks are installed
+only in the disposable test VM, never in production binaries or API methods.
+These are deterministic engine-process-loss tests, not sudden VM/power cuts.
+None of these fixture checks proves bcachefs
 power-loss behavior or loop-device identity after a staged backing file is
 renamed. The API must remain draft until isolated bcachefs filesystem/block
 create, subvolume/snapshot clone, metadata/quota preservation and crash-boundary
