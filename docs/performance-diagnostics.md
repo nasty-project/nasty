@@ -11,10 +11,9 @@ This feature is independent of usage telemetry. It never uploads reports.
 4. Stop detailed capture or let it expire. **Clear history** clears engine history
    and this browser's timing history, not other browsers' histories.
 
-Returning to Settings while detailed capture is active automatically opens System
-tuning and loads a fresh report with the complete preview expanded. Returning to
-the tuning tab also rechecks the engine; stopped or expired captures are not
-restored from stale browser state.
+Returning to Settings while capture is active automatically opens System tuning
+and loads a fresh report with the complete preview expanded. Retained prior-engine
+reports are also available even after capture stops.
 
 ## Collected information
 
@@ -45,34 +44,67 @@ credentials in the export. This is data minimization, not a guarantee of complet
 anonymity: timing patterns, versions and size buckets can still reveal workload
 characteristics. Review before sharing.
 
-## Interpreting timings
-
-Summaries show count, cumulative duration, maximum, p50 and p95, sorted by
-cumulative duration. Stage durations overlap with backend durations; do not add
-them together. Backend duration excludes socket queueing. The difference between
-client and backend duration includes transport, socket queueing and browser
-scheduling; it is **not** a measured lock wait.
-
-Detailed task-local context covers awaited subprocess helpers; independently
-spawned tasks may not inherit it. This is targeted instrumentation, not a profiler
-of every lock or function. Pressure is observed when the report is requested,
-not sampled continuously alongside every operation.
-
-History is lost on engine restart or browser reload. This first version does not
-persist shutdown/unmount/reboot observations across boots, cannot diagnose a
-completely unresponsive engine, and is unavailable while the engine is disabled
-in storage maintenance. Durable systemd-level lifecycle capture is a follow-up.
-
 ## API
 
-All three methods require an **unscoped Admin** session:
+All methods require an **unscoped Admin** session:
 
 - `system.diagnostics.report`: structured preview, including temporary correlation
   metadata used by the WebUI. Use the WebUI download for report-local relabeling.
 - `system.diagnostics.capture`, with `{"enabled": true|false}`: start a 15-minute
   detailed capture or stop it. Re-enabling restarts the 15-minute window.
-- `system.diagnostics.clear`: clear engine timing and cached pool context.
+- `system.diagnostics.capture_reboot`, with `{"enabled": true|false}`: opt in to
+  retained checkpoints for 30 minutes, or stop checkpointing while retaining history.
+- `system.diagnostics.clear`: stop capture and clear retained OS-disk history,
+  engine timings, and cached pool context.
 
 RPC responses include an additive `_timing` extension containing duration and
 temporary engine-local correlation metadata. Existing clients may ignore it.
 No existing request timeout, repair safety, or networking policy is changed.
+
+## Across reboot
+
+An unscoped admin can open Settings → Performance diagnostics and select
+**Capture across reboot for 30 minutes**. This is separate from the existing
+15-minute, in-memory detailed capture. It does not initiate a reboot.
+
+1. Enable reboot capture before reproducing a slow operation or restarting.
+2. Reboot normally if that is the operation being investigated.
+3. After login, return to diagnostics and select **Preview report**.
+4. Inspect `persistent_capture.previous_sessions` as well as the current
+   timings and boot phases. Download only after reviewing the report.
+5. Stop capture to retain the checkpoints, or **Clear history** to stop capture
+   and remove both retained engine checkpoints and browser history.
+
+The engine writes an initial checkpoint when enabled, then every five seconds
+to `/var/lib/nasty/performance-diagnostics.json` on the OS filesystem. Atomic
+replacement and fsync are used, with owner-only permissions. The file is capped
+at 2 MiB, with at most three engine sessions (each timing ring has 2048 records).
+Capture expires after 30 minutes, including time spent rebooting/offline.
+History is retained for at most 24 hours; expired history is removed when the
+engine is running or next starts. No extra data-pool scans are performed.
+
+Checkpoints contain structured durations, outcomes, bucketed hardware/pool
+context and boot-phase states, not raw journals, error text, request payloads,
+paths, filenames, credentials, command arguments/output or hardware identities.
+Session correlation uses a local random engine epoch; export replaces request
+sequence numbers with report-local aliases and omits epochs. Previous sessions
+are separate and never correlated with the current browser's requests.
+
+## Interpretation and limits
+
+- `received_to_backend` measures authentication, parsing and permission checks
+  after the engine reads a request. It does **not** measure time the request
+  waits unread behind earlier work on the sequential WebSocket connection.
+- Backend/serialization/stage durations overlap; do not add them together.
+- A browser timeout does not cancel or safely replay a server-side mutation.
+- Periodic checkpoints may miss the last interval on abrupt process/power loss;
+  no final shutdown checkpoint, kernel trace or crash dump is promised.
+- Engine boot phases are captured, but firmware, kernel boot, early engine
+  initialization and maintenance boots (where the engine is offline) are not.
+- Browser timing history still disappears on page reload. The previous-engine
+  section supplies server-side evidence, not missing browser timeout events.
+- Disk/checkpoint failures are reported without path/output details and do not
+  change storage recovery policy. Nothing is uploaded automatically.
+
+This instrumentation diagnoses symptoms; it neither raises global RPC timeouts
+nor changes request concurrency or storage mutation behavior.

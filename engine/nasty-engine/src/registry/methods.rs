@@ -453,6 +453,15 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     result: Some(serde_json::json!({"type": "object"})),
                 },
                 Method {
+                    name: "system.diagnostics.capture_reboot",
+                    desc: "Opt in to OS-disk timing checkpoints for 30 minutes across reboot. Retain up to 3 engine sessions for 24 hours; no uploads. Unscoped admin only.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::AdHoc(
+                        serde_json::json!({"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"]}),
+                    ),
+                    result: Some(serde_json::json!({"type": "object"})),
+                },
+                Method {
                     name: "system.webui.update",
                     desc: "Apply HTTPS and optional HTTP redirect ports with firewall reconciliation. Confirm within 30 seconds or revert. HTTP null disables the redirect listener.",
                     role: MethodRole::Admin,

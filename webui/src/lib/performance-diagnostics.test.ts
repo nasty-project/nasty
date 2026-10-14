@@ -33,9 +33,24 @@ describe('performance report privacy and summaries', () => {
 		const result = buildDiagnosticExport({ ...report, allowed_operations: ['fs.list'] });
 		expect(result.client_timings.map(t => t.operation)).toEqual(['fs.list', 'unknown']);
 	});
+	it('exports retained sessions separately without browser correlations or nested private fields', () => {
+		trackClientTiming({ method: 'fs.list', duration_ms: 5, outcome: 'ok', sequence: 900, epoch: report.epoch });
+		const previous = { ...report, epoch: 'private-prior-epoch', private_payload: 'private-secret',
+			boot_phases: [{ operation: 'filesystems.restore_mounts', state: 'failed', duration_ms: 10, error: 'private-path' }] };
+		const result = buildDiagnosticExport({ ...report, persistent_capture: { active: true, seconds_remaining: 60, previous_sessions: [previous, previous, previous] } });
+		expect(result.persistent_capture.previous_sessions).toHaveLength(2);
+		expect(result.persistent_capture.previous_sessions[0].client_timings).toEqual([]);
+		expect(result.client_timings).toHaveLength(1);
+		expect(JSON.stringify(result)).not.toContain('private');
+	});
 });
 
 describe('resuming detailed capture on navigation', () => {
+	it('restores retained reports even when capture has stopped', async () => {
+		const retained = { ...report, persistent_capture: { active: false, seconds_remaining: 0, previous_sessions: [report] } };
+		const call = vi.fn().mockResolvedValue(retained);
+		expect(await resumeDiagnosticCapture({ call }, { role: 'admin', scoped: false })).toBe(retained);
+	});
 	it('loads an active capture for an unscoped admin', async () => {
 		const active = { ...report, detailed_capture: true };
 		const call = vi.fn().mockResolvedValue(active);

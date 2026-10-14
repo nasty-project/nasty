@@ -22,6 +22,7 @@ export interface DiagnosticReport {
 	pool_context: { pool: string; total_bytes_bucket: number; device_count_bucket: number }[];
 	limitations: string[];
 	allowed_operations?: string[];
+	persistent_capture?: { active: boolean; checkpoint_failed?: boolean; seconds_remaining: number; previous_sessions: DiagnosticReport[] };
 }
 
 /** Re-read engine state on navigation; never assume an earlier capture is active. */
@@ -32,11 +33,11 @@ export async function resumeDiagnosticCapture(
 	if (!hasRootEquivalentAccess(identity.role, identity.scoped)) return null;
 	try {
 		const report = await client.call<DiagnosticReport>('system.diagnostics.report');
-		return report.detailed_capture ? report : null;
+		return report.detailed_capture || report.persistent_capture?.active || report.persistent_capture?.previous_sessions.length ? report : null;
 	} catch { return null; }
 }
 /** Build a fresh allowlisted export; no spread of server or client objects. */
-export function buildDiagnosticExport(report: DiagnosticReport) {
+function buildDiagnosticSession(report: DiagnosticReport, includeBrowser = false) {
 	const aliases = new Map<number, string>();
 	const alias = (sequence: number) => {
 		if (!aliases.has(sequence)) aliases.set(sequence, `request-${aliases.size + 1}`);
@@ -45,7 +46,7 @@ export function buildDiagnosticExport(report: DiagnosticReport) {
 	const operations = new Map(report.timings.filter(t => t.stage === 'backend').map(t => [t.sequence, t.operation]));
 	const knownOperations = new Set(report.allowed_operations ?? []);
 	const timings = report.timings.map(t => ({ request: alias(t.sequence), operation: t.operation, stage: t.stage, duration_ms: t.duration_ms, outcome: t.outcome }));
-	const client = history.map(t => {
+	const client = (includeBrowser ? history : []).map(t => {
 		const correlated = t.epoch === report.epoch && t.sequence !== undefined && operations.has(t.sequence);
 		return { request: correlated ? alias(t.sequence!) : null, operation: correlated ? operations.get(t.sequence!) : knownOperations.has(t.method) ? t.method : 'unknown',
 			duration_ms: t.duration_ms, outcome: t.outcome, late_response_ms: t.late_response_ms, late_outcome: t.late_outcome };
@@ -65,12 +66,25 @@ export function buildDiagnosticExport(report: DiagnosticReport) {
 		const value = report.pressure[key];
 		if (typeof value === 'number' && Number.isFinite(value)) pressure[key] = value;
 	}
-	return { schema_version: report.schema_version, engine_version: report.engine_version, kernel_version: report.kernel_version,
+	const session = { schema_version: report.schema_version, engine_version: report.engine_version, kernel_version: report.kernel_version,
 		cpu_count_bucket: report.cpu_count_bucket, memory_kib_bucket: report.memory_kib_bucket, pressure,
 		dropped_records: report.dropped_records, detailed_capture: report.detailed_capture,
 		pool_context: report.pool_context.map(p => ({ pool: p.pool, total_bytes_bucket: p.total_bytes_bucket, device_count_bucket: p.device_count_bucket })),
 		boot_phases: report.boot_phases.map(p => ({ operation: p.operation, state: p.state, duration_ms: p.duration_ms })),
 		limitations: report.limitations, summary, backend_timings: timings, client_timings: client };
+	return session;
+}
+export function buildDiagnosticExport(report: DiagnosticReport) {
+	return { ...buildDiagnosticSession(report, true), persistent_capture: {
+		active: report.persistent_capture?.active ?? false,
+		checkpoint_failed: report.persistent_capture?.checkpoint_failed ?? false,
+		seconds_remaining: report.persistent_capture?.seconds_remaining ?? 0,
+		previous_sessions: (report.persistent_capture?.previous_sessions ?? []).slice(-2).map(previous => {
+			// Reconstruct the export from explicit fields; never recursively export
+			// nested archives or associate this browser's timings with an old engine.
+			return buildDiagnosticSession(previous);
+		})
+	} };
 }
 import { hasRootEquivalentAccess } from './access';
 import type { AuthMe } from './types';
