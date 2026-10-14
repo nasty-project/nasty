@@ -24,7 +24,10 @@ pkgs.testers.runNixOSTest {
 
     machine.succeed("bcachefs format --force /dev/vdb")
     machine.succeed("mkdir -p /mnt/bcachefs && mount -t bcachefs /dev/vdb /mnt/bcachefs")
-    machine.succeed("printf 'source:1001\\nclone:1002\\nsnapshot-clone:1003\\n' > /etc/projid")
+    # These clone IDs are the exact values in the #980 kernel-BUG trace.
+    # Keep them rather than small illustrative IDs to cover any width/sign or
+    # allocation-bucket interaction in bcachefs quota handling.
+    machine.succeed("printf 'source:1001\\nclone:2378439521\\nsnapshot-clone:2944444548\\n' > /etc/projid")
 
     # Build the same topology before assigning IDs to the clones. The source
     # is assigned first (as happens during source creation); clone IDs are
