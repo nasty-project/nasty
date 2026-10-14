@@ -1494,8 +1494,8 @@ pub(crate) fn validate_compose(
     app_name: &str,
     allow_unsafe: bool,
 ) -> Result<(), String> {
-    let parsed: serde_json::Value =
-        serde_yaml_ng::from_str(yaml).map_err(|e| format!("compose YAML failed to parse: {e}"))?;
+    let parsed = nasty_apps::parse_compose_yaml(yaml)
+        .map_err(|e| format!("compose YAML failed to parse: {e}"))?;
 
     let services = parsed
         .get("services")
@@ -2001,6 +2001,40 @@ mod tests {
             "services:\n  bad:\n    image: alpine\n    privileged: true\n",
             "privileged",
         );
+    }
+
+    #[test]
+    fn compose_policy_inspects_expanded_merge_keys() {
+        err_strict(
+            "x-base: &base\n  image: alpine\n  privileged: true\nservices:\n  app:\n    <<: *base\n",
+            "privileged",
+        );
+        err_strict(
+            "x-base: &base\n  image: alpine\n  network_mode: host\nservices:\n  app:\n    <<: *base\n",
+            "network_mode",
+        );
+        err_strict(
+            "x-base: &base\n  image: alpine\n  volumes: [\"/etc:/host-etc\"]\nservices:\n  app:\n    <<: *base\n",
+            "/etc",
+        );
+        err_unsafe(
+            "x-base: &base\n  image: alpine\n  volumes: [\"/:/host\"]\nservices:\n  app:\n    <<: *base\n",
+            "root",
+        );
+        ok_strict(
+            "x-base: &base\n  image: alpine\n  privileged: true\nservices:\n  app:\n    <<: *base\n    privileged: false\n",
+        );
+    }
+
+    #[test]
+    fn compose_policy_rejects_duplicate_privilege_keys() {
+        for yaml in [
+            "services:\n  app:\n    image: alpine\n    privileged: true\n    privileged: false\n",
+            "services:\n  app:\n    image: alpine\n    privileged: false\n    privileged: true\n",
+        ] {
+            err_strict(yaml, "failed to parse");
+            err_unsafe(yaml, "failed to parse");
+        }
     }
 
     #[test]

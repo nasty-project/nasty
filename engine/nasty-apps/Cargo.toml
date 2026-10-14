@@ -16,7 +16,7 @@ schemars.workspace = true
 reqwest.workspace = true
 bollard = { version = "0.21", features = ["chrono"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-serde_yaml_ng = "0.10"
+serde-saphyr = { version = "2.0", default-features = false, features = ["deserialize"] }
 tempfile = "3"
 futures-util.workspace = true
 libc.workspace = true

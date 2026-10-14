@@ -35,6 +35,9 @@ use tracing::{error, info, warn};
 
 pub mod caddy;
 
+#[cfg(test)]
+mod compose_yaml_tests;
+
 use caddy::{AppRoute, CaddyApi};
 pub use caddy::{CaddyRouteSummary, HostCert};
 
@@ -914,12 +917,41 @@ fn extract_bind_source_target(entry: &serde_json::Value) -> Option<(String, Stri
     }
 }
 
+/// Shared parser for Compose inspection, editor validation and deploy policy.
+/// Default duplicate-key rejection and alias/resource budgets stay enabled.
+/// YAML merges are expanded before policy inspection. Include/filesystem and
+/// environment-interpolation features are disabled; Docker handles its own
+/// interpolation later, without the policy parser reading files or secrets.
+pub fn parse_compose_yaml(yaml: &str) -> Result<serde_json::Value, ComposeYamlError> {
+    serde_saphyr::from_str(yaml).map_err(ComposeYamlError)
+}
+
+/// A location-aware YAML error that does not render raw Compose source snippets.
+#[derive(Debug)]
+pub struct ComposeYamlError(serde_saphyr::Error);
+
+impl ComposeYamlError {
+    pub fn line(&self) -> Option<u32> {
+        self.0
+            .location()
+            .and_then(|location| u32::try_from(location.line()).ok())
+    }
+}
+
+impl std::fmt::Display for ComposeYamlError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0.without_snippet())
+    }
+}
+
+impl std::error::Error for ComposeYamlError {}
+
 /// Walk a parsed compose YAML and extract every bind-mount paired with
 /// its service's expected (uid, gid). The expected ids come from the
 /// service's `user:` field, falling back to PUID/PGID env vars when
 /// `user:` isn't set (LinuxServer.io style images).
 pub fn extract_compose_binds(yaml: &str) -> Vec<ComposeBind> {
-    let parsed: serde_json::Value = match serde_yaml_ng::from_str(yaml) {
+    let parsed = match parse_compose_yaml(yaml) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
@@ -984,7 +1016,7 @@ fn parse_compose_diagnostics(stderr: &str, tmp_path: &str) -> Vec<ComposeDiagnos
 
 /// Find a 1-based `line <N>` reference in a yaml error message
 /// ("yaml: line 9: did not find expected key", "  line 4: cannot
-/// unmarshal …"). go-yaml and serde_yaml both report 1-based lines.
+/// unmarshal …"). go-yaml and serde-saphyr both report 1-based lines.
 fn extract_line_number(msg: &str) -> Option<u32> {
     let pos = msg.find("line ")?;
     let digits: String = msg[pos + 5..]
@@ -2491,7 +2523,7 @@ fn parse_compose_inventory(
     content: &str,
     active_services: Option<&std::collections::HashSet<String>>,
 ) -> Option<ComposeInventory> {
-    let parsed: serde_json::Value = serde_yaml_ng::from_str(content).ok()?;
+    let parsed = parse_compose_yaml(content).ok()?;
     let services = parsed.get("services")?.as_object()?;
     let is_active = |name: &str, service: &serde_json::Value| {
         active_services.map_or_else(
@@ -7821,7 +7853,7 @@ impl AppsService {
 
     /// Live-lint a compose file for the editor (#439). Two stages:
     ///
-    /// 1. In-process YAML parse (`serde_yaml_ng`) — catches the
+    /// 1. In-process YAML parse (`serde-saphyr`) — catches the
     ///    syntax/indentation class of error with a precise line number,
     ///    without spawning anything. Most keystrokes that break a file
     ///    break it here.
@@ -7840,12 +7872,12 @@ impl AppsService {
         }
 
         // Stage 1: YAML syntax.
-        if let Err(e) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&req.compose) {
+        if let Err(e) = parse_compose_yaml(&req.compose) {
             return CheckComposeResult {
                 schema_checked: false,
                 valid: false,
                 diagnostics: vec![ComposeDiagnostic {
-                    line: e.location().map(|l| l.line() as u32),
+                    line: e.line(),
                     message: format!("YAML syntax: {e}"),
                 }],
             };
