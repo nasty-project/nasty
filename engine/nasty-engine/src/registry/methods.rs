@@ -876,6 +876,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     result: Some(gen_schema::<Subvolume>(generator)),
                 },
                 Method {
+                    name: "subvolume.create_atomic",
+                    desc: "Stage a top-level subvolume privately with initial_properties and publish without replacement only after metadata is complete. Interrupted reservations require explicit recovery.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::Schema(gen_schema::<CreateSubvolumeRequest>(generator)),
+                    result: Some(gen_schema::<Subvolume>(generator)),
+                },
+                Method {
                     name: "subvolume.delete",
                     desc: "Delete a subvolume and all its snapshots.",
                     role: MethodRole::Operator,
@@ -966,6 +973,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                 Method {
                     name: "snapshot.clone",
                     desc: "Clone a snapshot into a new independent subvolume.",
+                    role: MethodRole::Operator,
+                    params: MethodParams::Schema(gen_schema::<CloneSnapshotRequest>(generator)),
+                    result: Some(gen_schema::<Subvolume>(generator)),
+                },
+                Method {
+                    name: "snapshot.clone_atomic",
+                    desc: "Stage and publish a snapshot clone with replacement initial_properties; never inherit a source volume's user identity properties.",
                     role: MethodRole::Operator,
                     params: MethodParams::Schema(gen_schema::<CloneSnapshotRequest>(generator)),
                     result: Some(gen_schema::<Subvolume>(generator)),
@@ -2396,6 +2410,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                 Method {
                     name: "subvolume.clone",
                     desc: "Create a writable COW clone of a subvolume by taking a non-read-only bcachefs snapshot under a new name (O(1), shares data blocks with the source).",
+                    role: MethodRole::Operator,
+                    params: MethodParams::Schema(gen_schema::<CloneSubvolumeRequest>(generator)),
+                    result: Some(gen_schema::<Subvolume>(generator)),
+                },
+                Method {
+                    name: "subvolume.clone_atomic",
+                    desc: "Stage and publish a subvolume clone with replacement initial_properties. Interrupted reservations are preserved for explicit recovery.",
                     role: MethodRole::Operator,
                     params: MethodParams::Schema(gen_schema::<CloneSubvolumeRequest>(generator)),
                     result: Some(gen_schema::<Subvolume>(generator)),
