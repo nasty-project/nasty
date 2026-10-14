@@ -35,7 +35,6 @@ reqwest.workspace = true
 sha2 = "0.11"
 subtle = "2"
 bollard = "0.21"
-serde_yaml_ng = "0.10"
 # `compat` exposes `.compat()` to adapt a tokio AsyncRead to futures-io for
 # async_zip's entry writer (see guestshare.rs).
 tokio-util = { workspace = true, features = ["io", "compat"] }
