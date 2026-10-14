@@ -23,7 +23,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed("setproject --version || true")
 
     machine.succeed("bcachefs format --force /dev/vdb")
-    machine.succeed("mkdir /mnt/bcachefs && mount -t bcachefs /dev/vdb /mnt/bcachefs")
+    machine.succeed("mkdir -p /mnt/bcachefs && mount -t bcachefs /dev/vdb /mnt/bcachefs")
     machine.succeed("printf 'source:1001\\nclone:1002\\nsnapshot-clone:1003\\n' > /etc/projid")
 
     # Baseline: a writable clone accepts a distinct project ID.
