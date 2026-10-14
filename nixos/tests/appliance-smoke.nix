@@ -562,7 +562,7 @@ pkgs.testers.runNixOSTest {
     # Production packages and the public RPC surface contain no test switches.
     systemd.services.nasty-engine.environment.LD_PRELOAD = "${publicationFault}/lib/publication-fault.so";
     systemd.services.nasty-engine.path = lib.mkBefore [ publicationFaultTools ];
-    systemd.services.nasty-engine.unitConfig.StartLimitIntervalSec = 0;
+    systemd.services.nasty-engine.unitConfig.StartLimitIntervalSec = lib.mkForce 0;
 
     # Docker is needed for the apps-ingress assertion.  The engine's
     # `apps.enable` RPC starts docker.service itself, but the unit has
