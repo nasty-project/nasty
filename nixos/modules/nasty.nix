@@ -2373,7 +2373,7 @@ in {
           "github.com/caddy-dns/desec@v1.1.0"
           "github.com/caddy-dns/rfc2136@v1.0.0"
         ];
-        hash = "sha256-PqxwMYygC5keQk+AR+fuSM8nio2IhIXjvrBBBpdBPMQ=";
+        hash = "sha256-QOFmybe4L5ktPOQ4bU8MP2+WMvTOQYLq1BBaKFIsYCQ=";
       };
       globalConfig = ''
         https_port ${toString cfg.webui.port}
