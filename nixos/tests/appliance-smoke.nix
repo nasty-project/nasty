@@ -929,6 +929,11 @@ pkgs.testers.runNixOSTest {
 
     # Cleanup migrates abandoned update roots without deleting rollback
     # evidence or protected systems. Guard failures happen before pruning.
+    # The test driver boots a store closure directly, without an installed
+    # system profile. Supply missing installation links only in this VM;
+    # production cleanup must continue refusing indeterminate system roots.
+    machine.succeed("mkdir -p /nix/var/nix/profiles")
+    machine.succeed('for link in /run/booted-system /nix/var/nix/profiles/system; do if [ ! -e "$link" ] && [ ! -L "$link" ]; then ln -s "$(readlink -f /run/current-system)" "$link"; fi; done')
     machine.succeed("mkdir -m 0700 /var/lib/nasty/update.regres /var/lib/nasty/update.currnt")
     machine.succeed("touch /var/lib/nasty/update.regres/backup-evidence")
     machine.succeed("ln -s /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-abandoned /var/lib/nasty/update.regres/result")
