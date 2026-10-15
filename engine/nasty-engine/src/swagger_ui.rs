@@ -1,7 +1,7 @@
 //! Swagger UI docs page, served at `/api/docs`.
 //!
 //! Loads `swagger-ui-bundle.js` + `swagger-ui.css` (vendored at
-//! `vendor/swagger-ui/`, pinned to swagger-ui-dist v5.32.14) and points it
+//! `vendor/swagger-ui/`, pinned to swagger-ui-dist v5.33.3) and points it
 //! at the engine's own `/api/openapi.json`. Assets are embedded into the
 //! binary via `include_dir!` so the page works on air-gapped boxes —
 //! no CDN, no runtime file dependency.
