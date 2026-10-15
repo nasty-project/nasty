@@ -93,6 +93,7 @@
 			>
 				{#snippet tooltip()}
 					<Chart.Tooltip
+						labelKey="time"
 						labelFormatter={(v: Date) => v.toLocaleTimeString()}
 						indicator="line"
 					>

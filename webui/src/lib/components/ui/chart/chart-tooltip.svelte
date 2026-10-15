@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { cn, type WithElementRef, type WithoutChildren } from "$lib/utils.js";
 	import type { HTMLAttributes } from "svelte/elements";
-	import { getPayloadConfigFromPayload, useChart, type TooltipPayload } from "./chart-utils.js";
+	import { getPayloadConfigFromPayload, getTooltipLabelValue, useChart, type TooltipPayload } from "./chart-utils.js";
 	import { getChartContext, Tooltip as TooltipPrimitive } from "layerchart";
 	import type { Snippet } from "svelte";
 
@@ -53,22 +53,15 @@
 	const formattedLabel = $derived.by(() => {
 		if (hideLabel || !tooltipCtx.series?.length) return null;
 
-		const [item] = tooltipCtx.series;
-		const key = labelKey ?? item?.label ?? item?.key ?? "value";
-
-		const itemConfig = getPayloadConfigFromPayload(chart.config, item, key);
-
-		const value =
-			!labelKey && typeof label === "string"
-				? (chart.config[label as keyof typeof chart.config]?.label ?? label)
-				: (itemConfig?.label ?? item.label);
+		const value = getTooltipLabelValue(chart.config, tooltipCtx.series, tooltipCtx.data, labelKey, label);
 
 		if (value === undefined) return null;
 		if (!labelFormatter) return value;
 		return labelFormatter(value, tooltipCtx.series);
 	});
 
-	const nestLabel = $derived(tooltipCtx.series.length === 1 && indicator !== "dot");
+	// A custom value snippet does not render the nested label itself.
+	const nestLabel = $derived(tooltipCtx.series.length === 1 && indicator !== "dot" && !formatter);
 </script>
 
 {#snippet TooltipLabel()}
