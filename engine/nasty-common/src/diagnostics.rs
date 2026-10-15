@@ -35,6 +35,7 @@ fn recorder() -> &'static Mutex<Recorder> {
     })
 }
 tokio::task_local! { pub static REQUEST: (u64, &'static str); }
+tokio::task_local! { pub static RECEIVED: Instant; }
 pub fn next_sequence() -> u64 {
     let mut r = recorder().lock().unwrap();
     r.next += 1;
@@ -69,8 +70,15 @@ pub fn snapshot() -> (Vec<Timing>, u64, bool) {
     )
 }
 pub fn detailed(enabled: bool) {
+    detailed_for(if enabled {
+        Duration::from_secs(15 * 60)
+    } else {
+        Duration::ZERO
+    });
+}
+pub fn detailed_for(duration: Duration) {
     recorder().lock().unwrap().detailed_until =
-        enabled.then(|| Instant::now() + Duration::from_secs(15 * 60));
+        (!duration.is_zero()).then(|| Instant::now() + duration);
 }
 pub fn clear() {
     let mut r = recorder().lock().unwrap();

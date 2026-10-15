@@ -495,6 +495,18 @@ pub async fn handle_rpc_request(raw: &str, state: &AppState, session: &Session) 
     let t0 = std::time::Instant::now();
     let operation = crate::diagnostics::operation(&request.method);
     let sequence = nasty_common::diagnostics::next_sequence();
+    if !request.method.starts_with("system.diagnostics.")
+        && let Ok(elapsed) =
+            nasty_common::diagnostics::RECEIVED.try_with(|received| received.elapsed())
+    {
+        nasty_common::diagnostics::record(
+            sequence,
+            operation,
+            "received_to_backend",
+            elapsed,
+            "ok",
+        );
+    }
     let response = nasty_common::diagnostics::REQUEST
         .scope((sequence, operation), route(&request, state, session))
         .await;

@@ -464,6 +464,7 @@ let
   '';
 
   pythonWithWs = pkgs.python3.withPackages (ps: [ ps.websocket-client ]);
+  performanceDiagnosticsSmoke = pkgs.writeText "performance-diagnostics-smoke.py" (builtins.readFile ./performance-diagnostics-smoke.py);
 
   # Tiny Docker image used by the apps-ingress smoke step.  Boots
   # busybox httpd against a static `/www/index.html` whose contents
@@ -916,5 +917,14 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test -f /fs/smoke-pool/media/movies/readme.txt")
     machine.wait_for_unit("docker.service")
     machine.wait_until_succeeds("curl -ksS https://127.0.0.1/apps/smoke/ | grep -q nasty-smoke-test-OK")
+    # Capture only structured diagnostics on the OS disk, preserve across a
+    # service restart and full VM reboot, then explicitly delete the history.
+    machine.succeed("${pythonWithWs}/bin/python3 ${performanceDiagnosticsSmoke} enable")
+    machine.succeed("systemctl restart nasty-engine.service")
+    machine.wait_for_unit("nasty-engine.service")
+    machine.succeed("${pythonWithWs}/bin/python3 ${performanceDiagnosticsSmoke} verify")
+    machine.reboot()
+    machine.wait_for_unit("nasty-engine.service")
+    machine.succeed("${pythonWithWs}/bin/python3 ${performanceDiagnosticsSmoke} clear")
   '';
 }

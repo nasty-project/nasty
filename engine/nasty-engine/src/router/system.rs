@@ -637,10 +637,44 @@ pub(super) async fn try_route(
                 ),
             }
         }
+        "system.diagnostics.capture_reboot" => {
+            if !diagnostics_access(session) {
+                return Some(err(req, "Permission denied"));
+            }
+            match req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("enabled"))
+                .and_then(|v| v.as_bool())
+            {
+                Some(enabled) => match crate::diagnostics::persistence::capture(
+                    enabled,
+                    if enabled {
+                        Some(crate::diagnostics::current_report(state).await)
+                    } else {
+                        None
+                    },
+                )
+                .await
+                {
+                    Ok(()) => ok(req, serde_json::json!({"enabled": enabled})),
+                    Err(_) => err(req, "Could not save diagnostic capture configuration"),
+                },
+                None => Response::error(
+                    req.id.clone(),
+                    ErrorCode::InvalidParams,
+                    "enabled must be a boolean",
+                ),
+            }
+        }
         "system.diagnostics.clear" => {
             if !diagnostics_access(session) {
                 return Some(err(req, "Permission denied"));
             }
+            if crate::diagnostics::persistence::clear().await.is_err() {
+                return Some(err(req, "Could not clear retained diagnostics"));
+            }
+            nasty_common::diagnostics::detailed(false);
             nasty_common::diagnostics::clear();
             ok(req, serde_json::json!({"cleared": true}))
         }

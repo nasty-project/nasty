@@ -339,6 +339,8 @@ async fn main() -> anyhow::Result<()> {
         ]),
     });
 
+    diagnostics::persistence::initialize(state.clone()).await;
+
     // Restore state from previous session:
     // 1. Migrate and restore physical-device I/O scheduler overrides
     // 2. Restore networking and the persisted firewall policy
@@ -4617,6 +4619,7 @@ async fn handle_socket(
             msg = reader.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        let received = std::time::Instant::now();
                         last_seen = std::time::Instant::now();
                         let fresh_session = match state.auth.validate(&session.token, &client_ip).await {
                             Ok(fresh)
@@ -4628,7 +4631,7 @@ async fn handle_socket(
                                 break;
                             }
                         };
-                        let response = handle_rpc_request(&text, &state, &fresh_session).await;
+                        let response = nasty_common::diagnostics::RECEIVED.scope(received, handle_rpc_request(&text, &state, &fresh_session)).await;
                         if writer.send(Message::Text(response.into())).await.is_err() {
                             disconnect_reason = "write failed (socket closed)".to_string();
                             break;

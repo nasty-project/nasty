@@ -1,6 +1,7 @@
 //! Admin-only structured performance reports; never includes journal text.
 use serde_json::{Value, json};
 use std::sync::OnceLock;
+pub mod persistence;
 
 pub fn epoch() -> &'static str {
     static EPOCH: OnceLock<String> = OnceLock::new();
@@ -34,6 +35,11 @@ fn numeric_release(text: &str) -> String {
         .collect()
 }
 pub async fn report(state: &crate::AppState) -> Value {
+    let mut report = current_report(state).await;
+    report["persistent_capture"] = persistence::status().await;
+    report
+}
+pub async fn current_report(state: &crate::AppState) -> Value {
     let (timings, dropped, detailed) = nasty_common::diagnostics::snapshot();
     let boot = state.boot_status.snapshot().await;
     let memory = tokio::fs::read_to_string("/proc/meminfo")
@@ -74,7 +80,7 @@ pub async fn report(state: &crate::AppState) -> Value {
         "detailed_capture": detailed, "dropped_records": dropped, "timings": timings, "allowed_operations": operation_names(),
         "pool_context": nasty_common::diagnostics::pool_context().into_iter().enumerate().map(|(i, (size, devices))| json!({"pool": format!("pool-{}", i + 1), "total_bytes_bucket": size, "device_count_bucket": devices})).collect::<Vec<_>>(),
         "boot_phases": boot.phases.into_iter().map(|p| json!({"operation": p.name, "state": p.state, "duration_ms": p.duration_ms})).collect::<Vec<_>>(),
-        "limitations": ["In-memory history since engine start; bounded to 2048 timings.", "Subprocess stages require detailed capture; spawned tasks may not inherit request context.", "Backend duration excludes socket queueing; client minus backend time is not a direct lock/queue measurement.", "No additional filesystem scans, raw logs, pool identities, command arguments, or command output are collected.", "Pool buckets reflect the last ordinary filesystem listing, may be stale, and are limited to 128 pools. Labels do not persist between reports.", "Shutdown/reboot persistence is not yet captured."]})
+        "limitations": ["Current engine history is bounded to 2048 timings.", "Subprocess stages require detailed capture; spawned tasks may not inherit request context.", "Backend duration excludes socket queueing; client minus backend time is not a direct lock/queue measurement.", "No additional filesystem scans, raw logs, pool identities, command arguments, or command output are collected.", "Pool buckets reflect the last ordinary filesystem listing, may be stale, and are limited to 128 pools. Labels do not persist between reports.", "Opt-in reboot capture checkpoints every 5 seconds for 30 minutes; at most 3 engine sessions are retained for 24 hours. Abrupt loss may omit the last interval. Browser history does not survive reload; no pre-engine or maintenance-boot capture."]})
 }
 
 #[cfg(test)]
