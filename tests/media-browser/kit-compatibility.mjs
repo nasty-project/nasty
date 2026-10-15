@@ -2,28 +2,36 @@
 // This tests client behavior, not real engine authorization or storage operations.
 import assert from 'node:assert/strict';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { build } from '../../webui/node_modules/vite/dist/node/index.js';
 import { chromium, firefox } from 'playwright-core';
 import { startServer } from './server.mjs';
 
 const { values } = parseArgs({ options: {
   browser: { type: 'string', default: 'chromium' }, webui: { type: 'string' },
+  report: { type: 'string' },
 } });
 assert(['chromium', 'firefox'].includes(values.browser));
 const root = resolve(values.webui ?? fileURLToPath(new URL('../../webui/', import.meta.url)));
-const results = fileURLToPath(new URL(`./results/${values.webui ? 'baseline' : 'kit'}-${values.browser}/`, import.meta.url));
+// Use the checkout's own Vite instance: Kit 3's builder hooks are instance-local.
+const { build, createBuilder } = await import(pathToFileURL(`${root}/node_modules/vite/dist/node/index.js`).href);
+const kitVersion = JSON.parse(await readFile(`${root}/node_modules/@sveltejs/kit/package.json`, 'utf8')).version;
+const report = values.report ?? (values.webui ? 'baseline' : 'kit');
+assert(/^[a-z0-9-]+$/.test(report));
+const results = fileURLToPath(new URL(`./results/${report}-${values.browser}/`, import.meta.url));
 await mkdir(results, { recursive: true });
 const modules = new Set();
 const previousDirectory = process.cwd();
 process.chdir(root); // Kit 2's configuration loader uses cwd, unlike Kit 3.
-await build({ root, plugins: [{ name: 'qualify-runed-imports', generateBundle(_options, bundle) {
+const buildConfig = { root, plugins: [{ name: 'qualify-runed-imports', generateBundle(_options, bundle) {
   for (const chunk of Object.values(bundle)) {
     if (chunk.type === 'chunk') for (const id of Object.keys(chunk.modules)) modules.add(id);
   }
-} }] });
+} }] };
+// Kit 2 orchestrates its own builds in legacy hooks; Kit 3 uses buildApp.
+if (Number(kitVersion.split('.')[0]) >= 3) await (await createBuilder(buildConfig)).buildApp();
+else await build(buildConfig);
 process.chdir(previousDirectory);
 const runedModules = [...modules].filter(id => id.includes('/runed/'));
 assert(runedModules.length > 0, 'qualification must actually include runed');
@@ -51,10 +59,13 @@ const stats = {
 };
 
 async function scenario(name, role, run) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1100 }, locale: 'en-US', timezoneId: 'UTC' });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   const errors = [], errorReads = [], expectedAuthErrors = [], unexpected = [], calls = [], requests = [];
+  const historySamples = Array.from({ length: 8 }, (_, index) => ({
+    ts: Date.now() - (8 - index) * 10000, in_rate: 20 + index, out_rate: 10 + index,
+  }));
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => {
     if (message.type() !== 'error') return;
@@ -118,9 +129,7 @@ async function scenario(name, role, run) {
       let result;
       if (method === 'system.metrics.history') {
         const name = { cpu: 'cpu', mem: 'memory', net: 'fixture0', disk: 'fixture-disk' }[params.kind];
-        result = [{ name, samples: Array.from({ length: 8 }, (_, index) => ({
-          ts: Date.now() - (8 - index) * 10000, in_rate: 20 + index, out_rate: 10 + index,
-        })) }];
+        result = [{ name, samples: historySamples }];
       } else if (Object.hasOwn(answers, method)) result = answers[method];
       else {
         unexpected.push(`RPC ${method}`);
@@ -134,7 +143,7 @@ async function scenario(name, role, run) {
   const outcome = { name, passed: false };
   outcomes.push(outcome);
   try {
-    await run(page, calls, requests);
+    await run(page, calls, requests, historySamples);
     await Promise.all(errorReads);
     assert.deepEqual(unexpected, [], 'unexpected network/RPC access');
     assert.deepEqual(errors, [], 'browser errors');
@@ -240,7 +249,7 @@ try {
     assert.equal(calls.length, 0, 'public share must not make authenticated RPCs');
     assert(!requests.some(request => request.includes('/api/auth/')), 'public share must not probe auth');
   });
-  await scenario('chart-tooltips', 'admin', async page => {
+  await scenario('chart-tooltips', 'admin', async (page, _calls, _requests, samples) => {
     await page.goto(`${origin}/`);
     for (const subject of ['CPU usage history', 'Memory usage history', 'fixture0 network throughput history', 'fixture-disk disk throughput history']) {
       const chart = page.getByRole('img', { name: new RegExp(`^${subject}`) });
@@ -250,6 +259,9 @@ try {
       assert(box);
       await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.4);
       await page.locator('.lc-tooltip-container:visible span.font-mono').first().waitFor();
+      const label = await page.locator('.lc-tooltip-container:visible div.font-medium').first().textContent();
+      const times = await page.evaluate(samples => samples.map(sample => new Date(sample.ts).toLocaleTimeString()), samples);
+      assert(times.includes(label.trim()), `tooltip must display the selected sample time, got ${label}`);
       // Move off after the actual payload renders, not merely an empty container.
       await page.mouse.move(0, 0);
     }

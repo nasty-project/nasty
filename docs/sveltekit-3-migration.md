@@ -71,5 +71,11 @@ The test remains failing rather than suppressing a baseline failure. Resolve
 or explicitly disposition this separate regression before claiming complete
 component qualification. The PR stays draft under the user's hold decision.
 
+Independent fix: https://github.com/nasty-project/nasty/pull/991. With that
+patch applied in separate local qualification worktrees, all six scenarios
+pass on both Chromium and Firefox under both Kit 2 and Kit 3, including actual
+sample timestamp labels. The fix is not yet included in this migration branch;
+rebase after it merges and rerun qualification before revisiting readiness.
+
 No backend authentication, storage, networking, boot or deployment policy is
 changed by this frontend migration.

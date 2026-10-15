@@ -54,6 +54,11 @@ and screenshots are saved under `results/kit-<browser>/`.
 For an unchanged-main control, install dependencies in a separate checkout and
 append `--webui=/absolute/path/to/checkout/webui`; artifacts then go under
 `results/baseline-<browser>/`. Run these builds sequentially per checkout.
+Use `--report=fixed-main` (or another simple label) to retain control artifacts
+when testing a fix. Builds use the target checkout's own Vite, with Kit 2's
+legacy build hooks or Kit 3's full `buildApp` orchestration as appropriate.
+Tooltip checks require actual numeric payloads and the selected sample's time
+label for all four chart types, including single-series CPU/memory charts.
 Do not suppress failures just because the main control also fails.
 
 ## Real Android Firefox
