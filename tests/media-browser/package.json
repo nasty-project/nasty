@@ -6,6 +6,7 @@
     "fixtures": "node fixtures.mjs",
     "test": "node run.mjs",
     "test:unit": "node --test harness.test.mjs",
+    "test:kit": "node kit-compatibility.mjs",
     "test:android": "node run.mjs --browser=android-firefox"
   },
   "devDependencies": {
