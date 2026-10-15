@@ -47,6 +47,26 @@ export function getPayloadConfigFromPayload(
 	return configLabelKey in config ? config[configLabelKey] : config[key as keyof typeof config];
 }
 
+/** An explicit label key addresses the shared raw datum, not a series label. */
+export function getTooltipLabelValue(
+	config: ChartConfig,
+	series: TooltipPayload[],
+	data: unknown,
+	labelKey?: string,
+	label?: string,
+): unknown {
+	if (!series.length) return undefined;
+	if (labelKey) {
+		return typeof data === "object" && data !== null && Object.hasOwn(data, labelKey)
+			? (data as Record<string, unknown>)[labelKey]
+			: undefined;
+	}
+	if (typeof label === "string") return config[label]?.label ?? label;
+	const item = series[0];
+	const key = item.label ?? item.key ?? "value";
+	return getPayloadConfigFromPayload(config, item, key)?.label ?? item.label;
+}
+
 type ChartContextValue = {
 	config: ChartConfig;
 };
