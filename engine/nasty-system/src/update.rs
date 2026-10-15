@@ -323,6 +323,23 @@ fn render_wrapper_transaction_script(
 set -Eeuo pipefail
 export PATH="/run/current-system/sw/bin:$PATH"
 
+# Serialize new update transactions against nasty-cleanup. Older update units
+# are additionally guarded by cleanup's systemd/recovery-state checks.
+exec 9>/run/lock/nasty-update.lock
+if ! flock -n 9; then
+    echo "==> Another update or cleanup is running; update refused." >&2
+    exit 1
+fi
+# Spillover relocates temporary builds, not downloaded/installed store paths.
+STORE_FREE_KIB=$(df -Pk /nix/store | awk 'NR == 2 { print $4 }')
+if ! [[ "$STORE_FREE_KIB" =~ ^[0-9]+$ ]] || [ "$STORE_FREE_KIB" -lt 4194304 ]; then
+    echo "==> Not enough free space on the /nix/store filesystem (minimum headroom: 4 GiB)." >&2
+    echo "==> Run nasty-cleanup, inspect retained GC roots, or enlarge the OS/store filesystem." >&2
+    echo "==> Build-space override only moves temporary workspace; it does not move /nix/store." >&2
+    exit 1
+fi
+echo "==> /nix/store has $STORE_FREE_KIB KiB available. Large updates may require more than 4 GiB."
+
 LIVE_DIR="/etc/nixos"
 SYSTEM_PROFILE="/nix/var/nix/profiles/system"
 MARKER="@MARKER@"
@@ -385,6 +402,9 @@ dump_failure_diagnostics() {
 }
 
 cleanup() {
+# Release the indirect GC root explicitly, even if later workspace cleanup
+# fails. Only call this after success or completed rollback.
+    rm -f -- "$RESULT_LINK"
 @BD_CLEANUP@
     rm -rf "$WORK_DIR"
     rm -f -- "$0"
@@ -429,6 +449,8 @@ rollback_transaction() {
 #!/bin/bash
 set -euo pipefail
 export PATH="/run/current-system/sw/bin:$PATH"
+exec 9>/run/lock/nasty-update.lock
+flock 9
 NIXOS_INSTALL_BOOTLOADER=0 "$OLD_SYSTEM/bin/switch-to-configuration" switch
 if $TAILSCALE_REQUIRED; then
     echo "==> Waiting for the previous Tailscale connection to recover..."
@@ -450,6 +472,7 @@ if $TAILSCALE_REQUIRED; then
     fi
 fi
 rm -f "$MARKER"
+rm -f -- "$WORK_DIR/result"
 rm -rf "$WORK_DIR"
 rm -f -- "$UPDATE_SCRIPT"
 SIGNAL_ROLLBACK_EOF
@@ -4666,6 +4689,68 @@ proc /proc proc rw 0 0\n\
             "echo success",
             &super::build_dir_fragments(None),
         )
+    }
+
+    #[test]
+    fn update_store_preflight_checks_store_even_with_spillover() {
+        let script = rendered_transaction();
+        let header = script.split("LIVE_DIR=").next().unwrap();
+        for (free, success) in [("0", false), ("4194303", false), ("4194304", true)] {
+            let fixture = header
+                .replace("exec 9>/run/lock/nasty-update.lock", ":")
+                .replace("flock -n 9", ":")
+                .replace("$(df -Pk /nix/store | awk 'NR == 2 { print $4 }')", free);
+            let result = std::process::Command::new("bash")
+                .args(["-c", &fixture])
+                .output()
+                .unwrap();
+            assert_eq!(result.status.success(), success);
+            if !success {
+                let error = String::from_utf8_lossy(&result.stderr);
+                assert!(error.contains("/nix/store"));
+                assert!(error.contains("Build-space override only moves temporary workspace"));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_update_cleanup_unlinks_result_before_removing_workspace() {
+        let script = rendered_transaction();
+        let body = script
+            .split("cleanup() {")
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        assert!(
+            body.find("rm -f -- \"$RESULT_LINK\"").unwrap()
+                < body.find("rm -rf \"$WORK_DIR\"").unwrap()
+        );
+        let dir =
+            std::env::temp_dir().join(format!("nasty-update-cleanup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let work = dir.join("work");
+        std::fs::create_dir(&work).unwrap();
+        let result = work.join("result");
+        std::os::unix::fs::symlink("/nix/store/not-a-real-system", &result).unwrap();
+        let fixture_script = dir.join("fixture-script");
+        let outcome = std::process::Command::new("bash")
+            .args(["-c", body])
+            .arg(&fixture_script)
+            .env("WORK_DIR", &work)
+            .env("RESULT_LINK", &result)
+            .output()
+            .unwrap();
+        assert!(outcome.status.success());
+        assert!(!work.exists());
+        std::fs::remove_dir(dir).unwrap();
+        // Both completed rollback and success use cleanup; interrupted
+        // rollback defers root removal until its detached activation succeeds.
+        assert!(script.contains("elif $rollback_ok; then\n        cleanup"));
+        assert!(script.contains("exec 9>/run/lock/nasty-update.lock\nflock 9"));
+        assert!(script.contains("rm -f -- \"$WORK_DIR/result\""));
     }
 
     #[test]

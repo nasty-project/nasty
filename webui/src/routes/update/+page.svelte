@@ -986,7 +986,7 @@
 								<div class="font-medium">Recovery: build space override</div>
 								<div class="text-xs text-muted-foreground">
 									{#if buildDir.path}
-										Spillover active — sandbox lives on <code class="font-mono">{buildDir.resolved}</code>.
+									Spillover active — sandbox lives on <code class="font-mono">{buildDir.resolved}</code>.
 									{:else}
 										Last-resort knob. Only useful when upgrades fail with ENOSPC on a tight rootfs.
 									{/if}
@@ -998,6 +998,7 @@
 							<div class="space-y-3 border-t border-border/60 p-4">
 								<p class="text-xs text-muted-foreground">
 									Normally the Nix sandbox lives on <code class="font-mono">/tmp</code> (tmpfs in RAM, spilling to root) — that's where it belongs. <strong>Don't change this unless upgrades are failing with ENOSPC.</strong> When enabled, the engine runs the rebuild in single-user mode (<code class="font-mono">NIX_REMOTE=local</code>) with <code class="font-mono">--option build-dir &lt;pool&gt;/.nasty-nix-build</code> so the sandbox spills onto the chosen bcachefs pool. Trade-off: build is slower than tmpfs and writes wear on the pool's SSDs during every upgrade.
+									<strong>The override does not relocate <code class="font-mono">/nix/store</code>.</strong> Downloaded packages and installed build outputs still need space on the store filesystem. Updates require at least 4 GiB of free store headroom before starting; large updates can need more. Run <code class="font-mono">nasty-cleanup</code> if old update roots or generations are retaining space.
 								</p>
 								<div class="flex flex-col gap-3 sm:flex-row sm:items-center">
 									<select

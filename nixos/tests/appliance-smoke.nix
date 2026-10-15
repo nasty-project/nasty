@@ -926,5 +926,29 @@ pkgs.testers.runNixOSTest {
     machine.reboot()
     machine.wait_for_unit("nasty-engine.service")
     machine.succeed("${pythonWithWs}/bin/python3 ${performanceDiagnosticsSmoke} clear")
+
+    # Cleanup migrates abandoned update roots without deleting rollback
+    # evidence or protected systems. Guard failures happen before pruning.
+    # The test driver boots a store closure directly, without an installed
+    # system profile. Supply missing installation links only in this VM;
+    # production cleanup must continue refusing indeterminate system roots.
+    machine.succeed("mkdir -p /nix/var/nix/profiles")
+    machine.succeed('for link in /run/booted-system /nix/var/nix/profiles/system; do if [ ! -e "$link" ] && [ ! -L "$link" ]; then ln -s "$(readlink -f /run/current-system)" "$link"; fi; done')
+    machine.succeed("mkdir -m 0700 /var/lib/nasty/update.regres /var/lib/nasty/update.currnt")
+    machine.succeed("touch /var/lib/nasty/update.regres/backup-evidence")
+    machine.succeed("ln -s /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-abandoned /var/lib/nasty/update.regres/result")
+    machine.succeed("ln -s $(readlink -f /run/current-system) /var/lib/nasty/update.currnt/result")
+    machine.fail("nasty-cleanup invalid")
+    machine.succeed("test -L /var/lib/nasty/update.regres/result")
+    machine.fail("flock /run/lock/nasty-update.lock nasty-cleanup all")
+    machine.succeed("touch /run/nasty-wrapper-update-in-progress")
+    machine.fail("nasty-cleanup all")
+    machine.succeed("test -L /var/lib/nasty/update.regres/result")
+    machine.succeed("rm /run/nasty-wrapper-update-in-progress")
+    machine.succeed("flock /run/lock/nasty-update.lock ${pkgs.python3}/bin/python3 ${../scripts/update-roots.py}")
+    machine.fail("test -L /var/lib/nasty/update.regres/result")
+    machine.succeed("test -f /var/lib/nasty/update.regres/backup-evidence")
+    machine.succeed("test -L /var/lib/nasty/update.currnt/result")
+    machine.wait_for_unit("nasty-engine.service")
   '';
 }

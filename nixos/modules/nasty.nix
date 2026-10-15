@@ -882,6 +882,22 @@ in {
 
       (writeShellScriptBin "nasty-cleanup" ''
         set -euo pipefail
+        if [ "$(id -u)" -ne 0 ]; then
+          echo "Run nasty-cleanup as root." >&2
+          exit 1
+        fi
+        if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != all ]; }; then
+          echo "Usage: nasty-cleanup [all]" >&2
+          exit 2
+        fi
+        exec 9>/run/lock/nasty-update.lock
+        if ! ${pkgs.util-linux}/bin/flock -n 9; then
+          echo "An update or cleanup is running; cleanup refused." >&2
+          exit 1
+        fi
+        # Refuse active legacy units and recovery markers too. Only unlink
+        # unprotected, engine-owned update result roots; never erase backups.
+        ${pkgs.python3}/bin/python3 ${../scripts/update-roots.py} --check
         ${pkgs.coreutils}/bin/env -u POSIXLY_CORRECT \
           ${pkgs.util-linux}/bin/renice -n 10 -p $$ >/dev/null
         ${pkgs.util-linux}/bin/ionice -c2 -n7 -p $$
@@ -905,6 +921,9 @@ in {
             exit 2
             ;;
         esac
+        # Inventory surviving profile generations after pruning so result
+        # roots for removed generations do not keep those closures alive.
+        ${pkgs.python3}/bin/python3 ${../scripts/update-roots.py}
         echo "==> Running garbage collection..."
         nix-collect-garbage 2>&1
         # Re-sync /boot to match the surviving generations: GC removed
@@ -955,6 +974,11 @@ in {
         fi
 
         echo "==> Rebuilding NASty from /etc/nixos..."
+        exec 9>/run/lock/nasty-update.lock
+        if ! ${pkgs.util-linux}/bin/flock -n 9; then
+          echo "An update or cleanup is running; rebuild refused." >&2
+          exit 1
+        fi
         nixos-rebuild switch --flake /etc/nixos#nasty
         NASTY_REV=$(${pkgs.jq}/bin/jq -r '.nodes["nasty"].locked.rev // empty' /etc/nixos/flake.lock 2>/dev/null || true)
         [ -n "$NASTY_REV" ] && echo "''${NASTY_REV:0:7}" > /var/lib/nasty/version
