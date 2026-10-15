@@ -49,6 +49,9 @@ jobs:
       - name: Production UI and runed import qualification
         run: npm run test:kit -- --browser=${{ matrix.browser }}
         working-directory: tests/media-browser
+      - name: Type checks remain clean after production output exists
+        run: npm run check
+        working-directory: webui
       - uses: actions/upload-artifact@v7
         if: always()
         with:

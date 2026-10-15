@@ -15,6 +15,8 @@ This migration is **paused, not qualified for merge** as of 2026-10-15.
 - Replace removed `$app/stores` imports with reactive `$app/state` reads.
 - Replace launcher navigation's `keepFocus`/`noScroll` pair with `reset: false`.
 - Declare Kit's Node >=22.17 minimum and refresh the Nix npm dependency hash.
+- Explicitly scope TypeScript checks to source/config files so a preceding
+  static build does not cause generated minified JavaScript to be type-checked.
 
 ## Declared support versus runtime compatibility
 
@@ -63,19 +65,20 @@ dialog Tab confinement/Escape/focus restoration, and real chart tooltip payloads
 All backend data is synthetic; unexpected network/RPC calls fail. These are
 not tests of the engine's authorization enforcement or deployed Caddy routing.
 
-The tooltip scenario exposes **`toLocaleTimeString is not a function` on both
-unchanged main and Kit 3**, in Chromium and Firefox. The chart wrapper supplies
-a label that our IoChart tooltip formatter assumes is a Date. This is a
+The tooltip scenario exposed **`toLocaleTimeString is not a function` on both
+unchanged main and Kit 3**, in Chromium and Firefox. The chart wrapper supplied
+a label that our IoChart tooltip formatter assumed was a Date. This was a
 pre-existing chart integration bug, not demonstrated runed/Kit 3 breakage.
-The test remains failing rather than suppressing a baseline failure. Resolve
-or explicitly disposition this separate regression before claiming complete
-component qualification. The PR stays draft under the user's hold decision.
 
-Independent fix: https://github.com/nasty-project/nasty/pull/991. With that
-patch applied in separate local qualification worktrees, all six scenarios
-pass on both Chromium and Firefox under both Kit 2 and Kit 3, including actual
-sample timestamp labels. The fix is not yet included in this migration branch;
-rebase after it merges and rerun qualification before revisiting readiness.
+Independent fix https://github.com/nasty-project/nasty/pull/991 is now merged
+and included through a rebase onto main `3ce774b9`. With that patch applied in
+separate local qualification worktrees, all six scenarios passed on both
+Chromium and Firefox under both Kit 2 and Kit 3, including actual sample
+timestamp labels. Fresh local qualification on the rebased branch also passes
+all six scenarios in Chromium and Firefox, all 393 WebUI unit tests, and type
+checks both before and after production builds. Fresh GitHub checks are still
+required; no test failure is suppressed. The PR stays draft pending the user's decision
+on the declared-peer compatibility caveat, even if all checks pass.
 
 No backend authentication, storage, networking, boot or deployment policy is
 changed by this frontend migration.
