@@ -52,15 +52,13 @@ jobs:
       # runs: when only one Rust crate changes, only that crate +
       # downstream rebuild, the rest substitutes from Actions cache.
       # Realistic win on this job: ~17 min cold → ~5-8 min warm.
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
         with:
           # FlakeHub cache requires a registration we don't have; the
           # GHA store-path cache (the actual point of this action) works
-          # without it. Without `use-flakehub: false` v14 logs a
+          # without it. Without `use-flakehub: false` the action logs a
           # "FlakeHub registration required" error annotation on every
-          # run even though the GHA cache is succeeding. v14 also
-          # upgrades the action's runtime from Node 20 (deprecated in
-          # the runner, removed September 2026) to Node 24.
+          # run even though the GHA cache is succeeding.
           use-flakehub: false
 
       # Read-only Cachix substituter: pull cached deps to speed cold
