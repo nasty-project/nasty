@@ -87,6 +87,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
+      - name: Allow repart image user namespaces on the disposable runner
+        run: |
+          # Ubuntu AppArmor otherwise denies repart's unshare --map-root-user.
+          # This affects only the ephemeral test runner, never an appliance.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare --user --map-root-user true
       - name: Run pinned upstream test with appliance stable nixpkgs
         run: |
           nix build --impure --no-link -L --expr '

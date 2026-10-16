@@ -44,6 +44,9 @@ The upstream test image uses `image.repart.enable`, which stable 26.05 lacks.
 The test-only adapter accepts only `true`: stable's repart module already
 builds the image unconditionally when imported. Upstream test scripts, image
 contents, signature checks and production modules are not patched.
+The ephemeral Ubuntu OVMF runners allow unprivileged user namespaces for
+repart's image builder and check `unshare --map-root-user` before building.
+This runner-only AppArmor adjustment is not applied to any appliance.
 
 These checks do not qualify physical firmware, an existing appliance's keys,
 TPM-bound pool unlock, power-loss recovery or real-hardware upgrade/rollback.
