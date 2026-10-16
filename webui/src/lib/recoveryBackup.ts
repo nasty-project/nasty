@@ -3,6 +3,7 @@ export const CORE_RECOVERY_SOURCES = [
 	{ path: '/etc/nixos', label: 'installed system and hardware configuration' },
 	{ path: '/var/lib/caddy', label: 'TLS certificates and local CA identity' },
 	{ path: '/var/lib/systemd/credential.secret', label: 'host key for encrypted credentials' },
+	{ path: '/etc/machine-id', label: 'source machine identity for host credential recovery' },
 ] as const;
 
 export const CORE_RECOVERY_PATHS = CORE_RECOVERY_SOURCES.map(source => source.path);
