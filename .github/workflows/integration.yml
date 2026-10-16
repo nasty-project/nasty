@@ -120,6 +120,10 @@ jobs:
             --no-link -L
           nix build .#packages.x86_64-linux.bcachefs-tools \
             --no-link -L
+          nix build .#packages.x86_64-linux.tailscale \
+            --out-link result-tailscale -L
+          ./result-tailscale/bin/tailscale version
+          ./result-tailscale/bin/tailscaled --version
 
   aarch64-cache-push:
     name: Build & push aarch64 packages to Cachix
@@ -159,3 +163,7 @@ jobs:
             --no-link -L
           nix build .#packages.aarch64-linux.bcachefs-tools \
             --no-link -L
+          nix build .#packages.aarch64-linux.tailscale \
+            --out-link result-tailscale -L
+          ./result-tailscale/bin/tailscale version
+          ./result-tailscale/bin/tailscaled --version

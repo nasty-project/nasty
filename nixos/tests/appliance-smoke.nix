@@ -8,7 +8,7 @@
 # (#32) which cover the wire shape on either side of this boundary; this
 # proves the engine actually wires up to honour both.
 
-{ pkgs, nasty-engine, nasty-webui, nasty-bcachefs-tools }:
+{ pkgs, nasty-engine, nasty-webui, nasty-bcachefs-tools, nasty-tailscale }:
 
 let
   # Self-contained Python script run inside the guest. Putting it in its own
@@ -497,7 +497,7 @@ pkgs.testers.runNixOSTest {
       ../modules/nasty.nix
     ];
     _module.args = {
-      inherit nasty-engine nasty-webui nasty-bcachefs-tools;
+      inherit nasty-engine nasty-webui nasty-bcachefs-tools nasty-tailscale;
       nasty-version = "test";
     };
 
@@ -513,6 +513,7 @@ pkgs.testers.runNixOSTest {
       iscsi.enable = false;
       nvmeof.enable = false;
       watchdog.enable = true;
+      tailscale.enable = true;
     };
 
     # Docker is needed for the apps-ingress assertion.  The engine's
@@ -522,6 +523,9 @@ pkgs.testers.runNixOSTest {
     virtualisation.docker.enable = true;
     systemd.services.docker.wantedBy = lib.mkForce [ ];
     systemd.sockets.docker.wantedBy = lib.mkForce [ ];
+
+    # Exercise the appliance-selected daemon without authentication or log uploads.
+    systemd.services.nasty-tailscale.environment.TS_NO_LOGS_NO_SUPPORT = "true";
 
     # Stage the smoke-app image tarball into the VM's Nix store so
     # `docker load` finds it without ever needing network access.
@@ -600,6 +604,31 @@ pkgs.testers.runNixOSTest {
     )
     machine.wait_for_unit("nasty-engine.service")
     machine.wait_for_unit("sshd.service")
+    with subtest("selected Tailscale package preserves offline preferences and management networking"):
+      machine.fail("systemctl is-active --quiet nasty-tailscale.service")
+      machine.succeed("test ! -e /etc/systemd/system/multi-user.target.wants/nasty-tailscale.service")
+      tailscale_version = json.loads(machine.succeed("tailscale version --json"))
+      assert tailscale_version["short"] == "${nasty-tailscale.version}", tailscale_version
+      routes_before = json.loads(machine.succeed("ip -j -4 route show default"))
+      resolver_before = machine.succeed("cat /etc/resolv.conf")
+      machine.succeed("systemctl start nasty-tailscale.service")
+      machine.wait_for_unit("nasty-tailscale.service")
+      machine.wait_until_succeeds("test -S /run/tailscale/tailscaled.sock")
+      status = json.loads(machine.succeed("tailscale --socket=/run/tailscale/tailscaled.sock status --json"))
+      assert status["BackendState"] == "NeedsLogin", status
+      assert not status.get("TailscaleIPs"), status
+      for accept_routes in (True, False):
+        flag = "true" if accept_routes else "false"
+        machine.succeed(f"tailscale --socket=/run/tailscale/tailscaled.sock set --accept-routes={flag}")
+        machine.succeed("systemctl restart nasty-tailscale.service")
+        machine.wait_until_succeeds("tailscale --socket=/run/tailscale/tailscaled.sock debug prefs")
+        prefs = json.loads(machine.succeed("tailscale --socket=/run/tailscale/tailscaled.sock debug prefs"))
+        assert prefs["RouteAll"] is accept_routes, prefs
+      machine.succeed("systemctl stop nasty-tailscale.service")
+      machine.fail("systemctl is-active --quiet nasty-tailscale.service")
+      assert json.loads(machine.succeed("ip -j -4 route show default")) == routes_before
+      assert machine.succeed("cat /etc/resolv.conf") == resolver_before
+      machine.succeed("systemctl is-active --quiet sshd.service nasty-engine.service")
     machine.succeed("test \"$(systemctl show nasty-engine.service -p Nice --value)\" = -5")
     machine.succeed(
         "test \"$(systemctl show nasty-engine.service -p TimeoutStartUSec --value)\" = infinity"
