@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { theme } from '$lib/theme.svelte';
 	import { formatBytes } from '$lib/format';
 	import {
@@ -23,7 +23,7 @@
 	import logoDark from '$lib/assets/nasty-white.svg';
 	import { ArrowLeft, ChevronRight, Download, File, FolderOpen, Home, Lock } from '@lucide/svelte';
 
-	const token = $derived($page.params.token ?? '');
+	const token = $derived(page.params.token ?? '');
 
 	let loading = $state(true);
 	let meta = $state<PublicShareMeta | null>(null);

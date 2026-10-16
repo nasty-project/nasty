@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { getClient } from '$lib/client';
 	import { withToast } from '$lib/toast.svelte';
 	import { confirm } from '$lib/confirm.svelte';
@@ -619,7 +619,7 @@
 		backupStatePoll = setInterval(refreshBackupState, 15_000);
 
 		// Auto-open create form with config preset from ?create=config
-		if ($page.url.searchParams.get('create') === 'config' && isAdmin) {
+		if (page.url.searchParams.get('create') === 'config' && isAdmin) {
 			showCreate = true;
 			newName = 'NASty System Recovery';
 			newSources = recoverySources.map(source => source.path).join(', ');

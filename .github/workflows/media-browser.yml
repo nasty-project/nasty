@@ -27,6 +27,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  kit-compatibility:
+    name: UI compatibility (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - run: npm ci --legacy-peer-deps
+        working-directory: webui
+      - run: npm ci
+        working-directory: tests/media-browser
+      - run: npx playwright-core install --with-deps ${{ matrix.browser }}
+        working-directory: tests/media-browser
+      - name: Production UI and runed import qualification
+        run: npm run test:kit -- --browser=${{ matrix.browser }}
+        working-directory: tests/media-browser
+      - name: Type checks remain clean after production output exists
+        run: npm run check
+        working-directory: webui
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: kit-compatibility-${{ matrix.browser }}
+          path: tests/media-browser/results/kit-${{ matrix.browser }}/
+
   desktop:
     name: Media playback (${{ matrix.browser }})
     runs-on: ubuntu-latest

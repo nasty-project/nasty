@@ -35,6 +35,32 @@ fixtures default to 90 seconds. Use `CHROME_BIN` for an installed Chromium binar
 or `HEADED=1` for a visible desktop browser. Fixtures and results stay in this
 directory's ignored `artifacts/` and `results/` directories.
 
+## SvelteKit / component compatibility
+
+`npm --prefix tests/media-browser run test:kit -- --browser=chromium` (or
+`--browser=firefox`) rebuilds the production UI and checks its emitted module
+graph for accidental `runed/kit` / `useSearchParams` inclusion. It then exercises
+launcher group/history/focus navigation, role redirects, login labels, public
+share token changes, dashboard charts/tooltips and dialog keyboard/focus behavior.
+Install WebUI dependencies and the selected Playwright browser first; no media
+fixtures or live NAS are required.
+
+All backend responses are synthetic. Unexpected HTTP/RPC access and external
+requests fail; no mutation is forwarded. The document response uses the built
+SPA HTML. Thus this qualifies client behavior, not real authentication, Caddy
+fallback routing or storage safety. JSON summaries, module IDs, failure HTML
+and screenshots are saved under `results/kit-<browser>/`.
+
+For an unchanged-main control, install dependencies in a separate checkout and
+append `--webui=/absolute/path/to/checkout/webui`; artifacts then go under
+`results/baseline-<browser>/`. Run these builds sequentially per checkout.
+Use `--report=fixed-main` (or another simple label) to retain control artifacts
+when testing a fix. Builds use the target checkout's own Vite, with Kit 2's
+legacy build hooks or Kit 3's full `buildApp` orchestration as appropriate.
+Tooltip checks require actual numeric payloads and the selected sample's time
+label for all four chart types, including single-series CPU/memory charts.
+Do not suppress failures just because the main control also fails.
+
 ## Real Android Firefox
 
 Desktop mobile emulation does **not** run GeckoView or Android's media/audio

@@ -17,8 +17,8 @@ export function byteRange(header, size) {
   return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start <= end && start < size ? [start, end] : null;
 }
 
-export async function startServer({ host = '127.0.0.1', port = 0, delayMs = 0 } = {}) {
-  await stat(resolve(build, 'index.html'));
+export async function startServer({ host = '127.0.0.1', port = 0, delayMs = 0, buildDir = build } = {}) {
+  await stat(resolve(buildDir, 'index.html'));
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -53,8 +53,8 @@ export async function startServer({ host = '127.0.0.1', port = 0, delayMs = 0 } 
         return;
       }
       if (url.pathname.startsWith('/api/')) { res.writeHead(404); res.end(); return; }
-      const file = url.pathname.startsWith('/share/') ? resolve(build, 'index.html') : resolve(build, `.${decodeURIComponent(url.pathname)}`);
-      if (!file.startsWith(build + sep)) { res.writeHead(404); res.end(); return; }
+      const file = url.pathname.startsWith('/share/') ? resolve(buildDir, 'index.html') : resolve(buildDir, `.${decodeURIComponent(url.pathname)}`);
+      if (!file.startsWith(buildDir + sep)) { res.writeHead(404); res.end(); return; }
       const content = await readFile(file);
       res.writeHead(200, { 'Content-Security-Policy': csp, 'Content-Type': {
         '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png'

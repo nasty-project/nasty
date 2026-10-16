@@ -1,7 +1,7 @@
 <script lang="ts">
 	import MaintenanceReboot from '$lib/components/MaintenanceReboot.svelte';
 	import { onMount, setContext } from 'svelte';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { getClient, resetClient } from '$lib/client';
 	import { EngineUnavailableError, login as doLogin, logout as doLogout, loginWebauthn as doLoginWebauthn } from '$lib/auth';
 	import { pollEngineUntilReady, waitingBootStatus } from '$lib/engine-startup';
@@ -575,9 +575,9 @@
 	// NASty account. We skip the auth probe + WebSocket entirely and render
 	// the page bare (no sidebar, no login gate) — it talks to the engine
 	// only through the unauthenticated /api/public/share/* endpoints.
-	const isPublicShare = $derived($page.url.pathname.startsWith('/share/'));
+	const isPublicShare = $derived(page.url.pathname.startsWith('/share/'));
 	const isPortalRoute = $derived(
-		$page.url.pathname === '/portal' || $page.url.pathname.startsWith('/portal/')
+		page.url.pathname === '/portal' || page.url.pathname.startsWith('/portal/')
 	);
 
 	const onReconnect = async () => {
@@ -711,7 +711,7 @@
 			const client = getClient();
 			bindClientLifecycle(client);
 			authInfo = await client.connect();
-			const destination = redirectForRole(authInfo.role, $page.url.pathname);
+			const destination = redirectForRole(authInfo.role, page.url.pathname);
 			if (destination) await goto(destination, { replaceState: true });
 			connected = true;
 			showLogin = false;
@@ -921,7 +921,7 @@
 	}));
 	const roleRedirect = $derived.by(() => {
 		const session = authInfo as AuthResult | null;
-		return session && !isPublicShare ? redirectForRole(session.role, $page.url.pathname) : null;
+		return session && !isPublicShare ? redirectForRole(session.role, page.url.pathname) : null;
 	});
 	$effect(() => {
 		if (connected && roleRedirect) void goto(roleRedirect, { replaceState: true });
@@ -939,7 +939,7 @@
 		if (typeof localStorage !== 'undefined') localStorage.setItem(NAV_MODE_KEY, m);
 	}
 
-	const currentNav = $derived(currentNavigationItem($page.url.pathname, nav));
+	const currentNav = $derived(currentNavigationItem(page.url.pathname, nav));
 
 	// Track which groups are expanded — auto-expand based on active route
 	const SIDEBAR_GROUPS_KEY = 'nasty:sidebar_groups';
@@ -967,7 +967,7 @@
 		}
 	}
 
-	const activeGroup = $derived(activeNavigationGroup($page.url.pathname, nav));
+	const activeGroup = $derived(activeNavigationGroup(page.url.pathname, nav));
 	const launcherGroup = $derived.by((): NavGroup | null => {
 		const entry = nav.find((candidate) => candidate.id === activeGroup);
 		return entry && isNavGroup(entry) ? entry : null;
@@ -1235,7 +1235,7 @@
 
 			<!-- Nav — scrollable -->
 			{#if uiPrefs.menuStyle === 'launcher'}
-				<LauncherSidebarNav collapsed={sidebarCollapsed} active={$page.url.pathname === '/menu'} group={launcherGroup} />
+						<LauncherSidebarNav collapsed={sidebarCollapsed} active={page.url.pathname === '/menu'} group={launcherGroup} />
 			{:else if uiPrefs.menuStyle === 'icons'}
 				<IconSidebarNav
 					entries={renderNav}
