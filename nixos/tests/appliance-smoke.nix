@@ -605,7 +605,7 @@ pkgs.testers.runNixOSTest {
     )
     machine.wait_for_unit("nasty-engine.service")
     machine.wait_for_unit("sshd.service")
-    with subtest("selected Tailscale package preserves offline preferences and management networking"):
+    with subtest("selected Tailscale package supports offline preferences and preserves management networking"):
       machine.fail("systemctl is-active --quiet nasty-tailscale.service")
       machine.succeed("test ! -e /etc/systemd/system/multi-user.target.wants/nasty-tailscale.service")
       tailscale_version = json.loads(machine.succeed("tailscale version --json"))
@@ -621,10 +621,15 @@ pkgs.testers.runNixOSTest {
       for accept_routes in (True, False):
         flag = "true" if accept_routes else "false"
         machine.succeed(f"tailscale --socket=/run/tailscale/tailscaled.sock set --accept-routes={flag}")
-        machine.succeed("systemctl restart nasty-tailscale.service")
-        machine.wait_until_succeeds("tailscale --socket=/run/tailscale/tailscaled.sock debug prefs")
         prefs = json.loads(machine.succeed("tailscale --socket=/run/tailscale/tailscaled.sock debug prefs"))
         assert prefs["RouteAll"] is accept_routes, prefs
+      # Without a logged-in profile, upstream keeps preferences in memory only.
+      # Verify restart/status separately; this does not qualify authenticated-state persistence.
+      machine.succeed("systemctl restart nasty-tailscale.service")
+      machine.wait_until_succeeds("tailscale --socket=/run/tailscale/tailscaled.sock debug prefs")
+      status = json.loads(machine.succeed("tailscale --socket=/run/tailscale/tailscaled.sock status --json"))
+      assert status["BackendState"] == "NeedsLogin", status
+      assert not status.get("TailscaleIPs"), status
       machine.succeed("systemctl stop nasty-tailscale.service")
       machine.fail("systemctl is-active --quiet nasty-tailscale.service")
       assert json.loads(machine.succeed("ip -j -4 route show default")) == routes_before
