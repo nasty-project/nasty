@@ -497,7 +497,7 @@ pkgs.testers.runNixOSTest {
       ../modules/nasty.nix
     ];
     _module.args = {
-      inherit nasty-engine nasty-webui nasty-bcachefs-tools nasty-tailscale;
+      inherit nasty-engine nasty-webui nasty-bcachefs-tools;
       nasty-version = "test";
     };
 
@@ -514,6 +514,7 @@ pkgs.testers.runNixOSTest {
       nvmeof.enable = false;
       watchdog.enable = true;
       tailscale.enable = true;
+      tailscale.package = nasty-tailscale;
     };
 
     # Docker is needed for the apps-ingress assertion.  The engine's
