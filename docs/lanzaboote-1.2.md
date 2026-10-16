@@ -40,6 +40,11 @@ pinned upstream OVMF tests against NASty's stable nixpkgs: signed boot, test-key
 generation/enrollment, tampered kernel/initrd rejection, and Measured Boot.
 Only disposable VM keys, firmware variables, disks and TPM state are used.
 
+The upstream test image uses `image.repart.enable`, which stable 26.05 lacks.
+The test-only adapter accepts only `true`: stable's repart module already
+builds the image unconditionally when imported. Upstream test scripts, image
+contents, signature checks and production modules are not patched.
+
 These checks do not qualify physical firmware, an existing appliance's keys,
 TPM-bound pool unlock, power-loss recovery or real-hardware upgrade/rollback.
 Do not enroll keys, reseal storage, activate a system or reboot a live appliance

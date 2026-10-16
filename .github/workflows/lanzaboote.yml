@@ -6,6 +6,7 @@ on:
       - 'flake.nix'
       - 'flake.lock'
       - 'nixos/modules/nasty-secure-boot.nix'
+      - 'nixos/tests/lanzaboote-qualification.nix'
       - '.github/workflows/lanzaboote.yml'
   workflow_dispatch:
 
@@ -91,5 +92,9 @@ jobs:
           nix build --impure --no-link -L --expr '
             let
               flake = builtins.getFlake (toString ./.);
-            in builtins.getAttr (builtins.getEnv "LANZABOOTE_TEST") flake.inputs.lanzaboote.checks.x86_64-linux
+            in import ./nixos/tests/lanzaboote-qualification.nix {
+              pkgs = flake.inputs.nixpkgs.legacyPackages.x86_64-linux;
+              lanzaboote = flake.inputs.lanzaboote;
+              test = builtins.getEnv "LANZABOOTE_TEST";
+            }
           '
