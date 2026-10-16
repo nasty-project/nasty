@@ -35,7 +35,8 @@ in pkgs.testers.runNixOSTest {
       environment.systemPackages = [ pkgs.rustic pkgs.openssl ];
     };
     replacement = { ... }: {
-      environment.systemPackages = [ pkgs.rustic pkgs.openssl pkgs.util-linux pkgs.diffutils ];
+      environment.systemPackages = [ pkgs.rustic pkgs.openssl pkgs.util-linux pkgs.diffutils
+        (import ../packages/recovery.nix { inherit pkgs; }) ];
     };
   };
 
@@ -112,9 +113,38 @@ in pkgs.testers.runNixOSTest {
       assert replacement.succeed("cat /etc/machine-id") == fresh_machine_id
 
     with subtest("staging leaves fresh management and boot configuration unchanged"):
+      command = replacement.succeed("nasty-recovery stage --source /var/lib/recovery-test/staged")
+      staged = json.loads(command)
+      assert staged["status"] == "staged", staged
+      inspected = json.loads(replacement.succeed("nasty-recovery inspect " + staged["stage_id"]))
+      assert inspected["import_supported"] is False, inspected
+      assert inspected["coverage"]["source_machine_identity"] == "present", inspected
+      assert inspected["coverage"]["host_credential_key"] == "present", inspected
+      replacement.succeed("test \"$(stat -c %a /var/lib/nasty-recovery)\" = 700")
+      replacement.succeed("test \"$(stat -c %a /var/lib/nasty-recovery/" + staged["stage_id"] + "/tree/etc/machine-id)\" = 600")
+      assert replacement.succeed("sha256sum /var/lib/systemd/credential.secret") == fresh_key_hash
+      assert replacement.succeed("cat /etc/machine-id") == fresh_machine_id
       replacement.succeed("test \"$(cat /var/lib/nasty/networking.json)\" = fresh-network")
       replacement.succeed("test \"$(cat /etc/nixos/hardware-configuration.nix)\" = fresh-boot-disk")
       assert replacement.succeed("ip -j route show") == routes_before
       replacement.succeed("test ! -e /var/lib/nasty/settings.fixture")
+
+    with subtest("unsafe and incomplete CLI staging is refused without leaking paths"):
+      replacement.fail("runuser -u nobody -- nasty-recovery stage --source /var/lib/recovery-test/staged")
+      replacement.succeed("install -d -m 700 /var/lib/recovery-test/unsafe")
+      replacement.succeed("ln -s /etc/shadow /var/lib/recovery-test/unsafe/sensitive-filename")
+      code, output = replacement.execute("nasty-recovery stage --source /var/lib/recovery-test/unsafe")
+      assert code != 0, output
+      refusal = json.loads(output)
+      assert refusal["error"] == "unsafe_entry", refusal
+      assert "sensitive-filename" not in output, output
+      replacement.fail("nasty-recovery inspect " + refusal["stage_id"])
+      replacement.succeed("test -L /var/lib/recovery-test/unsafe/sensitive-filename")
+      replacement.succeed("install -d -m 700 /var/lib/recovery-test/mounted/child")
+      replacement.succeed("mount -t tmpfs tmpfs /var/lib/recovery-test/mounted/child")
+      code, output = replacement.execute("nasty-recovery stage --source /var/lib/recovery-test/mounted")
+      assert code != 0, output
+      assert json.loads(output)["error"] == "mount_boundary", output
+      replacement.succeed("umount /var/lib/recovery-test/mounted/child")
   '';
 }
