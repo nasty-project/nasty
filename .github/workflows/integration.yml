@@ -78,6 +78,7 @@ jobs:
       - name: Maintenance landing page unit regressions
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 nixos/tests/update-roots-test.py
+          PYTHONDONTWRITEBYTECODE=1 python3 nixos/tests/recovery-inspect-test.py
           PYTHONDONTWRITEBYTECODE=1 python3 nixos/tests/maintenance-web-test.py
           node --test nixos/tests/maintenance-page.test.mjs
           nix eval --json \

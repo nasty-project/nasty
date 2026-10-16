@@ -209,7 +209,7 @@ in {
   # option-existence validation. On older wrappers without the
   # input, this is just `[]` — the option below stays unflippable
   # and the assertion catches anyone who flips it anyway.
-  imports = [ ./nasty-maintenance.nix ] ++ lib.optionals lanzabooteAvailable [
+  imports = [ ./nasty-maintenance.nix ./nasty-recovery.nix ] ++ lib.optionals lanzabooteAvailable [
     lanzaboote.nixosModules.lanzaboote
     ./nasty-secure-boot.nix
   ];

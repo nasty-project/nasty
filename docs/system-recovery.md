@@ -131,11 +131,86 @@ test keys or restored trees become Nix outputs or production artifacts.
 
 ## Next independently reviewable gates
 
+### Private staging CLI (inspection only)
+
+`nasty-recovery` is packaged on appliances independently of the engine. It
+accepts an **already-extracted**, administrator-controlled recovery tree whose
+top level contains `etc/` and `var/`. Repository retrieval/extraction is still
+an expert prerequisite, not an implemented setup workflow. Never extract an
+untrusted archive over live paths. Do not mount or initialize a pool just to
+use this tool.
+
+With that tree available in a private directory on the fresh OS disk:
+
+```console
+sudo nasty-recovery stage --source /var/lib/recovery-input
+sudo nasty-recovery inspect <stage_id>
+```
+
+Use the generated 32-character `stage_id` from the first JSON response.
+`stage` copies, never moves or applies, into
+`/var/lib/nasty-recovery/<stage_id>/tree`. The workspace must be on the root
+filesystem, root-owned and mode 0700; the tool refuses unsafe existing
+permissions instead of changing them. Copies use directories 0700/files 0600,
+not backed-up ownership, modes, ACLs or executable permissions. Consequently
+this is an inspection copy, **not an ownership-preserving data restore**.
+
+The source must be quiescent on an ordinary local filesystem, under the
+administrator's control. This is not a sandbox for an attacker-controlled
+filesystem implementation or concurrent privileged writers. The tool uses
+fd-relative traversal without following symlinks and refuses hardlinks,
+special files, mount-device boundaries and overlapping source/workspace
+trees. Entire staging fails on any unsafe entry, including ordinary Nix
+`result` symlinks; it never dereferences, deletes or silently skips them.
+Keep the original snapshot intact and review any separately prepared
+regular-file inspection export. Do not remove links from a live configuration
+to satisfy the tool. Entry, depth, per-file and aggregate-byte limits are
+50,000, 24, 64 MiB and 1 GiB. Large app data inside the preset may exceed these
+limits and is not automatically excluded. Copying checks available space before
+starting and before data writes, leaving a best-effort 128 MiB free-space
+margin. Concurrent disk users and inode exhaustion can still cause failure;
+failed staging may occupy space. This is not a disk-space reservation.
+
+`inspect` performs no intentional writes and reports fixed category names,
+presence, bounded JSON-object checks, source machine-ID syntax and the
+relationship of the saved version label to `/etc/nasty-version`. It does not
+print backed-up paths, usernames, addresses, version strings, key material or
+JSON values. Output still reveals coverage, sizes and a local stage ID; review
+it before sharing. A matching version label does **not** prove schema or
+import compatibility. Successful inspection exits zero even when blockers
+are reported; `import_supported` is always false. Filesystem/input refusal or
+incomplete staging exits nonzero.
+
+No backup code/Nix is executed. Secret decryption, authenticated repository
+verification, manifest/schema validation, consistent identity export,
+unknown-file classification and pool identity validation remain unverified.
+Directories being present does not establish their completeness. The tool
+cannot label any snapshot safe or ready for import.
+
+The journal is separate from imported material. A stage is marked complete
+only after copied file contents/directories are synced; interrupted or refused
+stages remain incomplete and cannot be inspected as completed material.
+There is no automatic resume, cleanup, apply, activation or reboot. Preserve
+failed-stage evidence and use a new staging attempt. Staged contents are
+secret-bearing: keep them private and review deliberate cleanup separately.
+Inspection does not stop a running engine or inhibit consumers; because it
+never installs the old state, it does not substitute for a recovery boot gate.
+
+Unit tests exercise malformed/missing state, redaction, links/FIFOs, limits,
+unsafe workspace/IDs and incomplete-stage refusal. The two-VM material test
+also executes the packaged CLI on the fresh VM without an engine/data pool,
+checks private permissions and verifies the fresh key, identity and management
+configuration remain unchanged. This still does not qualify repository
+extraction or a production-state importer.
+
+### Remaining gates
+
 1. Capture a consistent, versioned recovery inventory, including explicit
    missing-state warnings and portable local account/Samba identity export.
    Never label old snapshots fully recoverable without inspecting their contents.
-2. Add private staging and read-only inspection with adversarial-input tests,
-   available without restoring old engine state or mounting a pool.
+2. Extend the private staging CLI with authenticated repository retrieval and
+   versioned manifest/schema inspection; qualify extraction separately before
+   exposing it to setup UI. The current CLI accepts only an extracted tree.
 3. Add the durable recovery boot gate and a controlled apply procedure; test
    every interruption boundary before connecting it to the setup UI.
 4. Upgrade the VM scenario to real NASty backup RPC → lost OS disk → fresh
