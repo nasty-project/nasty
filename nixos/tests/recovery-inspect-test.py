@@ -1,10 +1,13 @@
 """Adversarial staging fixtures; no host recovery state, services or pools."""
 import importlib.util
 import json
+import io
 import os
 from pathlib import Path
 import tempfile
 import unittest
+import tarfile
+import sys
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("recovery", Path(__file__).parent.parent / "scripts/recovery-inspect.py")
@@ -169,6 +172,122 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(recovery.Refusal, "insufficient_staging_space"):
                 self.stage()
         self.assertEqual(list(self.base.iterdir()), [])
+
+    def archive(self, members):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w", format=tarfile.GNU_FORMAT) as archive:
+            for name, kind, data in members:
+                entry = tarfile.TarInfo(name)
+                entry.type = kind
+                entry.size = len(data) if kind == tarfile.REGTYPE else 0
+                entry.mode = 0o7777
+                entry.uid = 9999
+                archive.addfile(entry, io.BytesIO(data))
+        return output.getvalue()
+
+    def extract(self, archive):
+        destination = self.root / ("extract-" + recovery.uuid.uuid4().hex)
+        destination.mkdir(mode=0o700)
+        fd = os.open(destination, recovery.DIRECTORY)
+        try:
+            result = recovery.extract_tar(io.BytesIO(archive), fd)
+            return destination, result
+        finally:
+            os.close(fd)
+
+    def test_restricted_archive_copy_never_restores_permissions(self):
+        archive = self.archive([
+            (".", tarfile.DIRTYPE, b""), ("etc/", tarfile.DIRTYPE, b""),
+            ("etc/machine-id", tarfile.REGTYPE, b"a" * 32),
+            ("var/lib/nasty/settings.json", tarfile.REGTYPE, b"{}"),
+        ])
+        destination, result = self.extract(archive)
+        self.assertEqual((destination / "etc/machine-id").read_bytes(), b"a" * 32)
+        self.assertEqual(result["bytes"], 34)
+        for path in destination.rglob("*"):
+            self.assertEqual(path.stat().st_mode & 0o7777, 0o700 if path.is_dir() else 0o600)
+
+    def test_archive_paths_cannot_escape(self):
+        for name in ("/escape", "../escape", "etc/../../escape", "etc//file", "./etc/file", "etc\\file", "etc/secret\nfile"):
+            with self.subTest(name=name), self.assertRaises(recovery.Refusal):
+                self.extract(self.archive([(name, tarfile.REGTYPE, b"secret")]))
+        self.assertFalse((self.root / "escape").exists())
+
+    def test_archive_links_special_entries_and_extensions_are_refused(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE, tarfile.CHRTYPE,
+                     tarfile.BLKTYPE, tarfile.XHDTYPE, tarfile.GNUTYPE_LONGNAME):
+            with self.subTest(kind=kind), self.assertRaises(recovery.Refusal):
+                self.extract(self.archive([("unsafe", kind, b"")]))
+
+    def test_archive_duplicates_and_type_conflicts_are_refused(self):
+        for members in (
+            [("same", tarfile.REGTYPE, b"a"), ("same", tarfile.REGTYPE, b"b")],
+            [("same", tarfile.REGTYPE, b"a"), ("same/child", tarfile.REGTYPE, b"b")],
+            [("same/child", tarfile.REGTYPE, b"a"), ("same", tarfile.REGTYPE, b"b")],
+        ):
+            with self.subTest(members=members), self.assertRaises((recovery.Refusal, OSError)):
+                self.extract(self.archive(members))
+
+    def test_archive_truncation_corruption_trailing_data_and_limits(self):
+        archive = self.archive([("fixture", tarfile.REGTYPE, b"abc")])
+        for bad in (archive[:100], archive[:513], archive[:1024], b"X" + archive[1:], archive + b"secret"):
+            with self.subTest(size=len(bad)), self.assertRaises(recovery.Refusal):
+                self.extract(bad)
+        for setting, value in (("MAX_FILE", 2), ("MAX_BYTES", 2), ("MAX_ENTRIES", 0), ("MAX_DEPTH", 0)):
+            with patch.object(recovery, setting, value), self.assertRaises(recovery.Refusal):
+                self.extract(archive)
+
+    def options(self, repository=None):
+        password = self.root / "password"
+        password.write_text("independent-password")
+        password.chmod(0o600)
+        options = self.root / "options.json"
+        options.write_text(json.dumps({"repository": repository or str(self.source), "password_file": str(password)}))
+        options.chmod(0o600)
+        return options, password
+
+    def test_options_reject_ambient_config_and_command_backends(self):
+        for repo in ("rclone:execute", "rest:http://server/", "s3:bucket", "relative/repo", "rest:https://host/?secret=x"):
+            options, _ = self.options(repo)
+            with self.subTest(repo=repo), self.assertRaises(recovery.Refusal):
+                recovery.retrieval_options(str(options), os.getuid())
+        options, password = self.options()
+        password.chmod(0o644)
+        with self.assertRaises(recovery.Refusal):
+            recovery.retrieval_options(str(options), os.getuid())
+        for snapshot in ("latest", "abc123", "a" * 64 + ":/", "../path"):
+            with self.assertRaises(recovery.Refusal):
+                recovery.retrieve(str(options), snapshot, self.fd, os.getuid())
+
+    @unittest.skipUnless(sys.platform == "linux", "packaged subprocess uses Linux /proc fd paths")
+    def test_subprocess_success_failure_timeout_and_environment_isolation(self):
+        options, _ = self.options()
+        archive = self.archive([("etc/machine-id", tarfile.REGTYPE, b"a" * 32)])
+        executable = self.root / "fake-rustic"
+        for outcome in ("success", "failure", "timeout"):
+            executable.write_text(
+                f"#!{sys.executable}\nimport os,sys,time\n"
+                "assert 'RUSTIC_PASSWORD' not in os.environ\n"
+                "assert 'RUSTIC_USE_PROFILE' not in os.environ\n"
+                "assert 'SSH_AUTH_SOCK' not in os.environ\n"
+                "assert open(os.environ['RUSTIC_PASSWORD_FILE']).read() == 'independent-password'\n"
+                "assert sys.argv[1] == '--use-profile' and open(sys.argv[2]).read() == ''\n"
+                "assert sys.argv[3:7] == ['--no-cache','dump','--archive','tar']\n"
+                + ("time.sleep(30)\n" if outcome == "timeout" else f"sys.stdout.buffer.write({archive!r})\n")
+                + ("sys.exit(1)\n" if outcome == "failure" else "")
+            )
+            executable.chmod(0o700)
+            with patch.object(recovery, "RUSTIC", str(executable)), \
+                    patch.object(recovery, "RETRIEVAL_SECONDS", 0.2 if outcome == "timeout" else 5), \
+                    patch.dict(os.environ, {"RUSTIC_PASSWORD": "never-inherit", "RUSTIC_USE_PROFILE": "evil", "SSH_AUTH_SOCK": "socket"}):
+                result = recovery.retrieve(str(options), "a" * 64, self.fd, os.getuid())
+            if outcome == "success":
+                self.assertEqual(result["status"], "staged")
+                self.assertEqual(self.inspect(result["stage_id"])["retrieval"], "authenticated_repository")
+            else:
+                self.assertEqual(result["status"], "incomplete")
+                with self.assertRaises(recovery.Refusal):
+                    self.inspect(result["stage_id"])
 
 
 if __name__ == "__main__":

@@ -134,11 +134,84 @@ test keys or restored trees become Nix outputs or production artifacts.
 ### Private staging CLI (inspection only)
 
 `nasty-recovery` is packaged on appliances independently of the engine. It
-accepts an **already-extracted**, administrator-controlled recovery tree whose
-top level contains `etc/` and `var/`. Repository retrieval/extraction is still
-an expert prerequisite, not an implemented setup workflow. Never extract an
+can retrieve an explicit encrypted-repository snapshot, or accept an
+**already-extracted**, administrator-controlled tree whose top level contains
+`etc/` and `var/`. It is not an implemented setup workflow. Never extract an
 untrusted archive over live paths. Do not mount or initialize a pool just to
 use this tool.
+
+#### Retrieve directly from an existing repository
+
+Independently obtain the repository address, password and **full 64-character
+snapshot ID**. The tool deliberately does not select `latest` or accept an
+ambiguous ID prefix. Snapshot discovery/selection remains an operator task
+(for example, the snapshot's full ID in `rustic snapshots --long`). Preserve
+the exact ID independently of the failed boot disk when preparing recovery.
+
+Create an absolute-path, root-owned regular password file, mode 0600, with
+the repository password. Do not put the password on the command line. Create
+a separate root-owned 0600 JSON options file, for example
+`/run/recovery-options.json`:
+
+```json
+{
+  "repository": "/path/to/existing/repository",
+  "password_file": "/run/recovery-repository-password"
+}
+```
+
+The only accepted keys are these two. Both files must be regular, private,
+single-link files, with no symlink path components. Prefer a private parent
+directory in `/run` for these independently supplied credentials. Do not put
+them in the Nix store or a diagnostics bundle.
+
+```console
+sudo nasty-recovery retrieve --options-file /run/recovery-options.json --snapshot <full_snapshot_id>
+sudo nasty-recovery inspect <stage_id>
+```
+
+The repository may be an existing absolute local directory or a
+`rest:https://server/repository/` address using ordinary certificate
+validation. REST Basic credentials, if needed, belong in the private JSON's
+repository URL (percent-encode reserved characters), never in shell
+arguments. Custom trust roots, S3, SFTP/rclone, insecure HTTP and arbitrary
+backend options are not supported by this first retrieval path. Do not
+disable TLS verification or initialize a replacement repository to bypass
+refusal. Keep repositories outside the staging workspace.
+
+The packaged, pinned rustic CLI decrypts/authenticates the selected snapshot
+and streams an uncompressed tar dump. No `restore`, `init`, backup, repair or
+prune command is invoked. Cache is disabled; inherited environment/profiles,
+proxy settings, password commands, hooks and credential agents are not used.
+Repository credentials are passed through a restricted environment/inherited
+password descriptor, not process arguments or the staging journal. Child
+stderr is suppressed because it can expose URLs or secrets. Errors therefore
+do not reliably distinguish incorrect passwords, corrupt objects or backend
+outages; the stage stays incomplete in all cases.
+
+The child has a ten-minute wall deadline, 120 CPU-second limit, 512 MiB address
+space limit and no regular-file writes. Large repositories may exceed these
+limits even for small snapshots. These controls are bounds, not a sandbox or
+a network-traffic quota. Only the selected snapshot's consumed objects are
+authenticated; this is not a full repository scrub or proof that its contents
+are safe, complete, consistent or from the intended appliance. Verify the
+repository and snapshot choice independently.
+
+Tar extraction accepts bounded regular files and directories only. Paths
+cannot be absolute, traverse parents, contain ambiguous separators, duplicate
+entries or conflict in type. Links/devices/FIFOs, sparse records and GNU/PAX
+extended headers (including longname records) cause refusal of the entire
+attempt. No backed-up permissions, owners, links, ACLs, xattrs or code are
+installed. This validates the dump's entries, not the original filesystem's
+types: rustic can represent a backed-up socket as an empty regular file, and
+hardlink/ownership fidelity is not retained. Ordinary Nix `result` links will therefore block retrieval too;
+there is no silent exclusion to make coverage appear complete. Failed or
+interrupted attempts retain private evidence and are never marked completed.
+Only a fully consumed stream and successful rustic exit publish a staged
+session. Inspection reports `authenticated_repository` for this provenance,
+but still always says `import_supported: false`.
+
+#### Stage an already-extracted tree
 
 With that tree available in a private directory on the fresh OS disk:
 
@@ -181,7 +254,7 @@ import compatibility. Successful inspection exits zero even when blockers
 are reported; `import_supported` is always false. Filesystem/input refusal or
 incomplete staging exits nonzero.
 
-No backup code/Nix is executed. Secret decryption, authenticated repository
+No backup code/Nix is executed. Appliance-secret decryption, full repository
 verification, manifest/schema validation, consistent identity export,
 unknown-file classification and pool identity validation remain unverified.
 Directories being present does not establish their completeness. The tool
@@ -200,17 +273,24 @@ Unit tests exercise malformed/missing state, redaction, links/FIFOs, limits,
 unsafe workspace/IDs and incomplete-stage refusal. The two-VM material test
 also executes the packaged CLI on the fresh VM without an engine/data pool,
 checks private permissions and verifies the fresh key, identity and management
-configuration remain unchanged. This still does not qualify repository
-extraction or a production-state importer.
+configuration remain unchanged. Retrieval tests also exercise wrong password,
+corrupt encrypted snapshot metadata, ambient-profile/environment isolation,
+exact material hashes and unchanged repository file contents. Restricted tar
+tests cover traversal, type conflicts, links/special files, extensions,
+truncation/checksum errors, trailing data and resource limits. A Linux fake
+producer verifies nonzero exit/timeout cannot publish a completed stage.
+HTTPS REST interoperability is not qualified by the local-repository VM test.
+This still does not qualify a production-state importer or power-loss recovery.
 
 ### Remaining gates
 
 1. Capture a consistent, versioned recovery inventory, including explicit
    missing-state warnings and portable local account/Samba identity export.
    Never label old snapshots fully recoverable without inspecting their contents.
-2. Extend the private staging CLI with authenticated repository retrieval and
-   versioned manifest/schema inspection; qualify extraction separately before
-   exposing it to setup UI. The current CLI accepts only an extracted tree.
+2. Extend retrieval qualification to remote repository transports and snapshot
+   discovery; add versioned manifest/schema inspection before setup UI. Define
+   explicit handling for excluded links/unsupported state without silent data
+   loss. The current bounded retrieval remains inspection-only.
 3. Add the durable recovery boot gate and a controlled apply procedure; test
    every interruption boundary before connecting it to the setup UI.
 4. Upgrade the VM scenario to real NASty backup RPC → lost OS disk → fresh

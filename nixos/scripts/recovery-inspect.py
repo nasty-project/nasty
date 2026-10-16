@@ -5,7 +5,12 @@ import json
 import os
 import re
 import stat
+import signal
+import subprocess
 import sys
+import threading
+import resource
+from urllib.parse import urlsplit
 import uuid
 
 
@@ -16,6 +21,9 @@ MAX_FILE = 64 * 1024 * 1024
 MAX_DEPTH = 24
 MAX_JSON = 2 * 1024 * 1024
 MIN_FREE_BYTES = 128 * 1024 * 1024
+RUSTIC = "@rustic@"
+CA_BUNDLE = "@ca_bundle@"
+RETRIEVAL_SECONDS = 600
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 REGULAR = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 SOURCES = {
@@ -306,6 +314,8 @@ def inspect(identifier, workspace, local_version=None, uid=0):
             blockers.append("version_compatibility_unverified")
         return {
             "schema": 1, "stage_id": identifier, "status": "inspected",
+            "retrieval": ("authenticated_repository" if state.get("retrieval") == "rustic_authenticated_dump"
+                          else "unverified_source"),
             "import_supported": False, "coverage": coverage, "version_relation": relation,
             "blockers": blockers,
             "unverified": ["state_schemas", "credential_decryption", "storage_identity", "unix_samba_identity",
@@ -318,6 +328,244 @@ def inspect(identifier, workspace, local_version=None, uid=0):
         os.close(session)
 
 
+def private_input(path, uid=0):
+    parent, name = os.path.split(path)
+    directory = open_directory(parent)
+    try:
+        fd = os.open(name, REGULAR, dir_fd=directory)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 16 * 1024):
+            os.close(fd)
+            raise Refusal("credentials_not_private")
+        return fd
+    finally:
+        os.close(directory)
+
+
+def retrieval_options(path, uid=0):
+    with os.fdopen(private_input(path, uid), "rb") as stream:
+        options = json.loads(stream.read(16 * 1024 + 1))
+    if not isinstance(options, dict) or set(options) != {"repository", "password_file"}:
+        raise Refusal("invalid_repository_options")
+    repo = options["repository"]
+    password = options["password_file"]
+    if not isinstance(repo, str) or not isinstance(password, str) or len(repo) > 4096:
+        raise Refusal("invalid_repository_options")
+    if repo.startswith("/"):
+        # Local repository must already exist; never initialize it.
+        fd = open_directory(repo)
+        os.close(fd)
+    elif repo.startswith("rest:https://"):
+        url = urlsplit(repo[5:])
+        if not url.hostname or url.fragment or url.query:
+            raise Refusal("invalid_repository_options")
+    else:
+        # In particular, no rclone subprocesses, arbitrary backend options,
+        # insecure HTTP, profiles, hooks or password commands.
+        raise Refusal("unsupported_repository_backend")
+    if any(ord(c) < 32 for c in repo):
+        raise Refusal("invalid_repository_options")
+    return repo, private_input(password, uid)
+
+
+def exact(stream, count):
+    data = bytearray()
+    while len(data) < count:
+        chunk = stream.read(count - len(data))
+        if not chunk:
+            raise Refusal("truncated_archive")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def tar_number(raw):
+    text = raw.rstrip(b"\0 ").lstrip(b" ")
+    if not text or any(c not in b"01234567" for c in text):
+        raise Refusal("invalid_archive_header")
+    return int(text, 8)
+
+
+def extract_tar(stream, root):
+    """Restricted uncompressed tar; never use extractall or restore metadata."""
+    seen = set()
+    budget = {"entries": 0, "bytes": 0}
+    created = set()
+    while True:
+        header = exact(stream, 512)
+        if header == bytes(512):
+            if exact(stream, 512) != bytes(512):
+                raise Refusal("invalid_archive_end")
+            # Permit only a bounded number of zero padding records. Drain to
+            # EOF so a failed producer cannot masquerade as a complete dump.
+            padding = 0
+            while chunk := stream.read(4096):
+                padding += len(chunk)
+                if padding > 64 * 1024 or any(chunk):
+                    raise Refusal("invalid_archive_end")
+            break
+        if tar_number(header[148:156]) != sum(header[:148]) + 8 * 32 + sum(header[156:]):
+            raise Refusal("invalid_archive_checksum")
+        if header[257:263] not in (b"ustar\0", b"ustar "):
+            raise Refusal("unsupported_archive_header")
+        kind = header[156:157]
+        if kind not in (b"0", b"\0", b"5"):
+            # Reject GNU longnames/PAX too: their metadata is not implicitly
+            # trusted or allocated before checking limits.
+            raise Refusal("unsafe_archive_entry")
+        size = tar_number(header[124:136])
+        if size > MAX_FILE or (kind == b"5" and size != 0):
+            raise Refusal("file_size_limit")
+        raw = header[:100].split(b"\0", 1)[0]
+        if header[257:263] == b"ustar\0":
+            prefix = header[345:500].split(b"\0", 1)[0]
+            if prefix:
+                raw = prefix + b"/" + raw
+        name = raw.decode("utf-8", errors="strict")
+        if kind == b"5" and name.endswith("/"):
+            name = name[:-1]
+        # Rustic may include a directory record for the snapshot root.
+        if name in ("", ".") and kind == b"5":
+            parts = []
+        else:
+            parts = name.split("/")
+            if (not name or any(p in ("", ".", "..") or len(p.encode()) > 255 for p in parts)
+                    or name.startswith("/") or "\\" in name or any(ord(c) < 32 for c in name)):
+                raise Refusal("unsafe_archive_path")
+        if len(parts) > MAX_DEPTH:
+            raise Refusal("depth_limit")
+        if name in seen:
+            raise Refusal("duplicate_archive_entry")
+        seen.add(name)
+        if len(seen) > MAX_ENTRIES:
+            raise Refusal("entry_limit")
+        budget["bytes"] += size
+        if budget["bytes"] > MAX_BYTES:
+            raise Refusal("byte_limit")
+        directory = os.dup(root)
+        try:
+            directories = parts if kind == b"5" else parts[:-1]
+            for index, part in enumerate(directories):
+                path = "/".join(parts[:index + 1])
+                if path not in created:
+                    os.mkdir(part, 0o700, dir_fd=directory)
+                    os.fsync(directory)
+                    created.add(path)
+                    if len(created) > MAX_ENTRIES:
+                        raise Refusal("entry_limit")
+                child = os.open(part, DIRECTORY, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            if kind != b"5":
+                check_space(directory, size)
+                target = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=directory)
+                try:
+                    remaining = size
+                    while remaining:
+                        chunk = exact(stream, min(remaining, 64 * 1024))
+                        check_space(directory, len(chunk))
+                        view = memoryview(chunk)
+                        while view:
+                            view = view[os.write(target, view):]
+                        remaining -= len(chunk)
+                    os.fsync(target)
+                finally:
+                    os.close(target)
+                created.add(name)
+                if len(created) > MAX_ENTRIES:
+                    raise Refusal("entry_limit")
+                if size % 512:
+                    exact(stream, 512 - size % 512)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    budget["entries"] = len(created)
+    os.fsync(root)
+    return budget
+
+
+def child_limits():
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)
+    resource.setrlimit(resource.RLIMIT_CPU, (120, 120))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+
+def retrieve(options_path, snapshot, workspace, uid=0):
+    if not re.fullmatch(r"[a-f0-9]{64}", snapshot):
+        raise Refusal("full_snapshot_id_required")
+    repository, password = retrieval_options(options_path, uid)
+    identifier = uuid.uuid4().hex
+    session = tree = process = timer = None
+    try:
+        if repository.startswith("/"):
+            repository_fd = open_directory(repository)
+            try:
+                if ancestor(repository_fd, workspace) or ancestor(workspace, repository_fd):
+                    raise Refusal("repository_overlaps_workspace")
+            finally:
+                os.close(repository_fd)
+        check_space(workspace)
+        os.mkdir(identifier, 0o700, dir_fd=workspace)
+        os.fsync(workspace)
+        session = os.open(identifier, DIRECTORY, dir_fd=workspace)
+        save_state(session, {"schema": 1, "status": "incomplete"})
+        os.mkdir("tree", 0o700, dir_fd=session)
+        tree = os.open("tree", DIRECTORY, dir_fd=session)
+        # An explicit absolute empty profile prevents ambient /etc/rustic,
+        # HOME or working-directory profiles (and their hooks) being loaded.
+        profile = os.open("empty.toml", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=session)
+        os.close(profile)
+        env = {"PATH": "/nonexistent", "HOME": f"/proc/self/fd/{session}",
+               "RUSTIC_REPOSITORY": repository,
+               "RUSTIC_PASSWORD_FILE": f"/proc/self/fd/{password}",
+               "SSL_CERT_FILE": CA_BUNDLE, "LANG": "C.UTF-8"}
+        try:
+            process = subprocess.Popen(
+                [RUSTIC, "--use-profile", f"/proc/self/fd/{session}/empty.toml", "--no-cache",
+                 "dump", "--archive", "tar", snapshot],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env=env, cwd="/", pass_fds=(password, session), start_new_session=True,
+                preexec_fn=child_limits,
+            )
+            def terminate():
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            timer = threading.Timer(RETRIEVAL_SECONDS, terminate)
+            timer.daemon = True
+            timer.start()
+            budget = extract_tar(process.stdout, tree)
+            if process.wait() != 0:
+                raise Refusal("repository_read_failed")
+            timer.cancel()
+            save_state(session, {"schema": 1, "status": "staged", "retrieval": "rustic_authenticated_dump",
+                                 "snapshot_id": snapshot, **budget})
+            return {"stage_id": identifier, "status": "staged"}
+        except (Refusal, OSError, ValueError, subprocess.SubprocessError) as error:
+            code = str(error) if isinstance(error, Refusal) else "repository_read_failed"
+            save_state(session, {"schema": 1, "status": "incomplete", "error": code})
+            return {"stage_id": identifier, "status": "incomplete", "error": code}
+    finally:
+        if timer is not None:
+            timer.cancel()
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            process.wait()
+            process.stdout.close()
+        os.close(password)
+        if tree is not None:
+            os.close(tree)
+        if session is not None:
+            os.close(session)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -325,15 +573,20 @@ def main():
     create.add_argument("--source", required=True, help="absolute directory containing etc/ and var/")
     report = commands.add_parser("inspect", help="read-only, redacted inventory of a completed stage")
     report.add_argument("stage_id")
+    fetch = commands.add_parser("retrieve", help="retrieve an explicit snapshot into private staging")
+    fetch.add_argument("--options-file", required=True, help="absolute root-owned 0600 JSON options file")
+    fetch.add_argument("--snapshot", required=True, help="full 64-character snapshot ID; no latest or prefixes")
     args = parser.parse_args()
     if os.geteuid() != 0:
         print(json.dumps({"error": "root_required"}))
         return 1
     workspace = None
     try:
-        workspace = open_workspace(create=args.command == "stage")
+        workspace = open_workspace(create=args.command != "inspect")
         if args.command == "stage":
             result = stage(args.source, workspace)
+        elif args.command == "retrieve":
+            result = retrieve(args.options_file, args.snapshot, workspace)
         else:
             try:
                 with open("/etc/nasty-version", encoding="utf-8") as stream:

@@ -1,7 +1,10 @@
 { pkgs }:
 
 let
-  script = pkgs.writeText "recovery-inspect.py" (builtins.readFile ../scripts/recovery-inspect.py);
+  script = pkgs.writeText "recovery-inspect.py" (builtins.replaceStrings
+    [ "@rustic@" "@ca_bundle@" ]
+    [ "${pkgs.rustic}/bin/rustic" "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ]
+    (builtins.readFile ../scripts/recovery-inspect.py));
 in pkgs.writeShellApplication {
   name = "nasty-recovery";
   text = ''
