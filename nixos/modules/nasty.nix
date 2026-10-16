@@ -12,15 +12,15 @@ let
   # Nixpkgs still packages the frozen v2.9.2 upstream source, so use the
   # fork's content-addressed static release artifacts for our two platforms.
   maintainedNcdu = let
-    version = "2.11.1";
+    version = "2.12.0";
     artifacts = {
       x86_64-linux = {
         arch = "x86_64";
-        hash = "sha256-0TyI5LnQdTB8UU5sagkmHiIEXeyPvfFr8Y69AJOhRpQ=";
+        hash = "sha256-tkR89cU47swWPjMskePlezIe+qAbDAzPm/5XXHbrE20=";
       };
       aarch64-linux = {
         arch = "aarch64";
-        hash = "sha256-Nkprgsa/xa+D2DZgfxvyr4o0DPNAr6dqbfJFwLJ3YyY=";
+        hash = "sha256-zqzuUZi0eQFoUIS4H8sGdWmJheb4Q+wsBK6gMvNzC54=";
       };
     };
     artifact = artifacts.${pkgs.stdenv.hostPlatform.system} or

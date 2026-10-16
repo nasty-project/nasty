@@ -566,7 +566,19 @@ pkgs.testers.runNixOSTest {
     machine.succeed("nasty-top --version | grep -Fq '0.0.11'")
     machine.succeed("command -v sqlite3 && sqlite3 --version")
     machine.succeed("7zz | grep -Fq '7-Zip'")
-    machine.succeed("ncdu --version | grep -Fq 'ncdu 2.11.1'")
+    machine.succeed("ncdu --version | grep -Fq 'ncdu 2.12.0'")
+    with subtest("ncdu scans a disposable directory in read-only export mode"):
+      machine.succeed("mkdir -p /tmp/ncdu-smoke")
+      machine.succeed("printf fixture-data > /tmp/ncdu-smoke/fixture.txt")
+      machine.succeed("ncdu --ignore-config -0 -rr -x -o /tmp/ncdu-smoke.json /tmp/ncdu-smoke")
+      ncdu_export = json.loads(machine.succeed("cat /tmp/ncdu-smoke.json"))
+      assert ncdu_export[0] == 1, f"unexpected ncdu export format: {ncdu_export!r}"
+      ncdu_tree = ncdu_export[3]
+      assert ncdu_tree[0]["name"] == "/tmp/ncdu-smoke", ncdu_tree
+      assert any(
+        isinstance(entry, dict) and entry.get("name") == "fixture.txt" and entry.get("asize") == 12
+        for entry in ncdu_tree[1:]
+      ), f"ncdu did not export the fixture file size: {ncdu_tree!r}"
 
     # nftables must establish a default-drop baseline independently of the
     # engine. Restart nftables as separate stop/start operations so PartOf stops
