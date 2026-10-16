@@ -1,0 +1,61 @@
+name: ncdu package smoke
+
+on:
+  pull_request:
+    paths:
+      - 'nixos/modules/nasty.nix'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/ncdu.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ncdu:
+    name: ncdu (${{ matrix.configuration }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            configuration: nasty
+          - runner: ubuntu-24.04-arm
+            configuration: nasty-aarch64
+    env:
+      NASTY_CONFIG: ${{ matrix.configuration }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - name: Build the actual appliance ncdu package
+        run: |
+          package=$(nix build --impure --no-link --print-out-paths --expr '
+            let
+              flake = builtins.getFlake (toString ./.);
+              configuration = builtins.getAttr (builtins.getEnv "NASTY_CONFIG") flake.nixosConfigurations;
+              packages = builtins.filter (p: (p.pname or "") == "ncdu") configuration.config.environment.systemPackages;
+            in assert builtins.length packages == 1; builtins.head packages
+          ')
+          echo "NCDU_BIN=$package/bin/ncdu" >> "$GITHUB_ENV"
+      - name: Version and read-only scan/export
+        run: |
+          "$NCDU_BIN" --version | grep -Fx 'ncdu 2.12.0'
+          fixture=$(mktemp -d "$RUNNER_TEMP/ncdu-smoke.XXXXXX")
+          mkdir "$fixture/data"
+          printf fixture-data > "$fixture/data/fixture.txt"
+          "$NCDU_BIN" --ignore-config -0 -rr -x -o "$fixture/report.json" "$fixture/data"
+          python3 - "$fixture" <<'PY'
+          import json
+          import pathlib
+          import sys
+          fixture = pathlib.Path(sys.argv[1])
+          report = json.loads((fixture / "report.json").read_text())
+          assert report[0] == 1, report
+          tree = report[3]
+          assert tree[0]["name"] == str(fixture / "data"), tree
+          assert any(isinstance(entry, dict) and entry.get("name") == "fixture.txt" and entry.get("asize") == 12 for entry in tree[1:]), tree
+          assert (fixture / "data/fixture.txt").read_text() == "fixture-data"
+          PY
