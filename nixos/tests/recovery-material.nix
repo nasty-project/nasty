@@ -69,6 +69,8 @@ in pkgs.testers.runNixOSTest {
     rustic = "rustic --repository /run/repository --password-file /run/repository-password"
     original.succeed(rustic + " init")
     original.succeed(rustic + " backup " + " ".join(sources))
+    snapshot_id = original.succeed("find /run/repository/snapshots -type f -printf '%f\\n'").strip()
+    assert len(snapshot_id) == 64, snapshot_id
     original.succeed("tar -C /run/repository -czf /run/repository.tar.gz .")
 
     # Only the encrypted repository survives. The replacement cannot read the
@@ -127,6 +129,44 @@ in pkgs.testers.runNixOSTest {
       replacement.succeed("test \"$(cat /var/lib/nasty/networking.json)\" = fresh-network")
       replacement.succeed("test \"$(cat /etc/nixos/hardware-configuration.nix)\" = fresh-boot-disk")
       assert replacement.succeed("ip -j route show") == routes_before
+      replacement.succeed("test ! -e /var/lib/nasty/settings.fixture")
+
+    with subtest("retrieve selected encrypted snapshot without manual extraction or ambient profiles"):
+      replacement.succeed("printf '%s' '{\"repository\":\"/run/repository\",\"password_file\":\"/run/repository-password\"}' > /run/recovery-options.json")
+      replacement.succeed("chmod 600 /run/recovery-options.json")
+      replacement.succeed("mkdir -p /etc/rustic")
+      replacement.succeed("printf intentionally-invalid-profile > /etc/rustic/rustic.toml")
+      repository_hashes = replacement.succeed("find /run/repository -type f -exec sha256sum {} + | sort")
+      retrieve = "nasty-recovery retrieve --options-file /run/recovery-options.json --snapshot " + snapshot_id
+      replacement.succeed("printf wrong-password > /run/repository-password")
+      code, output = replacement.execute(retrieve)
+      assert code != 0, output
+      refused = json.loads(output)
+      assert refused["status"] == "incomplete", refused
+      assert "wrong-password" not in output, output
+      replacement.fail("nasty-recovery inspect " + refused["stage_id"])
+      replacement.succeed("printf independent-fixture-password > /run/repository-password")
+      retrieved = json.loads(replacement.succeed("RUSTIC_USE_PROFILE=ambient-evil RUSTIC_PASSWORD=wrong " + retrieve))
+      assert retrieved["status"] == "staged", retrieved
+      retrieved_tree = "/var/lib/nasty-recovery/" + retrieved["stage_id"] + "/tree"
+      for path, expected in material_hashes.items():
+        assert replacement.succeed("sha256sum " + retrieved_tree + path).split()[0] == expected
+      inspected = json.loads(replacement.succeed("nasty-recovery inspect " + retrieved["stage_id"]))
+      assert inspected["retrieval"] == "authenticated_repository", inspected
+      assert inspected["import_supported"] is False, inspected
+      assert replacement.succeed("find /run/repository -type f -exec sha256sum {} + | sort") == repository_hashes
+      replacement.succeed("test \"$(stat -c %a " + retrieved_tree + "/var/lib/caddy/key.pem)\" = 600")
+      # Corrupt encrypted snapshot metadata: authentication failure must never
+      # publish a completed staging session, even with the right password.
+      replacement.succeed("printf corrupt > /run/repository/snapshots/" + snapshot_id)
+      code, output = replacement.execute(retrieve)
+      assert code != 0, output
+      replacement.fail("nasty-recovery inspect " + json.loads(output)["stage_id"])
+      assert replacement.succeed("sha256sum /var/lib/systemd/credential.secret") == fresh_key_hash
+      assert replacement.succeed("cat /etc/machine-id") == fresh_machine_id
+      assert replacement.succeed("ip -j route show") == routes_before
+      replacement.succeed("test \"$(cat /var/lib/nasty/networking.json)\" = fresh-network")
+      replacement.succeed("test \"$(cat /etc/nixos/hardware-configuration.nix)\" = fresh-boot-disk")
       replacement.succeed("test ! -e /var/lib/nasty/settings.fixture")
 
     with subtest("unsafe and incomplete CLI staging is refused without leaking paths"):
