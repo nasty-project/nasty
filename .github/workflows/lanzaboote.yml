@@ -1,0 +1,106 @@
+name: Lanzaboote qualification
+
+on:
+  pull_request:
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nixos/modules/nasty-secure-boot.nix'
+      - 'nixos/tests/lanzaboote-qualification.nix'
+      - '.github/workflows/lanzaboote.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  appliance:
+    name: Secure Boot build (${{ matrix.configuration }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            configuration: nasty-vm
+          - runner: ubuntu-24.04-arm
+            configuration: nasty-vm-aarch64
+    env:
+      NASTY_CONFIG: ${{ matrix.configuration }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: nasty
+          skipPush: true
+      - name: Validate opt-in defaults and build enabled appliance (no activation)
+        run: |
+          nix build --impure --no-link -L --expr '
+            let
+              flake = builtins.getFlake (toString ./.);
+              base = builtins.getAttr (builtins.getEnv "NASTY_CONFIG") flake.nixosConfigurations;
+              enabled = base.extendModules {
+                modules = [ {
+                  services.nasty.secureBoot.enable = true;
+                  # Appliance hardware configuration is an install-time stub.
+                  # These fixture paths are evaluated/built only, never mounted.
+                  fileSystems."/" = { device = "/dev/disk/by-label/test-root"; fsType = "ext4"; };
+                  fileSystems."/boot" = { device = "/dev/disk/by-label/test-esp"; fsType = "vfat"; };
+                } ];
+              };
+              before = base.config;
+              after = enabled.config;
+            in
+              assert !before.boot.lanzaboote.enable;
+              assert !before.boot.lanzaboote.autoGenerateKeys.enable;
+              assert !before.boot.lanzaboote.autoEnrollKeys.enable;
+              assert !before.boot.lanzaboote.measuredBoot.enable;
+              assert before.boot.loader.systemd-boot.enable;
+              assert after.boot.lanzaboote.enable;
+              assert after.boot.lanzaboote.autoGenerateKeys.enable;
+              assert !after.boot.lanzaboote.autoEnrollKeys.enable;
+              assert !after.boot.lanzaboote.measuredBoot.enable;
+              assert !after.boot.loader.systemd-boot.enable;
+              assert after.boot.lanzaboote.configurationLimit == 20;
+              assert after.boot.lanzaboote.pkiBundle == "/var/lib/sbctl";
+              assert after.boot.kernel.sysctl."kernel.kexec_load_disabled" == 1;
+              after.system.build.toplevel
+          '
+
+  upstream:
+    name: OVMF (${{ matrix.test }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - basic
+          - auto-generate-enroll
+          - hash-mismatch-kernel-sb
+          - hash-mismatch-initrd-sb
+          - measured-boot
+    env:
+      LANZABOOTE_TEST: ${{ matrix.test }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - name: Allow repart image user namespaces on the disposable runner
+        run: |
+          # Ubuntu AppArmor otherwise denies repart's unshare --map-root-user.
+          # This affects only the ephemeral test runner, never an appliance.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare --user --map-root-user true
+      - name: Run pinned upstream test with appliance stable nixpkgs
+        run: |
+          nix build --impure --no-link -L --expr '
+            let
+              flake = builtins.getFlake (toString ./.);
+            in import ./nixos/tests/lanzaboote-qualification.nix {
+              pkgs = flake.inputs.nixpkgs.legacyPackages.x86_64-linux;
+              lanzaboote = flake.inputs.lanzaboote;
+              test = builtins.getEnv "LANZABOOTE_TEST";
+            }
+          '

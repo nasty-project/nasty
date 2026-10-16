@@ -2541,12 +2541,12 @@ async fn migrate_wrapper_to_canonical_shape(
 
 /// Lanzaboote input lines as injected into the wrapper-flake
 /// `inputs` block by `add_lanzaboote_input_to_wrapper`. Pinned to
-/// `v1.0.0` here (same rev nasty's own flake.nix pins) so the lock
+/// `v1.2.0` here (same rev nasty's own flake.nix pins) so the lock
 /// stays consistent across nasty/wrapper. The `.inputs.nixpkgs.follows`
 /// keeps lanzaboote on nasty's pinned nixpkgs so cachix substitution
 /// hits.
 const LANZABOOTE_INPUT_BLOCK: &str = "\
-    lanzaboote.url = \"github:nix-community/lanzaboote/v1.0.0\";\n\
+    lanzaboote.url = \"github:nix-community/lanzaboote/v1.2.0\";\n\
     lanzaboote.inputs.nixpkgs.follows = \"nasty/nixpkgs\";\n";
 
 /// Inject lanzaboote as a top-level flake input into the wrapper at
@@ -4348,6 +4348,18 @@ outputs = { nixpkgs, nasty, ... }: {
     // ── lanzaboote injection / stripping (per-box opt-in SB) ────────
 
     #[test]
+    fn injected_lanzaboote_pin_matches_appliance_flake() {
+        let wrapper = format!("{{ inputs = {{ {} }}; }}", super::LANZABOOTE_INPUT_BLOCK);
+        let injected = super::parse_flake_input_urls(&wrapper).expect("injected inputs");
+        let appliance =
+            super::parse_flake_input_urls(super::EMBEDDED_NASTY_FLAKE).expect("appliance inputs");
+        assert_eq!(
+            injected.get("lanzaboote").expect("injected pin").url,
+            appliance.get("lanzaboote").expect("appliance pin").url,
+        );
+    }
+
+    #[test]
     fn inject_lanzaboote_input_adds_both_lines_before_closing_brace() {
         let wrapper = r#"{
   inputs = {
@@ -4361,7 +4373,7 @@ outputs = { nixpkgs, nasty, ... }: {
   };
 }"#;
         let out = super::inject_lanzaboote_input(wrapper).expect("inject");
-        assert!(out.contains("lanzaboote.url = \"github:nix-community/lanzaboote/v1.0.0\""));
+        assert!(out.contains("lanzaboote.url = \"github:nix-community/lanzaboote/v1.2.0\""));
         assert!(out.contains("lanzaboote.inputs.nixpkgs.follows = \"nasty/nixpkgs\""));
         // Pre-existing inputs must still be there.
         assert!(out.contains("nasty.url = \"github:nasty-project/nasty/v0.0.9\""));
