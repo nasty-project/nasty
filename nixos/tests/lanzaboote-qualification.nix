@@ -23,5 +23,11 @@ pkgs.testers.runNixOSTest {
       default = true;
       description = "Compatibility with upstream fixtures on always-enabled stable repart";
     };
+    # v1.2 dropped these after upstream nixpkgs changed its firmware defaults.
+    # Restore the v1.1 test hardware on stable: SB-capable OVMF with TPM support.
+    config.virtualisation = {
+      useSecureBoot = true;
+      efi.OVMF = pkgs.OVMFFull.fd;
+    };
   };
 }

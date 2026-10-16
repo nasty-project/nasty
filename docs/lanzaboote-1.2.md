@@ -44,6 +44,10 @@ The upstream test image uses `image.repart.enable`, which stable 26.05 lacks.
 The test-only adapter accepts only `true`: stable's repart module already
 builds the image unconditionally when imported. Upstream test scripts, image
 contents, signature checks and production modules are not patched.
+The adapter also restores the upstream v1.1 fixture's `useSecureBoot = true`
+and `OVMFFull` firmware settings, removed in v1.2 for newer nixpkgs defaults.
+Stable's default OVMF lacks Secure Boot and TPM support; using it would not
+qualify signed boot or Measured Boot, even if hash-rejection tests passed.
 The ephemeral Ubuntu OVMF runners allow unprivileged user namespaces for
 repart's image builder and check `unshare --map-root-user` before building.
 This runner-only AppArmor adjustment is not applied to any appliance.
