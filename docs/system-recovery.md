@@ -57,6 +57,7 @@ Its coverage is **not** equivalent to recovering every service or identity.
 | `/etc/nixos` | Included | Keep fresh hardware/boot/ESP configuration. Treat custom Nix and old wrappers as executable input, not trusted settings. Do not evaluate or activate backed-up Nix during inspection. |
 | `/var/lib/caddy` | Included | TLS private keys and local CA identity; validate ownership and planned names before enabling listeners. Paths configured outside this directory need separate coverage. |
 | `/var/lib/systemd/credential.secret` | Included | Needed for host-only systemd credentials. TPM+host credentials also require a usable original TPM/policy. Do not replace the fresh host key during inspection. |
+| `/etc/machine-id` | Added by this foundation change | systemd validates the host credential key against the source identity. Old presets lacked this file; do not promise old snapshots are sufficient or overwrite the fresh identity during inspection. Existing profiles need explicit updating and a new backup. |
 | `/var/lib/sbctl` | Optional, when present | Private signing keys; back up securely, but never auto-enroll firmware keys or restore enrollment progress. |
 | `/root/.ssh/authorized_keys`, SSH host keys under `/etc/ssh` | Not covered by the core preset | Explicit recovery decision needed. Preserve fresh SSH access; restoring server identity/access lists must be reviewed. |
 | Local Unix account/group IDs and Samba password/SID databases | Not covered by the core preset | `SmbService::create_user` uses `useradd` and `smbpasswd`; share JSON does not recreate these identities. Need consistent export and collision checks, preserving UID/GID/SID ownership. Do not blindly import `/etc/passwd`, `/etc/shadow` or live Samba databases. |
@@ -111,9 +112,13 @@ unclassified, not silently treated as safe to import.
   attached to it.
 - Reject a wrong repository password, then retrieve the snapshot into private
   staging with independently supplied credentials.
-- Verify recovered material, demonstrate the fresh credential key cannot
-  decrypt the old credential, and verify decryption with the recovered host key
-  inside a private mount namespace. The fresh key remains unchanged.
+- Verify recovered material, demonstrate that neither the fresh credential key
+  nor the recovered key with the fresh machine identity decrypts the old
+  credential, and verify decryption with the recovered host key **and source
+  machine ID** inside a private mount namespace. The fresh key and identity
+  remain unchanged. The initial VM run exposed this machine-identity dependency;
+  it motivated adding `/etc/machine-id` to the preset rather than dropping the
+  decryption assertion.
 - Assert fresh boot/network configuration is untouched and demonstrate that
   an SSH access file outside the preset was not recovered.
 

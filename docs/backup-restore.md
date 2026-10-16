@@ -29,6 +29,7 @@ The Admin-only **NASty System Recovery** preset includes:
 - `/var/lib/caddy` — TLS certificates and the local CA identity;
 - `/var/lib/systemd/credential.secret` — the host key needed to decrypt
   host-only `systemd-creds` values;
+- `/etc/machine-id` — the source identity used to validate that host key;
 - `/var/lib/sbctl` when Secure Boot signing keys exist.
 
 These sources contain appliance authentication state, filesystem recovery
@@ -37,6 +38,13 @@ signing keys. Anyone with the repository password can recover this material.
 The password must be strong, unique, and stored separately. TPM-sealed
 credentials can still require the original TPM even when the host credential
 key is present.
+
+Older presets did not include `/etc/machine-id`. Do not assume their saved
+host credential key can simply be copied to a fresh installation: systemd may
+reject it as belonging to a different machine. The source identity is recovery
+material, not permission to overwrite the fresh installation's live identity.
+Existing profiles must be updated explicitly and a new backup taken; changing
+the preset does not retrofit old profiles or snapshots.
 
 The preset deliberately excludes live Samba/AD databases. A file-level copy
 of live TDB/LDB state can be inconsistent; hosted domains must use the
