@@ -522,6 +522,9 @@
       dhcp-relay = import ./nixos/tests/dhcp-relay.nix {
         inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
       };
+      recovery-material = import ./nixos/tests/recovery-material.nix {
+        inherit pkgs;
+      };
     };
   };
 }

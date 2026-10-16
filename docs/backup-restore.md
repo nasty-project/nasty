@@ -48,6 +48,11 @@ every other snapshot. They do not overwrite a running appliance in place;
 the restored tree is staged for an administrator or future recovery wizard to
 validate and import.
 
+See [System recovery: boot-disk replacement](system-recovery.md) for the
+current recovery-state inventory, known coverage gaps and qualification plan.
+It is not yet an end-to-end import runbook; do not overwrite the fresh system
+with a staged snapshot and restart the engine.
+
 ## Principle: operations stay on `/fs`
 
 Restore only writes into `/fs` (bcachefs-managed storage). This matches
