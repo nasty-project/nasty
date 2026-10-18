@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use zbus::zvariant::OwnedValue;
+use zbus::OwnedVariant;
 
 use super::IpMethod;
 use super::layered::{Address, AddressMethod, Family, LayeredConfig, Link, LinkKind};
@@ -736,8 +736,8 @@ fn macvlan_mode_num(mode: &str) -> u32 {
 
 /// Build the DBus settings dict for an `NmConnection`. Compatible with
 /// `org.freedesktop.NetworkManager.Settings.AddConnection`.
-pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, OwnedValue>> {
-    let mut out: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, OwnedVariant>> {
+    let mut out: HashMap<String, HashMap<String, OwnedVariant>> = HashMap::new();
 
     // [connection]
     let mut conn = HashMap::new();
@@ -871,7 +871,7 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
         // {id, qos, protocol} — NM's vfs_to_dbus shape
         // (nm-setting-sriov.c). protocol 0 = 802.1Q.
         if !p.vfs.is_empty() {
-            let mut vfs: Vec<HashMap<String, OwnedValue>> = Vec::new();
+            let mut vfs: Vec<HashMap<String, OwnedVariant>> = Vec::new();
             for vf in &p.vfs {
                 let mut e = HashMap::new();
                 e.insert("index".into(), into_value(vf.index));
@@ -885,7 +885,7 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
                     e.insert("trust".into(), into_value(t));
                 }
                 if let Some(vlan) = vf.vlan {
-                    let mut v: HashMap<String, OwnedValue> = HashMap::new();
+                    let mut v: HashMap<String, OwnedVariant> = HashMap::new();
                     v.insert("id".into(), into_value(u32::from(vlan)));
                     v.insert("qos".into(), into_value(0u32));
                     v.insert("protocol".into(), into_value(0u32));
@@ -906,7 +906,7 @@ pub fn to_settings_dict(p: &NmConnection) -> HashMap<String, HashMap<String, Own
     out
 }
 
-fn ip_section_dict(ip: &NmIpSettings, family: Family) -> HashMap<String, OwnedValue> {
+fn ip_section_dict(ip: &NmIpSettings, family: Family) -> HashMap<String, OwnedVariant> {
     let mut s = HashMap::new();
     s.insert(
         "method".into(),
@@ -917,7 +917,7 @@ fn ip_section_dict(ip: &NmIpSettings, family: Family) -> HashMap<String, OwnedVa
     //   aa{sv} — array of dicts with keys "address" (string CIDR base)
     //   and "prefix" (u32). Optional gateway is on `[ipv4].gateway`.
     if !ip.addresses.is_empty() {
-        let mut addr_data: Vec<HashMap<String, OwnedValue>> = Vec::new();
+        let mut addr_data: Vec<HashMap<String, OwnedVariant>> = Vec::new();
         for cidr in &ip.addresses {
             if let Some((addr, prefix)) = parse_cidr(cidr, family) {
                 let mut entry = HashMap::new();
@@ -979,7 +979,7 @@ fn ip_section_dict(ip: &NmIpSettings, family: Family) -> HashMap<String, OwnedVa
     }
     // route-data (aa{sv}): on-link routes — dest + prefix, no next-hop.
     if !ip.routes.is_empty() {
-        let mut rd: Vec<HashMap<String, OwnedValue>> = Vec::new();
+        let mut rd: Vec<HashMap<String, OwnedVariant>> = Vec::new();
         for cidr in &ip.routes {
             if let Some((dest, prefix)) = parse_cidr(cidr, family) {
                 let mut e = HashMap::new();
@@ -1025,15 +1025,15 @@ fn mac_to_bytes(mac: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Wrap a value in `OwnedValue`. Centralized so the unwrap handling is
+/// Wrap a value in `OwnedVariant`. Centralized so the unwrap handling is
 /// in one place — these conversions only fail on out-of-memory, which
 /// would fail loudly elsewhere first.
-fn into_value<T>(v: T) -> OwnedValue
+fn into_value<T>(v: T) -> OwnedVariant
 where
-    T: Into<zbus::zvariant::Value<'static>>,
+    T: Into<zbus::Variant<'static>>,
 {
-    let value: zbus::zvariant::Value<'static> = v.into();
-    OwnedValue::try_from(value).expect("OwnedValue conversion")
+    let value: zbus::Variant<'static> = v.into();
+    OwnedVariant::try_from(value).expect("OwnedVariant conversion")
 }
 
 // ── Tests ──────────────────────────────────────────────────────
@@ -1224,10 +1224,10 @@ mod tests {
         let sriov = dict.get("sriov").expect("sriov section");
 
         let outer = sriov.get("vfs").expect("vfs key").try_clone().unwrap();
-        let arr: zbus::zvariant::Array = outer.try_into().expect("vfs is an array");
-        let first: zbus::zvariant::Value = arr.iter().next().unwrap().try_clone().unwrap();
-        let entry: zbus::zvariant::Dict = first.try_into().expect("vf entry is a dict");
-        let vf: HashMap<String, OwnedValue> = entry.try_into().unwrap();
+        let arr: zbus::Array = outer.try_into().expect("vfs is an array");
+        let first: zbus::Variant = arr.iter().next().unwrap().try_clone().unwrap();
+        let entry: zbus::Dict = first.try_into().expect("vf entry is a dict");
+        let vf: HashMap<String, OwnedVariant> = entry.try_into().unwrap();
 
         let index: u32 = vf["index"].try_clone().unwrap().try_into().unwrap();
         assert_eq!(index, 0);
@@ -1239,11 +1239,10 @@ mod tests {
         assert!(!spoof);
 
         let vlans = vf["vlans"].try_clone().unwrap();
-        let vlans_arr: zbus::zvariant::Array = vlans.try_into().expect("vlans is an array");
-        let vlan_entry: zbus::zvariant::Value =
-            vlans_arr.iter().next().unwrap().try_clone().unwrap();
-        let vlan_dict: zbus::zvariant::Dict = vlan_entry.try_into().unwrap();
-        let vlan: HashMap<String, OwnedValue> = vlan_dict.try_into().unwrap();
+        let vlans_arr: zbus::Array = vlans.try_into().expect("vlans is an array");
+        let vlan_entry: zbus::Variant = vlans_arr.iter().next().unwrap().try_clone().unwrap();
+        let vlan_dict: zbus::Dict = vlan_entry.try_into().unwrap();
+        let vlan: HashMap<String, OwnedVariant> = vlan_dict.try_into().unwrap();
         let id: u32 = vlan["id"].try_clone().unwrap().try_into().unwrap();
         assert_eq!(id, 100);
         let qos: u32 = vlan["qos"].try_clone().unwrap().try_into().unwrap();
@@ -1815,15 +1814,15 @@ mod tests {
 
     // ── DBus settings dict conversion ──────────────────────────
 
-    fn cidr_addr_data_first(dict: &HashMap<String, OwnedValue>) -> Option<(String, u32)> {
+    fn cidr_addr_data_first(dict: &HashMap<String, OwnedVariant>) -> Option<(String, u32)> {
         // Pull the first {address, prefix} entry out of `address-data`.
-        let addr_data: &OwnedValue = dict.get("address-data")?;
+        let addr_data: &OwnedVariant = dict.get("address-data")?;
         let outer = addr_data.try_clone().ok()?;
         // `address-data` is `aa{sv}` — array of dicts.
-        let arr: zbus::zvariant::Array = outer.try_into().ok()?;
-        let first: zbus::zvariant::Value = arr.iter().next()?.try_clone().ok()?;
-        let entry: zbus::zvariant::Dict = first.try_into().ok()?;
-        let map: HashMap<String, OwnedValue> = entry.try_into().ok()?;
+        let arr: zbus::Array = outer.try_into().ok()?;
+        let first: zbus::Variant = arr.iter().next()?.try_clone().ok()?;
+        let entry: zbus::Dict = first.try_into().ok()?;
+        let map: HashMap<String, OwnedVariant> = entry.try_into().ok()?;
         let addr: String = map.get("address")?.try_clone().ok()?.try_into().ok()?;
         let prefix: u32 = map.get("prefix")?.try_clone().ok()?.try_into().ok()?;
         Some((addr, prefix))
