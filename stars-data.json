@@ -1170,6 +1170,18 @@
           "stars": 408
         }
       ]
+    },
+    {
+      "timestamp": "2026-10-18T02:49:47.214Z",
+      "totalStars": 408,
+      "repos": [
+        {
+          "fullName": "nasty-project/nasty",
+          "name": "nasty",
+          "owner": "nasty-project",
+          "stars": 408
+        }
+      ]
     }
   ],
   "starsAtLastNotification": 408
