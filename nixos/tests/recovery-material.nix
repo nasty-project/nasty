@@ -138,11 +138,13 @@ in pkgs.testers.runNixOSTest {
       replacement.succeed("printf intentionally-invalid-profile > /etc/rustic/rustic.toml")
       repository_hashes = replacement.succeed("find /run/repository -type f -exec sha256sum {} + | sort")
       listing = "nasty-recovery snapshots --options-file /run/recovery-options.json"
+      workspace_before = replacement.succeed("ls -A /var/lib/nasty-recovery")
       listed = json.loads(replacement.succeed("RUSTIC_USE_PROFILE=ambient-evil RUSTIC_PASSWORD=wrong " + listing))
       assert listed["status"] == "listed", listed
       assert [s["id"] for s in listed["snapshots"]] == [snapshot_id], listed
       assert listed["snapshots"][0]["missing_recovery_paths"] == [], listed
-      replacement.succeed("test -z \"$(ls -A /var/lib/nasty-recovery)\"")
+      # Listing adds no stage session and leaves no scratch directory behind.
+      assert replacement.succeed("ls -A /var/lib/nasty-recovery") == workspace_before
       retrieve = "nasty-recovery retrieve --options-file /run/recovery-options.json --snapshot " + listed["snapshots"][0]["id"]
       replacement.succeed("printf wrong-password > /run/repository-password")
       code, output = replacement.execute(listing)
