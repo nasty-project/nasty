@@ -13,15 +13,15 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use zbus::Connection as DbusConnection;
 use zbus::proxy;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{OwnedObjectPath, OwnedVariant};
 
 use super::{NmConnection, NmConnectionType, to_settings_dict};
 
 /// NM's settings dict shape: `a{sa{sv}}` — section name → setting
-/// name → variant. We use `OwnedValue` so the dict can hold any
+/// name → variant. We use `OwnedVariant` so the dict can hold any
 /// type NM expects (strings, integers, arrays of arrays of bytes,
 /// etc.). The `to_settings_dict` converter in `super` produces this.
-pub type SettingsDict = HashMap<String, HashMap<String, OwnedValue>>;
+pub type SettingsDict = HashMap<String, HashMap<String, OwnedVariant>>;
 
 // ── Proxies ────────────────────────────────────────────────────
 
@@ -76,9 +76,9 @@ trait NetworkManager {
     /// of the new ActiveConnection.
     fn activate_connection(
         &self,
-        connection: &zbus::zvariant::ObjectPath<'_>,
-        device: &zbus::zvariant::ObjectPath<'_>,
-        specific_object: &zbus::zvariant::ObjectPath<'_>,
+        connection: &zbus::ObjectPath<'_>,
+        device: &zbus::ObjectPath<'_>,
+        specific_object: &zbus::ObjectPath<'_>,
     ) -> zbus::Result<OwnedObjectPath>;
 }
 
@@ -148,7 +148,6 @@ impl NmDbusClient {
     pub async fn get_settings(&self, path: &OwnedObjectPath) -> Result<SettingsDict, String> {
         let proxy = ConnectionSettingsProxy::builder(&self.conn)
             .path(path.clone())
-            .map_err(|e| format!("connection path {path}: {e}"))?
             .build()
             .await
             .map_err(|e| format!("connection proxy {path}: {e}"))?;
@@ -203,7 +202,6 @@ impl NmDbusClient {
     ) -> Result<(), String> {
         let proxy = ConnectionSettingsProxy::builder(&self.conn)
             .path(path.clone())
-            .map_err(|e| format!("connection path {path}: {e}"))?
             .build()
             .await
             .map_err(|e| format!("connection proxy {path}: {e}"))?;
@@ -218,7 +216,6 @@ impl NmDbusClient {
     pub async fn delete_connection(&self, path: &OwnedObjectPath) -> Result<(), String> {
         let proxy = ConnectionSettingsProxy::builder(&self.conn)
             .path(path.clone())
-            .map_err(|e| format!("connection path {path}: {e}"))?
             .build()
             .await
             .map_err(|e| format!("connection proxy {path}: {e}"))?;
@@ -246,7 +243,6 @@ impl NmDbusClient {
         for path in devices {
             let dev = DeviceProxy::builder(&self.conn)
                 .path(path.clone())
-                .map_err(|e| format!("device path {path}: {e}"))?
                 .build()
                 .await
                 .map_err(|e| format!("device proxy {path}: {e}"))?;
@@ -271,8 +267,8 @@ impl NmDbusClient {
         let nm = NetworkManagerProxy::new(&self.conn)
             .await
             .map_err(|e| format!("nm proxy: {e}"))?;
-        let unspecified = zbus::zvariant::ObjectPath::try_from("/")
-            .map_err(|e| format!("unspecified path: {e}"))?;
+        let unspecified =
+            zbus::ObjectPath::try_from("/").map_err(|e| format!("unspecified path: {e}"))?;
         let conn_ref = connection.as_ref();
         let dev_ref = device.as_ref();
         nm.activate_connection(&conn_ref, &dev_ref, &unspecified)
@@ -293,7 +289,6 @@ impl NmDbusClient {
         if profile.conn_type == NmConnectionType::Bridge && device.as_str() != "/" {
             let proxy = DeviceProxy::builder(&self.conn)
                 .path(device.clone())
-                .map_err(|e| format!("device path: {e}"))?
                 .build()
                 .await
                 .map_err(|e| format!("device proxy: {e}"))?;
@@ -408,7 +403,7 @@ pub fn compute_diff(desired: &[NmConnection], existing: &[NmExisting]) -> NmDiff
 
 /// Names of top-level sections that differ between two settings dicts.
 /// We compare section-by-section by serialized representation —
-/// sidesteps the `OwnedValue` equality awkwardness and is enough
+/// sidesteps the `OwnedVariant` equality awkwardness and is enough
 /// signal for change detection.
 fn diff_sections(a: &SettingsDict, b: &SettingsDict) -> Vec<String> {
     let mut sections: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
@@ -422,14 +417,14 @@ fn diff_sections(a: &SettingsDict, b: &SettingsDict) -> Vec<String> {
 }
 
 fn section_changed(
-    a: Option<&HashMap<String, OwnedValue>>,
-    b: Option<&HashMap<String, OwnedValue>>,
+    a: Option<&HashMap<String, OwnedVariant>>,
+    b: Option<&HashMap<String, OwnedVariant>>,
 ) -> bool {
     match (a, b) {
         (None, None) => false,
         (Some(_), None) | (None, Some(_)) => true,
         (Some(a), Some(b)) => {
-            // Compare keys-and-values via Debug repr — `OwnedValue`
+            // Compare keys-and-values via Debug repr — `OwnedVariant`
             // doesn't impl `Eq`, but its Debug is stable and includes
             // the variant + payload.  A real variant-walker would be
             // tighter; this is good enough for change detection.
