@@ -149,7 +149,8 @@ let
                 ["ssh", "-v", "-o", "BatchMode=yes", "-o", "PreferredAuthentications=none", *ssh_opts,
                  "sshsmoke@127.0.0.1", "true"], capture_output=True, text=True, timeout=30)
             line = next(l for l in probe.stderr.splitlines() if "Authentications that can continue" in l)
-            return set(line.split(":", 1)[1].strip().split(","))
+            # "debug1: Authentications that can continue: publickey,password"
+            return set(line.rsplit(": ", 1)[1].strip().split(","))
         with open("/tmp/ssh-askpass", "w") as askpass:
             askpass.write("#!/bin/sh\necho ssh-smoke-password\n")
         os.chmod("/tmp/ssh-askpass", 0o700)
