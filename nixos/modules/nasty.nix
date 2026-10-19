@@ -2768,6 +2768,26 @@ in {
     # baseline is back in place.
     systemd.services.nftables.reloadIfChanged = lib.mkForce false;
     systemd.services.nftables.serviceConfig.ExecReload = lib.mkForce "";
+    # Password login is owned by the engine-managed override file (seeded
+    # by tmpfiles, flipped via `system.ssh.set_password_auth`). sshd uses
+    # the *first* value seen for each keyword and nixpkgs writes `settings`
+    # before `extraConfig`, so its default `PasswordAuthentication yes` would
+    # always beat the Include (#516, #1005). Null it so the Include decides;
+    # mkDefault leaves explicit image choices (cloud.nix, vm.nix) in charge.
+    services.openssh = mkIf config.services.openssh.enable {
+      settings.PasswordAuthentication = lib.mkDefault null;
+      # With UsePAM, keyboard-interactive is a second password prompt the
+      # override can't reach. Clients fall back to the `password` method.
+      settings.KbdInteractiveAuthentication = lib.mkDefault false;
+      extraConfig = ''
+        Include /var/lib/nasty/sshd_override.conf
+      '';
+    };
+    # nixpkgs derives PAM unix auth from `PasswordAuthentication == true`;
+    # with it nulled, keep password checks available for the override.
+    security.pam.services.sshd.unixAuth = mkIf
+      (config.services.openssh.enable && config.services.openssh.settings.PasswordAuthentication == null)
+      (lib.mkForce true);
     systemd.services.sshd = mkIf config.services.openssh.enable {
       after = [ "nftables.service" ];
       # Stop the engine before SSH during shutdown so a stalled storage or
