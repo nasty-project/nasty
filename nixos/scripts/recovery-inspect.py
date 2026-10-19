@@ -24,6 +24,8 @@ MIN_FREE_BYTES = 128 * 1024 * 1024
 RUSTIC = "@rustic@"
 CA_BUNDLE = "@ca_bundle@"
 RETRIEVAL_SECONDS = 600
+MAX_SNAPSHOTS = 10_000
+MAX_LISTING = 16 * 1024 * 1024
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 REGULAR = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 SOURCES = {
@@ -492,6 +494,46 @@ def child_limits():
     resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
 
 
+def spawn_rustic(arguments, repository, password, scratch):
+    """Start the pinned rustic CLI with no ambient profile, hooks or credentials."""
+    # An explicit absolute empty profile prevents ambient /etc/rustic,
+    # HOME or working-directory profiles (and their hooks) being loaded.
+    profile = os.open("empty.toml", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=scratch)
+    os.close(profile)
+    env = {"PATH": "/nonexistent", "HOME": f"/proc/self/fd/{scratch}",
+           "RUSTIC_REPOSITORY": repository,
+           "RUSTIC_PASSWORD_FILE": f"/proc/self/fd/{password}",
+           "SSL_CERT_FILE": CA_BUNDLE, "LANG": "C.UTF-8"}
+    process = subprocess.Popen(
+        [RUSTIC, "--use-profile", f"/proc/self/fd/{scratch}/empty.toml", "--no-cache", *arguments],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=env, cwd="/", pass_fds=(password, scratch), start_new_session=True,
+        preexec_fn=child_limits,
+    )
+    def terminate():
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    timer = threading.Timer(RETRIEVAL_SECONDS, terminate)
+    timer.daemon = True
+    timer.start()
+    return process, timer
+
+
+def reap(process, timer):
+    if timer is not None:
+        timer.cancel()
+    if process is not None:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait()
+        process.stdout.close()
+
+
 def retrieve(options_path, snapshot, workspace, uid=0):
     if not re.fullmatch(r"[a-f0-9]{64}", snapshot):
         raise Refusal("full_snapshot_id_required")
@@ -513,30 +555,8 @@ def retrieve(options_path, snapshot, workspace, uid=0):
         save_state(session, {"schema": 1, "status": "incomplete"})
         os.mkdir("tree", 0o700, dir_fd=session)
         tree = os.open("tree", DIRECTORY, dir_fd=session)
-        # An explicit absolute empty profile prevents ambient /etc/rustic,
-        # HOME or working-directory profiles (and their hooks) being loaded.
-        profile = os.open("empty.toml", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=session)
-        os.close(profile)
-        env = {"PATH": "/nonexistent", "HOME": f"/proc/self/fd/{session}",
-               "RUSTIC_REPOSITORY": repository,
-               "RUSTIC_PASSWORD_FILE": f"/proc/self/fd/{password}",
-               "SSL_CERT_FILE": CA_BUNDLE, "LANG": "C.UTF-8"}
         try:
-            process = subprocess.Popen(
-                [RUSTIC, "--use-profile", f"/proc/self/fd/{session}/empty.toml", "--no-cache",
-                 "dump", "--archive", "tar", snapshot],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                env=env, cwd="/", pass_fds=(password, session), start_new_session=True,
-                preexec_fn=child_limits,
-            )
-            def terminate():
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            timer = threading.Timer(RETRIEVAL_SECONDS, terminate)
-            timer.daemon = True
-            timer.start()
+            process, timer = spawn_rustic(["dump", "--archive", "tar", snapshot], repository, password, session)
             budget = extract_tar(process.stdout, tree)
             if process.wait() != 0:
                 raise Refusal("repository_read_failed")
@@ -549,21 +569,95 @@ def retrieve(options_path, snapshot, workspace, uid=0):
             save_state(session, {"schema": 1, "status": "incomplete", "error": code})
             return {"stage_id": identifier, "status": "incomplete", "error": code}
     finally:
-        if timer is not None:
-            timer.cancel()
-        if process is not None:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            process.wait()
-            process.stdout.close()
+        reap(process, timer)
         os.close(password)
         if tree is not None:
             os.close(tree)
         if session is not None:
             os.close(session)
+
+
+def recovery_paths(paths):
+    """Required recovery categories not covered by any snapshot source path."""
+    missing = []
+    for name, (path, kind) in SOURCES.items():
+        if kind == "optional-directory":
+            continue
+        wanted = "/" + path
+        if not any(p == "/" or wanted == p or wanted.startswith(p.rstrip("/") + "/") for p in paths):
+            missing.append(name)
+    return missing
+
+
+def summarize_snapshots(document):
+    """Fixed, validated fields only; never echo arbitrary repository metadata."""
+    if not isinstance(document, list):
+        raise Refusal("invalid_snapshot_listing")
+    snapshots = []
+    for item in document:
+        # rustic emits a plain list when ungrouped, else {group_key, snapshots}.
+        if isinstance(item, dict) and "group_key" in item:
+            group = item.get("snapshots")
+            if not isinstance(group, list):
+                raise Refusal("invalid_snapshot_listing")
+            snapshots.extend(group)
+        else:
+            snapshots.append(item)
+    if len(snapshots) > MAX_SNAPSHOTS:
+        raise Refusal("snapshot_limit")
+    result = []
+    for snap in snapshots:
+        if not isinstance(snap, dict) or not isinstance(snap.get("id"), str) \
+                or not re.fullmatch(r"[a-f0-9]{64}", snap["id"]):
+            raise Refusal("invalid_snapshot_listing")
+        time = snap.get("time")
+        if not (isinstance(time, str) and re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})(\[[A-Za-z0-9_/+-]{1,64}\])?",
+                time)):
+            time = None
+        host = snap.get("hostname")
+        if not (isinstance(host, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host)):
+            host = None
+        paths = snap.get("paths")
+        if not isinstance(paths, list) or not all(
+                isinstance(p, str) and p.startswith("/") and len(p) <= 4096 for p in paths):
+            paths = []
+        result.append({"id": snap["id"], "time": time, "hostname": host,
+                       "missing_recovery_paths": recovery_paths(paths)})
+    return result
+
+
+def snapshots(options_path, workspace, uid=0):
+    """List snapshots without touching staging or the repository."""
+    repository, password = retrieval_options(options_path, uid)
+    # Transient private scratch for the empty profile; not a stage session.
+    scratch_name = ".list-" + uuid.uuid4().hex
+    scratch = process = timer = None
+    try:
+        os.mkdir(scratch_name, 0o700, dir_fd=workspace)
+        scratch = os.open(scratch_name, DIRECTORY, dir_fd=workspace)
+        try:
+            process, timer = spawn_rustic(["snapshots", "--json"], repository, password, scratch)
+            output = process.stdout.read(MAX_LISTING + 1)
+            if len(output) > MAX_LISTING:
+                raise Refusal("listing_limit")
+            if process.wait() != 0:
+                raise Refusal("repository_read_failed")
+            timer.cancel()
+            document = json.loads(output)
+        except (OSError, ValueError, RecursionError, subprocess.SubprocessError):
+            raise Refusal("repository_read_failed")
+        return {"schema": 1, "status": "listed", "snapshots": summarize_snapshots(document)}
+    finally:
+        reap(process, timer)
+        os.close(password)
+        if scratch is not None:
+            try:
+                os.unlink("empty.toml", dir_fd=scratch)
+            except FileNotFoundError:
+                pass
+            os.close(scratch)
+            os.rmdir(scratch_name, dir_fd=workspace)
 
 
 def main():
@@ -576,6 +670,8 @@ def main():
     fetch = commands.add_parser("retrieve", help="retrieve an explicit snapshot into private staging")
     fetch.add_argument("--options-file", required=True, help="absolute root-owned 0600 JSON options file")
     fetch.add_argument("--snapshot", required=True, help="full 64-character snapshot ID; no latest or prefixes")
+    listing = commands.add_parser("snapshots", help="list repository snapshots and their recovery-path coverage")
+    listing.add_argument("--options-file", required=True, help="absolute root-owned 0600 JSON options file")
     args = parser.parse_args()
     if os.geteuid() != 0:
         print(json.dumps({"error": "root_required"}))
@@ -587,6 +683,8 @@ def main():
             result = stage(args.source, workspace)
         elif args.command == "retrieve":
             result = retrieve(args.options_file, args.snapshot, workspace)
+        elif args.command == "snapshots":
+            result = snapshots(args.options_file, workspace)
         else:
             try:
                 with open("/etc/nasty-version", encoding="utf-8") as stream:

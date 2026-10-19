@@ -289,6 +289,68 @@ class RecoveryTests(unittest.TestCase):
                 with self.assertRaises(recovery.Refusal):
                     self.inspect(result["stage_id"])
 
+    def snapshot(self, **fields):
+        return {"id": "b" * 64, "time": "2026-10-16T20:34:42.123456789+02:00[Europe/Warsaw]",
+                "hostname": "nasty", "paths": ["/var/lib/nasty", "/etc", "/var/lib/caddy",
+                                               "/var/lib/systemd/credential.secret"], **fields}
+
+    def test_snapshot_listing_reports_only_validated_fields_and_coverage(self):
+        full = self.snapshot(tags=["secret-tag"], label="private-label", summary={"x": 1})
+        partial = self.snapshot(id="c" * 64, paths=["/var/lib/nasty"])
+        whole = self.snapshot(id="d" * 64, paths=["/"])
+        hostile = self.snapshot(id="e" * 64, time="yesterday\n", hostname="evil\x1b[2J", paths=["relative"])
+        for document in ([full, partial, whole, hostile],
+                         [{"group_key": {"hostname": "nasty"}, "snapshots": [full, partial]},
+                          {"group_key": {}, "snapshots": [whole, hostile]}]):
+            listed = recovery.summarize_snapshots(document)
+            self.assertEqual([set(s) for s in listed], [{"id", "time", "hostname", "missing_recovery_paths"}] * 4)
+            self.assertEqual(listed[0]["time"], full["time"])
+            self.assertEqual(listed[0]["missing_recovery_paths"], [])
+            self.assertEqual(listed[1]["missing_recovery_paths"],
+                             ["system_configuration", "tls_identity", "host_credential_key", "source_machine_identity"])
+            self.assertEqual(listed[2]["missing_recovery_paths"], [])
+            self.assertEqual((listed[3]["time"], listed[3]["hostname"]), (None, None))
+            self.assertEqual(len(listed[3]["missing_recovery_paths"]), 5)
+            self.assertNotIn("secret-tag", json.dumps(listed))
+        # /etcetera is not an ancestor of /etc/nixos.
+        self.assertIn("system_configuration",
+                      recovery.summarize_snapshots([self.snapshot(paths=["/etcetera"])])[0]["missing_recovery_paths"])
+        for document in ({}, [{"id": "B" * 64}], [{"id": "b" * 63}], [{"group_key": {}, "snapshots": {}}], ["x"]):
+            with self.subTest(document=document), self.assertRaises(recovery.Refusal):
+                recovery.summarize_snapshots(document)
+        with patch.object(recovery, "MAX_SNAPSHOTS", 1), self.assertRaises(recovery.Refusal):
+            recovery.summarize_snapshots([full, partial])
+
+    @unittest.skipUnless(sys.platform == "linux", "packaged subprocess uses Linux /proc fd paths")
+    def test_snapshot_listing_subprocess_isolation_failures_and_no_staging(self):
+        options, _ = self.options()
+        listing = json.dumps([self.snapshot()]).encode()
+        executable = self.root / "fake-rustic"
+        for outcome in ("success", "failure", "timeout", "oversize", "malformed"):
+            output = {"oversize": b"[" + b" " * 64 + b"]", "malformed": b"[{"}.get(outcome, listing)
+            executable.write_text(
+                f"#!{sys.executable}\nimport os,sys,time\n"
+                "assert 'RUSTIC_PASSWORD' not in os.environ\n"
+                "assert 'SSH_AUTH_SOCK' not in os.environ\n"
+                "assert open(os.environ['RUSTIC_PASSWORD_FILE']).read() == 'independent-password'\n"
+                "assert sys.argv[1] == '--use-profile' and open(sys.argv[2]).read() == ''\n"
+                "assert sys.argv[3:] == ['--no-cache','snapshots','--json']\n"
+                + ("time.sleep(30)\n" if outcome == "timeout" else f"sys.stdout.buffer.write({output!r})\n")
+                + ("sys.exit(1)\n" if outcome == "failure" else "")
+            )
+            executable.chmod(0o700)
+            with patch.object(recovery, "RUSTIC", str(executable)), \
+                    patch.object(recovery, "MAX_LISTING", 32 if outcome == "oversize" else 1024), \
+                    patch.object(recovery, "RETRIEVAL_SECONDS", 0.2 if outcome == "timeout" else 5), \
+                    patch.dict(os.environ, {"RUSTIC_PASSWORD": "never-inherit", "SSH_AUTH_SOCK": "socket"}):
+                if outcome == "success":
+                    result = recovery.snapshots(str(options), self.fd, os.getuid())
+                    self.assertEqual([s["id"] for s in result["snapshots"]], ["b" * 64])
+                else:
+                    with self.subTest(outcome=outcome), self.assertRaises(recovery.Refusal):
+                        recovery.snapshots(str(options), self.fd, os.getuid())
+            # Listing never leaves a stage session or scratch directory behind.
+            self.assertEqual(os.listdir(self.base), [])
 
 if __name__ == "__main__":
     unittest.main()

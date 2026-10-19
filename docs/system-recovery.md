@@ -142,11 +142,10 @@ use this tool.
 
 #### Retrieve directly from an existing repository
 
-Independently obtain the repository address, password and **full 64-character
-snapshot ID**. The tool deliberately does not select `latest` or accept an
-ambiguous ID prefix. Snapshot discovery/selection remains an operator task
-(for example, the snapshot's full ID in `rustic snapshots --long`). Preserve
-the exact ID independently of the failed boot disk when preparing recovery.
+Independently obtain the repository address and password. `retrieve` needs a
+**full 64-character snapshot ID**; it deliberately does not select `latest` or
+accept an ambiguous ID prefix. List candidates with `snapshots` (below) and
+choose one explicitly.
 
 Create an absolute-path, root-owned regular password file, mode 0600, with
 the repository password. Do not put the password on the command line. Create
@@ -166,9 +165,22 @@ directory in `/run` for these independently supplied credentials. Do not put
 them in the Nix store or a diagnostics bundle.
 
 ```console
+sudo nasty-recovery snapshots --options-file /run/recovery-options.json
 sudo nasty-recovery retrieve --options-file /run/recovery-options.json --snapshot <full_snapshot_id>
 sudo nasty-recovery inspect <stage_id>
 ```
+
+`snapshots` runs the same isolated rustic child (`snapshots --json`) and prints
+only each snapshot's full ID, time, hostname and `missing_recovery_paths`: the
+required recovery categories (NASty state, system configuration, TLS identity,
+host credential key, source machine identity) whose paths no source path of
+that snapshot covers. Tags, labels, source paths and other repository metadata
+are not echoed; malformed times/hostnames are reported as `null`. It creates
+no staging session and refuses output above 16 MiB or 10,000 snapshots. An
+empty `missing_recovery_paths` means only that the snapshot's *declared*
+sources cover those paths, not that the files exist or are valid; use
+`retrieve` and `inspect` for that. The listing is not authenticated against an
+expected appliance identity: hostname and time come from the repository.
 
 The repository may be an existing absolute local directory or a
 `rest:https://server/repository/` address using ordinary certificate
@@ -287,8 +299,8 @@ This still does not qualify a production-state importer or power-loss recovery.
 1. Capture a consistent, versioned recovery inventory, including explicit
    missing-state warnings and portable local account/Samba identity export.
    Never label old snapshots fully recoverable without inspecting their contents.
-2. Extend retrieval qualification to remote repository transports and snapshot
-   discovery; add versioned manifest/schema inspection before setup UI. Define
+2. Extend retrieval and snapshot-listing qualification to remote repository
+   transports; add versioned manifest/schema inspection before setup UI. Define
    explicit handling for excluded links/unsupported state without silent data
    loss. The current bounded retrieval remains inspection-only.
 3. Add the durable recovery boot gate and a controlled apply procedure; test
