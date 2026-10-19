@@ -393,10 +393,20 @@ pub(super) async fn try_route(
             ok(req, available)
         }
         "system.ssh.status" => {
-            // Read from the engine-managed override file (source of truth)
-            let password_auth = std::fs::read_to_string("/var/lib/nasty/sshd_override.conf")
-                .unwrap_or_default()
-                .contains("yes");
+            // Report what sshd actually enforces, not what the override file
+            // asks for: a value earlier in sshd_config wins over the Include.
+            let effective = nasty_common::cmd::run_ok("sshd", &["-T"]).await;
+            let password_auth = match effective.as_deref().map(sshd_accepts_passwords) {
+                Ok(Some(accepts)) => accepts,
+                other => {
+                    tracing::warn!(
+                        "sshd -T unavailable ({other:?}); reporting override file instead"
+                    );
+                    std::fs::read_to_string("/var/lib/nasty/sshd_override.conf")
+                        .unwrap_or_default()
+                        .contains("yes")
+                }
+            };
             let keys = std::fs::read_to_string("/root/.ssh/authorized_keys")
                 .unwrap_or_default()
                 .lines()
@@ -1538,6 +1548,46 @@ fn human_bytes(b: u64) -> String {
         format!("{b} B")
     } else {
         format!("{v:.1} {}", U[i])
+    }
+}
+
+/// Whether sshd's effective config (`sshd -T`) lets a client log in with a
+/// password. With UsePAM, keyboard-interactive prompts for the same password.
+fn sshd_accepts_passwords(effective: &str) -> Option<bool> {
+    let value = |key: &str| {
+        effective
+            .lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(' '))
+            .map(|v| v.trim() == "yes")
+    };
+    Some(value("passwordauthentication")? || value("kbdinteractiveauthentication")?)
+}
+
+#[cfg(test)]
+mod sshd_effective_tests {
+    use super::sshd_accepts_passwords;
+
+    #[test]
+    fn either_password_method_counts_as_password_login() {
+        let config = |pw: &str, kbd: &str| {
+            format!(
+                "port 22\npasswordauthentication {pw}\nkbdinteractiveauthentication {kbd}\nusepam yes\n"
+            )
+        };
+        assert_eq!(sshd_accepts_passwords(&config("no", "no")), Some(false));
+        assert_eq!(sshd_accepts_passwords(&config("yes", "no")), Some(true));
+        assert_eq!(sshd_accepts_passwords(&config("no", "yes")), Some(true));
+    }
+
+    #[test]
+    fn missing_keys_are_unknown_not_disabled() {
+        assert_eq!(sshd_accepts_passwords(""), None);
+        assert_eq!(sshd_accepts_passwords("passwordauthentication no\n"), None);
+        // A longer keyword sharing the prefix is not the setting itself.
+        assert_eq!(
+            sshd_accepts_passwords("passwordauthenticationx no\nkbdinteractiveauthentication no\n"),
+            None
+        );
     }
 }
 

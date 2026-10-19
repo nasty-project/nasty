@@ -16,6 +16,7 @@ let
   # string, which mangles indentation under the testScript type-checker.
   rpcSmoke = pkgs.writeText "rpc-smoke.py" ''
     import json
+    import os
     import ssl
     import subprocess
     import sys
@@ -138,6 +139,47 @@ let
         call(ws, "system.diagnostics.capture", 602, {"enabled": False})
         call(ws, "system.diagnostics.clear", 603)
         assert call(ws, "system.diagnostics.report", 604)["timings"] == []
+
+        # SSH password login follows the engine toggle (#1005): sshd's
+        # advertised methods, a real PAM password login and the reported
+        # status must all agree, both disabled and re-enabled.
+        ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+        def ssh_methods():
+            probe = subprocess.run(
+                ["ssh", "-v", "-o", "BatchMode=yes", "-o", "PreferredAuthentications=none", *ssh_opts,
+                 "sshsmoke@127.0.0.1", "true"], capture_output=True, text=True, timeout=30)
+            line = next(l for l in probe.stderr.splitlines() if "Authentications that can continue" in l)
+            # "debug1: Authentications that can continue: publickey,password"
+            return set(line.rsplit(": ", 1)[1].strip().split(","))
+        with open("/tmp/ssh-askpass", "w") as askpass:
+            askpass.write("#!/bin/sh\necho ssh-smoke-password\n")
+        os.chmod("/tmp/ssh-askpass", 0o700)
+        def ssh_password_login():
+            return subprocess.run(
+                ["ssh", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no",
+                 "-o", "NumberOfPasswordPrompts=1", *ssh_opts, "sshsmoke@127.0.0.1", "true"],
+                env={**os.environ, "SSH_ASKPASS": "/tmp/ssh-askpass", "SSH_ASKPASS_REQUIRE": "force", "DISPLAY": "none"},
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=30).returncode == 0
+        def wait_methods(expected):
+            # `systemctl reload sshd` returns before the re-exec settles.
+            deadline = time.monotonic() + 15
+            while (methods := ssh_methods()) != expected:
+                assert time.monotonic() < deadline, f"sshd still offers {methods!r}, expected {expected!r}"
+                time.sleep(0.5)
+        assert call(ws, "system.ssh.status", 620)["password_auth"] is True
+        wait_methods({"publickey", "password"})
+        assert ssh_password_login(), "password login refused while enabled"
+        smoke_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWn6lmf1fzNTbc2IAz8fk8qnex0MMI4hgVfKwkqqq93 smoke"
+        call(ws, "system.ssh.add_key", 621, {"key": smoke_key})
+        call(ws, "system.ssh.set_password_auth", 622, {"enabled": False})
+        wait_methods({"publickey"})
+        assert not ssh_password_login(), "password login accepted while disabled"
+        assert call(ws, "system.ssh.status", 623)["password_auth"] is False
+        call(ws, "system.ssh.set_password_auth", 624, {"enabled": True})
+        wait_methods({"publickey", "password"})
+        assert ssh_password_login(), "password login refused after re-enabling"
+        assert call(ws, "system.ssh.status", 625)["password_auth"] is True
+        call(ws, "system.ssh.remove_key", 626, {"key": smoke_key})
         # Existing default rules can be edited without delete/recreate. Partial
         # updates retain identity, metric, condition and enable/disable state.
         original_rule = next(r for r in call(ws, "alert.rules.list", 610) if r["id"] == "disk-temp-warn")
@@ -537,6 +579,8 @@ pkgs.testers.runNixOSTest {
     # transient test VM.
     services.timesyncd.enable = lib.mkForce false;
     services.openssh.enable = true;
+    # Unprivileged password-login target for the SSH toggle check.
+    users.users.sshsmoke = { isNormalUser = true; password = "ssh-smoke-password"; };
     services.avahi.enable = true;
     services.smartd.enable = true;
     systemd.services.smartd.wantedBy = lib.mkForce [ ];
