@@ -358,6 +358,57 @@ MARKER_SET=false
 TAILSCALE_REQUIRED=false
 TAILSCALE_IP_BEFORE=""
 TRANSACTION_STARTED_AT=$(date '+%Y-%m-%d %H:%M:%S')
+NEW_GENERATION=""
+
+# systemd-boot copies each generation's kernel and initrd to
+# $ESP/EFI/nixos/<store dir>-<file>.efi and only prunes unreferenced copies
+# afterwards, so a full ESP fails activation part-way through.
+ESP="/boot"
+
+uses_esp_copies() {
+    [ -e "$1/boot.json" ] && compgen -G "$ESP/loader/entries/nixos-generation-*.conf" >/dev/null
+}
+
+bootspec_boot_files() {
+    jq -r '."org.nixos.bootspec.v1" | .kernel, .initrd' "$1/boot.json"
+}
+
+esp_copy() {
+    printf '%s/EFI/nixos/%s-%s.efi' "$ESP" "$(basename "$(dirname "$1")")" "$(basename "$1")"
+}
+
+check_esp_space() {
+    uses_esp_copies "$1" || return 0
+    local file need_kib=1024 free_kib
+    for file in $(bootspec_boot_files "$1"); do
+        [ -e "$(esp_copy "$file")" ] \
+            || need_kib=$((need_kib + ($(wc -c < "$file") + 1023) / 1024))
+    done
+    free_kib=$(df -Pk "$ESP" | awk 'NR == 2 { print $4 }')
+    [[ "$free_kib" =~ ^[0-9]+$ ]] || free_kib=0
+    if [ "$free_kib" -lt "$need_kib" ]; then
+        echo "==> Not enough free space on $ESP: the new kernel and initrd need $((need_kib / 1024)) MiB, $((free_kib / 1024)) MiB available." >&2
+        echo "==> Run nasty-cleanup all to remove older generations and their boot files, then retry." >&2
+        return 1
+    fi
+}
+
+# Drop ESP copies that only the failed candidate referenced, so the previous
+# generation's bootloader install doesn't retry a copy that just hit ENOSPC.
+remove_candidate_esp_copies() {
+    uses_esp_copies "$1" || return 0
+    local file copy link keep
+    for file in $(bootspec_boot_files "$1"); do
+        keep=false
+        for link in "$SYSTEM_PROFILE"-*-link; do
+            [ -e "$link/boot.json" ] || continue
+            bootspec_boot_files "$link" | grep -xF "$file" >/dev/null && keep=true
+        done
+        copy=$(esp_copy "$file")
+        $keep || rm -f -- "$copy"
+        rm -f -- "$copy"*.tmp
+    done
+}
 
 _proxy_conf() {
     readlink -f /run/current-system/etc/caddy/Caddyfile 2>/dev/null || true
@@ -442,6 +493,11 @@ rollback_transaction() {
     if $PROFILE_MUTATED; then
         nix-env --profile "$SYSTEM_PROFILE" --switch-generation "$OLD_GENERATION" \
             || rollback_ok=false
+        if $rollback_ok && [ -n "$NEW_GENERATION" ] && [ "$NEW_GENERATION" != "$OLD_GENERATION" ]; then
+            nix-env --profile "$SYSTEM_PROFILE" --delete-generations "$NEW_GENERATION" \
+                || rollback_ok=false
+        fi
+        remove_candidate_esp_copies "$RESULT" || rollback_ok=false
         if $detach_activation; then
             if $rollback_ok; then
                 SIGNAL_ROLLBACK="$WORK_DIR/signal-rollback.sh"
@@ -604,6 +660,8 @@ if [ "$CADDY_REQUIRED" = true ] && [ -f /var/lib/nasty/webui-listeners.json ]; t
     CADDY_HEALTH_URL="https://127.0.0.1:$CADDY_PORT/health"
 fi
 
+check_esp_space "$RESULT"
+
 # Suppress generation recovery until activation has passed health checks.
 install -m 0600 /dev/null "$MARKER"
 MARKER_SET=true
@@ -611,6 +669,7 @@ LIVE_MUTATED=true
 install_pair "$STAGE"
 PROFILE_MUTATED=true
 nix-env --profile "$SYSTEM_PROFILE" --set "$RESULT"
+NEW_GENERATION=$(nix-env --profile "$SYSTEM_PROFILE" --list-generations | awk '$NF == "(current)" { print $1 }')
 echo "==> Activating verified system closure..."
 NIXOS_INSTALL_BOOTLOADER=0 "$RESULT/bin/switch-to-configuration" switch
 
@@ -4865,6 +4924,168 @@ proc /proc proc rw 0 0\n\
         assert!(script.contains("--setenv \"TAILSCALE_IP_BEFORE=$TAILSCALE_IP_BEFORE\""));
         assert!(script.contains("previous Tailscale connection did not recover"));
         assert!(script.contains(super::UPDATE_TRANSACTION_MARKER));
+    }
+
+    /// Fixture tree: fake store files, a bootspec per generation and an ESP
+    /// laid out like systemd-boot's. Returns the root directory.
+    fn esp_fixture(entries: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("nasty-update-esp-{}", uuid::Uuid::new_v4()));
+        for (path, size) in [
+            ("store/aaa-linux-old/Image", 1),
+            ("store/bbb-linux-new/Image", 3000),
+            ("store/ccc-initrd-shared/initrd", 2000),
+        ] {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; size]).unwrap();
+        }
+        let bootspec = |kernel: &str| {
+            serde_json::json!({ "org.nixos.bootspec.v1": {
+                "kernel": dir.join(kernel), "initrd": dir.join("store/ccc-initrd-shared/initrd"),
+            }})
+            .to_string()
+        };
+        for (system, kernel) in [
+            ("profiles/system-1-link", "store/aaa-linux-old/Image"),
+            ("result", "store/bbb-linux-new/Image"),
+        ] {
+            std::fs::create_dir_all(dir.join(system)).unwrap();
+            std::fs::write(dir.join(system).join("boot.json"), bootspec(kernel)).unwrap();
+        }
+        std::fs::create_dir_all(dir.join("esp/EFI/nixos")).unwrap();
+        if entries {
+            std::fs::create_dir_all(dir.join("esp/loader/entries")).unwrap();
+            std::fs::write(dir.join("esp/loader/entries/nixos-generation-1.conf"), "").unwrap();
+        }
+        dir
+    }
+
+    fn run_esp_helpers(dir: &std::path::Path, free_kib: &str, call: &str) -> std::process::Output {
+        let script = rendered_transaction();
+        let helpers = script
+            .split("ESP=\"/boot\"")
+            .nth(1)
+            .unwrap()
+            .split("_proxy_conf() {")
+            .next()
+            .unwrap()
+            .replace("$(df -Pk \"$ESP\" | awk 'NR == 2 { print $4 }')", free_kib);
+        let fixture = format!(
+            "set -Eeuo pipefail\nESP={esp:?}\nSYSTEM_PROFILE={profile:?}\n{helpers}\n{call}",
+            esp = dir.join("esp"),
+            profile = dir.join("profiles/system"),
+        );
+        std::process::Command::new("bash")
+            .args([
+                "-c",
+                &fixture,
+                "fixture",
+                &dir.join("result").to_string_lossy(),
+            ])
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn esp_preflight_refuses_only_when_missing_boot_files_do_not_fit() {
+        let dir = esp_fixture(true);
+        // 1024 KiB headroom + 3 KiB kernel + 2 KiB initrd, neither copied yet.
+        let short = run_esp_helpers(&dir, "1028", "check_esp_space \"$1\"");
+        assert!(!short.status.success());
+        let error = String::from_utf8_lossy(&short.stderr);
+        assert!(error.contains("Not enough free space on"), "{error}");
+        assert!(error.contains("nasty-cleanup all"), "{error}");
+        assert!(
+            run_esp_helpers(&dir, "1029", "check_esp_space \"$1\"")
+                .status
+                .success()
+        );
+
+        // Copies already on the ESP cost nothing.
+        for name in ["bbb-linux-new-Image.efi", "ccc-initrd-shared-initrd.efi"] {
+            std::fs::write(dir.join("esp/EFI/nixos").join(name), "").unwrap();
+        }
+        assert!(
+            run_esp_helpers(&dir, "1024", "check_esp_space \"$1\"")
+                .status
+                .success()
+        );
+        assert!(
+            !run_esp_helpers(&dir, "1023", "check_esp_space \"$1\"")
+                .status
+                .success()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // Without systemd-boot entries (e.g. lanzaboote) the check is skipped.
+        let dir = esp_fixture(false);
+        assert!(
+            run_esp_helpers(&dir, "0", "check_esp_space \"$1\"")
+                .status
+                .success()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rollback_removes_only_candidate_esp_copies() {
+        let dir = esp_fixture(true);
+        let nixos = dir.join("esp/EFI/nixos");
+        for name in [
+            "aaa-linux-old-Image.efi",
+            "bbb-linux-new-Image.efi",
+            "ccc-initrd-shared-initrd.efi",
+            "ccc-initrd-shared-initrd.efix1y2z3.tmp",
+        ] {
+            std::fs::write(nixos.join(name), "").unwrap();
+        }
+        let out = run_esp_helpers(&dir, "0", "remove_candidate_esp_copies \"$1\"");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut left: Vec<_> = std::fs::read_dir(&nixos)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["aaa-linux-old-Image.efi", "ccc-initrd-shared-initrd.efi"]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wrapper_transaction_checks_esp_before_mutation_and_drops_candidate_on_rollback() {
+        let script = rendered_transaction();
+        let build = script
+            .find("nix build \"$STAGE#nixosConfigurations")
+            .unwrap();
+        let preflight = script.find("check_esp_space \"$RESULT\"").unwrap();
+        let marker = script
+            .find("install -m 0600 /dev/null \"$MARKER\"\nMARKER_SET=true\nLIVE_MUTATED")
+            .unwrap();
+        assert!(build < preflight);
+        assert!(preflight < marker);
+
+        let switch_back = script
+            .find("--switch-generation \"$OLD_GENERATION\"")
+            .unwrap();
+        let drop_candidate = script
+            .find("--delete-generations \"$NEW_GENERATION\"")
+            .unwrap();
+        let drop_copies = script
+            .find("remove_candidate_esp_copies \"$RESULT\" ||")
+            .unwrap();
+        let reactivate = script
+            .find("\"$OLD_SYSTEM/bin/switch-to-configuration\" switch")
+            .unwrap();
+        assert!(switch_back < drop_candidate);
+        assert!(drop_candidate < drop_copies);
+        assert!(drop_copies < reactivate);
+        assert!(script.contains("--set \"$RESULT\"\nNEW_GENERATION=$("));
     }
 
     #[test]
