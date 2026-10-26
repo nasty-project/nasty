@@ -87,6 +87,27 @@ ignore = [
     # (ramosbugs/openidconnect-rs#244).
     "RUSTSEC-2026-0387",
 
+    # RUSTSEC-2026-0391 — `zstd` < 0.14.3: abandoned stream data leaks
+    #   into the next stream on a context reused via `with_context`.
+    # RUSTSEC-2026-0398 — `zstd-safe` < 8.2.0: `Seekable::decompress`
+    #   sets a Vec length past capacity (`seekable` feature only).
+    # RUSTSEC-2026-0403 — `zstd-safe` < 8.2.0: uninitialized memory via
+    #   `zstd::stream::write::Decoder` on a corrupt legacy frame.
+    #
+    # Reach in our codebase:
+    #   rustic_core 0.13.0 → zstd 0.13.3 → zstd-safe 7.3.0 (fixes are in
+    #   the semver-incompatible zstd 0.14 / zstd-safe 8 lines).
+    #
+    # Exposure model: rustic_core only calls `encode_all`, `decode_all`
+    # and `copy_encode`, each with a fresh context; it never uses
+    # `with_context`, the `seekable` feature is off, and `decode_all` is
+    # named unaffected by 0403. The engine doesn't use zstd directly.
+    #
+    # Remove these entries when rustic_core releases on zstd >= 0.14.3.
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
+
     # RUSTSEC-2025-0052 — `async-std` is discontinued.
     # RUSTSEC-2026-0271 — `suppaftp` permits CRLF command injection in
     # FTP control-channel arguments before 10.0.2.
