@@ -72,6 +72,21 @@ ignore = [
     # release.
     "RUSTSEC-2023-0071",
 
+    # RUSTSEC-2026-0387 — timing variability in `crypto-bigint` < 0.7.6
+    # arithmetic meant to be constant-time; leaks only matter for
+    # operations on secret integers. No 0.5.x fix exists.
+    #
+    # Reach in our codebase:
+    #   openidconnect 4.0.1 → p256/p384 0.13 → elliptic-curve → crypto-bigint 0.5.5
+    #
+    # Exposure model: NASty only verifies ES256/ES384 ID token
+    # signatures against the IdP's public key; nothing signs with an
+    # EC private key, so there is no secret operand to leak.
+    #
+    # Remove this entry when openidconnect releases p256/p384 0.14
+    # (ramosbugs/openidconnect-rs#244).
+    "RUSTSEC-2026-0387",
+
     # RUSTSEC-2025-0052 — `async-std` is discontinued.
     # RUSTSEC-2026-0271 — `suppaftp` permits CRLF command injection in
     # FTP control-channel arguments before 10.0.2.
