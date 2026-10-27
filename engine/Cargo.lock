@@ -2929,7 +2929,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "nasty-apps"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bollard",
  "chrono",
@@ -2950,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-backup"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "cron",
@@ -2971,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-common"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.23.1",
  "libc",
@@ -2987,7 +2987,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3030,7 +3030,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-metrics"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3046,7 +3046,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-sharing"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "nasty-common",
  "schemars 1.2.3",
@@ -3060,14 +3060,14 @@ dependencies = [
 
 [[package]]
 name = "nasty-snapshot"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "nasty-storage",
 ]
 
 [[package]]
 name = "nasty-storage"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "cron",
@@ -3086,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-system"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.23.1",
  "bcrypt",
@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "nasty-vm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "nasty-common",
  "schemars 1.2.3",

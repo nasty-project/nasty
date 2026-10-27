@@ -1,5 +1,139 @@
 # Changelog
 
+## v0.1.2 — 2026-10-27
+
+> **This is the installation, operability & hardening release.** NASty now
+> installs from any Linux live system and on legacy-BIOS x86 machines, and an
+> offline storage maintenance mode keeps SSH available while pools stay
+> untouched. Saved service settings now reliably reach the running services,
+> media previews play browser-decoded AC-3 audio, VM disks and bridges are
+> safer to manage, and updates guard the EFI partition and the Nix store against
+> running out of space. Security patches cover TLS, certificate trust, and
+> dependency advisories.
+
+### Headline changes
+
+- **Install anywhere (#894, #896, #916, #918, #919).** A packaged
+  `nasty-install` helper installs from any Linux live environment with
+  whole-disk safety checks, x86_64 machines can install in legacy BIOS mode with
+  GRUB, split installs reserve a 50 GiB OS partition, and both full installer
+  ISOs fit under GitHub's 2 GiB asset limit.
+- **Offline storage maintenance mode (#958, #971).** `nasty-maintenance enter`
+  reboots into a persistent mode that keeps networking and SSH while data pools
+  and their consumers stay offline, with a read-only landing page at the usual
+  WebUI address explaining how to connect and exit.
+- **Saved service settings reliably reach running services (#923–#928).**
+  iSCSI queue depth applies to new targets, NVMe-oF uses the saved Base NQN,
+  NFS tuning is reapplied whenever the server starts, and SMB, UPS, and Backup
+  Server report when saved settings could not be applied live.
+- **Media previews (#934–#944).** Guest shares and the file manager preview
+  audio and video with a shared player, show container and codec properties,
+  and decode AC-3/E-AC-3 audio in the browser when it lacks native support.
+- **Safer updates (#985, #1009).** Updates check EFI partition space before
+  changing anything and can always roll back from a full ESP, and
+  `nasty-cleanup` reclaims abandoned update roots that pinned old systems.
+- **Configurable WebUI ports and alerts (#969, #977).** HTTPS and optional HTTP
+  redirect ports can be changed with a confirm-or-rollback transaction, and
+  alert thresholds, including disk temperatures, can be edited in the WebUI.
+
+### Storage and disks
+
+- Whole disks that still carry partitions can be inspected and explicitly
+  wiped for reuse; filesystem creation prepares only confirmed disks and
+  revalidates their identity before erasure (#911).
+- Disk inventory separates HDD/SSD media from the native SATA/SAS/NVMe
+  interface, so the tiering wizard recognizes SAS SSDs, SATA HDDs behind SAS
+  shelves, and NVMe SSDs correctly (#912).
+- Pool members referenced by persistent by-id aliases no longer show a false
+  "Missing member" status (#966).
+- Filesystem accounting and upload limits are correct on 32-bit systems with
+  large filesystems (#964).
+- Configured Apps storage and relocation targets are protected from deletion,
+  and nested subvolumes must be deleted individually so dependency checks
+  cannot be bypassed (#898).
+- Local performance diagnostics in Settings → System tuning capture backend and
+  browser timings for slow pages, optionally across a reboot. Nothing is
+  uploaded; reports are reviewed and downloaded locally (#972, #973, #984).
+
+### Sharing and services
+
+- iSCSI target creation rejects names `targetcli` cannot persist, lowercases
+  IQNs, uses the configured Base IQN, and only reports success after the
+  configuration is saved (#917, #922).
+- Backblaze B2 backup repositories initialize correctly using the bucket ID and
+  application key fields (#910).
+- Slow service operations show progress, outcomes, and a link to logs instead
+  of appearing stuck (#899).
+
+### Networking, VMs and access
+
+- Memberless bridges activate correctly and can be created with a static
+  address, and isolated VM bridges can use an engine-managed DHCP relay
+  (#960, #961).
+- VM disks are created under the VM's own layout, and disks already used by
+  other VMs, Kubernetes volumes, iSCSI/NVMe-oF exports, or local mounts are
+  flagged and protected from accidental attachment (#898, #968, #970).
+- Tailscale no longer accepts advertised routes by default, which could route
+  LAN replies through the tailnet; route acceptance is now a saved setting
+  (#930).
+- The SSH password-login toggle takes effect in sshd (#1006), and FIDO
+  (`sk-`) SSH keys can be added (#947).
+- Custom TLS DNS-01 providers work in the WebUI, and Aliyun (AliDNS) is
+  supported (#950, #955).
+- GitHub API errors and rate limits during update checks are reported with
+  actionable guidance (#957).
+
+### Recovery
+
+- A packaged `nasty-recovery` CLI can list snapshots in a backup repository,
+  retrieve one into private staging, and inspect it read-only. These are the
+  first, inspection-only steps toward restoring a replaced OS disk; nothing is
+  applied to the running system (#998–#1001).
+
+### Security
+
+- The engine's TLS stack is patched for rustls and rustls-webpki advisories,
+  and the compromised emSign roots are distrusted in the engine, the system CA
+  bundle, and the recovery image (#983, #1008, #1010).
+- Unmaintained YAML and D-Bus dependencies are replaced, and RustCrypto, zstd,
+  and WebUI dependency advisories are resolved (#959, #981, #1002, #1012).
+
+### Platform and tools
+
+- bcachefs-tools and its matching DKMS source move from 1.39.6 to **1.39.7**
+  (#951).
+- Linux moves from 6.18.52 to **6.18.57** across the weekly nixpkgs updates,
+  Tailscale moves from 1.102.4 to **1.104.1**, and lanzaboote to **1.2.0**
+  (#903, #913, #929, #952, #979, #994–#996, #1004, #1007, #1011).
+- `sqlite3`, `7zz`, and the maintained `ncdu` fork (**2.12.0**) are installed,
+  and `/etc/nixos/custom.nix.example` shows how to add packages
+  (#901, #904, #993).
+- The WebUI moves to SvelteKit 3, and Rust, WebUI, Swagger UI, and CI
+  dependencies are refreshed (#931–#933, #945, #986–#992).
+
+### Upgrading
+
+- **Removed tools:** DiskWatch, NetWatch, SysWatch, and uv/uvx are no longer
+  installed on the appliance. nasty-top, btop, Python, and the core disk and
+  network tools remain (#919).
+- **Tailscale routes:** advertised routes are no longer accepted by default.
+  If the appliance relied on reaching subnets through Tailscale, enable route
+  acceptance again on the VPN page (#930).
+- **iSCSI names:** new targets cannot use underscores, IQNs are created in
+  lowercase, and new targets and NVMe-oF subsystems use the saved Base IQN/NQN.
+  Existing targets and subsystems keep their names (#917, #922, #924).
+- **Backblaze B2:** add the bucket ID to existing B2 backup profiles; saved
+  keys do not need to be rotated (#910).
+- **SSH passwords:** if password login was disabled in the WebUI, sshd now
+  enforces it. Make sure key-based access works before upgrading (#1006).
+- **emSign certificates:** services presenting certificates that chain to
+  emSign roots are no longer trusted by the appliance (#1010).
+- **Legacy BIOS:** only new installations can choose BIOS mode. Existing
+  installations keep their UEFI bootloader; changing modes requires a
+  reinstall (#916).
+- **bcachefs 1.39.x:** keep backups current and avoid downgrading tools or the
+  kernel after a filesystem has adopted newer 1.39.x on-disk features.
+
 ## v0.1.1 — 2026-09-16
 
 > **This is the dashboard control, security & reliability release.** Dashboards
