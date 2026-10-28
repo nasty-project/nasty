@@ -123,7 +123,7 @@ Building something with NASty? Open an issue or PR and we'll add it here.
 3. Open the WebUI at `https://<nasty-ip>`
 4. Sign in with **admin** / **admin** and set a new password when prompted
 
-Current development builds can install in UEFI mode or, experimentally on x86_64, legacy BIOS mode (without Secure Boot). Boot the installer in the mode you want to keep; the v0.1.1 release still requires UEFI/OVMF. If the ISO will not boot on your firmware, see [INSTALL.md](INSTALL.md) for an alternative installation method from any Linux live environment.
+NASty can install in UEFI mode or, experimentally on x86_64, legacy BIOS mode (without Secure Boot). Boot the installer in the mode you want to keep. If the ISO will not boot on your firmware, see [INSTALL.md](INSTALL.md) for an alternative installation method from any Linux live environment.
 
 ## Update Flavors
 
