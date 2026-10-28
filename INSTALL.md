@@ -52,17 +52,15 @@ curl -L https://nixos.org/nix/install | sh -s -- --no-daemon --yes
 . /root/.nix-profile/etc/profile.d/nix.sh
 ```
 
-The `v0.1.1` tag predates the packaged helper and BIOS support. The pinned
-helper below installs only in UEFI mode. To install in legacy BIOS mode, boot
-a NASty ISO containing BIOS support, or use a newer release's packaged helper
-once available. The boot mode is determined by how you boot the live system;
+The helper installs in UEFI mode or, on x86_64, legacy BIOS mode (without Secure
+Boot). The boot mode is determined by how you boot the live system;
 `--boot-mode auto` is the default, and an explicit `uefi` or `bios` must match.
 
 Start with a dry run. It checks the boot mode, Secure Boot, target-disk safety, release
 resolution, the wrapper lock, and NixOS evaluation without modifying the disk:
 
 ```bash
-INSTALLER_REF=9fbbaebd2e34079bf0b6de97fca86cd30e73f80f
+INSTALLER_REF=v0.1.2
 DISK=/dev/nvme0n1
 
 nix --extra-experimental-features 'nix-command flakes' run \
