@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.2 — 2026-10-27
+## v0.1.2 — 2026-10-28
 
 > **This is the installation, operability & hardening release.** NASty now
 > installs from any Linux live system and on legacy-BIOS x86 machines, and an
