@@ -414,10 +414,6 @@ in {
       options = "--delete-older-than 30d";
     };
 
-    # ── Trusted CAs ────────────────────────────────────────────
-    # Drop distrusted roots from the system bundle until nixpkgs catches up.
-    security.pki.caCertificateBlacklist = import ../packages/distrusted-cas.nix;
-
     # ── NTP ────────────────────────────────────────────────────
     services.timesyncd.enable = true;
 
