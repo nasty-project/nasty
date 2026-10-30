@@ -403,27 +403,26 @@ impl AuthService {
             }
         }
 
-        let mut current = self.state.write().await;
-        let mut state = current.clone();
-
-        let user = state
+        // Argon2 runs outside the state lock: every authenticated request
+        // takes its read side, so hashing under the write lock stalls the API.
+        let user = self
+            .state
+            .read()
+            .await
             .users
             .iter()
             .find(|u| u.username == username)
-            .ok_or(AuthError::InvalidCredentials);
-
-        let user = match user {
-            Ok(u) => u,
-            Err(e) => {
+            .cloned();
+        let hash = user.as_ref().and_then(|u| u.password_hash.clone());
+        let verified = verify_login_password(password, hash.clone()).await;
+        let user = match (user, &hash, verified) {
+            (Some(user), Some(_), true) => user,
+            (None, ..) => {
                 audit("login_failed", username, client_ip, "user not found");
                 self.record_failed_attempt(username, client_ip, now).await;
-                return Err(e);
+                return Err(AuthError::InvalidCredentials);
             }
-        };
-
-        let hash = match user.password_hash.as_deref() {
-            Some(h) => h,
-            None => {
+            (Some(_), None, _) => {
                 audit(
                     "login_failed",
                     username,
@@ -433,14 +432,23 @@ impl AuthService {
                 self.record_failed_attempt(username, client_ip, now).await;
                 return Err(AuthError::InvalidCredentials);
             }
-        };
-        match verify_password(password, hash) {
-            Ok(()) => {}
-            Err(e) => {
+            (Some(_), Some(_), false) => {
                 audit("login_failed", username, client_ip, "wrong password");
                 self.record_failed_attempt(username, client_ip, now).await;
-                return Err(e);
+                return Err(AuthError::InvalidCredentials);
             }
+        };
+
+        let mut current = self.state.write().await;
+        let mut state = current.clone();
+        // The password may have changed, or the user been removed, while the
+        // hash was being checked.
+        if !state
+            .users
+            .iter()
+            .any(|u| u.username == username && u.password_hash == hash)
+        {
+            return Err(AuthError::InvalidCredentials);
         }
 
         // Successful login — clear per-username failures. We deliberately
@@ -992,9 +1000,13 @@ impl AuthService {
 
     async fn record_failed_attempt(&self, username: &str, client_ip: &str, now: u64) {
         let mut rl = self.rate_limit.write().await;
-        let user_entry = rl.by_user.entry(username.to_string()).or_default();
-        user_entry.push(now);
-        user_entry.retain(|&t| now.saturating_sub(t) < LOCKOUT_WINDOW_SECS);
+        // Drop other usernames' and IPs' expired entries too, or every name and
+        // address ever tried stays in memory and the file until restart.
+        rl.prune(now);
+        rl.by_user
+            .entry(username.to_string())
+            .or_default()
+            .push(now);
         if client_ip != "unknown" {
             let ip_entry = rl.by_ip.entry(ip_bucket(client_ip)).or_default();
             ip_entry.push(now);
@@ -1585,6 +1597,40 @@ pub(crate) fn hash_password(password: &str) -> Result<String, AuthError> {
         .hash_password_with_salt(password.as_bytes(), &salt_bytes)
         .map_err(|e| AuthError::HashError(e.to_string()))?;
     Ok(hash.to_string())
+}
+
+/// Concurrent login hashes. Each Argon2 check allocates 19 MiB, so a burst of
+/// logins must queue rather than all run at once.
+static LOGIN_PASSWORD_CHECKS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+
+/// Hash checked for unknown or password-less users, so response time doesn't
+/// reveal which usernames exist. Callers never accept its result.
+static DUMMY_PASSWORD_HASH: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    hash_password("nasty-login-timing-dummy").expect("hash dummy login password")
+});
+
+/// Verify a login password on a blocking worker; `None` checks the dummy hash
+/// and always returns false.
+async fn verify_login_password(password: &str, hash: Option<String>) -> bool {
+    let Ok(permit) = LOGIN_PASSWORD_CHECKS.clone().acquire_owned().await else {
+        return false;
+    };
+    let password = password.to_string();
+    tokio::task::spawn_blocking(move || {
+        // The worker owns the permit so a dropped request can't free capacity
+        // while Argon2 is still running.
+        let _permit = permit;
+        match hash {
+            Some(hash) => verify_password(&password, &hash).is_ok(),
+            None => {
+                let _ = verify_password(&password, &DUMMY_PASSWORD_HASH);
+                false
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 pub(crate) fn verify_password(password: &str, hash: &str) -> Result<(), AuthError> {
@@ -2733,6 +2779,14 @@ mod tests {
         // The very-old entry is outside the window and shouldn't count.
         assert_eq!(rl.user_failures("alice", now), 2);
         assert_eq!(rl.user_failures("bob", now), 0);
+    }
+
+    #[tokio::test]
+    async fn login_password_check_never_accepts_the_dummy_hash() {
+        let hash = hash_password("hunter2").unwrap();
+        assert!(verify_login_password("hunter2", Some(hash.clone())).await);
+        assert!(!verify_login_password("wrong", Some(hash)).await);
+        assert!(!verify_login_password("nasty-login-timing-dummy", None).await);
     }
 
     #[test]
