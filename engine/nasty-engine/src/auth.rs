@@ -248,6 +248,19 @@ const IP_LOCKOUT_WINDOW_SECS: u64 = 60 * 60; // 1 hour
 
 const RATE_LIMIT_PATH: &str = "/var/lib/nasty/auth-rate-limit.json";
 
+/// Per-IP limiter bucket. IPv6 failures are counted per /64: one subscriber
+/// usually holds a whole /64, so per-address counting is bypassed by moving to
+/// a new address every few attempts.
+fn ip_bucket(ip: &str) -> String {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
+            let prefix = u128::from(v6) & !((1u128 << 64) - 1);
+            format!("{}/64", std::net::Ipv6Addr::from(prefix))
+        }
+        _ => ip.to_string(),
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct RateLimitState {
     /// Failure timestamps per username.
@@ -285,7 +298,7 @@ impl RateLimitState {
 
     fn ip_failures(&self, ip: &str, now: u64) -> usize {
         self.by_ip
-            .get(ip)
+            .get(&ip_bucket(ip))
             .map(|v| {
                 v.iter()
                     .filter(|&&t| now.saturating_sub(t) < IP_LOCKOUT_WINDOW_SECS)
@@ -983,7 +996,7 @@ impl AuthService {
         user_entry.push(now);
         user_entry.retain(|&t| now.saturating_sub(t) < LOCKOUT_WINDOW_SECS);
         if client_ip != "unknown" {
-            let ip_entry = rl.by_ip.entry(client_ip.to_string()).or_default();
+            let ip_entry = rl.by_ip.entry(ip_bucket(client_ip)).or_default();
             ip_entry.push(now);
             ip_entry.retain(|&t| now.saturating_sub(t) < IP_LOCKOUT_WINDOW_SECS);
         }
@@ -2731,6 +2744,19 @@ mod tests {
             vec![now - IP_LOCKOUT_WINDOW_SECS - 1, now - 60, now - 30, now],
         );
         assert_eq!(rl.ip_failures("10.0.0.1", now), 3);
+    }
+
+    #[test]
+    fn rate_limit_counts_ipv6_per_64() {
+        let now = 1_000_000;
+        let mut rl = RateLimitState::default();
+        rl.by_ip
+            .insert(ip_bucket("2001:db8:1:2::1"), vec![now - 30, now]);
+        assert_eq!(rl.ip_failures("2001:db8:1:2:ffff::9", now), 2, "same /64");
+        assert_eq!(rl.ip_failures("2001:db8:1:3::1", now), 0, "other /64");
+        assert_eq!(ip_bucket("10.0.0.1"), "10.0.0.1");
+        assert_eq!(ip_bucket("::ffff:10.0.0.1"), "::ffff:10.0.0.1");
+        assert_eq!(ip_bucket("unknown"), "unknown");
     }
 
     #[test]
