@@ -1736,6 +1736,34 @@ fn is_inside_block_subvolume(path: &std::path::Path) -> bool {
     false
 }
 
+/// Filesystem and subvolume roots are managed on the Subvolumes page, where
+/// dependents (shares, apps, VMs, Kubernetes volumes) are checked first.
+fn is_storage_root(path: &std::path::Path, subvolume_paths: &[String]) -> bool {
+    let rel = path.strip_prefix(FILES_ROOT).unwrap_or(path);
+    rel.components().count() <= 1
+        || subvolume_paths
+            .iter()
+            .any(|subvolume| std::path::Path::new(subvolume) == path)
+}
+
+/// [`is_storage_root`] against the live subvolume list; fails closed when the
+/// list can't be read.
+async fn is_storage_root_live(state: &AppState, path: &std::path::Path) -> bool {
+    match state.subvolumes.list_all(None, None).await {
+        Ok(subvolumes) => {
+            let paths: Vec<String> = subvolumes.into_iter().map(|s| s.path).collect();
+            is_storage_root(path, &paths)
+        }
+        Err(e) => {
+            warn!(
+                "Refusing file operation on {}: cannot list subvolumes: {e}",
+                path.display()
+            );
+            true
+        }
+    }
+}
+
 /// Validate that a path is under /fs and doesn't escape via traversal.
 fn safe_path(requested: &str) -> Result<std::path::PathBuf, StatusCode> {
     let clean = requested.replace("\\", "/");
@@ -2175,10 +2203,8 @@ async fn files_delete_handler(
         }
     };
 
-    // Refuse to delete filesystem/subvolume roots (depth 1 under /fs, e.g. /fs/mypool)
-    let rel = target.strip_prefix(FILES_ROOT).unwrap_or(&target);
-    if rel.components().count() <= 1 {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot delete filesystem root directories — use the Subvolumes page"}))).into_response();
+    if is_storage_root_live(&state, &target).await {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot delete filesystem or subvolume roots — use the Subvolumes page"}))).into_response();
     }
 
     // Protect block subvolume backing files (vol.img and anything in the subvolume dir)
@@ -2708,12 +2734,10 @@ async fn files_rename_handler(
                 .into_response();
         }
     };
-    // Refuse to move filesystem/subvolume roots (depth 1 under /fs).
-    let from_rel = from.strip_prefix(FILES_ROOT).unwrap_or(&from);
-    if from_rel.components().count() <= 1 {
+    if is_storage_root_live(&state, &from).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Cannot rename filesystem root directories — use the Subvolumes page"})),
+            Json(serde_json::json!({"error": "Cannot rename filesystem or subvolume roots — use the Subvolumes page"})),
         )
             .into_response();
     }
@@ -5333,5 +5357,33 @@ mod restore_tests {
             .await
             .unwrap();
         assert_eq!(tokio::fs::read(live.join("a.txt")).await.unwrap(), b"v1");
+    }
+}
+
+#[cfg(test)]
+mod storage_root_tests {
+    use super::is_storage_root;
+    use std::path::Path;
+
+    #[test]
+    fn filesystem_and_subvolume_roots_are_protected() {
+        let subvolumes = [
+            "/fs/data/apps".to_string(),
+            "/fs/data/media/photos".to_string(),
+        ];
+        assert!(is_storage_root(Path::new("/fs/data"), &subvolumes));
+        assert!(is_storage_root(Path::new("/fs/data/apps"), &subvolumes));
+        assert!(
+            is_storage_root(Path::new("/fs/data/media/photos"), &subvolumes),
+            "nested subvolume"
+        );
+        assert!(!is_storage_root(
+            Path::new("/fs/data/apps/config"),
+            &subvolumes
+        ));
+        assert!(!is_storage_root(
+            Path::new("/fs/data/plain-folder"),
+            &subvolumes
+        ));
     }
 }
