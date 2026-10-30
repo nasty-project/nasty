@@ -1163,16 +1163,15 @@ pub struct BcachefsDeviceHealth {
 }
 
 /// One parsed `bcachefs reconcile status` snapshot, for stall tracking
-/// (#487). A single snapshot can't distinguish "stalled" from
-/// bcachefs's normal pacing — the rebalance thread sits in `waiting`
-/// with pending work between throttled bursts *by design* — so the
-/// caller compares fingerprints across samples and only declares a
-/// stall when the counters haven't moved for a full window.
+/// (#487, #1019). A single snapshot can't tell a slow pass from a stuck
+/// one, so the caller compares fingerprints across samples and only
+/// declares a stall when the counters haven't moved for a full window.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReconcileSample {
-    /// Fingerprint of the pending-work counters (the raw `pending:` /
-    /// `scan pending` lines). `None` when no work is pending — nothing
-    /// to stall on.
+    /// Fingerprint of the actionable work counters (`scan pending` plus
+    /// every work row except the parked `pending:` row). `None` when there
+    /// is nothing to stall on: no actionable work, or the thread is
+    /// `waiting`.
     pub pending: Option<String>,
     /// The thread reported an actively-progressing state.
     pub active: bool,
@@ -1188,22 +1187,34 @@ pub fn parse_reconcile_sample(raw: &str) -> ReconcileSample {
         .and_then(|n| n.parse::<u64>().ok())
         .unwrap_or(0)
         > 0;
-    let pending_line = lower
+    // Work rows look like `target:  204k  15.3M` (data, metadata). The
+    // `pending:` row is work bcachefs parked because its target can't take
+    // it; it's only retried on device add/resize/relabel, so it never drains
+    // on its own and can't indicate a stall.
+    let work_rows: Vec<&str> = lower
         .lines()
-        .find(|l| l.trim().starts_with("pending:"))
-        .map(str::trim);
-    let work_pending = pending_line
-        .map(|l| l.split_whitespace().skip(1).any(|n| n != "0"))
-        .unwrap_or(false);
-    let pending = (scan_pending || work_pending).then(|| {
+        .map(str::trim)
+        .filter(|l| {
+            let mut tokens = l.split_whitespace();
+            matches!(tokens.next(), Some(key) if key.ends_with(':') && key != "pending:")
+                && tokens.count() == 2
+        })
+        .collect();
+    let work_pending = work_rows
+        .iter()
+        .any(|l| l.split_whitespace().skip(1).any(|n| n != "0"));
+    // bcachefs only enters `waiting:` after a full pass found nothing it
+    // could move (reconcile_wait); a stuck thread shows as processing.
+    let waiting = lower
+        .lines()
+        .any(|l| l.trim().trim_end_matches(':') == "waiting");
+    let pending = ((scan_pending || work_pending) && !waiting).then(|| {
         let mut fp = String::new();
         if let Some(l) = scan_pending_line {
             fp.push_str(l.trim());
             fp.push('\n');
         }
-        if let Some(l) = pending_line {
-            fp.push_str(l);
-        }
+        fp.push_str(&work_rows.join("\n"));
         fp
     });
     // Anything bcachefs reports as in-flight counts as progressing —
@@ -1668,18 +1679,45 @@ mod tests {
 
     // ── reconcile stall sampling (#487) ────────────────────────
 
+    /// `bcachefs reconcile status` from #1019 with the thread state and
+    /// `target`/`pending` rows substituted.
+    fn reconcile_status(state: &str, target: &str, pending: &str) -> String {
+        format!(
+            "Scan pending:     0\n                  data  metadata\n  replicas:          0         0\n  checksum:          0         0\n  target:   {target}\n  high_priority:     0         0\n  pending:  {pending}\n  stripes:           0         0\n\n{state}\n\nReconcile thread backtrace:\n  [<0>] do_reconcile+0x10c3/0x1100 [bcachefs]\n"
+        )
+    }
+
+    const RECONCILE_WAITING: &str = "waiting:\nio wait duration:      7.45G\nio wait remaining:     7.42G\nduration waited:       24 h";
+    const RECONCILE_PROCESSING: &str = "processing reconcile_work normal: 12%";
+
     #[test]
     fn reconcile_sample_no_pending_work() {
-        let s = parse_reconcile_sample("pending: 0\nscan pending 0\nwaiting\n");
+        let s = parse_reconcile_sample(&reconcile_status(RECONCILE_PROCESSING, "0 0", "0 0"));
         assert_eq!(s.pending, None);
     }
 
     #[test]
-    fn reconcile_sample_waiting_with_pending_is_not_active() {
-        // The over-eager case from #487: pending work + `waiting` is
-        // bcachefs's normal pacing, not (yet) a stall. The sample must
-        // carry a fingerprint so the caller can watch for progress.
-        let s = parse_reconcile_sample("pending: 12 GiB\nscan pending 0\nwaiting\n");
+    fn reconcile_sample_waiting_is_never_a_stall_candidate() {
+        // #1019: idle pool, parked metadata and a little target work, thread
+        // waiting on the write I/O clock.
+        let s = parse_reconcile_sample(&reconcile_status(
+            RECONCILE_WAITING,
+            "204k 15.3M",
+            "0 8.26G",
+        ));
+        assert_eq!(s.pending, None);
+    }
+
+    #[test]
+    fn reconcile_sample_parked_work_alone_is_not_pending() {
+        let s = parse_reconcile_sample(&reconcile_status(RECONCILE_PROCESSING, "0 0", "0 8.26G"));
+        assert_eq!(s.pending, None);
+    }
+
+    #[test]
+    fn reconcile_sample_actionable_work_while_processing_is_tracked() {
+        let s =
+            parse_reconcile_sample(&reconcile_status(RECONCILE_PROCESSING, "204k 15.3M", "0 0"));
         assert!(s.pending.is_some());
         assert!(!s.active);
     }
@@ -1689,23 +1727,33 @@ mod tests {
         // `working`/`scanning` never matched the old `running`-only
         // check, flagging actively-progressing pools as stalled.
         for state in ["working", "scanning", "running"] {
-            let s = parse_reconcile_sample(&format!("pending: 12 GiB\n{state}\n"));
+            let s = parse_reconcile_sample(&reconcile_status(state, "12G 0", "0 0"));
             assert!(s.active, "{state} must count as active");
         }
     }
 
     #[test]
-    fn reconcile_sample_fingerprint_tracks_counter_changes() {
-        let a = parse_reconcile_sample("pending: 12 GiB\nwaiting\n");
-        let b = parse_reconcile_sample("pending: 11 GiB\nwaiting\n");
-        let a2 = parse_reconcile_sample("pending: 12 GiB\nwaiting\n");
-        assert_ne!(a.pending, b.pending, "progress must change the fingerprint");
-        assert_eq!(a.pending, a2.pending, "same counters, same fingerprint");
+    fn reconcile_sample_fingerprint_tracks_actionable_counters_only() {
+        let sample = |target, pending| {
+            parse_reconcile_sample(&reconcile_status(RECONCILE_PROCESSING, target, pending)).pending
+        };
+        let a = sample("12G 0", "0 1G");
+        assert_ne!(
+            a,
+            sample("11G 0", "0 1G"),
+            "progress must change the fingerprint"
+        );
+        assert_eq!(
+            a,
+            sample("12G 0", "0 1G"),
+            "same counters, same fingerprint"
+        );
+        assert_eq!(a, sample("12G 0", "0 2G"), "parked work is not progress");
     }
 
     #[test]
     fn reconcile_sample_scan_pending_counts_as_pending() {
-        let s = parse_reconcile_sample("pending: 0\nscan pending 3\nwaiting\n");
+        let s = parse_reconcile_sample("Scan pending:     3\n  pending:  0 0\nprocessing\n");
         assert!(s.pending.is_some());
     }
 
