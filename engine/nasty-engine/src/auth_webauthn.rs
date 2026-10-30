@@ -189,8 +189,11 @@ impl WebauthnService {
         let origin_str = format!("https://{rp_id}");
         let origin = Url::parse(&origin_str)
             .map_err(|e| WebauthnError::Auth(format!("invalid RP origin {origin_str}: {e}")))?;
+        // Credentials are bound to the RP ID, not the port, and a router can
+        // forward any external port to 443 (#1017).
         let webauthn = WebauthnBuilder::new(rp_id, &origin)?
             .rp_name("NASty")
+            .allow_any_port(true)
             .build()?;
         Ok(Self {
             webauthn,
