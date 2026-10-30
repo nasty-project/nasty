@@ -21,6 +21,9 @@ use nasty_system::settings::OidcSettings;
 
 /// Window during which a started OIDC login flow can be completed via callback.
 const PENDING_TTL_SECS: u64 = 5 * 60;
+/// Sign-ins started but not yet completed. `/oidc/start` needs no login, so
+/// the map must not grow with request volume.
+const MAX_PENDING: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OidcError {
@@ -230,8 +233,9 @@ impl OidcClient {
     }
 
     /// Build an authorization URL and stash the PKCE verifier + nonce keyed by
-    /// the CSRF state value. Returns the URL to redirect the browser to.
-    pub async fn authorize_url(&self) -> url::Url {
+    /// the CSRF state value. Returns the URL to redirect the browser to, or
+    /// `None` when too many sign-ins are already in flight.
+    pub async fn authorize_url(&self) -> Option<url::Url> {
         let client = self.build_client();
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let mut builder = client.authorize_url(
@@ -247,6 +251,9 @@ impl OidcClient {
         let now = unix_now();
         let mut pending = self.pending.write().await;
         pending.retain(|_, p| p.expires_at > now);
+        if pending.len() >= MAX_PENDING {
+            return None;
+        }
         pending.insert(
             csrf.secret().clone(),
             Pending {
@@ -255,7 +262,7 @@ impl OidcClient {
                 expires_at: now + PENDING_TTL_SECS,
             },
         );
-        url
+        Some(url)
     }
 
     /// Look up a pending flow by the state value the IdP echoed back, exchange
