@@ -4386,8 +4386,13 @@ async fn oidc_start_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
     let Some(client) = state.oidc.current().await else {
         return (StatusCode::NOT_FOUND, "OIDC not enabled").into_response();
     };
-    let url = client.authorize_url().await;
-    axum::response::Redirect::to(url.as_str()).into_response()
+    match client.authorize_url().await {
+        Some(url) => axum::response::Redirect::to(url.as_str()).into_response(),
+        None => axum::response::Redirect::to(
+            "/#oidc_error=too+many+sign-ins+in+progress%2C+try+again+in+a+few+minutes",
+        )
+        .into_response(),
+    }
 }
 
 #[derive(Deserialize)]
