@@ -127,12 +127,13 @@
 		if (typeof window === 'undefined' || !webauthnConfig) return true;
 		const h = window.location.hostname.toLowerCase();
 		const rp = webauthnConfig.rp_id.toLowerCase();
-		return h === rp || h.endsWith('.' + rp);
+		// The engine accepts only the exact host (any port), not subdomains.
+		return h === rp;
 	});
 	const webauthnOriginBlocker = $derived.by((): string | null => {
 		if (webauthnIsLikelyIp) {
 			return webauthnConfig
-				? `WebAuthn cannot be used over an IP address. Visit https://${webauthnConfig.rp_id} (or a subdomain of it) to register security keys here.`
+				? `WebAuthn cannot be used over an IP address. Visit https://${webauthnConfig.rp_id} to register security keys here.`
 				: 'WebAuthn cannot be used over an IP address — visit this NASty by hostname.';
 		}
 		if (!webauthnIsSecureContext) {
