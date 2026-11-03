@@ -251,7 +251,7 @@ const RATE_LIMIT_PATH: &str = "/var/lib/nasty/auth-rate-limit.json";
 /// Per-IP limiter bucket. IPv6 failures are counted per /64: one subscriber
 /// usually holds a whole /64, so per-address counting is bypassed by moving to
 /// a new address every few attempts.
-fn ip_bucket(ip: &str) -> String {
+pub(crate) fn ip_bucket(ip: &str) -> String {
     match ip.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
             let prefix = u128::from(v6) & !((1u128 << 64) - 1);
