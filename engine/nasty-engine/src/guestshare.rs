@@ -1279,7 +1279,7 @@ impl GuestShareService {
     pub fn allow_unlock_request(&self, ip: &str, now: i64) -> bool {
         let mut requests = self.unlock_requests.lock().unwrap();
         requests.reserve(
-            ip.to_string(),
+            crate::auth::ip_bucket(ip),
             now,
             UNLOCK_REQUEST_WINDOW_SECS,
             UNLOCK_REQUEST_MAX,
@@ -1308,8 +1308,10 @@ impl GuestShareService {
     }
 }
 
+/// IPv6 counts per /64 (see `auth::ip_bucket`), so rotating addresses cannot
+/// reset the limit.
 fn unlock_failure_key(ip: &str, token: &str) -> String {
-    format!("{ip}|{}", sha256_hex(token))
+    format!("{}|{}", crate::auth::ip_bucket(ip), sha256_hex(token))
 }
 
 #[cfg(test)]
@@ -1860,6 +1862,26 @@ mod tests {
         }
         assert!(!svc.allow_unlock_request("192.0.2.1", now));
         assert!(svc.allow_unlock_request("192.0.2.1", now + UNLOCK_REQUEST_WINDOW_SECS + 1));
+    }
+
+    #[test]
+    fn unlock_limits_count_ipv6_per_64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, _) = service(tmp.path());
+        let now = 1000;
+
+        for i in 0..UNLOCK_MAX_FAILURES {
+            assert!(svc.reserve_unlock_attempt(&format!("2001:db8:1:2::{i:x}"), "tok", now));
+        }
+        assert!(!svc.reserve_unlock_attempt("2001:db8:1:2:ffff::9", "tok", now));
+        assert!(svc.reserve_unlock_attempt("2001:db8:1:3::1", "tok", now));
+        svc.clear_unlock_failures("2001:db8:1:2::abcd", "tok");
+        assert!(svc.reserve_unlock_attempt("2001:db8:1:2::1", "tok", now));
+
+        for i in 0..UNLOCK_REQUEST_MAX {
+            assert!(svc.allow_unlock_request(&format!("2001:db8:9:9::{i:x}"), now));
+        }
+        assert!(!svc.allow_unlock_request("2001:db8:9:9:ffff::1", now));
     }
 
     #[tokio::test]
