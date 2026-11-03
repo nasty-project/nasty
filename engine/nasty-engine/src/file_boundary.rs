@@ -91,6 +91,87 @@ impl BoundaryNode {
     }
 }
 
+/// A directory opened without following a symlink at any level. `join` names
+/// a child through `/proc/self/fd`, so only that last name is looked up by
+/// path: swapping an ancestor for a symlink afterwards cannot redirect it.
+pub struct PinnedDirectory {
+    #[cfg(target_os = "linux")]
+    _fd: Arc<OwnedFd>,
+    path: std::path::PathBuf,
+}
+
+impl PinnedDirectory {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn join(&self, name: &OsStr) -> std::path::PathBuf {
+        self.path.join(name)
+    }
+}
+
+/// Pin an absolute, already-canonical directory. Fails if any component is
+/// now a symlink, i.e. the tree changed since the path was canonicalized.
+#[cfg(target_os = "linux")]
+pub fn pin_directory(dir: &Path) -> io::Result<PinnedDirectory> {
+    match open_root_beneath(Path::new("/"), dir)? {
+        BoundaryNode::Directory(directory) => Ok(PinnedDirectory {
+            path: format!("/proc/self/fd/{}", directory.fd.as_raw_fd()).into(),
+            _fd: directory.fd,
+        }),
+        BoundaryNode::File(_) => Err(invalid_path("not a directory")),
+    }
+}
+
+// shortcut: no /proc magic links off Linux, so macOS dev builds act on the
+// plain path without race protection; the engine only ships on Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn pin_directory(dir: &Path) -> io::Result<PinnedDirectory> {
+    Ok(PinnedDirectory {
+        path: dir.to_path_buf(),
+    })
+}
+
+/// Pin the parent of `path` and return the child path to act on. Keep the
+/// returned directory alive while the child path is in use.
+pub fn pin_parent(path: &Path) -> io::Result<(PinnedDirectory, std::path::PathBuf)> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(invalid_path("path has no parent"));
+    };
+    let parent = pin_directory(parent)?;
+    let child = parent.join(name);
+    Ok((parent, child))
+}
+
+/// Copy a regular file without following a symlink at either end. With
+/// `replace`, an existing regular file is overwritten in place (keeping its
+/// owner); otherwise the destination must not exist (O_EXCL).
+pub fn copy_regular_file(src: &Path, dst: &Path, replace: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut from = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(src)?;
+    let meta = from.metadata()?;
+    if !meta.is_file() {
+        return Err(invalid_path("source is not a regular file"));
+    }
+    let mut to = OpenOptions::new()
+        .write(true)
+        .create_new(!replace)
+        .create(replace)
+        .truncate(replace)
+        .mode(meta.permissions().mode())
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(dst)?;
+    if !to.metadata()?.is_file() {
+        return Err(invalid_path("destination is not a regular file"));
+    }
+    io::copy(&mut from, &mut to)?;
+    // `mode` above is filtered by the umask; match std::fs::copy exactly.
+    to.set_permissions(meta.permissions())
+}
+
 /// Open a shared file or directory as the root of a descriptor-relative walk.
 pub fn open_root_beneath(files_root: &Path, shared_root: &Path) -> io::Result<BoundaryNode> {
     let shared_relative = shared_root
@@ -529,6 +610,54 @@ mod tests {
         let mut bytes = Vec::new();
         report.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"report");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_parent_ignores_later_symlink_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let share = root.join("share");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&share).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(share.join("old"), b"share").unwrap();
+        std::fs::write(outside.join("old"), b"secret").unwrap();
+
+        let (_parent, pinned) = pin_parent(&share.join("old")).unwrap();
+        // Swap the checked folder for a symlink to somewhere else.
+        std::fs::rename(&share, root.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside, &share).unwrap();
+
+        std::fs::remove_file(&pinned).unwrap();
+        assert!(!root.join("moved/old").exists());
+        assert_eq!(std::fs::read(outside.join("old")).unwrap(), b"secret");
+        // A fresh pin sees the symlink and refuses.
+        assert!(pin_parent(&share.join("old")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_regular_file_never_follows_or_clobbers_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let victim = tmp.path().join("victim");
+        let link = tmp.path().join("link");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&victim, b"keep").unwrap();
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        assert!(copy_regular_file(&src, &link, false).is_err());
+        assert!(copy_regular_file(&src, &link, true).is_err());
+        assert!(copy_regular_file(&link, &tmp.path().join("out"), false).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+
+        let dst = tmp.path().join("dst");
+        copy_regular_file(&src, &dst, false).unwrap();
+        assert!(copy_regular_file(&src, &dst, false).is_err());
+        std::fs::write(&src, b"newer").unwrap();
+        copy_regular_file(&src, &dst, true).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"newer");
     }
 
     #[cfg(unix)]

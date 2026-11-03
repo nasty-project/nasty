@@ -2208,7 +2208,16 @@ async fn files_delete_handler(
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Cannot modify block subvolume contents — manage via the Subvolumes page"}))).into_response();
     }
 
-    let meta = match tokio::fs::metadata(&target).await {
+    // Act through the pinned parent so a parent swapped for a symlink after
+    // the check above cannot redirect the delete outside /fs.
+    let Ok((_parent, pinned)) = file_boundary::pin_parent(&target) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Not found"})),
+        )
+            .into_response();
+    };
+    let meta = match tokio::fs::symlink_metadata(&pinned).await {
         Ok(m) => m,
         Err(_) => {
             return (
@@ -2219,10 +2228,11 @@ async fn files_delete_handler(
         }
     };
 
+    // remove_dir_all does not follow a symlink at the top or below it.
     let result = if meta.is_dir() {
-        tokio::fs::remove_dir_all(&target).await
+        tokio::fs::remove_dir_all(&pinned).await
     } else {
-        tokio::fs::remove_file(&target).await
+        tokio::fs::remove_file(&pinned).await
     };
 
     match result {
@@ -2325,7 +2335,17 @@ async fn files_upload_handler(
     }
 
     let dest = dir.join(&file_name);
-    match tokio::fs::symlink_metadata(&dest).await {
+    // Every write below goes through the pinned directory, so `dir` swapped
+    // for a symlink after the checks above cannot redirect the upload.
+    let Ok(pinned_dir) = file_boundary::pin_directory(&dir) else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Target directory changed; try again"})),
+        )
+            .into_response();
+    };
+    let pinned_dest = pinned_dir.join(std::ffi::OsStr::new(&file_name));
+    match tokio::fs::symlink_metadata(&pinned_dest).await {
         Ok(meta) => {
             if meta.is_dir() {
                 return (
@@ -2358,7 +2378,10 @@ async fn files_upload_handler(
         }
     }
 
-    let temp = dir.join(format!(".nasty-upload-{}", uuid::Uuid::new_v4()));
+    let temp = pinned_dir.join(std::ffi::OsStr::new(&format!(
+        ".nasty-upload-{}",
+        uuid::Uuid::new_v4()
+    )));
 
     let file = match std::fs::OpenOptions::new()
         .write(true)
@@ -2413,10 +2436,10 @@ async fn files_upload_handler(
         )
             .into_response();
     }
-    match publish_upload(&temp, &dest, overwrite).await {
+    match publish_upload(&temp, &pinned_dest, overwrite).await {
         Ok(UploadPublish::Published) => temp_guard.disarm(),
         Ok(UploadPublish::Conflict) => {
-            let overwrite_allowed = tokio::fs::symlink_metadata(&dest)
+            let overwrite_allowed = tokio::fs::symlink_metadata(&pinned_dest)
                 .await
                 .is_ok_and(|meta| !meta.is_dir());
             return (
@@ -2627,15 +2650,21 @@ async fn files_mkdir_handler(
             .into_response();
     }
 
-    if full.exists() {
+    let Ok(pinned_parent) = file_boundary::pin_directory(&parent) else {
         return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Parent directory changed; try again"})),
+        )
+            .into_response();
+    };
+    let pinned = pinned_parent.join(std::ffi::OsStr::new(leaf));
+
+    match tokio::fs::create_dir(&pinned).await {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "Already exists"})),
         )
-            .into_response();
-    }
-
-    match tokio::fs::create_dir(&full).await {
+            .into_response(),
         Ok(()) => {
             info!("Created directory {}", full.display());
 
@@ -2647,11 +2676,16 @@ async fn files_mkdir_handler(
             // until it's chmod'd by hand (#519). Access control lives in the
             // protocol layer, not POSIX bits — the same reasoning as the
             // subvolume-create chmod (#482) and the SMB share-root chmod.
+            // chmod through an O_NOFOLLOW handle: a by-path chmod would follow
+            // a symlink swapped in for the new folder and open up its target.
             {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) =
-                    tokio::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o777)).await
-                {
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                let chmod = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(&pinned)
+                    .and_then(|dir| dir.set_permissions(std::fs::Permissions::from_mode(0o777)));
+                if let Err(e) = chmod {
                     tracing::warn!(
                         "chmod 0777 {} failed: {e} — SMB/NFS writes into the new folder may be denied",
                         full.display()
@@ -2802,7 +2836,17 @@ async fn files_rename_handler(
         )
             .into_response();
     }
-    if to.exists() {
+    let (Ok((_from_parent, pinned_from)), Ok((_to_parent, pinned_to))) = (
+        file_boundary::pin_parent(&from),
+        file_boundary::pin_parent(&to),
+    ) else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Source or destination changed; try again"})),
+        )
+            .into_response();
+    };
+    if tokio::fs::symlink_metadata(&pinned_to).await.is_ok() {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "Destination already exists"})),
@@ -2810,7 +2854,7 @@ async fn files_rename_handler(
             .into_response();
     }
 
-    match tokio::fs::rename(&from, &to).await {
+    match tokio::fs::rename(&pinned_from, &pinned_to).await {
         Ok(()) => {
             info!("Renamed {} -> {}", from.display(), to.display());
             auth::audit(
@@ -3036,13 +3080,42 @@ async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Res
 async fn copy_file(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     let src = src.to_path_buf();
     let dst = dst.to_path_buf();
-    nasty_common::priority::spawn_bulk(move || {
-        std::fs::copy(&src, &dst)
-            .map(|_| ())
-            .map_err(|error| format!("copy {} -> {}: {error}", src.display(), dst.display()))
-    })
-    .await
-    .map_err(|error| format!("spawn bulk copy worker: {error}"))?
+    nasty_common::priority::spawn_bulk(move || copy_file_sync(&src, &dst, false))
+        .await
+        .map_err(|error| format!("spawn bulk copy worker: {error}"))?
+}
+
+/// Copy one file to a new name. Both parents are pinned and neither end is
+/// followed if it is a symlink, so a concurrent swap cannot redirect it.
+fn copy_file_sync(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    replace: bool,
+) -> Result<(), String> {
+    let error = |e: std::io::Error| format!("copy {} -> {}: {e}", src.display(), dst.display());
+    let (_src_parent, pinned_src) = file_boundary::pin_parent(src).map_err(error)?;
+    let (_dst_parent, pinned_dst) = file_boundary::pin_parent(dst).map_err(error)?;
+    file_boundary::copy_regular_file(&pinned_src, &pinned_dst, replace).map_err(error)
+}
+
+/// Recreate a symlink at `dst`. The link itself is copied, never followed.
+fn copy_symlink_sync(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    let error = |e: std::io::Error| format!("symlink {} -> {}: {e}", src.display(), dst.display());
+    let (_src_parent, pinned_src) = file_boundary::pin_parent(src).map_err(error)?;
+    let (_dst_parent, pinned_dst) = file_boundary::pin_parent(dst).map_err(error)?;
+    let target = std::fs::read_link(&pinned_src).map_err(error)?;
+    std::os::unix::fs::symlink(&target, &pinned_dst).map_err(error)
+}
+
+/// List a directory through a pinned descriptor.
+fn read_pinned_dir(
+    dir: &std::path::Path,
+) -> Result<(file_boundary::PinnedDirectory, std::fs::ReadDir), String> {
+    let pinned =
+        file_boundary::pin_directory(dir).map_err(|e| format!("open {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(pinned.path()).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    Ok((pinned, entries))
 }
 
 fn copy_dir_recursive_sync(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
@@ -3050,12 +3123,13 @@ fn copy_dir_recursive_sync(src: &std::path::Path, dst: &std::path::Path) -> Resu
     let mut stack: Vec<(std::path::PathBuf, std::path::PathBuf)> =
         vec![(src.to_path_buf(), dst.to_path_buf())];
     while let Some((src_dir, dst_dir)) = stack.pop() {
-        std::fs::create_dir(&dst_dir).map_err(|e| format!("mkdir {}: {e}", dst_dir.display()))?;
-        let entries = std::fs::read_dir(&src_dir)
-            .map_err(|e| format!("read_dir {}: {e}", src_dir.display()))?;
+        let mkdir_error = |e: std::io::Error| format!("mkdir {}: {e}", dst_dir.display());
+        let (_dst_parent, pinned_dst) = file_boundary::pin_parent(&dst_dir).map_err(mkdir_error)?;
+        std::fs::create_dir(&pinned_dst).map_err(mkdir_error)?;
+        let (_src_pin, entries) = read_pinned_dir(&src_dir)?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("next_entry {}: {e}", src_dir.display()))?;
-            let entry_src = entry.path();
+            let entry_src = src_dir.join(entry.file_name());
             let entry_dst = dst_dir.join(entry.file_name());
             let meta = entry
                 .metadata()
@@ -3063,18 +3137,9 @@ fn copy_dir_recursive_sync(src: &std::path::Path, dst: &std::path::Path) -> Resu
             if meta.is_dir() {
                 stack.push((entry_src, entry_dst));
             } else if meta.file_type().is_symlink() {
-                let target = std::fs::read_link(&entry_src)
-                    .map_err(|e| format!("read_link {}: {e}", entry_src.display()))?;
-                std::os::unix::fs::symlink(&target, &entry_dst)
-                    .map_err(|e| format!("symlink {}: {e}", entry_dst.display()))?;
+                copy_symlink_sync(&entry_src, &entry_dst)?;
             } else {
-                std::fs::copy(&entry_src, &entry_dst).map_err(|e| {
-                    format!(
-                        "copy {} -> {}: {e}",
-                        entry_src.display(),
-                        entry_dst.display()
-                    )
-                })?;
+                copy_file_sync(&entry_src, &entry_dst, false)?;
             }
         }
     }
@@ -3119,11 +3184,11 @@ fn derive_restore_dest(rel: &str) -> Result<String, String> {
 /// Remove whatever currently exists at `p` (file, symlink, or directory)
 /// so a restore can overwrite it. No-op when `p` doesn't exist.
 fn remove_existing(p: &std::path::Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(p) {
-        Ok(m) if m.is_dir() => {
-            std::fs::remove_dir_all(p).map_err(|e| format!("rm -r {}: {e}", p.display()))
-        }
-        Ok(_) => std::fs::remove_file(p).map_err(|e| format!("rm {}: {e}", p.display())),
+    let error = |e: std::io::Error| format!("rm {}: {e}", p.display());
+    let (_parent, pinned) = file_boundary::pin_parent(p).map_err(error)?;
+    match std::fs::symlink_metadata(&pinned) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(&pinned).map_err(error),
+        Ok(_) => std::fs::remove_file(&pinned).map_err(error),
         Err(_) => Ok(()),
     }
 }
@@ -3145,22 +3210,21 @@ fn restore_dir_recursive_sync(src: &std::path::Path, dst: &std::path::Path) -> R
     let mut stack: Vec<(std::path::PathBuf, std::path::PathBuf)> =
         vec![(src.to_path_buf(), dst.to_path_buf())];
     while let Some((src_dir, dst_dir)) = stack.pop() {
-        match std::fs::symlink_metadata(&dst_dir) {
+        let mkdir_error = |e: std::io::Error| format!("mkdir {}: {e}", dst_dir.display());
+        let (_dst_parent, pinned_dst) = file_boundary::pin_parent(&dst_dir).map_err(mkdir_error)?;
+        match std::fs::symlink_metadata(&pinned_dst) {
             Ok(m) if m.is_dir() => {} // merge into the existing directory
             Ok(_) => {
                 // A non-directory is in the way — replace it with a dir.
                 remove_existing(&dst_dir)?;
-                std::fs::create_dir(&dst_dir)
-                    .map_err(|e| format!("mkdir {}: {e}", dst_dir.display()))?;
+                std::fs::create_dir(&pinned_dst).map_err(mkdir_error)?;
             }
-            Err(_) => std::fs::create_dir_all(&dst_dir)
-                .map_err(|e| format!("mkdir {}: {e}", dst_dir.display()))?,
+            Err(_) => std::fs::create_dir(&pinned_dst).map_err(mkdir_error)?,
         }
-        let entries = std::fs::read_dir(&src_dir)
-            .map_err(|e| format!("read_dir {}: {e}", src_dir.display()))?;
+        let (_src_pin, entries) = read_pinned_dir(&src_dir)?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("next_entry {}: {e}", src_dir.display()))?;
-            let entry_src = entry.path();
+            let entry_src = src_dir.join(entry.file_name());
             let entry_dst = dst_dir.join(entry.file_name());
             let meta = entry
                 .metadata()
@@ -3197,22 +3261,17 @@ fn restore_leaf_sync(
 ) -> Result<(), String> {
     if meta.file_type().is_symlink() {
         remove_existing(dst)?;
-        let target =
-            std::fs::read_link(src).map_err(|e| format!("read_link {}: {e}", src.display()))?;
-        std::os::unix::fs::symlink(&target, dst)
-            .map_err(|e| format!("symlink {}: {e}", dst.display()))
-    } else {
-        // `std::fs::copy` overwrites a regular file, but not a dir/symlink
-        // sitting at the destination — clear those first.
-        if let Ok(m) = std::fs::symlink_metadata(dst)
-            && (m.is_dir() || m.file_type().is_symlink())
-        {
-            remove_existing(dst)?;
-        }
-        std::fs::copy(src, dst)
-            .map(|_| ())
-            .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))
+        return copy_symlink_sync(src, dst);
     }
+    // A regular file is overwritten in place (keeps its owner); clear a
+    // dir/symlink in the way first. The O_NOFOLLOW open refuses a symlink
+    // swapped in after this check.
+    if let Ok(m) = std::fs::symlink_metadata(dst)
+        && !m.is_file()
+    {
+        remove_existing(dst)?;
+    }
+    copy_file_sync(src, dst, true)
 }
 
 /// Restore files/folders from a read-only snapshot back over their live
@@ -3636,7 +3695,14 @@ async fn files_content_put_handler(
             .into_response();
     }
 
-    let meta = match tokio::fs::metadata(&target).await {
+    let Ok((parent, pinned_target)) = file_boundary::pin_parent(&target) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Not found"})),
+        )
+            .into_response();
+    };
+    let meta = match tokio::fs::symlink_metadata(&pinned_target).await {
         Ok(m) => m,
         Err(_) => {
             return (
@@ -3656,10 +3722,22 @@ async fn files_content_put_handler(
 
     // Write to a sibling temp file and rename. Keeps the original
     // intact if the write fails partway, and means concurrent readers
-    // never see a truncated file. The temp name uses the PID to avoid
-    // colliding with anything else the engine might create.
-    let tmp = target.with_extension(format!("nasty-edit.{}.tmp", std::process::id()));
-    if let Err(e) = tokio::fs::write(&tmp, &body).await {
+    // never see a truncated file. The random name plus O_EXCL means a
+    // planted symlink can never be written through.
+    let tmp = parent.join(std::ffi::OsStr::new(&format!(
+        ".nasty-edit-{}.tmp",
+        uuid::Uuid::new_v4()
+    )));
+    let written = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .await?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &body).await
+    }
+    .await;
+    if let Err(e) = written {
         let _ = tokio::fs::remove_file(&tmp).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3667,7 +3745,7 @@ async fn files_content_put_handler(
         )
             .into_response();
     }
-    if let Err(e) = tokio::fs::rename(&tmp, &target).await {
+    if let Err(e) = tokio::fs::rename(&tmp, &pinned_target).await {
         let _ = tokio::fs::remove_file(&tmp).await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
