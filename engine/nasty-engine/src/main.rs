@@ -2118,11 +2118,7 @@ async fn validate_bearer(
             ));
         }
     };
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
+    let client_ip = crate::client_ip(headers);
     let session = auth.validate(&token, &client_ip).await.map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
@@ -3724,10 +3720,7 @@ async fn webauthn_login_start_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WebauthnLoginStartRequest>,
 ) -> impl IntoResponse {
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+    let client_ip = crate::client_ip(&headers);
     match state.webauthn.login_start(&state.auth, &req.username).await {
         Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(&resp).unwrap())).into_response(),
         Err(e) => {
@@ -3755,10 +3748,7 @@ async fn webauthn_login_finish_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WebauthnLoginFinishRequest>,
 ) -> impl IntoResponse {
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+    let client_ip = crate::client_ip(&headers);
     let verified_username = match state
         .webauthn
         .login_finish(&state.auth, &req.auth_id, &req.response)
@@ -3773,7 +3763,7 @@ async fn webauthn_login_finish_handler(
             );
             state
                 .auth
-                .record_webauthn_failure(&req.username, client_ip)
+                .record_webauthn_failure(&req.username, &client_ip)
                 .await;
             return (
                 StatusCode::UNAUTHORIZED,
@@ -3797,7 +3787,7 @@ async fn webauthn_login_finish_handler(
         );
         state
             .auth
-            .record_webauthn_failure(&req.username, client_ip)
+            .record_webauthn_failure(&req.username, &client_ip)
             .await;
         return (
             StatusCode::UNAUTHORIZED,
@@ -3808,7 +3798,7 @@ async fn webauthn_login_finish_handler(
 
     match state
         .auth
-        .mint_session_for_webauthn(&verified_username, client_ip)
+        .mint_session_for_webauthn(&verified_username, &client_ip)
         .await
     {
         Ok(token) => {
@@ -3849,19 +3839,16 @@ async fn login_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+    let client_ip = crate::client_ip(&headers);
     match state
         .auth
-        .login(&req.username, &req.password, client_ip)
+        .login(&req.username, &req.password, &client_ip)
         .await
     {
         Ok(token) => {
             if on_files_domain
                 && !matches!(
-                    state.auth.validate(&token, client_ip).await,
+                    state.auth.validate(&token, &client_ip).await,
                     Ok(Session {
                         role: auth::Role::User,
                         ..
@@ -3988,7 +3975,9 @@ fn now_unix_i64() -> i64 {
         .unwrap_or_default()
 }
 
-fn share_client_ip(headers: &axum::http::HeaderMap) -> String {
+/// Client address as set by Caddy (`header_up X-Real-IP {remote_host}`); the
+/// engine only listens on 127.0.0.1, so the header cannot come from the client.
+pub(crate) fn client_ip(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
@@ -4082,7 +4071,7 @@ async fn public_share_unlock_handler(
     Json(body): Json<ShareUnlockRequest>,
 ) -> impl IntoResponse {
     let now = now_unix_i64();
-    let client_ip = share_client_ip(&headers);
+    let client_ip = client_ip(&headers);
 
     if !state.guest_shares.allow_unlock_request(&client_ip, now) {
         return (
@@ -4166,7 +4155,7 @@ async fn public_share_download_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let now = now_unix_i64();
-    let client_ip = share_client_ip(&headers);
+    let client_ip = client_ip(&headers);
 
     let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
         return share_not_available();
@@ -4271,7 +4260,7 @@ async fn public_share_zip_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let now = now_unix_i64();
-    let client_ip = share_client_ip(&headers);
+    let client_ip = client_ip(&headers);
 
     let Some(share) = state.guest_shares.lookup_active(&token, now).await else {
         return share_not_available();
@@ -4435,11 +4424,7 @@ async fn oidc_callback_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<OidcCallbackQuery>,
 ) -> impl IntoResponse {
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
+    let client_ip = crate::client_ip(&headers);
 
     let bounce = |fragment: String| -> axum::response::Response {
         axum::response::Redirect::to(&format!("/#{fragment}")).into_response()
@@ -4572,11 +4557,7 @@ async fn ws_handler(
     Extension(FilesDomainRequest(on_files_domain)): Extension<FilesDomainRequest>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
+    let client_ip = crate::client_ip(&headers);
     // Browsers send the session cookie on the upgrade request automatically;
     // resolve it here so the WS task doesn't have to wait for an auth message.
     // Non-browser clients (kubectl, CSI driver) typically don't have a cookie

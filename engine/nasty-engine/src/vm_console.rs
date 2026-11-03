@@ -24,7 +24,7 @@ pub async fn vnc_handler(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = crate::client_ip(&headers);
     let pre_auth_token = crate::token_from_headers(&headers);
     ws.on_upgrade(move |socket| {
         proxy_unix_socket(
@@ -46,7 +46,7 @@ pub async fn serial_handler(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = crate::client_ip(&headers);
     let pre_auth_token = crate::token_from_headers(&headers);
     ws.on_upgrade(move |socket| {
         proxy_unix_socket(
@@ -59,14 +59,6 @@ pub async fn serial_handler(
             pre_auth_token,
         )
     })
-}
-
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 /// Bidirectional proxy: WebSocket ↔ Unix socket.
