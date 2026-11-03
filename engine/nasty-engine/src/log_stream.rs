@@ -18,11 +18,7 @@ pub async fn logs_handler(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
+    let client_ip = crate::client_ip(&headers);
     let pre_auth_token = crate::token_from_headers(&headers);
     ws.on_upgrade(move |socket| handle_logs(socket, state, client_ip, pre_auth_token))
 }

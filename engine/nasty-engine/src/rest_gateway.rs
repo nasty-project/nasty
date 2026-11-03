@@ -136,11 +136,7 @@ async fn dispatch(
     }
 
     // 2. Auth: pull token, validate → Session.
-    let client_ip = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
+    let client_ip = crate::client_ip(&headers);
     let Some(token) = token_from_headers(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
