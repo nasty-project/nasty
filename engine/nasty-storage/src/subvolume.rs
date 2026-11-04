@@ -733,6 +733,9 @@ pub struct CreateSubvolumeRequest {
     /// Initialize this filesystem inside a newly-created block image. Ignored
     /// for an existing destination; existing data is never reformatted.
     pub block_filesystem: Option<BlockFilesystem>,
+    /// Properties committed before publication by subvolume.create_atomic.
+    #[serde(default)]
+    pub initial_properties: HashMap<String, String>,
 }
 
 fn default_type() -> SubvolumeType {
@@ -779,6 +782,9 @@ pub struct CloneSnapshotRequest {
     pub snapshot: String,
     /// Name for the new writable subvolume created from the snapshot.
     pub new_name: String,
+    /// Replacement user properties committed by snapshot.clone_atomic.
+    #[serde(default)]
+    pub initial_properties: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -808,6 +814,9 @@ pub struct CloneSubvolumeRequest {
     pub name: String,
     /// Name for the new writable subvolume.
     pub new_name: String,
+    /// Replacement user properties committed by subvolume.clone_atomic.
+    #[serde(default)]
+    pub initial_properties: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1459,7 +1468,16 @@ impl SubvolumeService {
         req: CreateSubvolumeRequest,
         owner: Option<String>,
     ) -> Result<Subvolume, SubvolumeError> {
-        self.create_inner(req, owner, false).await
+        self.create_inner(req, owner, false, false).await
+    }
+
+    /// Create with durable private staging and creation-time user properties.
+    pub async fn create_atomic(
+        &self,
+        req: CreateSubvolumeRequest,
+        owner: Option<String>,
+    ) -> Result<Subvolume, SubvolumeError> {
+        self.create_inner(req, owner, false, true).await
     }
 
     /// Create a VM block disk under the server-owned `vms/<name>` namespace.
@@ -1491,9 +1509,11 @@ impl SubvolumeService {
                 metadata_target: None,
                 data_replicas: None,
                 block_filesystem: None,
+                initial_properties: HashMap::new(),
             },
             owner,
             true,
+            false,
         )
         .await
     }
@@ -1503,8 +1523,17 @@ impl SubvolumeService {
         req: CreateSubvolumeRequest,
         owner: Option<String>,
         allow_nested_block: bool,
+        atomic: bool,
     ) -> Result<Subvolume, SubvolumeError> {
         validate_subvolume_name(&req.name)?;
+        if atomic {
+            crate::provisioning::validate_destination(&req.name)?;
+            crate::provisioning::validate_properties(&req.initial_properties)?;
+        } else if !req.initial_properties.is_empty() {
+            return Err(SubvolumeError::CommandFailed(
+                "initial_properties requires subvolume.create_atomic".into(),
+            ));
+        }
 
         if req.subvolume_type == SubvolumeType::Block && req.volsize_bytes.is_none() {
             return Err(SubvolumeError::VolsizeRequired);
@@ -1573,6 +1602,13 @@ impl SubvolumeService {
             let existing = self
                 .get(&req.filesystem, &req.name, owner.as_deref())
                 .await?;
+            if atomic {
+                crate::provisioning::require_properties(
+                    &subvol_path,
+                    &existing.properties,
+                    &req.initial_properties,
+                )?;
+            }
             if existing.subvolume_type != req.subvolume_type {
                 return Err(SubvolumeError::ExistingIncompatible(format!(
                     "requested {:?}, existing {:?}",
@@ -1605,7 +1641,7 @@ impl SubvolumeService {
                         .is_some_and(|uuid| !uuid.is_empty())
                 )));
             }
-            if existing.subvolume_type == SubvolumeType::Filesystem {
+            if existing.subvolume_type == SubvolumeType::Filesystem && !atomic {
                 use std::os::unix::fs::PermissionsExt;
                 tokio::fs::set_permissions(&subvol_path, std::fs::Permissions::from_mode(0o777))
                     .await
@@ -1617,12 +1653,32 @@ impl SubvolumeService {
             }
             return Ok(existing);
         }
+        crate::provisioning::require_no_reservation(&mount_point, &req.name)?;
         // Ensure parent directories exist for nested subvolumes (e.g. "projects/web")
         if let Some(parent) = Path::new(&subvol_path).parent()
             && !parent.exists()
         {
             tokio::fs::create_dir_all(parent).await?;
         }
+
+        let publication = if atomic {
+            Some(
+                crate::provisioning::Publication::reserve_async(
+                    &mount_point,
+                    &req.name,
+                    owner.as_deref(),
+                    &req.initial_properties,
+                    "create",
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let subvol_path = publication
+            .as_ref()
+            .map(|stage| stage.volume.clone())
+            .unwrap_or(subvol_path);
 
         // Create the bcachefs subvolume
         info!(
@@ -1832,6 +1888,9 @@ impl SubvolumeService {
             }
             return Err(error);
         }
+        if atomic {
+            crate::provisioning::write_properties(&subvol_path, &req.initial_properties, false)?;
+        }
         if let Err(error) = xattr::set(&subvol_path, XATTR_NASTY_PROVISIONING_STATE, b"ready") {
             if req.subvolume_type == SubvolumeType::Block {
                 quarantine_failed_create(&subvol_path, loop_device.as_deref()).await;
@@ -1856,7 +1915,17 @@ impl SubvolumeService {
             }
         }
 
+        if let Some(publication) = publication {
+            publication.publish_async().await?;
+        }
         let mut subvolume = self.get(&req.filesystem, &req.name, None).await?;
+        if atomic {
+            crate::provisioning::require_properties(
+                &subvolume.path,
+                &subvolume.properties,
+                &req.initial_properties,
+            )?;
+        }
         subvolume.created = true;
         Ok(subvolume)
     }
@@ -2451,8 +2520,37 @@ impl SubvolumeService {
         owner_filter: Option<&str>,
         allow_admin_override: bool,
     ) -> Result<Subvolume, SubvolumeError> {
+        self.clone_snapshot_inner(req, owner_filter, allow_admin_override, false)
+            .await
+    }
+
+    pub async fn clone_snapshot_atomic(
+        &self,
+        req: CloneSnapshotRequest,
+        owner_filter: Option<&str>,
+        allow_admin_override: bool,
+    ) -> Result<Subvolume, SubvolumeError> {
+        self.clone_snapshot_inner(req, owner_filter, allow_admin_override, true)
+            .await
+    }
+
+    async fn clone_snapshot_inner(
+        &self,
+        req: CloneSnapshotRequest,
+        owner_filter: Option<&str>,
+        allow_admin_override: bool,
+        atomic: bool,
+    ) -> Result<Subvolume, SubvolumeError> {
         validate_existing_snapshot_name(&req.subvolume, &req.snapshot)?;
         validate_subvolume_name(&req.new_name)?;
+        if atomic {
+            crate::provisioning::validate_destination(&req.new_name)?;
+            crate::provisioning::validate_properties(&req.initial_properties)?;
+        } else if !req.initial_properties.is_empty() {
+            return Err(SubvolumeError::CommandFailed(
+                "initial_properties requires snapshot.clone_atomic".into(),
+            ));
+        }
         let _guards = self
             .lock_destinations(&req.filesystem, &[&req.subvolume, &req.new_name])
             .await;
@@ -2499,6 +2597,13 @@ impl SubvolumeService {
             let existing = self
                 .get(&req.filesystem, &req.new_name, owner_filter)
                 .await?;
+            if atomic {
+                crate::provisioning::require_properties(
+                    &new_subvol_path,
+                    &existing.properties,
+                    &req.initial_properties,
+                )?;
+            }
             let recorded_source = xattr::get(&new_subvol_path, XATTR_NASTY_CLONE_SOURCE)
                 .ok()
                 .flatten()
@@ -2516,10 +2621,29 @@ impl SubvolumeService {
             return Ok(existing);
         }
 
+        crate::provisioning::require_no_reservation(&mount_point, &req.new_name)?;
         info!(
             "Cloning snapshot '{}/{}@{}' to new subvolume '{}'",
             req.filesystem, req.subvolume, req.snapshot, req.new_name
         );
+        let publication = if atomic {
+            Some(
+                crate::provisioning::Publication::reserve_async(
+                    &mount_point,
+                    &req.new_name,
+                    owner_filter,
+                    &req.initial_properties,
+                    &clone_source,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let new_subvol_path = publication
+            .as_ref()
+            .map(|stage| stage.volume.clone())
+            .unwrap_or(new_subvol_path);
         materialize_subvol_from_snapshot(&snap_path, &new_subvol_path, owner_filter).await?;
         if path_identity(&snap_path)? != source_identity {
             return Err(SubvolumeError::CommandFailed(format!(
@@ -2538,7 +2662,23 @@ impl SubvolumeService {
             ))
         })?;
 
-        self.get(&req.filesystem, &req.new_name, owner_filter).await
+        if let Some(publication) = publication {
+            crate::provisioning::write_properties(&new_subvol_path, &req.initial_properties, true)?;
+            xattr::set(&new_subvol_path, XATTR_NASTY_PROVISIONING_STATE, b"ready")?;
+            publication.publish_async().await?;
+            let mut subvolume = self
+                .get(&req.filesystem, &req.new_name, owner_filter)
+                .await?;
+            crate::provisioning::require_properties(
+                &subvolume.path,
+                &subvolume.properties,
+                &req.initial_properties,
+            )?;
+            subvolume.created = true;
+            Ok(subvolume)
+        } else {
+            self.get(&req.filesystem, &req.new_name, owner_filter).await
+        }
     }
 
     /// Roll a filesystem subvolume back to a snapshot's state. Assumes the
@@ -2671,9 +2811,36 @@ impl SubvolumeService {
         req: CloneSubvolumeRequest,
         owner_filter: Option<&str>,
     ) -> Result<Subvolume, SubvolumeError> {
+        self.clone_subvolume_inner(req, owner_filter, false).await
+    }
+
+    pub async fn clone_subvolume_atomic(
+        &self,
+        req: CloneSubvolumeRequest,
+        owner_filter: Option<&str>,
+    ) -> Result<Subvolume, SubvolumeError> {
+        self.clone_subvolume_inner(req, owner_filter, true).await
+    }
+
+    async fn clone_subvolume_inner(
+        &self,
+        req: CloneSubvolumeRequest,
+        owner_filter: Option<&str>,
+        atomic: bool,
+    ) -> Result<Subvolume, SubvolumeError> {
         validate_subvolume_name(&req.name)?;
         validate_subvolume_name(&req.new_name)?;
-        let _destination_guard = self.lock_destination(&req.filesystem, &req.new_name).await;
+        if atomic {
+            crate::provisioning::validate_destination(&req.new_name)?;
+            crate::provisioning::validate_properties(&req.initial_properties)?;
+        } else if !req.initial_properties.is_empty() {
+            return Err(SubvolumeError::CommandFailed(
+                "initial_properties requires subvolume.clone_atomic".into(),
+            ));
+        }
+        let _guards = self
+            .lock_destinations(&req.filesystem, &[&req.name, &req.new_name])
+            .await;
 
         let parent = self.get(&req.filesystem, &req.name, owner_filter).await?;
 
@@ -2697,9 +2864,20 @@ impl SubvolumeService {
                     req.new_name, recorded_source, clone_source
                 )));
             }
-            return self.get(&req.filesystem, &req.new_name, None).await;
+            let existing = self
+                .get(&req.filesystem, &req.new_name, owner_filter)
+                .await?;
+            if atomic {
+                crate::provisioning::require_properties(
+                    &new_subvol_path,
+                    &existing.properties,
+                    &req.initial_properties,
+                )?;
+            }
+            return Ok(existing);
         }
 
+        crate::provisioning::require_no_reservation(&mount_point, &req.new_name)?;
         // For block subvolumes, flush pending I/O before cloning
         if parent.subvolume_type == SubvolumeType::Block
             && let Some(ref loop_dev) = parent.block_device
@@ -2714,6 +2892,25 @@ impl SubvolumeService {
             "Cloning subvolume '{}/{}' to new subvolume '{}'",
             req.filesystem, req.name, req.new_name
         );
+        let publication = if atomic {
+            Some(
+                crate::provisioning::Publication::reserve_async(
+                    &mount_point,
+                    &req.new_name,
+                    owner_filter,
+                    &req.initial_properties,
+                    &clone_source,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let new_subvol_path = publication
+            .as_ref()
+            .map(|stage| stage.volume.clone())
+            .unwrap_or(new_subvol_path);
+
         // Writable snapshot = COW clone
         cmd::run_ok(
             "bcachefs",
@@ -2772,7 +2969,23 @@ impl SubvolumeService {
             }
         }
 
-        self.get(&req.filesystem, &req.new_name, None).await
+        if let Some(publication) = publication {
+            crate::provisioning::write_properties(&new_subvol_path, &req.initial_properties, true)?;
+            xattr::set(&new_subvol_path, XATTR_NASTY_PROVISIONING_STATE, b"ready")?;
+            publication.publish_async().await?;
+            let mut subvolume = self
+                .get(&req.filesystem, &req.new_name, owner_filter)
+                .await?;
+            crate::provisioning::require_properties(
+                &subvolume.path,
+                &subvolume.properties,
+                &req.initial_properties,
+            )?;
+            subvolume.created = true;
+            Ok(subvolume)
+        } else {
+            self.get(&req.filesystem, &req.new_name, None).await
+        }
     }
 
     /// Set (merge-upsert) xattr properties on a subvolume.
@@ -3979,6 +4192,7 @@ mod tests {
                     subvolume: "safe".to_string(),
                     snapshot: "nested/snapshot".to_string(),
                     new_name: "clone".to_string(),
+                    initial_properties: HashMap::new(),
                 },
                 None,
                 false,

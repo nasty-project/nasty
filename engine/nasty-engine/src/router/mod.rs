@@ -78,17 +78,20 @@ fn is_operator_allowed(method: &str) -> bool {
         || matches!(
             method,
             "subvolume.create"
+                | "subvolume.create_atomic"
                 | "subvolume.delete"
                 | "subvolume.attach"
                 | "subvolume.detach"
                 | "subvolume.resize"
                 | "subvolume.update"
                 | "subvolume.clone"
+                | "subvolume.clone_atomic"
                 | "subvolume.set_properties"
                 | "subvolume.remove_properties"
                 | "snapshot.create"
                 | "snapshot.delete"
                 | "snapshot.clone"
+                | "snapshot.clone_atomic"
                 | "share.nfs.create"
                 | "share.nfs.update"
                 | "share.nfs.delete"
@@ -1354,6 +1357,7 @@ pub(super) async fn vm_clone(
             filesystem: disk.filesystem.clone(),
             name: disk.subvolume.clone(),
             new_name: clone_name.clone(),
+            initial_properties: std::collections::HashMap::new(),
         };
         let cloned = state
             .subvolumes

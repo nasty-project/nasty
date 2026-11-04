@@ -7,6 +7,7 @@ pub mod cmd;
 pub mod disk_type;
 pub mod filesystem;
 pub mod io_scheduler;
+mod provisioning;
 pub mod scrub_scheduler;
 pub mod subvolume;
 
