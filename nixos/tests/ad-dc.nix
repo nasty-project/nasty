@@ -120,6 +120,7 @@ let
             resp = json.loads(ws.recv())
             if resp.get("id") == _next_id:
                 break
+            assert "id" not in resp and resp.get("method") == "event", f"id mismatch: {resp!r}"
         assert "error" not in resp, f"{method} returned error: {resp!r}"
         return resp["result"]
 
