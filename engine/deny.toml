@@ -109,6 +109,8 @@ ignore = [
     "RUSTSEC-2026-0403",
 
     # RUSTSEC-2025-0052 — `async-std` is discontinued.
+    # RUSTSEC-2026-0441 — `pin-utils`, an `async-std` dependency, is
+    # unmaintained.
     # RUSTSEC-2026-0271 — `suppaftp` permits CRLF command injection in
     # FTP control-channel arguments before 10.0.2.
     #
@@ -122,16 +124,17 @@ ignore = [
     # rustic_backend 0.7.x hardcodes `services-ftp` into its own opendal
     # feature set (not behind a feature flag we can disable — verified
     # against rustic_backend 0.7.0's Cargo.toml). No FTP control channel
-    # can therefore be constructed from NASty input, so neither finding
-    # is reachable at runtime. cargo-deny sees only the dependency graph.
+    # can therefore be constructed from NASty input, so none of these
+    # findings is reachable at runtime. cargo-deny sees only the dependency graph.
     #
     # No compatible patched release exists: opendal-service-ftp 0.58.2
     # requires suppaftp ^8.0.3, while the injection fix is in 10.0.2.
-    # OpenDAL main has upgraded, so remove both exceptions once that is
+    # OpenDAL main has upgraded, so remove these exceptions once that is
     # released and adopted by rustic_backend, or when rustic_backend
     # exposes per-service opendal features. History: issue #386.
     "RUSTSEC-2025-0052",
     "RUSTSEC-2026-0271",
+    "RUSTSEC-2026-0441",
 ]
 
 [licenses]
