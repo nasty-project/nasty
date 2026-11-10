@@ -8,8 +8,8 @@
       to { opacity: 1; }
     }
     .data-line-0 {
-      stroke-dasharray: 1160;
-      stroke-dashoffset: 1160;
+      stroke-dasharray: 1161;
+      stroke-dashoffset: 1161;
       animation: drawLine 2s ease-out forwards;
     }
     .data-point {
@@ -61,46 +61,46 @@
     <text x="353.7931034482759" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Jul 2</text>
     <text x="427.2413793103448" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Jul 25</text>
     <text x="500.6896551724138" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Aug 17</text>
-    <text x="574.1379310344828" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Sep 8</text>
-    <text x="647.5862068965517" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Oct 1</text>
-    <text x="721.0344827586207" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Oct 24</text>
-    <text x="770" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Nov 9</text>
+    <text x="574.1379310344828" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Sep 9</text>
+    <text x="647.5862068965517" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Oct 2</text>
+    <text x="721.0344827586207" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Oct 25</text>
+    <text x="770" y="370" text-anchor="middle" class="chart-muted" font-size="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Nov 10</text>
   </g>
   <line x1="770" y1="50" x2="770" y2="350" class="chart-axis" stroke-width="1" />
   <line x1="60" y1="350" x2="770" y2="350" class="chart-axis" stroke-width="1" />
   
-  <path d="M60,349.4 C68.16091954022988,345.4 76.32183908045977,342.5 84.48275862068965,337.4 C92.64367816091954,332.29999999999995 100.80459770114942,323.7 108.9655172413793,318.8 C117.12643678160919,313.90000000000003 125.28735632183907,311.1 133.44827586206895,308 C141.60919540229884,304.9 149.77011494252872,303.59999999999997 157.9310344827586,300.2 C166.0919540229885,296.8 174.2528735632184,295.20000000000005 182.41379310344828,287.6 C190.57471264367817,280 198.73563218390805,262.9 206.89655172413794,254.6 C215.05747126436782,246.29999999999998 223.2183908045977,244.70000000000002 231.3793103448276,237.8 C239.54022988505747,230.9 247.70114942528735,218.29999999999998 255.86206896551724,213.2 C264.0229885057471,208.1 272.183908045977,209.9 280.34482758620686,207.20000000000002 C288.50574712643675,204.50000000000003 296.6666666666667,199.5 304.82758620689657,197 C312.98850574712645,194.5 321.14942528735634,194.1 329.3103448275862,192.2 C337.4712643678161,190.29999999999998 345.632183908046,187.3 353.7931034482759,185.6 C361.95402298850576,183.89999999999998 370.11494252873564,183.69999999999996 378.2758620689655,181.99999999999997 C386.4367816091954,180.29999999999998 394.5977011494253,177.8 402.7586206896552,175.4 C410.91954022988506,173 419.08045977011494,169.7 427.2413793103448,167.6 C435.4022988505747,165.5 443.5632183908046,164.20000000000002 451.7241379310345,162.8 C459.88505747126436,161.4 468.04597701149424,160.7 476.2068965517241,159.2 C484.367816091954,157.7 492.5287356321839,155.89999999999998 500.6896551724138,153.79999999999998 C508.85057471264366,151.7 517.0114942528736,148.9 525.1724137931035,146.6 C533.3333333333334,144.3 541.4942528735633,142 549.6551724137931,140 C557.816091954023,138 565.9770114942529,136.90000000000003 574.1379310344828,134.60000000000002 C582.2988505747127,132.3 590.4597701149426,129.5 598.6206896551724,126.19999999999999 C606.7816091954023,122.89999999999998 614.9425287356322,117.29999999999998 623.1034482758621,114.79999999999998 C631.264367816092,112.29999999999998 639.4252873563219,112.49999999999999 647.5862068965517,111.19999999999999 C655.7471264367816,109.89999999999999 663.9080459770115,107.99999999999997 672.0689655172414,106.99999999999997 C680.2298850574713,105.99999999999997 688.3908045977012,106.20000000000002 696.551724137931,105.20000000000002 C704.7126436781609,104.20000000000002 712.8735632183908,102.2 721.0344827586207,101 C729.1954022988506,99.8 737.3563218390805,98.9 745.5172413793103,98 C753.6781609195402,97.1 761.8390804597701,96.39999999999999 770,95.6" fill="none" stroke="#dfb317" stroke-width="2.5" class="data-line-0" />
+  <path d="M60,349.4 C68.16091954022988,345.4 76.32183908045977,342.5 84.48275862068965,337.4 C92.64367816091954,332.29999999999995 100.80459770114942,323.8 108.9655172413793,318.8 C117.12643678160919,313.8 125.28735632183907,310.5 133.44827586206895,307.4 C141.60919540229884,304.29999999999995 149.77011494252872,303.5 157.9310344827586,300.2 C166.0919540229885,296.9 174.2528735632184,295.3 182.41379310344828,287.6 C190.57471264367817,279.90000000000003 198.73563218390805,262.3 206.89655172413794,254 C215.05747126436782,245.7 223.2183908045977,244.70000000000002 231.3793103448276,237.8 C239.54022988505747,230.9 247.70114942528735,217.8 255.86206896551724,212.6 C264.0229885057471,207.4 272.183908045977,209.2 280.34482758620686,206.6 C288.50574712643675,204 296.6666666666667,199.4 304.82758620689657,197 C312.98850574712645,194.6 321.14942528735634,194.1 329.3103448275862,192.2 C337.4712643678161,190.29999999999998 345.632183908046,187.4 353.7931034482759,185.6 C361.95402298850576,183.79999999999998 370.11494252873564,183.2 378.2758620689655,181.39999999999998 C386.4367816091954,179.59999999999997 394.5977011494253,177.10000000000002 402.7586206896552,174.8 C410.91954022988506,172.5 419.08045977011494,169.6 427.2413793103448,167.6 C435.4022988505747,165.6 443.5632183908046,164.3 451.7241379310345,162.8 C459.88505747126436,161.3 468.04597701149424,160.1 476.2068965517241,158.6 C484.367816091954,157.1 492.5287356321839,155.99999999999997 500.6896551724138,153.79999999999998 C508.85057471264366,151.59999999999997 517.0114942528736,147.89999999999998 525.1724137931035,145.39999999999998 C533.3333333333334,142.89999999999998 541.4942528735633,140.70000000000002 549.6551724137931,138.8 C557.816091954023,136.9 565.9770114942529,136.3 574.1379310344828,134 C582.2988505747127,131.7 590.4597701149426,128.4 598.6206896551724,125 C606.7816091954023,121.6 614.9425287356322,116 623.1034482758621,113.6 C631.264367816092,111.19999999999999 639.4252873563219,111.7 647.5862068965517,110.6 C655.7471264367816,109.49999999999999 663.9080459770115,107.89999999999996 672.0689655172414,106.99999999999997 C680.2298850574713,106.09999999999998 688.3908045977012,106.30000000000001 696.551724137931,105.20000000000002 C704.7126436781609,104.10000000000002 712.8735632183908,101.60000000000001 721.0344827586207,100.4 C729.1954022988506,99.2 737.3563218390805,99 745.5172413793103,98 C753.6781609195402,97 761.8390804597701,95.60000000000001 770,94.4" fill="none" stroke="#dfb317" stroke-width="2.5" class="data-line-0" />
   <g class="points">
     
     <circle cx="60" cy="349.4" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.50s" />
     <circle cx="84.48275862068965" cy="337.4" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.55s" />
     <circle cx="108.9655172413793" cy="318.8" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.60s" />
-    <circle cx="133.44827586206895" cy="308" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.65s" />
+    <circle cx="133.44827586206895" cy="307.4" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.65s" />
     <circle cx="157.9310344827586" cy="300.2" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.70s" />
     <circle cx="182.41379310344828" cy="287.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.75s" />
-    <circle cx="206.89655172413794" cy="254.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.80s" />
+    <circle cx="206.89655172413794" cy="254" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.80s" />
     <circle cx="231.3793103448276" cy="237.8" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.85s" />
-    <circle cx="255.86206896551724" cy="213.2" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.90s" />
-    <circle cx="280.34482758620686" cy="207.20000000000002" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.95s" />
+    <circle cx="255.86206896551724" cy="212.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.90s" />
+    <circle cx="280.34482758620686" cy="206.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 1.95s" />
     <circle cx="304.82758620689657" cy="197" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.00s" />
     <circle cx="329.3103448275862" cy="192.2" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.05s" />
     <circle cx="353.7931034482759" cy="185.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.10s" />
-    <circle cx="378.2758620689655" cy="181.99999999999997" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.15s" />
-    <circle cx="402.7586206896552" cy="175.4" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.20s" />
+    <circle cx="378.2758620689655" cy="181.39999999999998" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.15s" />
+    <circle cx="402.7586206896552" cy="174.8" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.20s" />
     <circle cx="427.2413793103448" cy="167.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.25s" />
     <circle cx="451.7241379310345" cy="162.8" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.30s" />
-    <circle cx="476.2068965517241" cy="159.2" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.35s" />
+    <circle cx="476.2068965517241" cy="158.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.35s" />
     <circle cx="500.6896551724138" cy="153.79999999999998" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.40s" />
-    <circle cx="525.1724137931035" cy="146.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.45s" />
-    <circle cx="549.6551724137931" cy="140" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.50s" />
-    <circle cx="574.1379310344828" cy="134.60000000000002" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.55s" />
-    <circle cx="598.6206896551724" cy="126.19999999999999" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.60s" />
-    <circle cx="623.1034482758621" cy="114.79999999999998" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.65s" />
-    <circle cx="647.5862068965517" cy="111.19999999999999" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.70s" />
+    <circle cx="525.1724137931035" cy="145.39999999999998" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.45s" />
+    <circle cx="549.6551724137931" cy="138.8" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.50s" />
+    <circle cx="574.1379310344828" cy="134" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.55s" />
+    <circle cx="598.6206896551724" cy="125" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.60s" />
+    <circle cx="623.1034482758621" cy="113.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.65s" />
+    <circle cx="647.5862068965517" cy="110.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.70s" />
     <circle cx="672.0689655172414" cy="106.99999999999997" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.75s" />
     <circle cx="696.551724137931" cy="105.20000000000002" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.80s" />
-    <circle cx="721.0344827586207" cy="101" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.85s" />
+    <circle cx="721.0344827586207" cy="100.4" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.85s" />
     <circle cx="745.5172413793103" cy="98" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.90s" />
-    <circle cx="770" cy="95.6" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.95s" />
+    <circle cx="770" cy="94.4" r="4" fill="#dfb317" class="data-point" style="animation-delay: 2.95s" />
   </g>
 </svg>
