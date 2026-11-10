@@ -1,6 +1,7 @@
 /** Toast notification store */
 
 import { getSessionGeneration, registerSessionReset } from './client';
+import { isOutcomeUnknown } from './rpc';
 
 type ToastType = 'success' | 'error' | 'info';
 
@@ -67,7 +68,10 @@ export async function withToast<T>(
 		return result;
 	} catch (e: unknown) {
 		const msg = e instanceof Error ? e.message : typeof e === 'object' && e !== null && 'message' in e ? String((e as { message: unknown }).message) : String(e);
-		if (generation === getSessionGeneration()) error(msg);
+		if (generation === getSessionGeneration()) {
+			if (isOutcomeUnknown(e)) add('info', `${msg}. The action may still be running; check its status before retrying.`, 8000);
+			else error(msg);
+		}
 		return undefined;
 	} finally {
 		if (generation === getSessionGeneration()) _busy--;

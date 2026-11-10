@@ -7,6 +7,14 @@ interface RpcError {
 	code: number;
 	message: string;
 	data?: unknown;
+	/** Set by the client when the request was sent but no reply came back. */
+	outcomeUnknown?: true;
+}
+
+/** The request may have reached the engine and still be running, so the
+ *  caller must not treat it as failed. */
+export function isOutcomeUnknown(error: unknown): boolean {
+	return typeof error === 'object' && error !== null && (error as RpcError).outcomeUnknown === true;
 }
 
 interface PendingCall {
@@ -118,7 +126,7 @@ export class NastyClient {
 
 	private rejectPendingCalls() {
 		for (const pending of this.pending.values()) {
-			pending.reject({ code: -32000, message: 'WebSocket disconnected' });
+			pending.reject({ code: -32000, message: 'WebSocket disconnected', outcomeUnknown: true });
 		}
 		this.pending.clear();
 	}
@@ -293,7 +301,7 @@ export class NastyClient {
 				timing.duration_ms = Math.round(performance.now() - t0); timing.outcome = 'timeout';
 				this.late.set(id, { timing, started: t0 });
 				if (this.late.size > 128) this.late.delete(this.late.keys().next().value!);
-				reject({ code: -32000, message: 'Request timed out' });
+				reject({ code: -32000, message: 'Request timed out', outcomeUnknown: true });
 			}, timeoutMs);
 
 			this.pending.set(id, {
