@@ -211,7 +211,8 @@ describe('request/response correlation', () => {
 			const client = await connectAuthed();
 			const callPromise = client.call('slow', undefined, 100);
 			const expectation = expect(callPromise).rejects.toMatchObject({
-				message: 'Request timed out'
+				message: 'Request timed out',
+				outcomeUnknown: true
 			});
 			await vi.advanceTimersByTimeAsync(150);
 			await expectation;
@@ -274,7 +275,8 @@ describe('connection lifecycle', () => {
 		mockInstances[0].fireClose();
 		await expect(callPromise).rejects.toMatchObject({
 			code: -32000,
-			message: 'WebSocket disconnected'
+			message: 'WebSocket disconnected',
+			outcomeUnknown: true
 		});
 	});
 

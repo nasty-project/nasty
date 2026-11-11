@@ -8,7 +8,8 @@
 		formatBytes,
 		formatPercent
 	} from '$lib/format';
-	import { withToast, success as toastSuccess, error as toastError } from '$lib/toast.svelte';
+	import { withToast, success as toastSuccess, error as toastError, info as toastInfo } from '$lib/toast.svelte';
+	import { isOutcomeUnknown } from '$lib/rpc';
 
 	let pageTab = $state<'manage' | 'diagnostics'>(
 		typeof window !== 'undefined' && window.location.hash === '#diagnostics' ? 'diagnostics' : 'manage'
@@ -958,6 +959,12 @@
 				toastSuccess(`Device ${devicePath} removed from "${fsName}"`);
 				await refresh();
 			} catch (e) {
+				// No reply is not a refusal: bcachefs may still be evacuating.
+				if (isOutcomeUnknown(e)) {
+					toastInfo(`Removal of ${devicePath} is still running. Follow it on the Operations page.`);
+					await refresh();
+					return;
+				}
 				// The safe remove was refused — typically the device still
 				// holds data/metadata bcachefs won't migrate on its own (e.g.
 				// removal would drop below the configured replicas). Rather

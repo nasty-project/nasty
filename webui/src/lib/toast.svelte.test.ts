@@ -93,6 +93,13 @@ describe('withToast', () => {
 		]);
 	});
 
+	test('reports a request with no reply as possibly still running, not failed', async () => {
+		await withToast(() => Promise.reject({ code: -32000, message: 'Request timed out', outcomeUnknown: true }), 'done');
+		expect(getToasts()).toEqual([
+			expect.objectContaining({ type: 'info', message: expect.stringMatching(/^Request timed out\. The action may still be running/) })
+		]);
+	});
+
 	test('falls back to String(e) for primitives and unrecognised shapes', async () => {
 		const result = await withToast(async () => {
 			throw 'plain string';
