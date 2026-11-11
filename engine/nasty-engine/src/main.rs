@@ -56,6 +56,8 @@ pub struct AppState {
     pub oidc: auth_oidc::OidcHolder,
     pub webauthn: auth_webauthn::WebauthnService,
     pub events: EventBus,
+    /// Long-running operations started by RPCs (#1032).
+    pub jobs: Arc<nasty_common::jobs::JobRegistry>,
     pub log_reload: LogReloadHandle,
     pub system: nasty_system::SystemService,
     pub settings: nasty_system::settings::SettingsService,
@@ -265,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
         oidc: auth_oidc::OidcHolder::default(),
         webauthn,
         events: event_tx,
+        jobs: Arc::default(),
         log_reload: reload_handle,
         system: nasty_system::SystemService::new(None, Some(built.to_string())),
         settings: settings_service,

@@ -75,7 +75,7 @@ export interface SystemHealth {
 
 /** A long-running array operation in progress (#528). */
 export interface ActiveOperation {
-	kind: string; // "evacuate" | "scrub" | "reconcile"
+	kind: string; // "evacuate" | "remove" | "scrub" | "reconcile"
 	fs: string;
 	target?: string | null;
 	progress_percent?: number | null;
@@ -94,7 +94,7 @@ export interface SystemStatus {
 /** A controllable data operation for the Operations panel (#553), from
  * `system.operations.list`. Carries the action the UI can take. */
 export interface Operation {
-	kind: string; // "scrub" | "evacuate" | "reconcile" | "copygc"
+	kind: string; // "scrub" | "evacuate" | "remove" | "reconcile" | "copygc"
 	fs: string;
 	target?: string | null;
 	run_id?: string | null;
@@ -108,6 +108,19 @@ export interface Operation {
 	last_outcome?: 'ok' | 'errors' | 'corrected' | 'uncorrected' | 'failed_corrected' | 'failed_uncorrected' | 'failed' | 'cancelled' | null;
 	detail: string;
 	control: string; // "start" | "cancel" | "pause" | "resume" | "none"
+}
+
+/** A long-running engine operation (#1032), e.g. a device removal. */
+export interface Job {
+	id: string;
+	kind: string;
+	filesystem: string;
+	target: string;
+	state: 'running' | 'succeeded' | 'refused' | 'failed' | 'cancelled';
+	started_at: number;
+	finished_at: number | null;
+	error: string | null;
+	cancel_requested: boolean;
 }
 
 /** Scrub schedule state returned by `fs.scrub.schedule.update`. */

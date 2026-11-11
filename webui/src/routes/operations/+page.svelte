@@ -72,7 +72,7 @@
 
 	function kindLabel(kind: string): string {
 		return (
-			{ scrub: 'Scrub', evacuate: 'Evacuate', reconcile: 'Reconcile', copygc: 'Copygc' }[kind] ??
+			{ scrub: 'Scrub', evacuate: 'Evacuate', remove: 'Remove', reconcile: 'Reconcile', copygc: 'Copygc' }[kind] ??
 			kind
 		);
 	}
@@ -94,11 +94,11 @@
 			const what =
 				op.kind === 'scrub'
 					? `the scrub on ${op.fs}`
-					: `evacuation of ${op.target} on ${op.fs}`;
+					: `${op.kind === 'remove' ? 'removal' : 'evacuation'} of ${op.target} on ${op.fs}`;
 			const body =
 				op.kind === 'scrub'
 					? 'The scrub stops where it is; already-checked data stays verified. You can start a fresh scrub later.'
-					: 'The device stops draining and returns to read-write. Data already moved off stays moved; the device keeps what is left.';
+					: 'The device stops draining, stays in the pool and returns to read-write. Data already moved off stays moved; the device keeps what is left.';
 			if (!(await confirm(`Cancel ${what}?`, body))) return;
 		}
 
@@ -108,7 +108,7 @@
 				? op.control === 'start'
 					? 'fs.scrub.start'
 					: 'fs.scrub.cancel'
-				: op.kind === 'evacuate'
+				: op.kind === 'evacuate' || op.kind === 'remove'
 					? 'fs.device.evacuate.cancel'
 					: op.kind === 'reconcile'
 						? op.control === 'resume'
@@ -118,7 +118,7 @@
 							? 'fs.copygc.enable'
 							: 'fs.copygc.disable';
 		const params =
-			op.kind === 'evacuate'
+			op.kind === 'evacuate' || op.kind === 'remove'
 				? { filesystem: op.fs, device: op.target }
 				: op.kind === 'scrub' && op.control === 'cancel'
 					? { name: op.fs, run_id: op.run_id }

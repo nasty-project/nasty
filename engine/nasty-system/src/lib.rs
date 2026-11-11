@@ -142,7 +142,7 @@ pub struct ServiceStatus {
 /// always visible while it runs.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ActiveOperation {
-    /// "evacuate" | "scrub" | "reconcile".
+    /// "evacuate" | "remove" | "scrub" | "reconcile".
     pub kind: String,
     /// Filesystem the operation is running on.
     pub fs: String,
@@ -175,7 +175,7 @@ pub struct CustomConfig {
 /// can be resumed.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Operation {
-    /// "scrub" | "evacuate" | "reconcile" | "copygc".
+    /// "scrub" | "evacuate" | "remove" | "reconcile" | "copygc".
     pub kind: String,
     /// Filesystem the operation belongs to.
     pub fs: String,

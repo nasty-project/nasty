@@ -1203,12 +1203,20 @@ async fn build_system_status(state: &AppState) -> (nasty_system::SystemStatus, u
             for dev in &fs.devices {
                 if dev.state.as_deref() == Some("evacuating") {
                     let short = dev.path.rsplit('/').next().unwrap_or(&dev.path);
+                    let removing = state
+                        .jobs
+                        .running(super::fs::DEVICE_REMOVE_JOB, &dev.path)
+                        .is_some();
                     operations.push(nasty_system::ActiveOperation {
-                        kind: "evacuate".to_string(),
+                        kind: if removing { "remove" } else { "evacuate" }.to_string(),
                         fs: fs.name.clone(),
                         target: Some(dev.path.clone()),
                         progress_percent: None,
-                        detail: format!("Evacuating {short}"),
+                        detail: if removing {
+                            format!("Removing {short}")
+                        } else {
+                            format!("Evacuating {short}")
+                        },
                     });
                 }
             }
@@ -1311,16 +1319,37 @@ async fn build_operations(
                 .map(|c| (c.bytes_seen, c.bytes_moved))
         };
 
-        // Running evacuations (bcachefs marks the member "evacuating").
+        // Running evacuations (bcachefs marks the member "evacuating"). A
+        // removal drains the same way, so its row is the removal's.
+        let removals: Vec<_> = state
+            .jobs
+            .list()
+            .into_iter()
+            .filter(|j| {
+                j.kind == super::fs::DEVICE_REMOVE_JOB
+                    && j.filesystem == fs.name
+                    && j.state == nasty_common::jobs::JobState::Running
+            })
+            .collect();
         for dev in &fs.devices {
             if dev.state.as_deref() == Some("evacuating") {
                 let short = dev.path.rsplit('/').next().unwrap_or(&dev.path);
-                let mut detail = format!("Draining {short}");
+                let removal = removals.iter().find(|j| j.target == dev.path);
+                let mut detail = match removal {
+                    Some(j) if j.cancel_requested => format!("Cancelling removal of {short}"),
+                    Some(_) => format!("Removing {short}"),
+                    None => format!("Draining {short}"),
+                };
                 if let Some((_, m)) = moved("evacuate").filter(|&(_, m)| m > 0) {
                     detail += &format!(" — {} drained", human_bytes(m));
                 }
                 ops.push(nasty_system::Operation {
-                    kind: "evacuate".into(),
+                    kind: if removal.is_some() {
+                        "remove"
+                    } else {
+                        "evacuate"
+                    }
+                    .into(),
                     fs: fs.name.clone(),
                     target: Some(dev.path.clone()),
                     run_id: None,
@@ -1333,10 +1362,39 @@ async fn build_operations(
                     next_run_at: None,
                     schedule_error: None,
                     detail,
-                    control: "cancel".into(),
+                    control: if removal.is_some_and(|j| j.cancel_requested) {
+                        "none".into()
+                    } else {
+                        "cancel".into()
+                    },
                 });
                 any_evacuating = true;
             }
+        }
+        // Removals with nothing draining yet, or of a missing member (no
+        // data to move): still running, but not cancellable from here.
+        for job in removals.iter().filter(|j| {
+            !fs.devices
+                .iter()
+                .any(|d| d.path == j.target && d.state.as_deref() == Some("evacuating"))
+        }) {
+            ops.push(nasty_system::Operation {
+                kind: "remove".into(),
+                fs: fs.name.clone(),
+                target: Some(job.target.clone()),
+                run_id: None,
+                state: "running".into(),
+                progress_percent: None,
+                last_run_at: None,
+                last_duration_secs: None,
+                last_outcome: None,
+                schedule: None,
+                next_run_at: None,
+                schedule_error: None,
+                detail: format!("Removing {}", job.target),
+                control: "none".into(),
+            });
+            any_evacuating = true;
         }
         // Scrub — always shown, running or idle, so the operator can start
         // one from here. Percent stays from the CLI (bcachefs computes it
