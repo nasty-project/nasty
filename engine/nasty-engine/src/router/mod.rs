@@ -210,6 +210,13 @@ pub(super) fn parse_params<T: serde::de::DeserializeOwned>(request: &Request) ->
 }
 
 /// Check if a method is read-only (safe for ReadOnly role)
+/// Whether a raw WebSocket request may run alongside others on its connection.
+/// Unparseable requests are not read-only; they get their error from the
+/// serial path like any other non-read.
+pub(crate) fn runs_concurrently(raw: &str) -> bool {
+    serde_json::from_str::<Request>(raw).is_ok_and(|request| is_read_only(&request.method))
+}
+
 fn is_read_only(method: &str) -> bool {
     // Suffix heuristics catch the vast majority of pure reads without
     // forcing every new endpoint to be enumerated below. `.list` /
@@ -2083,7 +2090,7 @@ mod tests {
         AlertCoverage, ReconcileProgress, ReconcileProgressSample, audit_detail,
         clear_reconcile_tracker, collection_for_method, configured_apps_storage_role,
         is_operator_allowed, is_read_only, is_universally_allowed, is_user_allowed,
-        reconcile_progress, reconcile_stall_check_at,
+        reconcile_progress, reconcile_stall_check_at, runs_concurrently,
     };
 
     #[test]
@@ -2385,6 +2392,16 @@ mod tests {
             assert!(!is_operator_allowed(method));
             assert!(!is_user_allowed(method));
         }
+    }
+
+    #[test]
+    fn only_reads_run_concurrently_on_a_connection() {
+        let call = |method: &str| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}"}}"#);
+        assert!(runs_concurrently(&call("fs.list")));
+        assert!(runs_concurrently(&call("system.update.status")));
+        assert!(!runs_concurrently(&call("fs.device.remove")));
+        assert!(!runs_concurrently(&call("subvolume.create")));
+        assert!(!runs_concurrently("not json"));
     }
 
     /// Every status endpoint in the codebase is a pure read.

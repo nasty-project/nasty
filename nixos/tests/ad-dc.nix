@@ -116,8 +116,11 @@ let
         if params is not None:
             req["params"] = params
         ws.send(json.dumps(req))
-        resp = json.loads(ws.recv())
-        assert resp.get("id") == _next_id, f"id mismatch: {resp!r}"
+        while True:
+            resp = json.loads(ws.recv())
+            if resp.get("id") == _next_id:
+                break
+            assert "id" not in resp and resp.get("method") == "event", f"id mismatch: {resp!r}"
         assert "error" not in resp, f"{method} returned error: {resp!r}"
         return resp["result"]
 

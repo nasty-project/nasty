@@ -4647,6 +4647,30 @@ async fn ws_handler(
     })
 }
 
+/// Requests one connection may have running or queued. At the cap the socket
+/// stops reading, so a flooding client backs up in TCP instead of engine memory.
+const MAX_IN_FLIGHT_RPCS: usize = 32;
+
+struct QueuedRpc {
+    text: String,
+    session: Session,
+    received: std::time::Instant,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl QueuedRpc {
+    async fn run(self, state: &AppState, responses: &tokio::sync::mpsc::Sender<String>) {
+        let response = nasty_common::diagnostics::RECEIVED
+            .scope(
+                self.received,
+                handle_rpc_request(&self.text, state, &self.session),
+            )
+            .await;
+        // The receiver is gone once the client disconnects; the work still ran.
+        let _ = responses.send(response).await;
+    }
+}
+
 async fn handle_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
@@ -4693,6 +4717,22 @@ async fn handle_socket(
     ping_ticker.tick().await; // skip the immediate first tick
     let mut last_seen = std::time::Instant::now();
     let connected_at = std::time::Instant::now();
+    let rpc_slots = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_RPCS));
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel(MAX_IN_FLIGHT_RPCS);
+    // Mutations keep running one at a time per connection: CSI multiplexes a
+    // whole cluster's requests over one socket, and the share services rely
+    // on that for their read-modify-write of persisted state.
+    let (mutation_tx, mut mutation_rx) =
+        tokio::sync::mpsc::channel::<QueuedRpc>(MAX_IN_FLIGHT_RPCS);
+    tokio::spawn({
+        let state = state.clone();
+        let response_tx = response_tx.clone();
+        async move {
+            while let Some(rpc) = mutation_rx.recv().await {
+                rpc.run(&state, &response_tx).await;
+            }
+        }
+    });
     // Captures *why* the WS closed so the disconnect log line below
     // says more than just "disconnected" — distinguishes client-side
     // close (with code/reason), TCP-level stream end, server-side idle
@@ -4704,7 +4744,7 @@ async fn handle_socket(
 
     loop {
         tokio::select! {
-            msg = reader.next() => {
+            msg = reader.next(), if rpc_slots.available_permits() > 0 => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         let received = std::time::Instant::now();
@@ -4719,9 +4759,19 @@ async fn handle_socket(
                                 break;
                             }
                         };
-                        let response = nasty_common::diagnostics::RECEIVED.scope(received, handle_rpc_request(&text, &state, &fresh_session)).await;
-                        if writer.send(Message::Text(response.into())).await.is_err() {
-                            disconnect_reason = "write failed (socket closed)".to_string();
+                        let rpc = QueuedRpc {
+                            text: text.to_string(),
+                            session: fresh_session,
+                            received,
+                            _slot: rpc_slots.clone().acquire_owned().await.expect("semaphore is never closed"),
+                        };
+                        if router::runs_concurrently(&rpc.text) {
+                            let state = state.clone();
+                            let response_tx = response_tx.clone();
+                            tokio::spawn(async move { rpc.run(&state, &response_tx).await });
+                        } else if mutation_tx.send(rpc).await.is_err() {
+                            disconnect_reason = "mutation worker stopped".to_string();
+                            let _ = writer.send(Message::Close(None)).await;
                             break;
                         }
                     }
@@ -4754,6 +4804,14 @@ async fn handle_socket(
                     }
                 }
             }
+            Some(response) = response_rx.recv() => {
+                // Reading pauses at the in-flight cap, so a Pong may be unread.
+                last_seen = std::time::Instant::now();
+                if writer.send(Message::Text(response.into())).await.is_err() {
+                    disconnect_reason = "write failed (socket closed)".to_string();
+                    break;
+                }
+            }
             event = async {
                 match event_rx.as_mut() {
                     Some(receiver) => Some(receiver.recv().await),
@@ -4783,7 +4841,7 @@ async fn handle_socket(
                     let _ = writer.send(Message::Close(None)).await;
                     break;
                 }
-                if last_seen.elapsed() > IDLE_TIMEOUT {
+                if rpc_slots.available_permits() > 0 && last_seen.elapsed() > IDLE_TIMEOUT {
                     disconnect_reason = format!(
                         "server idle timeout ({}s no traffic)",
                         IDLE_TIMEOUT.as_secs()
