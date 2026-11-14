@@ -2,18 +2,6 @@
   "version": 1,
   "snapshots": [
     {
-      "timestamp": "2026-09-23T03:05:26.106Z",
-      "totalStars": 391,
-      "repos": [
-        {
-          "fullName": "nasty-project/nasty",
-          "name": "nasty",
-          "owner": "nasty-project",
-          "stars": 391
-        }
-      ]
-    },
-    {
       "timestamp": "2026-09-24T02:56:35.397Z",
       "totalStars": 393,
       "repos": [
@@ -615,6 +603,18 @@
     },
     {
       "timestamp": "2026-11-13T04:51:49.364Z",
+      "totalStars": 428,
+      "repos": [
+        {
+          "fullName": "nasty-project/nasty",
+          "name": "nasty",
+          "owner": "nasty-project",
+          "stars": 428
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-14T04:45:00.174Z",
       "totalStars": 428,
       "repos": [
         {
