@@ -9,7 +9,6 @@
 		formatPercent
 	} from '$lib/format';
 	import { withToast, success as toastSuccess, error as toastError, info as toastInfo } from '$lib/toast.svelte';
-	import { isOutcomeUnknown } from '$lib/rpc';
 
 	let pageTab = $state<'manage' | 'diagnostics'>(
 		typeof window !== 'undefined' && window.location.hash === '#diagnostics' ? 'diagnostics' : 'manage'
@@ -19,7 +18,7 @@
 	import { unlockFs } from '$lib/unlock-fs.svelte';
 	import { summarizeDependents } from '$lib/fs-dependents';
 	import { diskTier, tierCapabilities } from '$lib/disk-tiers';
-	import type { Filesystem, UnavailableFilesystem, FilesystemDevice, BlockDevice, DiskPreparation, DeviceState, ScrubStatus, FsckStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents, TpmBindStatus, DiskHealth } from '$lib/types';
+	import type { Filesystem, UnavailableFilesystem, FilesystemDevice, BlockDevice, DiskPreparation, DeviceState, ScrubStatus, FsckStatus, ReconcileStatus, TieringProfile, TieringProfileId, FsDependents, TpmBindStatus, DiskHealth, Job } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { Card, CardContent } from '$lib/components/ui/card';
@@ -42,6 +41,9 @@
 	 * when an FS was expanded, which is why operators couldn't see
 	 * "last scrubbed N days ago" at a glance). */
 	let scrubStatuses: Record<string, ScrubStatus> = $state({});
+	/** Device removal jobs per filesystem, oldest first (#1032). */
+	let removals: Record<string, Job[]> = $state({});
+	let dismissedRemovals = $state<Record<string, true>>({});
 	/** Interval handle for the running-scrub poller. Lazily started
 	 * when any FS reports `running`, cleared when none do. 5s cadence
 	 * is plenty — `bcachefs scrub` on a multi-TB pool runs for
@@ -432,6 +434,22 @@
 		for (const r of scrubResults) if (r) nextScrub[r[0]] = r[1];
 		scrubStatuses = nextScrub;
 		updateScrubPolling();
+
+		const removalResults = await Promise.all(
+			filesystems.filter((fs) => fs.mounted).map(async (fs) => {
+				try {
+					const jobs = await client.call<Job[]>('fs.device.remove.status', { filesystem: fs.name });
+					return [fs.name, jobs] as const;
+				} catch { return null; }
+			})
+		);
+		const wasRunning = new Set(Object.values(removals).flat().filter((j) => j.state === 'running').map((j) => j.id));
+		const nextRemovals: Record<string, Job[]> = {};
+		for (const r of removalResults) if (r) nextRemovals[r[0]] = r[1];
+		for (const job of Object.values(nextRemovals).flat()) {
+			if (job.state === 'succeeded' && wasRunning.has(job.id)) toastSuccess(`Removed ${job.target} from "${job.filesystem}"`);
+		}
+		removals = nextRemovals;
 
 		// fsck state is only meaningful for unmounted filesystems (an
 		// offline check can't run while mounted), so only fetch for those.
@@ -951,40 +969,44 @@
 		});
 	}
 
+	/** The engine runs removals as background jobs (#1032): this only starts
+	 * one. Its outcome arrives through `fs.device.remove.status`. */
+	async function startRemoval(fsName: string, device: string, force: boolean) {
+		const job = await withToast(() => client.call<Job>('fs.device.remove', { filesystem: fsName, device, force }));
+		if (job) toastInfo(`Removing ${device} from "${fsName}". Follow it on the Operations page.`);
+		await refresh();
+	}
+
+	function runningRemoval(fsName: string, device: string): boolean {
+		return (removals[fsName] ?? []).some((j) => j.target === device && j.state === 'running');
+	}
+
+	/** The latest removal of each device, when it ended without removing it. */
+	function removalNotices(fsName: string): Job[] {
+		const latest = new Map<string, Job>();
+		for (const job of removals[fsName] ?? []) latest.set(job.target, job);
+		return [...latest.values()].filter((j) => (j.state === 'refused' || j.state === 'failed') && !dismissedRemovals[j.id]);
+	}
+
 	async function removeDevice(fsName: string, devicePath: string) {
 		if (!await confirm(`Remove ${devicePath}?`, `Data will be evacuated from filesystem "${fsName}" first.`)) return;
-		await runDeviceAction(devicePath, async () => {
-			try {
-				await client.call('fs.device.remove', { filesystem: fsName, device: devicePath }, 120000);
-				toastSuccess(`Device ${devicePath} removed from "${fsName}"`);
-				await refresh();
-			} catch (e) {
-				// No reply is not a refusal: bcachefs may still be evacuating.
-				if (isOutcomeUnknown(e)) {
-					toastInfo(`Removal of ${devicePath} is still running. Follow it on the Operations page.`);
-					await refresh();
-					return;
-				}
-				// The safe remove was refused — typically the device still
-				// holds data/metadata bcachefs won't migrate on its own (e.g.
-				// removal would drop below the configured replicas). Rather
-				// than dead-end the user in the terminal with `--force` (#554),
-				// surface the real reason and offer a deliberately-gated force
-				// remove that the engine already supports.
-				const reason = String((e as Error)?.message ?? e).replace(/^Error:\s*/, '');
-				const forced = await confirmDangerous(
-					`Force-remove ${devicePath}?`,
-					`bcachefs refused to remove ${devicePath} safely:\n\n${reason}\n\nForce-remove pulls the device out anyway, skipping the migrate-off and redundancy checks. If the pool no longer has enough replicas on the remaining devices, this loses data. Type the device path below to confirm you understand.`,
-					devicePath
-				);
-				if (!forced) return;
-				const ok = await withToast(
-					() => client.call('fs.device.remove', { filesystem: fsName, device: devicePath, force: true }, 120000),
-					`Force-removed ${devicePath} from "${fsName}"`
-				);
-				if (ok !== undefined) await refresh();
-			}
-		});
+		await runDeviceAction(devicePath, () => startRemoval(fsName, devicePath, false));
+	}
+
+	/** Offered only after bcachefs refused the safe remove — typically the
+	 * device still holds data/metadata it won't migrate on its own (e.g.
+	 * removal would drop below the configured replicas). Rather than
+	 * dead-end the user in the terminal with `--force` (#554), show the
+	 * real reason and gate the force remove the engine already supports. */
+	async function forceRemoveDevice(fsName: string, job: Job) {
+		const devicePath = job.target;
+		const forced = await confirmDangerous(
+			`Force-remove ${devicePath}?`,
+			`bcachefs refused to remove ${devicePath} safely:\n\n${job.error ?? ''}\n\nForce-remove pulls the device out anyway, skipping the migrate-off and redundancy checks. If the pool no longer has enough replicas on the remaining devices, this loses data. Type the device path below to confirm you understand.`,
+			devicePath
+		);
+		if (!forced) return;
+		await runDeviceAction(devicePath, () => startRemoval(fsName, devicePath, true));
 	}
 
 	/** Force-remove a missing/dead member by its slot index (#466/#473).
@@ -998,13 +1020,7 @@
 			`Removes the missing device from "${fsName}". Its data can't be migrated (the disk is gone), so this relies on the replicas still present on the remaining devices. Don't do this if the pool is already at minimum redundancy.`,
 			{ confirmLabel: 'Force remove', cancelLabel: 'Cancel' }
 		)) return;
-		await runDeviceAction(dev.path, async () => {
-			await withToast(
-				() => client.call('fs.device.remove', { filesystem: fsName, device: String(idx), force: true }, 120000),
-				`Removed dead member (slot ${idx}) from "${fsName}"`
-			);
-			await refresh();
-		});
+		await runDeviceAction(dev.path, () => startRemoval(fsName, String(idx), true));
 	}
 
 	async function evacuateDevice(fsName: string, devicePath: string) {
@@ -2706,11 +2722,17 @@
 												{:else}
 													<span class="text-xs italic text-muted-foreground" title="The disk for this member slot is not currently detected. Reconnect it — it may reappear under a different name, in which case Bring online and Add Device will offer to re-attach it.">disk not detected</span>
 												{/if}
-												<Button variant="destructive" size="xs" disabled={busy} onclick={() => removeMissingDevice(fs.name, dev)}>Remove (force)</Button>
+												{#if runningRemoval(fs.name, String(dev.member_index))}
+													<span class="text-xs text-muted-foreground">Removing…</span>
+												{:else}
+													<Button variant="destructive" size="xs" disabled={busy} onclick={() => removeMissingDevice(fs.name, dev)}>Remove (force)</Button>
+												{/if}
 											{:else if fs.mounted}
 												{@const ds = devDisplayState(dev)}
 												{@const busy = !!busyDevices[dev.path]}
-												{#if ds === 'evacuating'}
+												{#if runningRemoval(fs.name, dev.path)}
+													<span class="text-xs text-muted-foreground">Removing…</span>
+												{:else if ds === 'evacuating'}
 													<Button variant="destructive" size="xs" disabled={busy} onclick={() => removeDevice(fs.name, dev.path)}>Remove</Button>
 												{:else}
 													{#if ds === 'rw'}
@@ -2729,6 +2751,25 @@
 								{/each}
 							</tbody>
 						</table>
+
+						{#each removalNotices(fs.name) as job (job.id)}
+							<div class="mt-2 flex flex-wrap items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
+								<div class="min-w-0">
+									<div class="font-medium">
+										{job.state === 'refused' ? `bcachefs refused to remove ${job.target}` : `Removing ${job.target} failed`}
+									</div>
+									{#if job.error}
+										<pre class="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">{job.error}</pre>
+									{/if}
+								</div>
+								<div class="flex shrink-0 gap-1.5">
+									{#if job.state === 'refused' && fs.devices.some((d) => d.path === job.target && !d.missing)}
+										<Button variant="destructive" size="xs" disabled={!!busyDevices[job.target]} onclick={() => forceRemoveDevice(fs.name, job)}>Force remove</Button>
+									{/if}
+									<Button variant="secondary" size="xs" onclick={() => (dismissedRemovals[job.id] = true)}>Dismiss</Button>
+								</div>
+							</div>
+						{/each}
 
 						{#if fs.mounted}
 							{#if addDeviceFs === fs.name}

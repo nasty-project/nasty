@@ -15,6 +15,7 @@ fn filesystem_param(method: &str) -> Option<&'static str> {
     match method {
         "fs.device.add"
         | "fs.device.remove"
+        | "fs.device.remove.status"
         | "fs.device.evacuate"
         | "fs.device.evacuate.cancel"
         | "fs.device.set_state"
@@ -81,6 +82,7 @@ fn owner_scoped_fs_read(method: &str) -> bool {
             | "fs.fsck.status"
             | "fs.reconcile.status"
             | "fs.tpm.status"
+            | "fs.device.remove.status"
     )
 }
 
@@ -432,12 +434,38 @@ pub(super) async fn try_route(
             },
             Err(e) => invalid(req, e),
         },
-        "fs.device.remove" => match parse_params(req) {
-            Ok(p) => match state.filesystems.device_remove(p).await {
-                Ok(v) => ok(req, v),
-                Err(e) => err(req, e),
-            },
-            Err(e) => invalid(req, e),
+        "fs.device.remove" => {
+            match parse_params::<nasty_storage::filesystem::DeviceActionRequest>(req) {
+                Ok(p) => match state.filesystems.device_remove_preflight(&p).await {
+                    Err(e) => err(req, e),
+                    Ok(()) => match state
+                        .jobs
+                        .start(DEVICE_REMOVE_JOB, &p.filesystem, &p.device)
+                    {
+                        Ok(job) => {
+                            spawn_device_remove(state, session, job.id.clone(), p);
+                            ok(req, job)
+                        }
+                        Err(running) => err(
+                            req,
+                            format!("removal of {} is already running", running.target),
+                        ),
+                    },
+                },
+                Err(e) => invalid(req, e),
+            }
+        }
+        "fs.device.remove.status" => match require_str(req, "filesystem") {
+            Ok(filesystem) => {
+                let jobs: Vec<_> = state
+                    .jobs
+                    .list()
+                    .into_iter()
+                    .filter(|j| j.kind == DEVICE_REMOVE_JOB && j.filesystem == filesystem)
+                    .collect();
+                ok(req, jobs)
+            }
+            Err(r) => r,
         },
         "fs.device.evacuate" => {
             match parse_params::<nasty_storage::filesystem::DeviceActionRequest>(req) {
@@ -623,19 +651,71 @@ pub(super) async fn try_route(
         }
         "fs.device.evacuate.cancel" => {
             match parse_params::<nasty_storage::filesystem::DeviceActionRequest>(req) {
-                Ok(p) => match state
-                    .filesystems
-                    .device_evacuate_cancel(&p.filesystem, &p.device)
-                    .await
-                {
-                    Ok(()) => ok(req, "ok"),
-                    Err(e) => err(req, e),
-                },
+                // Also stops a removal draining the device; mark its job first
+                // so the killed process is recorded as cancelled, not failed.
+                Ok(p) => {
+                    state.jobs.request_cancel(DEVICE_REMOVE_JOB, &p.device);
+                    match state
+                        .filesystems
+                        .device_evacuate_cancel(&p.filesystem, &p.device)
+                        .await
+                    {
+                        Ok(()) => ok(req, "ok"),
+                        Err(e) => err(req, e),
+                    }
+                }
                 Err(e) => invalid(req, e),
             }
         }
         _ => return None,
     })
+}
+
+pub(crate) const DEVICE_REMOVE_JOB: &str = "device.remove";
+
+/// Run a device removal to completion in the background (#1032): bcachefs
+/// migrates the data off first, which can take hours. The outcome lands in
+/// the job, the journal and the audit log.
+fn spawn_device_remove(
+    state: &AppState,
+    session: &Session,
+    job_id: String,
+    req: nasty_storage::filesystem::DeviceActionRequest,
+) {
+    use nasty_common::jobs::JobState;
+    let filesystems = state.filesystems.clone();
+    let jobs = state.jobs.clone();
+    let events = state.events.clone();
+    let user = session.username.clone();
+    let ip = session
+        .client_ip
+        .clone()
+        .unwrap_or_else(|| "unknown".into());
+    tokio::spawn(async move {
+        let (outcome, error) = match filesystems.device_remove(&req).await {
+            Ok(()) => (JobState::Succeeded, None),
+            Err(nasty_storage::DeviceRemoveError::Refused(e)) => (JobState::Refused, Some(e)),
+            Err(nasty_storage::DeviceRemoveError::Failed(e)) => (JobState::Failed, Some(e)),
+        };
+        let Some(job) = jobs.finish(&job_id, outcome, error) else {
+            return;
+        };
+        let outcome = serde_json::to_value(job.state)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let detail = match &job.error {
+            Some(e) => format!("{} {}: {outcome}: {e}", req.filesystem, req.device),
+            None => format!("{} {}: {outcome}", req.filesystem, req.device),
+        };
+        if job.state == JobState::Succeeded {
+            tracing::info!("Device removal finished: {detail}");
+        } else {
+            tracing::warn!("Device removal finished: {detail}");
+        }
+        crate::auth::audit("fs.device.remove.finished", &user, &ip, &detail);
+        let _ = events.send("filesystem".to_string());
+    });
 }
 
 pub(crate) async fn reconcile_block_shares(state: &AppState) -> Result<(), String> {
@@ -808,6 +888,7 @@ mod tests {
             "fs.fsck.status",
             "fs.reconcile.status",
             "fs.tpm.status",
+            "fs.device.remove.status",
         ] {
             assert!(owner_scoped_fs_read(method), "{method}");
             assert!(

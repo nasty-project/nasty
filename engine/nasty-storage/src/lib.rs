@@ -10,6 +10,6 @@ pub mod io_scheduler;
 pub mod scrub_scheduler;
 pub mod subvolume;
 
-pub use filesystem::{FilesystemError, FilesystemService};
+pub use filesystem::{DeviceRemoveError, FilesystemError, FilesystemService};
 pub use scrub_scheduler::ScrubScheduleService;
 pub use subvolume::SubvolumeService;

@@ -803,10 +803,17 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                 },
                 Method {
                     name: "fs.device.remove",
-                    desc: "Remove a device from a filesystem. The device should be fully evacuated first.",
+                    desc: "Start removing a device from a filesystem. bcachefs migrates its data off first, which can take hours, so this returns a running job at once; follow it with `fs.device.remove.status`. A refused removal ends in state `refused` with bcachefs's message in `error`. Cancel with `fs.device.evacuate.cancel`.",
                     role: MethodRole::Admin,
                     params: MethodParams::Schema(gen_schema::<DeviceActionRequest>(generator)),
-                    result: Some(gen_schema::<Filesystem>(generator)),
+                    result: Some(gen_schema::<nasty_common::jobs::Job>(generator)),
+                },
+                Method {
+                    name: "fs.device.remove.status",
+                    desc: "List running and recently finished device removals on a filesystem (the last 20 finished, up to 24 hours; cleared on engine restart). Filesystem-scoped sessions may read only their assigned filesystem.",
+                    role: MethodRole::Any,
+                    params: MethodParams::AdHoc(ad_hoc_one("filesystem", "Filesystem name.")),
+                    result: Some(gen_schema::<Vec<nasty_common::jobs::Job>>(generator)),
                 },
                 Method {
                     name: "fs.device.evacuate",

@@ -228,6 +228,43 @@ async fn bcachefs_unlock_with_key(device: &str, key_bytes: &[u8]) -> Result<(), 
     Ok(())
 }
 
+/// How a device removal that was started ended without removing the device.
+#[derive(Debug, Error)]
+pub enum DeviceRemoveError {
+    /// bcachefs ran and declined; the message is its own stderr.
+    #[error("{0}")]
+    Refused(String),
+    /// bcachefs could not run, was stopped, or left the device in place.
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// Whether `device` (a path, or the member index of a missing member) is
+/// still part of `fs`.
+fn is_member(fs: &Filesystem, device: &str) -> bool {
+    let index = device.parse::<u32>().ok();
+    fs.devices
+        .iter()
+        .any(|d| d.path == device || (index.is_some() && d.member_index == index))
+}
+
+/// `pkill -f` regex matching exactly the command line `device_remove` runs.
+fn device_remove_pattern(device: &str, mount_point: &str) -> String {
+    let escape = |s: &str| {
+        s.chars()
+            .flat_map(|c| {
+                let special = "\\.^$|?*+()[]{}".contains(c);
+                special.then_some('\\').into_iter().chain([c])
+            })
+            .collect::<String>()
+    };
+    format!(
+        "^bcachefs device remove (--force --force-metadata )?{} {}$",
+        escape(device),
+        escape(mount_point)
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum FilesystemError {
     #[error("bcachefs command failed: {0}")]
@@ -4512,20 +4549,41 @@ impl FilesystemService {
         self.get(&req.filesystem).await
     }
 
-    /// Remove a device from a mounted filesystem.
-    /// This evacuates data first, then removes the device.
-    /// bcachefs device remove <device> <mountpoint>
-    pub async fn device_remove(
+    /// Checks that must pass before a removal job is started, so the caller
+    /// gets an immediate error instead of a job that fails at once.
+    pub async fn device_remove_preflight(
         &self,
-        req: DeviceActionRequest,
-    ) -> Result<Filesystem, FilesystemError> {
+        req: &DeviceActionRequest,
+    ) -> Result<(), FilesystemError> {
         let fs = self.get(&req.filesystem).await?;
         if !fs.mounted {
             return Err(FilesystemError::CommandFailed(
                 "filesystem must be mounted to remove a device".to_string(),
             ));
         }
-        let mount_point = fs.mount_point.as_ref().unwrap();
+        if !is_member(&fs, &req.device) {
+            return Err(FilesystemError::InvalidInput(format!(
+                "{} is not a member of filesystem '{}'",
+                req.device, req.filesystem
+            )));
+        }
+        Ok(())
+    }
+
+    /// Remove a device from a mounted filesystem, running to completion.
+    /// bcachefs migrates the device's data off first, which can take hours,
+    /// so callers run this in the background (#1032).
+    /// bcachefs device remove <device> <mountpoint>
+    pub async fn device_remove(&self, req: &DeviceActionRequest) -> Result<(), DeviceRemoveError> {
+        let fs = self
+            .get(&req.filesystem)
+            .await
+            .map_err(|e| DeviceRemoveError::Failed(e.to_string()))?;
+        let Some(mount_point) = fs.mount_point.as_ref().filter(|_| fs.mounted) else {
+            return Err(DeviceRemoveError::Failed(
+                "filesystem must be mounted to remove a device".to_string(),
+            ));
+        };
 
         info!(
             "Removing device {} from filesystem '{}'{}",
@@ -4545,12 +4603,39 @@ impl FilesystemService {
         }
         args.push(&req.device);
         args.push(mount_point);
-        cmd::run_ok_bulk("bcachefs", &args)
+        let output = cmd::run_bulk("bcachefs", &args)
             .await
-            .map_err(FilesystemError::CommandFailed)?;
-
+            .map_err(|e| DeviceRemoveError::Failed(format!("failed to execute bcachefs: {e}")))?;
         self.invalidate_list_cache().await;
-        self.get(&req.filesystem).await
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        match output.status.code() {
+            Some(0) => {}
+            Some(code) if stderr.is_empty() => {
+                return Err(DeviceRemoveError::Refused(format!(
+                    "bcachefs exited with status {code}"
+                )));
+            }
+            Some(_) => return Err(DeviceRemoveError::Refused(stderr)),
+            None => {
+                return Err(DeviceRemoveError::Failed(format!(
+                    "bcachefs was stopped before finishing ({})",
+                    output.status
+                )));
+            }
+        }
+        // A clean exit is not proof: confirm the member is actually gone.
+        let fs = self
+            .get(&req.filesystem)
+            .await
+            .map_err(|e| DeviceRemoveError::Failed(e.to_string()))?;
+        if is_member(&fs, &req.device) {
+            return Err(DeviceRemoveError::Failed(format!(
+                "bcachefs exited successfully but {} is still a member of '{}'",
+                req.device, req.filesystem
+            )));
+        }
+        Ok(())
     }
 
     /// Evacuate all data off a device (move to other devices in the filesystem).
@@ -4607,12 +4692,12 @@ impl FilesystemService {
         Ok(())
     }
 
-    /// Cancel a running device evacuation: terminate the
-    /// `bcachefs device evacuate <device>` process and return the device
-    /// to `rw` so it rejoins normal operation. Data already migrated off
-    /// stays migrated; the device simply keeps what's left. Both steps
-    /// are best-effort (`pkill` exits 1 when the child already finished).
-    /// (#553)
+    /// Cancel a running device evacuation or removal: terminate the
+    /// `bcachefs device evacuate <device>` or `bcachefs device remove`
+    /// process and return the device to `rw` so it rejoins normal
+    /// operation. Data already migrated off stays migrated; the device
+    /// simply keeps what's left. Every step is best-effort (`pkill` exits 1
+    /// when the child already finished). (#553, #1032)
     pub async fn device_evacuate_cancel(
         &self,
         name: &str,
@@ -4627,6 +4712,11 @@ impl FilesystemService {
         let pattern = format!("bcachefs device evacuate {device}");
         info!("Cancelling evacuation of {device} on '{name}' via pkill -TERM -f '{pattern}'");
         nasty_common::cmd::try_run("pkill", &["-TERM", "-f", &pattern]).await;
+        if let Some(mount_point) = fs.mount_point.as_deref() {
+            let pattern = device_remove_pattern(device, mount_point);
+            info!("Cancelling removal of {device} on '{name}' via pkill -TERM -f '{pattern}'");
+            nasty_common::cmd::try_run("pkill", &["-TERM", "-f", &pattern]).await;
+        }
         self.evacuating.lock().await.remove(device);
         // Return the device to read-write so it's usable again; the
         // partial drain is harmless (replicas were preserved throughout).
@@ -8705,6 +8795,28 @@ mod tests {
         assert!(target.is_dir());
 
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn removed_device_membership_checks_path_and_missing_member_index() {
+        let mut fs = filesystem_fixture("pool", "uuid");
+        fs.devices = vec![
+            serde_json::from_value(serde_json::json!({"path": "/dev/sdd"})).unwrap(),
+            serde_json::from_value(serde_json::json!({"path": "", "member_index": 3})).unwrap(),
+        ];
+        assert!(is_member(&fs, "/dev/sdd"));
+        assert!(is_member(&fs, "3"));
+        assert!(!is_member(&fs, "/dev/sde"));
+        assert!(!is_member(&fs, "4"));
+    }
+
+    #[test]
+    fn device_remove_cancel_pattern_matches_only_that_removal() {
+        let pattern = device_remove_pattern("/dev/sdd", "/fs/pool.a");
+        assert_eq!(
+            pattern,
+            r"^bcachefs device remove (--force --force-metadata )?/dev/sdd /fs/pool\.a$"
+        );
     }
 
     fn filesystem_fixture(name: &str, uuid: &str) -> Filesystem {
