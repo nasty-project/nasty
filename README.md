@@ -7,7 +7,8 @@
 </p>
 
 <p align="center">
-  <strong>A NAS appliance built on bcachefs.</strong>
+  <strong>A NAS appliance built on bcachefs.</strong><br>
+  <a href="https://nasty-project.eu">nasty-project.eu</a>
 </p>
 
 ---
