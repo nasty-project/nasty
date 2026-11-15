@@ -54,6 +54,7 @@
 		ExternalLink,
 		MessageCircle,
 		Code2,
+		Globe,
 		Search,
 		AlertTriangle,
 		EyeOff,
@@ -1441,6 +1442,12 @@
 									Glossary
 								</a>
 								<div class="my-1 border-t border-border"></div>
+								<a href="https://nasty-project.eu" target="_blank" rel="noopener noreferrer"
+									class="flex items-center gap-2 rounded px-3 py-2 text-sm text-popover-foreground no-underline hover:bg-accent transition-colors">
+									<Globe size={15} />
+									Website
+									<ExternalLink size={12} class="ml-auto text-muted-foreground" />
+								</a>
 								<a href="https://github.com/nasty-project" target="_blank" rel="noopener noreferrer"
 									class="flex items-center gap-2 rounded px-3 py-2 text-sm text-popover-foreground no-underline hover:bg-accent transition-colors">
 									<Code2 size={15} />
