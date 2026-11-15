@@ -696,7 +696,10 @@ impl NvmeofService {
             return Ok(existing);
         }
 
-        let allow_any = req.allow_any_host.unwrap_or(true);
+        // Explicit hosts mean a closed subsystem, as the request documents.
+        let allow_any = req
+            .allow_any_host
+            .unwrap_or_else(|| req.allowed_hosts.as_ref().is_none_or(Vec::is_empty));
 
         let subsys_path = format!("{NVMET_BASE}/subsystems/{nqn}");
         configfs_mkdir(&subsys_path).await?;
@@ -1162,18 +1165,23 @@ impl NvmeofService {
             configfs_mkdir(&host_path).await?;
         }
 
-        // Symlink into subsystem's allowed_hosts
-        let link_path = format!(
-            "{NVMET_BASE}/subsystems/{}/allowed_hosts/{}",
-            subsys.nqn, req.host_nqn
-        );
-        configfs_symlink(&host_path, &link_path).await?;
-
-        // Disable allow_any_host since we're using explicit ACLs
+        // Disable allow_any_host first: nvmet refuses (EINVAL) to link an
+        // allowed host while it is set. Persist it so a failed link below
+        // leaves the subsystem closed rather than open.
         let subsys_path = format!("{NVMET_BASE}/subsystems/{}", subsys.nqn);
         configfs_write(&format!("{subsys_path}/attr_allow_any_host"), "0").await?;
+        if subsys.allow_any_host {
+            subsys.allow_any_host = false;
+            state_dir()
+                .save(&subsys.id, &subsys)
+                .await
+                .map_err(NvmeofError::Io)?;
+        }
 
-        subsys.allow_any_host = false;
+        // Symlink into subsystem's allowed_hosts
+        let link_path = format!("{subsys_path}/allowed_hosts/{}", req.host_nqn);
+        configfs_symlink(&host_path, &link_path).await?;
+
         if !subsys.allowed_hosts.contains(&req.host_nqn) {
             subsys.allowed_hosts.push(req.host_nqn);
         }
