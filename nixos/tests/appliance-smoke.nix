@@ -337,6 +337,11 @@ let
         assert any(fs["name"] == "smoke-pool" for fs in fs_list), (
             f"created filesystem missing from fs.list: {fs_list!r}"
         )
+        # Options go through sysfs. A filesystem that has only had one device
+        # gets a sysfs directory named after the device, not its UUID.
+        call(ws, "fs.options.update", 4001, {"name": "smoke-pool", "compression": "lz4"})
+        smoke_fs = call(ws, "fs.get", 4002, {"name": "smoke-pool"})
+        assert smoke_fs["options"]["compression"] == "lz4", f"compression not applied: {smoke_fs['options']!r}"
 
         # Disk ownership is reserved even when a VM is stopped. Exercise the
         # RPC safeguards independently of the frontend picker.
