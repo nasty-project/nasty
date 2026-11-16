@@ -88,7 +88,7 @@
 	);
 	let checking = $state(initialReleaseUpdate?.requestState === 'loading');
 	let manualReleaseCheckPending = false;
-	let startingDevUpgrade = $state(false);
+	let pullingUpstream = $state(false);
 	let taggedReleaseBanner: TaggedReleaseBannerState = $state({ kind: 'loading' });
 	let versionRows: VersionRow[] = $state([]);
 	/** bcachefs-tools ref this NASty build ships with (system.info). When
@@ -160,7 +160,7 @@
 	});
 
 	const upstreamBusy = $derived.by(() =>
-		startingSwitch || startingUpgrade || startingDevUpgrade || status?.state === 'running'
+		startingSwitch || startingUpgrade || pullingUpstream || status?.state === 'running'
 	);
 
 	const versionSelectionCount = $derived.by(() =>
@@ -524,35 +524,26 @@
 		savingBuildDir = false;
 	}
 
-	async function upgradeDevBuild() {
+	async function pullUpstreamAndRebuild() {
 		if (!await confirm(
-			'Update to latest development build?',
-			`This will fetch the latest commit from the nasty input and rebuild the system if there are changes.`
+			'Pull upstream and rebuild?',
+			`This will merge upstream/main into the clean main checkout at /home/admin/nasty, refresh the nasty flake input, and rebuild this system. Uncommitted changes stop the operation. If Git conflicts occur, the update stops without rebuilding and lists the conflicted files so you can resolve and commit the merge in the checkout, then retry.`
 		)) return;
 
-		startingDevUpgrade = true;
+		pullingUpstream = true;
 		logCollapsed = false;
 		status = { state: 'running', log: '', reboot_required: false, webui_changed: false };
 		clearReleaseUpdateCheck();
 		const result = await withToast(
-			() => client.call('system.version.switch', {
-				inputs: versionRows.map((row) => ({
-					name: row.name,
-					url: row.url.trim(),
-					// Development upgrades keep the deliberately independent
-					// Tailscale channel pinned. Its row in Upstream is the only
-					// place that opts into refreshing that package source.
-					update: row.name !== 'tailscale-nixpkgs'
-				}))
-			}, 120000),
-			'Development build update started'
+			() => client.call('system.version.pull_upstream', undefined, 120000),
+			'Upstream pull and rebuild started'
 		);
 		if (result !== undefined) {
 			startPolling();
 		} else {
 			await loadStatus();
 		}
-		startingDevUpgrade = false;
+		pullingUpstream = false;
 	}
 
 	function startPolling() {
@@ -743,7 +734,7 @@
 						<div class="flex-1">
 							<div class="font-medium text-amber-200">Last update attempt failed</div>
 							<p class="mt-1 text-muted-foreground">
-								The most recent update didn't complete — the system kept running the previous generation. If disk space ran out, use <code class="font-mono text-xs">nasty-cleanup all</code> to reclaim old generations and re-sync <code class="font-mono text-xs">/boot</code>. Then start the same action again: check and upgrade a development build, use Upgrade for a tagged release, or resubmit the selected Upstream inputs. The log below has the failed attempt's journal output.
+								The most recent update didn't complete — the system kept running the previous generation. If disk space ran out, use <code class="font-mono text-xs">nasty-cleanup all</code> to reclaim old generations and re-sync <code class="font-mono text-xs">/boot</code>. If the log lists merge conflicts, resolve and commit them in <code class="font-mono text-xs">/home/admin/nasty</code> before retrying. The log below has the failed attempt's journal output.
 							</p>
 						</div>
 					</div>
@@ -834,11 +825,9 @@
 										<Button size="sm" variant="secondary" onclick={checkForUpdates} disabled={checking || upstreamBusy}>
 											{checking ? 'Checking...' : 'Check for Updates'}
 										</Button>
-										{#if checkInfo?.update_available}
-											<Button size="sm" class="border-amber-500/70 hover:border-amber-400 hover:shadow-[0_0_12px_rgba(251,191,36,0.4)]" onclick={upgradeDevBuild} disabled={startingDevUpgrade || status?.state === 'running'}>
-												{startingDevUpgrade ? 'Starting...' : 'Upgrade'}
-											</Button>
-										{/if}
+										<Button size="sm" class="border-amber-500/70 hover:border-amber-400 hover:shadow-[0_0_12px_rgba(251,191,36,0.4)]" onclick={pullUpstreamAndRebuild} disabled={pullingUpstream || status?.state === 'running'}>
+											{pullingUpstream ? 'Pulling...' : 'Pull upstream & rebuild'}
+										</Button>
 										{#if bcachefsSyncAvailable}
 											<Button size="sm" variant="secondary" onclick={syncBcachefsToBundled} disabled={syncingBcachefs || status?.state === 'running'}
 												title="Your bcachefs pin differs from the version bundled with this NASty release. Re-pin to it and rebuild.">

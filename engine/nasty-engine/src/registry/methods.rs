@@ -396,6 +396,13 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     params: MethodParams::Schema(gen_schema::<VersionSwitchRequest>(generator)),
                     result: None,
                 },
+                Method {
+                    name: "system.version.pull_upstream",
+                    desc: "Pull upstream/main into the configured local nasty checkout, stop on uncommitted changes or merge conflicts, then rebuild the system.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::None,
+                    result: None,
+                },
             ],
         ),
         (

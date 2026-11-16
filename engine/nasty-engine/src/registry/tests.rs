@@ -190,6 +190,19 @@ fn registry_builds_without_panic() {
 }
 
 #[test]
+fn upstream_pull_method_is_admin_only_and_has_no_parameters() {
+    let (_generator, groups) = super::build_full_registry();
+    let method = groups
+        .iter()
+        .flat_map(|(_, methods)| methods)
+        .find(|method| method.name == "system.version.pull_upstream")
+        .expect("system.version.pull_upstream must be registered");
+
+    assert!(matches!(&method.role, super::MethodRole::Admin));
+    assert!(matches!(&method.params, super::MethodParams::None));
+}
+
+#[test]
 fn compose_get_result_matches_compose_content() {
     let (_generator, groups) = super::build_full_registry();
     let method = groups

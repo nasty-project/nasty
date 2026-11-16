@@ -4,6 +4,7 @@ use rowan::ast::AstNode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -307,6 +308,71 @@ fn build_dir_fragments(stored: Option<&str>) -> BuildDirFragments {
             }
         }
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn render_upstream_pull_steps(repo_path: &Path) -> String {
+    let repo_path = shell_quote(&repo_path.to_string_lossy());
+    r#"NASTY_REPO=@REPO_PATH@
+pull_upstream_main() {
+    if ! git -C "$NASTY_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "==> Local nasty input is not a Git checkout: $NASTY_REPO" >&2
+        return 1
+    fi
+    if git -C "$NASTY_REPO" rev-parse --verify -q MERGE_HEAD >/dev/null; then
+        echo "==> A merge is already in progress in $NASTY_REPO." >&2
+        echo "==> Finish or abort it before retrying the upstream update." >&2
+        return 1
+    fi
+    if [[ -n "$(git -C "$NASTY_REPO" status --porcelain --untracked-files=normal)" ]]; then
+        echo "==> The local nasty checkout has uncommitted changes; refusing to pull." >&2
+        git -C "$NASTY_REPO" status --short
+        echo "==> Commit or stash those changes, then retry." >&2
+        return 1
+    fi
+    branch=$(git -C "$NASTY_REPO" branch --show-current)
+    if [[ "$branch" != "main" ]]; then
+        echo "==> Expected the local nasty checkout on branch main, found '$branch'." >&2
+        return 1
+    fi
+    upstream_url=$(git -C "$NASTY_REPO" remote get-url upstream 2>/dev/null || true)
+    if [[ -z "$upstream_url" ]]; then
+        git -C "$NASTY_REPO" remote add upstream https://github.com/nasty-project/nasty.git
+        upstream_url=https://github.com/nasty-project/nasty.git
+    fi
+    case "$upstream_url" in
+        https://github.com/nasty-project/nasty.git|git@github.com:nasty-project/nasty.git) ;;
+        *)
+            echo "==> The upstream remote points to '$upstream_url', not nasty-project/nasty." >&2
+            return 1
+            ;;
+    esac
+
+    echo "==> Fetching original upstream main..."
+    git -C "$NASTY_REPO" fetch upstream +refs/heads/main:refs/remotes/upstream/main
+    if git -C "$NASTY_REPO" merge-base --is-ancestor upstream/main HEAD; then
+        echo "==> Local main already contains upstream/main."
+    else
+        echo "==> Merging upstream/main into local main..."
+        if ! git -C "$NASTY_REPO" -c 'user.name=NASty Updater' -c 'user.email=nasty-updater@localhost' merge --no-edit upstream/main; then
+            conflicts=$(git -C "$NASTY_REPO" diff --name-only --diff-filter=U || true)
+            if [[ -n "$conflicts" ]]; then
+                echo "==> Merge conflicts detected. No system rebuild was started." >&2
+                echo "==> Resolve these files in $NASTY_REPO, complete the merge, then retry:" >&2
+                printf '%s\n' "$conflicts" >&2
+            else
+                echo "==> Upstream merge failed. No system rebuild was started." >&2
+            fi
+            return 1
+        fi
+    fi
+}
+pull_upstream_main
+nix flake update nasty"#
+    .replace("@REPO_PATH@", &repo_path)
 }
 
 /// Render the detached update unit's transaction. The live wrapper pair is
@@ -1731,6 +1797,45 @@ impl UpdateService {
         start_update_transaction("NASty version switch", &script, None).await?;
 
         info!("Version switch started for inputs: {}", updates.join(", "));
+        Ok(())
+    }
+
+    /// Pull original main into a local nasty checkout, then rebuild the system
+    /// from that checkout using the normal rollback-capable update transaction.
+    pub async fn pull_upstream_and_rebuild(&self) -> Result<(), UpdateError> {
+        if self.status().await.state == "running" {
+            return Err(UpdateError::AlreadyRunning);
+        }
+
+        let (current_flake, _) = self.wrapper_flake_candidate().await?;
+        let current_urls = flake_input_urls(&current_flake)?;
+        let nasty_url = current_urls.get("nasty").ok_or_else(|| {
+            UpdateError::CommandFailed(format!("missing nasty.url in {NIXOS_FLAKE_DIR}/flake.nix"))
+        })?;
+        let repo_path = local_nasty_repo_path(nasty_url)?;
+        if !repo_path.is_dir() {
+            return Err(UpdateError::CommandFailed(format!(
+                "local nasty checkout does not exist: {}",
+                repo_path.display()
+            )));
+        }
+
+        nasty_common::cmd::try_run("systemctl", &["reset-failed", UPDATE_UNIT]).await;
+        nasty_common::cmd::try_run("systemctl", &["stop", UPDATE_UNIT]).await;
+
+        let update_steps = render_upstream_pull_steps(&repo_path);
+        let repo_path = shell_quote(&repo_path.to_string_lossy());
+        let success_steps = format!(
+            "NASTY_REV=$(git -C {repo_path} rev-parse --short HEAD)\n\
+             test -n \"$NASTY_REV\"\n\
+             echo \"$NASTY_REV\" > {VERSION_PATH}"
+        );
+        let bd = build_dir_fragments(read_update_build_dir().await.as_deref());
+        let script =
+            render_wrapper_transaction_script(&current_flake, &update_steps, &success_steps, &bd);
+        start_update_transaction("Pull upstream NASty main and rebuild", &script, None).await?;
+
+        info!("Upstream NASty pull and rebuild started");
         Ok(())
     }
 
@@ -3266,6 +3371,22 @@ async fn save_generation_labels(
 /// invariants imposed here; the wrapper-specific async wrapper
 /// `read_flake_input_urls` enforces `nasty.url` must exist on the
 /// operator's `/etc/nixos/flake.nix`.
+fn local_nasty_repo_path(url: &str) -> Result<PathBuf, UpdateError> {
+    let path = url.strip_prefix("path:").ok_or_else(|| {
+        UpdateError::CommandFailed(format!(
+            "upstream pull requires nasty.url to be a local path input; found {url}"
+        ))
+    })?;
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(UpdateError::CommandFailed(format!(
+            "local nasty path must be absolute: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
 fn parse_flake_input_urls(content: &str) -> Result<HashMap<String, ParsedFlakeInput>, UpdateError> {
     let parsed = rnix::Root::parse(content);
     if !parsed.errors().is_empty() {
@@ -3663,13 +3784,13 @@ async fn read_flake_lock_bcachefs() -> (Option<String>, Option<String>) {
 mod tests {
     use super::{
         GitHubRelease, ReleaseChannel, UpdateInfo, UpdateService, is_booted_generation,
-        map_systemd_state, normalize_git_tag_ref, parse_flake_input_urls, parse_official_nasty_ref,
-        parse_release_tag_version, published_stable_release_tag, read_wrapper_flake_version,
-        rewrite_flake_input_urls, should_rebootstrap_wrapper_flake, unquote_nix_string,
-        wrapper_flake_content_hash,
+        local_nasty_repo_path, map_systemd_state, normalize_git_tag_ref, parse_flake_input_urls,
+        parse_official_nasty_ref, parse_release_tag_version, published_stable_release_tag,
+        read_wrapper_flake_version, render_upstream_pull_steps, rewrite_flake_input_urls,
+        should_rebootstrap_wrapper_flake, unquote_nix_string, wrapper_flake_content_hash,
     };
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::Instant;
 
     #[test]
@@ -5139,6 +5260,34 @@ proc /proc proc rw 0 0\n\
   };
   outputs = { self, nixpkgs, ... }: {};
 }"#
+    }
+
+    #[test]
+    fn local_nasty_repo_path_requires_an_absolute_path_input() {
+        assert_eq!(
+            local_nasty_repo_path("path:/home/admin/nasty").unwrap(),
+            PathBuf::from("/home/admin/nasty")
+        );
+        assert!(local_nasty_repo_path("github:nasty-project/nasty/main").is_err());
+        assert!(local_nasty_repo_path("path:relative/nasty").is_err());
+    }
+
+    #[test]
+    fn upstream_pull_script_quotes_repo_paths_and_reports_conflicts() {
+        let script = render_upstream_pull_steps(Path::new("/tmp/nasty's checkout"));
+        let parsed = std::process::Command::new("bash")
+            .args(["-n", "-c", &script])
+            .output()
+            .unwrap();
+        assert!(
+            parsed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&parsed.stderr)
+        );
+        assert!(script.contains("git -C \"$NASTY_REPO\" diff --name-only --diff-filter=U"));
+        assert!(script.contains("+refs/heads/main:refs/remotes/upstream/main"));
+        assert!(script.contains("No system rebuild was started."));
+        assert!(script.contains("https://github.com/nasty-project/nasty.git"));
     }
 
     #[test]

@@ -940,6 +940,13 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
+        "system.version.pull_upstream" => match state.updates.pull_upstream_and_rebuild().await {
+            Ok(()) => {
+                state.system.invalidate_bcachefs_cache().await;
+                ok(req, serde_json::json!({"status": "started"}))
+            }
+            Err(e) => err(req, e),
+        },
         "system.update.channel.get" => ok(req, state.updates.get_channel().await),
         "system.update.build_dir.get" => ok(req, state.updates.get_update_build_dir().await),
         "system.update.build_dir.set" => match parse_params::<serde_json::Value>(req) {
