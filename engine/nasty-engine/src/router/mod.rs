@@ -1982,7 +1982,10 @@ async fn read_reconcile_progress(uuid: &str) -> ReconcileProgressSample {
     let Some(guard) = ReconcileProgressReadGuard::acquire(uuid) else {
         return ReconcileProgressSample::Unavailable;
     };
-    let path = format!("/sys/fs/bcachefs/{uuid}/internal/moving_ctxts");
+    let path = format!(
+        "{}/internal/moving_ctxts",
+        nasty_storage::filesystem::fs_sysfs_dir(uuid)
+    );
     let read = tokio::task::spawn_blocking(move || {
         let _guard = guard;
         std::fs::read_to_string(path)
@@ -2068,7 +2071,7 @@ fn clear_reconcile_tracker(fs_name: &str) {
 /// Read bcachefs error counters from sysfs. The completeness flag prevents a
 /// partial zero from resolving an alert while retaining any confirmed errors.
 pub(super) async fn read_bcachefs_error_count(uuid: &str) -> (u64, bool) {
-    let counters_dir = format!("/sys/fs/bcachefs/{uuid}/counters");
+    let counters_dir = format!("{}/counters", nasty_storage::filesystem::fs_sysfs_dir(uuid));
     let mut total = 0u64;
     let mut complete = true;
     for name in ["io_read_errors", "io_write_errors", "io_checksum_errors"] {

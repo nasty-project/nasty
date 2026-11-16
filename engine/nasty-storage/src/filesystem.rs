@@ -3750,7 +3750,7 @@ impl FilesystemService {
         }
 
         let uuid = &fs.uuid;
-        let base = format!("/sys/fs/bcachefs/{uuid}/options");
+        let base = format!("{}/options", fs_sysfs_dir(uuid));
 
         async fn write_opt(base: &str, name: &str, value: &str) -> Result<(), FilesystemError> {
             let path = format!("{base}/{name}");
@@ -4837,7 +4837,7 @@ impl FilesystemService {
         // Find the sysfs dev-N directory whose `block` symlink resolves to our device.
         // The symlink target ends with the kernel device name (e.g. "sdc").
         let dev_name = req.device.trim_start_matches("/dev/");
-        let sysfs_base = format!("/sys/fs/bcachefs/{}", fs.uuid);
+        let sysfs_base = fs_sysfs_dir(&fs.uuid);
         let mut label_path: Option<std::path::PathBuf> = None;
 
         let mut rd = tokio::fs::read_dir(&sysfs_base).await.map_err(|e| {
@@ -5655,7 +5655,7 @@ impl FilesystemService {
 
     /// Read reconcile_enabled from sysfs for a mounted filesystem.
     async fn reconcile_enabled(&self, uuid: &str) -> bool {
-        let path = format!("/sys/fs/bcachefs/{uuid}/options/reconcile_enabled");
+        let path = format!("{}/options/reconcile_enabled", fs_sysfs_dir(uuid));
         tokio::fs::read_to_string(&path)
             .await
             .map(|s| s.trim() != "0")
@@ -5674,7 +5674,7 @@ impl FilesystemService {
                 "filesystem must be mounted to toggle reconcile".to_string(),
             ));
         }
-        let path = format!("/sys/fs/bcachefs/{}/options/reconcile_enabled", fs.uuid);
+        let path = format!("{}/options/reconcile_enabled", fs_sysfs_dir(&fs.uuid));
         let val = if enabled { "1" } else { "0" };
         info!("Setting reconcile_enabled={val} on filesystem '{name}'");
         tokio::fs::write(&path, val)
@@ -5692,7 +5692,7 @@ impl FilesystemService {
         if !fs.mounted {
             return Ok(None);
         }
-        let path = format!("/sys/fs/bcachefs/{}/options/copygc_enabled", fs.uuid);
+        let path = format!("{}/options/copygc_enabled", fs_sysfs_dir(&fs.uuid));
         Ok(match tokio::fs::read_to_string(&path).await {
             Ok(s) => Some(s.trim() != "0"),
             Err(_) => None,
@@ -5713,7 +5713,7 @@ impl FilesystemService {
                 "filesystem must be mounted to toggle copygc".to_string(),
             ));
         }
-        let path = format!("/sys/fs/bcachefs/{}/options/copygc_enabled", fs.uuid);
+        let path = format!("{}/options/copygc_enabled", fs_sysfs_dir(&fs.uuid));
         let val = if enabled { "1" } else { "0" };
         info!("Setting copygc_enabled={val} on filesystem '{name}'");
         tokio::fs::write(&path, val)
@@ -5731,7 +5731,7 @@ impl FilesystemService {
         if !fs.mounted {
             return Vec::new();
         }
-        let path = format!("/sys/fs/bcachefs/{}/internal/moving_ctxts", fs.uuid);
+        let path = format!("{}/internal/moving_ctxts", fs_sysfs_dir(&fs.uuid));
         let raw = tokio::fs::read_to_string(&path).await.unwrap_or_default();
         parse_moving_ctxts(&raw)
     }
@@ -6523,7 +6523,7 @@ async fn read_sysfs_attr(dir: &str, attr: &str) -> Option<String> {
 }
 
 async fn read_device_sysfs(uuid: &str) -> Vec<DeviceSysfs> {
-    let base = format!("/sys/fs/bcachefs/{uuid}");
+    let base = fs_sysfs_dir(uuid);
     let mut out = Vec::new();
     let mut rd = match tokio::fs::read_dir(&base).await {
         Ok(r) => r,
@@ -6611,7 +6611,7 @@ async fn read_fs_options_sysfs(uuid: &str) -> FilesystemOptions {
         return FilesystemOptions::default();
     }
 
-    let base = format!("/sys/fs/bcachefs/{uuid}/options");
+    let base = format!("{}/options", fs_sysfs_dir(uuid));
 
     async fn read_opt(base: &str, name: &str) -> Option<String> {
         let path = format!("{base}/{name}");
@@ -6804,6 +6804,36 @@ fn resolve_mount_devices(devices: Vec<String>, sysfs_base: &std::path::Path) -> 
 
 /// Where the kernel exposes mounted bcachefs filesystems.
 const SYSFS_BCACHEFS: &str = "/sys/fs/bcachefs";
+
+/// Sysfs directory of the mounted filesystem with this UUID. bcachefs names it
+/// after the UUID only once the filesystem has had more than one device; until
+/// then it is the device's kernel name (bcachefs 1.39 `fs/init/fs.c`), which
+/// udev's by-uuid link resolves to.
+pub fn fs_sysfs_dir(uuid: &str) -> String {
+    fs_sysfs_dir_in(
+        std::path::Path::new(SYSFS_BCACHEFS),
+        std::path::Path::new("/dev/disk/by-uuid"),
+        uuid,
+    )
+    .to_string_lossy()
+    .into_owned()
+}
+
+fn fs_sysfs_dir_in(
+    base: &std::path::Path,
+    by_uuid: &std::path::Path,
+    uuid: &str,
+) -> std::path::PathBuf {
+    let by_name = base.join(uuid);
+    if by_name.is_dir() {
+        return by_name;
+    }
+    std::fs::canonicalize(by_uuid.join(uuid))
+        .ok()
+        .and_then(|device| device.file_name().map(|name| base.join(name)))
+        .filter(|dir| dir.is_dir())
+        .unwrap_or(by_name)
+}
 
 /// Parse /proc/mounts for bcachefs entries.
 /// Returns map of mount_point -> list of devices.
@@ -9813,6 +9843,34 @@ weird_future_op: ...
             "unknown uuid (unmounted fs) yields None"
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn fs_sysfs_dir_follows_by_uuid_for_single_device_filesystems() {
+        let root = std::env::temp_dir().join(format!("nasty-sysfs-dir-{}", uuid::Uuid::new_v4()));
+        let (base, by_uuid, dev) = (root.join("sys"), root.join("by-uuid"), root.join("dev"));
+        let multi = "11111111-1111-1111-1111-111111111111";
+        let single = "22222222-2222-2222-2222-222222222222";
+        for dir in [
+            base.join(multi),
+            base.join("vdb"),
+            by_uuid.clone(),
+            dev.clone(),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(dev.join("vdb"), "").unwrap();
+        std::os::unix::fs::symlink(dev.join("vdb"), by_uuid.join(single)).unwrap();
+
+        assert_eq!(fs_sysfs_dir_in(&base, &by_uuid, multi), base.join(multi));
+        assert_eq!(fs_sysfs_dir_in(&base, &by_uuid, single), base.join("vdb"));
+        let unknown = "33333333-3333-3333-3333-333333333333";
+        assert_eq!(
+            fs_sysfs_dir_in(&base, &by_uuid, unknown),
+            base.join(unknown),
+            "unmounted or unknown keeps the UUID path"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
