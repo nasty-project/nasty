@@ -6790,6 +6790,19 @@ fn sysfs_fs_members(base: &std::path::Path, uuid: &str) -> Option<Vec<String>> {
     Some(members.into_iter().map(|(_, path)| path).collect())
 }
 
+/// Find the mounted filesystem that has `device` as a member, by
+/// scanning `<base>/<uuid>/dev-N/block`. The kernel creates these
+/// entries during mount, so unlike blkid/lsblk they never lag it.
+fn sysfs_uuid_for_device(base: &std::path::Path, device: &str) -> Option<String> {
+    std::fs::read_dir(base).ok()?.flatten().find_map(|entry| {
+        let uuid = entry.file_name().into_string().ok()?;
+        sysfs_fs_members(base, &uuid)?
+            .iter()
+            .any(|member| member == device)
+            .then_some(uuid)
+    })
+}
+
 /// Replace a by-uuid mount source with the real member list from
 /// sysfs. Colon-list and plain-device sources pass through untouched;
 /// a by-uuid source whose sysfs entry is missing (unmount race) also
@@ -8497,6 +8510,13 @@ async fn mounted_fs_uuid_at(mount_point: &str) -> Result<Option<String>, Filesys
     let Some(first_device) = devices.first() else {
         return Ok(None);
     };
+    let canonical = tokio::fs::canonicalize(first_device)
+        .await
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| first_device.clone());
+    if let Some(uuid) = sysfs_uuid_for_device(std::path::Path::new(SYSFS_BCACHEFS), &canonical) {
+        return Ok(Some(uuid));
+    }
     Ok(get_fs_uuid(first_device)
         .await
         .filter(|uuid| !uuid.is_empty()))
@@ -9811,6 +9831,19 @@ weird_future_op: ...
         assert!(
             sysfs_fs_members(&base, "00000000-0000-0000-0000-000000000000").is_none(),
             "unknown uuid (unmounted fs) yields None"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn sysfs_uuid_for_device_finds_the_filesystem_owning_the_member() {
+        let (base, uuid) = sysfs_fixture(&[("dev-0", "../vdb"), ("dev-1", "../vdc")]);
+        assert_eq!(sysfs_uuid_for_device(&base, "/dev/vdc"), Some(uuid));
+        assert_eq!(sysfs_uuid_for_device(&base, "/dev/vdd"), None);
+        assert_eq!(
+            sysfs_uuid_for_device(&base.join("missing"), "/dev/vdb"),
+            None,
+            "no sysfs tree yields None, not an error"
         );
         std::fs::remove_dir_all(&base).ok();
     }
