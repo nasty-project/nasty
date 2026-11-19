@@ -131,8 +131,8 @@ jobs:
     name: Build & push aarch64 packages to Cachix
     # No native aarch64 NixOS test job (the smoke tests live under
     # checks.x86_64-linux), so this runs in parallel with bcachefs-smoke
-    # and just ensures the aarch64 engine/webui/bcachefs-tools land in
-    # cachix.  Without this, aarch64 boxes (Pi, Odroid, etc.) miss the
+    # and just ensures the aarch64 packages and full appliance closure land
+    # in cachix.  Without this, aarch64 boxes (Pi, Odroid, etc.) miss the
     # cache for every upgrade and rebuild Rust + npm + bcachefs-tools
     # locally — 10+ minutes of CPU per upgrade.
     runs-on: ubuntu-24.04-arm
@@ -169,3 +169,20 @@ jobs:
             --out-link result-tailscale -L
           ./result-tailscale/bin/tailscale version
           ./result-tailscale/bin/tailscaled --version
+
+      - name: Build the full aarch64 appliance closure
+        # Everything an installed box needs (nasty-top, the bcachefs kernel
+        # module, ...), not just the packages above. The filesystems mirror
+        # what the installer's hardware-configuration.nix adds.
+        run: |
+          nix build --impure --no-link -L --expr '
+            let
+              flake = builtins.getFlake (toString ./.);
+              system = flake.nixosConfigurations.nasty-aarch64.extendModules {
+                modules = [{
+                  fileSystems."/" = { device = "/dev/disk/by-label/NASTY_ROOT"; fsType = "ext4"; };
+                  fileSystems."/boot" = { device = "/dev/disk/by-label/NASTY_EFI"; fsType = "vfat"; };
+                }];
+              };
+            in system.config.system.build.toplevel
+          '
