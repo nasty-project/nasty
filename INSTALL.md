@@ -55,6 +55,9 @@ curl -L https://nixos.org/nix/install | sh -s -- --no-daemon --yes
 The helper installs in UEFI mode or, on x86_64, legacy BIOS mode (without Secure
 Boot). The boot mode is determined by how you boot the live system;
 `--boot-mode auto` is the default, and an explicit `uefi` or `bios` must match.
+The one exception is aarch64 boards whose U-Boot starts the live system without
+UEFI but provides UEFI to the installed system; see
+[aarch64 boards with U-Boot](#aarch64-boards-with-u-boot).
 
 Start with a dry run. It checks the boot mode, Secure Boot, target-disk safety, release
 resolution, the wrapper lock, and NixOS evaluation without modifying the disk:
@@ -97,3 +100,26 @@ The first login requires changing that password.
   reinstall rather than changing a WebUI setting.
 - The initial installation requires network access to GitHub, the Nix cache,
   and `nasty.cachix.org`.
+
+### aarch64 boards with U-Boot
+
+Single-board computers such as the Odroid N2+ can run NASty through mainline
+U-Boot, which provides UEFI to the installed system.
+
+- **Bootloader:** use mainline U-Boot. Vendor bootloaders that hand over to a
+  mainline kernel through `kexec` (for example Petitboot) can hang at boot.
+- **Bootloader location:** some SoCs, such as Amlogic, expect the bootloader
+  near the start of the boot device, where the installer's GPT goes. Put U-Boot
+  where the installer does not write: SPI flash, an SD card, or the eMMC `boot0`
+  hardware partition.
+- **Boot mode:** if U-Boot started the live system through extlinux,
+  `/sys/firmware/efi` is missing. Pass `--boot-mode uefi`: the installer then
+  sets up systemd-boot at the fallback `EFI/BOOT/BOOTAA64.EFI` path without EFI
+  boot variables, which U-Boot cannot store.
+- **Device tree:** if U-Boot passes the wrong device tree, set `fdtfile` in the
+  U-Boot environment, or set `hardware.deviceTree.name` (for example
+  `"amlogic/meson-g12b-odroid-n2-plus.dtb"`) in
+  `/etc/nixos/nasty-installer-boot.nix` after installation.
+- **Memory:** boards with 4 GiB of RAM or less can run out of memory if
+  packages are built locally. Add swap before installing, or limit parallel
+  builds with `NIX_CONFIG=$'max-jobs = 1\ncores = 2'`.

@@ -18,6 +18,11 @@ if nasty_select_boot_mode auto aarch64-linux > /dev/null 2>&1; then
   echo 'BIOS request unexpectedly accepted on aarch64' >&2
   exit 1
 fi
+# U-Boot: live system booted via extlinux, installed system boots via UEFI.
+test "$(nasty_select_boot_mode uefi aarch64-linux 2>/dev/null)" = uefi
+nasty_write_boot_module "$tmp/uefi-novars.nix" uefi /dev/unused
+grep -q 'systemd-boot.enable = true' "$tmp/uefi-novars.nix"
+grep -q 'canTouchEfiVariables = lib.mkForce false' "$tmp/uefi-novars.nix"
 
 mkdir "$NASTY_EFI_DIR"
 test "$(nasty_select_boot_mode auto x86_64-linux)" = uefi
@@ -61,6 +66,7 @@ unset -f parted
 if command -v nix-instantiate >/dev/null 2>&1; then
   nix-instantiate --parse "$tmp/uefi.nix" > /dev/null
   nix-instantiate --parse "$tmp/bios.nix" > /dev/null
+  nix-instantiate --parse "$tmp/uefi-novars.nix" > /dev/null
 fi
 
 if command -v nix >/dev/null 2>&1; then
@@ -113,6 +119,19 @@ if command -v nix >/dev/null 2>&1; then
       efiVariables = system.config.boot.loader.efi.canTouchEfiVariables;
     }
   ' | grep -q '"efiVariables":true,"grub":false,"systemdBoot":true'
+
+  NASTY_BOOT_TEST_MODULE="$tmp/uefi-novars.nix" nix eval --impure --json --expr '
+    let
+      flake = builtins.getFlake (toString ./.);
+      system = flake.nixosConfigurations.nasty-vm.extendModules {
+        modules = [ (import (builtins.getEnv "NASTY_BOOT_TEST_MODULE")) ];
+      };
+    in {
+      grub = system.config.boot.loader.grub.enable;
+      systemdBoot = system.config.boot.loader.systemd-boot.enable;
+      efiVariables = system.config.boot.loader.efi.canTouchEfiVariables;
+    }
+  ' | grep -q '"efiVariables":false,"grub":false,"systemdBoot":true'
 
   # A UEFI install may later enable lanzaboote; its forced systemd-boot
   # disable must still override the installer module's normal true.
