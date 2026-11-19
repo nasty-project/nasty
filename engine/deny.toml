@@ -135,6 +135,18 @@ ignore = [
     "RUSTSEC-2025-0052",
     "RUSTSEC-2026-0271",
     "RUSTSEC-2026-0441",
+
+    # RUSTSEC-2026-0543 — `chrono` is unmaintained. An unmaintained
+    # notice, not a vulnerability; no patched or successor release exists.
+    #
+    # Reach in our codebase: direct in nasty-apps, nasty-backup,
+    # nasty-engine, nasty-storage and nasty-system, and transitive via
+    # bollard, cron, oauth2 and openidconnect. Replacing our own uses
+    # would not drop it from the graph.
+    #
+    # Remove this entry once those dependencies move off chrono, then
+    # migrate the direct uses.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
