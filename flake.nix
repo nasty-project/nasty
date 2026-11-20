@@ -512,6 +512,9 @@
       bcachefs-smoke = import ./nixos/tests/bcachefs-smoke.nix {
         inherit pkgs nasty-bcachefs-tools;
       };
+      quota-clone-repro = import ./nixos/tests/quota-clone-repro.nix {
+        inherit pkgs nasty-bcachefs-tools;
+      };
       appliance-smoke = import ./nixos/tests/appliance-smoke.nix {
         inherit pkgs nasty-engine nasty-webui nasty-bcachefs-tools;
         nasty-tailscale = tailscale-nixpkgs.legacyPackages.x86_64-linux.tailscale;

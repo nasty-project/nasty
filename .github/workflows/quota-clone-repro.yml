@@ -1,0 +1,25 @@
+# Throwaway: runs only the bcachefs quota-transfer reproducer on this branch.
+name: quota-clone-repro
+
+on:
+  push:
+    branches: [repro/quota-clone]
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v17
+        with:
+          name: nasty
+      - name: Run reproducer
+        run: nix build .#checks.x86_64-linux.quota-clone-repro -L --print-build-logs
