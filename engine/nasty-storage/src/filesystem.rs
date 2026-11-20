@@ -914,7 +914,39 @@ struct MemberInfo {
 /// How long a cached `list()` result stays valid.
 const FS_LIST_CACHE_TTL: Duration = Duration::from_secs(3);
 
-type ListCache = Arc<Mutex<Option<(Instant, Vec<Filesystem>)>>>;
+type ListCache = Arc<Mutex<ListCacheState>>;
+
+/// Cached `list()` result. `generation` is bumped by every invalidation so
+/// a discovery that started before a mutation can't store stale data.
+#[derive(Default)]
+struct ListCacheState {
+    entry: Option<(Instant, Vec<Filesystem>)>,
+    generation: u64,
+}
+
+impl ListCacheState {
+    fn fresh(&self) -> Option<&Vec<Filesystem>> {
+        self.entry
+            .as_ref()
+            .filter(|(ts, _)| ts.elapsed() < FS_LIST_CACHE_TTL)
+            .map(|(_, data)| data)
+    }
+
+    /// Store a discovery started at `generation`, unless the cache was
+    /// invalidated since (its result may predate a mutation).
+    fn store(&mut self, generation: u64, data: Vec<Filesystem>) -> bool {
+        let current = self.generation == generation;
+        if current {
+            self.entry = Some((Instant::now(), data));
+        }
+        current
+    }
+
+    fn invalidate(&mut self) {
+        self.entry = None;
+        self.generation += 1;
+    }
+}
 type ScrubStateMap = Arc<Mutex<HashMap<String, ScrubStatus>>>;
 type MountStateMap = Arc<Mutex<HashMap<String, MountFailure>>>;
 type FsckStateMap = Arc<Mutex<HashMap<String, FsckStatus>>>;
@@ -2403,9 +2435,21 @@ fn build_create_format_args(req: &CreateFilesystemRequest, devices: &[DeviceSpec
     args
 }
 
+fn observed(filesystems: Vec<Filesystem>) -> Vec<Filesystem> {
+    nasty_common::diagnostics::observe_pools(
+        filesystems
+            .iter()
+            .map(|fs| (fs.total_bytes, fs.devices.len() as u64)),
+    );
+    filesystems
+}
+
 #[derive(Clone)]
 pub struct FilesystemService {
     list_cache: ListCache,
+    /// One discovery at a time: concurrent `list()` callers on a cache miss
+    /// wait for it instead of each reading every device again.
+    list_discovery: Arc<Mutex<()>>,
     /// Serializes operations that can claim, repartition, wipe, mount, or
     /// unmount block devices. Identity checks still protect against changes
     /// made by other processes, but this closes in-process lifecycle races.
@@ -2502,7 +2546,8 @@ impl FilesystemService {
             }
         };
         Self {
-            list_cache: Arc::new(Mutex::new(None)),
+            list_cache: Arc::new(Mutex::new(ListCacheState::default())),
+            list_discovery: Arc::new(Mutex::new(())),
             block_mutations: Arc::new(Mutex::new(())),
             scrub_admission: Arc::new(Mutex::new(())),
             scrub_state: Arc::new(Mutex::new(scrub)),
@@ -2519,7 +2564,7 @@ impl FilesystemService {
     /// Invalidate the cached `list()` result.
     /// Call this after any mutation (create, mount, unmount, destroy, etc.).
     pub async fn invalidate_list_cache(&self) {
-        *self.list_cache.lock().await = None;
+        self.list_cache.lock().await.invalidate();
     }
 
     /// Record (and persist) the most recent failed mount for `name`.
@@ -2683,34 +2728,33 @@ impl FilesystemService {
             let cache = self.list_cache.lock().await;
             timing.finish(true);
             drop(timing);
-            if let Some((ts, ref data)) = *cache
-                && ts.elapsed() < FS_LIST_CACHE_TTL
-            {
-                nasty_common::diagnostics::observe_pools(
-                    data.iter()
-                        .map(|fs| (fs.total_bytes, fs.devices.len() as u64)),
-                );
-                return Ok(data.clone());
+            if let Some(data) = cache.fresh() {
+                return Ok(observed(data.clone()));
             }
         }
+
+        let _discovery = self.list_discovery.lock().await;
+        // Another caller may have finished a discovery while we waited.
+        let generation = {
+            let cache = self.list_cache.lock().await;
+            if let Some(data) = cache.fresh() {
+                return Ok(observed(data.clone()));
+            }
+            cache.generation
+        };
 
         let mut timing = nasty_common::diagnostics::Stage::new("filesystem.discovery");
         let result = self.list_uncached().await;
         timing.finish(result.is_ok());
         drop(timing);
         let result = result?;
-        nasty_common::diagnostics::observe_pools(
-            result
-                .iter()
-                .map(|fs| (fs.total_bytes, fs.devices.len() as u64)),
-        );
 
-        {
-            let mut cache = self.list_cache.lock().await;
-            *cache = Some((Instant::now(), result.clone()));
-        }
+        self.list_cache
+            .lock()
+            .await
+            .store(generation, result.clone());
 
-        Ok(result)
+        Ok(observed(result))
     }
 
     /// List UUID-bound registrations that are absent from live discovery.
@@ -8600,6 +8644,19 @@ async fn verify_filesystem_device_identity(fs: &Filesystem) -> Result<(), Filesy
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_cache_drops_discovery_that_predates_an_invalidation() {
+        let mut cache = ListCacheState::default();
+        // A discovery starts, then a mount invalidates the cache.
+        let started = cache.generation;
+        cache.invalidate();
+        assert!(!cache.store(started, Vec::new()));
+        assert!(cache.fresh().is_none());
+        // A discovery started after the invalidation is kept.
+        assert!(cache.store(cache.generation, Vec::new()));
+        assert!(cache.fresh().is_some());
+    }
 
     #[tokio::test]
     async fn sysfs_members_match_device_aliases_without_guessing_missing_members() {
