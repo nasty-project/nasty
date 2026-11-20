@@ -6648,9 +6648,9 @@ async fn read_device_sysfs(uuid: &str) -> Vec<DeviceSysfs> {
                 .await
                 .and_then(|s| s.parse().ok()),
             data_allowed: read_sysfs_attr(&dir, "data_allowed").await,
-            // The superblock `has_data` flags omit erasure-coded data (EC
-            // extents add no devices to their replicas entry), so derive the
-            // column from live per-device usage and fall back to the flags.
+            // The superblock `has_data` flags miss user data (seen on 1.39.7
+            // even without EC, and EC extents never add their devices), so
+            // derive it from live per-device usage; fall back to the flags.
             has_data: match read_sysfs_attr(&dir, "alloc_debug")
                 .await
                 .and_then(|s| has_data_from_alloc_debug(&s))
@@ -10427,29 +10427,35 @@ sda                     70.5G         4.0K        14.1M        70.5G   100%  off
     }
 
     #[test]
-    fn has_data_from_alloc_debug_reports_erasure_coded_data() {
+    fn has_data_from_alloc_debug_reports_data_types_with_sectors() {
+        // Real dev-0 output from a 1.39.7 box whose `has_data` read
+        // `journal,btree` despite ~9 GiB of user data; parity/stripe edited
+        // in to cover erasure-coded pools.
         let text = "\
-                    buckets         sectors      fragmented
-free                 100               0               0
-sb                     1             256               0
-journal               64          131072               0
-btree                 10           20480            1024
-user                   0               0               0
-cached                 0               0               0
-parity               900         1835008               0
-stripe              1800         3670016               0
-need_gc_gens           0               0               0
-need_discard           2               0               0
-unstriped              0               0               0
-capacity        953869
+                     buckets         sectors      fragmented
+free                   41176               0               0
+sb                         4            6152            2040
+journal                  400          819200               0
+btree                    175          139776          218624
+user                    8925        18204240           74160
+cached                     0               0               0
+parity                   900         1835008               0
+stripe                  1800         3670016               0
+need_gc_gens               0               0               0
+need_discard             520               0               0
+unstriped                  0               0               0
+multiple                   0               0               0
+capacity               51200
 
 reserves:
-stripe                 0
-btree                 10
+stripe                  1614
+normal                   814
+copygc                    14
+btree                      7
 ";
         assert_eq!(
             has_data_from_alloc_debug(text).as_deref(),
-            Some("journal,btree,parity,stripe")
+            Some("journal,btree,user,parity,stripe")
         );
         assert_eq!(
             has_data_from_alloc_debug("free 5 0 0\nuser 0 0 0\n").as_deref(),
