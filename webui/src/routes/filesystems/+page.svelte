@@ -400,7 +400,26 @@
 		}
 	}
 
-	async function refresh() {
+	// Single-flight: events, polls and actions all call refresh(); overlapping
+	// runs under load multiplied identical RPCs (#1052). A call during a run
+	// queues one rerun, and awaiting callers resolve after it.
+	let refreshing: Promise<void> | null = null;
+	let refreshAgain = false;
+	function refresh(): Promise<void> {
+		if (refreshing) {
+			refreshAgain = true;
+			return refreshing;
+		}
+		refreshing = (async () => {
+			do {
+				refreshAgain = false;
+				await refreshOnce();
+			} while (refreshAgain && !destroyed);
+		})().finally(() => { refreshing = null; });
+		return refreshing;
+	}
+
+	async function refreshOnce() {
 		const [liveResult, unavailableResult, deviceResult] = await Promise.all([
 			loadFilesystems(),
 			withToast(() => client.call<UnavailableFilesystem[]>('fs.unavailable.list')),

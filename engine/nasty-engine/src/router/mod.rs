@@ -387,7 +387,6 @@ fn is_read_only(method: &str) -> bool {
 fn collection_for_method(method: &str) -> Option<&'static str> {
     match method {
         "vm.disk.create" => Some("subvolume"),
-        m if m.starts_with("fs.device.") => Some("filesystem"),
         m if m.starts_with("fs.") && !is_read_only(m) => Some("filesystem"),
         m if m.starts_with("device.") && !is_read_only(m) => Some("filesystem"),
         m if m.starts_with("subvolume.") && !is_read_only(m) => Some("subvolume"),
@@ -2121,6 +2120,21 @@ mod tests {
     #[test]
     fn vm_disk_creation_emits_a_subvolume_event() {
         assert_eq!(collection_for_method("vm.disk.create"), Some("subvolume"));
+    }
+
+    #[test]
+    fn device_status_reads_do_not_emit_events() {
+        // The Filesystems page refreshes on "filesystem" events and polls
+        // this status, so emitting here made every refresh trigger another.
+        assert_eq!(collection_for_method("fs.device.remove.status"), None);
+        assert_eq!(
+            collection_for_method("fs.device.remove"),
+            Some("filesystem")
+        );
+        assert_eq!(
+            collection_for_method("fs.device.evacuate"),
+            Some("filesystem")
+        );
     }
 
     #[test]
