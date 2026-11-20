@@ -20,12 +20,14 @@ pub(super) async fn try_route(
     state: &AppState,
     session: &Session,
 ) -> Option<Response> {
-    let _block_share_guard =
-        if matches!(req.method.as_str(), "snapshot.clone" | "snapshot.rollback") {
-            Some(state.block_share_mutation.lock().await)
-        } else {
-            None
-        };
+    let _block_share_guard = if matches!(
+        req.method.as_str(),
+        "snapshot.clone" | "snapshot.clone_atomic" | "snapshot.rollback"
+    ) {
+        Some(state.block_share_mutation.lock().await)
+    } else {
+        None
+    };
 
     Some(match req.method.as_str() {
         "snapshot.list" => match require_str(req, "filesystem") {
@@ -73,19 +75,36 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
-        "snapshot.clone" => {
+        "snapshot.clone" | "snapshot.clone_atomic" => {
             match parse_params::<nasty_storage::subvolume::CloneSnapshotRequest>(req) {
                 Ok(p) if filesystem_scope_denied(session.filesystem.as_deref(), &p.filesystem) => {
                     err(req, "access denied")
                 }
-                Ok(p) => match state
-                    .snapshots
-                    .clone_snapshot(p, session.owner.as_deref(), session.role == Role::Admin)
-                    .await
-                {
-                    Ok(v) => ok(req, v),
-                    Err(e) => err(req, e),
-                },
+                Ok(p) => {
+                    let result = if req.method == "snapshot.clone_atomic" {
+                        state
+                            .snapshots
+                            .clone_snapshot_atomic(
+                                p,
+                                session.owner.as_deref(),
+                                session.role == Role::Admin,
+                            )
+                            .await
+                    } else {
+                        state
+                            .snapshots
+                            .clone_snapshot(
+                                p,
+                                session.owner.as_deref(),
+                                session.role == Role::Admin,
+                            )
+                            .await
+                    };
+                    match result {
+                        Ok(v) => ok(req, v),
+                        Err(e) => err(req, e),
+                    }
+                }
                 Err(e) => invalid(req, e),
             }
         }

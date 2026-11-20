@@ -37,10 +37,12 @@ pub(super) async fn try_route(
     let mutates_block_attachment = matches!(
         req.method.as_str(),
         "subvolume.create"
+            | "subvolume.create_atomic"
             | "subvolume.delete"
             | "subvolume.attach"
             | "subvolume.detach"
             | "subvolume.clone"
+            | "subvolume.clone_atomic"
     );
     let _block_share_guard = if mutates_block_attachment {
         Some(state.block_share_mutation.lock().await)
@@ -142,7 +144,7 @@ pub(super) async fn try_route(
             }
             (Err(r), _) | (_, Err(r)) => r,
         },
-        "subvolume.create" => {
+        "subvolume.create" | "subvolume.create_atomic" => {
             match parse_params::<nasty_storage::subvolume::CreateSubvolumeRequest>(req) {
                 Ok(p) => {
                     if session
@@ -153,7 +155,12 @@ pub(super) async fn try_route(
                         err(req, "access denied")
                     } else {
                         let owner = session.owner.clone();
-                        match state.subvolumes.create(p, owner).await {
+                        let result = if req.method == "subvolume.create_atomic" {
+                            state.subvolumes.create_atomic(p, owner).await
+                        } else {
+                            state.subvolumes.create(p, owner).await
+                        };
+                        match result {
                             Ok(v) => ok(req, v),
                             Err(e) => err(req, e),
                         }
@@ -260,7 +267,7 @@ pub(super) async fn try_route(
                 Err(e) => invalid(req, e),
             }
         }
-        "subvolume.clone" => {
+        "subvolume.clone" | "subvolume.clone_atomic" => {
             match parse_params::<nasty_storage::subvolume::CloneSubvolumeRequest>(req) {
                 Ok(p) => {
                     if session
@@ -270,11 +277,18 @@ pub(super) async fn try_route(
                     {
                         err(req, "access denied")
                     } else {
-                        match state
-                            .subvolumes
-                            .clone_subvolume(p, session.owner.as_deref())
-                            .await
-                        {
+                        let result = if req.method == "subvolume.clone_atomic" {
+                            state
+                                .subvolumes
+                                .clone_subvolume_atomic(p, session.owner.as_deref())
+                                .await
+                        } else {
+                            state
+                                .subvolumes
+                                .clone_subvolume(p, session.owner.as_deref())
+                                .await
+                        };
+                        match result {
                             Ok(v) => ok(req, v),
                             Err(e) => err(req, e),
                         }

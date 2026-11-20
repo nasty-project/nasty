@@ -395,6 +395,7 @@ pub(super) async fn try_route(
                     metadata_target: None,
                     data_replicas: None,
                     block_filesystem: None,
+                    initial_properties: std::collections::HashMap::new(),
                 };
                 if let Err(e) = state.subvolumes.create(create_req, None).await {
                     return Some(err(
