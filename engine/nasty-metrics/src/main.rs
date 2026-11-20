@@ -25,7 +25,7 @@ struct AppState {
     db: db::MetricsDb,
     /// Cached latest system stats snapshot (updated every 5s by collector).
     stats: RwLock<SystemStats>,
-    /// Cached latest disk health snapshot (updated every 60s by collector).
+    /// Cached latest disk health snapshot (updated every 5 min while SMART is enabled).
     disks: RwLock<Vec<DiskHealth>>,
     /// Cached latest bcachefs metrics snapshot.
     bcachefs: RwLock<Vec<BcachefsMetrics>>,
@@ -212,11 +212,23 @@ async fn system_collector(state: Arc<AppState>) {
     }
 }
 
-/// Disk health collector: samples every 60s (smartctl is slow).
+/// Disk health collector. SMART changes slowly and every query is traffic to
+/// the disk, so poll every 5 minutes, and only while SMART is enabled. The
+/// toggle is checked every minute so enabling SMART shows data promptly.
 async fn disk_collector(state: Arc<AppState>) {
+    const POLL: std::time::Duration = std::time::Duration::from_secs(300);
+    let mut cache = collect_system::DiskPollCache::default();
+    let mut last_poll: Option<std::time::Instant> = None;
     loop {
-        let disks = collect_system::disk_health().await;
-        *state.disks.write().await = disks;
+        if !collect_system::smart_enabled() {
+            cache = Default::default();
+            last_poll = None;
+            state.disks.write().await.clear();
+        } else if last_poll.is_none_or(|t| t.elapsed() >= POLL) {
+            let disks = collect_system::disk_health(&mut cache).await;
+            *state.disks.write().await = disks;
+            last_poll = Some(std::time::Instant::now());
+        }
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
 }
