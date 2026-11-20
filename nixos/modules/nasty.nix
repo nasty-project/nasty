@@ -560,6 +560,10 @@ in {
       echo "  Type 'benchmark'  to show storage benchmark commands."
       echo "  Type 'report'     to dump diagnostic info for bug reports."
       echo ""
+      echo "  Processes started here end when this session closes or the engine"
+      echo "  restarts (including updates), even with nohup. For long jobs use:"
+      echo "    nasty-run <command> [args]   e.g. nasty-run bcachefs fsck -n /dev/sdX"
+      echo ""
 
       help()      { cat /etc/nasty/help-cheatsheet; }
       system()    { cat /etc/nasty/system-cheatsheet; }
@@ -737,6 +741,7 @@ in {
          nasty-cleanup                              keep 3 generations + garbage collect
          nasty-cleanup all                          keep current generation only
          nasty-rebuild                              force rebuild from current /etc/nixos
+         nasty-run CMD [ARGS]                       run a long job that survives this terminal
 
        NixOS — system management
          nixos-rebuild switch --flake /etc/nixos#nasty     rebuild and activate
@@ -935,6 +940,55 @@ in {
         /run/current-system/bin/switch-to-configuration boot
         echo "==> Done."
         df -h / /boot
+      '')
+
+      # Long jobs started from the WebUI terminal die with it: the shell is a
+      # child of nasty-engine, so closing the session or restarting the engine
+      # (every update) ends them, nohup/setsid or not. A transient unit lives
+      # outside the engine and keeps output in the journal.
+      (writeShellScriptBin "nasty-run" ''
+        set -euo pipefail
+
+        usage() {
+          echo "usage: nasty-run [-n NAME] COMMAND [ARGS...]"
+          echo "Runs COMMAND as its own low-priority systemd unit, so it keeps running"
+          echo "after this terminal closes and across engine restarts. Output goes to"
+          echo "the journal. For pipes or redirects: nasty-run bash -c '...'"
+        }
+
+        name=""
+        case "''${1:-}" in
+          -h|--help) usage; exit 0 ;;
+          -n) [ "$#" -ge 3 ] || { usage >&2; exit 2; }; name=$2; shift 2 ;;
+        esac
+        [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+
+        exe=$(command -v -- "$1") || { echo "nasty-run: command not found: $1" >&2; exit 127; }
+        shift
+        [ -n "$name" ] || name=$(${pkgs.coreutils}/bin/basename -- "$exe")
+        # Unit names allow [A-Za-z0-9:_.-]; the timestamp keeps reruns distinct.
+        safe=$(printf '%s' "$name" | ${pkgs.coreutils}/bin/tr -c 'A-Za-z0-9_.-' '-')
+        unit="nasty-job-$safe-$(${pkgs.coreutils}/bin/date +%Y%m%d-%H%M%S)"
+
+        ${pkgs.systemd}/bin/systemd-run \
+          --unit "$unit" \
+          --collect \
+          --description "nasty-run: $exe $*" \
+          --working-directory "$PWD" \
+          --setenv "PATH=$PATH" \
+          --setenv "HOME=''${HOME:-/root}" \
+          --property StandardOutput=journal \
+          --property StandardError=journal \
+          --property Nice=10 \
+          --property IOSchedulingClass=best-effort \
+          --property IOSchedulingPriority=7 \
+          -- "$exe" "$@"
+
+        echo "==> Started $unit"
+        echo "    It keeps running after this terminal closes and across engine restarts."
+        echo "    follow:  journalctl -fu $unit"
+        echo "    status:  systemctl status $unit"
+        echo "    stop:    systemctl stop $unit"
       '')
 
       (writeShellScriptBin "nasty-rebuild" ''
