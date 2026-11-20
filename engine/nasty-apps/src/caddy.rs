@@ -518,11 +518,24 @@ impl CaddyApi {
             .chain(extra_internal_subjects.iter().map(String::as_str))
             .collect();
         let automation = build_tls_automation_json(policies, issuer, extra_internal_subjects);
-        let body = json!({
-            "automation": automation,
-            "certificates": { "automate": automate },
-        });
         let url = format!("{}/config/apps/tls", self.base_url);
+        // PATCH replaces the whole object, so start from what Caddy has:
+        // the Caddyfile's `tls <cert> <key>` (services.nasty.tls.certFile)
+        // lives in `certificates.load_files` and must survive.
+        let current = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("GET {url}: {e}"))?;
+        if !current.status().is_success() {
+            return Err(format!("GET {url}: status {}", current.status()));
+        }
+        let current: Value = current
+            .json()
+            .await
+            .map_err(|e| format!("parse {url}: {e}"))?;
+        let body = merge_tls_app(current, automation, &automate);
         let resp = self
             .client
             .patch(&url)
@@ -618,6 +631,23 @@ fn build_route_json(route: &AppRoute) -> Value {
 ///
 /// Order matters: managed hosts first, so Caddy's SNI matching hits
 /// them before falling through to nasty.local.
+/// Caddy's current `apps.tls` with only `automation` and
+/// `certificates.automate` replaced; everything else (notably
+/// `certificates.load_files` from an operator-supplied cert) is kept.
+fn merge_tls_app(current: Value, automation: Value, automate: &[&str]) -> Value {
+    let mut tls = match current {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    tls.insert("automation".into(), automation);
+    let certificates = tls.entry("certificates").or_insert_with(|| json!({}));
+    if !certificates.is_object() {
+        *certificates = json!({});
+    }
+    certificates["automate"] = json!(automate);
+    Value::Object(tls)
+}
+
 fn build_tls_automation_json(
     policies: &[TlsPolicy],
     issuer: &TlsIssuer,
@@ -1006,6 +1036,35 @@ fn extract_handler_summary(route: &Value) -> (String, Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tls_patch_keeps_operator_certificate() {
+        let current = serde_json::json!({
+            "automation": { "policies": [{ "subjects": ["old.example"] }] },
+            "certificates": {
+                "automate": ["old.example"],
+                "load_files": [{ "certificate": "/etc/nasty/tls.crt", "key": "/etc/nasty/tls.key" }],
+            },
+        });
+        let automation = serde_json::json!({ "policies": [] });
+        let merged = super::merge_tls_app(current, automation.clone(), &["nasty.local"]);
+        assert_eq!(merged["automation"], automation);
+        assert_eq!(
+            merged["certificates"]["automate"],
+            serde_json::json!(["nasty.local"])
+        );
+        assert_eq!(
+            merged["certificates"]["load_files"][0]["certificate"],
+            "/etc/nasty/tls.crt"
+        );
+
+        // No existing tls app (Caddy returns null): just our two keys.
+        let fresh = super::merge_tls_app(serde_json::Value::Null, automation, &["nasty.local"]);
+        assert_eq!(
+            fresh["certificates"],
+            serde_json::json!({ "automate": ["nasty.local"] })
+        );
+    }
+
     use super::*;
 
     #[test]
