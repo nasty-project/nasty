@@ -10,7 +10,16 @@ permissions:
 
 jobs:
   repro:
+    name: repro (${{ matrix.label }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: v1.39.7
+            override: ""
+          - label: bf58812c5f50 (testing, with #1121 fix)
+            override: "--override-input bcachefs-tools github:koverstreet/bcachefs-tools/bf58812c5f50"
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -22,4 +31,4 @@ jobs:
         with:
           name: nasty
       - name: Run reproducer
-        run: nix build .#checks.x86_64-linux.quota-clone-repro -L --print-build-logs
+        run: nix build .#checks.x86_64-linux.quota-clone-repro ${{ matrix.override }} -L --print-build-logs
