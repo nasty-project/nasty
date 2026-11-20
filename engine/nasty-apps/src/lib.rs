@@ -5433,7 +5433,10 @@ impl AppsService {
                     .get("allow_unsafe")
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
-                if let Err(e) = validate_app_name(&app_name) {
+                if app_name.is_empty() {
+                    // No name: a compose app's settings sidecar (startup
+                    // order, ingress) or an empty leftover, not a manifest.
+                } else if let Err(e) = validate_app_name(&app_name) {
                     warn!(
                         "apps: ignoring unsafe app name in manifest {}: {e}",
                         path.display()
