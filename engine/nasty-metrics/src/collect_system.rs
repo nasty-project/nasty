@@ -638,7 +638,34 @@ struct LsblkDisk {
 /// intentionally don't fire on it — UNAVAILABLE is "unknown", not "bad".
 pub const SMART_STATUS_UNAVAILABLE: &str = "UNAVAILABLE";
 
-pub async fn disk_health() -> Vec<DiskHealth> {
+/// State carried between SMART polls so a poll can skip work that would
+/// touch the disks: the endpoint scan is reused while the set of block
+/// devices is unchanged, and a disk found asleep keeps its last report.
+#[derive(Default)]
+pub struct DiskPollCache {
+    devices: Vec<String>,
+    endpoints: Vec<SmartctlEndpoint>,
+    last: std::collections::HashMap<(String, Option<String>), DiskHealth>,
+}
+
+/// SMART polling follows the operator's SMART toggle, which the engine
+/// persists here. A missing file or field means the engine default: on.
+pub fn smart_enabled() -> bool {
+    smart_enabled_in(
+        std::fs::read_to_string("/var/lib/nasty/protocols.json")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn smart_enabled_in(state: Option<&str>) -> bool {
+    state
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("smart").and_then(serde_json::Value::as_bool))
+        .unwrap_or(true)
+}
+
+pub async fn disk_health(cache: &mut DiskPollCache) -> Vec<DiskHealth> {
     // Two-stage enumeration:
     //   1. `smartctl --scan-open -j` is the authoritative SMART source.
     //      It's the only way to discover physical drives behind RAID
@@ -652,8 +679,15 @@ pub async fn disk_health() -> Vec<DiskHealth> {
     //      drives smartctl rejects before lsblk does, and any case
     //      where smartctl is missing entirely. This preserves the #349
     //      guarantee that every block device shows up somewhere.
-    let endpoints = scan_smartctl_endpoints().await;
     let lsblk_disks = enumerate_disks().await;
+    let mut devices: Vec<String> = lsblk_disks.iter().map(|d| d.device.clone()).collect();
+    devices.sort();
+    // `--scan-open` opens every device; only repeat it when disks come or go.
+    if cache.endpoints.is_empty() || devices != cache.devices {
+        cache.endpoints = scan_smartctl_endpoints().await;
+        cache.devices = devices;
+    }
+    let endpoints = cache.endpoints.clone();
     let scan_paths: std::collections::HashSet<String> =
         endpoints.iter().map(|e| e.device.clone()).collect();
 
@@ -683,7 +717,10 @@ pub async fn disk_health() -> Vec<DiskHealth> {
         } else {
             None
         };
-        results.push(build_disk_health(endpoint, hint).await);
+        let previous = cache
+            .last
+            .get(&(endpoint.device.clone(), endpoint.transport.clone()));
+        results.push(build_disk_health(endpoint, hint, previous).await);
     }
     for (_, disk) in lsblk_by_path {
         if scan_paths.contains(&disk.device) {
@@ -691,6 +728,10 @@ pub async fn disk_health() -> Vec<DiskHealth> {
         }
         results.push(build_disk_health_unreachable(disk));
     }
+    cache.last = results
+        .iter()
+        .map(|d| ((d.device.clone(), d.transport.clone()), d.clone()))
+        .collect();
     results
 }
 
@@ -836,6 +877,7 @@ async fn enumerate_disks() -> Vec<LsblkDisk> {
 async fn build_disk_health(
     endpoint: &SmartctlEndpoint,
     lsblk_hint: Option<&LsblkDisk>,
+    previous: Option<&DiskHealth>,
 ) -> DiskHealth {
     let dev_name = endpoint
         .device
@@ -860,53 +902,58 @@ async fn build_disk_health(
     let controller_name = controller_pci.as_deref().and_then(resolve_pci_name);
     let pcie_link = controller_pci.as_deref().and_then(resolve_pcie_link);
 
-    match query_smartctl(&endpoint.device, endpoint.transport.as_deref()).await {
-        Some(s) => DiskHealth {
-            device: endpoint.device.clone(),
-            transport: endpoint.transport.clone(),
-            ata_port,
-            controller_pci,
-            controller_name,
-            pcie_link,
-            // smartctl's strings are usually more accurate than lsblk's
-            // (lsblk reads sysfs's `model`, which truncates / pads), but
-            // for unfamiliar transports lsblk sometimes wins — prefer
-            // smartctl, fall back to lsblk, then to "Unknown". Both
-            // sources can carry padded SCSI Inquiry whitespace; normalize
-            // the lsblk fallback for the same reason we normalize
-            // smartctl's output in `query_smartctl`.
-            model: s
-                .model
-                .filter(|s| !s.is_empty())
-                .or_else(|| lsblk_hint.and_then(|d| normalize_model(&d.model)))
-                .unwrap_or_else(|| "Unknown".into()),
-            serial: s
-                .serial
-                .filter(|s| !s.is_empty())
-                .or_else(|| lsblk_hint.map(|d| d.serial.clone()))
-                .unwrap_or_else(|| "Unknown".into()),
-            firmware: s.firmware.unwrap_or_else(|| "Unknown".into()),
-            capacity_bytes: if s.capacity_bytes > 0 {
-                s.capacity_bytes
-            } else {
-                lsblk_hint.map(|d| d.size_bytes).unwrap_or(0)
-            },
-            temperature_c: s.temperature_c,
-            power_on_hours: s.power_on_hours,
-            health_passed: s.health_passed,
-            smart_status: if s.health_passed {
-                "PASSED".to_string()
-            } else {
-                "FAILED".to_string()
-            },
-            rotational: s.rotational,
-            native_interface: s.native_interface,
-            attributes: s.attributes,
-            nvme: s.nvme,
-            scsi: s.scsi,
-            ata: s.ata,
+    let s = match query_smartctl(&endpoint.device, endpoint.transport.as_deref()).await {
+        SmartQuery::Report(s) => *s,
+        // A spun-down disk keeps its last report rather than being woken.
+        SmartQuery::Asleep if let Some(previous) = previous => return previous.clone(),
+        SmartQuery::Asleep | SmartQuery::Unavailable => {
+            return build_disk_health_unreachable_for_endpoint(endpoint, lsblk_hint);
+        }
+    };
+    DiskHealth {
+        device: endpoint.device.clone(),
+        transport: endpoint.transport.clone(),
+        ata_port,
+        controller_pci,
+        controller_name,
+        pcie_link,
+        // smartctl's strings are usually more accurate than lsblk's
+        // (lsblk reads sysfs's `model`, which truncates / pads), but
+        // for unfamiliar transports lsblk sometimes wins — prefer
+        // smartctl, fall back to lsblk, then to "Unknown". Both
+        // sources can carry padded SCSI Inquiry whitespace; normalize
+        // the lsblk fallback for the same reason we normalize
+        // smartctl's output in `query_smartctl`.
+        model: s
+            .model
+            .filter(|s| !s.is_empty())
+            .or_else(|| lsblk_hint.and_then(|d| normalize_model(&d.model)))
+            .unwrap_or_else(|| "Unknown".into()),
+        serial: s
+            .serial
+            .filter(|s| !s.is_empty())
+            .or_else(|| lsblk_hint.map(|d| d.serial.clone()))
+            .unwrap_or_else(|| "Unknown".into()),
+        firmware: s.firmware.unwrap_or_else(|| "Unknown".into()),
+        capacity_bytes: if s.capacity_bytes > 0 {
+            s.capacity_bytes
+        } else {
+            lsblk_hint.map(|d| d.size_bytes).unwrap_or(0)
         },
-        None => build_disk_health_unreachable_for_endpoint(endpoint, lsblk_hint),
+        temperature_c: s.temperature_c,
+        power_on_hours: s.power_on_hours,
+        health_passed: s.health_passed,
+        smart_status: if s.health_passed {
+            "PASSED".to_string()
+        } else {
+            "FAILED".to_string()
+        },
+        rotational: s.rotational,
+        native_interface: s.native_interface,
+        attributes: s.attributes,
+        nvme: s.nvme,
+        scsi: s.scsi,
+        ata: s.ata,
     }
 }
 
@@ -997,16 +1044,37 @@ fn normalize_model(raw: &str) -> Option<String> {
     }
 }
 
-async fn query_smartctl(device: &str, transport: Option<&str>) -> Option<SmartReport> {
+/// `smartctl -n standby,N` exit status for a disk it skipped because it was
+/// in STANDBY or SLEEP. Unique, so it can't be mistaken for an open failure.
+const SMARTCTL_ASLEEP_EXIT: i32 = 3;
+
+enum SmartQuery {
+    Report(Box<SmartReport>),
+    /// Spun down; querying would have woken it.
+    Asleep,
+    Unavailable,
+}
+
+async fn query_smartctl(device: &str, transport: Option<&str>) -> SmartQuery {
     let mut cmd = tokio::process::Command::new("smartctl");
-    cmd.args(["-a", "--json=c"]);
+    let nocheck = format!("standby,{SMARTCTL_ASLEEP_EXIT}");
+    cmd.args(["-a", "-n", &nocheck, "--json=c"]);
     if let Some(t) = transport {
         cmd.args(["-d", t]);
     }
     cmd.arg(device);
-    let output = cmd.output().await.ok()?;
+    let Ok(output) = cmd.output().await else {
+        return SmartQuery::Unavailable;
+    };
+    if output.status.code() == Some(SMARTCTL_ASLEEP_EXIT) {
+        return SmartQuery::Asleep;
+    }
+    parse_smartctl_report(&output.stdout)
+        .map_or(SmartQuery::Unavailable, |r| SmartQuery::Report(Box::new(r)))
+}
 
-    let json: SmartctlJson = serde_json::from_slice(&output.stdout).ok()?;
+fn parse_smartctl_report(stdout: &[u8]) -> Option<SmartReport> {
+    let json: SmartctlJson = serde_json::from_slice(stdout).ok()?;
 
     // Treat "no smart_status object at all" as "unavailable" rather than
     // "FAILED". smartctl returns the object on every supported transport;
@@ -1948,6 +2016,16 @@ mod tests {
             None
         );
         assert_eq!(extract_deepest_pci_bdf(""), None);
+    }
+
+    #[test]
+    fn smart_polling_follows_the_persisted_toggle() {
+        assert!(!smart_enabled_in(Some(r#"{"ssh":true,"smart":false}"#)));
+        assert!(smart_enabled_in(Some(r#"{"smart":true}"#)));
+        // Engine defaults: a missing file, field or unparsable state means on.
+        assert!(smart_enabled_in(None));
+        assert!(smart_enabled_in(Some(r#"{"ssh":true}"#)));
+        assert!(smart_enabled_in(Some("not json")));
     }
 
     #[test]
