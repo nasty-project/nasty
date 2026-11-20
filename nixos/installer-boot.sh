@@ -17,7 +17,11 @@ nasty_select_boot_mode() {
     bios|uefi) ;;
     *) printf 'invalid boot mode: %s (expected auto, uefi, or bios)\n' "$requested" >&2; return 1 ;;
   esac
-  if [ "$requested" != "$detected" ]; then
+  if [ "$requested" = uefi ] && [ "$detected" = bios ] && [ "$system" = aarch64-linux ]; then
+    # U-Boot often starts the live system via extlinux yet offers UEFI to the
+    # installed one; such firmware cannot store EFI variables.
+    printf 'warning: the live environment did not boot via UEFI; installing for UEFI firmware without EFI boot variables (for example U-Boot), using the fallback EFI/BOOT loader\n' >&2
+  elif [ "$requested" != "$detected" ]; then
     printf 'requested %s installation, but the live environment booted in %s mode; reboot the installer in the desired mode\n' "$requested" "$detected" >&2
     return 1
   fi
@@ -95,12 +99,24 @@ nasty_grub_disk_path() {
 
 nasty_write_boot_module() {
   local dest=$1 mode=$2 disk=$3 grub_disk
-  if [ "$mode" = uefi ]; then
+  if [ "$mode" = uefi ] && [ "$(nasty_detect_boot_mode)" = uefi ]; then
     cat > "$dest" <<'EOF'
 # Installer-selected boot mode. Preserved by NASty updates.
 { ... }: {
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
+}
+EOF
+    return
+  fi
+  if [ "$mode" = uefi ]; then
+    cat > "$dest" <<'EOF'
+# Installer-selected boot mode. Preserved by NASty updates.
+# UEFI firmware without EFI variables (for example U-Boot): systemd-boot is
+# found through the fallback EFI/BOOT loader path.
+{ lib, ... }: {
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = lib.mkForce false;
 }
 EOF
     return

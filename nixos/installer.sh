@@ -22,7 +22,8 @@ Install NASty from a Linux live environment.
 Options:
   --disk PATH       Target whole disk, for example /dev/nvme0n1
   --mode MODE       "whole" or "split"
-  --boot-mode MODE  "auto" (default), "uefi", or "bios"
+  --boot-mode MODE  "auto" (default), "uefi", or "bios"; on aarch64, "uefi"
+                    also works from a non-UEFI live system (U-Boot)
   --yes             Skip the final destructive confirmation
   --dry-run         Validate the host, disk, release lock, and evaluation only
   --no-reboot       Return to the live shell after installation
