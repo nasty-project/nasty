@@ -6556,6 +6556,31 @@ async fn find_sysfs_member<'a>(
     members.get(resolved.to_str()?).copied()
 }
 
+/// Data types holding sectors on a device, from the usage table that opens
+/// sysfs `dev-N/alloc_debug` (`<type> <buckets> <sectors> <fragmented>`).
+/// `None` when no table rows parse, so the caller can fall back.
+fn has_data_from_alloc_debug(text: &str) -> Option<String> {
+    let mut parsed = false;
+    let mut types = Vec::new();
+    for line in text.lines().skip_while(|l| l.trim().is_empty()) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.is_empty() {
+            break; // end of the usage table; reserves etc. follow
+        }
+        let [name, _buckets, sectors, _fragmented] = cols[..] else {
+            continue;
+        };
+        let Ok(sectors) = sectors.parse::<u64>() else {
+            continue;
+        };
+        parsed = true;
+        if sectors > 0 && !matches!(name, "free" | "sb" | "need_gc_gens" | "need_discard") {
+            types.push(name);
+        }
+    }
+    parsed.then(|| types.join(","))
+}
+
 /// Read one sysfs attribute file, trimmed; `None` if absent/empty or the
 /// bcachefs "unset" sentinel `(none)`.
 async fn read_sysfs_attr(dir: &str, attr: &str) -> Option<String> {
@@ -6623,7 +6648,16 @@ async fn read_device_sysfs(uuid: &str) -> Vec<DeviceSysfs> {
                 .await
                 .and_then(|s| s.parse().ok()),
             data_allowed: read_sysfs_attr(&dir, "data_allowed").await,
-            has_data: read_sysfs_attr(&dir, "has_data").await,
+            // The superblock `has_data` flags omit erasure-coded data (EC
+            // extents add no devices to their replicas entry), so derive the
+            // column from live per-device usage and fall back to the flags.
+            has_data: match read_sysfs_attr(&dir, "alloc_debug")
+                .await
+                .and_then(|s| has_data_from_alloc_debug(&s))
+            {
+                Some(types) => Some(types).filter(|t| !t.is_empty()),
+                None => read_sysfs_attr(&dir, "has_data").await,
+            },
             discard: read_sysfs_attr(&dir, "discard")
                 .await
                 .map(|s| s == "1" || s == "true"),
@@ -10390,6 +10424,38 @@ sda                     70.5G         4.0K        14.1M        70.5G   100%  off
             scrub_outcome_after_cancel(ScrubOutcome::Ok, None, Some(0), true),
             ScrubOutcome::Ok
         );
+    }
+
+    #[test]
+    fn has_data_from_alloc_debug_reports_erasure_coded_data() {
+        let text = "\
+                    buckets         sectors      fragmented
+free                 100               0               0
+sb                     1             256               0
+journal               64          131072               0
+btree                 10           20480            1024
+user                   0               0               0
+cached                 0               0               0
+parity               900         1835008               0
+stripe              1800         3670016               0
+need_gc_gens           0               0               0
+need_discard           2               0               0
+unstriped              0               0               0
+capacity        953869
+
+reserves:
+stripe                 0
+btree                 10
+";
+        assert_eq!(
+            has_data_from_alloc_debug(text).as_deref(),
+            Some("journal,btree,parity,stripe")
+        );
+        assert_eq!(
+            has_data_from_alloc_debug("free 5 0 0\nuser 0 0 0\n").as_deref(),
+            Some("")
+        );
+        assert_eq!(has_data_from_alloc_debug("garbage\n"), None);
     }
 
     #[test]
