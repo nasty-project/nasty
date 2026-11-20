@@ -618,6 +618,16 @@ pkgs.testers.runNixOSTest {
     machine.start(allow_reboot=True)
 
     machine.succeed("nasty-top --version | grep -Fq '0.0.11'")
+    # nasty-run detaches long jobs into their own unit, outside nasty-engine,
+    # so they survive the WebUI terminal closing and engine restarts.
+    started = machine.succeed("cd /tmp && nasty-run -n smoke-job sleep 300")
+    job = next(w for w in started.split() if w.startswith("nasty-job-smoke-job-"))
+    machine.succeed(f"systemctl is-active --quiet {job}")
+    machine.succeed(f"systemctl show -p Nice --value {job} | grep -qx 10")
+    machine.succeed(f"systemctl show -p WorkingDirectory --value {job} | grep -qx /tmp")
+    machine.succeed(f"systemctl stop {job}")
+    machine.fail(f"systemctl is-active --quiet {job}")
+    machine.fail("nasty-run no-such-command-xyz")
     machine.succeed("command -v sqlite3 && sqlite3 --version")
     machine.succeed("7zz | grep -Fq '7-Zip'")
     machine.succeed("ncdu --version | grep -Fq 'ncdu 2.12.0'")
