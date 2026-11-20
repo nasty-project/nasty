@@ -976,7 +976,7 @@
 				{:else if widget.id === 'operations'}
 					<OperationsWidget operations={systemStatus?.operations ?? []} loaded={operationsLoaded} {density} presentation={widget.presentation} />
 				{:else if widget.id === 'storage'}
-					<StorageWidget {filesystems} usages={filesystemUsages} health={diskHealth} rates={diskRates} {density} />
+					<StorageWidget {filesystems} loaded={filesystemsLoaded} usages={filesystemUsages} health={diskHealth} rates={diskRates} {density} />
 				{:else if widget.id === 'history'}
 					<HistoryWidget cpuSamples={cpuSamples} memorySamples={memorySamples} range={metricsRange} loading={historyLoading} width={widget.width} {density} presentation={widget.presentation} />
 				{:else if widget.id === 'network' && stats}
