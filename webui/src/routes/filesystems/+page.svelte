@@ -57,6 +57,10 @@
 	let hostTpmAvailable = $state(false);
 	let wizardStep: 0 | 1 | 2 | 3 = $state(0); // 0=hidden, 1=name+devices, 2=profile, 3=review
 	let loading = $state(true);
+	/** Last fs.list failure, shown instead of the empty state; cleared on success. */
+	let fsListError = $state<string | null>(null);
+	let fsListRetry: ReturnType<typeof setTimeout> | null = null;
+	let destroyed = false;
 	let creating = $state(false);
 
 	// Wizard state
@@ -376,11 +380,29 @@
 		if (evacuationPoll) { clearInterval(evacuationPoll); evacuationPoll = null; }
 		if (scrubPoll) { clearInterval(scrubPoll); scrubPoll = null; }
 		if (fsckPoll) { clearInterval(fsckPoll); fsckPoll = null; }
+		if (fsListRetry) { clearTimeout(fsListRetry); fsListRetry = null; }
+		destroyed = true;
 	});
+
+	// A slow or failed fs.list must not read as "no filesystems": keep the
+	// last known list, say why it is stale, and retry.
+	async function loadFilesystems(): Promise<Filesystem[] | undefined> {
+		try {
+			const result = await client.call<Filesystem[]>('fs.list');
+			fsListError = null;
+			return result;
+		} catch (e: unknown) {
+			fsListError = e instanceof Error ? e.message : String((e as { message?: unknown })?.message ?? e);
+			if (!fsListRetry && !destroyed) {
+				fsListRetry = setTimeout(() => { fsListRetry = null; void refresh(); }, 10_000);
+			}
+			return undefined;
+		}
+	}
 
 	async function refresh() {
 		const [liveResult, unavailableResult, deviceResult] = await Promise.all([
-			withToast(() => client.call<Filesystem[]>('fs.list')),
+			loadFilesystems(),
 			withToast(() => client.call<UnavailableFilesystem[]>('fs.unavailable.list')),
 			withToast(() => client.call<BlockDevice[]>('device.list')),
 		]);
@@ -2068,8 +2090,19 @@
 	</Card>
 {/if}
 
+{#if fsListError && !loading && (filesystems.length > 0 || unavailableFilesystems.length > 0)}
+	<p class="mb-4 rounded-md border border-amber-700/50 bg-amber-950/20 px-3 py-2 text-sm text-amber-300" role="status">
+		Showing the last known state. Couldn't refresh filesystems ({fsListError}); retrying…
+	</p>
+{/if}
+
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
+{:else if fsListError && filesystems.length === 0 && unavailableFilesystems.length === 0}
+	<div class="flex flex-col items-center justify-center py-12 text-center" role="status">
+		<p class="text-muted-foreground">Couldn't load filesystems ({fsListError}).</p>
+		<p class="mt-1 text-sm text-muted-foreground">The system may be busy. Retrying…</p>
+	</div>
 {:else if filesystems.length === 0 && unavailableFilesystems.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">No filesystems configured yet.</p>

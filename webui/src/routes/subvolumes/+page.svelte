@@ -94,6 +94,8 @@
 	}
 	let subvolumes: Subvolume[] = $state([]);
 	let loading = $state(true);
+	/** fs.list failure on load; shown with a retry instead of an empty state. */
+	let fsListError = $state<string | null>(null);
 
 	let wizardStep: 0 | 1 | 2 | 3 = $state(0); // 0=hidden
 	let newName = $state('');
@@ -476,14 +478,26 @@
 	onMount(async () => {
 		client.onEvent(handleEvent);
 		client.onReconnect(handleReconnect);
-		filesystems = await client.call<Filesystem[]>('fs.list');
+		await loadPage();
+	});
+
+	async function loadPage() {
+		loading = true;
+		try {
+			filesystems = await client.call<Filesystem[]>('fs.list');
+			fsListError = null;
+		} catch (e: unknown) {
+			fsListError = e instanceof Error ? e.message : String((e as { message?: unknown })?.message ?? e);
+			loading = false;
+			return;
+		}
 		const mounted = filesystems.filter(p => p.mounted);
 		if (mounted.length > 0) {
 			await Promise.all([refresh(), loadShares()]);
 			if (pageTab === 'snapshots') await loadSnapshots();
 		}
 		loading = false;
-	});
+	}
 
 	onDestroy(() => {
 		client.offEvent(handleEvent);
@@ -1205,6 +1219,11 @@
 
 {#if loading}
 	<p class="text-muted-foreground">Loading...</p>
+{:else if fsListError}
+	<div class="flex flex-col items-center justify-center py-12 text-center" role="status">
+		<p class="text-muted-foreground">Couldn't load filesystems ({fsListError}). The system may be busy.</p>
+		<Button size="sm" class="mt-2" onclick={() => void loadPage()}>Retry</Button>
+	</div>
 {:else if filesystems.length === 0}
 	<div class="flex flex-col items-center justify-center py-12 text-center">
 		<p class="text-muted-foreground">No filesystems configured.</p>

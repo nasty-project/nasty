@@ -7,8 +7,9 @@
 	import { Database, TriangleAlert } from '@lucide/svelte';
 
 	type DiskRate = { readRate: number; writeRate: number };
-	let { filesystems, usages, health, rates, density }: {
+	let { filesystems, loaded = true, usages, health, rates, density }: {
 		filesystems: Filesystem[];
+		loaded?: boolean;
 		usages: Record<string, FsUsage>;
 		health: DiskHealth[];
 		rates: Map<string, DiskRate>;
@@ -88,7 +89,9 @@
 		</CardTitle>
 	</CardHeader>
 	<CardContent class="p-0">
-		{#if filesystems.length === 0}
+		{#if !loaded && filesystems.length === 0}
+			<div class="px-4 pb-4 text-sm text-muted-foreground">Unavailable: filesystem inventory could not be loaded.</div>
+		{:else if filesystems.length === 0}
 			<div class="px-4 pb-4 text-sm text-muted-foreground">No filesystems configured.</div>
 		{:else}
 			<div class="divide-y divide-border">
