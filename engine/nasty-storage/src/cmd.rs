@@ -7,34 +7,52 @@ use tracing::debug;
 /// All system commands go through here for logging and future testability.
 pub async fn run(program: &str, args: &[&str]) -> std::io::Result<Output> {
     debug!("exec: {} {}", program, args.join(" "));
-    Command::new(program).args(args).output().await
+    timed(program, Command::new(program).args(args).output()).await
+}
+
+/// Record the command as a diagnostics stage, like `nasty_common::cmd` does.
+async fn timed(
+    program: &str,
+    output: impl std::future::Future<Output = std::io::Result<Output>>,
+) -> std::io::Result<Output> {
+    let mut timing =
+        nasty_common::diagnostics::Stage::new(nasty_common::diagnostics::command_stage(program));
+    let result = output.await;
+    timing.finish(result.as_ref().is_ok_and(|o| o.status.success()));
+    result
 }
 
 /// Execute a CPU/IO-heavy command below control-plane priority.
 pub async fn run_bulk(program: &str, args: &[&str]) -> std::io::Result<Output> {
     debug!("exec (bulk): {} {}", program, args.join(" "));
-    nasty_common::priority::bulk_command(program)
-        .args(args)
-        .output()
-        .await
+    timed(
+        program,
+        nasty_common::priority::bulk_command(program)
+            .args(args)
+            .output(),
+    )
+    .await
 }
 
 /// Execute a command with data piped to stdin.
 pub async fn run_stdin(program: &str, args: &[&str], stdin_data: &[u8]) -> std::io::Result<Output> {
     debug!("exec (stdin): {} {}", program, args.join(" "));
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    timed(program, async {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_data).await?;
-        // Drop to close stdin so the process can proceed
-    }
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(stdin_data).await?;
+            // Drop to close stdin so the process can proceed
+        }
 
-    child.wait_with_output().await
+        child.wait_with_output().await
+    })
+    .await
 }
 
 /// Execute a command with stdin, returning stdout on success or stderr on failure.
@@ -80,5 +98,28 @@ pub async fn run_ok_bulk(program: &str, args: &[&str]) -> Result<String, String>
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("{program} exited with {}: {stderr}", output.status))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nasty_common::diagnostics;
+
+    #[tokio::test]
+    async fn commands_are_timed_during_detailed_capture() {
+        diagnostics::detailed(true);
+        let sequence = diagnostics::next_sequence();
+        diagnostics::REQUEST
+            .scope((sequence, "fs.list"), async {
+                super::run("true", &[]).await.unwrap();
+            })
+            .await;
+        diagnostics::detailed(false);
+        assert!(
+            diagnostics::snapshot()
+                .0
+                .iter()
+                .any(|t| t.sequence == sequence && t.stage == "command.other" && t.outcome == "ok")
+        );
     }
 }

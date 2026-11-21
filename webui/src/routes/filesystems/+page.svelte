@@ -1514,11 +1514,15 @@
 	{/await}
 {:else}
 
+<!-- Hidden until the list has loaded once: offering Create while the
+     inventory is unknown suggests the pool is gone (#1051). -->
+{#if wizardStep !== 0 || !(loading || (fsListError && filesystems.length === 0 && unavailableFilesystems.length === 0))}
 <div class="mb-4">
 	<Button size="sm" onclick={() => wizardStep === 0 ? openWizard() : (wizardStep = 0)}>
 		{wizardStep !== 0 ? 'Cancel' : 'Create Filesystem'}
 	</Button>
 </div>
+{/if}
 
 {#if wizardStep !== 0}
 	<Card class="mb-6 max-w-4xl">
