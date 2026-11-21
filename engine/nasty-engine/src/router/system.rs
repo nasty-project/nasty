@@ -1207,6 +1207,9 @@ async fn build_system_status(state: &AppState) -> (nasty_system::SystemStatus, u
                         .jobs
                         .running(super::fs::DEVICE_REMOVE_JOB, &dev.path)
                         .is_some();
+                    if !removing && evacuation_drained(dev.has_data.as_deref()) {
+                        continue;
+                    }
                     operations.push(nasty_system::ActiveOperation {
                         kind: if removing { "remove" } else { "evacuate" }.to_string(),
                         fs: fs.name.clone(),
@@ -1335,12 +1338,16 @@ async fn build_operations(
             if dev.state.as_deref() == Some("evacuating") {
                 let short = dev.path.rsplit('/').next().unwrap_or(&dev.path);
                 let removal = removals.iter().find(|j| j.target == dev.path);
+                // bcachefs keeps the member "evacuating" after it drains, so a
+                // finished evacuation would otherwise read as running forever.
+                let drained = removal.is_none() && evacuation_drained(dev.has_data.as_deref());
                 let mut detail = match removal {
                     Some(j) if j.cancel_requested => format!("Cancelling removal of {short}"),
                     Some(_) => format!("Removing {short}"),
+                    None if drained => format!("Drained {short}, ready to remove"),
                     None => format!("Draining {short}"),
                 };
-                if let Some((_, m)) = moved("evacuate").filter(|&(_, m)| m > 0) {
+                if let Some((_, m)) = moved("evacuate").filter(|&(_, m)| m > 0 && !drained) {
                     detail += &format!(" — {} drained", human_bytes(m));
                 }
                 ops.push(nasty_system::Operation {
@@ -1353,7 +1360,7 @@ async fn build_operations(
                     fs: fs.name.clone(),
                     target: Some(dev.path.clone()),
                     run_id: None,
-                    state: "running".into(),
+                    state: if drained { "idle" } else { "running" }.into(),
                     progress_percent: None,
                     last_run_at: None,
                     last_duration_secs: None,
@@ -1569,6 +1576,15 @@ fn scrub_outcome_name(status: &nasty_storage::filesystem::ScrubStatus) -> Option
         (Some(ScrubOutcome::Cancelled), _) => Some("cancelled"),
         (None, _) => None,
     }
+}
+
+/// An evacuating member whose usage shows nothing left to move. Journal
+/// buckets stay allocated until the device is removed, so they don't count.
+fn evacuation_drained(has_data: Option<&str>) -> bool {
+    has_data
+        .unwrap_or_default()
+        .split(',')
+        .all(|t| matches!(t.trim(), "" | "journal" | "sb"))
 }
 
 /// The single informational row shown when no device is evacuating, so the
@@ -1797,8 +1813,8 @@ mod tests {
 #[cfg(test)]
 mod operations_tests {
     use super::{
-        diagnostics_access, evacuate_idle_row, filesystem_visible, scrub_idle_detail,
-        scrub_outcome_name, system_inventory_access_error,
+        diagnostics_access, evacuate_idle_row, evacuation_drained, filesystem_visible,
+        scrub_idle_detail, scrub_outcome_name, system_inventory_access_error,
     };
     use crate::auth::{Role, Session};
     use nasty_storage::filesystem::{ScrubErrorKind, ScrubOutcome, ScrubStatus};
@@ -1923,6 +1939,14 @@ mod operations_tests {
             scrub_idle_detail(&status(Some(1_700_000_000), None)),
             "Idle"
         );
+    }
+
+    #[test]
+    fn evacuation_drained_ignores_journal_only() {
+        assert!(evacuation_drained(None));
+        assert!(evacuation_drained(Some("journal")));
+        assert!(!evacuation_drained(Some("journal,btree")));
+        assert!(!evacuation_drained(Some("parity,stripe")));
     }
 
     #[test]
