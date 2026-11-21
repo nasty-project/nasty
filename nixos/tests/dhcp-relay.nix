@@ -131,6 +131,9 @@ in pkgs.testers.runNixOSTest {
     networking.firewall.allowedTCPPorts = [ 8080 ];
     systemd.services.wan-http = {
       wantedBy = [ "multi-user.target" ];
+      # Binds 203.0.113.2, which only exists once eth1's address unit has run.
+      wants = [ "network-addresses-eth1.service" ];
+      after = [ "network-addresses-eth1.service" ];
       serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 -m http.server 8080 --bind 203.0.113.2";
     };
   };
