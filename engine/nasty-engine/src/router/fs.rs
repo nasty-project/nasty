@@ -438,19 +438,21 @@ pub(super) async fn try_route(
             match parse_params::<nasty_storage::filesystem::DeviceActionRequest>(req) {
                 Ok(p) => match state.filesystems.device_remove_preflight(&p).await {
                     Err(e) => err(req, e),
-                    Ok(()) => match state
-                        .jobs
-                        .start(DEVICE_REMOVE_JOB, &p.filesystem, &p.device)
-                    {
-                        Ok(job) => {
-                            spawn_device_remove(state, session, job.id.clone(), p);
-                            ok(req, job)
+                    Ok(()) => {
+                        match state
+                            .jobs
+                            .start(DEVICE_REMOVE_JOB, &p.filesystem, &p.device, p.force)
+                        {
+                            Ok(job) => {
+                                spawn_device_remove(state, session, job.id.clone(), p);
+                                ok(req, job)
+                            }
+                            Err(running) => err(
+                                req,
+                                format!("removal of {} is already running", running.target),
+                            ),
                         }
-                        Err(running) => err(
-                            req,
-                            format!("removal of {} is already running", running.target),
-                        ),
-                    },
+                    }
                 },
                 Err(e) => invalid(req, e),
             }
