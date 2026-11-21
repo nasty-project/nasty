@@ -121,6 +121,7 @@ export interface Job {
 	finished_at: number | null;
 	error: string | null;
 	cancel_requested: boolean;
+	forced: boolean;
 }
 
 /** Scrub schedule state returned by `fs.scrub.schedule.update`. */

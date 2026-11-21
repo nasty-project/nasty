@@ -2808,14 +2808,16 @@
 							<div class="mt-2 flex flex-wrap items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
 								<div class="min-w-0">
 									<div class="font-medium">
-										{job.state === 'refused' ? `bcachefs refused to remove ${job.target}` : `Removing ${job.target} failed`}
+										{job.state === 'refused'
+											? job.forced ? `bcachefs refused to force-remove ${job.target} too` : `bcachefs refused to remove ${job.target}`
+											: `Removing ${job.target} failed`}
 									</div>
 									{#if job.error}
 										<pre class="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">{job.error}</pre>
 									{/if}
 								</div>
 								<div class="flex shrink-0 gap-1.5">
-									{#if job.state === 'refused' && fs.devices.some((d) => d.path === job.target && !d.missing)}
+									{#if job.state === 'refused' && !job.forced && fs.devices.some((d) => d.path === job.target && !d.missing)}
 										<Button variant="destructive" size="xs" disabled={!!busyDevices[job.target]} onclick={() => forceRemoveDevice(fs.name, job)}>Force remove</Button>
 									{/if}
 									<Button variant="secondary" size="xs" onclick={() => (dismissedRemovals[job.id] = true)}>Dismiss</Button>

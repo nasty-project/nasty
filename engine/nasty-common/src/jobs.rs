@@ -46,6 +46,9 @@ pub struct Job {
     pub error: Option<String>,
     /// Cancellation was requested; the job is still winding down.
     pub cancel_requested: bool,
+    /// Started with a safety check overridden (force-remove), so a refusal
+    /// means the override was refused too.
+    pub forced: bool,
 }
 
 #[derive(Default)]
@@ -56,7 +59,13 @@ pub struct JobRegistry {
 impl JobRegistry {
     /// Start a job, or return the one of the same kind already running on
     /// the same target.
-    pub fn start(&self, kind: &str, filesystem: &str, target: &str) -> Result<Job, Box<Job>> {
+    pub fn start(
+        &self,
+        kind: &str,
+        filesystem: &str,
+        target: &str,
+        forced: bool,
+    ) -> Result<Job, Box<Job>> {
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(running) = find_running(&jobs, kind, target) {
             return Err(Box::new(running.clone()));
@@ -71,6 +80,7 @@ impl JobRegistry {
             finished_at: None,
             error: None,
             cancel_requested: false,
+            forced,
         };
         jobs.push(job.clone());
         Ok(job)
@@ -152,19 +162,31 @@ mod tests {
     #[test]
     fn one_running_job_per_kind_and_target() {
         let jobs = JobRegistry::default();
-        let first = jobs.start("device.remove", "pool", "/dev/sdd").unwrap();
-        let again = jobs.start("device.remove", "pool", "/dev/sdd").unwrap_err();
+        let first = jobs
+            .start("device.remove", "pool", "/dev/sdd", false)
+            .unwrap();
+        let again = jobs
+            .start("device.remove", "pool", "/dev/sdd", false)
+            .unwrap_err();
         assert_eq!(again.id, first.id);
-        assert!(jobs.start("device.remove", "pool", "/dev/sde").is_ok());
+        assert!(
+            jobs.start("device.remove", "pool", "/dev/sde", false)
+                .is_ok()
+        );
 
         jobs.finish(&first.id, JobState::Refused, Some("would lose data".into()));
-        assert!(jobs.start("device.remove", "pool", "/dev/sdd").is_ok());
+        assert!(
+            jobs.start("device.remove", "pool", "/dev/sdd", false)
+                .is_ok()
+        );
     }
 
     #[test]
     fn failure_after_cancel_is_cancelled() {
         let jobs = JobRegistry::default();
-        let job = jobs.start("device.remove", "pool", "/dev/sdd").unwrap();
+        let job = jobs
+            .start("device.remove", "pool", "/dev/sdd", false)
+            .unwrap();
         assert!(jobs.request_cancel("device.remove", "/dev/sdd").is_some());
         let done = jobs
             .finish(&job.id, JobState::Failed, Some("signal 15".into()))
@@ -185,6 +207,7 @@ mod tests {
             finished_at,
             error: None,
             cancel_requested: false,
+            forced: false,
         };
         let now = 100_000;
         let mut jobs = vec![job(None), job(Some(now - FINISHED_RETENTION_SECS))];
