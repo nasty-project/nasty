@@ -6227,6 +6227,30 @@ async fn get_disk_free_space(disk_path: &str) -> Result<u64, String> {
     Ok(0)
 }
 
+/// `bcachefs show-super -f members_v2` output, cached per (uuid, device
+/// set). show-super reads the superblock off the disk, bypassing the page
+/// cache, so under heavy pool I/O one call took 30-40 s and stalled every
+/// discovery (#1051). What we use it for (per-slot Rotational, slot of a
+/// dropped path) only changes with the member set, which is the cache key.
+/// shortcut: a Rotational flag flipped outside NASty while the device set is
+/// unchanged stays stale until the engine restarts.
+async fn members_v2_cached(uuid: &str, device_paths: &[String], first_dev: &str) -> String {
+    type Cache = std::sync::Mutex<HashMap<(String, Vec<String>), String>>;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (uuid.to_string(), device_paths.to_vec());
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return hit.clone();
+    }
+    match cmd::run_ok("bcachefs", &["show-super", "-f", "members_v2", first_dev]).await {
+        Ok(out) => {
+            cache.lock().unwrap().insert(key, out.clone());
+            out
+        }
+        Err(_) => String::new(),
+    }
+}
+
 /// Read per-device info (labels, durability) for a mounted bcachefs filesystem.
 /// Uses `bcachefs show-super` on the first device to extract member info.
 async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemDevice> {
@@ -6235,9 +6259,7 @@ async fn read_fs_devices(uuid: &str, device_paths: &[String]) -> Vec<FilesystemD
         None => return Vec::new(),
     };
 
-    let member_info = cmd::run_ok("bcachefs", &["show-super", "-f", "members_v2", first_dev])
-        .await
-        .unwrap_or_default();
+    let member_info = members_v2_cached(uuid, device_paths, first_dev).await;
 
     // The authoritative member set for a mounted pool (incl. missing
     // members — phantom dev-N with no block device). Empty when unmounted.

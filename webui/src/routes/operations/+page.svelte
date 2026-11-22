@@ -18,6 +18,7 @@
 
 	let operations: Operation[] = $state([]);
 	let loading = $state(true);
+	let loadError = $state<string | null>(null);
 	let busy = $state<string | null>(null);
 	let isAdmin = $state(false);
 	let editingSchedule = $state<string | null>(null);
@@ -54,7 +55,11 @@
 			operations = edited && !next.some((op) => opKey(op) === editingSchedule)
 				? [...next, edited]
 				: next;
-		} catch { /* Keep the last good rows during transient poll failures. */ }
+			loadError = null;
+		} catch (e) {
+			// Keep the last good rows during transient poll failures.
+			loadError = e instanceof Error ? e.message : String(e);
+		}
 		loading = false;
 	}
 
@@ -194,7 +199,14 @@
 		{/if}
 	</p>
 
-	{#if !loading && operations.length === 0}
+	{#if !loading && operations.length === 0 && loadError}
+		<Card>
+			<CardContent class="flex flex-col items-center py-10 text-center text-muted-foreground" role="status">
+				Couldn't load operations ({loadError}). The system may be busy.
+				<Button size="sm" class="mt-2" onclick={() => void load()}>Retry</Button>
+			</CardContent>
+		</Card>
+	{:else if !loading && operations.length === 0}
 		<Card>
 			<CardContent class="py-10 text-center text-muted-foreground">
 				Nothing running. Scrubs and evacuations appear here while in progress; reconcile and
