@@ -58,6 +58,17 @@ impl SnapshotService {
             .clone_snapshot(req, owner_filter, allow_admin_override)
             .await
     }
+
+    pub async fn clone_snapshot_atomic(
+        &self,
+        req: CloneSnapshotRequest,
+        owner_filter: Option<&str>,
+        allow_admin_override: bool,
+    ) -> Result<Subvolume, SubvolumeError> {
+        self.subvolumes
+            .clone_snapshot_atomic(req, owner_filter, allow_admin_override)
+            .await
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────
