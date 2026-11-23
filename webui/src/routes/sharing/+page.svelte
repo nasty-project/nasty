@@ -13,7 +13,8 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
-	import { AlertTriangle } from '@lucide/svelte';
+	import { AlertTriangle, FolderOpen } from '@lucide/svelte';
+	import PathPicker from '$lib/components/PathPicker.svelte';
 	import NfsPanel from './NfsPanel.svelte';
 	import GuestSharesPanel from './GuestSharesPanel.svelte';
 	import SmbPanel from './SmbPanel.svelte';
@@ -81,6 +82,7 @@
 	let shareNvmeofPort = $state('4420');
 
 	let shareSubvolumes: Subvolume[] = $state([]);
+	let sharePickerOpen = $state(false);
 	let isAdmin = $state(false);
 	let canMutateShareProtocols = $state(false);
 	let canMutateSmbIdentities = $state(false);
@@ -170,12 +172,27 @@
 		)
 	);
 
+	type ShareSource = Pick<Subvolume, 'name' | 'path' | 'block_device'>;
+
+	/** A picked folder that isn't itself a subvolume (NFS/SMB only). */
+	const shareFolder = $derived(
+		!isBlock && shareSubvolume && !shareSubvolumes.some(sv => sv.path === shareSubvolume) ? shareSubvolume : ''
+	);
+
+	function shareSource(): ShareSource | undefined {
+		if (!shareSubvolume) return undefined;
+		const sv = shareSubvolumes.find(s => s.path === shareSubvolume || s.block_device === shareSubvolume);
+		if (sv) return sv;
+		if (!shareFolder) return undefined;
+		return { name: shareFolder.split('/').filter(Boolean).at(-1) ?? shareFolder, path: shareFolder, block_device: null };
+	}
+
 	// Per-protocol "create one share" hook. Each entry knows its own
 	// API method + payload shape; createShare() just dispatches. This
 	// replaces a 4-way if/else cascade with a single registry lookup.
 	const protocolCreators: Record<
 		'nfs' | 'smb' | 'iscsi' | 'nvmeof',
-		(sv: Subvolume) => Promise<unknown>
+		(sv: ShareSource) => Promise<unknown>
 	> = {
 		nfs: (sv) => withToast(
 			() => client.call('share.nfs.create', {
@@ -215,8 +232,7 @@
 	};
 
 	async function createShare() {
-		if (!shareSubvolume) return;
-		const sv = shareSubvolumes.find(s => s.path === shareSubvolume || s.block_device === shareSubvolume);
+		const sv = shareSource();
 		if (!sv) return;
 		const ok = await protocolCreators[shareProtocol](sv);
 		if (ok !== undefined) {
@@ -392,9 +408,13 @@
 			<!-- Step 2: Source -->
 			{:else if shareWizardStep === 2}
 			<div class="mb-4">
-				<Label>Subvolume</Label>
-				<select bind:value={shareSubvolume} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+				<Label>{isBlock ? 'Subvolume' : 'Subvolume or folder'}</Label>
+				<div class="mt-1 flex gap-2">
+				<select bind:value={shareSubvolume} class="h-9 min-w-0 flex-1 rounded-md border border-input bg-transparent px-3 text-sm">
 					<option value="">Select a subvolume...</option>
+					{#if shareFolder}
+						<option value={shareFolder}>Folder: {shareFolder}</option>
+					{/if}
 					{#each filteredShareSubvolumes as sv}
 						{#if isBlock}
 							<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
@@ -403,6 +423,15 @@
 						{/if}
 					{/each}
 				</select>
+				{#if !isBlock}
+					<Button variant="secondary" size="sm" class="h-9" onclick={() => sharePickerOpen = true}>
+						<FolderOpen size={14} class="mr-1" /> Browse…
+					</Button>
+				{/if}
+				</div>
+				{#if !isBlock}
+					<p class="mt-1 text-xs text-muted-foreground">Share a whole subvolume, or browse to a folder inside one.</p>
+				{/if}
 				{#if filteredShareSubvolumes.length === 0 && !showInlineCreate}
 					<p class="mt-1 text-xs text-muted-foreground">
 						No {isBlock ? 'block' : 'filesystem'} subvolumes available.
@@ -445,8 +474,8 @@
 			<div class="flex gap-2">
 				<Button variant="secondary" size="sm" onclick={() => shareWizardStep = 1}>← Back</Button>
 				<Button size="sm" onclick={() => {
-					// Auto-fill names from subvolume
-					const sv = shareSubvolumes.find(s => s.path === shareSubvolume || s.block_device === shareSubvolume);
+					// Auto-fill names from the subvolume or folder
+					const sv = shareSource();
 					if (sv) {
 						if (shareProtocol === 'smb' && !shareSmbName) shareSmbName = sv.name;
 						if (shareProtocol === 'iscsi' && !shareIscsiName) shareIscsiName = sv.name;
@@ -627,3 +656,16 @@
 		</div>
 	</div>
 {/if}
+
+<PathPicker
+	open={sharePickerOpen}
+	initialPath={shareSubvolume}
+	title="Pick a folder to share"
+	onPick={(path) => {
+		shareSubvolume = path;
+		sharePickerOpen = false;
+		// The picker can create subvolumes; refresh so they list as such.
+		loadShareSubvolumes();
+	}}
+	onClose={() => { sharePickerOpen = false; }}
+/>
