@@ -743,7 +743,8 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each summary.memory.dimms as dimm (dimm.locator)}
+								<!-- Unkeyed: firmware can repeat Locator across banks (#1071). -->
+								{#each summary.memory.dimms as dimm}
 									<tr class="border-t border-border/40 {dimm.size_bytes === 0 ? 'opacity-50' : ''}">
 										<td class="py-2 pr-3 font-mono text-xs">{dimm.locator}</td>
 										<td class="py-2 pr-3"
