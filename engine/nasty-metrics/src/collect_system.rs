@@ -684,7 +684,19 @@ pub async fn disk_health(cache: &mut DiskPollCache) -> Vec<DiskHealth> {
     devices.sort();
     // `--scan-open` opens every device; only repeat it when disks come or go.
     if cache.endpoints.is_empty() || devices != cache.devices {
-        cache.endpoints = scan_smartctl_endpoints().await;
+        let mut endpoints = scan_smartctl_endpoints().await;
+        for e in &mut endpoints {
+            let Some(ctrl) = e.device.strip_prefix("/dev/") else {
+                continue;
+            };
+            let serial = tokio::fs::read_to_string(format!("/sys/class/nvme/{ctrl}/serial"))
+                .await
+                .ok();
+            if let Some(ns) = nvme_namespace_for(&e.device, serial.as_deref(), &lsblk_disks) {
+                e.device = ns;
+            }
+        }
+        cache.endpoints = endpoints;
         cache.devices = devices;
     }
     let endpoints = cache.endpoints.clone();
@@ -733,6 +745,28 @@ pub async fn disk_health(cache: &mut DiskPollCache) -> Vec<DiskHealth> {
         .map(|d| ((d.device.clone(), d.transport.clone()), d.clone()))
         .collect();
     results
+}
+
+/// `smartctl --scan-open` names NVMe drives by controller (`/dev/nvme2`),
+/// while lsblk, pools and the PCI view use the namespace (`/dev/nvme2n1`),
+/// so the two never matched and every NVMe drive showed SMART unavailable
+/// (#1072). Map the controller to the lsblk disk with its serial; serial
+/// rather than name, since native multipath numbers namespaces by
+/// subsystem. shortcut: drives with several namespaces keep the controller
+/// path, as one serial matches more than one disk.
+fn nvme_namespace_for(device: &str, serial: Option<&str>, disks: &[LsblkDisk]) -> Option<String> {
+    let ctrl = device.strip_prefix("/dev/nvme")?;
+    if ctrl.is_empty() || !ctrl.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let serial = serial.map(str::trim).filter(|s| !s.is_empty())?;
+    let mut hits = disks
+        .iter()
+        .filter(|d| d.device.starts_with("/dev/nvme") && d.serial.trim() == serial);
+    match (hits.next(), hits.next()) {
+        (Some(d), None) => Some(d.device.clone()),
+        _ => None,
+    }
 }
 
 /// One SMART-reachable endpoint discovered by `smartctl --scan-open -j`.
@@ -1530,6 +1564,33 @@ fn parse_pcie_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nvme_controller_maps_to_namespace_by_serial() {
+        let disk = |device: &str, serial: &str| LsblkDisk {
+            device: device.into(),
+            size_bytes: 0,
+            model: String::new(),
+            serial: serial.into(),
+        };
+        let disks = [
+            disk("/dev/nvme1n1", "9EJKF0GYZ0EA"),
+            disk("/dev/nvme2n1", "9EWKF1JFZ0EA"),
+            disk("/dev/sda", "9EWKF1JFZ0EA"),
+            disk("/dev/nvme3n1", "DUP"),
+            disk("/dev/nvme3n2", "DUP"),
+        ];
+        let map = |dev, serial| nvme_namespace_for(dev, serial, &disks);
+        // sysfs pads the serial with spaces and a newline.
+        assert_eq!(
+            map("/dev/nvme2", Some("9EWKF1JFZ0EA      \n")).as_deref(),
+            Some("/dev/nvme2n1")
+        );
+        assert_eq!(map("/dev/nvme2", None), None);
+        assert_eq!(map("/dev/nvme3", Some("DUP")), None);
+        assert_eq!(map("/dev/nvme2n1", Some("9EWKF1JFZ0EA")), None);
+        assert_eq!(map("/dev/sda", Some("9EWKF1JFZ0EA")), None);
+    }
 
     // Real-world `smartctl -a --json=c` payloads collected from four
     // independent NVMe vendors so the parser keeps working when smartctl
