@@ -13,10 +13,7 @@
 		nfsRemove,
 		nfsAddClient,
 		nfsRemoveClient,
-		nfsLoadSubvolumes,
 	} from '$lib/sharing/nfs.svelte';
-
-	$effect(() => { if (nfs.showCreate) nfsLoadSubvolumes(); });
 
 	/** Per-panel "tried Add" flag — defers the amber required-field
 	 * decoration until the operator has clicked Add at least once

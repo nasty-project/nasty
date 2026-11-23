@@ -17,11 +17,8 @@ function initialIscsiState() {
 		loading: true,
 		protocol: null as ProtocolStatus | null,
 		iqnPrefix: 'iqn.2137-04.storage.nasty',
-		showCreate: false,
 		blockSubvolumes: [] as Subvolume[],
 		expanded: {} as Record<string, boolean>,
-		newName: '',
-		newDevice: '',
 		addLunTarget: '',
 		addLunPath: '',
 		addLunType: '',
@@ -83,27 +80,6 @@ export async function iscsiLoadSubvolumes() {
 		const all = await getClient().call<Subvolume[]>('subvolume.list_all');
 		iscsi.blockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
 	});
-}
-
-export function iscsiOnDeviceSelect() {
-	if (iscsi.newDevice && !iscsi.newName) {
-		const sv = iscsi.blockSubvolumes.find(s => s.block_device === iscsi.newDevice);
-		if (sv) iscsi.newName = sv.name;
-	}
-}
-
-export async function iscsiCreate() {
-	if (!iscsi.newName || !iscsi.newDevice) return;
-	const ok = await withToast(
-		() => getClient().call('share.iscsi.create', { name: iscsi.newName, device_path: iscsi.newDevice }),
-		'iSCSI target created'
-	);
-	if (ok !== undefined) {
-		iscsi.showCreate = false;
-		iscsi.newName = '';
-		iscsi.newDevice = '';
-		await iscsiRefresh();
-	}
 }
 
 export async function iscsiRemove(id: string) {

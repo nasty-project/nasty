@@ -16,13 +16,8 @@ function initialNvmeState() {
 		loading: true,
 		protocol: null as ProtocolStatus | null,
 		nqnPrefix: 'nqn.2137-04.storage.nasty',
-		showCreate: false,
 		blockSubvolumes: [] as Subvolume[],
 		expanded: {} as Record<string, boolean>,
-		newName: '',
-		newDevice: '',
-		newAddr: '0.0.0.0',
-		newPort: 4420,
 		addNsSubsys: '',
 		addNsDevice: '',
 		repairNsSubsys: '',
@@ -75,34 +70,6 @@ export async function nvmeLoadSubvolumes() {
 		const all = await getClient().call<Subvolume[]>('subvolume.list_all');
 		nvme.blockSubvolumes = all.filter(s => s.subvolume_type === 'block' && s.block_device);
 	});
-}
-
-export function nvmeOnDeviceSelect() {
-	if (nvme.newDevice && !nvme.newName) {
-		const sv = nvme.blockSubvolumes.find(s => s.block_device === nvme.newDevice);
-		if (sv) nvme.newName = sv.name;
-	}
-}
-
-export async function nvmeCreate() {
-	if (!nvme.newName || !nvme.newDevice) return;
-	const ok = await withToast(
-		() => getClient().call('share.nvmeof.create', {
-			name: nvme.newName,
-			device_path: nvme.newDevice,
-			addr: nvme.newAddr,
-			port: nvme.newPort,
-		}),
-		'NVMe-oF share created'
-	);
-	if (ok !== undefined) {
-		nvme.showCreate = false;
-		nvme.newName = '';
-		nvme.newDevice = '';
-		nvme.newAddr = '0.0.0.0';
-		nvme.newPort = 4420;
-		await nvmeRefresh();
-	}
 }
 
 export async function nvmeRemove(id: string) {

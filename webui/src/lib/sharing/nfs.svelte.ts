@@ -14,7 +14,7 @@
 import { getClient, registerSessionReset } from '$lib/client';
 import { withToast } from '$lib/toast.svelte';
 import { confirm } from '$lib/confirm.svelte';
-import type { NfsShare, Subvolume, ProtocolStatus } from '$lib/types';
+import type { NfsShare, ProtocolStatus } from '$lib/types';
 
 export type NfsSortKey = 'path' | 'status';
 
@@ -23,12 +23,6 @@ function initialNfsState() {
 		shares: [] as NfsShare[],
 		loading: true,
 		protocol: null as ProtocolStatus | null,
-		showCreate: false,
-		subvolumes: [] as Subvolume[],
-		newSubvolume: '',
-		newComment: '',
-		newHost: '',
-		newOptions: 'rw,sync,no_subtree_check',
 		expanded: {} as Record<string, boolean>,
 		addClientShare: null as string | null,
 		addClientHost: '',
@@ -65,32 +59,6 @@ export async function nfsLoadProtocol() {
 		const all = await getClient().call<ProtocolStatus[]>('service.protocol.list');
 		nfs.protocol = all.find(p => p.name === 'nfs') ?? null;
 	} catch { /* ignore */ }
-}
-
-export async function nfsLoadSubvolumes() {
-	await withToast(async () => {
-		const all = await getClient().call<Subvolume[]>('subvolume.list_all');
-		nfs.subvolumes = all.filter(s => s.subvolume_type === 'filesystem');
-	});
-}
-
-export async function nfsCreate() {
-	if (!nfs.newSubvolume || !nfs.newHost) return;
-	const ok = await withToast(
-		() => getClient().call('share.nfs.create', {
-			path: nfs.newSubvolume,
-			comment: nfs.newComment || undefined,
-			clients: [{ host: nfs.newHost, options: nfs.newOptions }],
-		}),
-		'NFS share created'
-	);
-	if (ok !== undefined) {
-		nfs.showCreate = false;
-		nfs.newSubvolume = '';
-		nfs.newComment = '';
-		nfs.newHost = '';
-		await nfsRefresh();
-	}
 }
 
 export async function nfsToggleEnabled(share: NfsShare) {
