@@ -164,6 +164,10 @@ pub struct DiskHealth {
     /// pass-throughs typically leave `interface_speed` unpopulated).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ata: Option<AtaHealth>,
+    /// The last poll found the drive in standby (spun down) and left it
+    /// asleep; the SMART fields are from before it slept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standby: bool,
 }
 
 /// ATA / SATA summary fields complementing the generic SMART attribute

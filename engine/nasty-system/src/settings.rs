@@ -322,6 +322,10 @@ pub struct Settings {
     /// Whether pseudonymous usage telemetry is enabled.
     #[serde(default = "default_telemetry_enabled")]
     pub telemetry_enabled: bool,
+    /// Minutes between SMART polls (1-1440). Each poll checks whether
+    /// HDDs are in standby without waking them.
+    #[serde(default = "default_smart_poll_minutes")]
+    pub smart_poll_minutes: u32,
     /// OpenID Connect single-sign-on configuration. Disabled by default.
     #[serde(default)]
     pub oidc: OidcSettings,
@@ -541,6 +545,10 @@ fn default_clock_24h() -> bool {
     true
 }
 
+fn default_smart_poll_minutes() -> u32 {
+    5
+}
+
 fn default_telemetry_enabled() -> bool {
     true
 }
@@ -565,6 +573,7 @@ impl Default for Settings {
             tls_dns_resolver: None,
             tls_dns_propagation_wait: None,
             telemetry_enabled: default_telemetry_enabled(),
+            smart_poll_minutes: default_smart_poll_minutes(),
             oidc: OidcSettings::default(),
         }
     }
@@ -604,6 +613,8 @@ pub struct SettingsUpdate {
     pub tls_dns_propagation_wait: Option<u32>,
     /// Enable/disable pseudonymous usage telemetry.
     pub telemetry_enabled: Option<bool>,
+    /// Minutes between SMART polls, 1-1440 (optional).
+    pub smart_poll_minutes: Option<u32>,
 }
 
 pub struct SettingsService {
@@ -709,6 +720,12 @@ impl SettingsService {
             .as_deref()
             .map(normalize_dashboard_motd)
             .transpose()?;
+        if let Some(minutes) = update.smart_poll_minutes {
+            if !(1..=1440).contains(&minutes) {
+                return Err("SMART poll interval must be 1-1440 minutes".into());
+            }
+            settings.smart_poll_minutes = minutes;
+        }
         // Validate and stage the coupled TLS fields before applying any
         // external side effects such as timezone or hostname changes.
         let mut tls_changed = apply_domain_updates(
