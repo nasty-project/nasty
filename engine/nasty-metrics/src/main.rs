@@ -213,10 +213,10 @@ async fn system_collector(state: Arc<AppState>) {
 }
 
 /// Disk health collector. SMART changes slowly and every query is traffic to
-/// the disk, so poll every 5 minutes, and only while SMART is enabled. The
-/// toggle is checked every minute so enabling SMART shows data promptly.
+/// the disk, so poll at the configured interval (default 5 minutes), and only
+/// while SMART is enabled. The toggle and interval are checked every minute so
+/// changes apply promptly.
 async fn disk_collector(state: Arc<AppState>) {
-    const POLL: std::time::Duration = std::time::Duration::from_secs(300);
     let mut cache = collect_system::DiskPollCache::default();
     let mut last_poll: Option<std::time::Instant> = None;
     loop {
@@ -224,7 +224,7 @@ async fn disk_collector(state: Arc<AppState>) {
             cache = Default::default();
             last_poll = None;
             state.disks.write().await.clear();
-        } else if last_poll.is_none_or(|t| t.elapsed() >= POLL) {
+        } else if last_poll.is_none_or(|t| t.elapsed() >= collect_system::smart_poll_interval()) {
             let disks = collect_system::disk_health(&mut cache).await;
             *state.disks.write().await = disks;
             last_poll = Some(std::time::Instant::now());

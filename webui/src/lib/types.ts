@@ -972,6 +972,8 @@ export interface DiskHealth {
 	nvme?: NvmeHealth;
 	scsi?: ScsiHealth;
 	ata?: AtaHealth;
+	/** Last poll found the drive spun down; SMART fields predate it. */
+	standby?: boolean;
 }
 
 /** PCIe link state for a storage controller, sourced from
@@ -1270,6 +1272,7 @@ export interface Settings {
 	tls_dns_resolver: string | null;
 	tls_dns_propagation_wait: number | null;
 	telemetry_enabled: boolean;
+	smart_poll_minutes: number;
 	oidc: OidcSettings;
 }
 

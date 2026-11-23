@@ -44,6 +44,11 @@
 		return matches.length > 0 && matches.every((disk) => disk.smart_status === 'UNAVAILABLE');
 	}
 
+	function standby(device: FilesystemDevice): boolean {
+		const matches = healthEntriesFor(device);
+		return matches.length > 0 && matches.every((disk) => disk.standby);
+	}
+
 	function rateFor(device: FilesystemDevice): DiskRate | undefined {
 		return rates.get(deviceName(device.path));
 	}
@@ -65,6 +70,7 @@
 		if (device.state === 'failed') return { label: 'failed', className: 'border-red-800 bg-red-950 text-red-300' };
 		if (device.state === 'evacuating') return { label: 'evacuating', className: 'border-amber-700 bg-amber-950 text-amber-300' };
 		if (device.state === 'ro') return { label: 'ro', className: 'border-amber-700 bg-amber-950 text-amber-300' };
+		if (standby(device)) return { label: 'standby', className: 'border-sky-800 bg-sky-950 text-sky-300' };
 		if (smartUnavailable(device)) return { label: 'SMART unavailable', className: 'border-border bg-muted text-muted-foreground' };
 		return { label: device.state ?? 'online', className: 'border-emerald-800 bg-emerald-950 text-emerald-300' };
 	}
@@ -129,7 +135,7 @@
 											<td class="px-3 text-right"><div class="tabular-nums">{usage ? formatBytes(usage.used_bytes) : '-'}</div>{#if usage}<div class="ml-auto mt-1 h-1 w-20 overflow-hidden rounded-full bg-secondary"><div class="h-full rounded-full {barColor(allocationPercent)}" style="width: {Math.min(100, allocationPercent)}%"></div></div>{/if}</td>
 											<td class="px-3 text-right tabular-nums text-muted-foreground">{usage ? formatBytes(usage.free_bytes) : '-'}</td>
 											<td class="px-3 text-right tabular-nums"><span class="text-cyan-400">{rate ? formatBytes(rate.readRate) + '/s' : '-'}</span><span class="mx-1 text-muted-foreground">/</span><span class="text-violet-400">{rate ? formatBytes(rate.writeRate) + '/s' : '-'}</span></td>
-											<td class="px-4 text-right font-medium {smartFailed(device) ? 'text-red-400' : disk?.temperature_c != null && disk.temperature_c >= 50 ? 'text-amber-400' : disk?.temperature_c != null ? 'text-emerald-400' : 'text-muted-foreground'}">{formatTemp(disk?.temperature_c ?? null) ?? '-'}</td>
+											<td title={disk?.standby ? 'Last reading before standby' : undefined} class="px-4 text-right font-medium {smartFailed(device) ? 'text-red-400' : disk?.standby ? 'text-muted-foreground' : disk?.temperature_c != null && disk.temperature_c >= 50 ? 'text-amber-400' : disk?.temperature_c != null ? 'text-emerald-400' : 'text-muted-foreground'}">{formatTemp(disk?.temperature_c ?? null) ?? '-'}</td>
 										</tr>
 									{/each}
 								</tbody>

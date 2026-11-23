@@ -399,6 +399,15 @@
 		);
 	}
 
+	async function saveSmartPoll(minutes: number) {
+		if (!settings) return;
+		settings.smart_poll_minutes = minutes;
+		await withToast(
+			() => client.call('system.settings.update', { smart_poll_minutes: minutes }),
+			`SMART poll interval: ${minutes} min`
+		);
+	}
+
 	async function saveTelemetry(enabled: boolean) {
 		if (!settings) return;
 		settings.telemetry_enabled = enabled;
@@ -930,6 +939,20 @@
 								class="rounded-r-md px-3 py-1 font-medium transition-colors {settings.temp_unit === 'fahrenheit' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'}"
 							>°F</button>
 						</div>
+					</div>
+
+					<div class="mb-4 flex items-center justify-between gap-3">
+						<label for="smart-poll" class="text-sm text-muted-foreground" title="How often disk health and standby state are checked. Polls don't wake sleeping drives.">SMART Poll Interval</label>
+						<select
+							id="smart-poll"
+							value={settings.smart_poll_minutes ?? 5}
+							onchange={(e) => saveSmartPoll(Number(e.currentTarget.value))}
+							class="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+						>
+							{#each [...new Set([1, 5, 15, 30, 60, settings.smart_poll_minutes ?? 5])].sort((a, b) => a - b) as m (m)}
+								<option value={m}>{m} min</option>
+							{/each}
+						</select>
 					</div>
 
 					<div class="flex gap-2">

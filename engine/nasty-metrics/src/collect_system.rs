@@ -658,6 +658,25 @@ pub fn smart_enabled() -> bool {
     )
 }
 
+/// Time between SMART polls, from the engine's `smart_poll_minutes`
+/// setting. Missing or out-of-range values fall back to 5 minutes.
+pub fn smart_poll_interval() -> std::time::Duration {
+    smart_poll_interval_in(
+        std::fs::read_to_string("/var/lib/nasty/settings.json")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn smart_poll_interval_in(settings: Option<&str>) -> std::time::Duration {
+    let minutes = settings
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("smart_poll_minutes")?.as_u64())
+        .filter(|m| (1..=1440).contains(m))
+        .unwrap_or(5);
+    std::time::Duration::from_secs(minutes * 60)
+}
+
 fn smart_enabled_in(state: Option<&str>) -> bool {
     state
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -939,8 +958,15 @@ async fn build_disk_health(
     let s = match query_smartctl(&endpoint.device, endpoint.transport.as_deref()).await {
         SmartQuery::Report(s) => *s,
         // A spun-down disk keeps its last report rather than being woken.
-        SmartQuery::Asleep if let Some(previous) = previous => return previous.clone(),
-        SmartQuery::Asleep | SmartQuery::Unavailable => {
+        SmartQuery::Asleep => {
+            let mut health = match previous {
+                Some(previous) => previous.clone(),
+                None => build_disk_health_unreachable_for_endpoint(endpoint, lsblk_hint),
+            };
+            health.standby = true;
+            return health;
+        }
+        SmartQuery::Unavailable => {
             return build_disk_health_unreachable_for_endpoint(endpoint, lsblk_hint);
         }
     };
@@ -988,6 +1014,7 @@ async fn build_disk_health(
         nvme: s.nvme,
         scsi: s.scsi,
         ata: s.ata,
+        standby: false,
     }
 }
 
@@ -1033,6 +1060,7 @@ fn build_disk_health_unreachable_for_endpoint(
         nvme: None,
         scsi: None,
         ata: None,
+        standby: false,
     }
 }
 
@@ -2087,6 +2115,16 @@ mod tests {
         assert!(smart_enabled_in(None));
         assert!(smart_enabled_in(Some(r#"{"ssh":true}"#)));
         assert!(smart_enabled_in(Some("not json")));
+    }
+
+    #[test]
+    fn smart_poll_interval_reads_setting_with_fallback() {
+        let mins = |s: Option<&str>| smart_poll_interval_in(s).as_secs() / 60;
+        assert_eq!(mins(Some(r#"{"smart_poll_minutes":30}"#)), 30);
+        assert_eq!(mins(Some(r#"{"smart_poll_minutes":0}"#)), 5);
+        assert_eq!(mins(Some(r#"{"smart_poll_minutes":5000}"#)), 5);
+        assert_eq!(mins(Some(r#"{"timezone":"UTC"}"#)), 5);
+        assert_eq!(mins(None), 5);
     }
 
     #[test]
