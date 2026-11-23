@@ -22,8 +22,8 @@ describe('session state reset', () => {
 		domain.password = 'domain secret';
 		dc.adminPassword = 'dc secret';
 		rdma.loading = true;
-		nfs.newHost = '192.0.2.1';
-		smb.newName = 'private';
+		nfs.addClientHost = '192.0.2.1';
+		smb.addUserName = 'private';
 		iscsi.addAclPass = 'chap secret';
 		nvme.addHostNqn = 'nqn.2026-01.test:host';
 		rollbackState.set({ txnId: 'txn-1', revertAtUnix: 1234, riskReason: null });
@@ -41,8 +41,8 @@ describe('session state reset', () => {
 		expect(domain.password).toBe('');
 		expect(dc.adminPassword).toBe('');
 		expect(rdma.loading).toBe(false);
-		expect(nfs.newHost).toBe('');
-		expect(smb.newName).toBe('');
+		expect(nfs.addClientHost).toBe('');
+		expect(smb.addUserName).toBe('');
 		expect(iscsi.addAclPass).toBe('');
 		expect(nvme.addHostNqn).toBe('');
 		expect(rollbackState.pending).toBeNull();

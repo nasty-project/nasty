@@ -5,21 +5,15 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
-	import { Label } from '$lib/components/ui/label';
-	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
-	import { requiredFieldCls } from '$lib/utils';
 	import {
 		smb,
 		smbToggleSort,
 		smbRefresh,
-		smbCreate,
 		smbToggleEnabled,
 		smbRemove,
 		smbToggleField,
 		smbRemoveUser,
-		smbOnSubvolumeSelect,
-		smbLoadSubvolumes,
 		smbEnsureSystemUsers,
 	} from '$lib/sharing/smb.svelte';
 	import { domain, domainSearchUsers } from '$lib/domain.svelte';
@@ -37,18 +31,6 @@
 		const valid_users = [...share.valid_users, entry];
 		withToast(() => client.call('share.smb.update', { id: share.id, valid_users }), `${entry} added`).then(() => smbRefresh());
 	}
-
-	/** Gates the amber required-field decoration on the SMB create form
-	 * until the operator has clicked Create at least once with a missing
-	 * field. Without it the form opens "alarmed" before any input. */
-	let createTried = $state(false);
-	async function smbCreateGuarded() {
-		if (!smb.newName || !smb.newSubvolume) { createTried = true; return; }
-		createTried = false;
-		await smbCreate();
-	}
-
-	$effect(() => { if (smb.showCreate) smbLoadSubvolumes(); });
 
 	const smbFiltered = $derived(
 		smb.search.trim()
@@ -74,69 +56,6 @@
 <div class="mb-4 flex items-center gap-3">
 	<Input bind:value={smb.search} placeholder="Search..." class="h-9 w-48" />
 </div>
-
-{#if smb.showCreate}
-	<Card class="mb-6 max-w-2xl">
-		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
-			<div class="mb-4">
-				<Label for="smb-subvol">Subvolume {#if !smb.newSubvolume && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<select id="smb-subvol" bind:value={smb.newSubvolume} onchange={smbOnSubvolumeSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!smb.newSubvolume, createTried)}">
-					<option value="">Select a subvolume...</option>
-					{#each smb.subvolumes as sv}
-						<option value={sv.path}>{sv.filesystem}/{sv.name} ({sv.path})</option>
-					{/each}
-				</select>
-				{#if smb.subvolumes.length === 0}
-					<span class="mt-1 block text-xs text-muted-foreground">No filesystem subvolumes found.</span>
-					<Button size="xs" class="mt-1" onclick={() => goto('/subvolumes')}>Subvolumes</Button>
-				{/if}
-			</div>
-			<div class="mb-4">
-				<Label for="smb-name">Share Name {#if !smb.newName && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="smb-name" bind:value={smb.newName} placeholder="documents" class="mt-1 {requiredFieldCls(!smb.newName, createTried)}" />
-				<span class="mt-1 block text-xs text-muted-foreground">Name visible to network clients</span>
-			</div>
-			<div class="mb-4">
-				<Label for="smb-comment">Comment</Label>
-				<Input id="smb-comment" bind:value={smb.newComment} placeholder="Optional description" class="mt-1" />
-			</div>
-			<div class="mb-4">
-				<label class="flex cursor-pointer items-center gap-2">
-					<input
-						type="checkbox"
-						bind:checked={smb.newTimeMachine}
-						onchange={() => { if (smb.newTimeMachine) { smb.newGuestOk = false; smb.newReadOnly = false; } }}
-						class="h-4 w-4" />
-					Time Machine — macOS backup destination
-				</label>
-				{#if smb.newTimeMachine}
-					<div class="mt-2 ml-6 flex items-center gap-2 text-sm">
-						<span class="text-muted-foreground">Max size (GiB)</span>
-						<input
-							type="number"
-							min="1"
-							placeholder="unlimited"
-							value={smb.newTmMaxSize ?? ''}
-							oninput={(e) => { const v = (e.target as HTMLInputElement).value; smb.newTmMaxSize = v === '' ? null : Number(v); }}
-							class="h-8 w-32 rounded-md border border-input bg-transparent px-2 text-sm" />
-					</div>
-				{/if}
-			</div>
-			{#if !smb.newTimeMachine}
-				<div class="mb-4 flex gap-6">
-					<label class="flex cursor-pointer items-center gap-2">
-						<input type="checkbox" bind:checked={smb.newReadOnly} class="h-4 w-4" /> Read-only
-					</label>
-					<label class="flex cursor-pointer items-center gap-2">
-						<input type="checkbox" bind:checked={smb.newGuestOk} class="h-4 w-4" /> Allow guests
-					</label>
-				</div>
-			{/if}
-			<Button onclick={smbCreateGuarded}>Create</Button>
-		</CardContent>
-	</Card>
-{/if}
 
 {#if smb.loading}
 	<p class="text-muted-foreground">Loading...</p>

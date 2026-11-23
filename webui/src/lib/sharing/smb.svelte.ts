@@ -12,7 +12,7 @@
 import { getClient, registerSessionReset } from '$lib/client';
 import { withToast } from '$lib/toast.svelte';
 import { confirm } from '$lib/confirm.svelte';
-import type { SmbShare, SmbGroup, Subvolume, ProtocolStatus } from '$lib/types';
+import type { SmbShare, SmbGroup, ProtocolStatus } from '$lib/types';
 
 export type SmbSortKey = 'name' | 'path' | 'status';
 
@@ -21,15 +21,6 @@ function initialSmbState() {
 		shares: [] as SmbShare[],
 		loading: true,
 		protocol: null as ProtocolStatus | null,
-		showCreate: false,
-		subvolumes: [] as Subvolume[],
-		newSubvolume: '',
-		newName: '',
-		newComment: '',
-		newReadOnly: false,
-		newGuestOk: false,
-		newTimeMachine: false,
-		newTmMaxSize: null as number | null,
 		expanded: {} as Record<string, boolean>,
 		addUserShare: null as string | null,
 		addUserName: '',
@@ -79,45 +70,6 @@ export async function smbLoadProtocol() {
 		const all = await getClient().call<ProtocolStatus[]>('service.protocol.list');
 		smb.protocol = all.find(p => p.name === 'smb') ?? null;
 	} catch { /* ignore */ }
-}
-
-export async function smbLoadSubvolumes() {
-	await withToast(async () => {
-		const all = await getClient().call<Subvolume[]>('subvolume.list_all');
-		smb.subvolumes = all.filter(s => s.subvolume_type === 'filesystem');
-	});
-}
-
-export function smbOnSubvolumeSelect() {
-	if (smb.newSubvolume && !smb.newName) {
-		const sv = smb.subvolumes.find(s => s.path === smb.newSubvolume);
-		if (sv) smb.newName = sv.name;
-	}
-}
-
-export async function smbCreate() {
-	if (!smb.newName || !smb.newSubvolume) return;
-	const ok = await withToast(
-		() => getClient().call('share.smb.create', {
-			name: smb.newName,
-			path: smb.newSubvolume,
-			comment: smb.newComment || undefined,
-			read_only: smb.newReadOnly,
-			guest_ok: smb.newGuestOk,
-			time_machine: smb.newTimeMachine,
-			time_machine_max_size_gib: smb.newTmMaxSize ?? undefined,
-		}),
-		'SMB share created'
-	);
-	if (ok !== undefined) {
-		smb.showCreate = false;
-		smb.newSubvolume = '';
-		smb.newName = '';
-		smb.newComment = '';
-		smb.newTimeMachine = false;
-		smb.newTmMaxSize = null;
-		await smbRefresh();
-	}
 }
 
 export async function smbToggleEnabled(share: SmbShare) {

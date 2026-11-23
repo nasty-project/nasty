@@ -3,7 +3,6 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
-	import { Card, CardContent } from '$lib/components/ui/card';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 	import { validateAddressForFamily } from '$lib/network';
@@ -12,8 +11,6 @@
 	import {
 		nvme,
 		nvmeToggleSort,
-		nvmeOnDeviceSelect,
-		nvmeCreate,
 		nvmeRemove,
 		nvmeAddNamespace,
 		nvmeRemoveNamespace,
@@ -23,27 +20,19 @@
 		nvmeAddHost,
 		nvmeRemoveHost,
 		nvmeLoadSubvolumes,
-		nvmeLoadBaseNqn,
 	} from '$lib/sharing/nvmeof.svelte';
 
 	let { isAdmin = false }: { isAdmin?: boolean } = $props();
 
 	$effect(() => {
-		if (nvme.showCreate || nvme.addNsSubsys || nvme.repairNsSubsys) nvmeLoadSubvolumes();
-		if (nvme.showCreate) nvmeLoadBaseNqn();
+		if (nvme.addNsSubsys || nvme.repairNsSubsys) nvmeLoadSubvolumes();
 	});
 
 	// Per-form "tried" flags — defer amber required-field decoration
 	// until each submit button is clicked at least once.
-	let createTried = $state(false);
 	let addNsTried = $state(false);
 	let addHostTried = $state(false);
 
-	async function nvmeCreateGuarded() {
-		if (!nvme.newName || !nvme.newDevice) { createTried = true; return; }
-		createTried = false;
-		await nvmeCreate();
-	}
 	async function nvmeAddNamespaceGuarded() {
 		if (!nvme.addNsDevice) { addNsTried = true; return; }
 		addNsTried = false;
@@ -95,42 +84,6 @@
 <div class="mb-4 flex items-center gap-3">
 	<Input bind:value={nvme.search} placeholder="Search..." class="h-9 w-48" />
 </div>
-
-{#if nvme.showCreate}
-	<Card class="mb-6 max-w-2xl">
-		<CardContent class="pt-6">
-			<h3 class="mb-4 text-lg font-semibold">New Share</h3>
-			<div class="mb-4">
-				<Label for="nvme-device">Block Subvolume {#if !nvme.newDevice && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<select id="nvme-device" bind:value={nvme.newDevice} onchange={nvmeOnDeviceSelect} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm {requiredFieldCls(!nvme.newDevice, createTried)}">
-					<option value="">Select a block subvolume...</option>
-					{#each nvme.blockSubvolumes as sv}
-						<option value={sv.block_device}>{sv.filesystem}/{sv.name} ({sv.block_device})</option>
-					{/each}
-				</select>
-				{#if nvme.blockSubvolumes.length === 0}
-					<span class="mt-1 block text-xs text-muted-foreground">No attached block subvolumes found. Create a block subvolume and attach it first.</span>
-				{/if}
-			</div>
-			<div class="mb-4">
-				<Label for="nvme-name">Share Name {#if !nvme.newName && createTried}<span class="text-xs font-normal text-amber-500">required</span>{/if}</Label>
-				<Input id="nvme-name" bind:value={nvme.newName} placeholder="faststore" class="mt-1 {requiredFieldCls(!nvme.newName, createTried)}" />
-				<span class="mt-1 block text-xs text-muted-foreground">NQN: {nvme.nqnPrefix}:{nvme.newName || '...'}</span>
-			</div>
-			<div class="grid grid-cols-2 gap-4 mb-4">
-				<div>
-					<Label for="nvme-addr">Listen Address</Label>
-					<Input id="nvme-addr" bind:value={nvme.newAddr} class="mt-1" />
-				</div>
-				<div>
-					<Label for="nvme-port">Port</Label>
-					<Input id="nvme-port" type="number" bind:value={nvme.newPort} class="mt-1" />
-				</div>
-			</div>
-			<Button onclick={nvmeCreateGuarded}>Create</Button>
-		</CardContent>
-	</Card>
-{/if}
 
 {#if nvme.loading}
 	<p class="text-muted-foreground">Loading...</p>
