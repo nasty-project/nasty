@@ -1114,6 +1114,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/files/mkdir", post(files_mkdir_handler))
         .route("/api/files/rename", post(files_rename_handler))
         .route("/api/files/copy", post(files_copy_handler))
+        .route("/api/files/jobs", get(files_jobs_handler))
         .route("/api/files/restore", post(files_restore_handler))
         .route(
             "/api/files/content",
@@ -2887,24 +2888,34 @@ async fn files_rename_handler(
     }
 }
 
-/// Copy a file or directory to a new location under /fs. The source
-/// and destination safety rules mirror `files_rename_handler`: both
-/// ends must canonicalize under /fs, neither may target a filesystem
-/// root, and the destination must not exist (we never silently
-/// overwrite — bulk-copying a folder of media onto an existing folder
-/// of the same name has bitten us before).
+/// Background job kind for WebUI copies; listed by `/api/files/jobs`.
+pub(crate) const FILES_COPY_JOB: &str = "files.copy";
+
+#[derive(serde::Deserialize)]
+struct CopyRequest {
+    /// Items copied as one job, in order.
+    #[serde(default)]
+    items: Vec<RenameRequest>,
+    /// A bare `{ from, to }` (the shape before copy jobs) is one item.
+    #[serde(flatten)]
+    single: Option<RenameRequest>,
+}
+
+/// Copy files or directories to new locations under /fs as one background
+/// job. The safety rules mirror `files_rename_handler`: both ends must
+/// canonicalize under /fs, neither may target a filesystem root, and the
+/// destination must not exist (we never silently overwrite — bulk-copying a
+/// folder of media onto an existing folder of the same name has bitten us
+/// before).
 ///
-/// Unlike rename, copy isn't kernel-atomic. For files we use
-/// `tokio::fs::copy` directly; for directories we walk iteratively
-/// with a stack — recursion depth on a populated photo / media tree
-/// can otherwise blow the default stack.
-///
-/// POST /api/files/copy with body `{ from, to }` — same shape as
-/// rename so the WebUI can reuse its existing request builder.
+/// POST /api/files/copy with body `{ items: [{ from, to }, …] }` or a single
+/// `{ from, to }`. Returns 202 with the job; its progress and per-file errors
+/// are read from GET /api/files/jobs. A copy from a USB drive can run for an
+/// hour, longer than any request should stay open.
 async fn files_copy_handler(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RenameRequest>,
+    Json(req): Json<CopyRequest>,
 ) -> impl IntoResponse {
     let authenticated = match validate_bearer(
         &headers,
@@ -2918,174 +2929,254 @@ async fn files_copy_handler(
         Err(e) => return e.into_response(),
     };
 
-    let from = match safe_path_for_request(&req.from, &authenticated, "files.copy") {
+    let items: Vec<RenameRequest> = req.items.into_iter().chain(req.single).collect();
+    let mut pairs = Vec::new();
+    let mut progress = nasty_common::jobs::JobProgress::default();
+    let mut first_rejection = None;
+    for item in &items {
+        match validate_copy_item(item, &authenticated) {
+            Ok(pair) => pairs.push(pair),
+            Err((status, error)) => {
+                progress.record_error(format!("{}: {error}", item.from));
+                first_rejection.get_or_insert((status, error));
+            }
+        }
+    }
+    // Nothing to copy: answer like the single copy always did.
+    if pairs.is_empty() {
+        let (status, error) =
+            first_rejection.unwrap_or((StatusCode::BAD_REQUEST, "Nothing to copy".to_string()));
+        return (status, Json(serde_json::json!({"error": error}))).into_response();
+    }
+
+    let destination = pairs[0].1.parent().unwrap_or(&pairs[0].1).to_path_buf();
+    let filesystem = destination
+        .strip_prefix(FILES_ROOT)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let job = state.jobs.start_with_progress(
+        FILES_COPY_JOB,
+        &filesystem,
+        &destination.to_string_lossy(),
+        &authenticated.session.username,
+        progress,
+    );
+
+    let jobs = state.jobs.clone();
+    let events = state.events.clone();
+    let job_id = job.id.clone();
+    let user = authenticated.session.username.clone();
+    let ip = authenticated.client_ip.clone();
+    tokio::spawn(async move {
+        let run_jobs = jobs.clone();
+        let run_id = job_id.clone();
+        let copied = pairs.clone();
+        if let Err(e) =
+            nasty_common::priority::spawn_bulk(move || run_copy_job(&run_jobs, &run_id, &copied))
+                .await
+        {
+            jobs.update_progress(&job_id, |p| p.record_error(e));
+        }
+        let error_count = jobs
+            .list()
+            .into_iter()
+            .find(|j| j.id == job_id)
+            .and_then(|j| j.progress)
+            .map_or(0, |p| p.error_count);
+        let (outcome, error) = if error_count == 0 {
+            (nasty_common::jobs::JobState::Succeeded, None)
+        } else {
+            let noun = if error_count == 1 { "error" } else { "errors" };
+            (
+                nasty_common::jobs::JobState::Failed,
+                Some(format!("{error_count} {noun}")),
+            )
+        };
+        for (from, to) in &pairs {
+            info!("Copied {} -> {}", from.display(), to.display());
+        }
+        let detail = pairs
+            .iter()
+            .map(|(from, to)| format!("from={} to={}", from.display(), to.display()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        match &error {
+            None => auth::audit("files.copy", &user, &ip, &detail),
+            Some(e) => auth::audit(
+                "files.copy_failed",
+                &user,
+                &ip,
+                &format!("{detail} error={e}"),
+            ),
+        }
+        jobs.finish(&job_id, outcome, error);
+        // A failed directory copy can leave part of the destination behind.
+        let _ = events.send("files".to_string());
+    });
+
+    (StatusCode::ACCEPTED, Json(job)).into_response()
+}
+
+/// The caller's copy jobs, running and recently finished, oldest first.
+/// GET /api/files/jobs. Only the starter sees a job: its errors name files.
+async fn files_jobs_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let authenticated =
+        match validate_bearer(&headers, &state.auth, EndpointAccess::Read, "files.jobs").await {
+            Ok(authenticated) => authenticated,
+            Err(e) => return e.into_response(),
+        };
+    let jobs: Vec<_> = state
+        .jobs
+        .list()
+        .into_iter()
+        .filter(|j| {
+            j.kind == FILES_COPY_JOB
+                && j.user.as_deref() == Some(authenticated.session.username.as_str())
+        })
+        .collect();
+    Json(jobs).into_response()
+}
+
+/// Check one copy item, returning the resolved (source, destination).
+fn validate_copy_item(
+    item: &RenameRequest,
+    authenticated: &AuthenticatedRequest,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), (StatusCode, String)> {
+    let from = match safe_path_for_request(&item.from, authenticated, "files.copy") {
         Ok(p) => p,
         Err(status) => {
-            return (
-                status,
-                Json(serde_json::json!({"error": "Invalid source path"})),
-            )
-                .into_response();
+            return Err((status, "Invalid source path".to_string()));
         }
     };
     let from_rel = from.strip_prefix(FILES_ROOT).unwrap_or(&from);
     if from_rel.components().count() <= 1 {
-        return (
+        return Err((
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Cannot copy filesystem root directories — use the Subvolumes page"})),
-        )
-            .into_response();
+            "Cannot copy filesystem root directories — use the Subvolumes page".to_string(),
+        ));
     }
     if is_inside_block_subvolume(&from) {
-        return (
+        return Err((
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Cannot copy block subvolume contents — manage via the Subvolumes page"})),
-        )
-            .into_response();
+            "Cannot copy block subvolume contents — manage via the Subvolumes page".to_string(),
+        ));
     }
 
-    let clean_to = req.to.replace("\\", "/");
+    let clean_to = item.to.replace("\\", "/");
     let trimmed_to = clean_to.trim_start_matches('/');
     let (parent_req, leaf) = match trimmed_to.rsplit_once('/') {
         Some((p, l)) => (p, l),
         None => {
-            return (
+            return Err((
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "Destination must include a filesystem path component"})),
-            )
-                .into_response();
+                "Destination must include a filesystem path component".to_string(),
+            ));
         }
     };
     if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains('/') {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid destination name"})),
-        )
-            .into_response();
+            "Invalid destination name".to_string(),
+        ));
     }
-    let parent = match safe_path_for_request(parent_req, &authenticated, "files.copy") {
+    let parent = match safe_path_for_request(parent_req, authenticated, "files.copy") {
         Ok(p) => p,
         Err(status) => {
-            return (
-                status,
-                Json(serde_json::json!({"error": "Invalid destination parent"})),
-            )
-                .into_response();
+            return Err((status, "Invalid destination parent".to_string()));
         }
     };
     if is_inside_block_subvolume(&parent) {
-        return (
+        return Err((
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Cannot copy into block subvolume contents"})),
-        )
-            .into_response();
+            "Cannot copy into block subvolume contents".to_string(),
+        ));
     }
     let to = parent.join(leaf);
     if !to.starts_with(FILES_ROOT) {
-        return (
+        return Err((
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Invalid destination path"})),
-        )
-            .into_response();
+            "Invalid destination path".to_string(),
+        ));
     }
     if to == from {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Source and destination are the same"})),
-        )
-            .into_response();
+            "Source and destination are the same".to_string(),
+        ));
     }
     // Refuse copying a directory into itself or any of its descendants
     // — that's an infinite walk and produces nonsense even when
     // bounded. `to.starts_with(&from)` catches both cases.
     if to.starts_with(&from) {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Cannot copy a directory into itself"})),
-        )
-            .into_response();
+            "Cannot copy a directory into itself".to_string(),
+        ));
     }
     if to.exists() {
-        return (
+        return Err((
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "Destination already exists"})),
-        )
-            .into_response();
+            "Destination already exists".to_string(),
+        ));
     }
 
-    let from_meta = match tokio::fs::symlink_metadata(&from).await {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("stat source: {e}")})),
-            )
-                .into_response();
-        }
-    };
+    Ok((from, to))
+}
 
-    let result = if from_meta.is_dir() {
-        copy_dir_recursive(&from, &to).await
-    } else {
-        copy_file(&from, &to).await
-    };
-
-    match result {
-        Ok(()) => {
-            info!("Copied {} -> {}", from.display(), to.display());
-            auth::audit(
-                "files.copy",
-                &authenticated.session.username,
-                &authenticated.client_ip,
-                &format!("from={} to={}", from.display(), to.display()),
-            );
-            let _ = state.events.send("files".to_string());
-            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
-        }
-        Err(e) => {
-            auth::audit(
-                "files.copy_failed",
-                &authenticated.session.username,
-                &authenticated.client_ip,
-                &format!("from={} to={} error={e}", from.display(), to.display()),
-            );
-            // Directory copies can fail after creating part of the destination.
-            let _ = state.events.send("files".to_string());
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
+/// Copy every pair, recording progress and errors on the job. Runs on a
+/// bulk worker. An item that fails part-way keeps what it copied; the rest
+/// of that item and the following items still copy.
+fn run_copy_job(
+    jobs: &nasty_common::jobs::JobRegistry,
+    id: &str,
+    pairs: &[(std::path::PathBuf, std::path::PathBuf)],
+) {
+    let total = pairs.iter().map(|(from, _)| tree_size(from)).sum();
+    jobs.update_progress(id, |p| p.bytes_total = total);
+    let mut copied = |n: u64| jobs.update_progress(id, |p| p.bytes_done += n);
+    let mut errors = |e: String| jobs.update_progress(id, |p| p.record_error(e));
+    for (from, to) in pairs {
+        let mut current = |path: &std::path::Path| {
+            jobs.update_progress(id, |p| p.current = path.display().to_string());
+        };
+        match std::fs::symlink_metadata(from) {
+            Ok(meta) if meta.is_dir() => {
+                copy_dir_recursive_sync(from, to, &mut current, &mut copied, &mut errors);
+            }
+            Ok(_) => {
+                current(from);
+                if let Err(e) = copy_file_sync(from, to, false, &mut copied) {
+                    errors(e);
+                }
+            }
+            Err(e) => errors(format!("stat {}: {e}", from.display())),
         }
     }
 }
 
-/// Recursively copy `src` to `dst`. Iterative (stack-based) so a deep
-/// tree can't blow the default tokio task stack. Plain files use
-/// `tokio::fs::copy`; symlinks are recreated with `symlink` rather
-/// than dereferenced (matches `cp -a` semantics — losing a relative
-/// symlink to absolute, or vice versa, would silently change what the
-/// user expects to be a literal link).
-///
-/// Permissions and timestamps follow the kernel's default behaviour
-/// for `copy`/`mkdir` — we don't preserve mtime/atime explicitly.
-/// That's fine for the WebUI's "copy this folder" affordance, which
-/// is treated by users as "new copy made now," not "snapshot of
-/// the original at this point in time."
-async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    let src = src.to_path_buf();
-    let dst = dst.to_path_buf();
-    nasty_common::priority::spawn_bulk(move || copy_dir_recursive_sync(&src, &dst))
-        .await
-        .map_err(|error| format!("spawn bulk copy worker: {error}"))?
-}
-
-async fn copy_file(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    let src = src.to_path_buf();
-    let dst = dst.to_path_buf();
-    nasty_common::priority::spawn_bulk(move || copy_file_sync(&src, &dst, false))
-        .await
-        .map_err(|error| format!("spawn bulk copy worker: {error}"))?
+/// Bytes of regular files under `path` (or of `path` itself), for the
+/// progress total. Unreadable entries count as zero; the copy reports them.
+fn tree_size(path: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.is_file() {
+            total += meta.len();
+        } else if meta.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&p)
+        {
+            stack.extend(entries.flatten().map(|e| e.path()));
+        }
+    }
+    total
 }
 
 /// Copy one file to a new name. Both parents are pinned and neither end is
@@ -3094,11 +3185,12 @@ fn copy_file_sync(
     src: &std::path::Path,
     dst: &std::path::Path,
     replace: bool,
+    copied: &mut dyn FnMut(u64),
 ) -> Result<(), String> {
     let error = |e: std::io::Error| format!("copy {} -> {}: {e}", src.display(), dst.display());
     let (_src_parent, pinned_src) = file_boundary::pin_parent(src).map_err(error)?;
     let (_dst_parent, pinned_dst) = file_boundary::pin_parent(dst).map_err(error)?;
-    file_boundary::copy_regular_file(&pinned_src, &pinned_dst, replace).map_err(error)
+    file_boundary::copy_regular_file(&pinned_src, &pinned_dst, replace, copied).map_err(error)
 }
 
 /// Recreate a symlink at `dst`. The link itself is copied, never followed.
@@ -3121,32 +3213,69 @@ fn read_pinned_dir(
     Ok((pinned, entries))
 }
 
-fn copy_dir_recursive_sync(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+/// Recursively copy `src` to `dst`. Iterative (stack-based) so a deep tree
+/// can't overflow the stack. Symlinks are recreated, not dereferenced
+/// (`cp -a` semantics). A file or folder that fails is reported through
+/// `errors` and skipped, so one unreadable file on a flaky USB drive does
+/// not stop the rest of the copy.
+///
+/// Permissions follow the kernel's defaults for `copy`/`mkdir`; timestamps
+/// are not preserved. Users treat the WebUI's copy as "a new copy made now".
+fn copy_dir_recursive_sync(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    current: &mut dyn FnMut(&std::path::Path),
+    copied: &mut dyn FnMut(u64),
+    errors: &mut dyn FnMut(String),
+) {
     // (current source path, current destination path) tuples.
     let mut stack: Vec<(std::path::PathBuf, std::path::PathBuf)> =
         vec![(src.to_path_buf(), dst.to_path_buf())];
     while let Some((src_dir, dst_dir)) = stack.pop() {
         let mkdir_error = |e: std::io::Error| format!("mkdir {}: {e}", dst_dir.display());
-        let (_dst_parent, pinned_dst) = file_boundary::pin_parent(&dst_dir).map_err(mkdir_error)?;
-        std::fs::create_dir(&pinned_dst).map_err(mkdir_error)?;
-        let (_src_pin, entries) = read_pinned_dir(&src_dir)?;
+        let created = file_boundary::pin_parent(&dst_dir)
+            .and_then(|(parent, pinned)| std::fs::create_dir(&pinned).map(|()| parent));
+        if let Err(e) = created {
+            errors(mkdir_error(e));
+            continue;
+        }
+        // The pin keeps the listed directory from being swapped mid-walk.
+        let (_src_pin, entries) = match read_pinned_dir(&src_dir) {
+            Ok(listing) => listing,
+            Err(e) => {
+                errors(e);
+                continue;
+            }
+        };
         for entry in entries {
-            let entry = entry.map_err(|e| format!("next_entry {}: {e}", src_dir.display()))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    errors(format!("next_entry {}: {e}", src_dir.display()));
+                    break;
+                }
+            };
             let entry_src = src_dir.join(entry.file_name());
             let entry_dst = dst_dir.join(entry.file_name());
-            let meta = entry
-                .metadata()
-                .map_err(|e| format!("metadata {}: {e}", entry_src.display()))?;
-            if meta.is_dir() {
-                stack.push((entry_src, entry_dst));
-            } else if meta.file_type().is_symlink() {
-                copy_symlink_sync(&entry_src, &entry_dst)?;
-            } else {
-                copy_file_sync(&entry_src, &entry_dst, false)?;
+            let result = match entry.metadata() {
+                Err(e) => Err(format!("metadata {}: {e}", entry_src.display())),
+                Ok(meta) if meta.is_dir() => {
+                    stack.push((entry_src, entry_dst));
+                    Ok(())
+                }
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    copy_symlink_sync(&entry_src, &entry_dst)
+                }
+                Ok(_) => {
+                    current(&entry_src);
+                    copy_file_sync(&entry_src, &entry_dst, false, copied)
+                }
+            };
+            if let Err(e) = result {
+                errors(e);
             }
         }
     }
-    Ok(())
 }
 
 // ── Restore-from-snapshot endpoint ─────────────────────────────
@@ -3274,7 +3403,7 @@ fn restore_leaf_sync(
     {
         remove_existing(dst)?;
     }
-    copy_file_sync(src, dst, true)
+    copy_file_sync(src, dst, true, &mut |_| {})
 }
 
 /// Restore files/folders from a read-only snapshot back over their live
@@ -5510,5 +5639,61 @@ mod storage_root_tests {
             Path::new("/fs/data/plain-folder"),
             &subvolumes
         ));
+    }
+}
+
+#[cfg(test)]
+mod copy_job_tests {
+    use super::{CopyRequest, run_copy_job};
+    use nasty_common::jobs::{JobProgress, JobRegistry};
+
+    #[test]
+    fn copy_job_counts_bytes_and_skips_what_it_cannot_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a"), b"hello").unwrap();
+        std::fs::write(src.join("sub/b"), b"world!").unwrap();
+        // A FIFO is not a regular file: the copy reports it and carries on.
+        let fifo = std::ffi::CString::new(src.join("pipe").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        std::fs::write(tmp.path().join("single"), b"xyz").unwrap();
+
+        let jobs = JobRegistry::default();
+        let job = jobs.start_with_progress("files.copy", "fs", "dst", "u", JobProgress::default());
+        let pairs = vec![
+            (src.clone(), tmp.path().join("dst")),
+            (tmp.path().join("missing"), tmp.path().join("dst-missing")),
+            (tmp.path().join("single"), tmp.path().join("dst-single")),
+        ];
+        run_copy_job(&jobs, &job.id, &pairs);
+
+        let progress = jobs.list().remove(0).progress.unwrap();
+        assert_eq!((progress.bytes_done, progress.bytes_total), (14, 14));
+        assert_eq!(progress.error_count, 2, "{:?}", progress.errors);
+        assert!(progress.errors.iter().any(|e| e.contains("pipe")));
+        assert!(progress.errors.iter().any(|e| e.contains("missing")));
+        assert_eq!(
+            std::fs::read(tmp.path().join("dst/sub/b")).unwrap(),
+            b"world!"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("dst-single")).unwrap(),
+            b"xyz"
+        );
+    }
+
+    #[test]
+    fn copy_request_accepts_a_batch_or_the_single_item_shape() {
+        let batch: CopyRequest = serde_json::from_str(
+            r#"{"items":[{"from":"a/x","to":"a/y"},{"from":"a/z","to":"a/w"}]}"#,
+        )
+        .unwrap();
+        assert_eq!((batch.items.len(), batch.single.is_none()), (2, true));
+        let single: CopyRequest = serde_json::from_str(r#"{"from":"a/x","to":"a/y"}"#).unwrap();
+        assert_eq!(
+            (single.items.len(), single.single.unwrap().from),
+            (0, "a/x".to_string())
+        );
     }
 }

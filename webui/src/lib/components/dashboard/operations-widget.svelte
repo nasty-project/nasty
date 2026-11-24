@@ -7,7 +7,7 @@
 	let { operations, loaded, density, presentation }: { operations: ActiveOperation[]; loaded: boolean; density: DashboardDensity; presentation: DashboardWidgetPresentation } = $props();
 
 	function kindLabel(kind: string): string {
-		return ({ scrub: 'Scrub', evacuate: 'Evacuate', reconcile: 'Reconcile', copygc: 'Copy-GC' } as Record<string, string>)[kind] ?? kind;
+		return ({ scrub: 'Scrub', evacuate: 'Evacuate', reconcile: 'Reconcile', copygc: 'Copy-GC', copy: 'File copy' } as Record<string, string>)[kind] ?? kind;
 	}
 </script>
 

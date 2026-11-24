@@ -122,6 +122,20 @@ export interface Job {
 	error: string | null;
 	cancel_requested: boolean;
 	forced: boolean;
+	/** Who started it; set on file copy jobs. */
+	user?: string;
+	/** Byte progress and per-item errors; set on file copy jobs. */
+	progress?: JobProgress;
+}
+
+export interface JobProgress {
+	bytes_done: number;
+	bytes_total: number;
+	/** The file being copied. */
+	current: string;
+	/** The first errors, each naming what failed; `error_count` counts all. */
+	errors: string[];
+	error_count: number;
 }
 
 /** Scrub schedule state returned by `fs.scrub.schedule.update`. */

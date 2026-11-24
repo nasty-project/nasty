@@ -49,6 +49,35 @@ pub struct Job {
     /// Started with a safety check overridden (force-remove), so a refusal
     /// means the override was refused too.
     pub forced: bool,
+    /// Who started it, for jobs only their starter may see (file copies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Byte progress and per-item errors, for jobs that report them (file copies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<JobProgress>,
+}
+
+/// Errors kept per job; the count keeps going past it.
+const PROGRESS_ERRORS_KEPT: usize = 100;
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct JobProgress {
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// The item being worked on, e.g. the file being copied.
+    pub current: String,
+    /// The first errors, each naming what failed; `error_count` has them all.
+    pub errors: Vec<String>,
+    pub error_count: u64,
+}
+
+impl JobProgress {
+    pub fn record_error(&mut self, error: String) {
+        if self.errors.len() < PROGRESS_ERRORS_KEPT {
+            self.errors.push(error);
+        }
+        self.error_count += 1;
+    }
 }
 
 #[derive(Default)]
@@ -70,20 +99,43 @@ impl JobRegistry {
         if let Some(running) = find_running(&jobs, kind, target) {
             return Err(Box::new(running.clone()));
         }
-        let job = Job {
-            id: uuid::Uuid::new_v4().to_string(),
-            kind: kind.to_string(),
-            filesystem: filesystem.to_string(),
-            target: target.to_string(),
-            state: JobState::Running,
-            started_at: now(),
-            finished_at: None,
-            error: None,
-            cancel_requested: false,
-            forced,
-        };
-        jobs.push(job.clone());
-        Ok(job)
+        Ok(push_job(
+            &mut jobs, kind, filesystem, target, forced, None, None,
+        ))
+    }
+
+    /// Start a job that may run alongside others of its kind on the same
+    /// target (two copies into one folder), reporting `progress`.
+    pub fn start_with_progress(
+        &self,
+        kind: &str,
+        filesystem: &str,
+        target: &str,
+        user: &str,
+        progress: JobProgress,
+    ) -> Job {
+        let mut jobs = self.jobs.lock().unwrap();
+        push_job(
+            &mut jobs,
+            kind,
+            filesystem,
+            target,
+            false,
+            Some(user),
+            Some(progress),
+        )
+    }
+
+    /// Update a running job's progress; a no-op for jobs without one.
+    pub fn update_progress(&self, id: &str, update: impl FnOnce(&mut JobProgress)) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(progress) = jobs
+            .iter_mut()
+            .find(|j| j.id == id && j.state == JobState::Running)
+            .and_then(|j| j.progress.as_mut())
+        {
+            update(progress);
+        }
     }
 
     /// Record how a job ended. A failure after a cancel request is recorded
@@ -124,6 +176,33 @@ impl JobRegistry {
         prune(&mut jobs, now());
         jobs.clone()
     }
+}
+
+fn push_job(
+    jobs: &mut Vec<Job>,
+    kind: &str,
+    filesystem: &str,
+    target: &str,
+    forced: bool,
+    user: Option<&str>,
+    progress: Option<JobProgress>,
+) -> Job {
+    let job = Job {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: kind.to_string(),
+        filesystem: filesystem.to_string(),
+        target: target.to_string(),
+        state: JobState::Running,
+        started_at: now(),
+        finished_at: None,
+        error: None,
+        cancel_requested: false,
+        forced,
+        user: user.map(str::to_string),
+        progress,
+    };
+    jobs.push(job.clone());
+    job
 }
 
 fn find_running<'a>(jobs: &'a [Job], kind: &str, target: &str) -> Option<&'a Job> {
@@ -196,6 +275,37 @@ mod tests {
     }
 
     #[test]
+    fn progress_jobs_run_side_by_side_and_cap_kept_errors() {
+        let jobs = JobRegistry::default();
+        let a = jobs.start_with_progress(
+            "files.copy",
+            "pool",
+            "/fs/pool/x",
+            "u",
+            JobProgress::default(),
+        );
+        let b = jobs.start_with_progress(
+            "files.copy",
+            "pool",
+            "/fs/pool/x",
+            "u",
+            JobProgress::default(),
+        );
+        assert_ne!(a.id, b.id);
+        for i in 0..PROGRESS_ERRORS_KEPT + 5 {
+            jobs.update_progress(&a.id, |p| p.record_error(format!("e{i}")));
+        }
+        jobs.update_progress(&b.id, |p| p.bytes_done = 7);
+        let list = jobs.list();
+        let a = list[0].progress.as_ref().unwrap();
+        assert_eq!(
+            (a.errors.len(), a.error_count),
+            (PROGRESS_ERRORS_KEPT, PROGRESS_ERRORS_KEPT as u64 + 5)
+        );
+        assert_eq!(list[1].progress.as_ref().unwrap().bytes_done, 7);
+    }
+
+    #[test]
     fn prune_keeps_running_and_recent_finished_jobs() {
         let job = |finished_at| Job {
             id: String::new(),
@@ -208,6 +318,8 @@ mod tests {
             error: None,
             cancel_requested: false,
             forced: false,
+            user: None,
+            progress: None,
         };
         let now = 100_000;
         let mut jobs = vec![job(None), job(Some(now - FINISHED_RETENTION_SECS))];
