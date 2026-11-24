@@ -1874,6 +1874,66 @@ fn safe_path_for_request(
     result
 }
 
+/// File-browser prefix for external drives (#1080). `@` is not allowed in
+/// filesystem names, so it can never shadow a filesystem under /fs.
+const EXTERNAL_PREFIX: &str = "@external";
+
+/// Like [`safe_path_for_request`], but `@external/<drive>/…` resolves into
+/// the read-only external drive mounts. Only the read handlers (browse,
+/// size, content, copy source) call this, so nothing writes, deletes or
+/// shares a path on a USB drive. Admin-only, like mounting the drive.
+fn safe_read_path_for_request(
+    requested: &str,
+    authenticated: &AuthenticatedRequest,
+    endpoint: &str,
+) -> Result<std::path::PathBuf, StatusCode> {
+    let clean = requested.replace('\\', "/");
+    let Some(rest) = clean
+        .trim_start_matches('/')
+        .strip_prefix(EXTERNAL_PREFIX)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    else {
+        return safe_path_for_request(requested, authenticated, endpoint);
+    };
+    let session = &authenticated.session;
+    if session.role != auth::Role::Admin || session.filesystem.is_some() || session.owner.is_some()
+    {
+        auth::audit(
+            "permission_denied",
+            &session.username,
+            &authenticated.client_ip,
+            &format!("endpoint={endpoint} reason=ExternalDrive"),
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let root = std::path::Path::new(nasty_storage::external::EXTERNAL_ROOT);
+    let canonical = root
+        .join(rest.trim_start_matches('/'))
+        .canonicalize()
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    if !canonical.starts_with(root) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(canonical)
+}
+
+/// A resolved path as the Files page names it: relative to /fs, or under
+/// `@external` for an external drive.
+fn files_display_path(path: &std::path::Path) -> String {
+    if let Ok(rest) = path.strip_prefix(nasty_storage::external::EXTERNAL_ROOT) {
+        let rest = rest.to_string_lossy();
+        return if rest.is_empty() {
+            EXTERNAL_PREFIX.to_string()
+        } else {
+            format!("{EXTERNAL_PREFIX}/{rest}")
+        };
+    }
+    path.strip_prefix(FILES_ROOT)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
+
 /// Total the apparent size of a directory tree. GET /api/files/size?path=first/sub
 ///
 /// On-demand only (the browse listing never totals folders — that would make
@@ -1891,7 +1951,7 @@ async fn files_size_handler(
         };
 
     let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let dir = match safe_path_for_request(req_path, &authenticated, "files.size") {
+    let dir = match safe_read_path_for_request(req_path, &authenticated, "files.size") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -1971,7 +2031,7 @@ async fn files_browse_handler(
         };
 
     let req_path = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let dir = match safe_path_for_request(req_path, &authenticated, "files.browse") {
+    let dir = match safe_read_path_for_request(req_path, &authenticated, "files.browse") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -2042,11 +2102,7 @@ async fn files_browse_handler(
         })
     });
 
-    let display_path = dir
-        .strip_prefix(FILES_ROOT)
-        .unwrap_or(&dir)
-        .to_string_lossy()
-        .to_string();
+    let display_path = files_display_path(&dir);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -3047,7 +3103,7 @@ fn validate_copy_item(
     item: &RenameRequest,
     authenticated: &AuthenticatedRequest,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), (StatusCode, String)> {
-    let from = match safe_path_for_request(&item.from, authenticated, "files.copy") {
+    let from = match safe_read_path_for_request(&item.from, authenticated, "files.copy") {
         Ok(p) => p,
         Err(status) => {
             return Err((status, "Invalid source path".to_string()));
@@ -3604,7 +3660,7 @@ async fn files_content_handler(
         }
     };
 
-    let target = match safe_path_for_request(req_path, &authenticated, "files.content.get") {
+    let target = match safe_read_path_for_request(req_path, &authenticated, "files.content.get") {
         Ok(p) => p,
         Err(status) => {
             return (status, Json(serde_json::json!({"error": "Invalid path"}))).into_response();
@@ -5695,5 +5751,75 @@ mod copy_job_tests {
             (single.items.len(), single.single.unwrap().from),
             (0, "a/x".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod external_path_tests {
+    use super::{AuthenticatedRequest, StatusCode, files_display_path, safe_read_path_for_request};
+    use crate::auth::{Role, Session};
+
+    fn request(role: Role, filesystem: Option<&str>) -> AuthenticatedRequest {
+        AuthenticatedRequest {
+            session: Session {
+                token: "token".to_string(),
+                username: "test".to_string(),
+                role,
+                file_principal: None,
+                filesystem: filesystem.map(str::to_string),
+                owner: None,
+                created_at: 0,
+                must_change_password: false,
+                client_ip: None,
+            },
+            client_ip: "127.0.0.1".to_string(),
+        }
+    }
+
+    #[test]
+    fn external_drives_are_admin_only_and_unscoped() {
+        for denied in [
+            request(Role::Operator, None),
+            request(Role::Admin, Some("tank")),
+        ] {
+            assert_eq!(
+                safe_read_path_for_request("@external/sdb1", &denied, "files.browse"),
+                Err(StatusCode::FORBIDDEN)
+            );
+        }
+        // Climbing out of the mount root never resolves.
+        assert!(
+            safe_read_path_for_request(
+                "/@external/../../etc",
+                &request(Role::Admin, None),
+                "files.browse"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_the_exact_prefix_selects_external_drives() {
+        // `@externalx` is an ordinary (nonexistent) /fs path, not a drive, so
+        // a non-admin gets the /fs answer rather than the external refusal.
+        assert_eq!(
+            safe_read_path_for_request(
+                "@externalx/a",
+                &request(Role::Operator, None),
+                "files.browse"
+            ),
+            Err(StatusCode::NOT_FOUND)
+        );
+    }
+
+    #[test]
+    fn display_paths_name_external_drives_by_prefix() {
+        let p = std::path::Path::new;
+        assert_eq!(
+            files_display_path(p("/run/nasty/external/sdb1/a")),
+            "@external/sdb1/a"
+        );
+        assert_eq!(files_display_path(p("/run/nasty/external")), "@external");
+        assert_eq!(files_display_path(p("/fs/tank/x")), "tank/x");
     }
 }

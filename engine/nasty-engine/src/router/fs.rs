@@ -61,6 +61,8 @@ fn requires_root_equivalent(method: &str) -> bool {
             | "device.prepare.inspect"
             | "device.set_type"
             | "device.set_io_scheduler"
+            | "device.external.mount"
+            | "device.external.unmount"
     )
 }
 
@@ -88,7 +90,7 @@ fn owner_scoped_fs_read(method: &str) -> bool {
 
 fn scoped_inventory_access_error(method: &str, session: &Session) -> Option<&'static str> {
     let scoped = session.filesystem.is_some() || session.owner.is_some();
-    ((method == "device.list" && scoped)
+    (((method == "device.list" || method == "device.external.list") && scoped)
         || (session.owner.is_some() && owner_scoped_fs_read(method)))
     .then_some("access denied: scoped credentials cannot read global storage inventory")
 }
@@ -114,6 +116,21 @@ async fn require_block_share_recovery_access(
         }
     }
     None
+}
+
+/// Block devices and `/proc/mounts`, which external drives are judged against.
+async fn external_inputs(
+    state: &AppState,
+) -> Result<(Vec<nasty_storage::filesystem::BlockDevice>, String), String> {
+    let devices = state
+        .filesystems
+        .list_devices()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mounts = tokio::fs::read_to_string("/proc/mounts")
+        .await
+        .map_err(|e| format!("read /proc/mounts: {e}"))?;
+    Ok((devices, mounts))
 }
 
 pub(super) async fn try_route(
@@ -386,6 +403,34 @@ pub(super) async fn try_route(
             match state.filesystems.list_devices_with_health(&health).await {
                 Ok(v) => ok(req, v),
                 Err(e) => err(req, e),
+            }
+        }
+        "device.external.list" => match external_inputs(state).await {
+            Ok((devices, mounts)) => ok(req, nasty_storage::external::list(&devices, &mounts)),
+            Err(e) => err(req, e),
+        },
+        "device.external.mount" | "device.external.unmount" => {
+            match parse_params::<nasty_storage::external::ExternalDriveRequest>(req) {
+                Ok(params) => match external_inputs(state).await {
+                    Ok((devices, mounts)) if req.method == "device.external.mount" => {
+                        match nasty_storage::external::mount(&params.device, &devices, &mounts)
+                            .await
+                        {
+                            Ok(drive) => ok(req, drive),
+                            Err(e) => err(req, e),
+                        }
+                    }
+                    Ok((devices, mounts)) => {
+                        match nasty_storage::external::unmount(&params.device, &devices, &mounts)
+                            .await
+                        {
+                            Ok(()) => ok(req, "ok"),
+                            Err(e) => err(req, e),
+                        }
+                    }
+                    Err(e) => err(req, e),
+                },
+                Err(e) => invalid(req, e),
             }
         }
         "device.prepare.inspect" => {
@@ -864,6 +909,8 @@ mod tests {
             "device.prepare.inspect",
             "device.set_type",
             "device.set_io_scheduler",
+            "device.external.mount",
+            "device.external.unmount",
         ] {
             assert!(requires_root_equivalent(method), "{method}");
         }

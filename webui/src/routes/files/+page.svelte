@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import type { Job } from '$lib/types';
+	import type { ExternalDrive, Job } from '$lib/types';
 	import { goto } from '$app/navigation';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput, Share2, Check, RotateCcw, Calculator, Loader2 } from '@lucide/svelte';
+	import { FolderOpen, File, ArrowUp, Upload, FolderPlus, Trash2, Image, Film, Music, FileText, Download, Pencil, Copy, FolderInput, Share2, Check, RotateCcw, Calculator, Loader2, HardDrive } from '@lucide/svelte';
 	import SortTh from '$lib/components/SortTh.svelte';
 	import PathPicker from '$lib/components/PathPicker.svelte';
 	import { getClient } from '$lib/client';
@@ -159,6 +159,7 @@
 	let shareUrl: string | null = $state(null);
 	let shareCopied = $state(false);
 	let canCreateGuestShares = $state(false);
+	let isAdmin = $state(false);
 
 	function openShare(entry: FileEntry) {
 		shareTarget = entry;
@@ -467,10 +468,48 @@
 		getClient().call<{ role: string; scoped: boolean }>('auth.me')
 			.then((session) => {
 				canCreateGuestShares = !session.scoped && (session.role === 'admin' || session.role === 'operator');
+				isAdmin = !session.scoped && session.role === 'admin';
+				if (isAdmin) loadExternalDrives();
 			})
 			.catch(() => { canCreateGuestShares = false; });
 		return () => clearTimeout(copyJobsTimer);
 	});
+
+	// External drives (#1080) mount read-only and browse as `@external/<name>`.
+	const EXTERNAL_PREFIX = '@external';
+	const inExternal = $derived(currentPath.split('/').filter(Boolean)[0] === EXTERNAL_PREFIX);
+	let externalDrives: ExternalDrive[] = $state([]);
+	let externalBusy = $state('');
+
+	async function loadExternalDrives() {
+		try {
+			externalDrives = await getClient().call<ExternalDrive[]>('device.external.list');
+		} catch {
+			externalDrives = [];
+		}
+	}
+
+	async function mountExternal(drive: ExternalDrive) {
+		externalBusy = drive.name;
+		const mounted = await withToast(
+			() => getClient().call<ExternalDrive>('device.external.mount', { device: drive.device }),
+			`${drive.label || drive.name} mounted read-only`
+		);
+		externalBusy = '';
+		await loadExternalDrives();
+		if (mounted) await browse(`${EXTERNAL_PREFIX}/${mounted.name}`);
+	}
+
+	async function ejectExternal(drive: ExternalDrive) {
+		externalBusy = drive.name;
+		await withToast(
+			() => getClient().call('device.external.unmount', { device: drive.name }),
+			`${drive.label || drive.name} ejected; it can be unplugged`
+		);
+		externalBusy = '';
+		await loadExternalDrives();
+		if (inExternal) await browse('');
+	}
 
 	// True when the current path is inside a read-only snapshot, i.e. the
 	// component after the filesystem (`<fs>/<subvol>@<snap>/…`) contains '@'.
@@ -510,6 +549,8 @@
 
 	async function browse(path: string) {
 		loading = true;
+		// A drive plugged in since the last visit shows up at the top level.
+		if (isAdmin && !path) loadExternalDrives();
 		try {
 			const res = await fetch(`/api/files/browse?path=${encodeURIComponent(path)}`);
 			const data = await res.json();
@@ -568,7 +609,7 @@
 	const breadcrumbs = $derived.by(() => {
 		const parts = currentPath.split('/').filter(Boolean);
 		return parts.map((part, i) => ({
-			label: part,
+			label: i === 0 && part === EXTERNAL_PREFIX ? 'External drives' : part,
 			path: parts.slice(0, i + 1).join('/'),
 		}));
 	});
@@ -774,12 +815,12 @@
 				<ArrowUp size={14} class="mr-1" /> Up
 			</Button>
 		{/if}
-		{#if !isRoot}
+		{#if !isRoot && !inExternal}
 			<Button variant="outline" size="sm" onclick={triggerUpload} disabled={uploading}>
 				<Upload size={14} class="mr-1" /> Upload
 			</Button>
 		{/if}
-		{#if !isRoot}
+		{#if !isRoot && !inExternal}
 			<Button variant="outline" size="sm" onclick={() => { showMkdir = true; newDirName = ''; }}>
 				<FolderPlus size={14} class="mr-1" /> New Folder
 			</Button>
@@ -803,11 +844,26 @@
 	</div>
 {/if}
 
+{#if inExternal}
+	<div class="mb-3 flex items-start gap-2 rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-300">
+		<HardDrive size={16} class="mt-0.5 shrink-0" />
+		<span>
+			You're viewing an <span class="font-medium">external drive</span>, mounted read-only. Select files or folders
+			and click <span class="font-medium">Copy</span> to bring them into a filesystem. Eject it from the top level of
+			Files before unplugging.
+		</span>
+	</div>
+{/if}
+
 {#if selected.size > 0 && !isRoot}
 	<div class="mb-3 flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
 		<span class="text-sm font-medium">{selected.size} selected</span>
 		<div class="ml-auto flex items-center gap-2">
-			{#if inSnapshot}
+			{#if inExternal}
+				<Button size="sm" variant="outline" onclick={() => openPicker(selectedEntries(), 'copy')} disabled={bulkActionRunning}>
+					<Copy size={14} class="mr-1" /> Copy
+				</Button>
+			{:else if inSnapshot}
 				<Button size="sm" onclick={() => restoreConfirm = true} disabled={bulkActionRunning}>
 					<RotateCcw size={14} class="mr-1" /> Restore
 				</Button>
@@ -907,6 +963,36 @@
 			onkeydown={(e) => { if (e.key === 'Enter') createDir(); if (e.key === 'Escape') showMkdir = false; }} />
 		<Button size="sm" onclick={createDir}>Create</Button>
 		<Button variant="secondary" size="sm" onclick={() => showMkdir = false}>Cancel</Button>
+	</div>
+{/if}
+
+<!-- External drives (admins, top level only) -->
+{#if isRoot && isAdmin && externalDrives.length > 0}
+	<div class="mb-4 rounded-md border border-border">
+		<div class="border-b border-border px-3 py-2 text-sm font-semibold">External drives</div>
+		{#each externalDrives as drive (drive.name)}
+			<div class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-3 py-2 text-sm last:border-b-0">
+				<HardDrive size={16} class="shrink-0 text-muted-foreground" />
+				<div class="min-w-0 flex-1">
+					<div class="truncate font-medium">{drive.label || drive.model || drive.name}</div>
+					<div class="truncate text-xs text-muted-foreground">
+						{#if drive.device}
+							{drive.device} · {drive.fs_type} · {formatSize(drive.size_bytes)}{drive.transport ? ` · ${drive.transport.toUpperCase()}` : ''}
+						{:else}
+							Unplugged without ejecting · {drive.fs_type}
+						{/if}
+					</div>
+				</div>
+				{#if drive.mounted}
+					{#if drive.device}
+						<Button size="sm" variant="outline" onclick={() => browse(`${EXTERNAL_PREFIX}/${drive.name}`)}>Open</Button>
+					{/if}
+					<Button size="sm" variant="outline" onclick={() => ejectExternal(drive)} disabled={externalBusy === drive.name}>Eject</Button>
+				{:else}
+					<Button size="sm" variant="outline" onclick={() => mountExternal(drive)} disabled={externalBusy === drive.name}>Mount</Button>
+				{/if}
+			</div>
+		{/each}
 	</div>
 {/if}
 
@@ -1015,7 +1101,7 @@
 										<Download size={14} />
 									</a>
 								{/if}
-								{#if canCreateGuestShares}
+								{#if canCreateGuestShares && !inExternal}
 									<button
 										class="text-muted-foreground/40 hover:text-foreground transition-colors"
 										onclick={() => openShare(entry)}
@@ -1024,6 +1110,7 @@
 										<Share2 size={14} />
 									</button>
 								{/if}
+								{#if !inExternal}
 								<button
 									class="text-muted-foreground/40 hover:text-foreground transition-colors"
 									onclick={() => startRename(entry)}
@@ -1031,6 +1118,7 @@
 									title="Rename">
 									<Pencil size={14} />
 								</button>
+								{/if}
 								<button
 									class="text-muted-foreground/40 hover:text-foreground transition-colors"
 									onclick={() => openPicker([entry], 'copy')}
@@ -1038,6 +1126,7 @@
 									title="Copy to…">
 									<Copy size={14} />
 								</button>
+								{#if !inExternal}
 								<button
 									class="text-muted-foreground/40 hover:text-foreground transition-colors"
 									onclick={() => openPicker([entry], 'move')}
@@ -1052,6 +1141,7 @@
 									title="Delete">
 									<Trash2 size={14} />
 								</button>
+								{/if}
 							</div>
 						</td>
 					{/if}
@@ -1204,7 +1294,7 @@
 			<div class="shrink-0 flex items-center justify-between px-4 py-2 border-b border-border">
 				<span class="text-sm font-semibold text-white font-mono">{previewFile.name}{editing ? ' (editing)' : ''}</span>
 				<div class="flex items-center gap-2">
-					{#if cat === 'text' && !isRoot}
+					{#if cat === 'text' && !isRoot && !inExternal}
 						{#if editing}
 							<Button size="xs" onclick={saveEdit} disabled={editSaving}>
 								{editSaving ? 'Saving…' : 'Save'}

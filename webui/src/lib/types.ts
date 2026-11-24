@@ -621,6 +621,20 @@ export interface DeviceIoScheduler {
 	configured: string | null;
 }
 
+/** A drive outside any pool that can be mounted read-only (#1080). */
+export interface ExternalDrive {
+	/** Block device; empty when the drive was unplugged without ejecting. */
+	device: string;
+	/** Shown in the Files page as `@external/<name>`. */
+	name: string;
+	label: string | null;
+	fs_type: string;
+	size_bytes: number;
+	model: string | null;
+	transport: string | null;
+	mounted: boolean;
+}
+
 export interface BlockDevice {
 	path: string;
 	size_bytes: number;
