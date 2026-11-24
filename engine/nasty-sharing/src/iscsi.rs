@@ -571,6 +571,49 @@ impl IscsiService {
         Ok((target, previous))
     }
 
+    /// Create portals bound to an address that has come up since the target
+    /// was restored. LIO's boot restore (target.service) cannot bind a portal
+    /// to an address that is not up yet and never retries; the engine's state
+    /// still has the portal. Run on every address watch tick.
+    pub async fn bind_pending_portals(&self) {
+        let targets: Vec<IscsiTarget> = state_dir().load_all().await;
+        let mut created = false;
+        for target in &targets {
+            let tpg_path = format!("{ISCSI_BASE}/{}/tpgt_1", target.iqn);
+            if tokio::fs::metadata(&tpg_path).await.is_err() {
+                continue;
+            }
+            for portal in &target.portals {
+                if crate::nvmeof::is_wildcard_addr(&portal.ip)
+                    || !crate::nvmeof::addr_is_local(&portal.ip)
+                    || tokio::fs::metadata(np_path_for(&tpg_path, &portal.ip, portal.port))
+                        .await
+                        .is_ok()
+                {
+                    continue;
+                }
+                match create_np(&tpg_path, portal).await {
+                    Ok(()) => {
+                        info!(
+                            "iSCSI: bound portal {}:{} for {} now that its address is up",
+                            portal.ip, portal.port, target.iqn
+                        );
+                        created = true;
+                    }
+                    Err(e) => warn!(
+                        "iSCSI: binding portal {}:{} for {} failed: {e}",
+                        portal.ip, portal.port, target.iqn
+                    ),
+                }
+            }
+        }
+        // saveconfig was written without the portal; persist it so the next
+        // boot restore tries it too.
+        if created {
+            save_lio_config().await;
+        }
+    }
+
     pub async fn restore_target_state(&self, target: &IscsiTarget) -> Result<(), IscsiError> {
         state_dir().save(&target.id, target).await?;
         Ok(())
