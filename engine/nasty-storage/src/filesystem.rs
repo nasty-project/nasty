@@ -3995,7 +3995,7 @@ impl FilesystemService {
             "lsblk",
             &[
                 "-Jbno",
-                "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,PTTYPE,ROTA,MODEL,SERIAL,VENDOR,TRAN,UUID",
+                "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,PTTYPE,ROTA,MODEL,SERIAL,VENDOR,TRAN,UUID,LABEL",
             ],
         )
         .await
@@ -4084,6 +4084,7 @@ impl FilesystemService {
                     let vendor = pick("vendor");
                     let transport = pick("tran");
                     let fs_uuid = pick("uuid");
+                    let label = pick("label");
 
                     let smart = smart_by_path
                         .get(format!("/dev/{name}").as_str())
@@ -4128,6 +4129,7 @@ impl FilesystemService {
                             partition_table_type: pick("pttype"),
                             parent_path: parent_disk.map(|name| format!("/dev/{name}")),
                             fs_uuid,
+                            label,
                             in_use: in_fs || actually_mounted,
                             rotational: classification.rotational,
                             device_class: classification.device_class,
@@ -4318,6 +4320,7 @@ impl FilesystemService {
                             partition_table_type: None,
                             parent_path: Some(disk_path.clone()),
                             fs_uuid: None,
+                            label: None,
                             in_use: false,
                             rotational,
                             device_class,
@@ -6135,6 +6138,9 @@ pub struct BlockDevice {
     /// offline/former member apart from a foreign disk (#472).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs_uuid: Option<String>,
+    /// Filesystem label from lsblk, e.g. a USB stick's volume name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Whether the device is currently in use (mounted, in a filesystem, or has partitions in use).
     pub in_use: bool,
     /// Whether the underlying disk spins (false for NVMe/SSD, true for HDD).

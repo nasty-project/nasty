@@ -5,6 +5,7 @@
 
 pub mod cmd;
 pub mod disk_type;
+pub mod external;
 pub mod filesystem;
 pub mod io_scheduler;
 pub mod scrub_scheduler;

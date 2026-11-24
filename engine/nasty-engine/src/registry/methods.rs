@@ -621,6 +621,35 @@ pub(super) fn registry(generator: &mut SchemaGenerator) -> Vec<(&'static str, Ve
                     result: None,
                 },
                 Method {
+                    name: "device.external.list",
+                    desc: "List drives outside any pool that can be mounted read-only for copying (#1080): exFAT, FAT, NTFS or ext on a disk with nothing else in use. Requires an unscoped session.",
+                    role: MethodRole::Any,
+                    params: MethodParams::None,
+                    result: Some(gen_schema::<Vec<nasty_storage::external::ExternalDrive>>(
+                        generator,
+                    )),
+                },
+                Method {
+                    name: "device.external.mount",
+                    desc: "Mount an external drive read-only under /run/nasty/external; the Files page shows it as @external/<name>.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<
+                        nasty_storage::external::ExternalDriveRequest,
+                    >(generator)),
+                    result: Some(gen_schema::<nasty_storage::external::ExternalDrive>(
+                        generator,
+                    )),
+                },
+                Method {
+                    name: "device.external.unmount",
+                    desc: "Eject an external drive: unmount it so it can be unplugged. Takes the device or the drive's name.",
+                    role: MethodRole::Admin,
+                    params: MethodParams::Schema(gen_schema::<
+                        nasty_storage::external::ExternalDriveRequest,
+                    >(generator)),
+                    result: None,
+                },
+                Method {
                     name: "device.set_io_scheduler",
                     desc: "Set and persist the I/O scheduler on the physical whole disk owning a queue, or stop managing it without changing the active scheduler. Device aliases and partitions are resolved through sysfs.",
                     role: MethodRole::Admin,
