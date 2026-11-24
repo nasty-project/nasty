@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import type { Job } from '$lib/types';
 	import { goto } from '$app/navigation';
 	import { Card, CardContent } from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
@@ -279,40 +280,134 @@
 	async function runPickerAction(destAbs: string) {
 		pickerOpen = false;
 		const destRel = relFromHostPath(destAbs);
-		const endpoint = pickerMode === 'copy' ? '/api/files/copy' : '/api/files/rename';
-		const verb = pickerMode === 'copy' ? 'copy' : 'move';
 		const targets = pickerTargets.slice();
 		pickerTargets = [];
+		// Copying or moving onto itself is skipped silently.
+		const items = targets
+			.map((entry) => ({
+				name: entry.name,
+				from: currentPath ? `${currentPath}/${entry.name}` : entry.name,
+				to: destRel ? `${destRel}/${entry.name}` : entry.name,
+			}))
+			.filter((item) => item.from !== item.to);
+		if (pickerMode === 'copy') {
+			await startCopy(items);
+		} else {
+			await runMove(items);
+		}
+		clearSelection();
+		await browse(currentPath);
+	}
 
+	// Copies run as engine jobs (#1080): one request starts the whole batch,
+	// and its progress is polled from /api/files/jobs.
+	async function startCopy(items: { from: string; to: string }[]) {
+		if (items.length === 0) return;
+		try {
+			const res = await fetch('/api/files/copy', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ items: items.map(({ from, to }) => ({ from, to })) }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				toastError(`Copy failed: ${data.error || res.statusText}`);
+				return;
+			}
+			watchedJobs = [...watchedJobs, (data as Job).id];
+		} catch (e) {
+			toastError(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
+			return;
+		}
+		await loadCopyJobs();
+	}
+
+	async function runMove(items: { name: string; from: string; to: string }[]) {
 		bulkActionRunning = true;
 		const errors: string[] = [];
-		for (let i = 0; i < targets.length; i++) {
-			const entry = targets[i];
-			bulkActionStatus = `${verb} ${i + 1}/${targets.length}: ${entry.name}`;
-			const from = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-			const to = destRel ? `${destRel}/${entry.name}` : entry.name;
-			if (from === to) continue; // copying/moving onto self → skip silently
+		for (let i = 0; i < items.length; i++) {
+			const item = items[i];
+			bulkActionStatus = `move ${i + 1}/${items.length}: ${item.name}`;
 			try {
-				const res = await fetch(endpoint, {
+				const res = await fetch('/api/files/rename', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ from, to }),
+					body: JSON.stringify({ from: item.from, to: item.to }),
 				});
 				if (!res.ok) {
 					const data = await res.json().catch(() => ({}));
-					errors.push(`${entry.name}: ${data.error || res.statusText}`);
+					errors.push(`${item.name}: ${data.error || res.statusText}`);
 				}
 			} catch (e) {
-				errors.push(`${entry.name}: ${e instanceof Error ? e.message : String(e)}`);
+				errors.push(`${item.name}: ${e instanceof Error ? e.message : String(e)}`);
 			}
 		}
 		bulkActionRunning = false;
 		bulkActionStatus = '';
 		if (errors.length > 0) {
-			alert(`${verb} finished with ${errors.length} error(s):\n\n${errors.join('\n')}`);
+			alert(`move finished with ${errors.length} error(s):\n\n${errors.join('\n')}`);
 		}
-		clearSelection();
-		await browse(currentPath);
+	}
+
+	const DISMISSED_JOBS_KEY = 'nasty.files.dismissedCopyJobs';
+	let copyJobs: Job[] = $state([]);
+	// Jobs started or seen running here; they stay listed when they succeed.
+	let watchedJobs: string[] = $state([]);
+	let dismissedJobs: string[] = $state(readDismissedJobs());
+	let copyJobsTimer: ReturnType<typeof setTimeout> | undefined;
+
+	// Running copies, failed ones until dismissed (so a closed tab does not
+	// lose them), and successes this page watched.
+	const visibleCopyJobs = $derived(
+		copyJobs.filter((job) =>
+			job.state === 'running' ||
+			(!dismissedJobs.includes(job.id) && (job.state !== 'succeeded' || watchedJobs.includes(job.id)))
+		)
+	);
+
+	function readDismissedJobs(): string[] {
+		try {
+			return JSON.parse(localStorage.getItem(DISMISSED_JOBS_KEY) ?? '[]');
+		} catch {
+			return [];
+		}
+	}
+
+	function dismissCopyJob(id: string) {
+		// Finished jobs leave the engine within a day; keep only ids still listed.
+		dismissedJobs = [...dismissedJobs.filter((d) => copyJobs.some((j) => j.id === d)), id];
+		try {
+			localStorage.setItem(DISMISSED_JOBS_KEY, JSON.stringify(dismissedJobs));
+		} catch {
+			// Private windows can refuse storage; the dismissal still holds here.
+		}
+	}
+
+	async function loadCopyJobs() {
+		clearTimeout(copyJobsTimer);
+		try {
+			const res = await fetch('/api/files/jobs');
+			if (res.ok) {
+				const next: Job[] = await res.json();
+				const wasRunning = copyJobs.filter((j) => j.state === 'running').map((j) => j.id);
+				const finished = next.some((j) => j.state !== 'running' && wasRunning.includes(j.id));
+				watchedJobs = [...new Set([...watchedJobs, ...next.filter((j) => j.state === 'running').map((j) => j.id)])];
+				copyJobs = next;
+				if (finished) await browse(currentPath);
+			}
+		} catch {
+			// Keep the last list; the next poll retries.
+		}
+		if (copyJobs.some((j) => j.state === 'running')) {
+			copyJobsTimer = setTimeout(loadCopyJobs, 1000);
+		}
+	}
+
+	function copyJobTitle(job: Job): string {
+		const dest = job.target.replace(/^\/fs\/?/, '') || '/';
+		if (job.state === 'running') return `Copying to ${dest}`;
+		if (job.state === 'succeeded') return `Copied to ${dest}`;
+		return `Copy to ${dest} finished with errors`;
 	}
 
 	async function runBulkDelete() {
@@ -368,11 +463,13 @@
 	onMount(() => {
 		const initial = new URLSearchParams(window.location.search).get('path');
 		browse(initial ? initial.replace(/^\/fs\/?/, '') : '');
+		loadCopyJobs();
 		getClient().call<{ role: string; scoped: boolean }>('auth.me')
 			.then((session) => {
 				canCreateGuestShares = !session.scoped && (session.role === 'admin' || session.role === 'operator');
 			})
 			.catch(() => { canCreateGuestShares = false; });
+		return () => clearTimeout(copyJobsTimer);
 	});
 
 	// True when the current path is inside a read-only snapshot, i.e. the
@@ -741,6 +838,53 @@
 		{bulkActionStatus || 'Working…'}
 	</div>
 {/if}
+
+<!-- Copy jobs -->
+{#each visibleCopyJobs as job (job.id)}
+	{@const progress = job.progress}
+	<div class="mb-3 rounded-md border border-border px-3 py-2 text-sm">
+		<div class="flex items-center gap-2">
+			{#if job.state === 'running'}
+				<Loader2 size={14} class="shrink-0 animate-spin text-muted-foreground" />
+			{:else if job.state === 'succeeded'}
+				<Check size={14} class="shrink-0 text-green-500" />
+			{/if}
+			<span class="min-w-0 flex-1 truncate font-mono" title={job.target}>{copyJobTitle(job)}</span>
+			{#if progress}
+				<span class="shrink-0 tabular-nums text-muted-foreground">
+					{formatSize(progress.bytes_done)} / {formatSize(progress.bytes_total)}
+				</span>
+			{/if}
+			{#if job.state !== 'running'}
+				<Button size="sm" variant="ghost" onclick={() => dismissCopyJob(job.id)}>Dismiss</Button>
+			{/if}
+		</div>
+		{#if job.state === 'running' && progress}
+			<div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
+				<div
+					class="h-full rounded-full bg-primary transition-all"
+					style="width: {progress.bytes_total > 0 ? Math.min(100, (progress.bytes_done / progress.bytes_total) * 100) : 0}%"
+				></div>
+			</div>
+			{#if progress.current}
+				<div class="mt-1 truncate font-mono text-xs text-muted-foreground" title={progress.current}>{progress.current}</div>
+			{/if}
+		{/if}
+		{#if progress && progress.error_count > 0}
+			<details class="mt-1 text-xs text-red-400">
+				<summary class="cursor-pointer">{progress.error_count} {progress.error_count === 1 ? 'error' : 'errors'}</summary>
+				<ul class="mt-1 space-y-0.5">
+					{#each progress.errors as error, i (i)}
+						<li class="break-all font-mono">{error}</li>
+					{/each}
+					{#if progress.error_count > progress.errors.length}
+						<li>…and {progress.error_count - progress.errors.length} more</li>
+					{/if}
+				</ul>
+			</details>
+		{/if}
+	</div>
+{/each}
 
 <!-- Upload progress -->
 {#if uploading}

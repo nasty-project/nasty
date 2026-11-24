@@ -146,9 +146,19 @@ pub fn pin_parent(path: &Path) -> io::Result<(PinnedDirectory, std::path::PathBu
 /// Copy a regular file without following a symlink at either end. With
 /// `replace`, an existing regular file is overwritten in place (keeping its
 /// owner); otherwise the destination must not exist (O_EXCL).
-pub fn copy_regular_file(src: &Path, dst: &Path, replace: bool) -> io::Result<()> {
+/// Copy a regular file, reporting each piece copied to `copied`.
+pub fn copy_regular_file(
+    src: &Path,
+    dst: &Path,
+    replace: bool,
+    copied: &mut dyn FnMut(u64),
+) -> io::Result<()> {
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
-    let mut from = OpenOptions::new()
+    // Large enough to keep copy_file_range efficient, small enough that a
+    // multi-gigabyte file shows progress.
+    const PIECE: u64 = 64 * 1024 * 1024;
+    let from = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(src)?;
@@ -167,7 +177,14 @@ pub fn copy_regular_file(src: &Path, dst: &Path, replace: bool) -> io::Result<()
     if !to.metadata()?.is_file() {
         return Err(invalid_path("destination is not a regular file"));
     }
-    io::copy(&mut from, &mut to)?;
+    // `Take<&File>` keeps std's copy_file_range fast path.
+    loop {
+        let n = io::copy(&mut (&from).take(PIECE), &mut to)?;
+        if n == 0 {
+            break;
+        }
+        copied(n);
+    }
     // `mode` above is filtered by the umask; match std::fs::copy exactly.
     to.set_permissions(meta.permissions())
 }
@@ -647,16 +664,16 @@ mod tests {
         std::fs::write(&victim, b"keep").unwrap();
         std::os::unix::fs::symlink(&victim, &link).unwrap();
 
-        assert!(copy_regular_file(&src, &link, false).is_err());
-        assert!(copy_regular_file(&src, &link, true).is_err());
-        assert!(copy_regular_file(&link, &tmp.path().join("out"), false).is_err());
+        assert!(copy_regular_file(&src, &link, false, &mut |_| {}).is_err());
+        assert!(copy_regular_file(&src, &link, true, &mut |_| {}).is_err());
+        assert!(copy_regular_file(&link, &tmp.path().join("out"), false, &mut |_| {}).is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
 
         let dst = tmp.path().join("dst");
-        copy_regular_file(&src, &dst, false).unwrap();
-        assert!(copy_regular_file(&src, &dst, false).is_err());
+        copy_regular_file(&src, &dst, false, &mut |_| {}).unwrap();
+        assert!(copy_regular_file(&src, &dst, false, &mut |_| {}).is_err());
         std::fs::write(&src, b"newer").unwrap();
-        copy_regular_file(&src, &dst, true).unwrap();
+        copy_regular_file(&src, &dst, true, &mut |_| {}).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"newer");
     }
 

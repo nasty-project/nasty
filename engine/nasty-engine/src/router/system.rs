@@ -1165,6 +1165,32 @@ fn diagnostics_access(session: &Session) -> bool {
     session.role == Role::Admin && session.filesystem.is_none() && session.owner.is_none()
 }
 
+/// Running WebUI copies as (filesystem, job id, percent, detail). Neither
+/// names a path: the status band is shared by every signed-in user. The job
+/// id keeps two copies to one filesystem apart.
+fn running_copies(state: &AppState) -> Vec<(String, String, Option<f32>, String)> {
+    state
+        .jobs
+        .list()
+        .into_iter()
+        .filter(|j| {
+            j.kind == crate::FILES_COPY_JOB && j.state == nasty_common::jobs::JobState::Running
+        })
+        .map(|j| {
+            let progress = j.progress.unwrap_or_default();
+            let percent = (progress.bytes_total > 0)
+                .then(|| (progress.bytes_done as f64 / progress.bytes_total as f64 * 100.0) as f32);
+            let detail = format!(
+                "Copying files to {} — {} of {}",
+                j.filesystem,
+                human_bytes(progress.bytes_done),
+                human_bytes(progress.bytes_total)
+            );
+            (j.filesystem, j.id, percent, detail)
+        })
+        .collect()
+}
+
 fn filesystem_visible(name: &str, filter: Option<&str>) -> bool {
     filter.is_none_or(|filter| name == filter)
 }
@@ -1252,6 +1278,16 @@ async fn build_system_status(state: &AppState) -> (nasty_system::SystemStatus, u
                 });
             }
         }
+    }
+
+    for (fs, id, progress_percent, detail) in running_copies(state) {
+        operations.push(nasty_system::ActiveOperation {
+            kind: "copy".to_string(),
+            fs,
+            target: Some(id),
+            progress_percent,
+            detail,
+        });
     }
 
     (
@@ -1526,6 +1562,27 @@ async fn build_operations(
                 control: ctrl.into(),
             });
         }
+    }
+    for (fs, id, progress_percent, detail) in running_copies(state) {
+        if !filesystem_visible(&fs, filesystem_filter) {
+            continue;
+        }
+        ops.push(nasty_system::Operation {
+            kind: "copy".into(),
+            fs,
+            target: Some(id),
+            run_id: None,
+            state: "running".into(),
+            progress_percent,
+            last_run_at: None,
+            last_duration_secs: None,
+            last_outcome: None,
+            schedule: None,
+            next_run_at: None,
+            schedule_error: None,
+            detail,
+            control: "none".into(),
+        });
     }
     if !any_evacuating {
         ops.push(evacuate_idle_row());

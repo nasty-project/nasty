@@ -77,7 +77,7 @@
 
 	function kindLabel(kind: string): string {
 		return (
-			{ scrub: 'Scrub', evacuate: 'Evacuate', remove: 'Remove', reconcile: 'Reconcile', copygc: 'Copygc' }[kind] ??
+			{ scrub: 'Scrub', evacuate: 'Evacuate', remove: 'Remove', reconcile: 'Reconcile', copygc: 'Copygc', copy: 'File copy' }[kind] ??
 			kind
 		);
 	}
