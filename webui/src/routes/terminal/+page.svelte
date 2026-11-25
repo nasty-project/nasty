@@ -135,7 +135,11 @@
 		};
 	});
 
+	// The top bar is hidden in fullscreen, so the tabs move into the page there.
+	$effect(() => { terminalStatus.setToolbar(current !== null && !fullscreen ? shellBar : null); });
+
 	onDestroy(() => {
+		terminalStatus.setToolbar(null);
 		const socket = ws;
 		ws = null; // leaving the page is not a dropped connection
 		socket?.close();
@@ -228,19 +232,8 @@
 </script>
 
 <div class="{fullscreen ? 'fixed inset-0 z-50 flex flex-col bg-[#0f1117]' : 'flex h-full flex-col'}">
-	{#if current !== null}
-		<div class="mb-2 flex flex-wrap items-center gap-2 {fullscreen ? 'px-2 pt-2' : ''}" role="tablist" aria-label="Shells">
-			{#each tabs as n (n)}
-				<Button size="sm" variant={n === current ? 'default' : 'secondary'} role="tab" aria-selected={n === current}
-					onclick={() => { if (n !== current) openShell(n); }}>Shell {n}</Button>
-			{/each}
-			{#if nextFreeShell(tabs, maxShells) !== null}
-				<Button size="sm" variant="secondary" onclick={newShell}>New shell</Button>
-			{/if}
-			<Button size="sm" variant="secondary" onclick={closeShell}>Close shell {current}</Button>
-			<span class="text-xs text-muted-foreground">Shells keep running when you leave this page.</span>
-			{#if shellError}<span role="alert" class="text-xs text-red-400">{shellError}</span>{/if}
-		</div>
+	{#if current !== null && fullscreen}
+		<div class="px-2 pt-2 pb-1">{@render shellBar()}</div>
 	{/if}
 	<div class="relative flex-1 min-h-0 overflow-hidden {fullscreen ? '' : 'rounded-lg border border-border'} p-1" style="background: #0f1117">
 		<div bind:this={terminalEl} class="h-full w-full"></div>
@@ -262,6 +255,21 @@
 		</div>
 	</div>
 </div>
+
+{#snippet shellBar()}
+	<div class="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Shells"
+		title="Shells keep running when you leave this page.">
+		{#each tabs as n (n)}
+			<Button size="xs" variant={n === current ? 'default' : 'secondary'} role="tab" aria-selected={n === current}
+				onclick={() => { if (n !== current) openShell(n); }}>Shell {n}</Button>
+		{/each}
+		{#if nextFreeShell(tabs, maxShells) !== null}
+			<Button size="xs" variant="secondary" onclick={newShell}>New shell</Button>
+		{/if}
+		<Button size="xs" variant="secondary" onclick={closeShell}>Close shell {current}</Button>
+		{#if shellError}<span role="alert" class="text-xs text-red-400">{shellError}</span>{/if}
+	</div>
+{/snippet}
 
 <style>
 	@import '@xterm/xterm/css/xterm.css';
