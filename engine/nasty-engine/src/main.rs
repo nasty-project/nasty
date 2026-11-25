@@ -1131,6 +1131,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/files/rename", post(files_rename_handler))
         .route("/api/files/copy", post(files_copy_handler))
         .route("/api/files/jobs", get(files_jobs_handler))
+        .route("/api/terminal/shells", get(terminal::shells_handler))
+        .route(
+            "/api/terminal/shells/{n}",
+            delete(terminal::close_shell_handler),
+        )
         .route("/api/files/restore", post(files_restore_handler))
         .route(
             "/api/files/content",
