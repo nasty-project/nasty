@@ -36,6 +36,10 @@ struct TerminalAuth {
     /// Optional command to run instead of bash. First element is the executable,
     /// rest are arguments. Session exits when the command finishes.
     cmd: Option<Vec<String>>,
+    /// Persistent shell to attach (1..=MAX_SHELLS), started if not running.
+    /// Without it (and without `cmd`) the shell ends with the connection.
+    #[serde(default)]
+    shell: Option<u8>,
 }
 
 fn default_cols() -> u16 {
@@ -89,6 +93,23 @@ async fn handle_terminal(
         }
     };
 
+    let persistent = match (auth.cmd.is_none(), auth.shell) {
+        (true, Some(n)) => match ensure_shell(&auth.username, n).await {
+            Ok(socket_path) => Some(socket_path),
+            Err(e) => {
+                warn!("Failed to start shell {n} for '{}': {e}", auth.username);
+                // Already authenticated: the WebUI prints this as terminal text.
+                let _ = socket
+                    .send(Message::Text(
+                        format!("\r\n\x1b[31mFailed to start shell {n}: {e}\x1b[0m\r\n").into(),
+                    ))
+                    .await;
+                return;
+            }
+        },
+        _ => None,
+    };
+
     // Terminal sessions can launch arbitrary sustained work. Demote the shell
     // before exec so those processes cannot inherit the engine's priority.
     let mut cmd = CommandBuilder::new("bash");
@@ -100,6 +121,17 @@ async fn handle_terminal(
     ]);
     if let Some(ref argv) = auth.cmd {
         cmd.args(argv);
+    } else if let Some(ref socket_path) = persistent {
+        // Only this tmux client belongs to the connection; the shell lives
+        // in its own unit and outlives it.
+        cmd.args([
+            "tmux",
+            "-S",
+            socket_path.as_str(),
+            "attach-session",
+            "-t",
+            "main",
+        ]);
     } else {
         cmd.args(["bash", "--rcfile", "/etc/nasty/terminal-rc"]);
     }
@@ -222,6 +254,7 @@ struct TerminalAuthResult {
     cols: u16,
     rows: u16,
     cmd: Option<Vec<String>>,
+    shell: Option<u8>,
 }
 
 async fn wait_for_terminal_auth(
@@ -304,11 +337,11 @@ async fn wait_for_terminal_auth(
                 "terminal_opened",
                 &session.username,
                 client_ip,
-                &auth
-                    .cmd
-                    .as_deref()
-                    .map(|c| format!("cmd={}", c.join(" ")))
-                    .unwrap_or_default(),
+                &match (&auth.cmd, auth.shell) {
+                    (Some(c), _) => format!("cmd={}", c.join(" ")),
+                    (None, Some(n)) => format!("shell={n}"),
+                    (None, None) => String::new(),
+                },
             );
             let _ = socket
                 .send(Message::Text(r#"{"authenticated":true}"#.into()))
@@ -318,6 +351,7 @@ async fn wait_for_terminal_auth(
                 cols: auth.cols,
                 rows: auth.rows,
                 cmd: auth.cmd,
+                shell: auth.shell,
             })
         }
         Err(_) => {
@@ -327,5 +361,250 @@ async fn wait_for_terminal_auth(
             let _ = socket.send(Message::Close(None)).await;
             None
         }
+    }
+}
+
+// ── Persistent shells (#1085) ──────────────────────────────────────────
+//
+// Each shell is a tmux server in its own transient unit, so leaving the page,
+// the login expiring and engine restarts only end the attached client. `exit`,
+// "Close" (systemctl stop) or a reboot end the shell.
+
+/// Shells per user.
+pub const MAX_SHELLS: u8 = 4;
+const SHELL_SOCKET_DIR: &str = "/run/nasty-shells";
+const SHELL_START_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Usernames may hold characters unit names and paths can't, so key by hex.
+fn shell_key(username: &str) -> String {
+    username.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+fn shell_unit(username: &str, n: u8) -> String {
+    format!("nasty-shell-{}-{n}.service", shell_key(username))
+}
+
+fn shell_socket(username: &str, n: u8) -> String {
+    format!("{SHELL_SOCKET_DIR}/{}-{n}", shell_key(username))
+}
+
+fn check_shell_number(n: u8) -> Result<(), String> {
+    if (1..=MAX_SHELLS).contains(&n) {
+        Ok(())
+    } else {
+        Err(format!("shell must be 1..={MAX_SHELLS}"))
+    }
+}
+
+async fn shell_running(socket_path: &str) -> bool {
+    tokio::process::Command::new("tmux")
+        .args(["-S", socket_path, "has-session", "-t", "main"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
+}
+
+/// Start shell `n` for `username` unless it runs; returns its tmux socket.
+async fn ensure_shell(username: &str, n: u8) -> Result<String, String> {
+    check_shell_number(n)?;
+    let socket_path = shell_socket(username, n);
+    if shell_running(&socket_path).await {
+        return Ok(socket_path);
+    }
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(SHELL_SOCKET_DIR)
+            .map_err(|e| format!("{SHELL_SOCKET_DIR}: {e}"))?;
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    let output = tokio::process::Command::new("systemd-run")
+        .arg("--unit")
+        .arg(shell_unit(username, n))
+        .args([
+            "--collect",
+            "--description",
+            &format!("NASty shell {n} for {username}"),
+            "--property=Type=forking",
+            // Same demotion as a one-off terminal shell.
+            "--property=Nice=10",
+            "--property=IOSchedulingClass=best-effort",
+            "--property=IOSchedulingPriority=7",
+            "--working-directory=/root",
+            "--setenv=TERM=xterm-256color",
+            "--setenv=HOME=/root",
+            "--setenv=NASTY_WEBUI_TERMINAL=1",
+        ])
+        .arg(format!("--setenv=NASTY_SHELL={n}"))
+        .arg(format!("--setenv=PATH={path}"))
+        .args([
+            "--",
+            "tmux",
+            "-S",
+            &socket_path,
+            "-f",
+            "/etc/nasty/tmux.conf",
+        ])
+        .args(["new-session", "-d", "-s", "main"])
+        .args(["bash", "--rcfile", "/etc/nasty/terminal-rc"])
+        .output()
+        .await
+        .map_err(|e| format!("systemd-run: {e}"))?;
+    // A second tab racing this one gets "unit already exists"; both then wait
+    // for the same session.
+    let deadline = tokio::time::Instant::now() + SHELL_START_WAIT;
+    while tokio::time::Instant::now() < deadline {
+        if shell_running(&socket_path).await {
+            return Ok(socket_path);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        "tmux did not start".into()
+    } else {
+        stderr
+    })
+}
+
+/// Running shell numbers, from `systemctl list-units --plain --no-legend`.
+fn parse_running_shells(output: &str, username: &str) -> Vec<u8> {
+    let prefix = format!("nasty-shell-{}-", shell_key(username));
+    let mut shells: Vec<u8> = output
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            let unit = cols.next()?;
+            let active = cols.nth(1)? == "active";
+            let n = unit
+                .strip_prefix(&prefix)?
+                .strip_suffix(".service")?
+                .parse()
+                .ok()?;
+            (active && check_shell_number(n).is_ok()).then_some(n)
+        })
+        .collect();
+    shells.sort_unstable();
+    shells
+}
+
+async fn running_shells(username: &str) -> Result<Vec<u8>, String> {
+    let output = tokio::process::Command::new("systemctl")
+        .args(["list-units", "--plain", "--no-legend", "--type=service"])
+        .arg(format!("nasty-shell-{}-*", shell_key(username)))
+        .output()
+        .await
+        .map_err(|e| format!("systemctl: {e}"))?;
+    Ok(parse_running_shells(
+        &String::from_utf8_lossy(&output.stdout),
+        username,
+    ))
+}
+
+/// GET /api/terminal/shells: the caller's running shells.
+pub async fn shells_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    let authenticated = match crate::validate_bearer(
+        &headers,
+        &state.auth,
+        crate::auth::EndpointAccess::RootEquivalent,
+        "terminal.shells",
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    match running_shells(&authenticated.session.username).await {
+        Ok(shells) => {
+            axum::Json(serde_json::json!({ "shells": shells, "max": MAX_SHELLS })).into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/terminal/shells/{n}: end one of the caller's shells.
+pub async fn close_shell_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(n): axum::extract::Path<u8>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let authenticated = match crate::validate_bearer(
+        &headers,
+        &state.auth,
+        crate::auth::EndpointAccess::RootEquivalent,
+        "terminal.shells.close",
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    let error = |status, e: String| (status, axum::Json(serde_json::json!({ "error": e })));
+    if let Err(e) = check_shell_number(n) {
+        return error(StatusCode::BAD_REQUEST, e).into_response();
+    }
+    let username = &authenticated.session.username;
+    crate::auth::audit(
+        "terminal_shell_closed",
+        username,
+        &authenticated.client_ip,
+        &format!("shell={n}"),
+    );
+    match tokio::process::Command::new("systemctl")
+        .args(["stop", &shell_unit(username, n)])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => StatusCode::NO_CONTENT.into_response(),
+        Ok(o) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        )
+        .into_response(),
+        Err(e) => {
+            error(StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl: {e}")).into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_names_are_safe_for_any_username() {
+        assert_eq!(shell_unit("admin", 2), "nasty-shell-61646d696e-2.service");
+        assert_eq!(
+            shell_socket("a b/..", 1),
+            "/run/nasty-shells/6120622f2e2e-1"
+        );
+        assert!(check_shell_number(0).is_err());
+        assert!(check_shell_number(MAX_SHELLS + 1).is_err());
+    }
+
+    #[test]
+    fn running_shells_only_lists_this_users_active_shells() {
+        let admin = shell_key("admin");
+        let other = shell_key("bob");
+        let out = format!(
+            "nasty-shell-{admin}-3.service loaded active running NASty shell 3\n\
+             nasty-shell-{admin}-1.service loaded active running NASty shell 1\n\
+             nasty-shell-{admin}-2.service loaded failed failed NASty shell 2\n\
+             nasty-shell-{admin}-9.service loaded active running stray\n\
+             nasty-shell-{other}-4.service loaded active running NASty shell 4\n"
+        );
+        assert_eq!(parse_running_shells(&out, "admin"), [1, 3]);
     }
 }

@@ -547,6 +547,18 @@ in {
 
     # ── WebUI terminal welcome ──────────────────────────────────
 
+    # Persistent WebUI shells run in tmux (engine terminal.rs). Keep it out of
+    # sight: no status bar, and leave scrollback and selection to the browser
+    # terminal (no alternate screen, no mouse capture).
+    environment.etc."nasty/tmux.conf".text = ''
+      set -g status off
+      set -g mouse off
+      set -g escape-time 0
+      set -g history-limit 50000
+      set -g window-size latest
+      set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'
+    '';
+
     environment.etc."nasty/terminal-rc".text = ''
       # Source system-wide bashrc to get correct PATH for all tools
       [ -f /etc/bashrc ] && source /etc/bashrc
@@ -560,9 +572,14 @@ in {
       echo "  Type 'benchmark'  to show storage benchmark commands."
       echo "  Type 'report'     to dump diagnostic info for bug reports."
       echo ""
-      echo "  Processes started here end when this session closes or the engine"
-      echo "  restarts (including updates), even with nohup. For long jobs use:"
-      echo "    nasty-run <command> [args]   e.g. nasty-run bcachefs fsck -n /dev/sdX"
+      if [ -n "''${NASTY_SHELL:-}" ]; then
+        echo "  This is persistent shell $NASTY_SHELL: it keeps running when you leave"
+        echo "  the page or the engine restarts. 'exit' or Close ends it; a reboot does too."
+      else
+        echo "  Processes started here end when this session closes or the engine"
+        echo "  restarts (including updates), even with nohup. For long jobs use:"
+        echo "    nasty-run <command> [args]   e.g. nasty-run bcachefs fsck -n /dev/sdX"
+      fi
       echo ""
 
       help()      { cat /etc/nasty/help-cheatsheet; }
@@ -841,6 +858,7 @@ in {
       _7zz              # 7zz archive creation and extraction
       maintainedNcdu    # maintained ncdu fork for interactive directory usage
       htop
+      tmux              # persistent WebUI terminal shells; also usable over SSH
       python3           # scripting and quick data processing
       file              # file type identification
       tree              # directory structure visualization
@@ -1853,6 +1871,7 @@ in {
 
       path = with pkgs; [
         bashInteractive  # bash for terminal
+        tmux             # persistent WebUI terminal shells (#1085)
         config.services.openssh.package  # ssh-keygen for public key validation
         util-linux       # lsblk, blkid, wipefs, mount, umount
         e2fsprogs        # mkfs.ext3, mkfs.ext4
