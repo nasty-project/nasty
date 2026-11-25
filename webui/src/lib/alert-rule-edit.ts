@@ -1,4 +1,6 @@
-import type { AlertRule, AlertSeverity, TempUnit } from './types';
+import type { AlertRule, AlertSeverity, DiskType, TempUnit } from './types';
+
+export const diskTypeLabels: Record<DiskType, string> = { hdd: 'HDD', ssd: 'SATA SSD', nvme: 'NVMe' };
 
 export function displayedAlertThreshold(rule: AlertRule, unit: TempUnit): number {
 	return rule.metric === 'disk_temperature' && unit === 'fahrenheit'
