@@ -1318,6 +1318,9 @@
 							terminalStatus.value === 'connecting' ? 'text-amber-500' : 'text-muted-foreground/50'
 						}">{terminalStatus.value}</span>
 					{/if}
+					{#if currentNav.href === '/terminal' && terminalStatus.toolbar}
+						<div class="ml-3">{@render terminalStatus.toolbar()}</div>
+					{/if}
 				</div>
 
 				<!-- Centered banners — reload and reboot notifications -->
