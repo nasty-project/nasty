@@ -765,6 +765,19 @@ fn spawn_device_remove(
     });
 }
 
+/// Bind block-share ports and portals whose address has come up since they
+/// were restored. Driven by the address watch (`nasty_system::netwatch`).
+pub(crate) async fn bind_address_pending(state: &AppState) {
+    use nasty_system::protocol::Protocol;
+    let _guard = state.block_share_mutation.lock().await;
+    if state.protocols.is_enabled(Protocol::Nvmeof).await {
+        state.nvmeof.bind_pending_ports().await;
+    }
+    if state.protocols.is_enabled(Protocol::Iscsi).await {
+        state.iscsi.bind_pending_portals().await;
+    }
+}
+
 pub(crate) async fn reconcile_block_shares(state: &AppState) -> Result<(), String> {
     let _guard = state.block_share_mutation.lock().await;
     reconcile_block_shares_under_lock(state).await

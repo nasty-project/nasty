@@ -5,6 +5,7 @@ pub mod firewall;
 pub mod firmware;
 pub mod guest_tools;
 pub mod hardware;
+pub mod netwatch;
 pub mod network;
 pub mod notifications;
 pub mod nut;

@@ -414,17 +414,6 @@ impl NvmeofService {
         }
         let mut failures = Vec::new();
 
-        // Boot restore races the network coming up: a port bound to a
-        // specific address whose interface isn't configured yet fails to
-        // bind with EADDRNOTAVAIL and never retries (#625). Wait for those
-        // addresses to appear before binding. Wildcard-bound ports and
-        // already-ready addresses don't wait.
-        let addrs: Vec<String> = subsystems
-            .iter()
-            .flat_map(|s| s.ports.iter().map(|p| p.addr.clone()))
-            .collect();
-        wait_for_port_addresses(&addrs, std::time::Duration::from_secs(45)).await;
-
         for subsys in &subsystems {
             info!("Restoring NVMe-oF subsystem: {}", subsys.nqn);
 
@@ -480,62 +469,30 @@ impl NvmeofService {
                 }
             }
 
-            // Restore ports — reuse existing port if one already binds to the same address
+            // A port bound to an address that is not up yet (Tailscale, a late
+            // DHCP lease or VLAN) is not a failure: nothing listens there, so
+            // nothing is exposed, and `bind_pending_ports` binds it when the
+            // address appears (#625). Failing the restore here closed the
+            // firewall for every NVMe-oF port.
             for port in &subsys.ports {
-                let svc_id: u16 = port.service_id.parse().unwrap_or(4420);
-                let actual_port_id = if let Some(existing) =
-                    find_existing_port(&port.transport, &port.addr, svc_id, &port.addr_family).await
-                {
-                    existing
-                } else {
-                    let port_path = format!("{NVMET_BASE}/ports/{}", port.port_id);
-                    if let Err(e) = configfs_ensure_dir(&port_path).await {
-                        warn!("  Failed to create port {}: {e}", port.port_id);
-                        failures.push(format!("{} port {}: {e}", subsys.nqn, port.port_id));
-                        continue;
-                    }
-                    let configured = async {
-                        configfs_write(&format!("{port_path}/addr_trtype"), &port.transport)
-                            .await?;
-                        configfs_write(&format!("{port_path}/addr_traddr"), &port.addr).await?;
-                        configfs_write(&format!("{port_path}/addr_trsvcid"), &port.service_id)
-                            .await?;
-                        configfs_write(&format!("{port_path}/addr_adrfam"), &port.addr_family)
-                            .await?;
-                        Ok::<(), NvmeofError>(())
-                    }
-                    .await;
-                    if let Err(error) = configured {
-                        warn!("  Failed to configure port {}: {error}", port.port_id);
-                        failures.push(format!("{} port {}: {error}", subsys.nqn, port.port_id));
-                        continue;
-                    }
-                    port.port_id
-                };
-
-                let port_path = format!("{NVMET_BASE}/ports/{actual_port_id}");
-                let link = format!("{port_path}/subsystems/{}", subsys.nqn);
-                // Linking the subsystem is what triggers the kernel transport
-                // bind, so this is where EADDRNOTAVAIL surfaces. Report it
-                // instead of swallowing it (#625) — a silent failure left the
-                // target dead with no clue in the logs.
-                match configfs_ensure_symlink(
-                    &format!("{NVMET_BASE}/subsystems/{}", subsys.nqn),
-                    &link,
-                )
-                .await
-                {
-                    Ok(()) => info!(
+                if !addr_is_local(&port.addr) {
+                    info!(
+                        "  NVMe-oF port {}:{} waits for its address to come up",
+                        port.addr, port.service_id
+                    );
+                    continue;
+                }
+                match bind_port(subsys, port).await {
+                    Ok(port_id) => info!(
                         "  Restored port {} ({}:{})",
-                        actual_port_id, port.addr, port.service_id
+                        port_id, port.addr, port.service_id
                     ),
                     Err(e) => {
                         warn!(
-                            "  NVMe-oF port {} bind to {}:{} failed ({e}) — the address may not \
-                             be up yet; re-add the portal once its interface is active",
-                            actual_port_id, port.addr, port.service_id
+                            "  NVMe-oF port bind to {}:{} failed: {e}",
+                            port.addr, port.service_id
                         );
-                        failures.push(format!("{} port {} bind: {e}", subsys.nqn, actual_port_id));
+                        failures.push(format!("{} port {}: {e}", subsys.nqn, port.port_id));
                     }
                 }
             }
@@ -546,6 +503,38 @@ impl NvmeofService {
             Ok(())
         } else {
             Err(NvmeofError::ConfigFs(failures.join("; ")))
+        }
+    }
+
+    /// Bind restored subsystems' ports whose address has come up since. Run on
+    /// every address watch tick; a port that is already bound is left alone.
+    pub async fn bind_pending_ports(&self) {
+        let Ok(subsystems) = state_dir().load_all_strict::<NvmeofSubsystem>().await else {
+            return;
+        };
+        for subsys in &subsystems {
+            let subsys_path = format!("{NVMET_BASE}/subsystems/{}", subsys.nqn);
+            // Not in configfs: not restored, nothing to bind. (A subsystem
+            // quiesced as unsafe stays, but its namespaces are disabled and
+            // its firewall closed, so binding it exposes nothing.)
+            if tokio::fs::metadata(&subsys_path).await.is_err() {
+                continue;
+            }
+            for port in subsys.ports.iter().filter(|p| !is_wildcard_addr(&p.addr)) {
+                if !addr_is_local(&port.addr) || port_is_bound(subsys, port).await {
+                    continue;
+                }
+                match bind_port(subsys, port).await {
+                    Ok(port_id) => info!(
+                        "NVMe-oF: bound port {port_id} ({}:{}) for {} now that its address is up",
+                        port.addr, port.service_id, subsys.nqn
+                    ),
+                    Err(e) => warn!(
+                        "NVMe-oF: binding {}:{} for {} failed: {e}",
+                        port.addr, port.service_id, subsys.nqn
+                    ),
+                }
+            }
         }
     }
 
@@ -1228,7 +1217,7 @@ impl NvmeofService {
 /// Returns the port_id if found, so multiple subsystems can share a single listener.
 /// True for the bind-any addresses, which the kernel accepts regardless
 /// of link state.
-fn is_wildcard_addr(addr: &str) -> bool {
+pub(crate) fn is_wildcard_addr(addr: &str) -> bool {
     addr == "0.0.0.0" || addr == "::"
 }
 
@@ -1236,7 +1225,7 @@ fn is_wildcard_addr(addr: &str) -> bool {
 /// attempting a socket bind to it, which fails with EADDRNOTAVAIL exactly
 /// when nvmet's port bind would. Wildcards and unparseable addresses are
 /// treated as ready (never block on them).
-fn addr_is_local(addr: &str) -> bool {
+pub(crate) fn addr_is_local(addr: &str) -> bool {
     if is_wildcard_addr(addr) {
         return true;
     }
@@ -1246,39 +1235,43 @@ fn addr_is_local(addr: &str) -> bool {
     }
 }
 
-/// Wait until every specific (non-wildcard) port address is assigned to a
-/// local interface, sharing one deadline. nvmet binds each restored port
-/// to its exact address; on reboot the engine restores before the network
-/// has configured those addresses, so the bind fails with EADDRNOTAVAIL
-/// (-99) and — since nothing retries — the target stays dead until a manual
-/// re-add (#625). Ready addresses return immediately; only genuinely-absent
-/// ones wait. Best-effort: any still missing at the deadline are logged and
-/// restore proceeds.
-async fn wait_for_port_addresses(addrs: &[String], timeout: std::time::Duration) {
-    let deadline = std::time::Instant::now() + timeout;
-    let mut pending: Vec<&String> = addrs.iter().filter(|a| !is_wildcard_addr(a)).collect();
-    pending.sort();
-    pending.dedup();
-    if pending.is_empty() {
-        return;
-    }
-    loop {
-        pending.retain(|a| !addr_is_local(a));
-        if pending.is_empty() {
-            return;
-        }
-        if std::time::Instant::now() >= deadline {
-            for a in &pending {
-                warn!(
-                    "NVMe-oF: address {a} is not on any local interface after {}s — its \
-                     target port may fail to bind until the link is up; re-add the portal \
-                     once the interface is active",
-                    timeout.as_secs()
-                );
+/// Bind `subsys` to `port`, reusing a configfs port that already listens on
+/// the same address. Returns the configfs port id. Idempotent.
+async fn bind_port(subsys: &NvmeofSubsystem, port: &Port) -> Result<u16, NvmeofError> {
+    let svc_id: u16 = port.service_id.parse().unwrap_or(4420);
+    let port_id =
+        match find_existing_port(&port.transport, &port.addr, svc_id, &port.addr_family).await {
+            Some(existing) => existing,
+            None => {
+                let port_path = format!("{NVMET_BASE}/ports/{}", port.port_id);
+                configfs_ensure_dir(&port_path).await?;
+                configfs_write(&format!("{port_path}/addr_trtype"), &port.transport).await?;
+                configfs_write(&format!("{port_path}/addr_traddr"), &port.addr).await?;
+                configfs_write(&format!("{port_path}/addr_trsvcid"), &port.service_id).await?;
+                configfs_write(&format!("{port_path}/addr_adrfam"), &port.addr_family).await?;
+                port.port_id
             }
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        };
+    // Linking the subsystem is what triggers the kernel transport bind, so
+    // this is where EADDRNOTAVAIL surfaces.
+    configfs_ensure_symlink(
+        &format!("{NVMET_BASE}/subsystems/{}", subsys.nqn),
+        &format!("{NVMET_BASE}/ports/{port_id}/subsystems/{}", subsys.nqn),
+    )
+    .await?;
+    Ok(port_id)
+}
+
+async fn port_is_bound(subsys: &NvmeofSubsystem, port: &Port) -> bool {
+    let svc_id: u16 = port.service_id.parse().unwrap_or(4420);
+    match find_existing_port(&port.transport, &port.addr, svc_id, &port.addr_family).await {
+        Some(port_id) => tokio::fs::symlink_metadata(format!(
+            "{NVMET_BASE}/ports/{port_id}/subsystems/{}",
+            subsys.nqn
+        ))
+        .await
+        .is_ok(),
+        None => false,
     }
 }
 
@@ -2072,28 +2065,6 @@ mod tests {
     fn addr_is_local_false_for_unassigned_address() {
         // TEST-NET-1 (RFC 5737) — guaranteed not assigned to this host.
         assert!(!addr_is_local("192.0.2.1"));
-    }
-
-    #[tokio::test]
-    async fn wait_for_port_addresses_returns_fast_when_ready() {
-        // All ready (loopback + wildcard) → returns well within the timeout.
-        let start = std::time::Instant::now();
-        wait_for_port_addresses(
-            &["127.0.0.1".into(), "0.0.0.0".into()],
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        assert!(start.elapsed() < std::time::Duration::from_secs(1));
-    }
-
-    #[tokio::test]
-    async fn wait_for_port_addresses_gives_up_at_deadline() {
-        // Unassigned address → waits out the (short) deadline, then proceeds.
-        let start = std::time::Instant::now();
-        wait_for_port_addresses(&["192.0.2.1".into()], std::time::Duration::from_millis(700)).await;
-        let elapsed = start.elapsed();
-        assert!(elapsed >= std::time::Duration::from_millis(700));
-        assert!(elapsed < std::time::Duration::from_secs(3));
     }
 
     #[test]

@@ -22,6 +22,7 @@ mod subvolume;
 mod system;
 mod vm;
 
+pub(crate) use fs::bind_address_pending;
 pub(crate) use vm::{CreateVmDiskRequest, VmDiskCandidate};
 
 use crate::AppState;

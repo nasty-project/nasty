@@ -913,6 +913,22 @@ async fn main() -> anyhow::Result<()> {
         })
         .await;
 
+    // Ports and portals bound to one address bind once it exists: Tailscale,
+    // DHCP or a VLAN can come up after the restore above. The first pass
+    // catches addresses that appeared during boot.
+    {
+        let state = state.clone();
+        let mut addresses = nasty_system::netwatch::spawn();
+        tokio::spawn(async move {
+            loop {
+                router::bind_address_pending(&state).await;
+                if addresses.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
     // Pre-warm caches so first page loads are fast.
     // Runs before sd_notify_ready() — Caddy won't serve until this completes.
     info!("Warming caches...");
