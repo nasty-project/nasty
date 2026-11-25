@@ -24,6 +24,31 @@ pub struct AlertRule {
     pub threshold: f64,
     /// Severity level when the rule fires.
     pub severity: AlertSeverity,
+    /// Disk temperature rules only: limit the rule to one kind of disk.
+    /// `None` applies it to every disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_type: Option<DiskType>,
+}
+
+/// Kind of disk, for temperature limits: NVMe and SATA SSDs run hotter
+/// than spinning disks without harm (#1081).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskType {
+    Hdd,
+    Ssd,
+    Nvme,
+}
+
+impl DiskType {
+    /// A disk of unknown kind gets HDD limits, the strictest.
+    pub fn from_smart(nvme: bool, rotational: Option<bool>) -> Self {
+        match (nvme, rotational) {
+            (true, _) => Self::Nvme,
+            (false, Some(false)) => Self::Ssd,
+            _ => Self::Hdd,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]
@@ -166,7 +191,7 @@ impl AlertService {
             state.rules = defaults;
             save_state(&state).await.ok();
         } else {
-            let mut added = false;
+            let mut added = scope_legacy_temperature_rules(&mut state.rules);
             for default in &defaults {
                 if !state.rules.iter().any(|r| r.id == default.id) {
                     state.rules.push(default.clone());
@@ -193,6 +218,9 @@ impl AlertService {
         let mut state = self.state.write().await;
         if state.rules.iter().any(|r| r.id == rule.id) {
             return Err("rule ID already exists".into());
+        }
+        if rule.disk_type.is_some() && rule.metric != AlertMetric::DiskTemperature {
+            return Err("disk_type applies only to disk temperature rules".into());
         }
         let rule = AlertRule {
             id: if rule.id.is_empty() {
@@ -593,6 +621,9 @@ fn evaluate_rules(
             }
             AlertMetric::DiskTemperature => {
                 for disk in disk_health {
+                    if rule.disk_type.is_some_and(|t| t != disk.disk_type) {
+                        continue;
+                    }
                     if let Some(temp) = disk.temperature_c {
                         let val = temp as f64;
                         if check_condition(val, &rule.condition, rule.threshold) {
@@ -1099,6 +1130,8 @@ pub struct DiskHealthSummary {
     /// physical-drive key.
     pub transport: Option<String>,
     pub temperature_c: Option<i32>,
+    /// Matched against `AlertRule::disk_type` by temperature rules.
+    pub disk_type: DiskType,
     pub health_passed: bool,
     /// Mirror of `DiskHealth::smart_status`. Carried into the summary so
     /// the `SmartHealth` alert rule can distinguish "FAILED" (alert) from
@@ -1283,6 +1316,33 @@ fn check_condition(value: f64, condition: &AlertCondition, threshold: f64) -> bo
     }
 }
 
+const HDD_TEMP_WARN_NAME: &str = "HDD temperature warning";
+const HDD_TEMP_CRIT_NAME: &str = "HDD temperature critical";
+
+/// Before #1081 the two temperature rules applied to every disk. Scope them
+/// to HDDs where they still hold their shipped values (the SSD and NVMe
+/// defaults are then backfilled); a rule the operator changed stays as is.
+/// Returns whether anything changed.
+fn scope_legacy_temperature_rules(rules: &mut [AlertRule]) -> bool {
+    let mut changed = false;
+    for rule in rules.iter_mut().filter(|r| r.disk_type.is_none()) {
+        let (threshold, old_name, new_name) = match rule.id.as_str() {
+            "disk-temp-warn" => (50.0, "Disk temperature warning", HDD_TEMP_WARN_NAME),
+            "disk-temp-crit" => (60.0, "Disk temperature critical", HDD_TEMP_CRIT_NAME),
+            _ => continue,
+        };
+        if rule.threshold != threshold {
+            continue;
+        }
+        rule.disk_type = Some(DiskType::Hdd);
+        if rule.name == old_name {
+            rule.name = new_name.into();
+        }
+        changed = true;
+    }
+    changed
+}
+
 fn default_rules() -> Vec<AlertRule> {
     vec![
         AlertRule {
@@ -1293,6 +1353,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Above,
             threshold: 80.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         AlertRule {
             id: "fs-usage-crit".into(),
@@ -1302,24 +1363,67 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Above,
             threshold: 95.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             id: "disk-temp-warn".into(),
-            name: "Disk temperature warning".into(),
+            name: HDD_TEMP_WARN_NAME.into(),
             enabled: true,
             metric: AlertMetric::DiskTemperature,
             condition: AlertCondition::Above,
             threshold: 50.0,
             severity: AlertSeverity::Warning,
+            disk_type: Some(DiskType::Hdd),
         },
         AlertRule {
             id: "disk-temp-crit".into(),
-            name: "Disk temperature critical".into(),
+            name: HDD_TEMP_CRIT_NAME.into(),
             enabled: true,
             metric: AlertMetric::DiskTemperature,
             condition: AlertCondition::Above,
             threshold: 60.0,
             severity: AlertSeverity::Critical,
+            disk_type: Some(DiskType::Hdd),
+        },
+        AlertRule {
+            id: "ssd-temp-warn".into(),
+            name: "SSD temperature warning".into(),
+            enabled: true,
+            metric: AlertMetric::DiskTemperature,
+            condition: AlertCondition::Above,
+            threshold: 60.0,
+            severity: AlertSeverity::Warning,
+            disk_type: Some(DiskType::Ssd),
+        },
+        AlertRule {
+            id: "ssd-temp-crit".into(),
+            name: "SSD temperature critical".into(),
+            enabled: true,
+            metric: AlertMetric::DiskTemperature,
+            condition: AlertCondition::Above,
+            threshold: 70.0,
+            severity: AlertSeverity::Critical,
+            disk_type: Some(DiskType::Ssd),
+        },
+        AlertRule {
+            id: "nvme-temp-warn".into(),
+            name: "NVMe temperature warning".into(),
+            enabled: true,
+            metric: AlertMetric::DiskTemperature,
+            condition: AlertCondition::Above,
+            threshold: 70.0,
+            severity: AlertSeverity::Warning,
+            disk_type: Some(DiskType::Nvme),
+        },
+        AlertRule {
+            id: "nvme-temp-crit".into(),
+            name: "NVMe temperature critical".into(),
+            enabled: true,
+            metric: AlertMetric::DiskTemperature,
+            condition: AlertCondition::Above,
+            threshold: 80.0,
+            severity: AlertSeverity::Critical,
+            disk_type: Some(DiskType::Nvme),
         },
         AlertRule {
             id: "smart-health".into(),
@@ -1329,6 +1433,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             // Threshold 0 = fire on any non-zero raw value. Operators
@@ -1344,6 +1449,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Above,
             threshold: 0.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         AlertRule {
             id: "memory-warn".into(),
@@ -1353,6 +1459,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Above,
             threshold: 90.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         AlertRule {
             id: "cpu-load-warn".into(),
@@ -1362,6 +1469,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Above,
             threshold: 90.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         // bcachefs health (always-on, threshold not used)
         AlertRule {
@@ -1372,6 +1480,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             id: "bcachefs-device-state".into(),
@@ -1381,6 +1490,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         AlertRule {
             id: "bcachefs-device-errors".into(),
@@ -1390,6 +1500,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             id: "bcachefs-io-errors".into(),
@@ -1399,6 +1510,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Above,
             threshold: 0.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             id: "bcachefs-scrub-errors".into(),
@@ -1408,6 +1520,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             id: "bcachefs-reconcile-stalled".into(),
@@ -1417,6 +1530,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         // Root partition space
         AlertRule {
@@ -1427,6 +1541,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Below,
             threshold: 10.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         AlertRule {
             id: "root-disk-crit".into(),
@@ -1436,6 +1551,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Below,
             threshold: 3.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         // /boot (ESP) space. Each kernel+initrd pair is roughly 50 MB;
         // when the ESP is under 100 MB free the next system update is
@@ -1450,6 +1566,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Below,
             threshold: 100.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         AlertRule {
             id: "boot-disk-crit".into(),
@@ -1459,6 +1576,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Below,
             threshold: 30.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             id: "certificate-expiry-warn".into(),
@@ -1468,6 +1586,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Below,
             threshold: 31.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         AlertRule {
             id: "certificate-expiry-crit".into(),
@@ -1477,6 +1596,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Below,
             threshold: 8.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             id: "certificate-renewal-failure".into(),
@@ -1486,6 +1606,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Critical,
+            disk_type: None,
         },
         AlertRule {
             id: "backup-failure".into(),
@@ -1495,6 +1616,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Equals,
             threshold: 1.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
         // Kernel error monitoring
         AlertRule {
@@ -1505,6 +1627,7 @@ fn default_rules() -> Vec<AlertRule> {
             condition: AlertCondition::Above,
             threshold: 0.0,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         },
     ]
 }
@@ -1766,6 +1889,7 @@ mod tests {
             condition,
             threshold,
             severity: AlertSeverity::Warning,
+            disk_type: None,
         }
     }
 
@@ -1924,6 +2048,7 @@ mod tests {
                 device: "sda".into(),
                 transport: None,
                 temperature_c: Some(60),
+                disk_type: DiskType::Hdd,
                 health_passed: true,
                 smart_status: "PASSED".into(),
                 critical_attrs_with_value: Vec::new(),
@@ -1932,6 +2057,7 @@ mod tests {
                 device: "sdb".into(),
                 transport: None,
                 temperature_c: None, // skipped
+                disk_type: DiskType::Hdd,
                 health_passed: true,
                 smart_status: "PASSED".into(),
                 critical_attrs_with_value: Vec::new(),
@@ -1940,6 +2066,7 @@ mod tests {
                 device: "sdc".into(),
                 transport: None,
                 temperature_c: Some(45), // below threshold
+                disk_type: DiskType::Hdd,
                 health_passed: true,
                 smart_status: "PASSED".into(),
                 critical_attrs_with_value: Vec::new(),
@@ -1959,6 +2086,75 @@ mod tests {
     }
 
     #[test]
+    fn default_temperature_rules_use_each_disk_type_limits() {
+        // An NVMe at 65°C is routine; the same reading on an HDD is critical.
+        let disk = |device: &str, disk_type| DiskHealthSummary {
+            device: device.into(),
+            transport: None,
+            temperature_c: Some(65),
+            disk_type,
+            health_passed: true,
+            smart_status: "PASSED".into(),
+            critical_attrs_with_value: Vec::new(),
+        };
+        let disks = [
+            disk("sda", DiskType::Hdd),
+            disk("sdb", DiskType::Ssd),
+            disk("nvme0", DiskType::Nvme),
+        ];
+        let rules: Vec<_> = default_rules()
+            .into_iter()
+            .filter(|r| r.metric == AlertMetric::DiskTemperature)
+            .collect();
+        let alerts = evaluate_rules(
+            &rules,
+            &zero_stats(),
+            &[],
+            &disks,
+            &[],
+            &KernelErrorAlert::default(),
+            DiskFreeSpace::default(),
+        );
+        let fired: Vec<_> = alerts
+            .iter()
+            .map(|a| (a.source.as_str(), a.rule_id.as_str()))
+            .collect();
+        assert_eq!(
+            fired,
+            [
+                ("sda", "disk-temp-warn"),
+                ("sda", "disk-temp-crit"),
+                ("sdb", "ssd-temp-warn"),
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_temperature_rules_scope_to_hdd_unless_changed() {
+        let mut rules = default_rules();
+        for r in &mut rules {
+            r.disk_type = None;
+        }
+        rules[2].name = "Disk temperature warning".into();
+        rules[3].threshold = 65.0; // operator-tuned crit stays global
+        assert_eq!(rules[2].id, "disk-temp-warn");
+        assert_eq!(rules[3].id, "disk-temp-crit");
+        assert!(scope_legacy_temperature_rules(&mut rules));
+        assert_eq!(rules[2].disk_type, Some(DiskType::Hdd));
+        assert_eq!(rules[2].name, HDD_TEMP_WARN_NAME);
+        assert_eq!(rules[3].disk_type, None);
+        assert!(!scope_legacy_temperature_rules(&mut rules));
+    }
+
+    #[test]
+    fn disk_type_from_smart_defaults_unknown_to_hdd() {
+        assert_eq!(DiskType::from_smart(true, None), DiskType::Nvme);
+        assert_eq!(DiskType::from_smart(false, Some(false)), DiskType::Ssd);
+        assert_eq!(DiskType::from_smart(false, Some(true)), DiskType::Hdd);
+        assert_eq!(DiskType::from_smart(false, None), DiskType::Hdd);
+    }
+
+    #[test]
     fn evaluate_rules_smart_health_fires_only_on_failure() {
         let r = rule(AlertMetric::SmartHealth, AlertCondition::Equals, 1.0);
         let disks = vec![
@@ -1966,6 +2162,7 @@ mod tests {
                 device: "sda".into(),
                 transport: None,
                 temperature_c: None,
+                disk_type: DiskType::Hdd,
                 health_passed: true,
                 smart_status: "PASSED".into(),
                 critical_attrs_with_value: Vec::new(),
@@ -1974,6 +2171,7 @@ mod tests {
                 device: "sdb".into(),
                 transport: None,
                 temperature_c: None,
+                disk_type: DiskType::Hdd,
                 health_passed: false,
                 smart_status: "FAILED".into(),
                 critical_attrs_with_value: Vec::new(),
@@ -2007,6 +2205,7 @@ mod tests {
                 device: "/dev/sda".into(),
                 transport: Some("megaraid,0".into()),
                 temperature_c: None,
+                disk_type: DiskType::Hdd,
                 health_passed: false,
                 smart_status: "FAILED".into(),
                 critical_attrs_with_value: Vec::new(),
@@ -2015,6 +2214,7 @@ mod tests {
                 device: "/dev/sda".into(),
                 transport: Some("megaraid,1".into()),
                 temperature_c: None,
+                disk_type: DiskType::Hdd,
                 health_passed: false,
                 smart_status: "FAILED".into(),
                 critical_attrs_with_value: Vec::new(),
@@ -2047,6 +2247,7 @@ mod tests {
             device: "sdb".into(),
             transport: None,
             temperature_c: None,
+            disk_type: DiskType::Hdd,
             health_passed: false,
             smart_status: "UNAVAILABLE".into(),
             critical_attrs_with_value: Vec::new(),
@@ -2112,6 +2313,7 @@ mod tests {
                 device: "sda".into(),
                 transport: None,
                 temperature_c: None,
+                disk_type: DiskType::Hdd,
                 health_passed: true,
                 smart_status: "PASSED".into(),
                 // Healthy drive: empty critical-attr list.
@@ -2121,6 +2323,7 @@ mod tests {
                 device: "sdb".into(),
                 transport: None,
                 temperature_c: None,
+                disk_type: DiskType::Hdd,
                 health_passed: true, // SMART still says PASSED!
                 smart_status: "PASSED".into(),
                 // But attribute 5 (Reallocated Sectors) has a non-zero
@@ -2163,6 +2366,7 @@ mod tests {
             device: "/dev/sda".into(),
             transport: None,
             temperature_c: None,
+            disk_type: DiskType::Hdd,
             health_passed: true,
             smart_status: "PASSED".into(),
             critical_attrs_with_value: vec![
@@ -2198,6 +2402,7 @@ mod tests {
                 device: "sda".into(),
                 transport: None,
                 temperature_c: None,
+                disk_type: DiskType::Hdd,
                 health_passed: true,
                 smart_status: "PASSED".into(),
                 critical_attrs_with_value: vec![(5, 5)], // exactly at threshold
@@ -2206,6 +2411,7 @@ mod tests {
                 device: "sdb".into(),
                 transport: None,
                 temperature_c: None,
+                disk_type: DiskType::Hdd,
                 health_passed: true,
                 smart_status: "PASSED".into(),
                 critical_attrs_with_value: vec![(5, 6)], // one over

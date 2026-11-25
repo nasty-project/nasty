@@ -1653,6 +1653,10 @@ pub(crate) async fn evaluate_active_alerts_inner(
                 device: d.device,
                 transport: d.transport,
                 temperature_c: d.temperature_c,
+                disk_type: alerts::DiskType::from_smart(
+                    d.nvme.is_some() || d.native_interface.as_deref() == Some("nvme"),
+                    d.rotational,
+                ),
                 health_passed: d.health_passed,
                 smart_status: d.smart_status,
                 critical_attrs_with_value,

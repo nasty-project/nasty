@@ -5,7 +5,7 @@
 	import { confirm } from '$lib/confirm.svelte';
 	import { requiredFieldCls } from '$lib/utils';
 	import { tempUnit, cToF, tempUnitLabel } from '$lib/temperature.svelte';
-	import type { AlertRule, ActiveAlert, AlertAcknowledgement, AlertMetric, AlertCondition, AlertSeverity, AuthMe, UserRole } from '$lib/types';
+	import type { AlertRule, ActiveAlert, AlertAcknowledgement, AlertMetric, AlertCondition, AlertSeverity, AuthMe, DiskType, UserRole } from '$lib/types';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
@@ -16,6 +16,7 @@
 	import { hasRootEquivalentAccess } from '$lib/access';
 	import type { TempUnit } from '$lib/types';
 	import type { alertRuleEditPatch } from '$lib/alert-rule-edit';
+	import { diskTypeLabels } from '$lib/alert-rule-edit';
 
 	let rules: AlertRule[] = $state([]);
 	let activeAlerts: ActiveAlert[] = $state([]);
@@ -36,6 +37,7 @@
 	let newCondition = $state<AlertCondition>('above');
 	let newThreshold = $state(80);
 	let newSeverity = $state<AlertSeverity>('warning');
+	let newDiskType = $state<DiskType | ''>('');
 
 	const client = getClient();
 
@@ -180,6 +182,7 @@
 				condition,
 				threshold: stored,
 				severity: newSeverity,
+				...(newMetric === 'disk_temperature' && newDiskType ? { disk_type: newDiskType } : {}),
 			}),
 			'Alert rule created'
 		);
@@ -189,6 +192,7 @@
 			createTried = false;
 			newCondition = 'above';
 			newThreshold = 80;
+			newDiskType = '';
 			await refresh();
 		}
 	}
@@ -306,6 +310,17 @@
 						</select>
 					</div>
 				{/if}
+				{#if newMetric === 'disk_temperature'}
+					<div class="flex-1">
+						<Label for="rule-disk-type">Disk type</Label>
+						<select id="rule-disk-type" bind:value={newDiskType} class="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm">
+							<option value="">All disks</option>
+							{#each Object.entries(diskTypeLabels) as [val, label]}
+								<option value={val}>{label}</option>
+							{/each}
+						</select>
+					</div>
+				{/if}
 			</div>
 			<div class="mb-4 flex gap-4">
 				{#if newMetric !== 'backup_failure'}
@@ -345,7 +360,7 @@
 			{#each sortedRules as rule}
 				<tr class="border-b border-border {!rule.enabled ? 'opacity-50' : ''}">
 					<td class="p-3"><strong>{rule.name}</strong></td>
-					<td class="p-3">{metricLabels[rule.metric] ?? rule.metric}</td>
+					<td class="p-3">{metricLabels[rule.metric] ?? rule.metric}{#if rule.disk_type} · {diskTypeLabels[rule.disk_type]}{/if}</td>
 					<td class="p-3">
 						{conditionLabels[rule.condition] ?? rule.condition}
 						{rule.metric === 'disk_temperature' && tempUnit.current === 'fahrenheit'

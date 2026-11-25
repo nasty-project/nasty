@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { AlertRule, AlertSeverity, TempUnit } from '$lib/types';
-	import { alertRuleEditPatch, displayedAlertThreshold } from '$lib/alert-rule-edit';
+	import { alertRuleEditPatch, diskTypeLabels, displayedAlertThreshold } from '$lib/alert-rule-edit';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
@@ -42,7 +42,7 @@
 				<div class="mb-4">
 					<Label for="edit-rule-threshold">Threshold{rule.metric === 'disk_temperature' ? ` (${unit === 'fahrenheit' ? '°F' : '°C'})` : ''}</Label>
 					<Input id="edit-rule-threshold" type="number" step="any" bind:value={threshold} required disabled={saving} class="mt-1" />
-					{#if rule.metric === 'disk_temperature'}<p class="mt-1 text-xs text-muted-foreground">Stored in Celsius. This threshold applies to all monitored disks, not just one device.</p>{/if}
+					{#if rule.metric === 'disk_temperature'}<p class="mt-1 text-xs text-muted-foreground">Stored in Celsius. This threshold applies to {rule.disk_type ? `every ${diskTypeLabels[rule.disk_type]} disk` : 'all monitored disks'}, not just one device.</p>{/if}
 				</div>
 			{/if}
 			<div class="mb-4">
